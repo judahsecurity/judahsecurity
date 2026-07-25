@@ -1165,38 +1165,55 @@ class ScannerWorker:
             db.close()
 
     def _queue_nuclei_follow_ups(self, db, parent_scan, remaining_targets, config, chunk_size):
-        """Queue follow-up NUCLEI scans for hosts beyond the per-scan cap.
+        """Queue the *next* follow-up NUCLEI scan only (chain, don't flood).
 
-        Each follow-up is a PENDING vulnerability scan carrying an explicit chunk
-        of hosts and ``presplit=True`` so it is neither split again nor used to
-        re-create assets. Returns the number of follow-up scans queued.
+        Previously we enqueued every remaining chunk at once (part 2..N), which
+        filled the worker with dozens of PENDING/RUNNING nuclei jobs and starved
+        ad-hoc scans. Now we enqueue a single follow-up that carries ALL remaining
+        hosts; when that job starts it re-applies the cap and queues the next
+        link in the chain.
         """
-        queued = 0
+        if not remaining_targets:
+            return 0
         try:
-            base_name = parent_scan.name if (parent_scan and parent_scan.name) else "nuclei"
+            parent_name = parent_scan.name if (parent_scan and parent_scan.name) else "nuclei"
+            # Strip prior "(part N)" so names stay "foo (part 3)" not "foo (part 2) (part 3)"
+            import re
+            base_name = re.sub(r"\s*\(part \d+\)\s*$", "", parent_name).strip() or "nuclei"
+            part_num = int((config or {}).get("follow_up_part", 1)) + 1
             org_id = parent_scan.organization_id if parent_scan else config.get("organization_id")
             started_by = parent_scan.started_by if parent_scan else "system"
-            for i in range(0, len(remaining_targets), chunk_size):
-                chunk = remaining_targets[i:i + chunk_size]
-                follow_config = {**(config or {}), "presplit": True, "max_targets": chunk_size}
-                db.add(Scan(
-                    name=f"{base_name} (part {queued + 2})",
-                    scan_type=ScanType.VULNERABILITY,
-                    organization_id=org_id,
-                    targets=chunk,
-                    config=follow_config,
-                    started_by=started_by,
-                    status=ScanStatus.PENDING,
-                ))
-                queued += 1
+            follow_config = {
+                **(config or {}),
+                # Skip expensive asset pre-create; still allow re-split/cap.
+                "skip_asset_precreate": True,
+                "max_targets": chunk_size,
+                "follow_up_part": part_num,
+            }
+            # Drop obsolete flag if present
+            follow_config.pop("presplit", None)
+            db.add(Scan(
+                name=f"{base_name} (part {part_num})",
+                scan_type=ScanType.VULNERABILITY,
+                organization_id=org_id,
+                targets=list(remaining_targets),
+                config=follow_config,
+                started_by=started_by,
+                status=ScanStatus.PENDING,
+            ))
             db.commit()
+            logger.info(
+                f"Queued Nuclei follow-up '{base_name} (part {part_num})' "
+                f"with {len(remaining_targets)} remaining hosts"
+            )
+            return 1
         except Exception as e:
-            logger.error(f"Failed to queue Nuclei follow-up scans: {e}")
+            logger.error(f"Failed to queue Nuclei follow-up scan: {e}")
             try:
                 db.rollback()
             except Exception:
                 pass
-        return queued
+            return 0
 
     async def handle_nuclei_scan(self, job_data: dict):
         """Handle Nuclei vulnerability scan job."""
@@ -1207,9 +1224,12 @@ class ScannerWorker:
         severity = job_data.get('severity') or ['critical', 'high', 'medium', 'low', 'info']
         tags = job_data.get('tags') or []
         exclude_tags = job_data.get('exclude_tags') or []
-        # Follow-up scans queued by the per-scan target cap already hold an
-        # explicit list of hosts; they must not be re-split or re-create assets.
-        presplit = bool((job_data.get('config') or {}).get('presplit'))
+        # Follow-up scans: skip asset pre-create, but still apply the host cap
+        # and chain the next part (one at a time) so the queue isn't flooded.
+        _cfg_early = job_data.get('config') or {}
+        skip_asset_precreate = bool(
+            _cfg_early.get('skip_asset_precreate') or _cfg_early.get('presplit')
+        )
         
         # Drop CIDR/netblock ranges — expanding them into 100k+ hosts is what
         # wedged the worker (scans never finished, slots never freed).
@@ -1265,7 +1285,7 @@ class ScannerWorker:
 
             # Cap asset pre-creation — looping 10k targets with per-row queries
             # was delaying nuclei start by minutes and holding a worker slot.
-            asset_targets = [] if presplit else targets[:500]
+            asset_targets = [] if skip_asset_precreate else targets[:500]
             
             for target in asset_targets:
                 try:
@@ -1354,29 +1374,29 @@ class ScannerWorker:
             rate_limit = config.get('rate_limit', DEFAULT_NUCLEI_RATE_LIMIT)
 
             # Cap hosts per job so one scan can't monopolize a worker slot.
-            # CIDRs were already filtered out above — slice the host list only
-            # (no full-inventory expansion, which previously hung the worker).
+            # CIDRs were already filtered out above — slice the host list only.
+            # Queue at most ONE follow-up with the remainder (chained); that job
+            # will re-cap and enqueue the next link when it runs.
             targets_to_scan = targets
-            if not presplit:
-                try:
-                    max_targets = int(config.get('max_targets') or os.getenv('NUCLEI_MAX_TARGETS_PER_SCAN', '500'))
-                except (TypeError, ValueError):
-                    max_targets = 500
-                if max_targets > 0 and len(targets) > max_targets:
-                    targets_to_scan = targets[:max_targets]
-                    remaining = targets[max_targets:]
-                    queued = self._queue_nuclei_follow_ups(
-                        db,
-                        scan,
-                        remaining,
-                        {**config, 'severity': severity, 'tags': tags, 'exclude_tags': exclude_tags},
-                        max_targets,
-                    )
-                    logger.warning(
-                        f"Nuclei scan {scan_id}: {len(targets)} hosts exceed cap "
-                        f"{max_targets}; scanning first {len(targets_to_scan)} and queued "
-                        f"{queued} follow-up scan(s) for {len(remaining)} remaining hosts."
-                    )
+            try:
+                max_targets = int(config.get('max_targets') or os.getenv('NUCLEI_MAX_TARGETS_PER_SCAN', '500'))
+            except (TypeError, ValueError):
+                max_targets = 500
+            if max_targets > 0 and len(targets) > max_targets:
+                targets_to_scan = targets[:max_targets]
+                remaining = targets[max_targets:]
+                queued = self._queue_nuclei_follow_ups(
+                    db,
+                    scan,
+                    remaining,
+                    {**config, 'severity': severity, 'tags': tags, 'exclude_tags': exclude_tags},
+                    max_targets,
+                )
+                logger.warning(
+                    f"Nuclei scan {scan_id}: {len(targets)} hosts exceed cap "
+                    f"{max_targets}; scanning first {len(targets_to_scan)} and queued "
+                    f"{queued} follow-up scan(s) for {len(remaining)} remaining hosts."
+                )
 
             # Materialize this org's active custom (analyst/AI-generated) templates
             # from the DB to disk so Nuclei can actually run them alongside the
