@@ -1505,7 +1505,14 @@ class ScannerWorker:
             if scan:
                 scan.status = ScanStatus.COMPLETED
                 scan.completed_at = datetime.utcnow()
-                scan.vulnerabilities_found = import_summary['findings_created']
+                # Count created + updated so rescans that refresh existing
+                # findings don't show "0 Vulnerabilities" in the UI.
+                findings_touched = (
+                    int(import_summary.get('findings_created') or 0)
+                    + int(import_summary.get('findings_updated') or 0)
+                    + int(import_summary.get('findings_reactivated') or 0)
+                )
+                scan.vulnerabilities_found = findings_touched
                 scan.assets_discovered = assets_created  # Record assets created from targets
                 scan.results = {
                     'summary': result.summary,
@@ -1514,7 +1521,7 @@ class ScannerWorker:
                     'targets_expanded': result.targets_expanded,
                     'targets_scanned': result.targets_scanned,
                     'live_hosts': len(unique_hosts),
-                    'findings_count': import_summary['findings_created'],
+                    'findings_count': findings_touched,
                     'auto_resolved_count': auto_resolved_count,
                     'assets_created_from_targets': assets_created,
                     'assets_updated': assets_updated,
@@ -1522,7 +1529,8 @@ class ScannerWorker:
                 db.commit()
             
             logger.info(
-                f"Nuclei scan complete: {import_summary['findings_created']} findings, "
+                f"Nuclei scan complete: {import_summary['findings_created']} created, "
+                f"{import_summary.get('findings_updated', 0)} updated, "
                 f"{len(import_summary.get('cves_found', []))} CVEs, {len(unique_hosts)} live hosts"
             )
             trigger_graph_sync(organization_id)
