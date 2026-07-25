@@ -278,8 +278,8 @@ class NucleiFindingsService:
                 result["reactivated"] = True
                 result["old_status"] = old_status
 
-            # Update remaining fields regardless
-            self._update_vulnerability(existing, nuclei_result)
+            # Refresh timestamps / scan linkage so analysts see it's still present
+            self._update_vulnerability(existing, nuclei_result, scan_id=scan_id)
             result["updated"] = True
             result["vulnerability_id"] = existing.id
         else:
@@ -297,12 +297,20 @@ class NucleiFindingsService:
             if duplicate:
                 # Same vulnerability already exists on a related asset (e.g., domain's IP)
                 # Merge into existing finding instead of creating a new one
+                from app.services.reactivation_service import reactivate_if_closed
+                old_status = duplicate.status.value
+                if reactivate_if_closed(duplicate):
+                    result["reactivated"] = True
+                    result["old_status"] = old_status
+
                 dedup_service.merge_finding_into_existing(
                     existing=duplicate,
                     new_asset=asset,
                     new_evidence=nuclei_result.extracted_results,
                     new_matched_at=nuclei_result.matched_at
                 )
+                # Also refresh last_detected / scan_id / redetection metadata
+                self._update_vulnerability(duplicate, nuclei_result, scan_id=scan_id)
                 result["updated"] = True
                 result["vulnerability_id"] = duplicate.id
                 result["deduplicated"] = True
@@ -643,18 +651,54 @@ class NucleiFindingsService:
     def _update_vulnerability(
         self,
         vulnerability: Vulnerability,
-        nuclei_result: NucleiResult
+        nuclei_result: NucleiResult,
+        scan_id: Optional[int] = None,
     ) -> None:
-        """Update existing vulnerability with new scan data."""
-        vulnerability.last_detected = datetime.utcnow()
-        
-        # Update extracted results if new ones found
+        """Update existing vulnerability when the same bug is redetected.
+
+        Analysts rely on last_detected / latest scan linkage to know the issue
+        is still present — always refresh those fields on a hit.
+        """
+        now = datetime.utcnow()
+        vulnerability.last_detected = now
+        vulnerability.updated_at = now
+
+        # Point the finding at the scan that most recently confirmed it
+        if scan_id is not None:
+            vulnerability.scan_id = scan_id
+
+        # Keep matcher/evidence current when Nuclei returns new detail
+        if nuclei_result.matcher_name:
+            vulnerability.matcher_name = nuclei_result.matcher_name
+        if nuclei_result.matched_at or nuclei_result.extracted_results:
+            evidence_parts = []
+            if nuclei_result.matched_at:
+                evidence_parts.append(f"Matched at: {nuclei_result.matched_at}")
+            if nuclei_result.extracted_results:
+                evidence_parts.append(
+                    "Extracted: " + ", ".join(str(x) for x in nuclei_result.extracted_results[:10])
+                )
+            if evidence_parts:
+                vulnerability.evidence = "\n".join(evidence_parts)
+
+        meta = dict(vulnerability.metadata_ or {})
+        meta["last_scan_timestamp"] = now.isoformat()
+        meta["last_redetected_at"] = now.isoformat()
+        meta["redetection_count"] = int(meta.get("redetection_count") or 0) + 1
+        if scan_id is not None:
+            meta["last_scan_id"] = scan_id
+        if nuclei_result.host:
+            meta["nuclei_host"] = nuclei_result.host
+        if nuclei_result.ip:
+            meta["nuclei_ip"] = nuclei_result.ip
+        if nuclei_result.matched_at:
+            meta["nuclei_matched_at"] = nuclei_result.matched_at
         if nuclei_result.extracted_results:
-            if vulnerability.metadata_ is None:
-                vulnerability.metadata_ = {}
-            vulnerability.metadata_["nuclei_extracted_results"] = nuclei_result.extracted_results[:10]
-            vulnerability.metadata_["last_scan_timestamp"] = datetime.utcnow().isoformat()
-        
+            meta["nuclei_extracted_results"] = nuclei_result.extracted_results[:10]
+        if nuclei_result.timestamp:
+            meta["nuclei_timestamp"] = nuclei_result.timestamp.isoformat()
+        vulnerability.metadata_ = meta
+
         # Potentially update severity if it changed (unusual but possible)
         new_severity = NUCLEI_SEVERITY_MAP.get(nuclei_result.severity.lower(), Severity.INFO)
         if new_severity.value != vulnerability.severity.value:
@@ -662,7 +706,7 @@ class NucleiFindingsService:
             severity_order = ["info", "low", "medium", "high", "critical"]
             if severity_order.index(new_severity.value) > severity_order.index(vulnerability.severity.value):
                 vulnerability.severity = new_severity
-                
+
                 # Update tags
                 if vulnerability.tags:
                     vulnerability.tags = [t for t in vulnerability.tags if not t.startswith("severity:")]
