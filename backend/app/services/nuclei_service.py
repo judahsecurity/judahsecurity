@@ -269,6 +269,7 @@ class NucleiScanResult:
     errors: list[str] = field(default_factory=list)
     duration_seconds: float = 0
     summary: dict = field(default_factory=dict)
+    timed_out: bool = False
 
 
 class NucleiService:
@@ -456,15 +457,31 @@ class NucleiService:
             
             # Resolve an overall runtime cap so a single scan can't run for
             # hours and monopolize a worker slot. 0/negative disables the cap.
+            # Scale with host count: a flat 15m on 300+ hosts kills Nuclei before
+            # templates finish, producing empty "completed" scheduled parts.
             if max_runtime_seconds is None:
                 try:
-                    # 15 minutes default — full-template scans against thousands of
-                    # hosts otherwise hold a worker slot for hours and starve the queue.
-                    max_runtime_seconds = int(os.getenv("NUCLEI_MAX_RUNTIME_SECONDS", "900"))
+                    base = int(os.getenv("NUCLEI_MAX_RUNTIME_SECONDS", "900"))
                 except ValueError:
-                    max_runtime_seconds = 900
+                    base = 900
+                try:
+                    per_host = int(os.getenv("NUCLEI_RUNTIME_SECONDS_PER_HOST", "18"))
+                except ValueError:
+                    per_host = 18
+                try:
+                    hard_cap = int(os.getenv("NUCLEI_MAX_RUNTIME_CAP_SECONDS", "2700"))
+                except ValueError:
+                    hard_cap = 2700
+                if base <= 0:
+                    max_runtime_seconds = 0  # disabled
+                else:
+                    scaled = max(base, per_host * max(len(targets), 1))
+                    max_runtime_seconds = min(hard_cap, scaled) if hard_cap > 0 else scaled
 
-            logger.info(f"Starting Nuclei scan on {len(targets)} targets")
+            logger.info(
+                f"Starting Nuclei scan on {len(targets)} targets "
+                f"(max_runtime={max_runtime_seconds}s)"
+            )
             logger.info(f"Nuclei command: {' '.join(cmd)}")
 
             # Run scan in its own process group so we can kill nuclei + children
@@ -484,6 +501,7 @@ class NucleiService:
                 )
             except asyncio.TimeoutError:
                 timed_out = True
+                result.timed_out = True
                 logger.warning(
                     f"Nuclei exceeded {max_runtime_seconds}s; killing process group and "
                     "parsing partial results collected so far"

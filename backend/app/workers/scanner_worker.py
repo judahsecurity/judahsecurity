@@ -494,9 +494,9 @@ class ScannerWorker:
         
         Returns the count of recovered scans.
         """
-        # Must be above NUCLEI_MAX_RUNTIME_SECONDS (default 900s) so legitimate
-        # nuclei jobs can finish, but low enough that wedged slots recover.
-        STALE_SCAN_THRESHOLD_MINUTES = 25
+        # Must be above NUCLEI_MAX_RUNTIME_CAP_SECONDS (default 2700s / 45m)
+        # so legitimate scaled nuclei jobs can finish.
+        STALE_SCAN_THRESHOLD_MINUTES = 55
         
         db = self.get_db_session()
         if not db:
@@ -1378,10 +1378,16 @@ class ScannerWorker:
             # Queue at most ONE follow-up with the remainder (chained); that job
             # will re-cap and enqueue the next link when it runs.
             targets_to_scan = targets
+            # Env wins over baked-in follow-up config (older parts had max_targets=500
+            # which cannot finish under the runtime budget and returns 0 findings).
             try:
-                max_targets = int(config.get('max_targets') or os.getenv('NUCLEI_MAX_TARGETS_PER_SCAN', '500'))
+                max_targets = int(
+                    os.getenv('NUCLEI_MAX_TARGETS_PER_SCAN')
+                    or config.get('max_targets')
+                    or 75
+                )
             except (TypeError, ValueError):
-                max_targets = 500
+                max_targets = 75
             if max_targets > 0 and len(targets) > max_targets:
                 targets_to_scan = targets[:max_targets]
                 remaining = targets[max_targets:]
@@ -1424,13 +1430,19 @@ class ScannerWorker:
             logger.info(
                 f"Nuclei scan returned: {len(result.findings)} findings, "
                 f"success={result.success}, errors={len(result.errors)}, "
-                f"duration={result.duration_seconds:.2f}s"
+                f"duration={result.duration_seconds:.2f}s, timed_out={result.timed_out}"
             )
             
             if result.errors:
                 logger.warning(f"Nuclei scan errors: {result.errors}")
             
-            if not result.findings:
+            if result.timed_out and not result.findings:
+                logger.warning(
+                    f"Nuclei scan {scan_id} timed out with 0 findings on "
+                    f"{len(targets_to_scan)} targets — chunk was likely too large "
+                    f"for the runtime budget. Lower NUCLEI_MAX_TARGETS_PER_SCAN."
+                )
+            elif not result.findings:
                 logger.info(
                     f"Nuclei found no vulnerabilities for targets. This could mean: "
                     f"1) The site is secure, 2) WAF is blocking scans, or "
@@ -1514,6 +1526,15 @@ class ScannerWorker:
                 )
                 scan.vulnerabilities_found = findings_touched
                 scan.assets_discovered = assets_created  # Record assets created from targets
+                if result.timed_out:
+                    msg = (
+                        f"Nuclei timed out after {result.duration_seconds:.0f}s on "
+                        f"{len(targets_to_scan)} targets "
+                        f"({findings_touched} findings from partial results)"
+                    )
+                    scan.error_message = msg[:500]
+                    if scan.current_step:
+                        scan.current_step = "Completed (timed out — partial results)"
                 scan.results = {
                     'summary': result.summary,
                     'import_summary': import_summary,
@@ -1525,6 +1546,8 @@ class ScannerWorker:
                     'auto_resolved_count': auto_resolved_count,
                     'assets_created_from_targets': assets_created,
                     'assets_updated': assets_updated,
+                    'timed_out': result.timed_out,
+                    'duration_seconds': result.duration_seconds,
                 }
                 db.commit()
             

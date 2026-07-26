@@ -64,7 +64,13 @@ services:
       # ProjectDiscovery Cloud API Key (optional - for Chaos subdomain dataset)
       - PDCP_API_KEY=${PDCP_API_KEY:-}
       # VulnCheck Exploit Intelligence token — powers the Vulnerability Intelligence feed
+      # and Delphi VulnCheck KEV scoring floors.
       - VULNCHECK_API_TOKEN=${VULNCHECK_API_TOKEN:-}
+      # NVD API key — raises rate limits for first-party CVE catalog enrichment.
+      - NVD_API_KEY=${NVD_API_KEY:-}
+      # Delphi extended KEV feeds (Shadowserver + KEVIntel via CIRCL). Default on.
+      - DELPHI_EXTENDED_KEV_ENABLED=${DELPHI_EXTENDED_KEV_ENABLED:-true}
+      - DELPHI_FIRE_CVE_PATH=${DELPHI_FIRE_CVE_PATH:-}
       # Neo4j Graph Database (optional - for asset relationship visualization)
       - NEO4J_URI=${NEO4J_URI:-}
       - NEO4J_USER=${NEO4J_USER:-neo4j}
@@ -224,9 +230,13 @@ services:
       - POLL_INTERVAL=${POLL_INTERVAL:-10}
       - PORT_SCAN_RATE=${PORT_SCAN_RATE:-2000}
       - NUCLEI_RATE_LIMIT=${NUCLEI_RATE_LIMIT:-300}
-      # Keep Nuclei jobs bounded so they can't wedge the worker queue
+      # Keep Nuclei jobs bounded so they can't wedge the worker queue.
+      # Runtime scales with host count: max(base, per_host * N), capped.
+      # 75 hosts * 18s ≈ 22m — large enough to finish critical/high templates.
       - NUCLEI_MAX_RUNTIME_SECONDS=${NUCLEI_MAX_RUNTIME_SECONDS:-900}
-      - NUCLEI_MAX_TARGETS_PER_SCAN=${NUCLEI_MAX_TARGETS_PER_SCAN:-500}
+      - NUCLEI_RUNTIME_SECONDS_PER_HOST=${NUCLEI_RUNTIME_SECONDS_PER_HOST:-18}
+      - NUCLEI_MAX_RUNTIME_CAP_SECONDS=${NUCLEI_MAX_RUNTIME_CAP_SECONDS:-2700}
+      - NUCLEI_MAX_TARGETS_PER_SCAN=${NUCLEI_MAX_TARGETS_PER_SCAN:-75}
       # --- Authenticated crawl credentials (optional) ---
       # Same as the backend: referenced by deep_crawl login as env:/secret: refs.
       # - TARGET_USER=${TARGET_USER:-}
