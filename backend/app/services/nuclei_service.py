@@ -535,11 +535,32 @@ class NucleiService:
                 stderr_text = stderr.decode()
                 # Info messages from Nuclei are normal
                 if "[INF]" in stderr_text or "Templates loaded" in stderr_text:
-                    logger.info(f"Nuclei info: {stderr_text[:500]}")
+                    logger.info(f"Nuclei info: {stderr_text[:800]}")
                 elif process.returncode != 0:
                     if "no templates" not in stderr_text.lower():
                         logger.warning(f"Nuclei stderr: {stderr_text}")
                         result.errors.append(stderr_text)
+
+                # Always parse run stats from stderr when present
+                import re as _re
+                run_stats: dict = {}
+                m = _re.search(r"Templates loaded for current scan:\s*(\d+)", stderr_text)
+                if m:
+                    run_stats["templates_loaded"] = int(m.group(1))
+                m = _re.search(r"Targets loaded for current scan:\s*(\d+)", stderr_text)
+                if m:
+                    run_stats["targets_loaded"] = int(m.group(1))
+                m = _re.search(r"Found\s+(\d+)\s+URL", stderr_text)
+                if m:
+                    run_stats["httpx_live_urls"] = int(m.group(1))
+                m = _re.search(r"Current nuclei-templates version:\s*(\S+)", stderr_text)
+                if m:
+                    run_stats["templates_version"] = m.group(1)
+                if "no templates" in stderr_text.lower():
+                    run_stats["no_templates"] = True
+                    result.errors.append("nuclei reported no templates loaded")
+                if run_stats:
+                    result.summary = {"_run_stats": run_stats}
             
             # Parse results
             logger.info(f"Checking for Nuclei output file: {output_file_path}")
@@ -607,8 +628,11 @@ class NucleiService:
             result.targets_original = original_count
             result.targets_expanded = expanded_count
             
-            # Generate summary
-            result.summary = self._generate_summary(result.findings)
+            # Generate summary (preserve run stats parsed from stderr)
+            run_stats = {}
+            if isinstance(result.summary, dict):
+                run_stats = dict(result.summary.pop("_run_stats", {}) or {})
+            result.summary = {**self._generate_summary(result.findings), **run_stats}
             
         except Exception as e:
             logger.error(f"Nuclei scan failed: {e}")
