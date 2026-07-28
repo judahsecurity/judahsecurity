@@ -1,37 +1,42 @@
 """
 OWASP Category Specialist Sub-Agents for Aegis Vanguard
 
-Thirteen focused ReAct agents that each hunt one vulnerability class in
-parallel during the vuln phase. Inspired by Shannon's 5-parallel-agents
-design and RedAmon's Fireteam (Scatter-Gather ReAct) pattern.
+Focused ReAct agents that each hunt one vulnerability class in parallel
+during the vuln phase (Fireteam / Scatter-Gather pattern).
 
 Each hunter:
   • has a narrow mission (one vuln class)
   • sees the recon brief via system prompt + task
   • runs its own ReAct loop with only the tools relevant to its class
   • returns findings that get merged/deduped at fan-in
-  • follows mandatory WAF bypass, stacked encoding, and detection-rotation protocols
+  • follows WAF bypass, stacked encoding, rank-then-hunt, and disclosed-report patterns
 
-Hunters (13):
-  injection_hunter    — SQLi, NoSQLi, cmdi, LDAPi, SSTI, XXE
-  xss_hunter          — Reflected, stored, DOM XSS (all sub-types)
-  auth_hunter         — Broken auth, session, JWT, MFA bypass, password reset
-  authz_hunter        — BOLA, IDOR, BFLA, GraphQL field pivots, tenant bypass
-  ssrf_hunter         — Classic + blind SSRF, protocol smuggling, cloud metadata
-  csrf_hunter         — CSRF token absence, SameSite gaps, state-changing cross-origin
-  cors_hunter         — CORS misconfigurations, wildcard + credentialed origins
-  file_upload_hunter  — Extension bypass, polyglots, MIME confusion, path traversal
-  open_redirect_hunter— Unvalidated redirects, OAuth redirect_uri abuse
-  race_condition_hunter— TOCTOU, concurrent-request races on state-changing endpoints
-  business_logic_hunter— Price manipulation, workflow bypass, mass assignment, negative values
-  oauth_hunter        — OAuth 2.0/OIDC flows, PKCE downgrade, state abuse, token exfil
-  llm_ai_hunter       — OWASP LLM Top 10: prompt injection, insecure output, model DoS
+Hunters:
+  injection, xss, auth, authz, ssrf, csrf, cors, file_upload, open_redirect,
+  race_condition, business_logic, oauth, llm_ai,
+  http_smuggling, cache_poison, saml_sso, host_header
 """
 
 from typing import List
 
 from agent.core import Agent
 from agent.agents import HUNTER_CORE_TOOLS
+from agent.hunt_patterns import (
+    AUTHZ_PATTERNS,
+    AUTH_PATTERNS,
+    CACHE_POISON_PATTERNS,
+    GRAPHQL_PATTERNS,
+    HOST_HEADER_PATTERNS,
+    HTTP_SMUGGLING_PATTERNS,
+    IDENTITY_PROTOCOL,
+    NEVER_SUBMIT_AND_CHAINS,
+    OAUTH_PATTERNS,
+    SAML_PATTERNS,
+    SSRF_PATTERNS,
+    STACK_CONDITIONAL,
+    SURFACE_RANK_PROTOCOL,
+    pack,
+)
 
 # =============================================================================
 # Shared methodology constants injected into every hunter
@@ -212,6 +217,46 @@ LLM_AI_TOOLS = [
     *HUNTER_CORE_TOOLS,
 ]
 
+HTTP_SMUGGLING_TOOLS = [
+    "scan_nuclei",
+    "send_http_request",
+    "confirm_vulnerability_poc",
+    *HUNTER_CORE_TOOLS,
+]
+
+CACHE_POISON_TOOLS = [
+    "scan_nuclei",
+    "analyze_security_headers",
+    "send_http_request",
+    "confirm_vulnerability_poc",
+    *HUNTER_CORE_TOOLS,
+]
+
+SAML_SSO_TOOLS = [
+    "scan_nuclei",
+    "crawl_urls",
+    "discover_api_surface",
+    "fuzz_directories",
+    "send_http_request",
+    "confirm_vulnerability_poc",
+    *HUNTER_CORE_TOOLS,
+]
+
+HOST_HEADER_TOOLS = [
+    "scan_nuclei",
+    "crawl_urls",
+    "discover_parameters",
+    "send_http_request",
+    "confirm_vulnerability_poc",
+    *HUNTER_CORE_TOOLS,
+]
+
+_SHARED_HUNT_DISCIPLINE = pack(
+    SURFACE_RANK_PROTOCOL,
+    NEVER_SUBMIT_AND_CHAINS,
+    STACK_CONDITIONAL,
+)
+
 
 # =============================================================================
 # Hunter factories
@@ -263,7 +308,9 @@ SVG uploads: `<svg xmlns="http://www.w3.org/2000/svg"><image href="file:///etc/p
 ### Confirmation
 For any confirmed finding, call confirm_vulnerability_poc with the exact endpoint,
 payload, and response snippet before completing your turn.
-""" + _BRAIN_AND_PRIOR_ART_PROTOCOL + _WAF_BYPASS_PROTOCOL + _STACKED_ENCODING_MANDATE + """
+""" + _BRAIN_AND_PRIOR_ART_PROTOCOL + _WAF_BYPASS_PROTOCOL + _STACKED_ENCODING_MANDATE + pack(
+            SURFACE_RANK_PROTOCOL, STACK_CONDITIONAL
+        ) + """
 ## Scope
 Hunt injection ONLY. Do not test XSS, auth, authz, or SSRF — other hunters cover those.
 Do NOT exfiltrate data even if injection confirmed. Prove existence, then stop.
@@ -374,10 +421,12 @@ check_subdomain_takeover(hosts=[...list from recon brief...])
 
 ### Confirmation
 Call confirm_vulnerability_poc for any auth bypass confirmed — never skip this step.
-""" + _BRAIN_AND_PRIOR_ART_PROTOCOL + _WAF_BYPASS_PROTOCOL + """
+""" + _BRAIN_AND_PRIOR_ART_PROTOCOL + _WAF_BYPASS_PROTOCOL + pack(
+            AUTH_PATTERNS, IDENTITY_PROTOCOL, _SHARED_HUNT_DISCIPLINE
+        ) + """
 ## Scope
 Hunt AUTHENTICATION only: login, session, JWT, MFA, password reset. Authorization (IDOR/BFLA)
-belongs to authz_hunter. OAuth flows belong to oauth_hunter.
+belongs to authz_hunter. OAuth flows belong to oauth_hunter. SAML deep-dive belongs to saml_sso_hunter.
 """,
         tool_names=AUTH_TOOLS,
         max_turns=max_turns,
@@ -426,7 +475,9 @@ POST/PUT requests with extra fields not in the UI:
 ### Confirmation
 For IDOR: demonstrate access to another user/tenant's data. Call confirm_vulnerability_poc
 with exact request/response snippet showing unauthorized data. Two accounts are needed for real proof.
-""" + _BRAIN_AND_PRIOR_ART_PROTOCOL + _WAF_BYPASS_PROTOCOL + """
+""" + _BRAIN_AND_PRIOR_ART_PROTOCOL + _WAF_BYPASS_PROTOCOL + pack(
+            AUTHZ_PATTERNS, GRAPHQL_PATTERNS, IDENTITY_PROTOCOL, _SHARED_HUNT_DISCIPLINE
+        ) + """
 ## Scope
 Hunt AUTHORIZATION only. Authentication (login/session) is auth_hunter's domain.
 Use read-only probes where possible — flag write/delete impact but don't execute it.
@@ -491,7 +542,9 @@ to confirm blind SSRF before claiming it as a finding.
 ### Confirmation
 call confirm_vulnerability_poc with the SSRF endpoint, payload, and evidence
 (OOB callback, internal service response, or cloud credentials).
-""" + _BRAIN_AND_PRIOR_ART_PROTOCOL + _WAF_BYPASS_PROTOCOL + """
+""" + _BRAIN_AND_PRIOR_ART_PROTOCOL + _WAF_BYPASS_PROTOCOL + pack(
+            SSRF_PATTERNS, _SHARED_HUNT_DISCIPLINE
+        ) + """
 ## Scope
 Hunt SSRF only. URL-reflection XSS belongs to xss_hunter. Injection belongs to injection_hunter.
 """,
@@ -711,9 +764,10 @@ For standalone open redirect: confirm with a send_http_request showing Location:
 in the response. Severity = medium.
 For OAuth chain: confirm the code/token reaches the attacker URL. Severity = high/critical.
 Call confirm_vulnerability_poc with the redirect endpoint, payload, and chain description.
-
+""" + pack(NEVER_SUBMIT_AND_CHAINS, SURFACE_RANK_PROTOCOL) + """
 ## Scope
 Hunt open redirects only. Full OAuth flow testing belongs to oauth_hunter.
+Standalone open redirect without a chain → DOWNGRADE or hand to chain builder — do not over-claim.
 """,
         tool_names=OPEN_REDIRECT_TOOLS,
         max_turns=max_turns,
@@ -889,9 +943,10 @@ If target uses Azure AD / Microsoft login:
 ### Confirmation
 For each OAuth flaw, call confirm_vulnerability_poc with the exact request showing
 the bypass and the resulting impact (account access, token exfil, CSRF auth).
-
+""" + pack(OAUTH_PATTERNS, IDENTITY_PROTOCOL, _SHARED_HUNT_DISCIPLINE) + """
 ## Scope
 Hunt OAuth/OIDC only. JWT attacks on non-OAuth tokens belong to auth_hunter.
+SAML ACS wrapping belongs to saml_sso_hunter.
 """,
         tool_names=OAUTH_TOOLS,
         max_turns=max_turns,
@@ -993,12 +1048,100 @@ non-AI endpoints belongs to other hunters.
     )
 
 
+def create_http_smuggling_hunter(max_turns: int = 25) -> Agent:
+    return Agent(
+        name="http_smuggling_hunter",
+        instructions="""You are the **HTTP Request Smuggling specialist** in the Aegis Vanguard fireteam.
+Hunt: CL.TE, TE.CL, TE.TE, and HTTP/2 downgrade desync against reverse proxies.
+
+## Methodology
+1. Fingerprint front-end (Cloudflare, nginx, AWS ALB, etc.) from recon brief.
+2. scan_nuclei(templates="tags=smuggling,desync,http-smuggling")
+3. Use send_http_request with crafted ambiguous CL/TE bodies; measure timing and dual-response anomalies.
+4. Confirm with a harmless canary (unique path echo) — no persistent poison of shared users beyond proof.
+""" + _BRAIN_AND_PRIOR_ART_PROTOCOL + pack(HTTP_SMUGGLING_PATTERNS, _SHARED_HUNT_DISCIPLINE) + """
+## Scope
+Smuggling only. Cache poisoning belongs to cache_poison_hunter.
+""",
+        tool_names=HTTP_SMUGGLING_TOOLS,
+        max_turns=max_turns,
+        temperature=0.0,
+    )
+
+
+def create_cache_poison_hunter(max_turns: int = 25) -> Agent:
+    return Agent(
+        name="cache_poison_hunter",
+        instructions="""You are the **Web Cache Poisoning specialist** in the Aegis Vanguard fireteam.
+Hunt: unkeyed header injection, cache key confusion, and cache deception.
+
+## Methodology
+1. Identify CDN/cache (CF-Cache-Status, Age, X-Cache, Via).
+2. scan_nuclei(templates="tags=cache,cache-poisoning,web-cache")
+3. Probe unkeyed headers with a unique canary via send_http_request; re-fetch without the header.
+4. Test cache deception: /account.css or /profile.js style paths that return HTML + cookies.
+""" + _BRAIN_AND_PRIOR_ART_PROTOCOL + pack(CACHE_POISON_PATTERNS, _SHARED_HUNT_DISCIPLINE) + """
+## Scope
+Cache issues only. Host-header password-reset poisoning belongs to host_header_hunter.
+""",
+        tool_names=CACHE_POISON_TOOLS,
+        max_turns=max_turns,
+        temperature=0.0,
+    )
+
+
+def create_saml_sso_hunter(max_turns: int = 30) -> Agent:
+    return Agent(
+        name="saml_sso_hunter",
+        instructions="""You are the **SAML / Enterprise SSO specialist** in the Aegis Vanguard fireteam.
+Hunt: SAML ACS flaws, metadata exposure impact, signature wrapping, and hybrid SSO gaps.
+
+## Methodology
+1. Discover /saml, /sso, /acs, /login/saml2, FederationMetadata URLs (fuzz + crawl).
+2. scan_nuclei(templates="tags=saml,sso,oidc")
+3. If SAMLResponse is observable, analyze wrapping / unsigned assertion acceptance safely.
+4. Coordinate with oauth patterns when OIDC is also present — do not duplicate oauth_hunter work.
+""" + _BRAIN_AND_PRIOR_ART_PROTOCOL + pack(
+            SAML_PATTERNS, IDENTITY_PROTOCOL, _SHARED_HUNT_DISCIPLINE
+        ) + """
+## Scope
+SAML/SSO only. Pure OAuth/OIDC redirect_uri work belongs to oauth_hunter.
+""",
+        tool_names=SAML_SSO_TOOLS,
+        max_turns=max_turns,
+        temperature=0.0,
+    )
+
+
+def create_host_header_hunter(max_turns: int = 25) -> Agent:
+    return Agent(
+        name="host_header_hunter",
+        instructions="""You are the **Host Header Injection specialist** in the Aegis Vanguard fireteam.
+Hunt: password-reset poisoning, absolute URL injection, and routing SSRF via Host.
+
+## Methodology
+1. Find password-reset and email-link generators.
+2. scan_nuclei(templates="tags=host-header,hostheader,password-reset")
+3. Probe Host / X-Forwarded-Host / X-Forwarded-Server with attacker domains.
+4. Only confirm HIGH when reset/email absolute URL uses the injected host.
+""" + _BRAIN_AND_PRIOR_ART_PROTOCOL + pack(
+            HOST_HEADER_PATTERNS, NEVER_SUBMIT_AND_CHAINS, SURFACE_RANK_PROTOCOL
+        ) + """
+## Scope
+Host-header impact only. Generic open redirects belong to open_redirect_hunter.
+""",
+        tool_names=HOST_HEADER_TOOLS,
+        max_turns=max_turns,
+        temperature=0.0,
+    )
+
+
 # =============================================================================
 # Convenience: build all hunters at once
 # =============================================================================
 
 def create_all_hunters(max_turns: int = 50) -> List[Agent]:
-    """Return the full 12-hunter OWASP fireteam.
+    """Return the full OWASP fireteam (core + advanced hunters).
 
     Args:
         max_turns: per-hunter ReAct turn budget. 50 is a good default for
@@ -1023,6 +1166,10 @@ def create_all_hunters(max_turns: int = 50) -> List[Agent]:
         create_business_logic_hunter(max(25, max_turns - 10)),
         create_oauth_hunter(max(25, max_turns - 10)),
         create_llm_ai_hunter(max(20, max_turns - 10)),
+        create_http_smuggling_hunter(narrow_turns),
+        create_cache_poison_hunter(narrow_turns),
+        create_saml_sso_hunter(max(20, max_turns - 10)),
+        create_host_header_hunter(narrow_turns),
     ]
 
 
@@ -1040,4 +1187,8 @@ HUNTER_CATEGORIES = {
     "business_logic_hunter": "business_logic",
     "oauth_hunter":          "oauth",
     "llm_ai_hunter":         "llm_ai",
+    "http_smuggling_hunter": "http_smuggling",
+    "cache_poison_hunter":   "cache_poison",
+    "saml_sso_hunter":       "saml_sso",
+    "host_header_hunter":    "host_header",
 }

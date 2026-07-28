@@ -144,6 +144,8 @@ class ASMToolsManager:
             "execute_naabu": self.execute_mcp_tool,
             "execute_httpx": self.execute_mcp_tool,
             "execute_subfinder": self.execute_mcp_tool,
+            "execute_subfaster": self.execute_mcp_tool,
+            "subfaster_help": self.execute_mcp_tool,
             "execute_dnsx": self.execute_mcp_tool,
             "execute_katana": self.execute_mcp_tool,
             "execute_curl": self.execute_mcp_tool,
@@ -163,8 +165,11 @@ class ASMToolsManager:
             "execute_kiterunner": self.execute_mcp_tool,
             "execute_wappalyzer": self.execute_mcp_tool,
             "execute_crtsh": self.execute_mcp_tool,
+            "execute_crt_name": self.execute_mcp_tool,
             "execute_schemathesis": self.execute_mcp_tool,
             "execute_browser": self.execute_mcp_tool,
+            "execute_deep_crawl": self.execute_mcp_tool,
+            "execute_interceptor": self.execute_mcp_tool,
             # Guardian-parity tools
             "execute_sqlmap": self.execute_mcp_tool,
             "execute_nikto": self.execute_mcp_tool,
@@ -176,6 +181,11 @@ class ASMToolsManager:
             "execute_xsstrike": self.execute_mcp_tool,
             "execute_gitleaks": self.execute_mcp_tool,
             "scan_js_urls_for_secrets": self.scan_js_urls_for_secrets,
+            "execute_retirejs": self.scan_js_urls_for_vulns,
+            "execute_jwt": self.execute_mcp_tool,
+            "execute_interactsh": self.execute_mcp_tool,
+            "execute_semgrep": self.execute_mcp_tool,
+            "execute_trivy": self.execute_mcp_tool,
             "execute_cmseek": self.execute_mcp_tool,
             "nuclei_help": self.execute_mcp_tool,
             "naabu_help": self.execute_mcp_tool,
@@ -207,6 +217,9 @@ class ASMToolsManager:
             "wpscan_help": self.execute_mcp_tool,
             "xsstrike_help": self.execute_mcp_tool,
             "gitleaks_help": self.execute_mcp_tool,
+            "jwt_help": self.execute_mcp_tool,
+            "semgrep_help": self.execute_mcp_tool,
+            "trivy_help": self.execute_mcp_tool,
             "cmseek_help": self.execute_mcp_tool,
             # Fireteam: scatter-gather specialists in parallel
             "fireteam_dispatch": self.fireteam_dispatch,
@@ -1752,6 +1765,39 @@ class ASMToolsManager:
             return json.dumps({"success": False, "error": str(e)}, indent=2)
         return json.dumps(result, indent=2, default=str)
 
+    async def scan_js_urls_for_vulns(
+        self,
+        urls: str,
+        max_urls: int = 30,
+    ) -> str:
+        """Fetch remote JS bundle URLs and run Retire.js to detect vulnerable libraries (by CVE). urls = newline- or comma-separated https URLs (or a JSON object)."""
+        import asyncio
+
+        from app.services.retirejs_service import scan_js_urls_for_vulns as run_scan
+
+        # Accept a JSON object {"urls": ..., "max_urls": ...} as well as a bare list.
+        url_input = urls
+        if isinstance(urls, str) and urls.strip().startswith("{"):
+            try:
+                obj = json.loads(urls)
+                url_input = obj.get("urls", "")
+                if obj.get("max_urls") is not None:
+                    max_urls = obj.get("max_urls")
+            except json.JSONDecodeError:
+                pass
+
+        try:
+            mu = int(max_urls) if max_urls is not None else 30
+        except (TypeError, ValueError):
+            mu = 30
+        mu = max(1, min(mu, 100))
+        try:
+            result = await asyncio.to_thread(run_scan, url_input, mu)
+        except Exception as e:
+            logger.exception("scan_js_urls_for_vulns failed")
+            return json.dumps({"success": False, "error": str(e)}, indent=2)
+        return json.dumps(result, indent=2, default=str)
+
     async def execute_llm_red_team(
         self,
         target_url: str,
@@ -2323,6 +2369,21 @@ class ASMToolsManager:
             {"vuln": "XSS via Smuggled Reflected Content", "severity": "high", "why": "Reflected content from smuggled request executes in victim's browser."},
             {"vuln": "Internal Service Access via Smuggling", "severity": "high", "why": "Smuggled request routes to internal endpoints not exposed externally."},
         ],
+        "host_header": [
+            {"vuln": "Password Reset Poisoning → ATO", "severity": "critical", "why": "Reset email absolute URL uses attacker Host / X-Forwarded-Host."},
+            {"vuln": "Web Cache Poisoning via Unkeyed Host", "severity": "high", "why": "Host influences cache key inconsistently across layers."},
+            {"vuln": "Routing SSRF", "severity": "high", "why": "Host selects upstream → internal service or metadata access."},
+        ],
+        "saml": [
+            {"vuln": "Account Takeover via Assertion Tampering", "severity": "critical", "why": "Unsigned or wrapped assertions change NameID to victim."},
+            {"vuln": "SSO Privilege Escalation", "severity": "critical", "why": "Group/role attributes accepted without signature validation."},
+            {"vuln": "Metadata XXE / SSRF", "severity": "high", "why": "IdP metadata fetch parses attacker XML or URLs."},
+        ],
+        "graphql": [
+            {"vuln": "BOLA via node(id) / global IDs", "severity": "high", "why": "GraphQL object IDs lack field-level authz."},
+            {"vuln": "Auth Bypass Mutation", "severity": "critical", "why": "Unauth mutations change email/password/role."},
+            {"vuln": "Batching / Alias Rate-Limit Bypass", "severity": "medium", "why": "Aliased queries evade per-request throttles."},
+        ],
     }
 
     async def detect_bug_chains(
@@ -2340,7 +2401,8 @@ class ASMToolsManager:
             vuln_type: Confirmed or suspected vulnerability class. Supported:
                        ssrf, xss, sqli, idor, open_redirect, xxe, lfi, csrf,
                        broken_auth, rce, mass_assignment, business_logic,
-                       subdomain_takeover, cache_poisoning, request_smuggling.
+                       subdomain_takeover, cache_poisoning, request_smuggling,
+                       host_header, saml, graphql.
             target: Optional hostname/URL for context in the output.
             notes: Optional notes about the confirmed finding.
         """
@@ -2360,6 +2422,10 @@ class ASMToolsManager:
             "smuggling": "request_smuggling", "http_smuggling": "request_smuggling",
             "cache": "cache_poisoning", "web_cache": "cache_poisoning",
             "subdomain_takeover": "subdomain_takeover", "takeover": "subdomain_takeover",
+            "hostheader": "host_header", "host_header_injection": "host_header",
+            "password_reset_poisoning": "host_header",
+            "sso": "saml", "saml_sso": "saml",
+            "gql": "graphql",
         }
         key = alias_map.get(key, key)
         chains = self._BUG_CHAINS.get(key)
@@ -2486,7 +2552,9 @@ class ASMToolsManager:
         dupe_risk_words = ["default page", "missing header", "server version", "banner",
                            "clickjacking", "self-xss", "csrf on logout", "logout csrf",
                            "rate limit on non-sensitive", "no rate limit on login page only",
-                           "options method", "http methods", "cors wildcard on public"]
+                           "options method", "http methods", "cors wildcard on public",
+                           "graphql introspection alone", "open redirect alone",
+                           "host header alone", "dns callback only"]
         q7 = not any(w in text for w in dupe_risk_words)
         questions.append({
             "question": "Is this unlikely to be marked as N/A / Informational / Duplicate?",
@@ -2495,8 +2563,27 @@ class ASMToolsManager:
                         "FAIL — common low-value pattern detected; review program policy for acceptability.",
         })
 
+        # Q8: Identity discipline for authz-class findings
+        authz_signal = any(w in text for w in [
+            "idor", "bola", "bfla", "authorization", "authz", "other user",
+            "another user", "cross-user", "cross-tenant", "object-level",
+        ])
+        identity_signal = any(w in text for w in [
+            "user a", "user b", "anonymous", "unauthenticated", "without auth",
+            "session a", "session b", "low-priv", "cross-identity", "two accounts",
+            "victim user", "attacker account",
+        ])
+        q8 = (not authz_signal) or identity_signal
+        questions.append({
+            "question": "For authz findings: is the proving identity documented (anon / A / B)?",
+            "pass": q8,
+            "feedback": "PASS — identity context present or not an authz finding." if q8 else
+                        "FAIL — document anonymous vs user-A vs user-B repro before submitting IDOR/BOLA.",
+        })
+
         score = sum(1 for q in questions if q["pass"])
-        if score >= 6:
+        total = len(questions)
+        if score >= total - 1:
             verdict = "SUBMIT"
             verdict_detail = "Strong finding. Submit with the evidence and steps provided."
         elif score >= 3:
@@ -2511,7 +2598,7 @@ class ASMToolsManager:
             "title": title,
             "severity": severity,
             "target": target or "not specified",
-            "score": f"{score}/7",
+            "score": f"{score}/{total}",
             "verdict": verdict,
             "verdict_detail": verdict_detail,
             "questions": questions,
@@ -3356,7 +3443,7 @@ class ASMToolsManager:
         if llm is None:
             try:
                 from langchain_anthropic import ChatAnthropic
-                llm = ChatAnthropic(model="claude-3-5-sonnet-20241022", temperature=0)
+                llm = ChatAnthropic(model="claude-sonnet-4-6", temperature=0)
             except Exception:
                 from langchain_openai import ChatOpenAI
                 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)

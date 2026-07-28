@@ -13,6 +13,9 @@ A "skill" is a named, bounded workflow the agent knows how to run:
     * ``surface-ranking`` - Rank recon results by testing value
     * ``api-authz-validation`` - Prove API authz gaps with minimal requests
     * ``idor-validation`` - Validate BOLA / IDOR with response comparison
+    * ``dual-identity-authz`` - Anonymous / A / B authz matrix
+    * ``nextjs-stack`` / ``springboot-stack`` / ``laravel-stack`` - Tech-conditional hunts
+    * ``spa-api-discovery`` - Hidden APIs from JS bundles
     * ``evidence-hygiene`` - Redact sensitive evidence before reporting
 
 In chat, the user can invoke any skill with::
@@ -165,11 +168,16 @@ SKILLS: list[Skill] = [
         playbook_id="surface_ranking",
         system_context=(
             "You are running the SURFACE-RANKING skill. Build a prioritized target "
-            "queue from existing recon and light follow-up checks. Favor assets with "
-            "authentication, APIs, exposed Swagger/OpenAPI, GraphQL, file upload, admin "
-            "routes, sensitive technologies, high-risk ports, known vulns, JS secrets, "
-            "or cloud/identity integrations. Do not perform destructive validation; "
-            "finish with ranked targets, why each matters, and the next safe proof step."
+            "queue BEFORE deep hunting. Hard priority order: "
+            "(1) auth/SSO/reset/MFA, (2) object-ID APIs + GraphQL, "
+            "(3) upload/webhook/URL-fetch/PDF, (4) admin/actuator/swagger/debug, "
+            "(5) framework hot paths if fingerprint matches (Next.js/Spring/Laravel), "
+            "(6) everything else. Favor assets with authentication, APIs, Swagger/OpenAPI, "
+            "GraphQL, file upload, admin routes, sensitive tech, risky ports, known vulns, "
+            "JS secrets, or cloud/identity integrations. Do not perform destructive "
+            "validation; finish with ranked targets, why each matters, suggested skill "
+            "(dual-identity-authz, nextjs-stack, etc.), and the next safe proof step. "
+            "save_note the ranked queue as category=artifact."
         ),
     ),
     Skill(
@@ -201,7 +209,91 @@ SKILLS: list[Skill] = [
             "responses across unauthenticated, user A, and user B contexts when test "
             "credentials are available. A finding needs concrete cross-user or cross-"
             "tenant data access, not just a 200 response. Use read-only requests unless "
-            "the engagement explicitly authorizes mutation."
+            "the engagement explicitly authorizes mutation. "
+            "Classify carefully: no-auth success = missing authentication; "
+            "user A reading user B = IDOR/BOLA; low-priv hitting admin function = BFLA."
+        ),
+    ),
+    Skill(
+        id="dual-identity-authz",
+        aliases=["dual-identity", "two-user-authz", "cross-identity", "authz-matrix"],
+        title="Dual-identity authorization matrix",
+        description=(
+            "Prove authz bugs with an anonymous / user-A / user-B matrix. Distinguishes "
+            "missing auth, IDOR/BOLA, and BFLA before reporting."
+        ),
+        scan_type="dual_identity_authz",
+        playbook_id="dual_identity_authz",
+        system_context=(
+            "You are running the DUAL-IDENTITY-AUTHZ skill. "
+            "1) Collect candidate object-ID and privileged endpoints from recon/notes. "
+            "2) For each candidate, send the SAME request under: anonymous, user A, user B "
+            "(use provided auth headers/cookies; ask if missing). "
+            "3) Compare status, length, owner fields, and sensitive data. "
+            "4) Classify: missing_auth | idor_bola | bfla | no_issue. "
+            "5) Only create_finding when cross-identity or unauth impact is proven with "
+            "response evidence. Call sanitize_evidence, then validate_finding, then "
+            "detect_bug_chains for confirmed authz bugs."
+        ),
+        required_inputs=["target"],
+    ),
+    Skill(
+        id="nextjs-stack",
+        aliases=["nextjs", "next-js", "vercel-next"],
+        title="Next.js stack hunt",
+        description="Tech-conditional checks for Next.js: middleware bypass, image SSRF, Server Actions, ISR cache.",
+        scan_type="nextjs_stack",
+        playbook_id="nextjs_stack",
+        system_context=(
+            "You are running the NEXTJS-STACK skill. Only proceed if fingerprinting shows "
+            "Next.js (/_next/, x-nextjs, or Vercel). Check: middleware auth bypass via "
+            "static asset paths; /_next/image URL SSRF; Server Actions invocation; "
+            "ISR/cache poisoning via unkeyed headers; RSC payload leakage. "
+            "Prove impact with execute_curl; do not claim CVE names without live proof."
+        ),
+    ),
+    Skill(
+        id="springboot-stack",
+        aliases=["spring", "springboot", "actuator"],
+        title="Spring Boot stack hunt",
+        description="Tech-conditional checks for Spring Boot actuators, SpEL, H2, Jolokia.",
+        scan_type="springboot_stack",
+        playbook_id="springboot_stack",
+        system_context=(
+            "You are running the SPRINGBOOT-STACK skill. Only if Spring/actuator signals "
+            "exist. Probe /actuator, /actuator/env, heapdump, mappings, gateway, jolokia, "
+            "h2-console. Prefer GET/HEAD. Escalate only with demonstrated data exposure "
+            "or RCE preconditions — never dump full heapdump into findings (sanitize)."
+        ),
+    ),
+    Skill(
+        id="laravel-stack",
+        aliases=["laravel", "ignition", "telescope"],
+        title="Laravel stack hunt",
+        description="Tech-conditional checks for Laravel debug, Telescope/Horizon, Ignition, signed URLs.",
+        scan_type="laravel_stack",
+        playbook_id="laravel_stack",
+        system_context=(
+            "You are running the LARAVEL-STACK skill. Only if Laravel/_ignition/telescope "
+            "signals exist. Check APP_DEBUG stack traces, Telescope/Horizon auth, "
+            "Ignition RCE preconditions (version-gated), signed URL tampering, .env leak. "
+            "Validate live; create_finding only with concrete evidence."
+        ),
+    ),
+    Skill(
+        id="spa-api-discovery",
+        aliases=["spa-api", "hidden-api", "js-api-map", "shadow-api"],
+        title="SPA → hidden API discovery",
+        description="Extract backend API routes from JS bundles and test them for missing auth / IDOR.",
+        scan_type="spa_api_discovery",
+        playbook_id="spa_api_discovery",
+        system_context=(
+            "You are running the SPA-API-DISCOVERY skill. "
+            "1) Collect first-party JS (execute_katana / js-recon). "
+            "2) Extract API base paths, GraphQL URLs, and object routes from bundles. "
+            "3) Probe discovered APIs unauthenticated then with low-priv auth. "
+            "4) Feed promising object routes into dual-identity-authz or idor-validation. "
+            "Introspection or route listing alone is not a finding — need authz impact."
         ),
     ),
     Skill(
@@ -235,14 +327,18 @@ SKILLS: list[Skill] = [
     Skill(
         id="finding-validation",
         aliases=["validate", "gate", "7q", "triage", "validate-finding"],
-        title="Finding validation (7-Question Gate)",
-        description="Score a proposed finding through 7 criteria before reporting: impact, reachability, reproducibility, boundary, evidence, severity, and N/A risk.",
+        title="Finding validation (8-Question Gate)",
+        description=(
+            "Score a proposed finding before reporting: impact, reachability, reproducibility, "
+            "boundary, evidence, severity, N/A risk, and identity discipline for authz."
+        ),
         scan_type="finding_validation",
         playbook_id="finding_validation",
         system_context=(
             "You are running the FINDING-VALIDATION skill. Call validate_finding with "
             "the title, description, severity, and any evidence. Use the score and "
-            "verdict to decide: SUBMIT (6-7), IMPROVE (3-5), or DROP (0-2). "
+            "verdict to decide: SUBMIT (pass nearly all), IMPROVE, or DROP. "
+            "For authz findings, require anonymous/user-A/user-B identity context. "
             "For IMPROVE, explain each failing question to the user. "
             "After validation, call detect_bug_chains to surface follow-on test opportunities."
         ),

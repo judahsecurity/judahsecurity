@@ -39,7 +39,7 @@ def _get_bridge() -> ASMBridge:
 
 @security_tool(category="recon", risk="safe")
 def scan_subdomains(domain: str, timeout: int = 300) -> str:
-    """Enumerate subdomains for a domain using subfinder and subcat passive sources.
+    """Enumerate subdomains for a domain using subfinder, subfaster, and subcat.
 
     Args:
         domain: Root domain to enumerate (e.g. example.com)
@@ -47,8 +47,9 @@ def scan_subdomains(domain: str, timeout: int = 300) -> str:
     """
     import scanners
     results_subfinder = scanners.run_subfinder(domain, _get_bridge(), timeout=timeout)
+    results_subfaster = scanners.run_subfaster(domain, _get_bridge(), timeout=min(timeout, 180))
     results_subcat = scanners.run_subcat(domain, _get_bridge(), timeout=min(timeout, 180))
-    results = list(set(results_subfinder + results_subcat))
+    results = list(set(results_subfinder + results_subfaster + results_subcat))
     return json.dumps({"subdomains": results, "count": len(results)})
 
 
@@ -1335,46 +1336,25 @@ Produce a structured "App Profile" covering:
 10. scan_js_urls_for_secrets on JS bundles to find hardcoded secrets and internal endpoint names.
 11. janus_dast_baseline for a passive DAST pass (no active payloads — observes responses only).
 
+## Ranked attack surface (required section)
+After mapping, emit a **Ranked Hunt Queue** (highest first) so hunters spend turns wisely:
+1. Auth / SSO / reset / MFA
+2. Object-ID APIs + GraphQL
+3. Upload / webhook / URL-fetch / PDF render (SSRF)
+4. Admin / actuator / swagger / debug
+5. Framework-specific hot paths (Next.js, Spring, Laravel, ASP.NET) if fingerprint matches
+6. Everything else
+
+Also flag **tech-conditional skills** hunters should load (Next.js middleware, Spring actuators, etc.).
+
 ## Output format
-Produce a structured markdown App Profile:
+Produce a structured markdown App Profile including:
+- Application Type, Authentication, Key Features, API Surface, Tech Stack
+- Interesting Attack Vectors
+- **Ranked Hunt Queue** (ordered list with why each matters)
+- **Suggested hunter focus** (e.g. authz_hunter on /api/v1/orders/{id})
 
-```
-## App Profile: [target]
-
-### Application Type
-[e.g., B2B SaaS project management tool]
-
-### Authentication
-[e.g., Session cookie + CSRF token; Google OAuth SSO; optional TOTP MFA]
-
-### Key Features & Attack Surface
-- File upload: POST /api/v1/attachments (multipart/form-data)
-- Payment: /checkout → Stripe integration
-- User invitation: POST /api/v1/invites (email-based)
-- Data export: GET /api/v1/reports/export?format=csv
-- Webhooks: /settings/webhooks (sends to user-configured URL)
-- Admin panel: /admin/* (separate auth flow)
-
-### API Surface
-- REST: /api/v1/* (JSON, Bearer token)
-- GraphQL: /graphql (introspection enabled?)
-- WebSocket: wss://app.com/ws/notifications
-
-### Tech Stack
-- Frontend: React SPA, webpack bundles
-- Backend: Rails 7.1 (X-Powered-By header)
-- DB: PostgreSQL (inferred from error messages)
-- CDN: Cloudflare (orange cloud)
-- Cloud: AWS (s3.amazonaws.com in JS)
-
-### Interesting Attack Vectors
-1. File upload endpoint accepts arbitrary MIME types (no server-side validation seen)
-2. Webhook URL is user-configurable — potential SSRF
-3. Report export with format parameter — potential injection sink
-4. Admin panel accessible at /admin without separate auth domain
-```
-
-This profile is passed directly to all 12 OWASP hunters as their attack-surface context.
+This profile is passed directly to the OWASP fireteam as their attack-surface context.
 """,
         tool_names=APP_MAPPER_TOOLS,
         max_turns=30,
@@ -1414,13 +1394,19 @@ A single NO kills the finding. Be strict — false positives waste everyone's ti
 
 **Q6: Is impact demonstrated, not theoretical?**
 - XSS: need cookie in exfil, not just alert()
-- SSRF: need DNS/HTTP OOB callback, not just error message
+- SSRF: need internal HTTP data or metadata, not DNS-only ping
 - IDOR: need another user's data in response, not just a 200 status code
 - SQLi: need time delay or error or data, not just a 500 error
 
 **Q7: Is the severity calibrated to achieved impact?**
 - Missing CSRF token + SameSite=Strict → KILL Q7 (SameSite prevents it)
 - XSS in admin-only panel with no user reachable → downgrade severity
+
+**Q8: Identity check (authz/auth findings) — which session proved it?**
+- Record: anonymous vs user_A vs user_B vs privileged
+- Missing auth (works with no cookie) ≠ IDOR (cross-user with A's token)
+- Own-data-only responses → KILL Q8
+- Cannot answer identity questions on authz findings → NEEDS_MORE_EVIDENCE
 
 ## Decision
 For each finding: PASS / KILL (Q#) / DOWNGRADE / NEEDS_MORE_EVIDENCE
@@ -1429,15 +1415,17 @@ For PASS findings: call confirm_vulnerability_poc to lock in severity and submit
 For NEEDS_MORE_EVIDENCE: use send_http_request or scan_nuclei to re-test before deciding.
 For KILL/DOWNGRADE: explain why in one sentence.
 
-## Never-submit list (instant KILL Q7 without chain)
+## Never-submit list (instant KILL without a working chain)
 - Missing security headers alone (X-Frame-Options, X-Content-Type-Options, etc.)
-- GraphQL introspection alone (not exploitable as standalone finding)
-- Self-XSS (attacker can only attack themselves)
-- Open redirect alone without OAuth chain or SSRF chain
-- SSRF DNS-only without HTTP response (confirm with HTTP callback)
+- GraphQL introspection alone (need authz bypass or cross-user node access)
+- Self-XSS (attacker can only attack themselves) without CSRF delivery
+- Open redirect alone without OAuth token theft or SSRF chain
+- Host header injection alone without password-reset poisoning proof
+- SSRF DNS-only without HTTP response body from internal/metadata
 - CORS wildcard without ACAC: true (credentials blocked by spec)
 - Missing cookie flags alone (report only if leads to concrete exploit)
 - SPAs exposing client_id (public by design)
+- Clickjacking on non-sensitive pages; rate-limit missing on non-auth forms
 """,
         tool_names=VALIDATOR_TOOLS,
         max_turns=25,

