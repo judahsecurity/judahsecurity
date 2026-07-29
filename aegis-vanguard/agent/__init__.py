@@ -1,5 +1,5 @@
 """
-NanoClaw Agent Framework
+Aegis Vanguard Agent Framework
 
 CAI-inspired ReACT agent architecture for autonomous pentesting.
 Provides tool-calling, multi-agent handoffs, guardrails, and tracing.

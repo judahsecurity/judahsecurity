@@ -1,5 +1,5 @@
 """
-ReACT Agent Loop for NanoClaw Agent Framework
+ReACT Agent Loop for Aegis Vanguard Agent Framework
 
 The core reasoning engine. Implements the Reason-Act-Observe cycle:
   1. Send context + tool schemas to LLM
@@ -95,9 +95,7 @@ class AgentRunner:
         self.registry = ToolRegistry()
         self.guardrails = guardrails or GuardrailEngine()
         self.tracer = tracer or Tracer(enabled=False)
-        self.default_model = default_model or os.environ.get(
-            "AEGIS_MODEL", os.environ.get("NANOCLAW_MODEL", "claude-sonnet-4-20250514")
-        )
+        self.default_model = default_model or os.environ.get("AEGIS_MODEL", "claude-sonnet-4-6")
         self.llm_backend = os.environ.get("AEGIS_LLM_BACKEND", "auto").lower()
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key and self.llm_backend in ("auto", "anthropic"):
@@ -353,7 +351,7 @@ class AgentRunner:
           1. Exact env var: AEGIS_MODEL_<AGENT_NAME> (e.g. AEGIS_MODEL_RECON_AGENT)
           2. Category env vars: AEGIS_MODEL_RECON / VULN / EXPLOIT / REPORT / HUNTER
           3. Agent.model from code
-          4. AEGIS_MODEL / NANOCLAW_MODEL default
+          4. AEGIS_MODEL default
 
         This keeps the ReAct prompts/analysis intact while allowing cost-aware
         routing: e.g. cheap model for recon/report, Opus/GPT-5.5 for exploit

@@ -56,6 +56,15 @@
 │  └──────────────────────────────────┘                                             │
 │                                                                                   │
 └──────────────────────────────────────────────────────────────────────────────────┘
+
+External autonomous pentester (optional):
+
+┌────────────────────────────┐     POST /api/v1/ingest/*      ┌──────────────────┐
+│  Aegis Vanguard            │ ─────────────────────────────▶ │  ASM Platform    │
+│  (aegis-vanguard/)         │                                │  findings +      │
+│  ReACT recon → vuln →      │ ◀── on-demand validate_finding │  validations     │
+│  exploit → report          │                                │                  │
+└────────────────────────────┘                                └──────────────────┘
 ```
 
 ## ✨ Features
@@ -438,6 +447,16 @@ theforcesecurity_ASM/
 │   ├── Dockerfile.scanner     # Scanner worker image
 │   └── requirements.txt
 │
+├── aegis-vanguard/            # Aegis Vanguard: autonomous ReACT pentest agent
+│   ├── agent/                 # Orchestrator, recon/vuln/exploit/report agents, guardrails
+│   ├── run_pentest.py         # Full pentest entrypoint
+│   ├── validate_finding.py    # On-demand single-finding validator
+│   ├── asm_bridge.py          # Ingestion client → ASM platform
+│   └── DEPLOYMENT.md          # Standalone / Docker deployment guide
+│
+├── harness/                   # Aegis Harness: batch scanning + detection benchmarking
+│   └── local_harness/         # batch/ (run many targets) + benchmark/ (accuracy vs corpus)
+│
 ├── db/init/                   # Database initialization
 ├── docs/                      # Technical documentation (11 guides)
 ├── aws/                       # AWS deployment configs
@@ -504,6 +523,17 @@ All endpoints are prefixed with `/api/v1/`. Full interactive docs available at `
 | `/agent/approve`, `/agent/answer` | Approval and Q&A flows |
 | `/agent-knowledge/` | Agent knowledge base CRUD |
 | `/mcp/tools`, `/mcp/call` | MCP tool listing and invocation |
+
+### Aegis Vanguard / Ingestion APIs
+
+External agent auth uses `tfasm_` API keys (`agent_type: aegis_vanguard`). See [aegis-vanguard/README.md](aegis-vanguard/README.md).
+
+| Endpoint | Description |
+|----------|-------------|
+| `/ingest/findings` | Batch findings from Aegis Vanguard (API key) |
+| `/ingest/heartbeat` | Agent health check |
+| `/ingest/api-keys` | Create / list / revoke agent API keys (JWT) |
+| `/vulnerabilities/{id}/validate` | Queue on-demand Aegis Vanguard finding validation |
 
 ### Security & Analysis APIs
 

@@ -1,6 +1,6 @@
 -- Migration: Finding validation + detection-logic feedback
 -- Adds:
---   * finding_validations   — one row per NanoClaw validator-agent run on a finding
+--   * finding_validations   — one row per Aegis Vanguard validator-agent run on a finding
 --   * detection_feedback     — template_id-keyed log of incorrect detection logic
 --   * vulnerabilities.validation_status / last_validation_verdict / last_validated_at
 --

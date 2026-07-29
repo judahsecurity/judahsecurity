@@ -106,16 +106,59 @@ OPENAI_MODEL=gpt-4o
 ANTHROPIC_API_KEY=
 ANTHROPIC_MODEL=claude-sonnet-4-6
 
+# =============================================================================
+# Aegis Vanguard (autonomous pentest agent + on-demand finding validator)
+# Code lives in aegis-vanguard/. See aegis-vanguard/DEPLOYMENT.md.
+# =============================================================================
+# How the scanner worker invokes validate_finding.py: docker | subprocess
+# AEGIS_VALIDATOR_MODE=docker
+# AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
+# AEGIS_VANGUARD_PATH=/path/to/aegis-vanguard   # only for subprocess mode
+# AEGIS_VALIDATE_MAX_TURNS=20
+# AEGIS_VALIDATE_TIMEOUT=900
+# Agent-side (also used inside the Vanguard container):
+# AEGIS_MODEL=claude-sonnet-4-6
+# AEGIS_GUARDRAILS=true
+# AEGIS_TRACING=true
+
 # DeepSeek (OpenAI-compatible). Optional. Provider string in task_models: "deepseek"
 # Get key at: https://platform.deepseek.com/
 # DEEPSEEK_API_KEY=
 # DEEPSEEK_MODEL=deepseek-chat
 
+# Moonshot / Kimi (OpenAI-compatible). Optional. Provider string in task_models: "kimi"
+# Get key at: https://platform.kimi.ai/
+# Per-org keys can also be saved in Settings → API Keys (service name: kimi).
+# MOONSHOT_API_KEY=
+# KIMI_MODEL=kimi-k3
+
+# Groq (OpenAI-compatible, free tier). Provider string: "groq"
+# Get key at: https://console.groq.com/keys
+# GROQ_API_KEY=
+# GROQ_MODEL=llama-3.3-70b-versatile
+
+# Local Ollama (no cloud key). Provider string: "ollama"
+# Docker Compose (recommended on EC2): enable the ollama profile so the
+# `ollama` + `ollama-init` services start and pull the model automatically.
+#   COMPOSE_PROFILES=ollama
+#   OLLAMA_BASE_URL=http://ollama:11434/v1
+#   docker compose --profile ollama up -d
+# Host / Docker Desktop instead: OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+# Smaller instances: OLLAMA_MODEL=qwen2.5:7b  (~8 GB RAM). 14b needs ~12–16 GB.
+# When a preferred cloud provider has no API key, the agent falls back to Ollama
+# if it is reachable (disable with OLLAMA_FALLBACK_ENABLED=false).
+# COMPOSE_PROFILES=ollama
+# OLLAMA_BASE_URL=http://ollama:11434/v1
+# OLLAMA_MODEL=qwen2.5:14b
+# OLLAMA_FALLBACK_ENABLED=true
+
 # Per-task model routing (bring-your-own-key):
 #   These env vars are the GLOBAL default keys/models. Each organization can
 #   override provider + model per task (reasoning / offensive / report) and
-#   supply its own encrypted keys via the API-config store — see the "agent"
-#   module in project settings ("task_models": {"offensive": "anthropic:claude-sonnet-4-6", ...}).
+#   supply its own encrypted keys via Settings → API Keys (or the API-config
+#   store) — see the "agent" module in project settings
+#   ("task_models": {"offensive": "anthropic:claude-sonnet-4-6",
+#                    "reasoning": "groq:llama-3.3-70b-versatile", ...}).
 #   Provider keys are only ever handed to the model SDK; they are never placed
 #   into prompts, tool output, or agent state.
 

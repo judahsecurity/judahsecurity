@@ -1,17 +1,15 @@
 # Aegis Vanguard — ASM Scanner Agent
 
-An AI-powered Attack Surface Management agent that runs inside a
-[NanoClaw](https://github.com/qwibitai/nanoclaw)-style container (folder still
-named `nanoclaw-agent/` for backward compatibility) and reports findings back
-to The Force Security ASM platform.
+An AI-powered Attack Surface Management agent that runs as a standalone CLI or
+Docker container and reports findings back to The Force Security ASM platform.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────┐     ┌──────────────────────────────────┐
-│       NanoClaw Container            │     │     ASM Platform                 │
+│       Aegis Vanguard Container      │     │     ASM Platform                 │
 │                                     │     │                                  │
-│  Claude Agent (via NanoClaw)        │     │  POST /api/v1/ingest/findings    │
+│  Claude Agent (ReACT pipeline)      │     │  POST /api/v1/ingest/findings    │
 │       │                             │     │       │                          │
 │       ▼                             │     │       ▼                          │
 │  scanners.py                        │────▶│  Ingestion Service               │
@@ -26,20 +24,16 @@ to The Force Security ASM platform.
 
 ## Setup
 
-### Phase 1: Standalone Testing (without NanoClaw)
-
-Test the agent components independently before integrating with NanoClaw.
-
-#### 1. Build the scanner container
+### 1. Build the scanner container
 
 ```bash
-cd nanoclaw-agent
-docker build -t asm-scanner .
+cd aegis-vanguard
+docker build -t aegis-vanguard:latest -f Dockerfile ..
 ```
 
-#### 2. Generate an API key on your ASM platform
+Build from the monorepo root so shared packages under `backend/packages/` are available.
 
-Log into your ASM platform and create an agent API key:
+### 2. Generate an API key on your ASM platform
 
 ```bash
 # Via API (requires admin JWT token)
@@ -51,24 +45,24 @@ curl -X POST http://your-asm-platform:8000/api/v1/ingest/api-keys \
 # Save the returned api_key (starts with tfasm_) - it's only shown once
 ```
 
-#### 3. Run standalone tests
+### 3. Run standalone tests
 
 ```bash
 # Dry-run test (no API connection needed)
-docker run --rm asm-scanner python3 asm_bridge.py test
+docker run --rm aegis-vanguard:latest python3 asm_bridge.py test
 
 # Test against your platform
 docker run --rm \
   -e ASM_API_URL=http://your-asm-platform:8000 \
   -e ASM_API_KEY=tfasm_YOUR_KEY_HERE \
   -e ASM_AGENT_ID=test-scanner-01 \
-  asm-scanner python3 asm_bridge.py test
+  aegis-vanguard:latest python3 asm_bridge.py test
 
 # Run a real subdomain scan
 docker run --rm \
   -e ASM_API_URL=http://your-asm-platform:8000 \
   -e ASM_API_KEY=tfasm_YOUR_KEY_HERE \
-  asm-scanner python3 -c "
+  aegis-vanguard:latest python3 -c "
 from asm_bridge import ASMBridge
 from scanners import run_subfinder
 bridge = ASMBridge()
@@ -78,61 +72,21 @@ print(bridge.stats)
 "
 ```
 
-### Phase 2: NanoClaw Integration
-
-#### 1. Fork and clone NanoClaw
+### 4. Run a full pentest
 
 ```bash
-gh repo fork qwibitai/nanoclaw --clone
-cd nanoclaw
+docker run --rm \
+  -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+  -e ASM_API_URL=http://your-asm-platform:8000 \
+  -e ASM_API_KEY=tfasm_YOUR_KEY_HERE \
+  -e AEGIS_MODEL=claude-sonnet-4-6 \
+  aegis-vanguard:latest \
+  --target https://example.com --scope example.com
 ```
 
-#### 2. Set up NanoClaw
+See [DEPLOYMENT.md](./DEPLOYMENT.md) for local Python setup, compose examples, and the full env var reference.
 
-```bash
-claude  # Start Claude Code
-# Then type: /setup
-```
-
-#### 3. Create an ASM scanner group
-
-Copy the agent files into a NanoClaw group:
-
-```bash
-mkdir -p groups/asm-scanner
-cp /path/to/nanoclaw-agent/CLAUDE.md groups/asm-scanner/CLAUDE.md
-cp /path/to/nanoclaw-agent/asm_bridge.py groups/asm-scanner/
-cp /path/to/nanoclaw-agent/scanners.py groups/asm-scanner/
-```
-
-#### 4. Configure the agent environment
-
-Add to your NanoClaw `.env`:
-
-```env
-ASM_API_URL=https://your-asm-platform.com
-ASM_API_KEY=tfasm_YOUR_KEY_HERE
-ASM_AGENT_ID=aegis-vanguard-prod-01
-```
-
-#### 5. Mount scanning tools in the container
-
-Update your NanoClaw container configuration to include ProjectDiscovery tools.
-You can either:
-- Use the provided Dockerfile to build a custom container image
-- Install tools via the NanoClaw setup process
-
-#### 6. Talk to your agent
-
-```
-@Andy scan example.com for subdomains and open ports
-@Andy run a full recon on example.com and report back
-@Andy check example.com for critical vulnerabilities
-```
-
-### Phase 3: Enterprise Ready
-
-For production deployments:
+## Production notes
 
 #### API Key Rotation
 - Create API keys with expiration dates
@@ -153,7 +107,7 @@ aegis-vanguard-03: Vulnerability scanning
 - Check ingestion batch responses for error rates
 
 #### Network Security
-- Run NanoClaw containers in an isolated network
+- Run Aegis Vanguard containers in an isolated network
 - Only allow outbound traffic to scan targets and the ASM platform
 - Use TLS for all API communication
 
@@ -163,7 +117,9 @@ aegis-vanguard-03: Vulnerability scanning
 |------|---------|
 | `asm_bridge.py` | Python client for the ASM platform ingestion API |
 | `scanners.py` | Wrappers around security scanning tools |
-| `CLAUDE.md` | Instructions for the NanoClaw Claude agent |
+| `CLAUDE.md` | Instructions for the Aegis Vanguard Claude agent |
+| `run_pentest.py` | Main ReACT pentest entrypoint |
+| `validate_finding.py` | On-demand single-finding validator |
 | `Dockerfile` | Container image with all scanning tools pre-installed |
 
 ## API Endpoints Used

@@ -1,7 +1,7 @@
 """
 Ingestion Service
 
-Processes findings submitted by external agents (NanoClaw, CI/CD pipelines, etc.)
+Processes findings submitted by external agents (Aegis Vanguard, CI/CD pipelines, etc.)
 and maps them into the ASM platform's data model (Assets, PortServices, Vulnerabilities).
 """
 

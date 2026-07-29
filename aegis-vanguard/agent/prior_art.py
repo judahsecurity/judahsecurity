@@ -4,7 +4,7 @@ Prior Art Search — keyword-search over a curated technique knowledge base.
 Hunters call search_prior_art(query, category) before testing a surface to get
 proven payloads, target patterns, and bypass notes from the knowledge base.
 
-The knowledge base is data/techniques.json relative to the nanoclaw-agent root.
+The knowledge base is data/techniques.json relative to the aegis-vanguard root.
 """
 from __future__ import annotations
 

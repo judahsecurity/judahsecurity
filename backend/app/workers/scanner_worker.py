@@ -797,11 +797,11 @@ class ScannerWorker:
             # For DB messages, the scan status will be set to FAILED by handlers
     
     async def handle_validate_finding(self, job_data: dict):
-        """Validate a single finding by invoking the NanoClaw validator agent.
+        """Validate a single finding by invoking the Aegis Vanguard validator agent.
 
-        Invokes nanoclaw-agent/validate_finding.py (via `docker run` of the
-        NanoClaw image by default, or a local subprocess when
-        NANOCLAW_VALIDATOR_MODE=subprocess). The agent actively re-tests the
+        Invokes aegis-vanguard/validate_finding.py (via `docker run` of the
+        Aegis Vanguard image by default, or a local subprocess when
+        AEGIS_VALIDATOR_MODE=subprocess). The agent actively re-tests the
         live target and returns a structured JSON verdict, which is written back
         to the FindingValidation row and denormalized onto the Vulnerability.
         A false positive attributed to the template's own logic also records a
@@ -961,21 +961,21 @@ class ScannerWorker:
                 scope = host
 
             # Build the validator invocation.
-            mode = os.getenv("NANOCLAW_VALIDATOR_MODE", "docker").lower()
-            max_turns = os.getenv("NANOCLAW_VALIDATE_MAX_TURNS", "20")
-            timeout_sec = int(os.getenv("NANOCLAW_VALIDATE_TIMEOUT", "900"))
+            mode = os.getenv("AEGIS_VALIDATOR_MODE", "docker").lower()
+            max_turns = os.getenv("AEGIS_VALIDATE_MAX_TURNS", "20")
+            timeout_sec = int(os.getenv("AEGIS_VALIDATE_TIMEOUT", "900"))
             cwd = None
             if mode == "subprocess":
-                nanoclaw_path = os.getenv("NANOCLAW_PATH") or str(
-                    Path(__file__).resolve().parents[3] / "nanoclaw-agent"
+                vanguard_path = os.getenv("AEGIS_VANGUARD_PATH") or str(
+                    Path(__file__).resolve().parents[3] / "aegis-vanguard"
                 )
                 cmd = [
-                    "python3", os.path.join(nanoclaw_path, "validate_finding.py"),
+                    "python3", os.path.join(vanguard_path, "validate_finding.py"),
                     "--finding-json", "-", "--max-turns", str(max_turns),
                 ]
-                cwd = nanoclaw_path
+                cwd = vanguard_path
             else:
-                image = os.getenv("NANOCLAW_IMAGE", "nanoclaw-agent:latest")
+                image = os.getenv("AEGIS_VANGUARD_IMAGE", "aegis-vanguard:latest")
                 cmd = [
                     "docker", "run", "--rm", "-i",
                     "-e", "ANTHROPIC_API_KEY", "-e", "AEGIS_MODEL",

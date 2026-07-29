@@ -2,11 +2,11 @@
 """
 ASM Platform Bridge
 
-Client library for NanoClaw agents to communicate findings back to
+Client library for Aegis Vanguard agents to communicate findings back to
 The Force Security ASM platform. Handles authentication, batching,
 retries, and structured finding submission.
 
-Usage inside NanoClaw container:
+Usage inside Aegis Vanguard container:
     from asm_bridge import ASMBridge, Finding
     
     bridge = ASMBridge()  # reads config from env or CLAUDE.md context
@@ -359,6 +359,12 @@ class ASMBridge:
         batch = self._buffer[:]
         self._buffer.clear()
 
+        # Optional local sink: append every flushed finding as a JSON line.
+        # Enabled by the benchmarking/batch harness via AEGIS_FINDINGS_SINK so a
+        # run produces a stable, machine-readable artifact independent of the
+        # platform ingestion API. No-op when the env var is unset.
+        self._write_sink(batch)
+
         payload = {
             "agent_id": self.agent_id,
             "agent_type": "aegis_vanguard",
@@ -402,6 +408,19 @@ class ASMBridge:
             ],
         }
         return self._post("/api/v1/ingest/heartbeat", payload)
+
+    def _write_sink(self, batch: List[Finding]) -> None:
+        """Append findings to the AEGIS_FINDINGS_SINK JSONL file if configured."""
+        sink_path = os.environ.get("AEGIS_FINDINGS_SINK", "")
+        if not sink_path:
+            return
+        try:
+            os.makedirs(os.path.dirname(os.path.abspath(sink_path)), exist_ok=True)
+            with open(sink_path, "a", encoding="utf-8") as fh:
+                for f in batch:
+                    fh.write(json.dumps(f.to_dict(), default=str) + "\n")
+        except Exception as e:  # never let sink IO break a scan
+            logger.warning(f"findings sink write failed ({sink_path}): {e}")
 
     @property
     def stats(self) -> dict:

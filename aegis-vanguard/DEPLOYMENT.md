@@ -1,9 +1,7 @@
 # Aegis Vanguard — Deployment Guide
 
-Aegis Vanguard is harness-agnostic: it runs as a **standalone Python CLI**, in
-**any Docker container**, or inside a **NanoClaw-style sandbox** (what the
-folder name is still named after). Nothing in the agent requires NanoClaw at
-runtime — this guide covers all three deployment shapes.
+Aegis Vanguard is harness-agnostic: it runs as a **standalone Python CLI** or in
+**any Docker container**. This guide covers both deployment shapes.
 
 Phase-1 status: the parallel OWASP fireteam (Shannon/RedAmon-inspired
 scatter-gather ReAct) is the default vuln-phase pipeline. See
@@ -40,7 +38,7 @@ air-gapped engagements, and local tuning.
 ### Setup
 
 ```bash
-cd nanoclaw-agent
+cd aegis-vanguard
 
 python3 -m venv .venv
 source .venv/bin/activate
@@ -55,7 +53,7 @@ export OPENAI_API_KEY=sk-...
 # Or Gemini:
 export GEMINI_API_KEY=...
 # Optional:
-export AEGIS_MODEL=claude-sonnet-4-20250514        # override default model
+export AEGIS_MODEL=claude-sonnet-4-6        # override default model
 export AEGIS_LLM_BACKEND=auto                       # auto|anthropic|litellm
 export AEGIS_TRACING=true                           # default on
 export AEGIS_GUARDRAILS=true                        # default on
@@ -90,7 +88,7 @@ different phases or specialist hunters to different models:
 
 ```bash
 # Default model for anything not explicitly routed.
-export AEGIS_MODEL=claude-sonnet-4-20250514
+export AEGIS_MODEL=claude-sonnet-4-6
 
 # Force LiteLLM for non-Claude providers. In auto mode, models beginning with
 # "claude-" use the native Anthropic SDK; all others go through LiteLLM.
@@ -98,13 +96,13 @@ export AEGIS_LLM_BACKEND=auto
 
 # Phase-level routing.
 export AEGIS_MODEL_RECON=gpt-5.5
-export AEGIS_MODEL_VULN=claude-sonnet-4-20250514
-export AEGIS_MODEL_EXPLOIT=claude-opus-4-20250514
+export AEGIS_MODEL_VULN=claude-sonnet-4-6
+export AEGIS_MODEL_EXPLOIT=claude-opus-4-1
 export AEGIS_MODEL_REPORT=gpt-5.5
 
 # Parallel OWASP fireteam routing.
-export AEGIS_MODEL_HUNTER=claude-sonnet-4-20250514
-export AEGIS_MODEL_INJECTION=claude-opus-4-20250514
+export AEGIS_MODEL_HUNTER=claude-sonnet-4-6
+export AEGIS_MODEL_INJECTION=claude-opus-4-1
 export AEGIS_MODEL_AUTHZ=gpt-5.5
 
 # Exact agent override wins over every other setting.
@@ -119,13 +117,13 @@ Routing precedence:
 2. Category env var: `AEGIS_MODEL_RECON`, `AEGIS_MODEL_EXPLOIT`,
    `AEGIS_MODEL_HUNTER`, `AEGIS_MODEL_INJECTION`, `AEGIS_MODEL_AUTHZ`, etc.
 3. `agent.model` set in code
-4. `AEGIS_MODEL` / legacy `NANOCLAW_MODEL`
+4. `AEGIS_MODEL` default
 
 Common model examples:
 
 ```bash
 # Native Anthropic SDK path (default for claude-* models in auto mode)
-export AEGIS_MODEL=claude-sonnet-4-20250514
+export AEGIS_MODEL=claude-sonnet-4-6
 
 # OpenAI / ChatGPT via LiteLLM
 export AEGIS_LLM_BACKEND=litellm
@@ -157,14 +155,14 @@ Output:
 
 ## 2. Docker (own image)
 
-Use this if you want Vanguard as a reproducible container but don't need the
-NanoClaw sandbox wrapper.
+Use this if you want Vanguard as a reproducible container with all scanners
+pre-installed.
 
 ### Build
 
 ```bash
-cd nanoclaw-agent
-docker build -t aegis-vanguard:latest .
+# From the monorepo root (Dockerfile COPY paths expect this context)
+docker build -f aegis-vanguard/Dockerfile -t aegis-vanguard:latest .
 ```
 
 The image installs every scanner listed above so no host dependencies are
@@ -177,7 +175,7 @@ docker run --rm \
     -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
     -e ASM_API_URL=http://asm-platform:8000 \
     -e ASM_API_KEY="$ASM_API_KEY" \
-    -e AEGIS_MODEL=claude-sonnet-4-20250514 \
+    -e AEGIS_MODEL=claude-sonnet-4-6 \
     -v "$(pwd)/traces:/agent/traces" \
     aegis-vanguard:latest \
     --target https://example.com --scope example.com
@@ -190,14 +188,14 @@ docker run --rm \
 services:
   vanguard:
     build:
-      context: ./nanoclaw-agent
+      context: ./aegis-vanguard
       dockerfile: Dockerfile
     image: aegis-vanguard:latest
     environment:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
       ASM_API_URL: http://asm-backend:8000
       ASM_API_KEY: ${ASM_API_KEY}
-      AEGIS_MODEL: claude-sonnet-4-20250514
+      AEGIS_MODEL: claude-sonnet-4-6
       AEGIS_TRACING: "true"
     volumes:
       - ./traces:/agent/traces
@@ -214,69 +212,43 @@ Spin up with `docker compose -f docker-compose.vanguard.yml run --rm vanguard`.
 
 ---
 
-## 3. Inside a NanoClaw container
+## 3. Isolated / sandboxed Docker runs
 
-This is the original target shape (folder name is `nanoclaw-agent/` for
-back-compat). NanoClaw provides additional syscall-level isolation around the
-Claude SDK and wraps outbound network egress. Use this for customer-facing
-scans.
-
-### Expected NanoClaw contract
-
-The agent expects the container to provide:
+For customer-facing scans, run the same image with tighter network and volume
+isolation. The agent expects:
 
 | Path            | Purpose                                                   |
 |-----------------|-----------------------------------------------------------|
 | `/agent/`       | Working directory for the CLI + traces                    |
 | `/agent/traces/`| Mount or volume for persisted trace JSON                  |
 | `/agent/workspaces/latest/deliverables/` | Where reports are written       |
-| `$ANTHROPIC_API_KEY` | Inherited from NanoClaw's secret store               |
+| `$ANTHROPIC_API_KEY` | LLM credential                                   |
 | `$ASM_API_URL` / `$ASM_API_KEY` | ASM platform ingestion credentials        |
 
-### Provisioning inside NanoClaw
+Example:
 
-1. Build the Vanguard image the same way as section 2.
-2. Either bake the image into your NanoClaw manifest, or pull it at runtime:
+```bash
+docker run --rm \
+    --network scan-egress \
+    -e ANTHROPIC_API_KEY \
+    -e ASM_API_URL \
+    -e ASM_API_KEY \
+    -e AEGIS_MODEL=claude-sonnet-4-6 \
+    -e AEGIS_GUARDRAILS=true \
+    -v "$(pwd)/traces:/agent/traces" \
+    -v "$(pwd)/reports:/agent/workspaces/latest/deliverables" \
+    aegis-vanguard:latest \
+    python3 /agent/run_pentest.py \
+        --target https://example.com \
+        --scope example.com
+```
 
-   ```bash
-   nanoclaw image pull aegis-vanguard:latest
-   ```
+Notes:
 
-3. Launch a sandboxed run. Replace the `nanoclaw run` invocation below with
-   whatever your NanoClaw distribution uses — the environment and command
-   are what matter:
-
-   ```bash
-   nanoclaw run \
-       --image aegis-vanguard:latest \
-       --env ANTHROPIC_API_KEY \
-       --env ASM_API_URL \
-       --env ASM_API_KEY \
-       --env AEGIS_MODEL=claude-sonnet-4-20250514 \
-       --volume "$(pwd)/traces:/agent/traces" \
-       --volume "$(pwd)/reports:/agent/workspaces/latest/deliverables" \
-       -- \
-       python3 /agent/run_pentest.py \
-           --target https://example.com \
-           --scope example.com
-   ```
-
-4. Collect the trace and report artifacts from the mounted volumes when the
-   run exits. The ASM platform will already have the findings streamed via
-   `ASMBridge` if `ASM_API_*` env vars were set.
-
-### NanoClaw-specific notes
-
-- The `CLAUDE.md` in `nanoclaw-agent/` is the Claude-side system card for the
-  agent. NanoClaw-aware Claude frontends will load it automatically; other
-  harnesses ignore it. It is not required for operation.
-- Aegis Praetorium's **Lictor** layer enforces rate-limits and scope
-  resolution even if NanoClaw's own egress layer is disabled. Do not rely on
-  only one of the two.
-- If you turn off NanoClaw guardrails for a test run, make sure
-  `AEGIS_GUARDRAILS=true` is still set so the Praetorium + legacy guardrail
-  engine remain in place. The two systems layer defense-in-depth — they are
-  not redundant.
+- The `CLAUDE.md` in `aegis-vanguard/` is the Claude-side system card for the
+  agent. It is not required for CLI operation.
+- Keep `AEGIS_GUARDRAILS=true` (and Praetorium Lictor/Censor/Augur) enabled for
+  defense-in-depth even when the host applies its own egress controls.
 
 ---
 
@@ -290,7 +262,7 @@ All configuration is environment-variable driven; no `.env` file is required.
 | `OPENAI_API_KEY`        | — (optional)                        | OpenAI/ChatGPT credential when using LiteLLM      |
 | `GEMINI_API_KEY`        | — (optional)                        | Gemini credential when using LiteLLM              |
 | `AEGIS_LLM_BACKEND`     | `auto`                              | `auto`, `anthropic`, or `litellm`                 |
-| `AEGIS_MODEL`           | `claude-sonnet-4-20250514`          | Default LLM model used by all agents/hunters      |
+| `AEGIS_MODEL`           | `claude-sonnet-4-6`          | Default LLM model used by all agents/hunters      |
 | `AEGIS_MODEL_RECON`     | —                                   | Override model for recon phase                    |
 | `AEGIS_MODEL_VULN`      | —                                   | Override model for legacy vuln agent              |
 | `AEGIS_MODEL_EXPLOIT`   | —                                   | Override model for exploit validation             |
@@ -301,11 +273,8 @@ All configuration is environment-variable driven; no `.env` file is required.
 | `AEGIS_MODEL_AUTH`      | —                                   | Override model for auth hunter                    |
 | `AEGIS_MODEL_AUTHZ`     | —                                   | Override model for authz hunter                   |
 | `AEGIS_MODEL_SSRF`      | —                                   | Override model for SSRF hunter                    |
-| `NANOCLAW_MODEL`        | (fallback for `AEGIS_MODEL`)        | Legacy alias, still honoured                      |
 | `AEGIS_TRACING`         | `true`                              | Enable OpenTelemetry-style span capture           |
-| `NANOCLAW_TRACING`      | (fallback)                          | Legacy alias                                      |
 | `AEGIS_GUARDRAILS`      | `true`                              | Enable legacy regex guardrail engine              |
-| `NANOCLAW_GUARDRAILS`   | (fallback)                          | Legacy alias                                      |
 | `AEGIS_LICTOR_ENABLED`  | `true`                              | Praetorium Lictor pre/post hooks                  |
 | `AEGIS_CENSOR_ENABLED`  | `true`                              | Praetorium Censor tool-input validation           |
 | `AEGIS_AUGUR_ENABLED`   | `true`                              | Praetorium Augur semantic output filter           |
@@ -347,7 +316,7 @@ Export the key. All five OWASP hunters + every phase agent need it.
 **`aegis_praetorium` import warning on startup**
 The agent runs without Praetorium (legacy guardrail engine still active).
 Install the package from `backend/packages/aegis_praetorium/` to enable
-Censor/Lictor/Augur. See `nanoclaw-agent/agent/core.py` for the import
+Censor/Lictor/Augur. See `aegis-vanguard/agent/core.py` for the import
 site — the agent is tolerant of the missing package.
 
 **Hunter hangs at high turn counts**

@@ -18,6 +18,7 @@ RUN curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-$(dpkg --print-architect
 
 # ── ProjectDiscovery tools ───────────────────────────────────────────
 RUN go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest \
+    && go install -v github.com/melvinsh/subfaster/v2/cmd/subfaster@latest \
     && go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest \
     && go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest \
     && go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest \
@@ -126,30 +127,29 @@ RUN mkdir -p /usr/share/wordlists/dirb && \
 
 # ── Python dependencies for the bridge ──────────────────────────────
 # Build from monorepo root so shared packages are available:
-#   docker build -f nanoclaw-agent/Dockerfile .
+#   docker build -f aegis-vanguard/Dockerfile .
 WORKDIR /agent
 COPY backend/packages/asm_scanner_core /packages/asm_scanner_core
 COPY backend/packages/aegis_praetorium /packages/aegis_praetorium
 RUN python3 -m pip install --break-system-packages -e /packages/asm_scanner_core \
     && python3 -m pip install --break-system-packages -e /packages/aegis_praetorium
-COPY nanoclaw-agent/requirements.txt ./
+COPY aegis-vanguard/requirements.txt ./
 RUN python3 -m pip install --break-system-packages -r requirements.txt
 
 # ── Playwright + Chromium for browser-based dynamic testing ─────────
 RUN playwright install --with-deps chromium
 
 # ── Agent files ─────────────────────────────────────────────────────
-COPY nanoclaw-agent/asm_bridge.py nanoclaw-agent/scanners.py nanoclaw-agent/healthcheck.py nanoclaw-agent/CLAUDE.md \
-     nanoclaw-agent/run_pentest.py nanoclaw-agent/reporter.py ./
-COPY nanoclaw-agent/agent/ ./agent/
+COPY aegis-vanguard/asm_bridge.py aegis-vanguard/scanners.py aegis-vanguard/healthcheck.py aegis-vanguard/CLAUDE.md \
+     aegis-vanguard/run_pentest.py aegis-vanguard/validate_finding.py aegis-vanguard/reporter.py ./
+COPY aegis-vanguard/agent/ ./agent/
 
 # Default env vars (override at runtime)
 ENV ASM_API_URL=""
 ENV ASM_API_KEY=""
 ENV ASM_AGENT_ID="aegis-vanguard"
 ENV ANTHROPIC_API_KEY=""
-# AEGIS_* env vars are preferred; NANOCLAW_* kept as aliases for backward compat.
-ENV AEGIS_MODEL="claude-sonnet-4-20250514"
+ENV AEGIS_MODEL="claude-sonnet-4-6"
 ENV AEGIS_GUARDRAILS="true"
 ENV AEGIS_TRACING="true"
 # Aegis Praetorium guard layer (Lictor / Censor / Augur) — shared with the

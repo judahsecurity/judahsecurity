@@ -1,10 +1,9 @@
 # The Force Security — Aegis Vanguard (Autonomous Pentester)
 
-You are **Aegis Vanguard**, an autonomous web application pentester running inside a
-NanoClaw-style container. You use a CAI-inspired ReACT (Reasoning + Action) agent
-architecture to discover, analyze, and validate vulnerabilities. You reason about
-what to do at every step, adapt based on results, and produce actionable security
-reports.
+You are **Aegis Vanguard**, an autonomous web application pentester. You use a
+CAI-inspired ReACT (Reasoning + Action) agent architecture to discover, analyze,
+and validate vulnerabilities. You reason about what to do at every step, adapt
+based on results, and produce actionable security reports.
 
 ## Architecture
 
@@ -63,10 +62,10 @@ python3 run_pentest.py --target https://example.com
 
 ```bash
 # Specify scope and model
-python3 run_pentest.py --target https://example.com --scope example.com --model claude-sonnet-4-20250514
+python3 run_pentest.py --target https://example.com --scope example.com --model claude-sonnet-4-6
 
 # Use cheaper model for recon-heavy scans
-python3 run_pentest.py --target https://example.com --model claude-haiku-4-20250414
+python3 run_pentest.py --target https://example.com --model claude-haiku-4-5
 
 # Limit tool risk level
 python3 run_pentest.py --target https://example.com --max-risk medium
@@ -143,7 +142,7 @@ The guardrail engine blocks dangerous operations regardless of what the LLM requ
 - **Encoded payloads** (base64/32 encoded dangerous commands)
 - **Prompt injection** (attempts to override instructions)
 
-Configure via `AEGIS_GUARDRAILS=true/false` (legacy `NANOCLAW_GUARDRAILS` still honored) or `--max-risk` flag.
+Configure via `AEGIS_GUARDRAILS=true/false` or `--max-risk` flag.
 
 ## Tracing & Observability
 
@@ -152,7 +151,7 @@ Every agent decision, tool call, and token usage is traced:
 ```json
 {
   "session_id": "example.com_1711900000",
-  "model": "claude-sonnet-4-20250514",
+  "model": "claude-sonnet-4-6",
   "agent_turns": 47,
   "tool_calls": 23,
   "handoffs": 3,
@@ -163,16 +162,16 @@ Every agent decision, tool call, and token usage is traced:
 ```
 
 Traces are saved to `/agent/traces/` and exported as JSON.
-Configure via `AEGIS_TRACING=true/false` (legacy `NANOCLAW_TRACING` still honored).
+Configure via `AEGIS_TRACING=true/false`.
 
 ## Environment Variables
 
 | Variable | Description |
 |----------|-------------|
 | `ANTHROPIC_API_KEY` | Required. Your Anthropic API key |
-| `AEGIS_MODEL` | LLM model (default: claude-sonnet-4-20250514). Legacy `NANOCLAW_MODEL` is read as fallback. |
-| `AEGIS_GUARDRAILS` | Enable guardrails (default: true). Legacy `NANOCLAW_GUARDRAILS` is read as fallback. |
-| `AEGIS_TRACING` | Enable tracing (default: true). Legacy `NANOCLAW_TRACING` is read as fallback. |
+| `AEGIS_MODEL` | LLM model (default: claude-sonnet-4-6). |
+| `AEGIS_GUARDRAILS` | Enable guardrails (default: true). |
+| `AEGIS_TRACING` | Enable tracing (default: true). |
 | `ASM_API_URL` | The Force Security platform API URL |
 | `ASM_API_KEY` | Agent API key (starts with tfasm_) |
 | `ASM_AGENT_ID` | Unique agent identifier |

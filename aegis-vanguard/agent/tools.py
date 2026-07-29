@@ -1,5 +1,5 @@
 """
-Tool Registry for NanoClaw Agent Framework
+Tool Registry for Aegis Vanguard Agent Framework
 
 Provides @security_tool decorator that:
 1. Auto-generates Anthropic tool-calling JSON schemas from function signatures

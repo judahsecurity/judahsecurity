@@ -471,7 +471,7 @@ class ApiClient {
     return response.data;
   }
 
-  // Finding validation (NanoClaw validator agent)
+  // Finding validation (Aegis Vanguard validator agent)
   async validateFinding(vulnId: number) {
     const response = await this.client.post(`/vulnerabilities/${vulnId}/validate`);
     return response.data;

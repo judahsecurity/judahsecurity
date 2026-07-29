@@ -8,10 +8,10 @@ reach subprocess spawn. Equivalent to Praetorian's Zod-schema wrapper layer.
 
 Used by:
   - the platform agent's MCP server (CLI-string-style ``args="..."`` invocations)
-  - the NanoClaw agent's tool registry (Python-kwarg-style invocations)
+  - the Aegis Vanguard agent's tool registry (Python-kwarg-style invocations)
 
 Tool-name lookups are normalized: ``execute_nuclei`` (platform) and
-``scan_nuclei`` (NanoClaw) both resolve to the canonical ``nuclei`` schema.
+``scan_nuclei`` (Aegis Vanguard) both resolve to the canonical ``nuclei`` schema.
 
 Tools without an explicit schema fall through to a permissive default that
 still rejects shell metacharacters and length bombs.
@@ -306,6 +306,50 @@ def _build_default_schemas() -> Dict[str, ToolSchema]:
         fields={
             "urls": FieldSchema(type="cli_string", max_length=16384),
             "max_urls": FieldSchema(type="integer", required=False),
+        },
+    )
+    # Retire.js: same URL-list shape as the secrets scanner.
+    s["retirejs"] = ToolSchema(
+        tool_name="retirejs",
+        fields={
+            "urls": FieldSchema(type="cli_string", max_length=16384),
+            "max_urls": FieldSchema(type="integer", required=False),
+        },
+    )
+    # jwt_tool: first token is the JWT (which can be long); allow generous length.
+    s["jwt"] = ToolSchema(
+        tool_name="jwt",
+        fields={"args": FieldSchema(type="cli_string", max_length=8192)},
+    )
+    # Interactsh OOB collaborator: subcommand-driven.
+    s["interactsh"] = ToolSchema(
+        tool_name="interactsh",
+        fields={
+            "args": FieldSchema(
+                type="cli_string",
+                max_length=512,
+                allowed_subcommands=["register", "poll", "list", "stop"],
+            ),
+        },
+    )
+    # Semgrep SAST: path + config flags; allow longer rule/path lists.
+    s["semgrep"] = ToolSchema(
+        tool_name="semgrep",
+        fields={"args": FieldSchema(type="cli_string", max_length=4096)},
+    )
+    # Trivy: first token must be a scan mode.
+    s["trivy"] = ToolSchema(
+        tool_name="trivy",
+        fields={
+            "args": FieldSchema(
+                type="cli_string",
+                max_length=2048,
+                allowed_subcommands=[
+                    "fs", "image", "config", "repo", "rootfs",
+                    "sbom", "kubernetes", "k8s", "vm", "server",
+                    "convert", "version",
+                ],
+            ),
         },
     )
     s["llm_red_team"] = ToolSchema(

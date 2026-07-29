@@ -1,11 +1,11 @@
 """
-Engagement Brain — persistent cross-run memory for NanoClaw assessments.
+Engagement Brain — persistent cross-run memory for Aegis Vanguard assessments.
 
 Stores exhausted techniques, effective payloads, WAF fingerprints, confirmed
 findings, and session notes so each run builds on the last rather than
 starting cold.
 
-Brain files live at:  ~/.nanoclaw/brains/<target-hash>.json
+Brain files live at:  ~/.aegis/brains/<target-hash>.json
 """
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("agent.brain")
 
-_BRAIN_DIR = Path.home() / ".nanoclaw" / "brains"
+_BRAIN_DIR = Path.home() / ".aegis" / "brains"
 
 
 class EngagementBrain:

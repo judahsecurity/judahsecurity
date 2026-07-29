@@ -1,4 +1,4 @@
-"""Agent API Key model for authenticating external agents (NanoClaw, CI/CD, etc.)."""
+"""Agent API Key model for authenticating external agents (Aegis Vanguard, CI/CD, etc.)."""
 
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, JSON

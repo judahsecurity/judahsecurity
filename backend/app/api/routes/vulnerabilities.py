@@ -951,7 +951,7 @@ def _maybe_sync_jira_ticket(
 
 
 # =============================================================================
-# ON-DEMAND FINDING VALIDATION (NanoClaw validator agent)
+# ON-DEMAND FINDING VALIDATION (Aegis Vanguard validator agent)
 # =============================================================================
 
 
@@ -967,7 +967,7 @@ def validate_finding(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_analyst),
 ):
-    """Queue an on-demand validation of this finding by the NanoClaw validator agent.
+    """Queue an on-demand validation of this finding by the Aegis Vanguard validator agent.
 
     The agent actively re-tests the live target and writes a verdict back to the
     finding. Returns the queued FindingValidation record; poll

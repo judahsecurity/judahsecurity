@@ -505,6 +505,106 @@ PLAYBOOKS: List[Dict[str, Any]] = [
         ],
     },
     {
+        "id": "dual_identity_authz",
+        "name": "Dual-identity authorization matrix",
+        "description": (
+            "Compare anonymous / user-A / user-B access on object and privileged endpoints "
+            "to prove missing auth, IDOR/BOLA, or BFLA with evidence."
+        ),
+        "objective": (
+            "Run a dual-identity authorization matrix on the target.\n\n"
+            "**Phase 1 — Collect candidates**\n"
+            "1) From recon/notes/Katana/JS, list endpoints with object IDs, tenant IDs, "
+            "exports, admin/staff paths, and GraphQL node queries.\n"
+            "2) Confirm you have (or request) two distinct low-priv sessions plus ability "
+            "to send anonymous requests.\n\n"
+            "**Phase 2 — Matrix**\n"
+            "3) For each candidate, send the same read-only request as: anonymous, user A, user B.\n"
+            "4) Record status, length, owner identifiers, and whether foreign PII/objects appear.\n"
+            "5) Classify each row: missing_auth | idor_bola | bfla | no_issue.\n\n"
+            "**Phase 3 — Report**\n"
+            "6) create_finding only for proven cross-identity or unauth impact.\n"
+            "7) sanitize_evidence → validate_finding → detect_bug_chains(vuln_type='idor').\n"
+            "8) save_note exhausted endpoints that showed no_issue."
+        ),
+        "initial_todos": [
+            {"description": "Collect object-ID and privileged endpoint candidates", "status": "pending", "priority": "high"},
+            {"description": "Obtain or confirm user A / user B auth contexts", "status": "pending", "priority": "high"},
+            {"description": "Run anonymous/A/B matrix on each candidate (read-only)", "status": "pending", "priority": "high"},
+            {"description": "Create findings for proven missing_auth/IDOR/BFLA only", "status": "pending", "priority": "high"},
+        ],
+    },
+    {
+        "id": "nextjs_stack",
+        "name": "Next.js stack hunt",
+        "description": "Conditional Next.js checks: middleware bypass, image SSRF, Server Actions, ISR cache.",
+        "objective": (
+            "Hunt Next.js-specific issues only if the target fingerprints as Next.js.\n"
+            "1) Confirm /_next/ static assets or Next headers.\n"
+            "2) Test middleware auth bypass via static/asset path quirks.\n"
+            "3) Probe /_next/image with internal URLs for SSRF (safe canaries).\n"
+            "4) Review Server Actions / RSC exposure; ISR cache via unkeyed headers.\n"
+            "5) create_finding only with live proof; otherwise save_note no Next.js surface."
+        ),
+        "initial_todos": [
+            {"description": "Confirm Next.js fingerprint", "status": "pending", "priority": "high"},
+            {"description": "Test middleware / image / Server Action / cache vectors", "status": "pending", "priority": "high"},
+            {"description": "Create findings or note clean Next.js surface", "status": "pending", "priority": "medium"},
+        ],
+    },
+    {
+        "id": "springboot_stack",
+        "name": "Spring Boot stack hunt",
+        "description": "Conditional Spring Boot actuator and related exposure checks.",
+        "objective": (
+            "Hunt Spring Boot exposures if actuator/Spring signals exist.\n"
+            "1) Probe /actuator and common subpaths with GET/HEAD.\n"
+            "2) Check env/mappings/gateway/jolokia/h2-console exposure.\n"
+            "3) Sanitize any sensitive samples; never attach full heap dumps.\n"
+            "4) create_finding for confirmed unauthenticated sensitive exposure."
+        ),
+        "initial_todos": [
+            {"description": "Confirm Spring/actuator signals", "status": "pending", "priority": "high"},
+            {"description": "Probe actuator and related consoles safely", "status": "pending", "priority": "high"},
+            {"description": "Create redacted findings for confirmed exposures", "status": "pending", "priority": "medium"},
+        ],
+    },
+    {
+        "id": "laravel_stack",
+        "name": "Laravel stack hunt",
+        "description": "Conditional Laravel debug/Telescope/Ignition/signed-URL checks.",
+        "objective": (
+            "Hunt Laravel-specific issues if Laravel/_ignition/telescope signals exist.\n"
+            "1) Check debug mode leakage and Telescope/Horizon auth.\n"
+            "2) Version-gate Ignition RCE checks — prove safely or skip.\n"
+            "3) Test signed URL tampering and .env exposure paths.\n"
+            "4) create_finding only with live evidence."
+        ),
+        "initial_todos": [
+            {"description": "Confirm Laravel fingerprint", "status": "pending", "priority": "high"},
+            {"description": "Check debug/Telescope/Ignition/signed URL/.env", "status": "pending", "priority": "high"},
+            {"description": "Create findings or note clean Laravel surface", "status": "pending", "priority": "medium"},
+        ],
+    },
+    {
+        "id": "spa_api_discovery",
+        "name": "SPA → hidden API discovery",
+        "description": "Map APIs from JS bundles and validate authz on discovered routes.",
+        "objective": (
+            "Discover hidden backend APIs from SPA JavaScript and test authorization.\n"
+            "1) Gather first-party JS bundles.\n"
+            "2) Extract API bases, GraphQL endpoints, and object routes.\n"
+            "3) Probe unauthenticated then low-priv.\n"
+            "4) Hand object routes to dual-identity matrix / idor-validation.\n"
+            "5) Do not report route listing alone — require authz impact."
+        ),
+        "initial_todos": [
+            {"description": "Collect and parse first-party JS for API routes", "status": "pending", "priority": "high"},
+            {"description": "Probe discovered APIs unauth and low-priv", "status": "pending", "priority": "high"},
+            {"description": "Run dual-identity checks on object routes; create findings", "status": "pending", "priority": "high"},
+        ],
+    },
+    {
         "id": "garak_scan",
         "name": "Garak LLM Vulnerability Scan (NVIDIA)",
         "description": (

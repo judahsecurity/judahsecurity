@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-NanoClaw Agent Healthcheck
+Aegis Vanguard Agent Healthcheck
 
 Verifies all security tools are installed and the ASM bridge is configured.
 Run with --quick for a fast binary-only check (used by Docker HEALTHCHECK),
@@ -88,7 +88,7 @@ def print_report(results, all_ok):
     BOLD = "\033[1m"
     RESET = "\033[0m"
 
-    print(f"\n{BOLD}NanoClaw Agent - Tool Inventory{RESET}\n")
+    print(f"\n{BOLD}Aegis Vanguard Agent - Tool Inventory{RESET}\n")
 
     print(f"{BOLD}Core Tools (required):{RESET}")
     for t in results["core"]:

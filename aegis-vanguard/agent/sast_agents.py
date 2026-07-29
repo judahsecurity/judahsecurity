@@ -1,5 +1,5 @@
 """
-SAST (Static Application Security Testing) Agents for NanoClaw.
+SAST (Static Application Security Testing) Agents for Aegis Vanguard.
 
 Three specialist agents that analyse source code when --source-dir is provided:
   secret_scanner_agent  — credentials, API keys, hardcoded tokens

@@ -91,6 +91,37 @@ def run_subcat(domain: str, bridge: ASMBridge, timeout: int = 180) -> List[str]:
     return subdomains
 
 
+def run_subfaster(domain: str, bridge: ASMBridge, timeout: int = 180) -> List[str]:
+    """Fast passive subdomain enumeration via subfaster.
+
+    Subfinder fork with default keyless sources: thc, submd, crt (crt.name),
+    shodanct, rapiddns, hackertarget, sitedossier.
+
+    Reference: https://github.com/melvinsh/subfaster
+    """
+    if not _tool_available("subfaster"):
+        logger.error("subfaster not installed — run: go install github.com/melvinsh/subfaster/v2/cmd/subfaster@latest")
+        return []
+
+    result = _run(["subfaster", "-d", domain], timeout=timeout)
+    subdomains = []
+    for line in result.stdout.strip().splitlines():
+        line = line.strip().lower()
+        if not line or line.startswith("#"):
+            continue
+        for prefix in ("https://", "http://"):
+            if line.startswith(prefix):
+                line = line[len(prefix):]
+                break
+        line = line.split("/")[0].split(":")[0]
+        if line and "." in line and line != domain:
+            subdomains.append(line)
+            bridge.submit_subdomain(line, source="subfaster")
+    bridge.flush()
+    logger.info(f"subfaster: {len(subdomains)} subdomains for {domain}")
+    return subdomains
+
+
 def run_amass(domain: str, bridge: ASMBridge, timeout: int = 600) -> List[str]:
     """Subdomain enumeration via amass."""
     if not _tool_available("amass"):
@@ -1248,7 +1279,7 @@ def run_js_url_secret_scan(
         os.makedirs(files_dir, exist_ok=True)
         name_to_url: Dict[str, str] = {}
 
-        with httpx.Client(headers={"User-Agent": "NanoClaw-JS-Secrets/1.0"}) as client:
+        with httpx.Client(headers={"User-Agent": "Aegis-Vanguard-JS-Secrets/1.0"}) as client:
             for url in parsed:
                 try:
                     with client.stream("GET", url, follow_redirects=True, timeout=fetch_timeout) as resp:
@@ -2067,10 +2098,11 @@ def run_full_recon(domain: str, bridge: ASMBridge) -> dict:
     logger.info(f"=== Full recon for {domain} ===")
     results = {"domain": domain}
 
-    # Phase 1: Subdomain discovery — run subfinder and subcat in parallel for maximum coverage
+    # Phase 1: Subdomain discovery — run subfinder, subfaster, and subcat for max coverage
     subs_subfinder = run_subfinder(domain, bridge)
+    subs_subfaster = run_subfaster(domain, bridge)
     subs_subcat = run_subcat(domain, bridge)
-    subs = list(set(subs_subfinder + subs_subcat))
+    subs = list(set(subs_subfinder + subs_subfaster + subs_subcat))
     results["subdomains"] = len(subs)
 
     all_hosts = [domain] + subs
