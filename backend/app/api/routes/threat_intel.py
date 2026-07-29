@@ -14,6 +14,7 @@ Enriched with:
 """
 
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -25,6 +26,7 @@ from app.api.deps import get_db, get_current_active_user
 from app.models.api_config import ExternalService, resolve_api_key
 
 router = APIRouter(prefix="/threat-intel", tags=["threat-intel"])
+logger = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT = 20.0
 
@@ -44,7 +46,7 @@ async def _fetch_vulncheck_kev(client: httpx.AsyncClient, days: int, token: str)
 
     Uses cursor-based pagination so the full KEV dataset is available for
     longer time windows. Stops fetching as soon as every entry on the current
-    page pre-dates the cutoff (VulnCheck sorts descending by dateAdded).
+    page pre-dates the cutoff (VulnCheck sorts descending by date_added).
     """
     if not token:
         return []
@@ -67,7 +69,8 @@ async def _fetch_vulncheck_kev(client: httpx.AsyncClient, days: int, token: str)
     max_pages = 10    # safety cap (~5 000 entries)
 
     for _ in range(max_pages):
-        params: dict = {"sort": "dateAdded", "order": "desc", "limit": page_limit}
+        # VulnCheck index API accepts sort=_timestamp|date_added (not camelCase).
+        params: dict = {"sort": "date_added", "order": "desc", "limit": page_limit}
         if cursor:
             params["cursor"] = cursor
 
@@ -80,7 +83,8 @@ async def _fetch_vulncheck_kev(client: httpx.AsyncClient, days: int, token: str)
             )
             resp.raise_for_status()
             payload = resp.json()
-        except Exception:
+        except Exception as exc:
+            logger.warning("VulnCheck KEV fetch failed: %s", exc)
             break
 
         entries = payload.get("data", []) or []
@@ -127,8 +131,9 @@ async def _fetch_vulncheck_kev(client: httpx.AsyncClient, days: int, token: str)
         if page_done:
             break
 
-        # Follow cursor for next page
-        cursor = payload.get("_next") or payload.get("cursor") or payload.get("meta", {}).get("next_cursor")
+        # Follow cursor for next page (_meta.next_cursor per VulnCheck v3 docs)
+        meta = payload.get("_meta") or payload.get("meta") or {}
+        cursor = payload.get("_next") or payload.get("cursor") or meta.get("next_cursor")
         if not cursor:
             break
 
