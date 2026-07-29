@@ -4,7 +4,7 @@ config and register a SQLAlchemy-backed scope resolver.
 
 Called once at FastAPI startup from ``app.main``. Keeps all platform-specific
 glue out of the shared package so ``aegis_praetorium`` stays dependency-free
-and works inside the NanoClaw container.
+and works inside the Aegis Vanguard container.
 
 What it does:
   1. Snapshots ``app.core.config.settings.AGENT_*`` into a ``PraetoriumConfig``

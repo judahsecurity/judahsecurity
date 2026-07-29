@@ -2,7 +2,7 @@
 Ingestion API Schemas
 
 Schemas for the external agent findings ingestion API.
-Used by NanoClaw agents and other external scanners to submit
+Used by Aegis Vanguard agents and other external scanners to submit
 findings back to the ASM platform.
 """
 
@@ -16,7 +16,6 @@ from app.schemas.unified_results import UnifiedFinding, Severity, ResultType, Co
 
 class AgentType(str, Enum):
     AEGIS_VANGUARD = "aegis_vanguard"
-    NANOCLAW = "nanoclaw"  # Legacy alias for pre-rename clients
     EXTERNAL_SCANNER = "external_scanner"
     CI_CD = "ci_cd"
     CUSTOM = "custom"
@@ -30,7 +29,7 @@ class IngestionBatchRequest(BaseModel):
     agent_version: Optional[str] = Field(None, description="Agent software version")
 
     organization_slug: Optional[str] = Field(None, description="Organization slug (alternative to org ID in API key)")
-    scan_context: Optional[str] = Field(None, description="What triggered this scan (e.g., 'scheduled', 'on-demand', 'nanoclaw-chat')")
+    scan_context: Optional[str] = Field(None, description="What triggered this scan (e.g., 'scheduled', 'on-demand', 'aegis-chat')")
 
     findings: List[UnifiedFinding] = Field(..., min_length=1, max_length=5000)
     metadata: Optional[Dict[str, Any]] = Field(None, description="Additional context from the agent")

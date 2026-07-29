@@ -2,7 +2,7 @@
 aegis_praetorium — Aegis Vanguard's deterministic guard layer.
 
 Houses the three shared "magistrate" components that sit between every agent
-(the platform agent in `backend/` and the NanoClaw agent in `nanoclaw-agent/`)
+(the platform agent in `backend/` and the Aegis Vanguard agent in `aegis-vanguard/`)
 and every security tool invocation:
 
     Censor  — input validator (rejects malformed / dangerous arguments early)
@@ -15,7 +15,7 @@ The package is intentionally dependency-free (stdlib only). Configuration is
 either programmatic (see ``set_config``) or read from environment variables
 (see ``aegis_praetorium.config.load_from_env``). Scope enforcement is
 pluggable via a ``ScopeResolver`` protocol so each agent can plug in its own
-resolution strategy (DB lookup in the platform, --scope flag in NanoClaw).
+resolution strategy (DB lookup in the platform, --scope flag in Aegis Vanguard).
 """
 
 from aegis_praetorium.augur import (

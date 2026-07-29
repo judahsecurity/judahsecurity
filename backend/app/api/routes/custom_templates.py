@@ -18,7 +18,6 @@ Endpoints:
 """
 
 import logging
-import re
 from datetime import datetime
 from typing import Any, Optional
 
@@ -31,6 +30,8 @@ from app.api.deps import get_current_active_user, get_db
 from app.core.config import settings
 from app.models.custom_nuclei_template import CustomNucleiTemplate
 from app.models.api_config import ExternalService, resolve_api_key
+from app.services.custom_template_store import remove_template_file, sync_template_file
+from app.services import custom_template_ai as ai
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,29 @@ class GenerateRequest(BaseModel):
     affected_url: Optional[str] = None
     affected_product: Optional[str] = None
     detection_evidence: Optional[str] = None  # e.g. error message, response body snippet
+    # If False (default), generation is blocked when a template already exists for
+    # this CVE (official Nuclei repo, PDCP, or an existing custom template). Set True
+    # to deliberately generate a duplicate/secondary template anyway.
+    force: bool = False
+
+
+class RefineRequest(BaseModel):
+    """Produce a more accurate template from a confirmed mis-detection.
+
+    Provide the mis-detection diagnosis (`template_logic_issue`, typically from the
+    Aegis Vanguard validator) plus either the original `template_yaml` or a `template_id`
+    that can be resolved to its YAML (custom DB template or local official catalog).
+    """
+    organization_id: int
+    template_logic_issue: str
+    template_id: Optional[str] = None
+    original_yaml: Optional[str] = None
+    target: Optional[str] = None                # known false-positive target (for re-check)
+    evidence: Optional[str] = None              # benign response that mis-fired
+    reasoning: Optional[str] = None             # validator reasoning
+    cve_ids: Optional[list[str]] = None
+    vulnerability_id: Optional[int] = None      # example finding that mis-fired
+    recheck: bool = True                        # re-run the refined template against target
 
 
 def _template_response(t: CustomNucleiTemplate) -> dict:
@@ -146,6 +170,7 @@ def create_template(
     db.add(t)
     db.commit()
     db.refresh(t)
+    sync_template_file(t)  # write to disk if active
     return _template_response(t)
 
 
@@ -183,6 +208,7 @@ def update_template(
     t.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(t)
+    sync_template_file(t)  # reflect current status/YAML on disk
     return _template_response(t)
 
 
@@ -195,23 +221,53 @@ def delete_template(
     t = db.query(CustomNucleiTemplate).filter(CustomNucleiTemplate.id == template_id).first()
     if not t:
         raise HTTPException(status_code=404, detail="Template not found")
+    org_id, tid = t.organization_id, t.template_id
     db.delete(t)
     db.commit()
+    remove_template_file(org_id, tid)
     return {"deleted": True}
 
 
 @router.post("/{template_id}/activate")
-def activate_template(
+async def activate_template(
     template_id: int,
+    skip_validation: bool = False,
     db: Session = Depends(get_db),
     _user=Depends(get_current_active_user),
 ):
+    """Activate a template so it is materialized to disk and run by the scanner.
+
+    The template's YAML is validated with `nuclei -validate` first; activation is
+    blocked if validation fails. Pass `skip_validation=true` to override (e.g. when
+    nuclei is unavailable in this environment and you accept the risk). If the
+    nuclei binary is not installed, validation fails open with a warning.
+    """
     t = db.query(CustomNucleiTemplate).filter(CustomNucleiTemplate.id == template_id).first()
     if not t:
         raise HTTPException(status_code=404, detail="Template not found")
+
+    if not skip_validation:
+        v = await ai.validate_template_yaml(t.template_yaml)
+        if v.get("ran") and not v.get("valid"):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "template_validation_failed",
+                    "message": "nuclei -validate rejected this template; fix it before activating.",
+                    "validation_output": v.get("output"),
+                    "hint": "Pass skip_validation=true to activate anyway.",
+                },
+            )
+        if not v.get("ran"):
+            logger.warning(
+                "Activating template %s without validation (%s)",
+                t.template_id, v.get("error"),
+            )
+
     t.status = "active"
     t.updated_at = datetime.utcnow()
     db.commit()
+    sync_template_file(t)  # write active template to disk for scanning
     return {"status": "active"}
 
 
@@ -227,82 +283,11 @@ def disable_template(
     t.status = "disabled"
     t.updated_at = datetime.utcnow()
     db.commit()
+    remove_template_file(t.organization_id, t.template_id)  # exclude from scanning
     return {"status": "disabled"}
 
 
 # ── AI generation ─────────────────────────────────────────────────────────────
-
-_NUCLEI_SYSTEM_PROMPT = """You are an expert security engineer specializing in writing Nuclei vulnerability detection templates.
-
-Nuclei is a fast, customizable vulnerability scanner. Templates are YAML files that define what to look for.
-
-## Nuclei Template Structure
-
-```yaml
-id: unique-template-id  # lowercase, hyphens only, no spaces
-
-info:
-  name: Product - Vulnerability Description
-  author: judah-security-oracle
-  severity: critical  # info | low | medium | high | critical
-  description: |
-    One paragraph explaining what this template detects and why it matters.
-  reference:
-    - https://nvd.nist.gov/vuln/detail/CVE-XXXX-YYYY
-  classification:
-    cvss-metrics: CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H
-    cvss-score: 9.8
-    cve-id: CVE-XXXX-YYYY
-    cwe-id: CWE-78
-  metadata:
-    verified: false
-    max-request: 3
-  tags: cve,cveYYYY,rce,product-name
-
-http:
-  - method: GET
-    path:
-      - "{{BaseURL}}/path/to/vulnerable/endpoint"
-    headers:
-      User-Agent: Mozilla/5.0
-    
-    matchers-condition: and
-    matchers:
-      - type: status
-        status:
-          - 200
-      - type: word
-        words:
-          - "specific string that only appears in vulnerable response"
-          - "another indicator"
-        condition: or
-        part: body
-      - type: regex
-        regex:
-          - "version:\\s*([0-9.]+)"
-        part: body
-```
-
-## Key rules:
-1. The `id` field must be globally unique — use format: cve-YYYY-NNNNN or custom-org-description
-2. Always use `matchers-condition: and` for multi-matcher logic
-3. Matchers should be SPECIFIC — avoid generic strings that would match on non-vulnerable targets
-4. For version detection: use `type: regex` with extractors
-5. For timing-based detection: use `type: dsl` with `duration > 5`
-6. POST requests need a `body` field and appropriate Content-Type header
-7. The `{{BaseURL}}` variable is the target URL
-8. Use `{{Hostname}}` for the host only (no port)
-9. Mark `verified: false` unless you have tested it manually
-10. Add all relevant tags (cve, year, vulnerability type, affected tech)
-
-## Detection strategy:
-- PREFER active detection (sending a request that triggers a unique response from vulnerable systems)
-- AVOID fingerprinting only (checking version numbers is weak)
-- DO NOT include actual exploit payloads that would cause harm
-- Use benign detection probes that confirm vulnerability without exploiting it
-
-Return ONLY the raw YAML. No markdown code fences, no explanation, no preamble.
-"""
 
 async def _fetch_cve_context(cve_id: str, db: Session) -> dict:
     """Fetch CVE context from PDCP for use in the generation prompt."""
@@ -358,7 +343,14 @@ def _build_generation_prompt(req: GenerateRequest, cve_ctx: dict) -> str:
         parts.append(f"\n## Vulnerability Description\n{req.vulnerability_description}")
 
     if req.affected_url:
-        parts.append(f"\n## Affected URL Pattern\n{req.affected_url}")
+        path_pattern = ai.url_to_path_pattern(req.affected_url)
+        parts.append(
+            "\n## Affected Path Pattern\n"
+            f"The vulnerability was observed at path `{path_pattern}` on an example host. "
+            "Use this ONLY to derive the request path relative to `{{BaseURL}}` "
+            "(e.g. `{{BaseURL}}" + path_pattern + "`). "
+            "Do NOT hardcode the example host — the template must run against any target."
+        )
 
     if req.affected_product:
         parts.append(f"\n## Affected Product\n{req.affected_product}")
@@ -376,95 +368,64 @@ def _build_generation_prompt(req: GenerateRequest, cve_ctx: dict) -> str:
     return "\n".join(parts)
 
 
-def _extract_yaml_from_response(raw: str) -> str:
-    """Strip markdown fences if the model included them despite instructions."""
-    raw = raw.strip()
-    # Remove ```yaml ... ``` or ``` ... ``` blocks
-    raw = re.sub(r"^```(?:yaml)?\s*\n?", "", raw, flags=re.MULTILINE)
-    raw = re.sub(r"\n?```\s*$", "", raw, flags=re.MULTILINE)
-    return raw.strip()
+def _find_existing_nuclei_template(
+    cve_id: str,
+    organization_id: int,
+    cve_ctx: dict,
+    db: Session,
+) -> Optional[dict]:
+    """Check whether a Nuclei template already exists for this CVE.
 
+    Runs cheap→expensive: existing custom templates (DB) → PDCP `is_template`
+    flag (already fetched) → local official template catalog on disk. Returns a
+    dict describing the first match found, or None if no template exists yet.
+    """
+    cve = (cve_id or "").upper()
+    if not cve:
+        return None
 
-def _parse_yaml_metadata(yaml_text: str) -> dict:
-    """Extract basic metadata from YAML without importing PyYAML (best-effort)."""
-    meta = {"cve_ids": [], "tags": [], "severity": None, "template_id": None, "template_type": "http"}
-    for line in yaml_text.splitlines():
-        line = line.strip()
-        if line.startswith("id:"):
-            meta["template_id"] = line.split(":", 1)[1].strip()
-        elif line.startswith("severity:"):
-            meta["severity"] = line.split(":", 1)[1].strip()
-        elif line.startswith("tags:"):
-            tags_raw = line.split(":", 1)[1].strip()
-            meta["tags"] = [t.strip() for t in tags_raw.split(",")]
-        elif line.startswith("cve-id:"):
-            cve = line.split(":", 1)[1].strip()
-            if cve:
-                meta["cve_ids"].append(cve.upper())
-        elif line.startswith("network:"):
-            meta["template_type"] = "network"
-        elif line.startswith("tcp:"):
-            meta["template_type"] = "tcp"
-        elif line.startswith("dns:"):
-            meta["template_type"] = "dns"
-    return meta
-
-
-async def _call_llm(prompt: str) -> str:
-    """Call the configured LLM and return the raw text response."""
-    ai_provider = getattr(settings, "AI_PROVIDER", "openai")
-    model_name = getattr(settings, "AI_MODEL", None)
-
-    try:
-        from langchain_anthropic import ChatAnthropic
-        from langchain_core.messages import HumanMessage, SystemMessage
-        anthropic_available = True
-    except ImportError:
-        anthropic_available = False
-
-    try:
-        from langchain_openai import ChatOpenAI
-        openai_available = True
-    except ImportError:
-        openai_available = False
-
-    messages_payload = [
-        {"role": "system", "content": _NUCLEI_SYSTEM_PROMPT},
-        {"role": "user", "content": prompt},
-    ]
-
-    if ai_provider == "anthropic" and anthropic_available:
-        from langchain_anthropic import ChatAnthropic
-        from langchain_core.messages import HumanMessage, SystemMessage
-        llm = ChatAnthropic(
-            model=model_name or "claude-sonnet-4-5",
-            api_key=getattr(settings, "ANTHROPIC_API_KEY", ""),
-            max_tokens=4096,
-        )
-        response = await llm.ainvoke([
-            SystemMessage(content=_NUCLEI_SYSTEM_PROMPT),
-            HumanMessage(content=prompt),
-        ])
-        return response.content
-
-    if openai_available:
-        from langchain_openai import ChatOpenAI
-        from langchain_core.messages import HumanMessage, SystemMessage
-        llm = ChatOpenAI(
-            model=model_name or "gpt-4o",
-            api_key=getattr(settings, "OPENAI_API_KEY", ""),
-            max_tokens=4096,
-        )
-        response = await llm.ainvoke([
-            SystemMessage(content=_NUCLEI_SYSTEM_PROMPT),
-            HumanMessage(content=prompt),
-        ])
-        return response.content
-
-    raise HTTPException(
-        status_code=503,
-        detail="No LLM provider configured. Set ANTHROPIC_API_KEY or OPENAI_API_KEY.",
+    # 1) An existing custom template in this org already covers the CVE.
+    org_templates = (
+        db.query(CustomNucleiTemplate)
+        .filter(CustomNucleiTemplate.organization_id == organization_id)
+        .all()
     )
+    for t in org_templates:
+        if cve in {c.upper() for c in (t.cve_ids or [])}:
+            return {
+                "source": "custom",
+                "template_id": t.template_id,
+                "status": t.status,
+                "message": f"A custom template ({t.template_id}, status={t.status}) already covers {cve} in this organization.",
+            }
+
+    # 2) PDCP reports an official Nuclei template exists (authoritative, host-independent).
+    if cve_ctx and (cve_ctx.get("is_template") or cve_ctx.get("nuclei_templates")):
+        return {
+            "source": "official",
+            "template_id": cve_ctx.get("filename") or cve.lower(),
+            "message": (
+                f"An official Nuclei template already exists for {cve}"
+                + (f" ({cve_ctx.get('filename')})" if cve_ctx.get("filename") else "")
+                + ". Use the community template instead of generating a duplicate."
+            ),
+        }
+
+    # 3) Local official template catalog on disk (best-effort; path may vary by deploy).
+    try:
+        from app.services.nuclei_template_parser_service import find_matching_nuclei_template
+        match = find_matching_nuclei_template(cve)
+        if match:
+            return {
+                "source": "official_local",
+                "template_id": match.id,
+                "path": match.template_path,
+                "message": f"An official Nuclei template for {cve} is present on disk ({match.template_path}).",
+            }
+    except Exception as e:
+        logger.debug("Local official template lookup failed for %s: %s", cve, e)
+
+    return None
 
 
 @router.post("/generate")
@@ -494,13 +455,31 @@ async def generate_template(
     if req.cve_id:
         cve_ctx = await _fetch_cve_context(req.cve_id.upper(), db)
 
+    # Pre-flight: don't waste an LLM call generating a template that already exists.
+    if req.cve_id and not req.force:
+        existing = _find_existing_nuclei_template(
+            req.cve_id, req.organization_id, cve_ctx, db
+        )
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "template_already_exists",
+                    "message": existing["message"],
+                    "existing": existing,
+                    "hint": "Set force=true to generate a custom/secondary template anyway.",
+                },
+            )
+
     # Build prompt and call LLM
     prompt = _build_generation_prompt(req, cve_ctx)
-    raw_yaml = await _call_llm(prompt)
-    clean_yaml = _extract_yaml_from_response(raw_yaml)
+    raw_yaml = await ai.call_llm(ai.NUCLEI_SYSTEM_PROMPT, prompt)
+    clean_yaml = ai.extract_yaml_from_response(raw_yaml)
+    # Safety net: ensure the finding's specific host never leaks into the template
+    clean_yaml = ai.strip_hardcoded_host(clean_yaml, req.affected_url)
 
     # Extract metadata from the generated YAML
-    meta = _parse_yaml_metadata(clean_yaml)
+    meta = ai.parse_yaml_metadata(clean_yaml)
 
     # Determine template_id — use YAML id or generate one
     template_id = meta.get("template_id") or ""
@@ -522,7 +501,7 @@ async def generate_template(
     cve_ids = list({c.upper() for c in (meta.get("cve_ids") or []) + ([req.cve_id.upper()] if req.cve_id else [])})
 
     ai_model = getattr(settings, "AI_MODEL", None) or (
-        "claude-sonnet-4-5" if getattr(settings, "AI_PROVIDER", "openai") == "anthropic" else "gpt-4o"
+        "claude-sonnet-4-6" if getattr(settings, "AI_PROVIDER", "openai") == "anthropic" else "gpt-4o"
     )
 
     t = CustomNucleiTemplate(
@@ -551,4 +530,67 @@ async def generate_template(
             "Template saved as draft. Review the YAML carefully before activating — "
             "AI-generated templates should be validated against a known-vulnerable target."
         ),
+    }
+
+
+@router.post("/refine")
+async def refine_template_endpoint(
+    req: RefineRequest,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_active_user),
+):
+    """Generate a more accurate template from a confirmed mis-detection.
+
+    Closes the validate → diagnose → refine loop: given the original template and
+    the reason it produced a false positive (e.g. from the Aegis Vanguard validator), the
+    LLM produces a tightened template saved as a draft. If `recheck` is set and a
+    `target` is provided, the refined template is re-run against that known
+    false-positive target; if it still fires, the response flags it so the analyst
+    does not blindly trust it.
+    """
+    if not req.template_logic_issue or not req.template_logic_issue.strip():
+        raise HTTPException(status_code=422, detail="template_logic_issue is required")
+    if not req.original_yaml and not req.template_id:
+        raise HTTPException(status_code=422, detail="Provide original_yaml or template_id")
+
+    try:
+        t = await ai.refine_template(
+            db,
+            organization_id=req.organization_id,
+            template_logic_issue=req.template_logic_issue,
+            original_yaml=req.original_yaml,
+            template_id=req.template_id,
+            target=req.target,
+            evidence=req.evidence,
+            reasoning=req.reasoning,
+            cve_ids=req.cve_ids,
+            created_by_user_id=getattr(user, "id", None),
+            example_vulnerability_id=req.vulnerability_id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+    recheck = None
+    if req.recheck and req.target:
+        recheck = await ai.recheck_template_against_target(t.template_yaml, req.target)
+
+    note = (
+        "Refined template saved as draft. Review the tightened matchers before activating."
+    )
+    if recheck and recheck.get("ran"):
+        if recheck.get("still_fires"):
+            note = (
+                "WARNING: the refined template STILL fired on the known false-positive "
+                "target. Review and tighten further before activating."
+            )
+        else:
+            note = (
+                "Refined template no longer fires on the known false-positive target. "
+                "Review, then activate to use it in scans."
+            )
+
+    return {
+        **_template_response(t),
+        "recheck": recheck,
+        "refinement_note": note,
     }

@@ -906,7 +906,7 @@ def filter_prowler(raw: str, max_chars: int = 20000) -> AugurReading:
 
 # Map of canonical scanner kind → filter function. Tool-name lookup strips
 # common prefixes (``execute_``, ``scan_``, ``run_``) so platform-style
-# ``execute_nuclei`` and NanoClaw-style ``scan_nuclei`` both resolve here.
+# ``execute_nuclei`` and sandboxed ``scan_nuclei`` both resolve here.
 _FILTERS = {
     "nuclei": filter_nuclei,
     "nmap": filter_nmap,
@@ -944,7 +944,7 @@ class Augur:
         """Return a filtered reading, or None if no filter is registered.
 
         ``tool_name`` may be the canonical kind (``"nuclei"``) or a full
-        platform / NanoClaw tool name (``"execute_nuclei"`` / ``"scan_nuclei"``).
+        platform / Aegis Vanguard tool name (``"execute_nuclei"`` / ``"scan_nuclei"``).
         """
         f = _FILTERS.get(_canonical_tool(tool_name))
         if not f:

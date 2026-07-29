@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "aegis-praetorium"
 version = "0.1.0"
-description = "Aegis Vanguard's deterministic guard layer (Lictor / Censor / Augur) shared across the platform agent and the NanoClaw agent"
+description = "Aegis Vanguard's deterministic guard layer (Lictor / Censor / Augur) shared across the platform agent and the Aegis Vanguard agent"
 requires-python = ">=3.10"
 dependencies = []
 

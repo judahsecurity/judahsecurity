@@ -9,7 +9,7 @@ Two configuration modes:
          from aegis_praetorium import PraetoriumConfig, set_config
          set_config(PraetoriumConfig(lictor_enabled=settings.AGENT_LICTOR_ENABLED, ...))
 
-  2. Environment variables (preferred for the NanoClaw container):
+  2. Environment variables (preferred for the Aegis Vanguard container):
 
          AEGIS_LICTOR_ENABLED=true
          AEGIS_CENSOR_ENABLED=true

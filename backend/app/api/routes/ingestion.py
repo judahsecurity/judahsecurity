@@ -1,7 +1,7 @@
 """
 Findings Ingestion API
 
-Authenticated endpoints for external agents (NanoClaw, CI/CD, custom scanners)
+Authenticated endpoints for external agents (Aegis Vanguard, CI/CD, custom scanners)
 to submit findings to the ASM platform. Supports both API key auth (for agents)
 and JWT auth (for admin management of API keys).
 """

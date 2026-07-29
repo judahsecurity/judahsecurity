@@ -163,7 +163,7 @@ All queries must filter by `organization_id` so indexes are used and data is ten
 - **ASN**: Created from `asset.asn` and linked to all resolved IPs via `BELONGS_TO_ASN`.
 - **HostingProvider**: Created from `asset.hosting_provider` and linked to both the asset and its IPs via `HOSTED_BY`.
 - **Certificate**: Created from `asset.ssl_info` JSON. SAN entries are expanded into `Subdomain` nodes via `ALSO_COVERS` — this surfaces shadow IT not yet in the asset inventory.
-- **is_internet_facing** on `IP` nodes: derived from `asset.is_public`. This is the boundary marker for future internal-hop modeling when nanoclaw-agent discovers internal assets.
+- **is_internet_facing** on `IP` nodes: derived from `asset.is_public`. This is the boundary marker for future internal-hop modeling when aegis-vanguard discovers internal assets.
 
 ## Troubleshooting: graphs not working on /graph
 

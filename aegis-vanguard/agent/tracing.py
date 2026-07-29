@@ -1,5 +1,5 @@
 """
-Observability & Tracing for NanoClaw Agent Framework
+Observability & Tracing for Aegis Vanguard Agent Framework
 
 OpenTelemetry-based tracing that records every agent decision, tool call,
 token usage, and cost. Exports to file (default) or OTLP endpoint.
@@ -18,6 +18,11 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger("agent.tracing")
 
 ANTHROPIC_PRICING = {
+    "claude-sonnet-4-6": {"input": 3.0, "output": 15.0},
+    "claude-sonnet-4-5": {"input": 3.0, "output": 15.0},
+    "claude-haiku-4-5": {"input": 1.0, "output": 5.0},
+    "claude-opus-4-1": {"input": 15.0, "output": 75.0},
+    # Legacy dated IDs kept so historical traces still price correctly.
     "claude-sonnet-4-20250514": {"input": 3.0, "output": 15.0},
     "claude-haiku-4-20250414": {"input": 0.80, "output": 4.0},
     "claude-opus-4-20250514": {"input": 15.0, "output": 75.0},
@@ -88,7 +93,7 @@ class Tracer:
         output_dir: str = "/agent/traces",
         session_id: Optional[str] = None,
     ):
-        self.enabled = enabled if os.environ.get("AEGIS_TRACING", os.environ.get("NANOCLAW_TRACING", "true")).lower() != "false" else False
+        self.enabled = enabled if os.environ.get("AEGIS_TRACING", "true").lower() != "false" else False
         self.output_dir = Path(output_dir)
         self.session_id = session_id or datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         self.spans: List[Span] = []
@@ -187,7 +192,7 @@ class Tracer:
     def print_summary(self):
         s = self.summary()
         print(f"\n{'='*50}")
-        print(f"  NanoClaw Agent Trace Summary")
+        print(f"  Aegis Vanguard Agent Trace Summary")
         print(f"{'='*50}")
         print(f"  Session:          {s['session_id']}")
         print(f"  Model:            {s['model']}")

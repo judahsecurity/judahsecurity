@@ -837,7 +837,7 @@ export default function FindingsPage() {
     await handleStatusChange(findingId, newStatus);
   };
 
-  // ── Finding validation (NanoClaw validator agent) ────────────────────────
+  // ── Finding validation (Aegis Vanguard validator agent) ────────────────────────
   const [validationResult, setValidationResult] = useState<any>(null);
   const [validating, setValidating] = useState(false);
   const [detectionIssueText, setDetectionIssueText] = useState('');

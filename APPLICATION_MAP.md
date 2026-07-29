@@ -374,6 +374,25 @@
    │  │  • OpenAI GPT (alternative)      │                    │
    │  └──────────────────────────────────┘                    │
    └──────────────────────────────────────────────────────────┘
+
+   ┌──────────────────────────────────────────────────────────┐
+   │              Aegis Vanguard (external agent)              │
+   │                                                           │
+   │  aegis-vanguard/  — autonomous ReACT pentest agent        │
+   │                                                           │
+   │  Orchestrator → Recon → Vuln → Exploit → Report           │
+   │         │                                                 │
+   │         ▼                                                 │
+   │  asm_bridge.py ──POST /api/v1/ingest/findings──▶ ASM DB   │
+   │                                                           │
+   │  On-demand validation:                                    │
+   │  Findings UI → /vulnerabilities/{id}/validate             │
+   │            → scanner worker → validate_finding.py         │
+   │            → FindingValidation + verdict on Vulnerability │
+   │                                                           │
+   │  Deploy: standalone Python or Docker (aegis-vanguard:latest)│
+   │  Docs:   aegis-vanguard/README.md + DEPLOYMENT.md         │
+   └──────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -741,6 +760,26 @@ Domain ──HAS_SUBDOMAIN──▶ Subdomain ──RESOLVES_TO──▶ IP ─�
 ```
 
 See [docs/GRAPH_SCHEMA.md](docs/GRAPH_SCHEMA.md) for full schema, Cypher queries, and troubleshooting.
+
+---
+
+## ⚔️ Aegis Vanguard
+
+Autonomous external pentest agent that lives in `aegis-vanguard/` (not inside the Docker Compose stack). It runs recon → vuln → exploit → report via a ReACT multi-agent loop and submits findings to the ASM platform.
+
+| Piece | Role |
+|-------|------|
+| `run_pentest.py` | Full-target pentest entrypoint |
+| `validate_finding.py` | Re-tests one existing finding (true/false positive) |
+| `asm_bridge.py` | Batches findings to `POST /api/v1/ingest/findings` |
+| `agent/` | Orchestrator, specialized agents, guardrails, tracing |
+| Praetorium | Shared Lictor/Censor/Augur guard layer with the platform agent |
+
+**Auth:** create an agent API key (`tfasm_…`) with `agent_type: aegis_vanguard`.  
+**Image:** `docker build -f aegis-vanguard/Dockerfile -t aegis-vanguard:latest .`  
+**Env (validator worker):** `AEGIS_VALIDATOR_MODE`, `AEGIS_VANGUARD_IMAGE`, `AEGIS_VANGUARD_PATH`, `AEGIS_VALIDATE_MAX_TURNS`, `AEGIS_VALIDATE_TIMEOUT`.
+
+See [aegis-vanguard/README.md](aegis-vanguard/README.md) and [aegis-vanguard/DEPLOYMENT.md](aegis-vanguard/DEPLOYMENT.md).
 
 ---
 

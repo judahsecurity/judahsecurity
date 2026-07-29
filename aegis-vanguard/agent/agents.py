@@ -1,5 +1,5 @@
 """
-Specialized Security Agents for NanoClaw
+Specialized Security Agents for Aegis Vanguard
 
 Defines the multi-agent architecture:
   Orchestrator -> Recon Agent -> Vuln Agent -> Exploit Agent -> Report Agent
@@ -1647,7 +1647,7 @@ def create_orchestrator() -> Agent:
 
     return Agent(
         name="orchestrator",
-        instructions="""You are the NanoClaw Orchestrator. You coordinate autonomous
+        instructions="""You are the Aegis Vanguard Orchestrator. You coordinate autonomous
 web application penetration testing.
 
 When given a target:

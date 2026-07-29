@@ -1,7 +1,7 @@
 """
 Finding Validation model.
 
-Records each on-demand run of the NanoClaw validator agent against a single
+Records each on-demand run of the Aegis Vanguard validator agent against a single
 finding. The agent actively re-tests the live target and returns a structured
 verdict (confirmed / false_positive / needs_more_evidence) plus the evidence it
 gathered. One finding can be validated multiple times; the latest completed

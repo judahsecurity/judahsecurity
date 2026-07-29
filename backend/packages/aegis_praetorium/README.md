@@ -1,7 +1,7 @@
 # aegis-praetorium
 
 Aegis Vanguard's deterministic guard layer, shared between the platform agent
-(`backend/app/services/agent/`) and the NanoClaw agent (`nanoclaw-agent/`).
+(`backend/app/services/agent/`) and the Aegis Vanguard agent (`aegis-vanguard/`).
 
 > The Praetorium was the headquarters where Roman magistrates — the praetors,
 > lictors, censors, and augurs — held court. This package houses the three
@@ -43,7 +43,7 @@ set_config(PraetoriumConfig(
     tool_output_max_chars=20000,
 ))
 
-# Env vars (preferred for NanoClaw)
+# Env vars (preferred for Aegis Vanguard)
 # AEGIS_LICTOR_ENABLED=true AEGIS_CENSOR_ENABLED=true AEGIS_AUGUR_ENABLED=true
 # AEGIS_ENFORCE_SCOPE=false AEGIS_RATE_CAPACITY=30 AEGIS_RATE_PER_MINUTE=30
 # AEGIS_TOOL_OUTPUT_MAX_CHARS=20000 AEGIS_AUGUR_VERBOSE=false
@@ -54,7 +54,7 @@ set_config(PraetoriumConfig(
 ```python
 from aegis_praetorium import HostListResolver, set_scope_resolver
 
-# NanoClaw: cli flag --scope example.com
+# Aegis Vanguard: cli flag --scope example.com
 set_scope_resolver(HostListResolver(["example.com"]))
 
 # Platform: SQLAlchemy-backed lookup

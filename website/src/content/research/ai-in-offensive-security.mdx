@@ -44,9 +44,9 @@ Aegis Oracle uses a multi-stage pipeline to score CVE exploitability in context:
 
 The LLM component handles the hardest part: understanding the natural language description of a vulnerability well enough to extract structured data. This was previously done manually by security engineers and took 5–10 minutes per CVE. The LLM does it in under 2 seconds with accuracy comparable to a senior analyst.
 
-### 2. Nanoclaw — Autonomous Pentest Agent
+### 2. Aegis Vanguard — Autonomous Pentest Agent
 
-Nanoclaw is a ReACT-based autonomous agent that can conduct targeted penetration testing with minimal human supervision. It:
+Aegis Vanguard is a ReACT-based autonomous agent that can conduct targeted penetration testing with minimal human supervision. It:
 
 - Plans an attack strategy based on scope and objectives
 - Executes reconnaissance using integrated tools (Nuclei, httpx, nmap, Playwright)
@@ -54,7 +54,7 @@ Nanoclaw is a ReACT-based autonomous agent that can conduct targeted penetration
 - Documents actions and findings in real time
 - Knows when to escalate to a human
 
-**Honest limitations**: Nanoclaw works well for discovery and low-hanging-fruit exploitation. It struggles with complex, multi-step attack chains that require creativity or adapting to unexpected defensive responses. It's a force multiplier, not a replacement for a skilled penetration tester.
+**Honest limitations**: Aegis Vanguard works well for discovery and low-hanging-fruit exploitation. It struggles with complex, multi-step attack chains that require creativity or adapting to unexpected defensive responses. It's a force multiplier, not a replacement for a skilled penetration tester.
 
 ## The Prompt Engineering Reality
 

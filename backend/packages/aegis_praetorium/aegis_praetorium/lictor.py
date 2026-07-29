@@ -9,7 +9,7 @@ results).
 
 Design goals:
 - Single chokepoint for SSRF, scope, destructive-flag, and rate-limit
-  enforcement across every tool every agent calls (platform agent + NanoClaw).
+  enforcement across every tool every agent calls (platform agent + Aegis Vanguard).
 - Hooks are pluggable: register additional pre/post hooks at startup.
 - Hooks cannot be bypassed by the LLM — equivalent to Praetorian's PreToolUse
   / PostToolUse / Stop Claude Code lifecycle events.
@@ -127,7 +127,7 @@ _SSRF_PATTERNS = [
 ]
 
 # Per-tool destructive-flag denylist. Add flags as we discover them. Tool-name
-# aliases for both naming conventions (platform: ``execute_X``, NanoClaw: ``X``).
+# aliases for both naming conventions (platform: ``execute_X``, Aegis Vanguard: ``X``).
 _DESTRUCTIVE_FLAGS: Dict[str, List[str]] = {
     "sqlmap": [
         "--os-shell", "--os-pwn", "--os-cmd", "--os-bof",
@@ -155,7 +155,7 @@ _SAFE_DEFAULTS: Dict[str, List[str]] = {
 
 
 def _canonical_tool(tool_name: str) -> str:
-    """Strip ``execute_`` / ``scan_`` prefixes so platform + NanoClaw share lookups."""
+    """Strip ``execute_`` / ``scan_`` prefixes so platform + Aegis Vanguard share lookups."""
     for prefix in ("execute_", "scan_", "run_"):
         if tool_name.startswith(prefix):
             return tool_name[len(prefix):]

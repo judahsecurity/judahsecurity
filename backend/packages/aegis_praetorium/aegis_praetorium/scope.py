@@ -13,7 +13,7 @@ Two implementations ship in-box:
                             "example.com" matches "foo.example.com".
 
 The platform agent (`backend/`) registers a SQLAlchemy-backed resolver that
-queries its ``Asset`` table by org_id. The NanoClaw agent registers a
+queries its ``Asset`` table by org_id. The Aegis Vanguard agent registers a
 ``HostListResolver`` from its ``--scope`` CLI flag.
 
 Hosts call ``set_scope_resolver`` once at startup; ``get_scope_resolver`` is
