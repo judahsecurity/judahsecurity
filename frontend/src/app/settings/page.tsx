@@ -53,6 +53,60 @@ interface ApiConfig {
 
 const API_SERVICES = [
   {
+    name: 'anthropic',
+    label: 'Anthropic (Claude)',
+    description: 'BYOK for the AI agent — planning, analysis, and offensive workflows. Use a Console API key (sk-ant-…), not a Claude Code / Cursor key.',
+    free: false,
+    hasUser: false,
+    link: 'https://console.anthropic.com/settings/keys',
+    group: 'AI / LLM',
+  },
+  {
+    name: 'openai',
+    label: 'OpenAI',
+    description: 'BYOK for GPT models via the agent model router (provider string: openai).',
+    free: false,
+    hasUser: false,
+    link: 'https://platform.openai.com/api-keys',
+    group: 'AI / LLM',
+  },
+  {
+    name: 'deepseek',
+    label: 'DeepSeek',
+    description: 'OpenAI-compatible DeepSeek models for agent tasks (provider string: deepseek).',
+    free: false,
+    hasUser: false,
+    link: 'https://platform.deepseek.com/',
+    group: 'AI / LLM',
+  },
+  {
+    name: 'kimi',
+    label: 'Kimi (Moonshot)',
+    description: 'Moonshot Kimi models for the agent (provider string: kimi). Keys from platform.kimi.ai; default model kimi-k3.',
+    free: false,
+    hasUser: false,
+    link: 'https://platform.kimi.ai/',
+    group: 'AI / LLM',
+  },
+  {
+    name: 'groq',
+    label: 'Groq',
+    description: 'Fast cloud inference with a free tier (provider string: groq). Default model llama-3.3-70b-versatile.',
+    free: true,
+    hasUser: false,
+    link: 'https://console.groq.com/keys',
+    group: 'AI / LLM',
+  },
+  {
+    name: 'ollama',
+    label: 'Ollama (local)',
+    description: 'Local models via Ollama — no cloud key. Used automatically as fallback when other providers have no API key. Default model qwen2.5:14b. Optional: save "ollama" as the key to mark configured.',
+    free: true,
+    hasUser: false,
+    link: 'https://ollama.com/',
+    group: 'AI / LLM',
+  },
+  {
     name: 'vulncheck',
     label: 'VulnCheck',
     description: 'KEV exploit intelligence — recently-added known-exploited CVEs, ransomware associations, threat-actor attribution, weaponized exploit evidence. Powers the Vulnerability Intelligence feed and OPES X-component scoring.',
@@ -574,11 +628,11 @@ export default function SettingsPage() {
               API Keys
             </CardTitle>
             <CardDescription>
-              Configure API keys for vulnerability intelligence and asset discovery. Keys are encrypted at rest and scoped per organization.
+              Configure API keys for AI models, vulnerability intelligence, and asset discovery. Keys are encrypted at rest and scoped per organization.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-6">
-            {['Vulnerability Intelligence', 'Asset Discovery'].map((group) => {
+            {['AI / LLM', 'Vulnerability Intelligence', 'Asset Discovery'].map((group) => {
               const groupServices = API_SERVICES.filter((s: any) => (s.group || 'Asset Discovery') === group);
               return (
                 <div key={group} className="space-y-4">

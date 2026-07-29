@@ -249,8 +249,22 @@ def default_security_checks_config():
 
 def default_agent_config():
     return {
-        "llm_provider": "anthropic",  # openai | anthropic (Claude)
-        "llm_model": "claude-sonnet-4-5",
+        # ── Single default model ─────────────────────────────────────────
+        # This is the ONE model everything uses unless a per-task override is
+        # set below. Change these two fields to switch the whole agent to a
+        # different model/provider. Providers: anthropic | openai | deepseek | kimi | groq | ollama.
+        "llm_provider": "anthropic",
+        "llm_model": "claude-sonnet-4-6",
+        # ── Optional per-task overrides ──────────────────────────────────
+        # Leave empty to use the single default above for every task. To route
+        # a specific task to a different model, add a "provider:model" entry,
+        # e.g. {"offensive": "anthropic:claude-sonnet-4-6",
+        #       "reasoning": "groq:llama-3.3-70b-versatile",
+        #       "report": "ollama:qwen2.5:14b"}.
+        # A "default" key here overrides llm_provider/llm_model for any task
+        # not explicitly listed. Keys come from the encrypted per-org API
+        # config store (bring-your-own-key).
+        "task_models": {},
         "max_iterations": 100,
         "require_approval_exploitation": True,
         "require_approval_post_exploitation": True,

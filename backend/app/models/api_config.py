@@ -151,11 +151,24 @@ class ExternalService:
     PDCP = "pdcp"                  # ProjectDiscovery Cloud Platform (vulnx, Nuclei templates)
     NVD = "nvd"                    # NVD API key (raises rate limits)
 
+    # LLM providers (bring-your-own-key). Keys are encrypted at rest and are
+    # ONLY ever handed to the model SDK client at construction time — they must
+    # never be placed into an LLM prompt, tool output, or agent state.
+    ANTHROPIC = "anthropic"        # Claude
+    OPENAI = "openai"              # GPT / Codex
+    DEEPSEEK = "deepseek"          # DeepSeek (OpenAI-compatible)
+    KIMI = "kimi"                  # Moonshot / Kimi (OpenAI-compatible)
+    GROQ = "groq"                  # Groq (OpenAI-compatible, free tier)
+    OLLAMA = "ollama"              # Local Ollama (OpenAI-compatible, no cloud key)
+    GEMINI = "gemini"              # Google Gemini (future)
+    OPENROUTER = "openrouter"      # OpenRouter aggregator (future)
+
     # Free services (no API key required)
     WAYBACK = "wayback"
     RAPIDDNS = "rapiddns"
     CRTSH = "crtsh"
     SHODAN_CTL = "shodan_ctl"
+    CRT_NAME = "crt_name"
     COMMONCRAWL = "commoncrawl"
     M365 = "m365"
 
@@ -172,6 +185,8 @@ DEFAULT_RATE_LIMITS = {
     ExternalService.WAYBACK: {"per_second": 1, "per_day": None},
     ExternalService.RAPIDDNS: {"per_second": 1, "per_day": None},
     ExternalService.SHODAN_CTL: {"per_second": 1, "per_day": None},
+    # crt.name free tier: 1000 requests per IP per day
+    ExternalService.CRT_NAME: {"per_second": 1, "per_day": 1000},
     ExternalService.M365: {"per_second": 1, "per_day": None},
     ExternalService.VULNCHECK: {"per_second": 10, "per_day": None},
     ExternalService.PDCP: {"per_second": 10, "per_day": None},
@@ -190,7 +205,49 @@ SERVICE_ENV_FALLBACK: dict[str, str] = {
     ExternalService.VIRUSTOTAL: "SUBCAT_VIRUSTOTAL_KEY",
     ExternalService.SECURITYTRAILS: "SUBCAT_SECURITYTRAILS_KEY",
     ExternalService.BINARYEDGE: "SUBCAT_BINARYEDGE_KEY",
+    # LLM providers
+    ExternalService.ANTHROPIC:  "ANTHROPIC_API_KEY",
+    ExternalService.OPENAI:     "OPENAI_API_KEY",
+    ExternalService.DEEPSEEK:   "DEEPSEEK_API_KEY",
+    ExternalService.KIMI:       "MOONSHOT_API_KEY",
+    ExternalService.GROQ:       "GROQ_API_KEY",
+    ExternalService.GEMINI:     "GEMINI_API_KEY",
+    ExternalService.OPENROUTER: "OPENROUTER_API_KEY",
+    # Ollama is local — no cloud key. Optional OLLAMA_API_KEY is unused by
+    # default; the router supplies a dummy client key when needed.
 }
+
+
+# Providers that route through the LLM factory. The key `provider` string used
+# throughout the model-routing layer matches these service names exactly.
+LLM_PROVIDERS: frozenset[str] = frozenset({
+    ExternalService.ANTHROPIC,
+    ExternalService.OPENAI,
+    ExternalService.DEEPSEEK,
+    ExternalService.KIMI,
+    ExternalService.GROQ,
+    ExternalService.OLLAMA,
+    ExternalService.GEMINI,
+    ExternalService.OPENROUTER,
+})
+
+# Providers that can run without a real cloud API key.
+KEYLESS_LLM_PROVIDERS: frozenset[str] = frozenset({
+    ExternalService.OLLAMA,
+})
+
+
+def resolve_llm_key(db, provider: str, organization_id: int | None = None) -> str | None:
+    """Resolve the API key for an LLM `provider` (per-org DB key, then env).
+
+    Thin wrapper over :func:`resolve_api_key` that constrains the lookup to
+    known LLM providers. The returned key is meant to be passed straight to the
+    model SDK client and must never be logged or placed into an LLM prompt.
+    """
+    provider = (provider or "").strip().lower()
+    if provider not in LLM_PROVIDERS:
+        return None
+    return resolve_api_key(db, provider, organization_id)
 
 
 def resolve_api_key(db, service: str, organization_id: int | None = None) -> str | None:

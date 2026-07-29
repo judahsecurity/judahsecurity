@@ -371,6 +371,13 @@ CORS_ORIGINS=["http://localhost","http://localhost:80","http://localhost:3000","
 # AWS SQS (Optional - leave empty to use database polling)
 SQS_QUEUE_URL=
 AWS_REGION=us-east-1
+
+# Local LLM fallback (Ollama) — needs ~12–16 GB RAM for qwen2.5:14b.
+# Use OLLAMA_MODEL=qwen2.5:7b on smaller instances. Do not open port 11434 in SG.
+COMPOSE_PROFILES=ollama
+OLLAMA_BASE_URL=http://ollama:11434/v1
+OLLAMA_MODEL=qwen2.5:14b
+OLLAMA_FALLBACK_ENABLED=true
 EOF
 
 # Secure the file
@@ -382,11 +389,17 @@ echo "Environment file created with PUBLIC_IP: ${PUBLIC_IP}"
 #### Step 6: Build and Start Services
 
 ```bash
-# Build and start all services (this takes 10-15 minutes on first run)
+# Build and start all services (this takes 10-15 minutes on first run).
+# With COMPOSE_PROFILES=ollama in .env, this also starts Ollama and pulls the model
+# (first model pull can take several minutes / ~9 GB for qwen2.5:14b).
 sudo docker compose up -d --build
 
 # Watch the build progress
 sudo docker compose logs -f
+
+# Confirm local LLM fallback (optional)
+sudo docker compose --profile ollama logs ollama-init
+curl -s http://127.0.0.1:11434/api/tags
 
 # Press Ctrl+C to exit logs when services are running
 ```
