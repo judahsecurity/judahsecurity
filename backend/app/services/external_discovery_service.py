@@ -12,6 +12,7 @@ Integrates multiple external intelligence sources for comprehensive asset discov
 - Microsoft 365 - Federated domain discovery
 - ASN Discovery - BGP/ASN data for organizations
 - Shodan CTL - Certificate Transparency Logs hostname discovery (free, no key)
+- crt.name - Aggregated CT/DNS subdomain index with first-seen dates (free, no key)
 
 Based on ASM Recon discovery methodology.
 """
@@ -314,6 +315,487 @@ class ExternalDiscoveryService:
             logger.error(f"Whoxy discovery error: {e}")
             result.error = str(e)
         
+        result.elapsed_time = time.time() - start_time
+        return result
+
+    # =========================================================================
+    # SecurityTrails - Reverse lookups (NS / MX / WHOIS) + associated domains
+    # =========================================================================
+
+    async def discover_securitytrails(
+        self,
+        domain: Optional[str] = None,
+        registration_emails: Optional[List[str]] = None,
+        organization_names: Optional[List[str]] = None,
+    ) -> DiscoveryResult:
+        """
+        Discover related domains via SecurityTrails reverse lookups.
+
+        This is the privacy-proof / off-corporate-registrar pivot: it finds
+        domains sharing the org's registrant email (current OR historical WHOIS),
+        SecurityTrails' associated-domain graph, and — when the operator has
+        configured explicitly-owned nameservers/mailservers — reverse-NS/MX.
+
+        Config (api_configs.config for service "securitytrails"):
+            - registration_emails: seed registrant emails to reverse
+            - registrar_names:     scoped registrar names for reverse-by-registrar
+            - owned_nameservers:   org-specific NS to reverse (shared providers skipped)
+            - owned_mailservers:   org-specific MX to reverse (shared providers skipped)
+        """
+        from app.services.securitytrails_service import get_securitytrails_service
+
+        start_time = time.time()
+        result = DiscoveryResult(source=ExternalService.SECURITYTRAILS, success=False)
+
+        api_key = self.get_api_key(ExternalService.SECURITYTRAILS)
+        if not api_key:
+            result.error = "SecurityTrails API key not configured"
+            return result
+
+        config = self.get_config(ExternalService.SECURITYTRAILS) or {}
+        emails = registration_emails or config.get("registration_emails", [])
+        registrar_names = config.get("registrar_names", [])
+
+        if not domain and not emails:
+            result.error = "No domain or registration emails configured"
+            return result
+
+        try:
+            st = get_securitytrails_service(api_key)
+            # NS/MX reverse lookups are handled by the provider-agnostic
+            # `discover_reverse_dns` source, so we leave them empty here to
+            # avoid duplicate API calls / credit usage.
+            data = await st.discover_related_domains(
+                domain=domain,
+                registration_emails=emails,
+                registrar_names=registrar_names,
+                owned_nameservers=None,
+                owned_mailservers=None,
+                use_history=True,
+                max_pages_per_query=5,
+            )
+
+            base = (domain or "").lower()
+            related = data.get("related_domains", [])
+            # Split apex/registrable domains vs subdomains of the seed
+            for host in related:
+                if base and (host == base or host.endswith("." + base)):
+                    result.subdomains.append(host)
+                else:
+                    result.domains.append(host)
+
+            result.success = True
+            result.raw_data = {
+                "discovered_emails": data.get("discovered_emails", []),
+                "domains_by_email": data.get("domains_by_email", {}),
+                "domains_by_registrar": data.get("domains_by_registrar", {}),
+                "domains_by_ns": data.get("domains_by_ns", {}),
+                "domains_by_mx": data.get("domains_by_mx", {}),
+                "domains_associated": data.get("domains_associated", []),
+                "total_domains_found": data.get("total_domains_found", 0),
+            }
+            logger.info(
+                f"SecurityTrails discovery found {len(result.domains)} domains "
+                f"and {len(result.subdomains)} subdomains"
+            )
+        except Exception as e:
+            logger.error(f"SecurityTrails discovery error: {e}")
+            result.error = str(e)
+
+        result.elapsed_time = time.time() - start_time
+        return result
+
+    # =========================================================================
+    # Reverse-NS / Reverse-MX - privacy-proof infrastructure pivot
+    # (provider-agnostic: uses WhoisXML and/or SecurityTrails)
+    # =========================================================================
+
+    def _get_owned_infrastructure(self) -> Tuple[List[str], List[str]]:
+        """
+        Read explicitly-owned nameservers/mailservers from whichever service
+        config carries them (securitytrails or whoisxml). These are the
+        org-specific hosts to reverse on (e.g. dns1.cscdns.net, the Proofpoint
+        tenant MX mxa-XXXXXXXX.gslb.pphosted.com).
+        """
+        owned_ns: List[str] = []
+        owned_mx: List[str] = []
+        for svc in (ExternalService.SECURITYTRAILS, ExternalService.WHOISXML):
+            cfg = self.get_config(svc) or {}
+            owned_ns.extend(cfg.get("owned_nameservers", []) or [])
+            owned_mx.extend(cfg.get("owned_mailservers", []) or [])
+        # Dedupe, preserve order
+        owned_ns = list(dict.fromkeys(n.strip().lower() for n in owned_ns if n and n.strip()))
+        owned_mx = list(dict.fromkeys(m.strip().lower() for m in owned_mx if m and m.strip()))
+        return owned_ns, owned_mx
+
+    async def _resolve_domain_infrastructure(self, domain: str) -> Tuple[List[str], List[str]]:
+        """
+        Resolve the primary domain's NS + MX via DNS (free, no API credits) and
+        return only the org-specific hosts (shared providers filtered out).
+        Used to auto-seed reverse-NS/MX pivots without manual configuration.
+        """
+        from app.services.securitytrails_service import _is_shared_pivot
+        from app.services.dns_service import DNSService
+
+        ns_hosts: List[str] = []
+        mx_hosts: List[str] = []
+        try:
+            svc = DNSService()
+            records = await asyncio.to_thread(svc.enumerate_domain, domain)
+            for ns in records.ns_records or []:
+                host = str(ns).strip().rstrip(".").lower()
+                if host and not _is_shared_pivot(host):
+                    ns_hosts.append(host)
+            for mx in records.mx_records or []:
+                host = str(mx.get("host", "")).strip().rstrip(".").lower()
+                if host and not _is_shared_pivot(host):
+                    mx_hosts.append(host)
+        except Exception as e:
+            logger.warning(f"Auto-seed DNS resolution failed for {domain}: {e}")
+        return list(dict.fromkeys(ns_hosts)), list(dict.fromkeys(mx_hosts))
+
+    @staticmethod
+    def _hosts_from_dns_records(dns_records: Any) -> Tuple[List[str], List[str]]:
+        """Extract (ns_hosts, mx_hosts) from a stored Asset.dns_records blob."""
+        ns_hosts: List[str] = []
+        mx_hosts: List[str] = []
+        if not isinstance(dns_records, dict):
+            return ns_hosts, mx_hosts
+        for ns in dns_records.get("NS", []) or dns_records.get("ns", []) or []:
+            host = (ns if isinstance(ns, str) else ns.get("host", "")).strip().rstrip(".").lower()
+            if host:
+                ns_hosts.append(host)
+        for mx in dns_records.get("MX", []) or dns_records.get("mx", []) or []:
+            host = (mx if isinstance(mx, str) else mx.get("host", "")).strip().rstrip(".").lower()
+            if host:
+                mx_hosts.append(host)
+        return ns_hosts, mx_hosts
+
+    async def _collect_org_infra_counts(
+        self,
+        sample_size: int = 150,
+        live_resolve_cap: int = 40,
+    ) -> Tuple["Counter", "Counter", int]:
+        """
+        Sample NS/MX across many in-scope assets and count how often each
+        org-specific host recurs. Uses stored ``Asset.dns_records`` when present
+        (free) and live-resolves up to ``live_resolve_cap`` assets that lack
+        records. Returns (ns_counter, mx_counter, sampled_asset_count).
+        """
+        from collections import Counter
+        from app.models.asset import Asset, AssetType
+        from app.services.securitytrails_service import _is_shared_pivot
+
+        ns_counter: Counter = Counter()
+        mx_counter: Counter = Counter()
+        try:
+            assets = (
+                self.db.query(Asset)
+                .filter(
+                    Asset.organization_id == self.organization_id,
+                    Asset.in_scope == True,
+                    Asset.asset_type.in_([AssetType.DOMAIN, AssetType.SUBDOMAIN]),
+                )
+                .limit(sample_size)
+                .all()
+            )
+        except Exception as e:
+            logger.warning(f"Infra sampling DB query failed: {e}")
+            return ns_counter, mx_counter, 0
+
+        needs_live: List[str] = []
+        sampled_assets = 0
+        for asset in assets:
+            ns_hosts, mx_hosts = self._hosts_from_dns_records(asset.dns_records)
+            if ns_hosts or mx_hosts:
+                sampled_assets += 1
+                for h in set(ns_hosts):
+                    if not _is_shared_pivot(h):
+                        ns_counter[h] += 1
+                for h in set(mx_hosts):
+                    if not _is_shared_pivot(h):
+                        mx_counter[h] += 1
+            elif asset.value:
+                needs_live.append(asset.value.strip().lower())
+
+        needs_live = needs_live[:live_resolve_cap]
+        if needs_live:
+            sem = asyncio.Semaphore(10)
+
+            async def _resolve(host: str) -> Tuple[List[str], List[str]]:
+                async with sem:
+                    return await self._resolve_domain_infrastructure(host)
+
+            for ns_hosts, mx_hosts in await asyncio.gather(
+                *[_resolve(h) for h in needs_live], return_exceptions=False
+            ):
+                if ns_hosts or mx_hosts:
+                    sampled_assets += 1
+                for h in set(ns_hosts):
+                    ns_counter[h] += 1
+                for h in set(mx_hosts):
+                    mx_counter[h] += 1
+
+        return ns_counter, mx_counter, sampled_assets
+
+    async def _sample_org_infrastructure(
+        self,
+        sample_size: int = 150,
+        live_resolve_cap: int = 40,
+        min_shared: int = 2,
+    ) -> Tuple[List[str], List[str]]:
+        """
+        Learn the org's shared infrastructure by sampling NS/MX across MANY
+        in-scope assets — not just the primary domain. This is what surfaces
+        pivots like the Proofpoint tenant MX or CSC nameservers even when the
+        apex domain itself sits on a shared provider (e.g. Azure DNS).
+
+        Returns only org-specific hosts that recur on ``min_shared``+ assets
+        (recurrence is the ownership signal; one-offs are dropped as noise).
+        """
+        ns_counter, mx_counter, sampled_assets = await self._collect_org_infra_counts(
+            sample_size, live_resolve_cap
+        )
+        # Adaptive threshold: for tiny orgs a single occurrence is enough
+        threshold = 1 if sampled_assets < 10 else min_shared
+        ns_seeds = sorted([h for h, c in ns_counter.items() if c >= threshold],
+                          key=lambda h: -ns_counter[h])
+        mx_seeds = sorted([h for h, c in mx_counter.items() if c >= threshold],
+                          key=lambda h: -mx_counter[h])
+        if ns_seeds or mx_seeds:
+            logger.info(
+                f"Sampled {sampled_assets} assets -> org infra pivots "
+                f"NS={ns_seeds[:10]} MX={mx_seeds[:10]}"
+            )
+        return ns_seeds, mx_seeds
+
+    async def get_reverse_pivot_plan(
+        self,
+        domain: Optional[str] = None,
+        whois_preview: bool = True,
+        min_shared: int = 2,
+    ) -> Dict[str, Any]:
+        """
+        Read-only "what would reverse discovery pivot on?" plan. Spends NO
+        purchase credits: NS/MX pivots come from config + free DNS/stored
+        records, and reverse-WHOIS uses WhoisXML's free ``preview`` mode to
+        report the would-return domain count per registrant term.
+        """
+        from app.services.securitytrails_service import _is_shared_pivot
+
+        cfg_ns, cfg_mx = self._get_owned_infrastructure()
+        st_cfg = self.get_config(ExternalService.SECURITYTRAILS) or {}
+        wx_cfg = self.get_config(ExternalService.WHOISXML) or {}
+
+        # host -> {seen_on_assets, sources}
+        ns_plan: Dict[str, Dict[str, Any]] = {}
+        mx_plan: Dict[str, Dict[str, Any]] = {}
+
+        def _add(plan, host, source, seen=None):
+            host = (host or "").strip().rstrip(".").lower()
+            if not host or _is_shared_pivot(host):
+                return
+            entry = plan.setdefault(host, {"host": host, "seen_on_assets": 0, "sources": []})
+            if source not in entry["sources"]:
+                entry["sources"].append(source)
+            if seen is not None:
+                entry["seen_on_assets"] = max(entry["seen_on_assets"], seen)
+
+        for h in cfg_ns:
+            _add(ns_plan, h, "config")
+        for h in cfg_mx:
+            _add(mx_plan, h, "config")
+
+        if domain:
+            d_ns, d_mx = await self._resolve_domain_infrastructure(domain)
+            for h in d_ns:
+                _add(ns_plan, h, "primary_domain")
+            for h in d_mx:
+                _add(mx_plan, h, "primary_domain")
+
+        ns_counter, mx_counter, sampled_assets = await self._collect_org_infra_counts()
+        threshold = 1 if sampled_assets < 10 else min_shared
+        for h, c in ns_counter.items():
+            if c >= threshold:
+                _add(ns_plan, h, "sampled", seen=c)
+        for h, c in mx_counter.items():
+            if c >= threshold:
+                _add(mx_plan, h, "sampled", seen=c)
+
+        # Reverse-WHOIS preview (free) for configured registrant terms
+        whois_terms = list(dict.fromkeys(
+            (st_cfg.get("registration_emails", []) or [])
+            + (wx_cfg.get("registration_emails", []) or [])
+            + (wx_cfg.get("organization_names", []) or [])
+        ))
+        whois_preview_results: List[Dict[str, Any]] = []
+        wx_key = self.get_api_key(ExternalService.WHOISXML)
+        if whois_preview and wx_key and whois_terms:
+            from app.services.whoisxml_reverse_service import get_whoisxml_reverse_service
+            wx = get_whoisxml_reverse_service(wx_key)
+            for term in whois_terms:
+                count = await wx.reverse_whois_preview([term])
+                whois_preview_results.append({
+                    "term": term,
+                    "would_return_domains": count,  # -1 == preview error/unknown
+                })
+
+        providers = [
+            p for p, key in (
+                ("whoisxml", self.get_api_key(ExternalService.WHOISXML)),
+                ("securitytrails", self.get_api_key(ExternalService.SECURITYTRAILS)),
+            ) if key
+        ]
+
+        return {
+            "organization_id": self.organization_id,
+            "primary_domain": domain,
+            "sampled_assets": sampled_assets,
+            "min_shared_threshold": threshold,
+            "providers_available": providers,
+            "nameserver_pivots": sorted(ns_plan.values(), key=lambda x: -x["seen_on_assets"]),
+            "mailserver_pivots": sorted(mx_plan.values(), key=lambda x: -x["seen_on_assets"]),
+            "reverse_whois_preview": whois_preview_results,
+            "note": (
+                "Read-only plan. NS/MX pivots and asset sampling are free; "
+                "reverse-WHOIS counts use WhoisXML preview mode (no credits spent). "
+                "Running discovery will spend provider quota/credits."
+            ),
+        }
+
+    async def discover_reverse_dns(
+        self,
+        owned_nameservers: Optional[List[str]] = None,
+        owned_mailservers: Optional[List[str]] = None,
+        domain: Optional[str] = None,
+        auto_seed: bool = True,
+        sample_org_assets: bool = True,
+        pivot_nameservers: Optional[List[str]] = None,
+        pivot_mailservers: Optional[List[str]] = None,
+    ) -> DiscoveryResult:
+        """
+        Discover domains that share the org's OWNED nameservers or mail servers.
+
+        This is the privacy-proof pivot that catches redacted/off-registrar
+        domains (e.g. everything on Rockwell's Proofpoint tenant or CSC managed
+        DNS). It queries WhoisXML and/or SecurityTrails — whichever have keys —
+        and unions the results. Shared/too-broad providers (azure-dns, awsdns,
+        bare provider apexes) are skipped automatically.
+
+        NS/MX to pivot on come from (unioned): the explicit argument, service
+        config (`owned_nameservers`/`owned_mailservers`), and — when
+        ``auto_seed`` is set — auto-discovered infrastructure: the primary
+        ``domain``'s own NS/MX plus (when ``sample_org_assets`` is set) hosts
+        that recur across many in-scope assets. All auto-seeding uses free DNS /
+        stored records and keeps only org-specific hosts.
+        """
+        from app.services.securitytrails_service import (
+            get_securitytrails_service,
+            _is_shared_pivot,
+        )
+        from app.services.whoisxml_reverse_service import get_whoisxml_reverse_service
+
+        start_time = time.time()
+        result = DiscoveryResult(source="reverse_dns", success=False)
+
+        # Explicit allowlist mode: when the caller passes a curated set of
+        # pivots (e.g. the user toggled hosts on the preview card), pivot on
+        # EXACTLY those hosts — no config merge, no auto-seeding, no surprises.
+        explicit_pivots = pivot_nameservers is not None or pivot_mailservers is not None
+        if explicit_pivots:
+            auto_seed = False
+            owned_ns = list(dict.fromkeys(
+                h.strip().rstrip(".").lower() for h in (pivot_nameservers or []) if h and h.strip()
+            ))
+            owned_mx = list(dict.fromkeys(
+                h.strip().rstrip(".").lower() for h in (pivot_mailservers or []) if h and h.strip()
+            ))
+        else:
+            cfg_ns, cfg_mx = self._get_owned_infrastructure()
+            owned_ns = list(owned_nameservers if owned_nameservers is not None else cfg_ns)
+            owned_mx = list(owned_mailservers if owned_mailservers is not None else cfg_mx)
+
+        # Auto-seed pivots (org-specific hosts only):
+        #   (a) the primary domain's own live NS/MX, and
+        #   (b) infra that recurs across MANY in-scope assets (Proofpoint tenant,
+        #       CSC nameservers, etc.) — this catches org infra even when the
+        #       apex domain sits on a shared provider like Azure DNS.
+        auto_ns: List[str] = []
+        auto_mx: List[str] = []
+        if auto_seed:
+            if domain:
+                d_ns, d_mx = await self._resolve_domain_infrastructure(domain)
+                auto_ns.extend(d_ns)
+                auto_mx.extend(d_mx)
+            if sample_org_assets:
+                s_ns, s_mx = await self._sample_org_infrastructure()
+                auto_ns.extend(s_ns)
+                auto_mx.extend(s_mx)
+            auto_ns = list(dict.fromkeys(auto_ns))
+            auto_mx = list(dict.fromkeys(auto_mx))
+            owned_ns = list(dict.fromkeys(owned_ns + auto_ns))
+            owned_mx = list(dict.fromkeys(owned_mx + auto_mx))
+
+        wx_key = self.get_api_key(ExternalService.WHOISXML)
+        st_key = self.get_api_key(ExternalService.SECURITYTRAILS)
+
+        if not wx_key and not st_key:
+            result.error = "No reverse-lookup provider configured (need WhoisXML or SecurityTrails key)"
+            return result
+        if not owned_ns and not owned_mx:
+            result.error = "No owned or auto-seeded nameservers / mailservers to pivot on"
+            return result
+
+        wx = get_whoisxml_reverse_service(wx_key) if wx_key else None
+        st = get_securitytrails_service(st_key) if st_key else None
+
+        domains_by_ns: Dict[str, List[str]] = {}
+        domains_by_mx: Dict[str, List[str]] = {}
+        all_domains: Set[str] = set()
+
+        async def _reverse(host: str, kind: str) -> List[str]:
+            found: Set[str] = set()
+            try:
+                if wx:
+                    found.update(await (wx.reverse_ns(host) if kind == "ns" else wx.reverse_mx(host)))
+                if st:
+                    found.update(await (st.reverse_ns(host) if kind == "ns" else st.reverse_mx(host)))
+            except Exception as e:
+                logger.error(f"reverse-{kind} error for {host}: {e}")
+            return sorted(d for d in found if d and "." in d)
+
+        for ns in owned_ns:
+            if _is_shared_pivot(ns):
+                logger.info(f"Skipping reverse-NS on shared/too-broad host: {ns}")
+                continue
+            found = await _reverse(ns, "ns")
+            domains_by_ns[ns] = found
+            all_domains.update(found)
+
+        for mx in owned_mx:
+            if _is_shared_pivot(mx):
+                logger.info(f"Skipping reverse-MX on shared/too-broad host: {mx}")
+                continue
+            found = await _reverse(mx, "mx")
+            domains_by_mx[mx] = found
+            all_domains.update(found)
+
+        result.success = True
+        result.domains = sorted(all_domains)
+        result.raw_data = {
+            "domains_by_ns": domains_by_ns,
+            "domains_by_mx": domains_by_mx,
+            "providers": [p for p, on in (("whoisxml", wx), ("securitytrails", st)) if on],
+            "auto_seeded_ns": auto_ns,
+            "auto_seeded_mx": auto_mx,
+            "pivoted_nameservers": owned_ns,
+            "pivoted_mailservers": owned_mx,
+            "total_domains_found": len(all_domains),
+        }
+        logger.info(
+            f"Reverse-DNS discovery found {len(all_domains)} domains from "
+            f"{len(domains_by_ns)} NS + {len(domains_by_mx)} MX pivots"
+        )
         result.elapsed_time = time.time() - start_time
         return result
 
@@ -724,6 +1206,72 @@ class ExternalDiscoveryService:
         return result
 
     # =========================================================================
+    # crt.name - Aggregated CT / DNS subdomain index
+    # =========================================================================
+
+    async def discover_crt_name(self, domain: str) -> DiscoveryResult:
+        """
+        Discover subdomains from crt.name's aggregated subdomain index.
+
+        Queries https://crt.name/v1/search which indexes live CT logs, retired
+        CT backfill, Common Crawl, ICANN CZDS, Chaos, DNS blocklists, and
+        active probing. Free, no API key (1000 req/IP/day). Returns names with
+        optional first-seen dates.
+
+        Args:
+            domain: Apex / eTLD+1 domain to search (e.g. "example.com")
+        """
+        start_time = time.time()
+        result = DiscoveryResult(source=ExternalService.CRT_NAME, success=False)
+
+        # format=json&dates=1 → [{sub, first_seen}, ...]
+        url = f"https://crt.name/v1/search?apex={domain}&format=json&dates=1"
+
+        try:
+            success, data = await self._make_request(url, timeout=60)
+
+            if not success:
+                result.error = f"crt.name error: {data}"
+                return result
+
+            all_subdomains = set()
+            first_seen: Dict[str, str] = {}
+
+            if isinstance(data, list):
+                for entry in data:
+                    if isinstance(entry, str):
+                        hostname = entry
+                        seen = None
+                    elif isinstance(entry, dict):
+                        hostname = entry.get("sub") or entry.get("name") or ""
+                        seen = entry.get("first_seen")
+                    else:
+                        continue
+
+                    if not isinstance(hostname, str):
+                        continue
+                    hostname = hostname.strip().lower()
+                    if hostname.startswith("*."):
+                        hostname = hostname[2:]
+                    if hostname.endswith(f".{domain}") or hostname == domain:
+                        all_subdomains.add(hostname)
+                        if seen and hostname not in first_seen:
+                            first_seen[hostname] = seen
+
+                result.success = True
+                result.subdomains = list(all_subdomains)
+                if first_seen:
+                    result.raw_data = {"first_seen": first_seen, "count": len(all_subdomains)}
+            else:
+                result.error = "Unexpected response format from crt.name"
+
+        except Exception as e:
+            result.error = str(e)
+
+        result.elapsed_time = time.time() - start_time
+        return result
+
+    # =========================================================================
     # Common Crawl - Web Crawl Data
     # =========================================================================
     
@@ -1016,6 +1564,7 @@ class ExternalDiscoveryService:
             tasks.append(("rapiddns", self.discover_rapiddns(domain)))
             tasks.append(("crtsh", self.discover_crtsh(domain)))
             tasks.append(("shodan_ctl", self.discover_shodan_ctl(domain)))
+            tasks.append(("crt_name", self.discover_crt_name(domain)))
             tasks.append(("m365", self.discover_m365(domain)))
             
             # Use comprehensive CC search if org_name or keywords provided
@@ -1067,6 +1616,26 @@ class ExternalDiscoveryService:
             
             if self.get_api_key(ExternalService.WHOISXML) and organization_names:
                 tasks.append(("whoisxml", self.discover_whoisxml(organization_names)))
+
+            if self.get_api_key(ExternalService.SECURITYTRAILS):
+                # SecurityTrails reverse lookups (WHOIS + associated domains).
+                # Privacy-proof pivot that catches off-corporate-registrar domains.
+                tasks.append(("securitytrails", self.discover_securitytrails(
+                    domain=domain,
+                    registration_emails=registration_emails,
+                    organization_names=organization_names,
+                )))
+
+            # Reverse-NS / reverse-MX on owned infrastructure (Proofpoint tenant,
+            # CSC managed DNS, etc.). Runs when a reverse-lookup provider key
+            # exists; NS/MX pivots come from config AND/OR are auto-seeded from
+            # the primary domain's live NS/MX (org-specific hosts only).
+            if (self.get_api_key(ExternalService.WHOISXML)
+                    or self.get_api_key(ExternalService.SECURITYTRAILS)):
+                tasks.append(("reverse_dns", self.discover_reverse_dns(
+                    domain=domain,
+                    auto_seed=True,
+                )))
         
         # Run all tasks concurrently
         task_results = await asyncio.gather(

@@ -588,7 +588,12 @@ export default function DomainsContent() {
         if (sourceFilter === 'whoxy' && !src.includes('whoxy')) return false;
         if (sourceFilter === 'commoncrawl' && !src.includes('commoncrawl')) return false;
         if (sourceFilter === 'sni' && !src.includes('sni')) return false;
-        if (sourceFilter === 'crtsh' && !src.includes('crtsh')) return false;
+        if (
+          sourceFilter === 'crtsh' &&
+          !src.includes('crtsh') &&
+          !src.includes('crt_name') &&
+          !src.includes('shodan_ctl')
+        ) return false;
         if (sourceFilter === 'virustotal' && !src.includes('virustotal')) return false;
         if (sourceFilter === 'wayback' && !src.includes('wayback')) return false;
         if (sourceFilter === 'rapiddns' && !src.includes('rapiddns')) return false;
@@ -646,6 +651,9 @@ export default function DomainsContent() {
       commoncrawl_comprehensive: { icon: Database, label: 'Common Crawl', className: 'bg-yellow-500/20 text-yellow-700 border-yellow-500/30' },
       sni_ip_ranges: { icon: Cloud, label: 'SNI/Cloud', className: 'bg-pink-500/20 text-pink-700 border-pink-500/30' },
       crtsh: { icon: Lock, label: 'Cert Trans', className: 'bg-green-500/20 text-green-700 border-green-500/30' },
+      crt_name: { icon: Lock, label: 'crt.name', className: 'bg-green-500/20 text-green-700 border-green-500/30' },
+      shodan_ctl: { icon: Lock, label: 'Shodan CTL', className: 'bg-green-500/20 text-green-700 border-green-500/30' },
+      subfaster: { icon: Radar, label: 'Subfaster', className: 'bg-indigo-500/20 text-indigo-700 border-indigo-500/30' },
       virustotal: { icon: Shield, label: 'VirusTotal', className: 'bg-red-500/20 text-red-700 border-red-500/30' },
       wayback: { icon: FileText, label: 'Wayback', className: 'bg-amber-500/20 text-amber-700 border-amber-500/30' },
       rapiddns: { icon: Radar, label: 'RapidDNS', className: 'bg-cyan-500/20 text-cyan-700 border-cyan-500/30' },

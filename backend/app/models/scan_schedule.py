@@ -416,13 +416,13 @@ CONTINUOUS_SCAN_TYPES = {
     },
     "paramspider": {
         "name": "Parameter Discovery (ParamSpider)",
-        "description": "Discover URL parameters from web archives for vulnerability testing. Finds XSS, SQLi, and other injection points.",
+        "description": "Discover URL parameters from web archives for vulnerability testing. Finds XSS, SQLi, and other injection points. IPs/CIDRs are auto-skipped (archive mining is by hostname), and large surfaces are covered in rotating batches across runs.",
         "default_config": {
-            "level": "high",
-            "timeout": 300,
-            "exclude_extensions": ["css", "js", "png", "jpg", "jpeg", "gif", "svg", "ico", "woff", "woff2"],
+            "max_domains": 500,      # domains scanned per run (batch size); rotates across runs for full coverage
+            "max_concurrent": 15,    # archive mining is I/O bound, so concurrency is the main speed lever
+            "timeout": 120,          # per-domain timeout (seconds)
         },
-        "recommended_frequency": "weekly",
+        "recommended_frequency": "daily",
     },
     "waybackurls": {
         "name": "Historical URL Discovery (WaybackURLs)",

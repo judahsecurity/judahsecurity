@@ -1,0 +1,16 @@
+# Aegis Harness — batch target list
+#
+# One target per line. Lines starting with '#' and blank lines are ignored.
+# A target is a URL the Aegis Vanguard scanner can reach. Optionally add a
+# scope after a comma to constrain in-scope hosts:
+#
+#     https://app.example.com, example.com
+#     https://staging.example.com
+#
+# Run:
+#     python -m local_harness.batch.run scan            # scan every target
+#     python -m local_harness.batch.run scan --resume   # skip completed targets
+#     python -m local_harness.batch.run status          # progress table
+#     python -m local_harness.batch.run collect          # aggregate findings
+
+# https://example.com, example.com

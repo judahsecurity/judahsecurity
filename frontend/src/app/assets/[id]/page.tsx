@@ -62,6 +62,7 @@ import {
   ChevronDown,
   Plus,
   FileDown,
+  Radar,
 } from 'lucide-react';
 import {
   DropdownMenu,
@@ -247,6 +248,7 @@ const assetTypeIcons: Record<string, any> = {
 
 const TABS = [
   { id: 'details', label: 'Details', icon: FileText },
+  { id: 'discovery', label: 'Discovery', icon: Radar },
   { id: 'app-structure', label: 'App Structure', icon: FolderSearch },
   { id: 'findings', label: 'Findings', icon: Shield },
   { id: 'ports', label: 'Open Ports', icon: Network },
@@ -1527,30 +1529,38 @@ export default function AssetDetailPage() {
               </Card>
             )}
 
-            {/* Discovery Path */}
-            <Card>
-              <CardHeader>
-                <CardTitle>How This Asset Was Discovered</CardTitle>
-                <CardDescription>Visual path from source to this asset</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <DiscoveryPath
-                  value={asset.value}
-                  assetType={asset.asset_type}
-                  rootDomain={asset.root_domain}
-                  liveUrl={asset.live_url}
-                  discoverySource={asset.discovery_source}
-                  discoveryChain={asset.discovery_chain}
-                  associationReason={asset.association_reason}
-                  associationConfidence={asset.association_confidence}
-                  hostingType={asset.hosting_type}
-                  hostingProvider={asset.hosting_provider}
-                  isEphemeralIp={asset.is_ephemeral_ip}
-                  resolvedFrom={asset.resolved_from}
-                />
-              </CardContent>
-            </Card>
           </>
+        )}
+
+        {/* Discovery Tab */}
+        {activeTab === 'discovery' && (
+          <Card>
+            <CardHeader>
+              <div className="flex items-center gap-2">
+                <Radar className="h-5 w-5 text-primary" />
+                <CardTitle>How This Asset Was Discovered</CardTitle>
+              </div>
+              <CardDescription>
+                The attribution path tracing this asset back to your organization, plus the source that surfaced it
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <DiscoveryPath
+                value={asset.value}
+                assetType={asset.asset_type}
+                rootDomain={asset.root_domain}
+                liveUrl={asset.live_url}
+                discoverySource={asset.discovery_source}
+                discoveryChain={asset.discovery_chain}
+                associationReason={asset.association_reason}
+                associationConfidence={asset.association_confidence}
+                hostingType={asset.hosting_type}
+                hostingProvider={asset.hosting_provider}
+                isEphemeralIp={asset.is_ephemeral_ip}
+                resolvedFrom={asset.resolved_from}
+              />
+            </CardContent>
+          </Card>
         )}
 
         {/* Findings Tab */}

@@ -205,6 +205,36 @@ class MCPServer:
             phase="informational",
             handler=self._execute_subfinder,
         ))
+
+        # Subfaster — fast passive enum (includes crt.name by default)
+        self.registry.register(MCPTool(
+            name="execute_subfaster",
+            description=(
+                "Run Subfaster for fast passive subdomain enumeration. "
+                "Speed-focused subfinder fork; default keyless sources include "
+                "crt (crt.name), shodanct, rapiddns, thc, submd, hackertarget, sitedossier. "
+                "Example: execute_subfaster(args='-d example.com')"
+            ),
+            tool_type=ToolType.SCAN,
+            parameters={
+                "args": {
+                    "type": "string",
+                    "description": "Subfaster CLI arguments (e.g., '-d example.com' or '-d example.com -all -oJ')"
+                }
+            },
+            required_params=["args"],
+            phase="informational",
+            handler=self._execute_subfaster,
+        ))
+        self.registry.register(MCPTool(
+            name="subfaster_help",
+            description="Get Subfaster command usage and options.",
+            tool_type=ToolType.QUERY,
+            parameters={},
+            required_params=[],
+            phase="informational",
+            handler=self._subfaster_help,
+        ))
         
         # DNSX DNS toolkit
         self.registry.register(MCPTool(
@@ -723,6 +753,28 @@ class MCPServer:
             phase="informational",
             handler=self._execute_crtsh,
         ))
+
+        # crt.name - aggregated CT/DNS subdomain index
+        self.registry.register(MCPTool(
+            name="execute_crt_name",
+            description=(
+                "Query crt.name aggregated subdomain index for an apex domain. "
+                "Combines live CT logs, historical CT backfill, Common Crawl, ICANN CZDS, "
+                "ProjectDiscovery Chaos, DNS blocklists, and active probing. Free, no API key. "
+                "Returns subdomains with first-seen dates when available. "
+                "Use alongside execute_crtsh for broader passive coverage."
+            ),
+            tool_type=ToolType.QUERY,
+            parameters={
+                "args": {
+                    "type": "string",
+                    "description": "Apex domain to query (eTLD+1, e.g., 'example.com')"
+                }
+            },
+            required_params=["args"],
+            phase="informational",
+            handler=self._execute_crt_name,
+        ))
         
         # Schemathesis - API fuzzer for OpenAPI/GraphQL schemas
         self.registry.register(MCPTool(
@@ -1105,7 +1157,264 @@ class MCPServer:
             phase="exploitation",
             handler=self._execute_browser,
         ))
-        
+
+        # Deep crawl - Interceptor-style interaction-first recon
+        self.registry.register(MCPTool(
+            name="execute_deep_crawl",
+            description=(
+                "Interceptor-style interaction-first deep crawl. Drives a real headless "
+                "Chromium tab like a human (scroll, expand menus, click safe tabs/buttons, "
+                "follow in-scope links) so the site's own JavaScript loads its lazy chunks "
+                "and SPA route bundles, then PASSIVELY captures the full client-side traffic "
+                "(fetch/XHR/SSE/WebSocket/sendBeacon/BroadcastChannel) using standard Web APIs "
+                "(no CDP). Collects every JS bundle, mines it for API endpoints/routes/params "
+                "and source maps, and reports first-party APIs, WebSockets, forms, and "
+                "third-party calls. Surfaces attack surface that katana/gau/waybackurls and "
+                "static scanners miss on JS-heavy apps. Runs on the headless Linux/cloud "
+                "server (Chromium is baked into the image, with a system-Chromium fallback). "
+                "Masks headless/automation fingerprints to browse like a normal user. Can crawl "
+                "AUTHENTICATED: either inject a session (cookies/storage_state/headers) or use "
+                "self-service login (pass a login page + username/password and it logs itself in). "
+                "Credentials can be references instead of literals so secrets stay out of the "
+                "trace: env:NAME, secret:NAME (/run/secrets), or file:/path (login also takes "
+                "username_env/password_env). "
+                "Read-only: never submits forms or clicks destructive controls "
+                "(logout/delete/pay/submit filtered); the only form it submits is the login form "
+                "you explicitly provide."
+            ),
+            tool_type=ToolType.SCAN,
+            parameters={
+                "args": {
+                    "type": "string",
+                    "description": (
+                        "Bare URL (e.g. \"https://target.com\") OR a JSON object: "
+                        '{"url": "https://target.com", "max_pages": 12, "interact": true, '
+                        '"scope": "target.com", "capture_js": true, '
+                        '"headers": {"Authorization": "Bearer <jwt>"}, '
+                        '"login": {"url": "https://target.com/login", "username": "u", "password": "p"}}'
+                    )
+                }
+            },
+            required_params=["args"],
+            phase="informational",
+            handler=self._execute_deep_crawl,
+        ))
+
+        # Interceptor - wrapper around the real Hacker-Valley-Media/Interceptor CLI
+        self.registry.register(MCPTool(
+            name="execute_interceptor",
+            description=(
+                "Interaction-first web recon. Prefers the REAL Hacker-Valley-Media/Interceptor "
+                "browser session when its CLI is reachable on this host (an operator desktop with "
+                "the extension loaded): it drives your ACTUAL logged-in Chrome/Brave with real "
+                "cookies and non-CDP synthetic input to reach authenticated / anti-automation-"
+                "protected surface headless crawlers can't. NOTE: the real Interceptor has no "
+                "crawler command — the crawl loop is built on top of its verbs by our driver "
+                "(interceptor_recon). Interceptor needs a real browser + extension and does NOT "
+                "run in a headless container, so on a Linux server the binary is absent and this "
+                "tool transparently FALLS BACK to the deep_crawl engine (expected, not an error). "
+                "For authenticated recon from the server, use execute_deep_crawl with a session. "
+                "Pass a bare URL or a JSON object (url, max_pages, scope, and — for the deep_crawl "
+                "fallback — cookies/storage_state/headers/basic_auth)."
+            ),
+            tool_type=ToolType.SCAN,
+            parameters={
+                "args": {
+                    "type": "string",
+                    "description": (
+                        "Bare URL (e.g. \"https://target.com\") or a JSON object "
+                        "(e.g. '{\"url\": \"https://app.target.com\", \"max_pages\": 20, "
+                        "\"scope\": \"target.com\"}')."
+                    )
+                }
+            },
+            required_params=["args"],
+            phase="informational",
+            handler=self._execute_interceptor,
+        ))
+
+        # jwt_tool - JWT testing and exploitation (ticarpi/jwt_tool)
+        self.registry.register(MCPTool(
+            name="execute_jwt",
+            description=(
+                "Run jwt_tool to inspect, test, and attack JSON Web Tokens. Decodes claims "
+                "and runs the common auth-bypass playbook: alg:none/blank-signature, key "
+                "confusion (RS256->HS256), weak HMAC secret cracking, 'jku'/'kid' injection, "
+                "and claim tampering. Pass the raw JWT plus jwt_tool flags. "
+                "Examples: '<JWT>' (decode + scan), '<JWT> -X a' (alg:none exploit), "
+                "'<JWT> -C -d /usr/share/wordlists/rockyou.txt' (crack HMAC secret), "
+                "'<JWT> -T' (interactive tamper — avoid in agent mode), "
+                "'<JWT> -X k -pk public.pem' (RS256->HS256 key confusion). "
+                "Use after you capture a JWT from a cookie, Authorization header, or JS bundle."
+            ),
+            tool_type=ToolType.EXPLOIT,
+            parameters={
+                "args": {
+                    "type": "string",
+                    "description": (
+                        "The JWT followed by jwt_tool flags "
+                        "(e.g. 'eyJhbGci... -X a' or 'eyJhbGci... -C -d wordlist.txt'). "
+                        "Do NOT pass -T (interactive tampering) in agent mode."
+                    )
+                }
+            },
+            required_params=["args"],
+            phase="exploitation",
+            handler=self._execute_jwt,
+        ))
+        self.registry.register(MCPTool(
+            name="jwt_help",
+            description="Get jwt_tool command usage and attack-mode options.",
+            tool_type=ToolType.QUERY,
+            parameters={},
+            required_params=[],
+            phase="informational",
+            handler=self._jwt_help,
+        ))
+
+        # Retire.js - detect vulnerable JavaScript libraries by CVE
+        self.registry.register(MCPTool(
+            name="execute_retirejs",
+            description=(
+                "Detect vulnerable JavaScript libraries (jQuery, AngularJS, Lodash, Bootstrap, "
+                "etc.) with known CVEs using Retire.js. Give it the .js bundle URLs surfaced by "
+                "execute_katana / execute_deep_crawl / execute_gau (newline- or comma-separated, "
+                "or a JSON object {\"urls\": \"...\", \"max_urls\": 30}). It downloads each bundle "
+                "and reports the vulnerable component, version, CVE, and severity mapped back to "
+                "the source URL. Pairs with scan_js_urls_for_secrets (secrets in the same bundles). "
+                "Run it after crawling so you know which client-side libs are exploitable."
+            ),
+            tool_type=ToolType.SCAN,
+            parameters={
+                "urls": {
+                    "type": "string",
+                    "description": (
+                        "Newline- or comma-separated https URLs to .js bundles, OR a JSON object "
+                        "'{\"urls\": \"https://t/a.js,https://t/b.js\", \"max_urls\": 30}'."
+                    ),
+                },
+                "max_urls": {
+                    "type": "integer",
+                    "description": "Max URLs to fetch (default 30, cap 100).",
+                },
+            },
+            required_params=["urls"],
+            phase="informational",
+            handler=self._execute_retirejs,
+        ))
+
+        # Interactsh - out-of-band (OOB) interaction detection for blind vulns
+        self.registry.register(MCPTool(
+            name="execute_interactsh",
+            description=(
+                "Out-of-band (OOB) collaborator for BLIND vulnerabilities you otherwise can't see: "
+                "blind SSRF, blind XXE, blind SQLi/command injection, blind RCE, and OOB data "
+                "exfiltration. Backed by interactsh-client (ProjectDiscovery). Workflow: "
+                "(1) 'register' -> returns a unique payload domain/URL and a session_id; "
+                "(2) inject that payload into a suspected sink (SSRF url param, XXE SYSTEM entity, "
+                "Host/Referer/X-Forwarded-For header, template/command arg, email/webhook field); "
+                "(3) 'poll <session_id>' -> returns any DNS/HTTP/SMTP callbacks the target made "
+                "(a callback = confirmed OOB interaction, i.e. a real finding). "
+                "Also: 'list' (active sessions), 'stop <session_id>'. Optional flags on register: "
+                "'register --server <self-hosted> --token <t>'. Sessions persist across tool calls "
+                "and auto-expire after ~1h."
+            ),
+            tool_type=ToolType.EXPLOIT,
+            parameters={
+                "args": {
+                    "type": "string",
+                    "description": (
+                        "Subcommand: 'register' [--server HOST --token TOKEN], "
+                        "'poll <session_id>', 'list', or 'stop <session_id>'."
+                    )
+                }
+            },
+            required_params=["args"],
+            phase="exploitation",
+            handler=self._execute_interactsh,
+        ))
+
+        # Semgrep - source-aware SAST
+        self.registry.register(MCPTool(
+            name="execute_semgrep",
+            description=(
+                "Run Semgrep for source-aware static analysis (SAST). Detects OWASP Top 10 patterns, "
+                "insecure crypto, SQLi/XSS sinks, SSRF, path traversal, hardcoded secrets, and "
+                "language-specific anti-patterns across Python, JS/TS, Go, Java, Ruby, PHP, C#, "
+                "and more. Requires a LOCAL source path or a git clone the agent has pulled — "
+                "this is whitebox analysis, not a remote URL scan. "
+                "Examples: '--config auto /path/to/src --json', "
+                "'--config p/owasp-top-ten --config p/secrets /path/to/repo --json', "
+                "'--config p/javascript --config p/react /tmp/checkout --json'. "
+                "Prefer --json for structured findings. Use when you have source code, a cloned "
+                "repo, or downloaded source maps / JS source that can be written to disk."
+            ),
+            tool_type=ToolType.SCAN,
+            parameters={
+                "args": {
+                    "type": "string",
+                    "description": (
+                        "Semgrep CLI arguments. Must include a path to scan and usually "
+                        "'--config auto' (or a ruleset like 'p/owasp-top-ten'). "
+                        "Add '--json' for machine-readable output."
+                    )
+                }
+            },
+            required_params=["args"],
+            phase="informational",
+            handler=self._execute_semgrep,
+        ))
+        self.registry.register(MCPTool(
+            name="semgrep_help",
+            description="Get Semgrep command usage and common rule-pack options.",
+            tool_type=ToolType.QUERY,
+            parameters={},
+            required_params=[],
+            phase="informational",
+            handler=self._semgrep_help,
+        ))
+
+        # Trivy - container / filesystem / IaC vulnerability scanner
+        self.registry.register(MCPTool(
+            name="execute_trivy",
+            description=(
+                "Run Trivy for container, filesystem, and IaC vulnerability / misconfiguration "
+                "scanning. Covers OS packages, language deps (npm, pip, go, maven, etc.), "
+                "secrets, licenses, and cloud/IaC misconfigs (Dockerfile, K8s, Terraform). "
+                "Subcommands: 'fs' (local path), 'image' (container image), 'config' (IaC), "
+                "'repo' (git URL or local repo), 'rootfs'. "
+                "Examples: 'fs /path/to/app --format json', "
+                "'image nginx:1.25 --severity CRITICAL,HIGH --format json', "
+                "'config /path/to/iac --format json', "
+                "'repo https://github.com/org/app --format json'. "
+                "Use when you have a local checkout, a Dockerfile/K8s manifests, or a known "
+                "container image from tech fingerprinting."
+            ),
+            tool_type=ToolType.SCAN,
+            parameters={
+                "args": {
+                    "type": "string",
+                    "description": (
+                        "Trivy CLI arguments starting with a subcommand "
+                        "(fs|image|config|repo|rootfs|sbom|kubernetes) plus target and flags. "
+                        "Prefer '--format json' for structured findings."
+                    )
+                }
+            },
+            required_params=["args"],
+            phase="informational",
+            handler=self._execute_trivy,
+        ))
+        self.registry.register(MCPTool(
+            name="trivy_help",
+            description="Get Trivy command usage and scan-mode options.",
+            tool_type=ToolType.QUERY,
+            parameters={},
+            required_params=[],
+            phase="informational",
+            handler=self._trivy_help,
+        ))
+
         # LLM Red Team Scanner
         self.registry.register(MCPTool(
             name="execute_llm_red_team",
@@ -1300,6 +1609,13 @@ class MCPServer:
     async def _execute_subfinder(self, args: str) -> Dict[str, Any]:
         cmd = ["subfinder"] + self._parse_args(args)
         return await self._run_command(cmd, timeout=300)
+
+    async def _execute_subfaster(self, args: str) -> Dict[str, Any]:
+        cmd = ["subfaster"] + self._parse_args(args)
+        return await self._run_command(cmd, timeout=300)
+
+    async def _subfaster_help(self) -> Dict[str, Any]:
+        return await self._run_command(["subfaster", "-h"], timeout=MCP_HELP_TIMEOUT)
     
     async def _execute_dnsx(self, args: str) -> Dict[str, Any]:
         cmd = ["dnsx"] + self._parse_args(args)
@@ -1524,6 +1840,77 @@ class MCPServer:
         except Exception as e:
             logger.error(f"crt.sh query failed for {domain}: {e}")
             return {"success": False, "output": "", "error": f"crt.sh error: {e}", "exit_code": -1}
+
+    async def _execute_crt_name(self, args: str) -> Dict[str, Any]:
+        """Query crt.name aggregated subdomain index."""
+        domain = args.strip().lower()
+        if not domain:
+            return {
+                "success": False,
+                "output": "",
+                "error": "Domain is required. Example: execute_crt_name(args=\"example.com\")",
+                "exit_code": -1,
+            }
+        domain = domain.replace("https://", "").replace("http://", "").rstrip("/").split("/")[0]
+        try:
+            import httpx as _httpx
+            async with _httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.get(
+                    f"https://crt.name/v1/search?apex={domain}&format=json&dates=1",
+                    follow_redirects=True,
+                )
+                if response.status_code == 429:
+                    return {
+                        "success": False,
+                        "output": "",
+                        "error": "crt.name rate limited (1000 req/IP/day)",
+                        "exit_code": -1,
+                    }
+                if response.status_code != 200:
+                    return {
+                        "success": False,
+                        "output": "",
+                        "error": f"crt.name returned HTTP {response.status_code}",
+                        "exit_code": -1,
+                    }
+                data = response.json()
+
+            rows = []
+            if isinstance(data, list):
+                for entry in data:
+                    if isinstance(entry, str):
+                        hostname, seen = entry, None
+                    elif isinstance(entry, dict):
+                        hostname = entry.get("sub") or entry.get("name") or ""
+                        seen = entry.get("first_seen")
+                    else:
+                        continue
+                    if not isinstance(hostname, str):
+                        continue
+                    hostname = hostname.strip().lower()
+                    if hostname.startswith("*."):
+                        hostname = hostname[2:]
+                    if hostname.endswith(f".{domain}") or hostname == domain:
+                        rows.append((hostname, seen))
+
+            # Deduplicate, keep earliest first_seen
+            by_host: Dict[str, Optional[str]] = {}
+            for hostname, seen in rows:
+                prev = by_host.get(hostname)
+                if hostname not in by_host or (seen and (not prev or seen < prev)):
+                    by_host[hostname] = seen
+
+            sorted_hosts = sorted(by_host.items(), key=lambda x: x[0])
+            output = f"crt.name found {len(sorted_hosts)} unique subdomains for {domain}:\n\n"
+            for hostname, seen in sorted_hosts:
+                if seen:
+                    output += f"{hostname}\tfirst_seen={seen}\n"
+                else:
+                    output += f"{hostname}\n"
+            return {"success": True, "output": output.rstrip(), "error": None, "exit_code": 0}
+        except Exception as e:
+            logger.error(f"crt.name query failed for {domain}: {e}")
+            return {"success": False, "output": "", "error": f"crt.name error: {e}", "exit_code": -1}
     
     async def _execute_schemathesis(self, args: str) -> Dict[str, Any]:
         parsed = self._parse_args(args)
@@ -1535,6 +1922,28 @@ class MCPServer:
     async def _schemathesis_help(self) -> Dict[str, Any]:
         return await self._run_command(["schemathesis", "run", "--help"], timeout=MCP_HELP_TIMEOUT)
     
+    async def _execute_deep_crawl(self, args: str) -> Dict[str, Any]:
+        """Interaction-first deep crawl with passive client-side traffic capture."""
+        try:
+            from app.services.deep_crawl_service import run_deep_crawl
+            return await run_deep_crawl(args)
+        except ImportError as e:
+            return {"success": False, "output": "", "error": f"Deep crawl service not available: {e}", "exit_code": -1}
+        except Exception as e:
+            logger.error(f"Deep crawl failed: {e}")
+            return {"success": False, "output": "", "error": f"Deep crawl error: {e}", "exit_code": -1}
+
+    async def _execute_interceptor(self, args: str) -> Dict[str, Any]:
+        """Interaction-first recon via the real Interceptor session when reachable, else deep_crawl."""
+        try:
+            from app.services.interceptor_service import run_interceptor
+            return await run_interceptor(args)
+        except ImportError as e:
+            return {"success": False, "output": "", "error": f"Interceptor service not available: {e}", "exit_code": -1}
+        except Exception as e:
+            logger.error(f"Interceptor failed: {e}")
+            return {"success": False, "output": "", "error": f"Interceptor error: {e}", "exit_code": -1}
+
     async def _execute_browser(self, args: str) -> Dict[str, Any]:
         """Execute browser automation actions for security testing."""
         try:
@@ -1651,6 +2060,169 @@ class MCPServer:
     
     async def _cmseek_help(self) -> Dict[str, Any]:
         return await self._run_command(["cmseek", "-h"], timeout=MCP_HELP_TIMEOUT)
+
+    async def _execute_jwt(self, args: str) -> Dict[str, Any]:
+        """Run jwt_tool against a JWT. Strips interactive -T to stay non-blocking."""
+        parts = self._parse_args(args)
+        if not parts:
+            return {
+                "success": False, "output": "",
+                "error": "execute_jwt requires a JWT (e.g. '<token> -X a')", "exit_code": -1,
+            }
+        # -T / --tamper launches an interactive menu that would hang the agent.
+        parts = [p for p in parts if p not in ("-T", "--tamper")]
+        cmd = ["jwt_tool"] + parts
+        return await self._run_command(cmd, timeout=600)
+
+    async def _jwt_help(self) -> Dict[str, Any]:
+        return await self._run_command(["jwt_tool", "-h"], timeout=MCP_HELP_TIMEOUT)
+
+    async def _execute_retirejs(
+        self, urls: str, max_urls: Optional[Union[int, str]] = None,
+    ) -> Dict[str, Any]:
+        from app.services.retirejs_service import scan_js_urls_for_vulns
+
+        # Accept a bare URL list or a JSON object {"urls": ..., "max_urls": ...}.
+        url_input = urls
+        if isinstance(urls, str) and urls.strip().startswith("{"):
+            try:
+                obj = json.loads(urls)
+                url_input = obj.get("urls", "")
+                if max_urls is None:
+                    max_urls = obj.get("max_urls")
+            except json.JSONDecodeError:
+                pass
+
+        try:
+            mu = int(max_urls) if max_urls is not None else 30
+        except (TypeError, ValueError):
+            mu = 30
+        mu = max(1, min(mu, 100))
+
+        try:
+            result = await asyncio.to_thread(scan_js_urls_for_vulns, url_input, mu)
+        except Exception as e:  # noqa: BLE001
+            logger.exception("retirejs scan failed")
+            return {"success": False, "output": "", "error": str(e), "exit_code": -1}
+
+        out = json.dumps(result, indent=2, default=str)
+        return {
+            "success": bool(result.get("success", True)),
+            "output": out,
+            "error": result.get("error") if result.get("success") is False else None,
+            "exit_code": 0,
+        }
+
+    async def _execute_interactsh(self, args: str) -> Dict[str, Any]:
+        """OOB collaborator: register/poll/list/stop interactsh-client sessions."""
+        from app.services import interactsh_service as ish
+
+        parts = self._parse_args(args)
+        sub = (parts[0].lower() if parts else "register")
+
+        try:
+            if sub == "register":
+                server = token = None
+                rest = parts[1:]
+                for i, tok in enumerate(rest):
+                    if tok in ("-s", "--server") and i + 1 < len(rest):
+                        server = rest[i + 1]
+                    elif tok in ("-t", "--token") and i + 1 < len(rest):
+                        token = rest[i + 1]
+                result = await asyncio.to_thread(ish.register, server, token)
+            elif sub == "poll":
+                if len(parts) < 2:
+                    return {"success": False, "output": "", "error": "poll requires a session_id", "exit_code": -1}
+                result = await asyncio.to_thread(ish.poll, parts[1])
+            elif sub == "list":
+                result = await asyncio.to_thread(ish.list_sessions)
+            elif sub == "stop":
+                if len(parts) < 2:
+                    return {"success": False, "output": "", "error": "stop requires a session_id", "exit_code": -1}
+                result = await asyncio.to_thread(ish.stop, parts[1])
+            else:
+                return {
+                    "success": False, "output": "",
+                    "error": f"Unknown subcommand '{sub}'. Use register|poll|list|stop.",
+                    "exit_code": -1,
+                }
+        except Exception as e:  # noqa: BLE001
+            logger.exception("interactsh %s failed", sub)
+            return {"success": False, "output": "", "error": str(e), "exit_code": -1}
+
+        out = json.dumps(result, indent=2, default=str)
+        return {
+            "success": bool(result.get("success", False)),
+            "output": out,
+            "error": result.get("error") if not result.get("success") else None,
+            "exit_code": 0 if result.get("success") else -1,
+        }
+
+    async def _execute_semgrep(self, args: str) -> Dict[str, Any]:
+        """Run Semgrep SAST. Exit code 1 means findings were found (treat as success)."""
+        parts = self._parse_args(args)
+        if not parts:
+            return {
+                "success": False, "output": "",
+                "error": (
+                    "execute_semgrep requires args (e.g. '--config auto /path/to/src --json')"
+                ),
+                "exit_code": -1,
+            }
+        # Inject --json if the agent forgot it and didn't ask for another format.
+        has_format = any(
+            p in ("--json", "--sarif", "--emacs", "--vim", "--gitlab-sast", "--junit-xml")
+            or p.startswith("--json=")
+            for p in parts
+        )
+        if not has_format:
+            parts = ["--json"] + parts
+        # Quiet progress noise so output stays findings-focused.
+        if "--quiet" not in parts and "-q" not in parts:
+            parts = ["--quiet"] + parts
+        cmd = ["semgrep"] + parts
+        result = await self._run_command(cmd, timeout=900)
+        # Semgrep: 0 = clean, 1 = findings, 2 = error. Surface findings as success.
+        if result.get("exit_code") == 1 and result.get("output"):
+            result["success"] = True
+            result["error"] = None
+        return result
+
+    async def _semgrep_help(self) -> Dict[str, Any]:
+        return await self._run_command(["semgrep", "--help"], timeout=MCP_HELP_TIMEOUT)
+
+    async def _execute_trivy(self, args: str) -> Dict[str, Any]:
+        """Run Trivy. Exit code 1 means vulnerabilities found (treat as success)."""
+        parts = self._parse_args(args)
+        if not parts:
+            return {
+                "success": False, "output": "",
+                "error": (
+                    "execute_trivy requires a subcommand "
+                    "(e.g. 'fs /path --format json' or 'image nginx:latest --format json')"
+                ),
+                "exit_code": -1,
+            }
+        # Prefer JSON unless the agent already chose a format.
+        has_format = any(
+            p in ("--format", "-f") or p.startswith("--format=") or p.startswith("-f=")
+            for p in parts
+        )
+        if not has_format:
+            parts = parts[:1] + ["--format", "json"] + parts[1:]
+        # Non-interactive / skip version check noise in agent loops.
+        if "--quiet" not in parts and "-q" not in parts:
+            parts = ["--quiet"] + parts
+        cmd = ["trivy"] + parts
+        result = await self._run_command(cmd, timeout=900)
+        # Trivy: 0 = clean, 1 = vulns found (when exit-code is default). Keep findings.
+        if result.get("exit_code") == 1 and result.get("output"):
+            result["success"] = True
+            result["error"] = None
+        return result
+
+    async def _trivy_help(self) -> Dict[str, Any]:
+        return await self._run_command(["trivy", "--help"], timeout=MCP_HELP_TIMEOUT)
     
     # ------------------------------------------------------------------
     # Aegis chokepoint: Censor → Lictor pre → handler → Lictor post → Augur
@@ -1663,6 +2235,7 @@ class MCPServer:
     _HANDLER_BINARY: Dict[str, str] = {
         "execute_nuclei": "nuclei", "execute_naabu": "naabu",
         "execute_httpx": "httpx", "execute_subfinder": "subfinder",
+        "execute_subfaster": "subfaster",
         "execute_dnsx": "dnsx", "execute_katana": "katana",
         "execute_curl": "curl", "execute_nmap": "nmap",
         "execute_masscan": "masscan", "execute_ffuf": "ffuf",
@@ -1677,6 +2250,8 @@ class MCPServer:
         "execute_tldfinder": "tldfinder", "execute_waybackurls": "waybackurls",
         "execute_hermes": "trufflehog", "execute_themis": "prowler",
         "execute_atlas": "pius", "execute_argus": "titus",
+        "execute_jwt": "jwt_tool", "execute_interactsh": "interactsh-client",
+        "execute_semgrep": "semgrep", "execute_trivy": "trivy",
     }
 
     @staticmethod

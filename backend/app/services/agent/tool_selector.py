@@ -33,6 +33,9 @@ _TECH_CLASSIFIERS: Dict[str, List[str]] = {
     "ruby": ["ruby", "rails", "sinatra", "puma", "unicorn"],
     "api": ["swagger", "openapi", "graphql", "rest", "api-docs", "redoc"],
     "spa": ["react", "angular", "vue", "svelte", "ember"],
+    "auth": ["jwt", "oauth", "oauth2", "oidc", "openid", "saml", "auth0", "keycloak", "okta", "cognito", "firebase auth"],
+    "container": ["docker", "dockerfile", "kubernetes", "k8s", "containerd", "podman", "helm", "openshift"],
+    "source": ["github", "gitlab", "bitbucket", ".git", "source map", "sourcemap"],
     "nginx": ["nginx"],
     "apache": ["apache"],
     "cloudflare": ["cloudflare"],
@@ -215,12 +218,14 @@ class ToolSelector:
         # Phase 5: Specialty scans based on findings
         recs.extend(self._specialty_recommendations())
 
-        # Filter out already-run tools and sort by priority
-        filtered = [
-            r for r in recs
-            if r.tool_name not in self._tools_already_run
-        ]
-        filtered.sort(key=lambda r: r.priority)
+        # Filter out already-run tools, dedupe by tool name, sort by priority
+        seen: Set[str] = set()
+        filtered: List[ToolRecommendation] = []
+        for r in sorted(recs, key=lambda x: x.priority):
+            if r.tool_name in self._tools_already_run or r.tool_name in seen:
+                continue
+            seen.add(r.tool_name)
+            filtered.append(r)
 
         return [r.to_dict() for r in filtered]
 
@@ -246,7 +251,7 @@ class ToolSelector:
             "reconnaissance", "technology", "waf_detection",
             "parameter_discovery", "injection_testing",
             "active_scanning", "tls_ssl", "cms", "api", "ai_security",
-            "general",
+            "source_sast", "supply_chain", "general",
         ]
 
         for cat in priority_order:
@@ -306,6 +311,34 @@ class ToolSelector:
                 priority=4,
                 rationale="Technology fingerprinting — identify CMS, frameworks, server stack with 6000+ signatures.",
                 category="technology",
+            ))
+
+        # Passive asset expansion — real tester always widens the surface early
+        if "execute_subfinder" not in self._tools_already_run:
+            recs.append(ToolRecommendation(
+                tool_name="execute_subfinder",
+                args_template="-d {target} -silent -json",
+                priority=3,
+                rationale="Passive subdomain enum — expand attack surface before deep testing a single host.",
+                category="reconnaissance",
+            ))
+
+        if "execute_uncover" not in self._tools_already_run:
+            recs.append(ToolRecommendation(
+                tool_name="execute_uncover",
+                args_template='query=ssl:"{target}" engines=["shodan","censys","fofa"] limit=200 persist=True',
+                priority=4,
+                rationale="InternetDB expansion (Uncover) — find related hosts/ports via Shodan/Censys/FOFA without active probing.",
+                category="reconnaissance",
+            ))
+
+        if "execute_katana" not in self._tools_already_run:
+            recs.append(ToolRecommendation(
+                tool_name="execute_katana",
+                args_template="-u https://{target} -d 2 -jc -json",
+                priority=5,
+                rationale="Crawl live site for endpoints, forms, and JS — feeds param mining and JS secret scans.",
+                category="reconnaissance",
             ))
 
         return recs
@@ -372,6 +405,25 @@ class ToolSelector:
                 phase_required="exploitation",
                 category="active_scanning",
             ))
+            if "execute_retirejs" not in self._tools_already_run:
+                recs.append(ToolRecommendation(
+                    tool_name="execute_retirejs",
+                    args_template="urls=<JS bundle URLs from katana/deep_crawl/gau>",
+                    priority=6,
+                    rationale="JS-heavy app — scan the crawled .js bundles for vulnerable libraries (jQuery/Angular/Lodash) with known CVEs.",
+                    category="reconnaissance",
+                ))
+
+        # JWT / token-based auth detected
+        if "auth" in self._target_types and "execute_jwt" not in self._tools_already_run:
+            recs.append(ToolRecommendation(
+                tool_name="execute_jwt",
+                args_template="<JWT captured from cookie/Authorization header/JS>",
+                priority=6,
+                rationale="Token-based auth (JWT/OAuth/OIDC) detected — decode captured JWTs and test alg:none, key confusion, and weak-secret cracking.",
+                phase_required="exploitation",
+                category="injection_testing",
+            ))
 
         # Chatbot / AI endpoint detected
         if "chatbot" in self._target_types:
@@ -381,6 +433,38 @@ class ToolSelector:
                 priority=6,
                 rationale="AI/chatbot technology detected — run OWASP LLM Top 10 assessment.",
                 category="ai_security",
+            ))
+            if "execute_garak" not in self._tools_already_run:
+                recs.append(ToolRecommendation(
+                    tool_name="execute_garak",
+                    args_template=(
+                        "--target_type rest --target_name https://{target} "
+                        "--probes dan,promptinject,encoding,jailbreak "
+                        "--report_prefix /tmp/garak_{target}"
+                    ),
+                    priority=8,
+                    rationale="Confirmed AI surface — deepen with garak probe families after llm_red_team.",
+                    phase_required="exploitation",
+                    category="ai_security",
+                ))
+
+        # GraphQL signals → dedicated audit
+        tech_blob = " ".join(self._technologies)
+        if "graphql" in tech_blob or "graphql" in self._target_types:
+            if "execute_graphql_cop" not in self._tools_already_run:
+                recs.append(ToolRecommendation(
+                    tool_name="execute_graphql_cop",
+                    args_template="-t https://{target}/graphql",
+                    priority=5,
+                    rationale="GraphQL detected — audit introspection, CSRF, batching, and IDE exposure.",
+                    category="api",
+                ))
+            recs.append(ToolRecommendation(
+                tool_name="create_scan",
+                args_template='scan_type=graphql_scan targets=["{target}"]',
+                priority=6,
+                rationale="Queue platform GraphQL scanner for full endpoint discovery + misconfig checks.",
+                category="api",
             ))
 
         return recs
@@ -412,12 +496,29 @@ class ToolSelector:
         if self.parameters:
             sqli_params = []
             xss_params = []
+            ssrf_params = []
             for name, info in self.parameters.items():
                 vulns = info.get("likely_vulnerable_to", [])
                 if "sqli" in vulns:
                     sqli_params.append(name)
                 if "xss" in vulns:
                     xss_params.append(name)
+                if "ssrf" in vulns:
+                    ssrf_params.append(name)
+
+            # Blind/OOB-prone params (SSRF, or blind SQLi/RCE) — stand up an OOB collaborator
+            if (ssrf_params or sqli_params) and "execute_interactsh" not in self._tools_already_run:
+                recs.append(ToolRecommendation(
+                    tool_name="execute_interactsh",
+                    args_template="register",
+                    priority=6,
+                    rationale=(
+                        "Params prone to blind SSRF/SQLi/RCE found — register an OOB collaborator, "
+                        "plant its payload URL in the sink, then poll for DNS/HTTP callbacks."
+                    ),
+                    phase_required="exploitation",
+                    category="injection_testing",
+                ))
 
             if sqli_params:
                 first_param = sqli_params[0]
@@ -529,6 +630,74 @@ class ToolSelector:
                 category="reconnaissance",
             ))
 
+        # Content discovery + API brute after baseline recon
+        if "execute_ffuf" not in self._tools_already_run and (
+            "execute_httpx" in self._tools_already_run or "execute_katana" in self._tools_already_run
+        ):
+            recs.append(ToolRecommendation(
+                tool_name="execute_ffuf",
+                args_template="-u https://{target}/FUZZ -w /usr/share/seclists/Discovery/Web-Content/common.txt -mc 200,204,301,302,403 -t 40",
+                priority=8,
+                rationale="Directory/content discovery on live host — find admin panels, backups, API roots.",
+                phase_required="exploitation",
+                category="reconnaissance",
+            ))
+
+        if "execute_kiterunner" not in self._tools_already_run and (
+            "api" in self._target_types or "spa" in self._target_types
+        ):
+            recs.append(ToolRecommendation(
+                tool_name="execute_kiterunner",
+                args_template="scan https://{target} -A=apiroutes-210228",
+                priority=7,
+                rationale="API/SPA signals — discover undocumented REST routes via smart wordlists.",
+                category="api",
+            ))
+
+        # JS secret / sink analysis after crawl tools have run
+        crawled = self._tools_already_run & {
+            "execute_katana", "execute_gau", "execute_waybackurls", "execute_deep_crawl",
+        }
+        if crawled and "scan_js_urls_for_secrets" not in self._tools_already_run:
+            recs.append(ToolRecommendation(
+                tool_name="scan_js_urls_for_secrets",
+                args_template="urls=<JS URLs from katana/deep_crawl/gau>",
+                priority=6,
+                rationale="JS bundles discovered — hunt hardcoded API keys/tokens before deeper testing.",
+                category="reconnaissance",
+            ))
+        if crawled:
+            recs.append(ToolRecommendation(
+                tool_name="create_scan",
+                args_template='scan_type=js_recon targets=["{target}"]',
+                priority=7,
+                rationale="Queue JS recon (secrets, source maps, dep-confusion, DOM sinks) via scanner worker.",
+                category="reconnaissance",
+            ))
+
+        # Takeover sweep once DNS/subdomain work has happened
+        dns_done = self._tools_already_run & {
+            "execute_subfinder", "execute_dnsx", "execute_crtsh", "execute_subfaster",
+        }
+        if dns_done:
+            recs.append(ToolRecommendation(
+                tool_name="create_scan",
+                args_template='scan_type=subdomain_takeover targets=["{target}"]',
+                priority=8,
+                rationale="Subdomains/DNS collected — sweep for dangling CNAMEs and takeover fingerprints.",
+                category="reconnaissance",
+            ))
+
+        # SPA → deep crawl when static crawl is thin or SPA fingerprint present
+        if "spa" in self._target_types and "execute_deep_crawl" not in self._tools_already_run:
+            recs.append(ToolRecommendation(
+                tool_name="execute_deep_crawl",
+                args_template="https://{target}",
+                priority=5,
+                rationale="SPA fingerprint — browser crawl to capture XHR/fetch/WebSocket APIs katana misses.",
+                category="reconnaissance",
+            ))
+
         # Git secret scanning (if git repo indicators found)
         git_indicators = {"github", "gitlab", "bitbucket", ".git"}
         if git_indicators & self._technologies:
@@ -540,6 +709,41 @@ class ToolSelector:
                 category="general",
             ))
 
+        # Source-aware SAST when repo / source indicators are present
+        if "source" in self._target_types or git_indicators & self._technologies:
+            if "execute_semgrep" not in self._tools_already_run:
+                recs.append(ToolRecommendation(
+                    tool_name="execute_semgrep",
+                    args_template="--config auto /path/to/cloned/source",
+                    priority=6,
+                    rationale=(
+                        "Source/repo indicators found — run Semgrep SAST on the local checkout "
+                        "for OWASP sinks, insecure crypto, and secrets."
+                    ),
+                    category="source_sast",
+                ))
+            if "execute_trivy" not in self._tools_already_run:
+                recs.append(ToolRecommendation(
+                    tool_name="execute_trivy",
+                    args_template="fs /path/to/cloned/source --severity CRITICAL,HIGH",
+                    priority=7,
+                    rationale="Source/repo available — scan dependencies and secrets with Trivy fs.",
+                    category="supply_chain",
+                ))
+
+        # Container / IaC supply-chain scanning
+        if "container" in self._target_types and "execute_trivy" not in self._tools_already_run:
+            recs.append(ToolRecommendation(
+                tool_name="execute_trivy",
+                args_template="image <image:tag from tech fingerprint> --severity CRITICAL,HIGH",
+                priority=6,
+                rationale=(
+                    "Container/K8s technology detected — scan the image (or IaC with "
+                    "'config /path') for OS/lang CVEs and misconfigurations."
+                ),
+                category="supply_chain",
+            ))
+
         # Certificate transparency for subdomain discovery
         if "execute_crtsh" not in self._tools_already_run:
             recs.append(ToolRecommendation(
@@ -547,6 +751,28 @@ class ToolSelector:
                 args_template="{target}",
                 priority=10,
                 rationale="Certificate transparency — passively discover subdomains from CT logs.",
+                category="reconnaissance",
+            ))
+        if "execute_crt_name" not in self._tools_already_run:
+            recs.append(ToolRecommendation(
+                tool_name="execute_crt_name",
+                args_template="{target}",
+                priority=10,
+                rationale=(
+                    "crt.name aggregated CT/DNS index — broader passive coverage "
+                    "(live CT, backfill, Chaos, CZDS, probes) with first-seen dates."
+                ),
+                category="reconnaissance",
+            ))
+        if "execute_subfaster" not in self._tools_already_run:
+            recs.append(ToolRecommendation(
+                tool_name="execute_subfaster",
+                args_template="-d {target}",
+                priority=11,
+                rationale=(
+                    "Subfaster — fast passive enum with crt.name + shodanct + "
+                    "rapiddns + thc/submd/hackertarget/sitedossier (no keys)."
+                ),
                 category="reconnaissance",
             ))
 

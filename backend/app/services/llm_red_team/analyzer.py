@@ -270,7 +270,7 @@ def _get_grading_llm():
     else:
         from langchain_anthropic import ChatAnthropic
         return ChatAnthropic(
-            model=getattr(settings, "ANTHROPIC_MODEL", "claude-sonnet-4-5"),
+            model=getattr(settings, "ANTHROPIC_MODEL", "claude-sonnet-4-6"),
             temperature=0,
             max_tokens=500,
         )

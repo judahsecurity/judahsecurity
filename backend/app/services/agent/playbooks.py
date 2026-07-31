@@ -4,6 +4,90 @@ from typing import List, Dict, Any, Optional
 
 PLAYBOOKS: List[Dict[str, Any]] = [
     {
+        "id": "external_assessment",
+        "name": "External Assessment (Tester Methodology)",
+        "description": (
+            "Full external engagement workflow: coordinated recon → enumeration → "
+            "surface ranking → targeted testing → evidence-backed findings. "
+            "Behaves like a real tester — branches on discoveries, does not spray tools blindly."
+        ),
+        "objective": (
+            "Conduct a thorough external security assessment like an experienced penetration tester.\n\n"
+            "OPERATING RULES (non-negotiable):\n"
+            "- Work in phases. Finish the purpose of a phase before moving on, but branch early when "
+            "a high-value lead appears (login, API, GraphQL, chatbot, admin, upload, dangling DNS).\n"
+            "- Call auto_select_tools after every major discovery wave so recommendations stay current.\n"
+            "- Prefer evidence over volume: reproduce interesting findings with a second tool or "
+            "targeted curl before create_finding. Call validate_finding first for medium+.\n"
+            "- Use create_scan for bulk / long-running platform work (subdomain_enum, graphql_scan, "
+            "subdomain_takeover, js_recon, jsluice_scan, vulnerability, waybackurls, katana, "
+            "paramspider, technology). Use execute_* for interactive, targeted follow-up.\n"
+            "- Stay in scope. Ask the user before destructive or authenticated testing if ROE is unclear.\n"
+            "- Do NOT complete after Nuclei alone. Coverage must include recon inventory, at least one "
+            "content/API discovery path, and tech-specific testing when signals exist.\n\n"
+            "**PHASE 0 — Scope & existing intel**\n"
+            "1) query_assets / query_ports / query_technologies / query_vulnerabilities / get_notes "
+            "for the target org. Note what is already known so you do not re-do work blindly.\n"
+            "2) add_asset for any seed hostname/URL/IP the user gave that is missing.\n"
+            "3) save_note(category='artifact') with engagement scope, seed targets, and plan.\n\n"
+            "**PHASE 1 — Passive discovery (fan-out)**\n"
+            "4) Subdomain / asset discovery in parallel where useful:\n"
+            "   - execute_subfinder + execute_subfaster + execute_crtsh (+ execute_crt_name / execute_amass if needed)\n"
+            "   - execute_uncover with ssl:\"<root>\" / hostname queries (persist=True) for internet-DB hits\n"
+            "   - create_scan(scan_type='subdomain_enum' or 'discovery') for bulk worker coverage\n"
+            "5) execute_dnsx on discovered hosts. Flag interesting CNAMEs for takeover later.\n"
+            "6) execute_httpx on live candidates (-tech-detect -status-code -title -follow-redirects).\n"
+            "7) execute_wafw00f + execute_wappalyzer/whatweb on primary live hosts.\n"
+            "8) auto_select_tools(target=...) — follow priority order.\n\n"
+            "**PHASE 2 — Ports, TLS, and service surface**\n"
+            "9) Request exploitation phase, then execute_naabu (top ports) on key hosts/IPs.\n"
+            "10) execute_nmap -sV on interesting non-HTTP ports; execute_testssl/sslyze on HTTPS hosts.\n"
+            "11) create_scan(scan_type='port_scan') for large IP/CIDR sets instead of looping execute_*.\n\n"
+            "**PHASE 3 — Content, API, and JS enumeration**\n"
+            "12) Parallel discovery of attack surface:\n"
+            "   - execute_katana (-d 2-3 -jc) and/or create_scan(katana/waybackurls/paramspider)\n"
+            "   - execute_gau / execute_waybackurls for historical URLs and forgotten params\n"
+            "   - execute_deep_crawl on SPAs / auth-walled apps (session if provided)\n"
+            "   - execute_ffuf for dirs on high-value hosts; execute_kiterunner when API signals exist\n"
+            "   - discover_parameters + execute_arjun on interesting endpoints\n"
+            "13) JS recon: scan_js_urls_for_secrets + execute_retirejs on crawled bundles; "
+            "create_scan(scan_type='js_recon' or 'jsluice_scan') for bulk JS analysis.\n"
+            "14) If GraphQL paths/hints appear: create_scan(graphql_scan) and/or execute_graphql_cop / "
+            "schemathesis. If chatbot/AI signals: execute_llm_red_team (and garak if confirmed).\n"
+            "15) create_scan(subdomain_takeover) when many CNAMEs / NXDOMAIN / provider fingerprints appear.\n"
+            "16) Rank the surface (rank_attack_surface / analyze_attack_surface). save_note the queue.\n"
+            "17) auto_select_tools again with updated context.\n\n"
+            "**PHASE 4 — Targeted testing (tester branching)**\n"
+            "18) Work the ranked queue, highest proof-value first. Examples:\n"
+            "   - WordPress → wpscan; other CMS → cmseek\n"
+            "   - OpenAPI/Swagger → schemathesis; REST APIs → authz checks + kiterunner leftovers\n"
+            "   - Injection candidates → sqlmap / xsstrike / browser check_xss with real params\n"
+            "   - Auth/SSO/admin → careful curl/browser proofs; dual-identity only if creds provided\n"
+            "   - Unkeyed cache / Host header leads → test_cache_poisoning\n"
+            "   - Next.js / Spring / Laravel fingerprints → corresponding stack skills/playbooks\n"
+            "19) execute_nuclei without -severity on primary live URLs (comprehensive). "
+            "Follow with create_scan(vulnerability) for remaining host inventory.\n"
+            "20) execute_nikto on key web servers when still within iteration budget.\n\n"
+            "**PHASE 5 — Confirm, record, report**\n"
+            "21) For each solid lead: sanitize_evidence → validate_finding → create_finding "
+            "(concrete request/response, impact, remediation). detect_bug_chains on confirmed vulns.\n"
+            "22) Queue any remaining bulk gaps with create_scan before completing.\n"
+            "23) Complete with: scope covered, tools run, live inventory summary, confirmed findings, "
+            "hypotheses not proven, and recommended next engagement steps.\n\n"
+            "Think like a tester: every tool call should answer a question raised by prior evidence."
+        ),
+        "initial_todos": [
+            {"description": "Phase 0: Review existing assets/vulns/notes; register seed targets", "status": "pending", "priority": "high"},
+            {"description": "Phase 1: Passive discovery (subfinder/crt/uncover) + httpx + WAF/tech", "status": "pending", "priority": "high"},
+            {"description": "Phase 1b: auto_select_tools and adjust plan from discoveries", "status": "pending", "priority": "high"},
+            {"description": "Phase 2: Ports (naabu/nmap) + TLS on key hosts", "status": "pending", "priority": "high"},
+            {"description": "Phase 3: Crawl/archive/params/JS/API/GraphQL/takeover as signals dictate", "status": "pending", "priority": "high"},
+            {"description": "Phase 3b: Rank attack surface; save artifact queue", "status": "pending", "priority": "high"},
+            {"description": "Phase 4: Targeted testing on ranked leads + Nuclei comprehensive", "status": "pending", "priority": "high"},
+            {"description": "Phase 5: Validate, create findings, queue bulk follow-ups, report", "status": "pending", "priority": "medium"},
+        ],
+    },
+    {
         "id": "web_app_assessment",
         "name": "Web App Assessment (Auto-Select)",
         "description": "Comprehensive web application vulnerability assessment with automatic tool selection based on discovered technologies.",

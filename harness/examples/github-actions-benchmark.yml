@@ -1,0 +1,79 @@
+# Example CI workflow: gate on Aegis Vanguard detection accuracy.
+#
+# Copy to .github/workflows/ in the repo you want to guard. Two common uses:
+#   1. Nightly accuracy regression test against a known-vulnerable corpus.
+#   2. PR gate that blocks if a scanned staging target grows new findings.
+#
+# Requires an ANTHROPIC_API_KEY secret (the scanner needs a frontier model).
+
+name: aegis-benchmark
+
+on:
+  schedule:
+    - cron: "0 6 * * *"   # nightly
+  workflow_dispatch: {}
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install harness
+        working-directory: harness
+        run: pip install -e ".[dev]"
+
+      # Findings-mode accuracy gate (heuristic judge, no LLM key needed for the
+      # judge itself — the scanner still needs a model key).
+      - name: Benchmark (accuracy regression)
+        working-directory: harness
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AEGIS_HARNESS_SCANNER_ARGS: "--fast --max-risk medium"
+        run: |
+          python -m local_harness.benchmark.run \
+            --setup \
+            --min-recall 0.6 \
+            --fail-on-scan-error
+
+      - name: Upload benchmark report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-report
+          path: harness/runs/benchmark/benchmark_report.json
+
+  # Optional: XBEN flag-capture gate (matches Strix's published methodology).
+  xben:
+    runs-on: ubuntu-latest
+    if: false   # enable after cloning the corpus and generating XBEN.json
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install harness
+        working-directory: harness
+        run: pip install -e ".[dev]"
+      - name: Clone XBOW corpus
+        run: git clone --depth 1 https://github.com/xbow-engineering/validation-benchmarks /tmp/xben
+      - name: Generate XBEN ground truth
+        working-directory: harness
+        run: |
+          python -m local_harness.benchmark.xben_import \
+            --corpus /tmp/xben \
+            --out local_harness/benchmark/ground_truth/XBEN.json
+      - name: Benchmark (flag capture)
+        working-directory: harness
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          python -m local_harness.benchmark.run \
+            --ground-truth local_harness/benchmark/ground_truth/XBEN.json \
+            --setup \
+            --min-success-rate 0.8 \
+            --fail-on-scan-error

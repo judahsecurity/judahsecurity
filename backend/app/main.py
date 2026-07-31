@@ -17,6 +17,7 @@ from app.models.user import User, UserRole
 from app.models.netblock import Netblock  # Import to ensure table creation
 from app.models.finding_exception import FindingException  # Required for Vulnerability relationship resolution
 from app.models.jira_integration import JiraIntegration, JiraTicket  # noqa: F401 — ensure tables are created
+from app.models.censys_integration import CensysAsmIntegration  # noqa: F401 — ensure table is created
 from app.models.custom_nuclei_template import CustomNucleiTemplate  # noqa: F401 — ensure table is created
 from app.api.routes import auth, users, organizations, assets, vulnerabilities, scans, discovery, nuclei, ports, screenshots, external_discovery, waybackurls, netblocks, labels, scan_schedules, tools, sni_discovery, scan_config, acquisitions, oracle, agent
 from app.api.routes import integrations
@@ -39,6 +40,9 @@ from app.api.routes import app_structure as app_structure_router
 from app.api.routes import mcp as mcp_router
 from app.api.routes import mitre as mitre_router
 from app.api.routes import llm_red_team as llm_red_team_router
+from app.api.routes import detection_feedback as detection_feedback_router
+from app.api.routes import detection_suppression as detection_suppression_router
+from app.api.routes import recon as recon_router
 
 # Configure logging
 logging.basicConfig(
@@ -156,6 +160,7 @@ app.include_router(agent_skills_router.router, prefix=settings.API_PREFIX)
 app.include_router(roe_router.router, prefix=settings.API_PREFIX)
 app.include_router(delphi_router.router, prefix=settings.API_PREFIX)
 app.include_router(ingestion_router.router, prefix=settings.API_PREFIX)
+app.include_router(recon_router.router, prefix=settings.API_PREFIX)
 app.include_router(graph_router.router, prefix=settings.API_PREFIX)
 app.include_router(reports_router.router, prefix=settings.API_PREFIX)
 app.include_router(pentest_router.router, prefix=settings.API_PREFIX)
@@ -163,6 +168,8 @@ app.include_router(app_structure_router.router, prefix=settings.API_PREFIX)
 app.include_router(mcp_router.router, prefix=settings.API_PREFIX)
 app.include_router(mitre_router.router, prefix=settings.API_PREFIX)
 app.include_router(llm_red_team_router.router, prefix=settings.API_PREFIX)
+app.include_router(detection_feedback_router.router, prefix=settings.API_PREFIX)
+app.include_router(detection_suppression_router.router, prefix=settings.API_PREFIX)
 
 
 # ── Scoring pipeline lifecycle ────────────────────────────────────────────────
@@ -578,6 +585,10 @@ def apply_oracle_migrations():
         "ALTER TABLE jira_tickets ADD COLUMN IF NOT EXISTS jira_assignee    VARCHAR(255)",
         "ALTER TABLE jira_tickets ADD COLUMN IF NOT EXISTS is_associated    BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE jira_tickets ADD COLUMN IF NOT EXISTS disconnected_at  TIMESTAMP WITH TIME ZONE",
+
+        # ── Censys ASM integration schema migrations ──────────────────────────
+        "ALTER TABLE censys_asm_integrations ADD COLUMN IF NOT EXISTS continuous_sync_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE censys_asm_integrations ADD COLUMN IF NOT EXISTS sync_interval_minutes   INTEGER NOT NULL DEFAULT 360",
 
         # ── Forced password reset for admin-provisioned accounts ──────────────
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE",

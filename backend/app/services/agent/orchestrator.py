@@ -62,6 +62,7 @@ from app.services.agent.prompts import (
     is_tool_allowed_in_phase,
 )
 from app.services.agent.tools import ASMToolsManager, set_tenant_context
+from app.services.agent.model_router import LLMTask
 from app.services.agent.knowledge import retrieve_knowledge
 from app.services.agent import evograph
 from app.services.agent.tool_selector import get_tool_recommendations
@@ -96,6 +97,75 @@ class DateTimeEncoder(json.JSONEncoder):
 def json_dumps_safe(obj, **kwargs):
     """JSON dumps with datetime support."""
     return json.dumps(obj, cls=DateTimeEncoder, **kwargs)
+
+
+# Keys whose values are credentials/secrets and must never be persisted to the
+# execution trace or streamed to the UI (e.g. when the operator hands the agent
+# login creds via ask_user, or passes them inline to execute_deep_crawl).
+_SENSITIVE_KEYS = {
+    "password", "passwd", "pwd", "secret", "token", "access_token",
+    "refresh_token", "authorization", "cookie", "cookies", "storage_state",
+    "local_storage", "api_key", "apikey", "x-api-key", "username", "user",
+    "email", "basic_auth",
+}
+# Values with these prefixes are *references*, not the secret itself, so they're
+# safe to keep visible (they help the operator see where a cred came from).
+_SAFE_REF_PREFIXES = ("env:", "secret:", "file:")
+_REDACTED = "***REDACTED***"
+
+
+def _mask_value(v):
+    if isinstance(v, str) and v.startswith(_SAFE_REF_PREFIXES):
+        return v
+    return _REDACTED
+
+
+def _redact_struct(obj):
+    """Recursively redact sensitive values in a parsed dict/list structure."""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if str(k).lower() in _SENSITIVE_KEYS:
+                out[k] = _mask_value(v) if isinstance(v, str) else _REDACTED
+            else:
+                out[k] = _redact_struct(v)
+        return out
+    if isinstance(obj, list):
+        return [_redact_struct(x) for x in obj]
+    return obj
+
+
+def redact_tool_args(tool_args):
+    """
+    Return a copy of tool_args safe to persist/stream — credentials removed.
+
+    Handles both nested dicts and the common case where args ride inside a JSON
+    string (e.g. execute_deep_crawl(args='{"login": {"password": "..."}}')).
+    """
+    if not isinstance(tool_args, dict):
+        return tool_args
+    out = {}
+    for k, v in tool_args.items():
+        # Sensitive top-level key (cookies, storage_state, basic_auth, …) —
+        # redact wholesale regardless of value type.
+        if str(k).lower() in _SENSITIVE_KEYS:
+            out[k] = _mask_value(v) if isinstance(v, str) else _REDACTED
+            continue
+        if isinstance(v, str):
+            s = v.strip()
+            if s.startswith("{") and any(
+                sk in s.lower()
+                for sk in ("password", "login", "authorization", "cookie", "token", "storage_state", "secret")
+            ):
+                try:
+                    out[k] = json.dumps(_redact_struct(json.loads(s)))
+                    continue
+                except Exception:
+                    pass
+            out[k] = v
+        else:
+            out[k] = _redact_struct(v)
+    return out
 
 
 class AgentOrchestrator:
@@ -204,7 +274,38 @@ class AgentOrchestrator:
             max_retries=2,
         )
         self._provider = "anthropic"
-    
+
+    def _resolve_llm(self, state: AgentState, task: str) -> BaseChatModel:
+        """Resolve the chat model for ``task`` using the caller's org config.
+
+        Reads only ``organization_id`` from state — the resolved API key stays
+        local to this call and is never written back into agent state. Falls
+        back to the process default ``self.llm`` if per-org resolution fails so
+        the agent never hard-breaks on a misconfigured tenant.
+        """
+        org_id = state.get("organization_id")
+        try:
+            from app.db.database import SessionLocal
+            from app.services.agent.model_router import get_llm_for_task
+
+            db = SessionLocal()
+            try:
+                return get_llm_for_task(
+                    db, org_id, task,
+                    temperature=0,
+                    max_tokens=settings.AGENT_MAX_OUTPUT_TOKENS,
+                    timeout=120,
+                    max_retries=2,
+                )
+            finally:
+                db.close()
+        except Exception:
+            logger.warning(
+                "Per-task LLM resolution failed for org=%s task=%s; using default provider",
+                org_id, task, exc_info=True,
+            )
+            return self.llm
+
     def _setup_tools(self) -> None:
         """Set up ASM tools for the agent."""
         self.tool_manager = ASMToolsManager()
@@ -490,7 +591,8 @@ class AgentOrchestrator:
             HumanMessage(content="Based on the current state, what is your next action? Output EXACTLY ONE valid JSON object.")
         ]
         
-        response = await self.llm.ainvoke(messages)
+        llm = self._resolve_llm(state, LLMTask.REASONING)
+        response = await llm.ainvoke(messages)
         response_text = response.content.strip()
         
         logger.debug(f"LLM response: {response_text[:500]}...")
@@ -585,13 +687,18 @@ class AgentOrchestrator:
         tool_args = step_data.get("tool_args") or {}
         phase = state.get("current_phase", "informational")
         iteration = state.get("current_iteration", 0)
-        
+
+        # Redacted view for streaming + trace persistence so credentials the
+        # operator hands the agent (or inline login secrets) never leak into the
+        # UI, execution trace, or cross-session learning store.
+        safe_args = redact_tool_args(tool_args)
+
         logger.info(f"[{user_id}] Executing tool: {tool_name}")
 
         await self._emit_status({
             "type": "tool_start",
             "tool_name": tool_name or "",
-            "tool_args": tool_args,
+            "tool_args": safe_args,
             "iteration": iteration,
         })
         
@@ -652,13 +759,16 @@ class AgentOrchestrator:
             "iteration": iteration,
         })
 
-        # EvoGraph: record step (fire-and-forget)
+        # Persist only the redacted args to the trace (state), never raw creds.
+        step_data["tool_args"] = safe_args
+
+        # EvoGraph: record step (fire-and-forget) — redacted args only.
         evograph.record_step(
             session_id=session_id,
             iteration=iteration,
             phase=phase,
             tool_name=tool_name,
-            tool_args=tool_args,
+            tool_args=safe_args,
             tool_output_summary=(step_data["tool_output"] or "")[:500],
             success=step_data["success"],
             thought=step_data.get("thought", ""),
@@ -669,7 +779,7 @@ class AgentOrchestrator:
                 iteration=iteration,
                 tool_name=tool_name,
                 error=step_data["error_message"][:300],
-                lesson=f"{tool_name} failed with args {str(tool_args)[:200]}",
+                lesson=f"{tool_name} failed with args {str(safe_args)[:200]}",
             )
 
         # Emit attack scenario update so the frontend can render the chain in real-time
@@ -703,7 +813,8 @@ class AgentOrchestrator:
             current_target_info=json_dumps_safe(state.get("target_info") or {}, indent=2),
         )
         
-        response = await self.llm.ainvoke([HumanMessage(content=analysis_prompt)])
+        llm = self._resolve_llm(state, LLMTask.OFFENSIVE)
+        response = await llm.ainvoke([HumanMessage(content=analysis_prompt)])
         analysis = self._parse_analysis_response(response.content)
         
         # Update step with analysis
@@ -868,7 +979,8 @@ class AgentOrchestrator:
             todo_list=format_todo_list(state.get("todo_list", [])),
         )
         
-        response = await self.llm.ainvoke([HumanMessage(content=report_prompt)])
+        llm = self._resolve_llm(state, LLMTask.REPORT)
+        response = await llm.ainvoke([HumanMessage(content=report_prompt)])
         
         return {
             "messages": [AIMessage(content=response.content)],

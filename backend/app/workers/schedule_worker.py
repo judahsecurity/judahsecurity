@@ -199,30 +199,42 @@ class ScheduleWorker:
         
         # 3. If no explicit targets, use ALL in-scope assets and netblocks for the organization
         else:
-            # Get all in-scope assets (domains, subdomains, IPs)
-            assets = db.query(Asset).filter(
-                Asset.organization_id == schedule.organization_id,
-                Asset.in_scope == True,
-                Asset.asset_type.in_([
+            # Domain-oriented scans (subdomain enumeration, domain discovery) only
+            # make sense against domain assets — pivot on apex domains + subdomains
+            # and skip IPs / netblocks so a daily "enumerate all domains" schedule
+            # stays fast and covers every domain in inventory (including new ones).
+            domain_scoped = schedule.scan_type in ("subdomain_enum", "discovery", "full_discovery")
+            if domain_scoped:
+                asset_type_filter = [AssetType.DOMAIN, AssetType.SUBDOMAIN]
+            else:
+                asset_type_filter = [
                     AssetType.DOMAIN,
                     AssetType.SUBDOMAIN,
                     AssetType.IP_ADDRESS,
                     AssetType.IP_RANGE,
-                ])
+                ]
+
+            assets = db.query(Asset).filter(
+                Asset.organization_id == schedule.organization_id,
+                Asset.in_scope == True,
+                Asset.asset_type.in_(asset_type_filter)
             ).all()
-            
-            # For port scans and critical_ports, only use IPv4 netblocks
-            # IPv6 has a much larger address space and requires different scanning strategies
-            netblock_query = db.query(Netblock).filter(
-                Netblock.organization_id == schedule.organization_id,
-                Netblock.in_scope == True
-            )
-            
-            if schedule.scan_type in ["port_scan", "masscan", "critical_ports"]:
-                netblock_query = netblock_query.filter(Netblock.ip_version == "ipv4")
-                logger.info(f"Filtering netblocks to IPv4 only for {schedule.scan_type}")
-            
-            netblocks = netblock_query.all()
+
+            # Domain-oriented scans don't use IP netblocks as targets.
+            netblocks = []
+            if not domain_scoped:
+                # For port scans and critical_ports, only use IPv4 netblocks
+                # IPv6 has a much larger address space and requires different scanning strategies
+                netblock_query = db.query(Netblock).filter(
+                    Netblock.organization_id == schedule.organization_id,
+                    Netblock.in_scope == True
+                )
+
+                if schedule.scan_type in ["port_scan", "masscan", "critical_ports"]:
+                    netblock_query = netblock_query.filter(Netblock.ip_version == "ipv4")
+                    logger.info(f"Filtering netblocks to IPv4 only for {schedule.scan_type}")
+
+                netblocks = netblock_query.all()
             
             # Collect targets
             asset_targets = [a.value for a in assets]
@@ -319,6 +331,46 @@ class ScheduleWorker:
             "triggered_by_schedule": schedule.id,
             "schedule_name": schedule.name,
         }
+        
+        # ParamSpider batch rotation: archive mining can't cover thousands of
+        # domains in a single run, so rotate through the attack surface in
+        # batches across successive scheduled runs. State (offset) is persisted
+        # on the schedule so each run picks up where the last left off, giving
+        # full coverage over time without ever running one giant scan.
+        if schedule.scan_type == "paramspider":
+            from app.services.paramspider_service import filter_scannable_domains
+            domains, ps_stats = filter_scannable_domains(targets)
+            if domains:
+                batch_size = max(1, int(config.get("max_domains", 500)))
+                sched_cfg = dict(schedule.config or {})
+                offset = int(sched_cfg.get("_paramspider_offset", 0) or 0)
+                if offset >= len(domains):
+                    offset = 0
+
+                batch = domains[offset:offset + batch_size]
+                # Wrap so a short final batch is topped up from the start
+                if len(domains) > batch_size and len(batch) < batch_size:
+                    batch += domains[:batch_size - len(batch)]
+
+                if batch_size >= len(domains):
+                    next_offset = 0  # whole surface covered in one run
+                else:
+                    next_offset = (offset + batch_size) % len(domains)
+
+                sched_cfg["_paramspider_offset"] = next_offset
+                schedule.config = sched_cfg  # reassign so SQLAlchemy persists it
+
+                config = {
+                    **config,
+                    "_paramspider_offset": offset,
+                    "batch_coverage": f"{offset}-{offset + len(batch)} of {len(domains)} domains",
+                }
+                targets = batch
+                logger.info(
+                    f"ParamSpider batch rotation for schedule {schedule.id}: "
+                    f"{len(domains)} scannable domains, scanning {len(batch)} this "
+                    f"run (offset {offset} -> {next_offset}, batch_size {batch_size})"
+                )
         
         # Special handling for critical_ports - use masscan for speed on CIDR blocks
         if schedule.scan_type == "critical_ports":
@@ -444,6 +496,53 @@ class ScheduleWorker:
         finally:
             db.close()
 
+    async def run_censys_asm_syncs(self):
+        """Run continuous Censys ASM syncs for connections whose interval is due.
+
+        Each active connection with ``continuous_sync_enabled`` is re-synced once
+        its ``sync_interval_minutes`` has elapsed since the last sync. Runs on
+        every loop tick (once/minute); the due-check is what enforces the cadence.
+        """
+        from app.models.censys_integration import CensysAsmIntegration
+        from app.services import censys_asm_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(CensysAsmIntegration).filter(
+                CensysAsmIntegration.is_active == True,
+                CensysAsmIntegration.continuous_sync_enabled == True,
+            ).all()
+
+            due = [c for c in candidates if c.is_sync_due(now)]
+            if not due:
+                return
+
+            logger.info(f"Censys ASM: {len(due)} connection(s) due for continuous sync")
+            for integration in due:
+                try:
+                    result = await censys_asm_service.sync_integration(db, integration)
+                    logger.info(
+                        f"Censys ASM sync (org {integration.organization_id}, "
+                        f"'{integration.workspace_name}'): {result.get('message')}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"Censys ASM sync failed for connection {integration.id}: {exc}",
+                        exc_info=True,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.error(f"Censys ASM continuous sync check failed: {exc}", exc_info=True)
+        finally:
+            db.close()
+
     async def run(self):
         """Main worker loop."""
         logger.info("Starting schedule worker...")
@@ -455,6 +554,9 @@ class ScheduleWorker:
         while not shutdown_requested:
             try:
                 await self.check_and_run_schedules()
+
+                # Continuous Censys ASM syncs — due-check enforces per-connection cadence
+                await self.run_censys_asm_syncs()
 
                 # Daily CommonCrawl refresh — fire once per 24-hour window
                 now = datetime.now(timezone.utc)

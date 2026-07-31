@@ -84,17 +84,83 @@ JSON_END = "===VALIDATION_JSON_END==="
 
 # Validation must never write back to the platform. Restrict to live re-test
 # tools only (no confirm_vulnerability_poc / submit_findings_to_platform).
-VALIDATION_ONLY_TOOLS = ["send_http_request", "scan_nuclei"]
+# probe_http / scan_ports help catch "wrong service on this port" FPs
+# (e.g. LDAP template firing on HTTPS:443) and confirm the issue is still open.
+VALIDATION_ONLY_TOOLS = [
+    "send_http_request",
+    "scan_nuclei",
+    "probe_http",
+    "scan_ports",
+    "fingerprint_tech",
+]
+
+# Well-known service → expected ports. Used for deterministic logic checks
+# before (and as guidance for) the LLM re-test.
+_SERVICE_PORTS: dict[str, set[int]] = {
+    "ldap": {389, 636, 3268, 3269},
+    "ldaps": {636, 3269},
+    "smtp": {25, 465, 587},
+    "smtps": {465},
+    "imap": {143, 993},
+    "imaps": {993},
+    "pop3": {110, 995},
+    "pop3s": {995},
+    "ftp": {21, 990},
+    "ftps": {990},
+    "ssh": {22},
+    "telnet": {23},
+    "mysql": {3306},
+    "mariadb": {3306},
+    "postgres": {5432},
+    "postgresql": {5432},
+    "mssql": {1433},
+    "redis": {6379},
+    "mongodb": {27017},
+    "memcached": {11211},
+    "elasticsearch": {9200, 9300},
+    "kibana": {5601},
+    "rdp": {3389},
+    "smb": {139, 445},
+    "nfs": {2049},
+    "vnc": {5900, 5901},
+    "mqtt": {1883, 8883},
+    "amqp": {5672},
+    "cassandra": {9042},
+    "couchdb": {5984},
+    "zookeeper": {2181},
+    "kafka": {9092},
+    "dns": {53},
+    "snmp": {161, 162},
+    "sip": {5060, 5061},
+}
+
+_WEB_PORTS = {80, 443, 8080, 8443, 8000, 8888, 3000, 5000, 9443}
 
 _STRUCTURED_OUTPUT_INSTRUCTIONS = """
 
-## Your task in THIS run (single-finding validation)
+## Your task in THIS run (single-finding re-validation)
 
-You are validating exactly ONE existing finding. Do NOT submit anything to any
-platform. You have only two tools: `send_http_request` and `scan_nuclei`. Use
-them to ACTIVELY re-test the live target before deciding — a bare "scanner
-matched" or "template matched" is NOT sufficient evidence on its own (KILL Q1
-unless you can reproduce it with a real request or observation).
+You are re-validating exactly ONE existing finding that is already in the ASM
+platform (often still marked Open). Do NOT submit anything to any platform.
+Available tools: send_http_request, scan_nuclei, probe_http, scan_ports,
+fingerprint_tech.
+
+Goals (in order):
+1. **Logical sanity** — Does the claimed vulnerability even make sense on this
+   host/port/service? Classic false positives:
+   - LDAP / AD / Kerberos / SMB / SSH / SMTP / Redis / MySQL / Mongo / RDP
+     findings on HTTP(S) ports 80/443/8080/8443
+   - Template name implies service X but the live response is clearly a web app
+   - Port in metadata does not match the protocol the finding claims
+   If the claim is nonsensical for the observed service, verdict = false_positive
+   with high confidence (set logical_mismatch=true). Do not "confirm" just because
+   a nuclei template once matched.
+2. **Still open?** — Re-test the live target. If the issue no longer reproduces
+   (fixed, port closed, endpoint gone), prefer false_positive (or note
+   still_open=false). If it still reproduces with real impact, confirmed +
+   still_open=true.
+3. **Meaningful impact** — A bare "scanner matched" or "template matched" is NOT
+   enough (KILL Q1) unless you can reproduce vulnerable BEHAVIOUR.
 
 When you are done, output your decision as a SINGLE JSON object wrapped exactly
 between these two sentinel lines, on their own lines, with nothing else after
@@ -105,27 +171,160 @@ the closing sentinel:
   "verdict": "confirmed | false_positive | needs_more_evidence",
   "confidence": "high | medium | low",
   "is_false_positive": true or false,
+  "still_open": true or false,
+  "logical_mismatch": true or false,
   "recommended_severity": "critical | high | medium | low | info",
   "reasoning": "one or two sentences: why this verdict, referencing the re-test",
   "evidence": "the concrete request/response or scan output that supports it",
-  "template_logic_issue": "if false_positive due to the detection template's own logic, describe the flawed matcher/logic; otherwise null"
+  "template_logic_issue": "if false_positive due to the detection template's own logic (wrong service/port/matcher), describe the flaw; otherwise null"
 }
 ===VALIDATION_JSON_END===
 
 Rules for the JSON:
-- verdict "confirmed": you reproduced real, exploitable/meaningful impact.
-- verdict "false_positive": the finding does not hold up (set is_false_positive=true).
+- verdict "confirmed": you reproduced real, exploitable/meaningful impact AND
+  the finding is logically consistent with the live service (still_open=true).
+- verdict "false_positive": does not hold up — wrong service/port, remediated,
+  or no longer reproducible (set is_false_positive=true; set still_open=false
+  when the issue is gone).
 - verdict "needs_more_evidence": inconclusive after re-test.
-- Set "template_logic_issue" ONLY when a template/signature-based detection's
-  matching logic is the reason for a false positive (e.g. it matches a
-  banner/version rather than proving the vulnerable behavior), so the detection
-  can be reported upstream. For sources that are not template/signature based
-  (manual findings, secrets, port/service observations), leave it null.
+- logical_mismatch=true when service/port/protocol cannot be what the finding
+  claims (e.g. "Anonymous LDAP" against https://host:443).
+- Set "template_logic_issue" when a template/signature matched the wrong
+  protocol or a weak banner/version check.
 - recommended_severity reflects the ACHIEVED impact, not the original label.
-- If your two tools genuinely cannot verify this class of finding (e.g. testing
-  whether a leaked credential is live), do not guess — return
-  "needs_more_evidence" and explain what evidence a human/tool would need.
+- If your tools cannot verify this class of finding (e.g. live credential use),
+  return "needs_more_evidence" — do not guess.
 """
+
+
+def _extract_port(finding: dict, target: str) -> int | None:
+    """Best-effort port from metadata, target URL, or host:port string."""
+    meta = finding.get("metadata") if isinstance(finding.get("metadata"), dict) else {}
+    for key in ("port", "nuclei_port", "dst_port"):
+        raw = meta.get(key)
+        if raw is None:
+            continue
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    parsed = urlparse(target if "://" in target else f"//{target}")
+    if parsed.port:
+        return parsed.port
+    if parsed.scheme == "https":
+        return 443
+    if parsed.scheme == "http":
+        return 80
+    # host:port without scheme
+    host = str(finding.get("target") or finding.get("host") or target or "")
+    m = re.search(r":(\d{2,5})(?:/|$)", host)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            return None
+    return None
+
+
+def _infer_claimed_services(finding: dict) -> list[str]:
+    """Infer which non-HTTP service the finding claims from title/template/tags."""
+    blob = " ".join(
+        str(x or "")
+        for x in (
+            finding.get("title"),
+            finding.get("description"),
+            finding.get("template_id"),
+            finding.get("affected_component"),
+            " ".join(finding.get("tags") or []),
+        )
+    ).lower()
+    hits: list[str] = []
+    for name in _SERVICE_PORTS:
+        # word-ish match so "ldap" hits ldap-anonymous but not "gladly"
+        if re.search(rf"(?<![a-z]){re.escape(name)}(?![a-z])", blob):
+            hits.append(name)
+    return hits
+
+
+def _logical_sanity_check(finding: dict, target: str) -> dict | None:
+    """
+    Deterministic pre-check for nonsensical findings.
+
+    Example: LDAP anonymous bind template matched against https://host:443.
+    Returns an early false_positive verdict, or None to continue with LLM re-test.
+    """
+    port = _extract_port(finding, target)
+    claimed = _infer_claimed_services(finding)
+    if not claimed or port is None:
+        return None
+
+    # Only auto-FP when claimed service is clearly non-web AND port is a web port
+    # (or otherwise outside the service's well-known ports).
+    mismatches = []
+    for svc in claimed:
+        expected = _SERVICE_PORTS.get(svc) or set()
+        if not expected:
+            continue
+        if port in expected:
+            continue
+        # Strong signal: non-HTTP service claimed on typical HTTP(S) ports
+        if port in _WEB_PORTS:
+            mismatches.append((svc, expected))
+        # Also flag when port is nowhere near the service's range and not a
+        # common alternate (keep conservative — only web-port case auto-kills).
+
+    if not mismatches:
+        return None
+
+    svc_list = ", ".join(f"{s} (expected ports {sorted(p)})" for s, p in mismatches)
+    return {
+        "verdict": "false_positive",
+        "confidence": "high",
+        "is_false_positive": True,
+        "still_open": False,
+        "logical_mismatch": True,
+        "recommended_severity": "info",
+        "reasoning": (
+            f"Logical mismatch: finding claims {svc_list}, but target port is {port} "
+            f"({target}). Non-HTTP service detections on HTTP(S) ports are almost "
+            f"always template/protocol false positives."
+        ),
+        "evidence": (
+            f"claimed_services={[s for s, _ in mismatches]} observed_port={port} "
+            f"target={target} template_id={finding.get('template_id')}"
+        ),
+        "template_logic_issue": (
+            f"Template/detection for {[s for s, _ in mismatches]} fired against "
+            f"port {port} instead of the service's well-known ports. Matcher likely "
+            f"does not verify the actual protocol/handshake."
+        ),
+        "sanity_flags": [
+            f"service_port_mismatch:{s}:port_{port}" for s, _ in mismatches
+        ],
+    }
+
+
+def _sanity_guidance(finding: dict, target: str) -> str:
+    """Soft guidance injected into the LLM prompt even when we don't auto-FP."""
+    port = _extract_port(finding, target)
+    claimed = _infer_claimed_services(finding)
+    lines = [
+        "\n## Logical sanity (check BEFORE confirming)\n",
+        "- Ask: would this vulnerability class exist on the live service at this port?\n",
+        "- LDAP/AD/SMB/SSH/SMTP/DB/Redis/RDP findings on 80/443/8080/8443 → almost always FP.\n",
+        "- If probe_http/fingerprint_tech shows a normal web app and the finding is a "
+        "non-HTTP protocol issue, mark false_positive with logical_mismatch=true.\n",
+        "- Re-check whether the issue is STILL OPEN (still_open). Remediated or "
+        "closed ports → false_positive / still_open=false.\n",
+    ]
+    if port is not None:
+        lines.append(f"- Observed port for this target: **{port}**.\n")
+    if claimed:
+        lines.append(
+            f"- Finding text appears to claim service(s): **{', '.join(claimed)}**. "
+            f"Verify the live protocol matches before confirming.\n"
+        )
+    return "".join(lines)
 
 
 # Source-specific validation guidance. The finding's `source_kind` (set by the
@@ -142,16 +341,18 @@ def _source_guidance(finding: dict) -> str:
             "This is a web/application finding. Re-issue the relevant HTTP "
             "request(s) with send_http_request (and/or a targeted scan_nuclei run) "
             "and confirm the vulnerable BEHAVIOUR in the live response — not just a "
-            "version string or a page that merely exists.\n"
+            "version string or a page that merely exists. If the issue no longer "
+            "reproduces, mark false_positive with still_open=false (likely remediated).\n"
         )
     if kind == "network_service":
         return common + (
             "This is a network/service finding (open port / exposed service). "
             "Confirm the service is actually reachable and behaving as claimed at "
-            "the given host:port. A port simply being open is NOT proof of the "
-            "vulnerability — verify the risky capability (e.g. anonymous access, "
-            "outdated protocol accepting connections). If the port is closed or "
-            "filtered on re-test, that points to a false positive.\n"
+            "the given host:port (use scan_ports / probe_http as needed). A port "
+            "simply being open is NOT proof of the vulnerability — verify the risky "
+            "capability (e.g. anonymous access, outdated protocol). If the port is "
+            "closed or filtered on re-test, the finding is no longer open "
+            "(false_positive / still_open=false).\n"
         )
     if kind == "secret":
         return common + (
@@ -301,6 +502,8 @@ def main() -> int:
             "verdict": "needs_more_evidence",
             "confidence": "low",
             "is_false_positive": False,
+            "still_open": None,
+            "logical_mismatch": False,
             "recommended_severity": str(finding.get("severity", "info")),
             "reasoning": f"Could not determine target: {e}",
             "evidence": "",
@@ -308,6 +511,29 @@ def main() -> int:
             "error": "invalid_target",
         })
         return 2
+
+    # Fast path: nonsensical service/port combos (LDAP on 443, etc.)
+    early = _logical_sanity_check(finding, target)
+    if early:
+        early["_meta"] = {
+            "template_id": finding.get("template_id"),
+            "detected_by": finding.get("detected_by"),
+            "source_kind": finding.get("source_kind"),
+            "target": target,
+            "short_circuit": "logical_sanity",
+        }
+        logger.info(
+            "Logical sanity short-circuit FP for template_id=%s target=%s flags=%s",
+            finding.get("template_id"), target, early.get("sanity_flags"),
+        )
+        if args.output:
+            try:
+                with open(args.output, "w", encoding="utf-8") as fh:
+                    json.dump(early, fh, indent=2, default=str)
+            except Exception as e:
+                logger.warning("Could not write --output file: %s", e)
+        _emit(early)
+        return 0
 
     parsed = urlparse(target)
     target_host = parsed.hostname or ""
@@ -369,6 +595,7 @@ def main() -> int:
         "title": finding.get("title"),
         "description": finding.get("description"),
         "severity": finding.get("severity", "medium"),
+        "status": finding.get("status"),
         "target": target,
         "asset": finding.get("asset"),
         "source_kind": finding.get("source_kind"),
@@ -405,16 +632,26 @@ def main() -> int:
             "`template_logic_issue` so a corrected template can be generated.\n"
         )
 
+    status_note = ""
+    if finding.get("status"):
+        status_note = (
+            f"Platform status of this finding: **{finding.get('status')}**. "
+            "Determine whether it is STILL OPEN / reproducible on the live target.\n"
+        )
+
     task = (
-        f"Validate this SINGLE finding by actively re-testing the live target.\n"
+        f"Re-validate this SINGLE existing finding by actively re-testing the live target.\n"
         f"Target: {target} (scope: {scope_domain}).\n"
+        f"{status_note}"
         f"{_source_guidance(finding)}\n"
+        f"{_sanity_guidance(finding, target)}\n"
         f"## Finding under review\n```json\n"
         f"{json.dumps(finding_view, indent=2, default=str)}\n```\n"
         f"{template_block}\n"
-        "Re-test with send_http_request and/or scan_nuclei as appropriate for the "
-        "source, then output the structured JSON verdict between the sentinel lines "
-        "as instructed."
+        "Re-test with send_http_request, scan_nuclei, probe_http, scan_ports, and/or "
+        "fingerprint_tech as appropriate. Catch logical mismatches (wrong service on "
+        "this port) and check whether the issue is still open, then output the "
+        "structured JSON verdict between the sentinel lines as instructed."
     )
 
     ctx = {
@@ -463,6 +700,10 @@ def main() -> int:
         verdict.get("is_false_positive")
         or verdict.get("verdict") == "false_positive"
     )
+    if "still_open" not in verdict:
+        verdict["still_open"] = verdict.get("verdict") == "confirmed"
+    if "logical_mismatch" not in verdict:
+        verdict["logical_mismatch"] = False
     verdict["_meta"] = {
         "template_id": finding.get("template_id"),
         "detected_by": finding.get("detected_by"),

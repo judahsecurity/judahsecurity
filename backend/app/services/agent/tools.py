@@ -1527,7 +1527,9 @@ class ASMToolsManager:
                        paramspider, http_probe, technology, screenshot,
                        login_portal, subdomain_enum, dns_resolution, discovery,
                        full, geo_enrich, tldfinder, whatweb, atlas_discovery,
-                       argus_secrets, hermes_secrets, janus_dast, themis_cspm
+                       argus_secrets, hermes_secrets, janus_dast, themis_cspm,
+                       graphql_scan, subdomain_takeover, js_recon, jsluice_scan,
+                       llm_red_team, commoncrawl_enum
             targets: List of hostnames, domains, or IPs to scan. If omitted,
                      scans all org domains/assets automatically.
             name: Optional scan name (auto-generated if omitted).
@@ -1565,6 +1567,12 @@ class ASMToolsManager:
             "hermes_secrets": ST.HERMES_SECRETS,
             "janus_dast": ST.JANUS_DAST,
             "themis_cspm": ST.THEMIS_CSPM,
+            "graphql_scan": ST.GRAPHQL_SCAN,
+            "subdomain_takeover": ST.SUBDOMAIN_TAKEOVER,
+            "js_recon": ST.JS_RECON,
+            "jsluice_scan": ST.JSLUICE_SCAN,
+            "llm_red_team": ST.LLM_RED_TEAM,
+            "commoncrawl_enum": ST.COMMONCRAWL_ENUM,
         }
         st = type_map.get(scan_type.lower().strip())
         if not st:

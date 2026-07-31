@@ -6,10 +6,13 @@ Aggregates CVEs from all major public exploitation intelligence sources:
   - VulnCheck KEV         (requires VULNCHECK_API_TOKEN)
   - ENISA EU KEV          (free, no key)
   - EUVD                  (EU Vulnerability Database, free, no key)
+  - Shadowserver          (honeypot exploited via CIRCL, free)
+  - KEVIntel              (attestations via CIRCL KEV catalog, free)
 
 Enriched with:
   - Detection coverage via ProjectDiscovery PDCP (optional key)
   - Active campaign signals via AlienVault OTX (free)
+  - NVD / OSV / GHSA first-party CVE metadata (on CVE detail)
   - Oracle OPES analysis from local DB
 """
 
@@ -23,7 +26,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db, get_current_active_user
+from app.core.config import settings
 from app.models.api_config import ExternalService, resolve_api_key
+from app.services.vuln_intel_enrichment import enrich_cve_catalog
+from app.services.vuln_intel_feeds import (
+    fetch_kevintel_attestations,
+    fetch_shadowserver_exploited,
+)
 
 router = APIRouter(prefix="/threat-intel", tags=["threat-intel"])
 logger = logging.getLogger(__name__)
@@ -286,6 +295,82 @@ async def _fetch_euvd(client: httpx.AsyncClient, cutoff: datetime) -> list[dict]
             break
         page += 1
 
+    return entries
+
+
+# ── Shadowserver (CIRCL honeypot exploited) ────────────────────────────────────
+
+async def _fetch_shadowserver(cutoff: datetime) -> list[dict]:
+    """
+    Shadowserver honeypot-exploited CVEs via CIRCL (cached on disk).
+
+    Only included for all-time queries (cutoff at datetime.min). Dated windows
+    would otherwise flood the feed with historical honeypot CVEs that have no
+    reliable per-CVE dateAdded. Shadowserver still floors Delphi priority on
+    findings enrichment regardless.
+    """
+    if cutoff > datetime.min.replace(tzinfo=timezone.utc):
+        return []
+    try:
+        refresh_hours = int(getattr(settings, "DELPHI_REFRESH_HOURS", 24))
+        cves = await asyncio.to_thread(
+            fetch_shadowserver_exploited,
+            force=False,
+            refresh_hours=refresh_hours,
+        )
+    except Exception:
+        return []
+    return [
+        {
+            "cve_id": cve,
+            "all_cves": [cve],
+            "date_added": "",
+            "vendor_project": "",
+            "product": "",
+            "vulnerability_name": "",
+            "short_description": "Observed in Shadowserver honeypot exploited-vulnerabilities feed",
+            "known_ransomware_use": "Unknown",
+            "kev_sources": ["shadowserver"],
+        }
+        for cve in sorted(cves)
+    ]
+
+
+# ── KEVIntel (CIRCL KEV catalog) ───────────────────────────────────────────────
+
+async def _fetch_kevintel(cutoff: datetime) -> list[dict]:
+    """KEVIntel attestations via CIRCL KEV catalog (free, no Pro API key)."""
+    try:
+        refresh_hours = int(getattr(settings, "DELPHI_REFRESH_HOURS", 24))
+        mapped = await asyncio.to_thread(
+            fetch_kevintel_attestations,
+            force=False,
+            refresh_hours=refresh_hours,
+        )
+    except Exception:
+        return []
+    entries = []
+    for cve, entry in mapped.items():
+        date_str = entry.get("date_added") or ""
+        try:
+            added = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
+            if added.tzinfo is None:
+                added = added.replace(tzinfo=timezone.utc)
+            if added < cutoff:
+                continue
+        except ValueError:
+            pass
+        entries.append({
+            "cve_id": cve,
+            "all_cves": [cve],
+            "date_added": date_str,
+            "vendor_project": entry.get("vendor_project", ""),
+            "product": entry.get("product", ""),
+            "vulnerability_name": entry.get("vulnerability_name", ""),
+            "short_description": (entry.get("short_description") or "")[:300],
+            "known_ransomware_use": entry.get("known_ransomware_use", "Unknown"),
+            "kev_sources": ["kevintel"],
+        })
     return entries
 
 
@@ -595,7 +680,7 @@ async def get_emerging_vulnerabilities(
     days: int = Query(30, ge=0, le=3650, description="KEV entries added in the last N days; 0 = all time"),
     severity: Optional[str] = Query(None, description="Filter by severity (critical,high,medium,low)"),
     detection: Optional[str] = Query(None, description="Filter: nuclei_template | poc_available | remote_no_template | no_detection"),
-    source: Optional[str] = Query(None, description="Filter by source(s): cisa_kev,vulncheck_kev,enisa_kev,euvd (comma-separated)"),
+    source: Optional[str] = Query(None, description="Filter by source(s): cisa_kev,vulncheck_kev,enisa_kev,euvd,shadowserver,kevintel (comma-separated)"),
     limit: int = Query(500, ge=1, le=5000),
     organization_id: Optional[int] = Query(None, description="Org whose stored API keys to use; omit to use any available key"),
     db: Session = Depends(get_db),
@@ -607,6 +692,8 @@ async def get_emerging_vulnerabilities(
       - VulnCheck KEV     (requires VULNCHECK_API_TOKEN)
       - ENISA EU KEV      (free)
       - EUVD              (free)
+      - Shadowserver      (free via CIRCL)
+      - KEVIntel          (free via CIRCL)
 
     Each entry includes kev_sources showing which feeds flagged that CVE.
     CVEs appearing in multiple independent sources have higher exploitation confidence.
@@ -628,12 +715,21 @@ async def get_emerging_vulnerabilities(
     )
 
     async with httpx.AsyncClient() as client:
-        # Fetch all four sources in parallel
-        vulncheck_entries, cisa_entries, enisa_entries, euvd_entries = await asyncio.gather(
+        # Fetch all exploitation sources in parallel
+        (
+            vulncheck_entries,
+            cisa_entries,
+            enisa_entries,
+            euvd_entries,
+            shadowserver_entries,
+            kevintel_entries,
+        ) = await asyncio.gather(
             _fetch_vulncheck_kev(client, days, vulncheck_token),
             _fetch_cisa_kev(client, cutoff),
             _fetch_enisa_kev(client, cutoff),
             _fetch_euvd(client, cutoff),
+            _fetch_shadowserver(cutoff),
+            _fetch_kevintel(cutoff),
         )
 
         # Merge all sources by CVE ID, combining kev_sources tags
@@ -642,6 +738,8 @@ async def get_emerging_vulnerabilities(
             cisa_entries,
             enisa_entries,
             euvd_entries,
+            shadowserver_entries,
+            kevintel_entries,
         ])
 
         if not merged_entries:
@@ -658,7 +756,14 @@ async def get_emerging_vulnerabilities(
                     "otx_active_campaigns": 0,
                     "oracle_analyzed": 0,
                     "by_severity": {"critical": 0, "high": 0, "medium": 0, "low": 0},
-                    "by_source": {"cisa_kev": 0, "vulncheck_kev": 0, "enisa_kev": 0, "euvd": 0},
+                    "by_source": {
+                        "cisa_kev": 0,
+                        "vulncheck_kev": 0,
+                        "enisa_kev": 0,
+                        "euvd": 0,
+                        "shadowserver": 0,
+                        "kevintel": 0,
+                    },
                     "multi_source_count": 0,
                     "vulncheck_configured": bool(vulncheck_token),
                     "pdcp_configured": bool(pdcp_key),
@@ -736,6 +841,8 @@ async def get_emerging_vulnerabilities(
             "vulncheck_kev": sum(1 for e in entries if "vulncheck_kev" in e.get("kev_sources", [])),
             "enisa_kev": sum(1 for e in entries if "enisa_kev" in e.get("kev_sources", [])),
             "euvd": sum(1 for e in entries if "euvd" in e.get("kev_sources", [])),
+            "shadowserver": sum(1 for e in entries if "shadowserver" in e.get("kev_sources", [])),
+            "kevintel": sum(1 for e in entries if "kevintel" in e.get("kev_sources", [])),
         },
         "multi_source_count": sum(1 for e in entries if len(e.get("kev_sources", [])) > 1),
         "vulncheck_configured": bool(vulncheck_token),
@@ -758,15 +865,24 @@ async def get_cve_detail(
     _current_user=Depends(get_current_active_user),
 ):
     """
-    Full enrichment for a single CVE: PDCP data + OTX + VulnCheck exploit
-    intelligence + any Oracle analysis on record.
+    Full enrichment for a single CVE: PDCP data + OTX + NVD/OSV/GHSA catalog
+    metadata + any Oracle analysis on record.
     """
     cve_id = cve_id.upper().strip()
     pdcp_key = _get_pdcp_key(db, organization_id)
+    nvd_key = resolve_api_key(db, ExternalService.NVD, organization_id) or getattr(settings, "NVD_API_KEY", None)
+    github_token = getattr(settings, "GITHUB_TOKEN", None)
+
     async with httpx.AsyncClient() as client:
-        pdcp, otx_count = await asyncio.gather(
+        pdcp, otx_count, catalog = await asyncio.gather(
             _fetch_pdcp_cve(client, cve_id, pdcp_key),
             _fetch_otx_pulse_count(client, cve_id),
+            asyncio.to_thread(
+                enrich_cve_catalog,
+                cve_id,
+                nvd_api_key=nvd_key,
+                github_token=github_token,
+            ),
         )
 
     oracle = _get_oracle_analysis_for_cves(db, [cve_id]).get(cve_id, {})
@@ -780,6 +896,7 @@ async def get_cve_detail(
         "is_template": bool(pdcp.get("is_template")),
         "is_poc": bool(pdcp.get("is_poc")),
         "is_remote": bool(pdcp.get("is_remote")),
+        "catalog": catalog,
         "oracle": oracle,
     }
 
@@ -882,17 +999,43 @@ async def get_threat_intel_stats(
     """Quick health-check showing which data sources are configured."""
     vulncheck_token = _get_vulncheck_token(db, organization_id)
     pdcp_key = _get_pdcp_key(db, organization_id)
+    nvd_key = resolve_api_key(db, ExternalService.NVD, organization_id) or getattr(settings, "NVD_API_KEY", None)
     return {
         "sources": {
             "vulncheck_kev": {
                 "configured": bool(vulncheck_token),
-                "description": "VulnCheck KEV — recently added exploited vulnerabilities",
+                "description": "VulnCheck KEV — broadest exploitation catalog (primary Delphi KEV-class signal)",
                 "key_source": "db" if resolve_api_key(db, ExternalService.VULNCHECK, organization_id) else "env",
             },
             "pdcp_vulnx": {
                 "configured": bool(pdcp_key),
                 "description": "ProjectDiscovery PDCP — Nuclei template & PoC availability",
                 "key_source": "db" if resolve_api_key(db, ExternalService.PDCP, organization_id) else "env",
+            },
+            "nvd": {
+                "configured": bool(nvd_key),
+                "description": "NVD CVE API — first-party CVSS/CWE metadata (key raises rate limits)",
+                "key_source": "db" if resolve_api_key(db, ExternalService.NVD, organization_id) else "env",
+            },
+            "osv": {
+                "configured": True,
+                "description": "OSV.dev — ecosystem package advisories (free)",
+                "key_source": "none_required",
+            },
+            "ghsa": {
+                "configured": True,
+                "description": "GitHub Security Advisories — free (GITHUB_TOKEN raises rate limits)",
+                "key_source": "none_required",
+            },
+            "shadowserver": {
+                "configured": True,
+                "description": "Shadowserver honeypot exploited CVEs via CIRCL (free)",
+                "key_source": "none_required",
+            },
+            "kevintel": {
+                "configured": True,
+                "description": "KEVIntel attestations via CIRCL KEV catalog (free)",
+                "key_source": "none_required",
             },
             "otx": {
                 "configured": True,

@@ -27,6 +27,7 @@ import {
   Plug,
   Radio,
   FileCode,
+  ShieldOff,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useAuth } from '@/store/auth';
@@ -41,6 +42,7 @@ const navigation = [
   { name: 'Findings', href: '/findings', icon: Shield },
   { name: 'Vulnerability Intel', href: '/vulnerability-intel', icon: Radio },
   { name: 'Detection Coverage', href: '/nuclei-templates', icon: FileCode },
+  { name: 'Detection Patterns', href: '/detection-patterns', icon: ShieldOff },
   { name: 'Exceptions', href: '/exceptions', icon: FileText },
   { name: 'Remediation', href: '/remediation', icon: Wrench },
   { name: 'Screenshots', href: '/screenshots', icon: Camera },

@@ -107,6 +107,22 @@ python3 run_pentest.py --target https://example.com --no-guardrails
 | `analyze_mail_security` | SPF/DKIM/DMARC mapping | safe |
 | `detect_third_party_vendors` | vendor detection | safe |
 
+### Parallel hunter fireteam (Phase 2)
+
+**Always-on (17):** injection, XSS, auth, authz, SSRF, CSRF, CORS, file-upload,
+open-redirect, race, business-logic, OAuth, LLM/AI, HTTP smuggling, cache poison,
+SAML/SSO, host-header.
+
+**Surface-selected API/framework:** GraphQL, gRPC, WebSocket, Next.js, Spring Boot,
+Laravel, ASP.NET, Node.js, deserialization — activated when recon/app-mapper text
+matches stack signals (or `--all-specialists`).
+
+**Surface-selected enterprise perimeter:** M365/Entra, Okta, SharePoint, SSL-VPN
+appliances, vCenter/Workspace ONE, cloud IAM post-cred, supply-chain recon —
+activated on perimeter signals, or forced with `--enterprise` / `--all-specialists`.
+
+CLI: `--enterprise`, `--no-enterprise`, `--all-specialists`, `--no-api-specialists`.
+
 ### Browser / Playwright
 | Tool | Function | Risk |
 |------|----------|------|
@@ -117,7 +133,9 @@ python3 run_pentest.py --target https://example.com --no-guardrails
 ### Exploit Validation
 | Tool | Function | Risk |
 |------|----------|------|
-| `sql_injection_test` | sqlmap batch validation | high |
+| `probe_sqli_params` | Differential SQLi canary (error/boolean/time) before sqlmap | high |
+| `sql_injection_test` | sqlmap confirmation (param/data/cookie aware) | high |
+| `probe_xss_reflection` | Canary reflection + context map before XSS confirm | high |
 | `xss_test` | XSStrike detection | high |
 | `test_dom_xss` | Playwright DOM XSS (fragment, param, sink injection) | high |
 | `wordpress_scan` | wpscan vuln scan | medium |

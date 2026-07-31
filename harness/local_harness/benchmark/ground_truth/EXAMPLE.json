@@ -1,0 +1,163 @@
+{
+  "_comment": "Bring-your-own-corpus benchmark ground truth. Each key is a target the Aegis Vanguard scanner will run against. `expected_findings` are the known-vulnerable defects the scanner SHOULD detect; the judge maps produced findings against them to compute recall/precision. `setup.docker` is optional guidance for standing the target up locally. Only scan targets you are authorized to test.",
+
+  "juice-shop": {
+    "target": "http://localhost:3000",
+    "scope": "localhost",
+    "setup": {
+      "docker": "docker run --rm -d -p 3000:3000 bkimminich/juice-shop",
+      "ready_path": "/",
+      "note": "OWASP Juice Shop — intentionally vulnerable Node/Angular app."
+    },
+    "expected_findings": [
+      {
+        "id": "JS-SQLI-LOGIN",
+        "category": "sqli",
+        "severity": "critical",
+        "endpoint": "/rest/user/login",
+        "description": "SQL injection in the login form allows authentication bypass ('  or 1=1--)."
+      },
+      {
+        "id": "JS-XSS-SEARCH",
+        "category": "xss",
+        "severity": "high",
+        "endpoint": "/#/search",
+        "description": "DOM XSS via the product search 'q' parameter reflected into the page."
+      },
+      {
+        "id": "JS-IDOR-BASKET",
+        "category": "idor",
+        "severity": "high",
+        "endpoint": "/rest/basket/",
+        "description": "IDOR: a user can access another user's basket by changing the id."
+      },
+      {
+        "id": "JS-AUTH-ADMIN",
+        "category": "authz",
+        "severity": "high",
+        "endpoint": "/#/administration",
+        "description": "Broken access control exposes the admin section to non-admin users."
+      }
+    ]
+  },
+
+  "dvwa": {
+    "target": "http://localhost:8080",
+    "scope": "localhost",
+    "setup": {
+      "docker": "docker run --rm -d -p 8080:80 vulnerables/web-dvwa",
+      "ready_path": "/login.php",
+      "note": "Damn Vulnerable Web Application — set security level to low."
+    },
+    "expected_findings": [
+      {
+        "id": "DVWA-SQLI",
+        "category": "sqli",
+        "severity": "critical",
+        "endpoint": "/vulnerabilities/sqli/",
+        "description": "Classic SQL injection in the 'id' GET parameter."
+      },
+      {
+        "id": "DVWA-XSS-REFLECTED",
+        "category": "xss",
+        "severity": "high",
+        "endpoint": "/vulnerabilities/xss_r/",
+        "description": "Reflected XSS in the 'name' parameter."
+      },
+      {
+        "id": "DVWA-CMD-INJECTION",
+        "category": "rce",
+        "severity": "critical",
+        "endpoint": "/vulnerabilities/exec/",
+        "description": "OS command injection in the ping utility 'ip' field."
+      },
+      {
+        "id": "DVWA-LFI",
+        "category": "lfi",
+        "severity": "high",
+        "endpoint": "/vulnerabilities/fi/",
+        "description": "Local file inclusion via the 'page' parameter."
+      },
+      {
+        "id": "DVWA-CSRF",
+        "category": "csrf",
+        "severity": "medium",
+        "endpoint": "/vulnerabilities/csrf/",
+        "description": "CSRF on the change-password form (no anti-CSRF token)."
+      }
+    ]
+  },
+
+  "webgoat": {
+    "target": "http://localhost:8081/WebGoat",
+    "scope": "localhost",
+    "setup": {
+      "docker": "docker run --rm -d -p 8081:8080 webgoat/webgoat",
+      "ready_path": "/WebGoat/login",
+      "note": "OWASP WebGoat — deliberately insecure Java teaching app."
+    },
+    "expected_findings": [
+      {
+        "id": "WG-SQLI",
+        "category": "sqli",
+        "severity": "high",
+        "endpoint": "/WebGoat/SqlInjection/attack",
+        "description": "SQL injection lessons expose injectable query parameters."
+      },
+      {
+        "id": "WG-XXE",
+        "category": "xxe",
+        "severity": "high",
+        "endpoint": "/WebGoat/xxe",
+        "description": "XML external entity processing in the comment upload."
+      },
+      {
+        "id": "WG-DESERIALIZATION",
+        "category": "deserialization",
+        "severity": "critical",
+        "endpoint": "/WebGoat/InsecureDeserialization/task",
+        "description": "Insecure Java deserialization leading to code execution."
+      }
+    ]
+  },
+
+  "nodegoat": {
+    "target": "http://localhost:4000",
+    "scope": "localhost",
+    "setup": {
+      "docker": "docker compose -f https://raw.githubusercontent.com/OWASP/NodeGoat/master/docker-compose.yml up -d",
+      "ready_path": "/login",
+      "note": "OWASP NodeGoat — vulnerable Node/Express app (OWASP Top 10)."
+    },
+    "expected_findings": [
+      {
+        "id": "NG-NOSQLI",
+        "category": "sqli",
+        "severity": "high",
+        "endpoint": "/login",
+        "description": "NoSQL injection in the login handler via crafted JSON body."
+      },
+      {
+        "id": "NG-SSJI",
+        "category": "rce",
+        "severity": "critical",
+        "endpoint": "/contributions",
+        "description": "Server-side JS injection via eval on contribution amounts."
+      },
+      {
+        "id": "NG-IDOR-ALLOCATIONS",
+        "category": "idor",
+        "severity": "high",
+        "endpoint": "/allocations/",
+        "description": "IDOR exposes other users' allocation data by userId."
+      },
+      {
+        "id": "NG-XSS-PROFILE",
+        "category": "xss",
+        "severity": "medium",
+        "endpoint": "/profile",
+        "description": "Stored XSS in profile fields (first/last name)."
+      }
+    ]
+  }
+}

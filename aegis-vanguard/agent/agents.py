@@ -663,21 +663,57 @@ def detect_third_party_vendors(hosts: list, timeout: int = 300) -> str:
 # --- Exploit Validation Tools ---
 
 @security_tool(category="exploit", risk="high")
-def sql_injection_test(target_url: str, timeout: int = 600) -> str:
-    """Test a URL for SQL injection using sqlmap in safe batch mode.
+def sql_injection_test(
+    target_url: str,
+    timeout: int = 600,
+    data: str = "",
+    param: str = "",
+    cookie: str = "",
+    method: str = "",
+    level: int = 3,
+    risk: int = 2,
+) -> str:
+    """Confirm SQL injection with sqlmap after probe_sqli_params flags a candidate.
+
+    Prefer probe_sqli_params first to find the parameter, then call this with
+    param= that name. Supports POST --data and cookies.
 
     Args:
-        target_url: URL with parameters to test (e.g. https://site.com/page?id=1)
+        target_url: URL with parameters (e.g. https://site.com/page?id=1)
         timeout: Max seconds to run
+        data: Optional POST body (form-urlencoded or as needed by sqlmap --data)
+        param: Specific parameter name to test (-p)
+        cookie: Cookie header value
+        method: Optional HTTP method override
+        level: sqlmap level 1-5 (default 3)
+        risk: sqlmap risk 1-3 (default 2)
     """
     import scanners
-    results = scanners.run_sqlmap(target_url, _get_bridge(), timeout=timeout)
-    return json.dumps({"results": results, "vulnerable": len(results) > 0}, default=str)
+    results = scanners.run_sqlmap(
+        target_url,
+        _get_bridge(),
+        timeout=timeout,
+        data=data,
+        param=param,
+        cookie=cookie,
+        method=method,
+        level=level,
+        risk=risk,
+    )
+    return json.dumps({
+        "results": results,
+        "findings": results,
+        "vulnerable": len(results) > 0,
+        "count": len(results),
+    }, default=str)
 
 
 @security_tool(category="exploit", risk="high")
 def xss_test(target_url: str, timeout: int = 300) -> str:
-    """Test a URL for Cross-Site Scripting using XSStrike.
+    """Test a URL for reflected XSS using XSStrike.
+
+    Prefer probe_xss_reflection first to map reflection contexts, then xss_test /
+    test_dom_xss for confirmation.
 
     Args:
         target_url: URL with parameters to test for XSS
@@ -685,7 +721,84 @@ def xss_test(target_url: str, timeout: int = 300) -> str:
     """
     import scanners
     results = scanners.run_xsstrike(target_url, _get_bridge(), timeout=timeout)
-    return json.dumps({"results": results, "vulnerable": len(results) > 0}, default=str)
+    return json.dumps({
+        "results": results,
+        "findings": results,
+        "vulnerable": len(results) > 0,
+        "count": len(results),
+    }, default=str)
+
+
+@security_tool(category="exploit", risk="high")
+def probe_sqli_params(
+    target_url: str,
+    method: str = "GET",
+    body: str = "",
+    params: str = "",
+    headers_json: str = "{}",
+    timeout: int = 25,
+) -> str:
+    """Deterministic SQLi differential probe across parameters.
+
+    For each param: baseline → quote error → boolean true/false → short time delay.
+    Call this BEFORE sql_injection_test. Returns candidates with signals.
+
+    Priority params: id, search, q, sort, filter, page, order_id, user_id, etc.
+
+    Args:
+        target_url: URL to probe (include query string when possible)
+        method: GET or POST
+        body: POST body if applicable
+        params: Comma-separated param names (optional — auto-detected from URL/body)
+        headers_json: Optional request headers JSON
+        timeout: Per-request timeout seconds
+    """
+    import scanners
+    result = scanners.run_probe_sqli_params(
+        target_url,
+        _get_bridge(),
+        method=method,
+        body=body,
+        params=params,
+        headers_json=headers_json,
+        timeout=timeout,
+    )
+    return json.dumps(result, default=str)
+
+
+@security_tool(category="exploit", risk="high")
+def probe_xss_reflection(
+    target_url: str,
+    method: str = "GET",
+    body: str = "",
+    params: str = "",
+    headers_json: str = "{}",
+    timeout: int = 20,
+) -> str:
+    """Map XSS reflection contexts with a unique canary, then try context payloads.
+
+    Call this BEFORE xss_test / test_dom_xss. Returns reflections[] (param → context)
+    and any unescaped-payload candidates.
+
+    Args:
+        target_url: URL to probe
+        method: GET or POST
+        body: POST body if applicable
+        params: Comma-separated param names (optional)
+        headers_json: Optional request headers JSON
+        timeout: Per-request timeout seconds
+    """
+    import scanners
+    result = scanners.run_probe_xss_reflection(
+        target_url,
+        _get_bridge(),
+        method=method,
+        body=body,
+        params=params,
+        headers_json=headers_json,
+        timeout=timeout,
+    )
+    return json.dumps(result, default=str)
 
 
 @security_tool(category="exploit", risk="medium")
@@ -824,11 +937,31 @@ def confirm_vulnerability_poc(
     return json.dumps({
         "confirmed": True,
         "finding": finding_title,
+        "title": finding_title,
+        "name": finding_title,
         "host": host,
+        "vuln_type": vuln_type,
         "original_severity": current_severity,
         "escalated_severity": escalated,
+        "severity": escalated,
         "escalated": escalated != current_severity,
         "poc_endpoint": endpoint,
+        "endpoint": endpoint,
+        "url": endpoint,
+        "matched_at": endpoint,
+        "payload": payload,
+        "findings": [{
+            "title": finding_title,
+            "name": finding_title,
+            "url": endpoint,
+            "matched_at": endpoint,
+            "severity": escalated,
+            "vuln_type": vuln_type,
+            "host": host,
+            "confirmed": True,
+            "payload": payload,
+            "source": tool or "confirm_vulnerability_poc",
+        }],
     })
 
 
@@ -1346,15 +1479,18 @@ After mapping, emit a **Ranked Hunt Queue** (highest first) so hunters spend tur
 6. Everything else
 
 Also flag **tech-conditional skills** hunters should load (Next.js middleware, Spring actuators, etc.).
+Flag **perimeter signals** for enterprise specialists: Entra/Okta, SharePoint, VPN appliances,
+vCenter, cloud keys/buckets, GraphQL/gRPC/WebSocket.
 
 ## Output format
 Produce a structured markdown App Profile including:
 - Application Type, Authentication, Key Features, API Surface, Tech Stack
 - Interesting Attack Vectors
+- **Perimeter / IdP / Cloud signals** (explicit yes/no bullets)
 - **Ranked Hunt Queue** (ordered list with why each matters)
-- **Suggested hunter focus** (e.g. authz_hunter on /api/v1/orders/{id})
+- **Suggested hunter focus** (e.g. authz_hunter on /api/v1/orders/{id}; graphql_hunter if /graphql)
 
-This profile is passed directly to the OWASP fireteam as their attack-surface context.
+This profile is passed directly to the hunter fireteam as their attack-surface context.
 """,
         tool_names=APP_MAPPER_TOOLS,
         max_turns=30,
@@ -1369,6 +1505,12 @@ def create_validator_agent() -> Agent:
         instructions="""You are the **Finding Validator** for Aegis Vanguard.
 Your job is to apply a 7-Question Gate to every finding before it reaches the ASM platform.
 A single NO kills the finding. Be strict — false positives waste everyone's time.
+
+## Logical sanity (check FIRST)
+Before the numbered gate: does this finding even make sense on the observed host/port/service?
+- LDAP / AD / Kerberos / SMB / SSH / SMTP / Redis / MySQL / Mongo / RDP on HTTP(S) 80/443/8080/8443 → KILL (logical mismatch)
+- Template implies protocol X but live response is a normal web app → KILL
+- When re-validating an existing Open finding: confirm it is STILL reproducible. If fixed or port closed → KILL (no longer open)
 
 ## The 7-Question Gate (apply in order, first NO = KILL)
 
@@ -1426,6 +1568,7 @@ For KILL/DOWNGRADE: explain why in one sentence.
 - Missing cookie flags alone (report only if leads to concrete exploit)
 - SPAs exposing client_id (public by design)
 - Clickjacking on non-sensitive pages; rate-limit missing on non-auth forms
+- Non-HTTP service findings (LDAP/SSH/SMTP/DB/…) matched against web ports
 """,
         tool_names=VALIDATOR_TOOLS,
         max_turns=25,
@@ -1616,6 +1759,14 @@ Strategy (adapt based on what you find):
 13. For discovered JavaScript bundles (e.g. .js under /static, /clientlibs), run scan_js_urls_for_secrets with those URLs to detect hardcoded keys/tokens
 14. Fuzz for hidden directories/API paths
 15. Discover parameters on interesting endpoints
+16. Flag **enterprise perimeter signals** explicitly in your summary when seen:
+    - Entra/M365: login.microsoftonline.com, *.onmicrosoft.com, autodiscover
+    - Okta: *.okta.com / custom Okta domains
+    - SharePoint: /_layouts/, /_vti_bin/, Authentication.asmx
+    - SSL VPN portals: AnyConnect, FortiGate, NetScaler, GlobalProtect, Ivanti, F5
+    - vCenter / Workspace ONE / Aria management UIs
+    - Cloud credential leaks (AKIA/ASIA keys, SA JSON) and public bucket hints
+    - GraphQL / gRPC / WebSocket endpoints (name them for specialist hunters)
 
 ADAPT your approach:
 - If WAF detected, note it for the vuln agent to adjust strategy

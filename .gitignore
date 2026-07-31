@@ -101,3 +101,6 @@ data/sni-downloads/*.txt
 # Website build artifacts
 website/.next/
 website/node_modules/
+
+# Materialized custom Nuclei templates (source of truth is the DB)
+backend/nuclei-templates-generated/

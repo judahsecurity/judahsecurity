@@ -1,0 +1,51 @@
+{
+  "_comment": "Smoke-test subset of the XBEN corpus (3 Level-1 challenges). Flags are the TRUE Makefile-baked values FLAG{sha256(UPPER(challenge-name))} from common.mk (verified against the built image), NOT the decoy per-challenge .env values. All three publish to a RANDOM host port (avoids colliding with the local asm_backend on :8000). Flag mode: solved when this exact flag appears in the scanner's findings.",
+
+  "XBEN-071-24": {
+    "name": "XBEN-071-24 SQL make mistakes",
+    "level": "1",
+    "tags": ["sqli"],
+    "flag": "FLAG{0aa3ada534b6aa7033dddbf624c076c48afd97407bcab9b1d6acb6bc502fa240}",
+    "scope": "localhost",
+    "setup": {
+      "up": "make -C /tmp/xben/benchmarks/XBEN-071-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-071-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-071-24/docker-compose.yml",
+      "container_port": 80,
+      "ready_timeout": 180,
+      "up_timeout": 900
+    }
+  },
+
+  "XBEN-020-24": {
+    "name": "XBEN-020-24 PHP SSRF",
+    "level": "1",
+    "tags": ["ssrf"],
+    "flag": "FLAG{6e5d772fb6e28ca52985079acf7bfa46d729870e6bae73166208f1fdcd831667}",
+    "scope": "localhost",
+    "setup": {
+      "up": "make -C /tmp/xben/benchmarks/XBEN-020-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-020-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-020-24/docker-compose.yml",
+      "container_port": 80,
+      "ready_timeout": 180,
+      "up_timeout": 900
+    }
+  },
+
+  "XBEN-021-24": {
+    "name": "XBEN-021-24 Simple IDOR Cookie",
+    "level": "1",
+    "tags": ["idor", "default_credentials"],
+    "flag": "FLAG{5544c209fc4348cdb09cea2800dff832291b6e4beb9a3fb0efca09e9a3eeb1c2}",
+    "scope": "localhost",
+    "setup": {
+      "up": "make -C /tmp/xben/benchmarks/XBEN-021-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-021-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-021-24/docker-compose.yml",
+      "container_port": 80,
+      "ready_timeout": 180,
+      "up_timeout": 900
+    }
+  }
+}

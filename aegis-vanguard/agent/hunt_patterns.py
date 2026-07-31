@@ -78,6 +78,44 @@ If tech stack unknown, fingerprint first — do not burn turns on irrelevant fra
 # Per-class pattern packs
 # =============================================================================
 
+SQLI_PATTERNS = """
+## High-signal SQLi patterns (BugHunter-aligned)
+- Prefer endpoints that REFLECT rows (search/list/report) → UNION is fastest proof
+- Establish column count with ORDER BY / UNION SELECT NULL… before dumping
+- Crown params: id, q, search, sort, filter, page, order_id, user_id, report dates
+- JSON APIs: also test body fields and NoSQL operators ($ne, $gt, $where)
+- Second-order: store quote in profile/filename, trigger later in admin/search query
+
+## Probe → confirm ladder
+1. probe_sqli_params (error / boolean / time)
+2. sql_injection_test(..., param=name, level=3)
+3. confirm_vulnerability_poc with non-sensitive proof (version()/database())
+
+## Kill signals
+- WAF 403 on one payload with no bypass attempt → incomplete, not clean
+- sqlmap on URL with zero parameters → wasted turn
+- Time delay <3s over baseline → inconclusive
+"""
+
+XSS_PATTERNS = """
+## High-signal XSS patterns (BugHunter-aligned)
+- Map reflection FIRST with probe_xss_reflection canary — then context-correct payloads
+- html_body → <img onerror=…> ; attr_double → "><img…> ; script_block → </script><img…>
+- DOM: hash, postMessage, location sinks via test_dom_xss (Playwright marker)
+- Stored: unique canary in comment/profile → re-fetch → execute
+- alert(1) blocked ≠ safe — use window.__vanguard_xss marker
+
+## Probe → confirm ladder
+1. probe_xss_reflection
+2. xss_test and/or test_dom_xss on reflected params
+3. confirm_vulnerability_poc with execution evidence (not reflection alone)
+
+## Kill signals
+- Fully encoded reflection with no bypass after stacked encoding
+- Self-XSS without delivery (CSRF/stored) path
+- CSP reports without a working gadget — informational only
+"""
+
 AUTHZ_PATTERNS = """
 ## High-signal IDOR / BOLA patterns (from paid report shapes)
 - Swap object IDs across: detail, list, export, download, share, invite, audit, attachment, preview
@@ -179,6 +217,165 @@ SAML_PATTERNS = """
 - Unsigned assertions accepted; XXE in metadata fetch
 - Golden SAML only if signing key exposed (rare) — do not forge otherwise
 Pair with OAuth/OIDC checks if hybrid SSO.
+"""
+
+# =============================================================================
+# API depth + framework specialists
+# =============================================================================
+
+GRPC_PATTERNS = """
+## gRPC / HTTP2 API patterns
+- Server reflection enabled → enumerate services/methods without a .proto
+- Missing auth metadata on internal methods; plaintext gRPC (h2c) on internet
+- Proto / descriptor leakage via /grpc.reflection.v1alpha.ServerReflection
+- Authz gaps: method-level ACL missing while HTTP gateway is locked down
+- Do not DoS with unbounded streaming — prove with one unauthorized method call
+"""
+
+WEBSOCKET_PATTERNS = """
+## WebSocket patterns
+- Cross-Site WebSocket Hijacking (CSWSH): cookie auth + missing/weak Origin check
+- No per-message auth after handshake; room/namespace join without membership check
+- Message tampering / IDOR over WS channels (subscribe to other-user topics)
+- socket.io: namespace ACL bypass; reconnect without re-auth
+Confirm with Origin: evil.com handshake + sensitive subscription — not just open WS.
+"""
+
+NEXTJS_PATTERNS = """
+## Next.js (only when fingerprint matches)
+- Middleware auth bypass via static asset / `_next/static` / rewritten paths
+- `/_next/image?url=` SSRF (internal + metadata) when remotePatterns loose
+- Server Actions: invoke unexpected action IDs; mass-assignment on bound args
+- ISR / cache key confusion; RSC flight payload leakage of secrets
+- `x-middleware-subrequest` / historic CVE class — version-gate with nuclei
+"""
+
+SPRING_PATTERNS = """
+## Spring Boot (only when fingerprint matches)
+- `/actuator/*` unauth: env, heapdump, mappings, gateway, jolokia, shutdown
+- SpEL injection in query/header-bound expressions
+- H2 console / Spring4Shell-class RCE only when version evidence matches
+- Prefer nuclei springboot/actuator tags before manual spray
+"""
+
+LARAVEL_PATTERNS = """
+## Laravel (only when fingerprint matches)
+- APP_DEBUG stack traces with env/secrets; Telescope/Horizon unauth
+- Ignition RCE (CVE-2021-3129) only with version evidence
+- Signed URL tampering; `.env` / storage exposure; debugbar
+"""
+
+ASPNET_PATTERNS = """
+## ASP.NET / IIS (only when fingerprint matches)
+- ViewState deserialization (MAC off / known machineKey) — validate carefully
+- elmah.axd / trace.axd / ScriptResource disclosure
+- NTLM Negotiate info leak on internet-facing IIS (hunt-ntlm-info class)
+- Path: WebResource.axd, handler mappings, `__VIEWSTATE`
+"""
+
+NODEJS_PATTERNS = """
+## Node.js / Express (only when fingerprint matches)
+- Prototype pollution → gadget to RCE (lodash merge/defaultsDeep)
+- `trust proxy` misconfig → IP spoof auth bypass
+- child_process / eval / template SSTI (EJS/Pug/Handlebars)
+- Path traversal in static file servers; Express open redirect helpers
+"""
+
+DESERIALIZATION_PATTERNS = """
+## Insecure deserialization
+- Java: ysoserial gadget hints only when ObjectInputStream / .ser upload present
+- PHP: phpggc / phar:// when unserialize sinks found
+- Python: pickle/yaml.load; .NET BinaryFormatter / LosFormatter (ViewState)
+- JNDI/Log4Shell class: confirm with canary callback, no destructive payload
+Never run OS-shell payloads — proof via controlled canary or safe property read.
+"""
+
+# =============================================================================
+# Enterprise perimeter + cloud post-credential
+# =============================================================================
+
+M365_ENTRA_PATTERNS = """
+## M365 / Entra ID (external-only)
+- Tenant discovery: login.microsoftonline.com/{domain}, GetCompanyInformation, autodiscover
+- User enumeration via GetCredentialType / Manage endpoints (rate-limit disciplined)
+- Federation / STS endpoints; Seamless SSO hints; legacy auth surfaces
+- Consent / OAuth app phishing preconditions (document only — no phishing victims)
+- Device code / PTA / password-spray posture notes — spray ONLY if engagement ROE allows
+- SharePoint Online / OneDrive anon sharing links if in scope
+Do NOT attempt Golden SAML, token theft malware, or mailbox exfil.
+"""
+
+OKTA_PATTERNS = """
+## Okta-as-IdP (external-only)
+- Tenant discovery: *.okta.com, oktapreview, custom domains, /.well-known/okta-organization
+- /api/v1/users/me, authn, factors enumeration without locking accounts
+- Password spray with lockout discipline; MFA factor enumeration
+- OIDC discovery + redirect_uri issues on Okta-hosted apps
+- Admin console / agent endpoints exposure on internet
+Coordinate with saml_sso_hunter / oauth_hunter for ACS and redirect issues.
+"""
+
+SHAREPOINT_PATTERNS = """
+## SharePoint on-prem (ToolShell + legacy)
+- Fingerprint /_layouts/, /_vti_bin/, Authentication.asmx, sites/default
+- Version disclosure; anonymous list/library access
+- Legacy SOAP auth bypass classes; ToolShell precondition chain (CVE-2025-53770 family)
+  — fingerprint + nuclei only unless ROE explicitly allows exploit validation
+- NTLM info disclosure on SharePoint/IIS fronts
+Validate with non-destructive probes; no webshell drops.
+"""
+
+ENTERPRISE_VPN_PATTERNS = """
+## SSL VPN / remote-access appliances
+Fingerprint + version-gate high-impact CVE classes (nuclei tags preferred):
+- Cisco ASA / AnyConnect
+- Fortinet FortiGate / FortiOS
+- Citrix NetScaler / ADC
+- Palo Alto GlobalProtect
+- Ivanti / Pulse Connect Secure
+- SonicWall, F5 BIG-IP
+Report: product, version/build evidence, relevant CVE/KEV, auth-bypass or RCE precondition.
+No mass exploit; no credential stuffing beyond ROE-approved spray.
+"""
+
+VCENTER_PATTERNS = """
+## VMware vCenter / Workspace ONE
+- Fingerprint /ui, /vcsa, SOAP SDK, vRealize / Aria, Workspace ONE UEM
+- High-impact CVE chains: unauth file upload, plugin RCE, SSTI classes (version-gate)
+- Default/weak creds only if ROE allows; no datastore wipe or VM power actions
+Prefer nuclei vmware/vcenter tags + version correlation over manual exploit kits.
+"""
+
+CLOUD_IAM_PATTERNS = """
+## Cloud IAM / post-credential (external + found secrets)
+When AWS/GCP/Azure keys, STS tokens, or SA JSONs appear in JS/repos/env:
+1. Classify credential type (AKIA, ASIA, GCP SA, Azure client secret, etc.)
+2. Estimate blast radius from key shape + any policy/resource hints in the leak
+3. Check companion misconfigs: public S3/GCS listing, open Firebase, Azure blob SAS
+4. SSRF→IMDS: document chain risk; do NOT fetch live IMDS from this agent
+   (guardrails block metadata IPs — report as chained impact with evidence of SSRF)
+5. Confused-deputy / cross-account AssumeRole only as analysis unless ROE grants a lab account
+Never use discovered keys to modify customer resources or exfiltrate production data.
+"""
+
+SUPPLY_CHAIN_PATTERNS = """
+## Supply-chain recon (external)
+- Dependency confusion: internal package names in JS/source maps vs public registries
+- Exposed .git / source maps / SBOM / package-lock with private registry URLs
+- GitHub Actions workflow_dispatch / pull_request_target injection preconditions
+- Container registry anon pull; CI artifact buckets
+Report reachable supply-chain openings — do not publish malware packages.
+"""
+
+PERIMETER_RANK_PROTOCOL = """
+## Perimeter rank-then-hunt
+1. Internet-facing IdP (Entra/Okta/SAML ACS) before marketing sites
+2. SSL VPN / remote access appliances
+3. Collaboration (SharePoint/Exchange/on-prem)
+4. Virtualization mgmt (vCenter / Aria / Workspace ONE)
+5. Cloud control-plane exposures + leaked cloud credentials
+6. CI/CD + package supply-chain
+Skip: pure SaaS marketing CDNs, third-party widgets, out-of-scope subsidiaries.
 """
 
 

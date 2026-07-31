@@ -345,24 +345,118 @@ def run_nikto(target: str, bridge: ASMBridge, timeout: int = 600) -> List[dict]:
     return findings
 
 
-def run_sqlmap(target_url: str, bridge: ASMBridge, timeout: int = 600) -> List[dict]:
-    """SQL injection testing via sqlmap."""
+def run_sqlmap(
+    target_url: str,
+    bridge: ASMBridge,
+    timeout: int = 600,
+    data: str = "",
+    param: str = "",
+    cookie: str = "",
+    method: str = "",
+    level: int = 3,
+    risk: int = 2,
+) -> List[dict]:
+    """SQL injection testing via sqlmap with structured finding output.
+
+    Prefer calling after probe_sqli_params flags a candidate. Supports POST body,
+    specific -p params, and cookies. Safe flags only (--batch, no os-shell).
+    """
     if not _tool_available("sqlmap"):
-        logger.error("sqlmap not installed"); return []
-    cmd = ["sqlmap", "-u", target_url, "--batch", "--level=2", "--risk=2",
-           "--output-dir=/tmp/sqlmap_out", "--forms"]
-    result = _run(cmd, timeout=timeout)
-    findings = []
-    output = result.stdout
-    if "is vulnerable" in output or "injectable" in output.lower():
-        bridge.submit_vulnerability(
-            host=target_url, title="SQL Injection Detected",
-            severity="critical", source="sqlmap",
-            description=output[-2000:], url=target_url,
-        )
-        findings.append({"url": target_url, "vulnerable": True})
-    bridge.flush()
-    logger.info(f"sqlmap: {len(findings)} injection points on {target_url}")
+        logger.error("sqlmap not installed")
+        return []
+
+    level = max(1, min(int(level or 3), 5))
+    risk = max(1, min(int(risk or 2), 3))
+    out_dir = tempfile.mkdtemp(prefix="sqlmap_")
+    cmd = [
+        "sqlmap", "-u", target_url,
+        "--batch",
+        f"--level={level}",
+        f"--risk={risk}",
+        f"--output-dir={out_dir}",
+        "--forms",
+        "--smart",
+        "--technique=BEUSTQ",
+        "--threads=2",
+    ]
+    if data:
+        cmd += ["--data", data]
+    if param:
+        cmd += ["-p", param]
+    if cookie:
+        cmd += ["--cookie", cookie]
+    if method:
+        cmd += ["--method", method.upper()]
+
+    try:
+        result = _run(cmd, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        logger.warning("sqlmap timed out on %s", target_url)
+        return []
+
+    output = (result.stdout or "") + "\n" + (result.stderr or "")
+    findings: List[dict] = []
+
+    # Parse "Parameter: <name> ..." / "is vulnerable" blocks
+    injectable_params = re.findall(
+        r"Parameter:\s*([^\s\(]+).*?(?:is vulnerable|injectable)",
+        output,
+        flags=re.I | re.S,
+    )
+    # Also catch "GET parameter 'id' is vulnerable"
+    injectable_params += re.findall(
+        r"(?:GET|POST|Cookie|Header)\s+parameter\s+'([^']+)'\s+is\s+vulnerable",
+        output,
+        flags=re.I,
+    )
+    techniques = re.findall(
+        r"Type:\s*([^\n]+)|Technique:\s*([^\n]+)",
+        output,
+        flags=re.I,
+    )
+    tech_notes = ", ".join(
+        (a or b).strip() for a, b in techniques if (a or b)
+    )[:500]
+
+    unique_params = sorted({p.strip() for p in injectable_params if p.strip()})
+    host = urlparse(target_url).hostname or target_url
+
+    if unique_params or re.search(r"\bis vulnerable\b|\binjectable\b", output, re.I):
+        if not unique_params:
+            unique_params = [param] if param else ["(detected)"]
+        for p_name in unique_params:
+            title = f"SQL Injection in parameter '{p_name}'"
+            desc = (
+                f"sqlmap confirmed injectable parameter '{p_name}' on {target_url}. "
+                f"Techniques: {tech_notes or 'see sqlmap output'}."
+            )
+            bridge.submit_vulnerability(
+                host=host,
+                title=title,
+                severity="critical",
+                source="sqlmap",
+                description=desc + "\n\n" + output[-1500:],
+                url=target_url,
+                confidence="confirmed",
+                tags=["sqli", "injection", "sqlmap", "confirmed"],
+            )
+            findings.append({
+                "title": title,
+                "name": title,
+                "url": target_url,
+                "matched_at": target_url,
+                "parameter": p_name,
+                "severity": "critical",
+                "vuln_type": "sqli",
+                "type": "sqli",
+                "vulnerable": True,
+                "confirmed": True,
+                "source": "sqlmap",
+                "evidence": tech_notes or output[-800:],
+            })
+        bridge.flush()
+
+    logger.info("sqlmap: %d injection points on %s", len(findings), target_url)
     return findings
 
 
@@ -1540,24 +1634,83 @@ def run_wpscan(target: str, bridge: ASMBridge, timeout: int = 600) -> List[dict]
     return findings
 
 
+def _resolve_xsstrike() -> Optional[str]:
+    """Locate XSStrike entrypoint across Docker and local installs."""
+    candidates = [
+        "/opt/xsstrike/xsstrike.py",
+        os.path.expanduser("~/XSStrike/xsstrike.py"),
+        os.path.expanduser("~/.local/share/XSStrike/xsstrike.py"),
+        shutil.which("xsstrike"),
+    ]
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return None
+
+
 def run_xsstrike(target_url: str, bridge: ASMBridge, timeout: int = 300) -> List[dict]:
-    """XSS detection via XSStrike."""
-    xsstrike_path = "/opt/xsstrike/xsstrike.py"
-    if not os.path.exists(xsstrike_path):
-        logger.error("xsstrike not installed"); return []
-    cmd = ["python3", xsstrike_path, "-u", target_url, "--skip"]
-    result = _run(cmd, timeout=timeout)
-    findings = []
-    output = result.stdout
-    if "Vulnerable" in output or "XSS" in output:
+    """XSS detection via XSStrike with structured findings."""
+    xsstrike_path = _resolve_xsstrike()
+    if not xsstrike_path:
+        logger.error("xsstrike not installed")
+        return []
+
+    if xsstrike_path.endswith(".py"):
+        cmd = ["python3", xsstrike_path, "-u", target_url, "--skip", "--blind"]
+    else:
+        cmd = [xsstrike_path, "-u", target_url, "--skip", "--blind"]
+
+    try:
+        result = _run(cmd, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        logger.warning("xsstrike timed out on %s", target_url)
+        return []
+
+    output = (result.stdout or "") + "\n" + (result.stderr or "")
+    findings: List[dict] = []
+    host = urlparse(target_url).hostname or target_url
+
+    # XSStrike prints payloads and "Vulnerable webpage" / efficiency scores
+    hit = bool(re.search(
+        r"Vulnerable webpage|efficiency:\s*[5-9]\d|Payload:\s*<|XSS\s+found",
+        output,
+        re.I,
+    ))
+    # Avoid false positives from the banner alone ("XSStrike")
+    if not hit and re.search(r"\b(Confirmed|Successful)\b", output, re.I):
+        hit = True
+
+    payloads = re.findall(r"Payload:\s*(.+)", output)
+    if hit or payloads:
+        payload_sample = (payloads[0] if payloads else "").strip()[:300]
+        title = "Reflected XSS Detected"
         bridge.submit_vulnerability(
-            host=target_url, title="Reflected XSS Detected",
-            severity="high", source="xsstrike",
-            url=target_url, description=output[-2000:],
+            host=host,
+            title=title,
+            severity="high",
+            source="xsstrike",
+            url=target_url,
+            description=(output[-2000:] if output else "XSStrike reported XSS"),
+            confidence="confirmed" if hit else "high",
+            tags=["xss", "reflected-xss", "xsstrike"],
         )
-        findings.append({"url": target_url, "type": "xss"})
-    bridge.flush()
-    logger.info(f"xsstrike: {len(findings)} XSS on {target_url}")
+        findings.append({
+            "title": title,
+            "name": title,
+            "url": target_url,
+            "matched_at": target_url,
+            "severity": "high",
+            "vuln_type": "xss",
+            "type": "xss",
+            "vulnerable": True,
+            "confirmed": bool(hit),
+            "source": "xsstrike",
+            "payload": payload_sample,
+            "evidence": output[-800:],
+        })
+        bridge.flush()
+
+    logger.info("xsstrike: %d XSS on %s", len(findings), target_url)
     return findings
 
 
@@ -2769,6 +2922,7 @@ def run_send_http_request(
             return {"error": str(e)}
 
     # Build curl command
+    t0 = time.time()
     cmd = ["curl", "-s", "-i", "-X", method.upper(), "--max-time", str(timeout)]
     if not follow_redirects:
         cmd.append("--no-location")
@@ -2780,9 +2934,11 @@ def run_send_http_request(
         cmd += ["-d", body]
     cmd.append(url)
 
-    raw = _run(cmd, timeout=timeout + 5)
+    raw_result = _run(cmd, timeout=timeout + 5)
+    elapsed_ms = round((time.time() - t0) * 1000)
+    raw = raw_result.stdout if hasattr(raw_result, "stdout") else (raw_result or "")
     if not raw:
-        return {"error": "empty response from curl"}
+        return {"error": "empty response from curl", "elapsed_ms": elapsed_ms}
 
     # Parse status from first line
     lines = raw.split("\n")
@@ -2805,6 +2961,420 @@ def run_send_http_request(
         "raw_headers": parts[0] if parts else "",
         "body": resp_body,
         "url": url,
+        "elapsed_ms": elapsed_ms,
+    }
+
+
+# =============================================================================
+# SQLi / XSS parameter probes (deterministic, no LLM spraying)
+# =============================================================================
+
+_SQL_ERROR_RE = re.compile(
+    r"(?:SQL syntax|mysql_fetch|mysqli_|pg_query|PostgreSQL.*ERROR|"
+    r"ORA-\d{5}|Microsoft OLE DB|ODBC SQL Server|SQLite3?::|"
+    r"Unclosed quotation mark|quoted string not properly terminated|"
+    r"You have an error in your SQL|SQLSTATE\[|JdbcSQLException|"
+    r"org\.hibernate\.|PDOException|DB2 SQL error)",
+    re.I,
+)
+
+_SQLI_PRIORITY_PARAMS = {
+    "id", "user_id", "userid", "uid", "order_id", "product_id", "item_id",
+    "page", "sort", "order", "filter", "category", "q", "query", "search",
+    "keyword", "report", "from", "to", "start", "end", "limit", "offset",
+    "select", "where", "name", "email", "username",
+}
+
+
+def _http_probe(
+    method: str,
+    url: str,
+    body: str = "",
+    headers: Optional[Dict[str, str]] = None,
+    timeout: int = 20,
+) -> dict:
+    """Lightweight timed HTTP probe used by SQLi/XSS canary scanners."""
+    return run_send_http_request(
+        method=method,
+        url=url,
+        headers_json=json.dumps(headers or {}),
+        body=body,
+        follow_redirects=True,
+        bridge=None,  # type: ignore[arg-type]
+        timeout=timeout,
+    )
+
+
+def _mutate_url_param(url: str, param: str, value: str) -> str:
+    from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
+    parsed = urlparse(url)
+    pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    if not any(k == param for k, _ in pairs):
+        pairs.append((param, value))
+    else:
+        pairs = [(k, value if k == param else v) for k, v in pairs]
+    return urlunparse(parsed._replace(query=urlencode(pairs, doseq=True)))
+
+
+def _mutate_body_param(body: str, param: str, value: str, content_type: str) -> str:
+    if "json" in (content_type or "").lower():
+        try:
+            obj = json.loads(body) if body else {}
+            if isinstance(obj, dict) and param in obj:
+                obj[param] = value
+                return json.dumps(obj)
+        except json.JSONDecodeError:
+            pass
+    # form-urlencoded
+    pairs = parse_qsl(body or "", keep_blank_values=True)
+    if not any(k == param for k, _ in pairs):
+        pairs.append((param, value))
+    else:
+        pairs = [(k, value if k == param else v) for k, v in pairs]
+    from urllib.parse import urlencode
+    return urlencode(pairs, doseq=True)
+
+
+def run_probe_sqli_params(
+    target_url: str,
+    bridge: ASMBridge,
+    method: str = "GET",
+    body: str = "",
+    params: str = "",
+    headers_json: str = "{}",
+    timeout: int = 25,
+) -> dict:
+    """Differential SQLi probe across URL/body parameters.
+
+    For each param: baseline → quote error → boolean true/false → short time delay.
+    Returns structured candidates ready for sqlmap confirmation.
+    """
+    try:
+        headers = json.loads(headers_json) if headers_json else {}
+    except json.JSONDecodeError:
+        headers = {}
+    content_type = ""
+    for k, v in list(headers.items()):
+        if k.lower() == "content-type":
+            content_type = v
+            break
+    if body and not content_type:
+        content_type = "application/x-www-form-urlencoded"
+        headers["Content-Type"] = content_type
+
+    parsed = urlparse(target_url)
+    query_params = [k for k, _ in parse_qsl(parsed.query, keep_blank_values=True)]
+    body_params = [k for k, _ in parse_qsl(body or "", keep_blank_values=True)]
+    if "json" in content_type.lower() and body:
+        try:
+            obj = json.loads(body)
+            if isinstance(obj, dict):
+                body_params = list(obj.keys())
+        except json.JSONDecodeError:
+            pass
+
+    if params.strip():
+        param_list = [p.strip() for p in params.split(",") if p.strip()]
+    else:
+        param_list = list(dict.fromkeys(query_params + body_params))
+
+    # Prioritize high-signal names
+    param_list.sort(key=lambda p: (0 if p.lower() in _SQLI_PRIORITY_PARAMS else 1, p))
+    param_list = param_list[:12]  # keep probe budget bounded
+
+    if not param_list:
+        return {
+            "url": target_url,
+            "vulnerable": False,
+            "candidates": [],
+            "error": "no parameters found — pass params= or a URL with ?id=1",
+        }
+
+    method = (method or "GET").upper()
+    baseline = _http_probe(method, target_url, body=body, headers=headers, timeout=timeout)
+    if baseline.get("error"):
+        return {"url": target_url, "vulnerable": False, "candidates": [], "error": baseline["error"]}
+
+    base_status = baseline.get("status")
+    base_body = baseline.get("body") or ""
+    base_len = len(base_body)
+    base_ms = baseline.get("elapsed_ms") or 0
+
+    candidates: List[dict] = []
+
+    def _send_mutated(param: str, value: str) -> dict:
+        if param in query_params or method == "GET":
+            url = _mutate_url_param(target_url, param, value)
+            return _http_probe(method, url, body=body, headers=headers, timeout=timeout + 8)
+        mutated_body = _mutate_body_param(body, param, value, content_type)
+        return _http_probe(method, target_url, body=mutated_body, headers=headers, timeout=timeout + 8)
+
+    for param in param_list:
+        signals: List[str] = []
+        evidence_bits: List[str] = []
+
+        # 1) Error-based quote
+        err_resp = _send_mutated(param, "'")
+        err_body = err_resp.get("body") or ""
+        if _SQL_ERROR_RE.search(err_body):
+            signals.append("sql_error")
+            evidence_bits.append(f"DB error on quote: {_SQL_ERROR_RE.search(err_body).group(0)[:80]}")
+        elif err_resp.get("status") and base_status and err_resp["status"] >= 500 and base_status < 500:
+            signals.append("500_on_quote")
+            evidence_bits.append(f"status {base_status}→{err_resp['status']} on '")
+
+        # 2) Boolean differential (numeric-ish)
+        true_resp = _send_mutated(param, "1 AND 1=1")
+        false_resp = _send_mutated(param, "1 AND 1=2")
+        t_body, f_body = true_resp.get("body") or "", false_resp.get("body") or ""
+        if t_body and f_body and abs(len(t_body) - len(f_body)) > max(40, int(0.05 * max(len(t_body), 1))):
+            if abs(len(t_body) - base_len) < abs(len(f_body) - base_len) or t_body != f_body:
+                signals.append("boolean_diff")
+                evidence_bits.append(
+                    f"boolean len true={len(t_body)} false={len(f_body)} base={base_len}"
+                )
+
+        # 3) Time-based (short sleep — 4s threshold vs baseline)
+        time_payloads = [
+            "1 AND SLEEP(4)",
+            "1;SELECT pg_sleep(4)--",
+            "1 WAITFOR DELAY '0:0:4'--",
+        ]
+        for tp in time_payloads:
+            tr = _send_mutated(param, tp)
+            ms = tr.get("elapsed_ms") or 0
+            if ms and base_ms is not None and ms >= max(3500, (base_ms or 0) + 3000):
+                signals.append("time_delay")
+                evidence_bits.append(f"time {ms}ms vs baseline {base_ms}ms with {tp[:40]}")
+                break
+
+        if signals:
+            severity = "critical" if "sql_error" in signals or "time_delay" in signals else "high"
+            title = f"SQLi candidate in '{param}' ({', '.join(signals)})"
+            finding = {
+                "title": title,
+                "name": title,
+                "url": target_url,
+                "matched_at": target_url,
+                "parameter": param,
+                "severity": severity,
+                "vuln_type": "sqli",
+                "type": "sqli",
+                "vulnerable": True,
+                "confirmed": "sql_error" in signals or "time_delay" in signals,
+                "signals": signals,
+                "evidence": "; ".join(evidence_bits),
+                "source": "probe_sqli",
+            }
+            candidates.append(finding)
+            bridge.submit_vulnerability(
+                host=parsed.hostname or target_url,
+                title=title,
+                severity=severity,
+                source="probe_sqli",
+                url=target_url,
+                description=finding["evidence"],
+                confidence="confirmed" if finding["confirmed"] else "high",
+                tags=["sqli", "injection", "probe"] + signals,
+            )
+
+    if candidates:
+        bridge.flush()
+
+    return {
+        "url": target_url,
+        "method": method,
+        "params_tested": param_list,
+        "baseline_ms": base_ms,
+        "baseline_status": base_status,
+        "vulnerable": len(candidates) > 0,
+        "candidates": candidates,
+        "findings": candidates,
+        "count": len(candidates),
+        "next_step": (
+            "Call sql_injection_test(target_url=..., param=<name>) on each candidate"
+            if candidates else
+            "No differential signals — try other endpoints or discover_parameters"
+        ),
+    }
+
+
+def _classify_xss_contexts(body_text: str, canary: str) -> List[str]:
+    """Classify how a canary reflects (HTML body, attribute, script, etc.)."""
+    contexts: List[str] = []
+    idx = 0
+    while True:
+        pos = body_text.find(canary, idx)
+        if pos < 0:
+            break
+        before = body_text[max(0, pos - 120):pos]
+        after = body_text[pos:min(len(body_text), pos + len(canary) + 40)]
+        if re.search(r"<script[^>]*>[^<]*$", before, re.I | re.S):
+            contexts.append("script_block")
+        if re.search(r'=\s*"[^"]*$', before):
+            contexts.append("attr_double")
+        if re.search(r"=\s*'[^']*$", before):
+            contexts.append("attr_single")
+        if "<!--" in before and "-->" not in before.split("<!--")[-1]:
+            contexts.append("html_comment")
+        if re.search(r">[^<]*$", before) and "<" not in after[:len(canary) + 5]:
+            contexts.append("html_body")
+        if re.search(r"""['"][^'"]*$""", before) and "script" in before.lower():
+            contexts.append("js_string")
+        if not any(c in contexts for c in (
+            "script_block", "attr_double", "attr_single", "html_body", "html_comment", "js_string"
+        )):
+            contexts.append("raw_reflection")
+        idx = pos + len(canary)
+    seen = set()
+    out = []
+    for c in contexts:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out or (["raw_reflection"] if canary in body_text else [])
+
+
+def run_probe_xss_reflection(
+    target_url: str,
+    bridge: ASMBridge,
+    method: str = "GET",
+    body: str = "",
+    params: str = "",
+    headers_json: str = "{}",
+    timeout: int = 20,
+) -> dict:
+    """Map XSS reflection contexts with a unique canary, then try context payloads.
+
+    Returns reflections[] plus any execute-confirmed findings (marker-based).
+    """
+    try:
+        headers = json.loads(headers_json) if headers_json else {}
+    except json.JSONDecodeError:
+        headers = {}
+
+    canary = f"vanguardXSS{os.urandom(3).hex()}"
+    parsed = urlparse(target_url)
+    query_params = [k for k, _ in parse_qsl(parsed.query, keep_blank_values=True)]
+    body_params = [k for k, _ in parse_qsl(body or "", keep_blank_values=True)]
+
+    if params.strip():
+        param_list = [p.strip() for p in params.split(",") if p.strip()]
+    else:
+        param_list = list(dict.fromkeys(query_params + body_params))
+        # Common reflection sinks if URL has no params yet
+        if not param_list:
+            param_list = ["q", "search", "query", "name", "callback", "redirect", "url", "next", "return", "msg", "error"]
+
+    param_list = param_list[:15]
+    method = (method or "GET").upper()
+    content_type = headers.get("Content-Type") or headers.get("content-type") or ""
+    if body and not content_type and method != "GET":
+        content_type = "application/x-www-form-urlencoded"
+        headers["Content-Type"] = content_type
+
+    reflections: List[dict] = []
+    findings: List[dict] = []
+
+    def _send(param: str, value: str) -> dict:
+        if method == "GET" or param in query_params or not body:
+            url = _mutate_url_param(target_url, param, value)
+            return _http_probe("GET" if method == "GET" else method, url, body=body if method != "GET" else "", headers=headers, timeout=timeout)
+        mutated = _mutate_body_param(body, param, value, content_type)
+        return _http_probe(method, target_url, body=mutated, headers=headers, timeout=timeout)
+
+    # Context-appropriate payloads using window marker (no alert dependency)
+    context_payloads = {
+        "html_body": f"<img src=x id={canary} onerror=window.__vanguard_xss=1>",
+        "attr_double": f'"><img src=x id={canary} onerror=window.__vanguard_xss=1>',
+        "attr_single": f"'><img src=x id={canary} onerror=window.__vanguard_xss=1>",
+        "script_block": f"</script><img src=x id={canary} onerror=window.__vanguard_xss=1>",
+        "js_string": f"'-window.__vanguard_xss=1-'",
+        "html_comment": f"--><img src=x id={canary} onerror=window.__vanguard_xss=1><!--",
+        "encoded_only": canary,  # reflection only — not executable yet
+    }
+
+    for param in param_list:
+        resp = _send(param, canary)
+        body_text = resp.get("body") or ""
+        if canary not in body_text:
+            # Encoded reflection still useful signal
+            if canary.replace("<", "&lt;") in body_text or canary in body_text.replace("\\u003c", "<"):
+                contexts = ["encoded_only"]
+            else:
+                continue
+        else:
+            contexts = _classify_xss_contexts(body_text, canary)
+
+        reflection = {
+            "parameter": param,
+            "canary": canary,
+            "contexts": contexts,
+            "status": resp.get("status"),
+            "reflected": True,
+        }
+        reflections.append(reflection)
+
+        # Attempt one context-matched payload via HTTP reflection check
+        for ctx in contexts:
+            payload = context_payloads.get(ctx) or context_payloads["html_body"]
+            if payload == canary:
+                continue
+            pr = _send(param, payload)
+            pb = pr.get("body") or ""
+            # Unescaped executable sink markers
+            if "onerror=window.__vanguard_xss" in pb or "window.__vanguard_xss=1" in pb:
+                if "<img" in pb or "onerror" in pb:
+                    title = f"Reflected XSS candidate in '{param}' ({ctx})"
+                    finding = {
+                        "title": title,
+                        "name": title,
+                        "url": target_url,
+                        "matched_at": target_url,
+                        "parameter": param,
+                        "severity": "high",
+                        "vuln_type": "xss",
+                        "type": "xss",
+                        "vulnerable": True,
+                        "confirmed": False,
+                        "context": ctx,
+                        "payload": payload,
+                        "evidence": f"Unescaped payload reflected in {ctx} context",
+                        "source": "probe_xss",
+                        "next_step": "Call test_dom_xss or xss_test to confirm execution",
+                    }
+                    findings.append(finding)
+                    bridge.submit_vulnerability(
+                        host=parsed.hostname or target_url,
+                        title=title,
+                        severity="high",
+                        source="probe_xss",
+                        url=target_url,
+                        description=finding["evidence"] + f"\nPayload: {payload}",
+                        confidence="high",
+                        tags=["xss", "reflected-xss", "probe", ctx],
+                    )
+                    break
+
+    if findings:
+        bridge.flush()
+
+    return {
+        "url": target_url,
+        "canary": canary,
+        "params_tested": param_list,
+        "reflections": reflections,
+        "reflection_count": len(reflections),
+        "vulnerable": len(findings) > 0,
+        "findings": findings,
+        "candidates": findings,
+        "count": len(findings),
+        "next_step": (
+            "Confirm with test_dom_xss(target_url, params='...') or xss_test; "
+            "then confirm_vulnerability_poc"
+            if (reflections or findings) else
+            "No reflections — try discover_parameters, crawl forms, or DOM sinks via test_dom_xss"
+        ),
     }
 
 

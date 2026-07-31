@@ -228,7 +228,7 @@ async def _scan_single_host(
             seen_slugs.add(dt.slug)
             unique_techs.append(dt)
 
-    # Attach technologies directly to the domain/subdomain asset
+    # Attach technologies to the primary asset (hostname or IP)
     for dt in unique_techs:
         db_tech = _get_or_create_technology(db, dt)
         add_tech_to_asset(
@@ -240,6 +240,51 @@ async def _scan_single_host(
             tag_parent=False,
         )
         techs_found += 1
+
+    # Propagate technologies to the underlying IP asset(s) so they show up
+    # on the IP asset page as well as on the hostname asset page.
+    if host_asset.asset_type in (AssetType.SUBDOMAIN, AssetType.DOMAIN):
+        # Collect every IP this subdomain resolves to (live_url IP + ip_addresses list)
+        ip_values: set[str] = set()
+        try:
+            if host_asset.ip_address:
+                ip_values.add(host_asset.ip_address.strip())
+            for ip in (host_asset.ip_addresses or []):
+                ip_values.add(str(ip).strip())
+            # Also try extracting IP from live_url (in case it was an IP URL)
+            if live_url:
+                from urllib.parse import urlparse as _urlparse
+                _netloc = _urlparse(live_url).netloc.split(":")[0]
+                import re as _re
+                if _re.match(r"^\d{1,3}(\.\d{1,3}){3}$", _netloc):
+                    ip_values.add(_netloc)
+        except Exception:
+            pass
+
+        for ip_val in ip_values:
+            ip_asset = (
+                db.query(Asset)
+                .filter(
+                    Asset.organization_id == organization_id,
+                    Asset.value == ip_val,
+                    Asset.asset_type == AssetType.IP_ADDRESS,
+                )
+                .first()
+            )
+            if ip_asset:
+                for dt in unique_techs:
+                    db_tech = _get_or_create_technology(db, dt)
+                    add_tech_to_asset(
+                        db,
+                        organization_id=organization_id,
+                        asset=ip_asset,
+                        tech=db_tech,
+                        also_tag_asset=False,
+                        tag_parent=False,
+                    )
+                logger.debug(
+                    f"Propagated {len(unique_techs)} technologies from {host} → IP {ip_val}"
+                )
 
     if chatbot_detections:
         metadata = dict(host_asset.metadata_ or {})
@@ -315,6 +360,8 @@ async def _scan_hosts_async(
     total_scanned = 0
     total_techs_found = 0
     total_chatbots_found = 0
+    total_skipped_no_asset = 0
+    total_errors = 0
     
     # For WhatRuns, use smaller batch size due to rate limiting
     batch_size = 3 if source == "whatruns" else (5 if source == "both" else BATCH_SIZE)
@@ -336,12 +383,13 @@ async def _scan_hosts_async(
         )
         
         # Process results with detailed logging
-        skipped_no_asset = 0
-        skipped_errors = 0
+        batch_skipped_no_asset = 0
+        batch_errors = 0
         for result in results:
             if isinstance(result, Exception):
                 logger.warning(f"Batch scan error: {result}")
-                skipped_errors += 1
+                batch_errors += 1
+                total_errors += 1
                 continue
             if result.get("scanned"):
                 total_scanned += 1
@@ -352,11 +400,20 @@ async def _scan_hosts_async(
             else:
                 reason = result.get("reason", "unknown")
                 if reason == "no_asset":
-                    skipped_no_asset += 1
-                logger.debug(f"Host {result.get('host')} skipped: {reason}")
+                    batch_skipped_no_asset += 1
+                    total_skipped_no_asset += 1
+                    logger.warning(
+                        f"Host '{result.get('host')}' not found as an asset in the database "
+                        f"(org={organization_id}). Run a discovery/DNS scan first to add it."
+                    )
+                else:
+                    logger.debug(f"Host {result.get('host')} skipped: {reason}")
         
-        if skipped_no_asset > 0 or skipped_errors > 0:
-            logger.info(f"Batch {batch_num}: {skipped_no_asset} hosts skipped (no matching asset), {skipped_errors} errors")
+        if batch_skipped_no_asset > 0 or batch_errors > 0:
+            logger.info(
+                f"Batch {batch_num}: {batch_skipped_no_asset} hosts skipped (no matching asset), "
+                f"{batch_errors} errors"
+            )
         
         # Commit after each batch to avoid long transactions
         db.commit()
@@ -367,7 +424,8 @@ async def _scan_hosts_async(
     
     logger.info(
         f"Technology scan complete: {total_scanned}/{total_hosts} hosts scanned, "
-        f"{total_techs_found} technologies detected, {total_chatbots_found} chatbot signals"
+        f"{total_techs_found} technologies detected, {total_chatbots_found} chatbot signals, "
+        f"{total_skipped_no_asset} skipped (no asset record)"
     )
     
     return {
@@ -375,6 +433,8 @@ async def _scan_hosts_async(
         "hosts_scanned": total_scanned,
         "technologies_found": total_techs_found,
         "chatbots_found": total_chatbots_found,
+        "skipped_no_asset": total_skipped_no_asset,
+        "errors": total_errors,
         "source": source,
     }
 

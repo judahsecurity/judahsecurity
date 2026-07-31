@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 from app.api.deps import get_current_user
 from app.models.user import User
-from app.services.delphi_enrichment_service import get_delphi_service
+from app.services.delphi_enrichment_service import TIER_RANK, get_delphi_service
 
 logger = logging.getLogger(__name__)
 
@@ -35,8 +35,11 @@ router = APIRouter(prefix="/delphi", tags=["Delphi (KEV + EPSS)"])
 class EPSSInfo(BaseModel):
     score: float
     percentile: float
-    bucket: str
+    # Display-only percentile label (e.g. "top 5%"). EPSS never drives priority.
+    display_label: Optional[str] = None
     date: Optional[str] = None
+    informational_only: bool = True
+    scoring_note: Optional[str] = None
 
 
 class KEVEntry(BaseModel):
@@ -57,9 +60,16 @@ class LookupResponse(BaseModel):
     cve_id: str
     enriched: bool
     kev: Optional[KEVEntry] = None
+    vulncheck_kev: Optional[Dict[str, Any]] = None
+    kevintel: Optional[Dict[str, Any]] = None
+    shadowserver_exploited: Optional[bool] = None
+    kev_sources: Optional[List[str]] = None
     epss: Optional[EPSSInfo] = None
     priority: Optional[str] = None
+    likelihood_score: Optional[int] = None
     priority_reason: Optional[str] = None
+    priority_signals: Optional[List[str]] = None
+    factors: Optional[Dict[str, Any]] = None
     reason: Optional[str] = None
 
 
@@ -81,6 +91,14 @@ class StatusResponse(BaseModel):
     kev_date_released: Optional[str] = None
     refresh_hours: int
     last_loaded: Optional[str] = None
+    epss_role: Optional[str] = None
+    extended_kev_enabled: Optional[bool] = None
+    vulncheck_kev_entries: Optional[int] = None
+    shadowserver_exploited_entries: Optional[int] = None
+    kevintel_entries: Optional[int] = None
+    breach_intel: Optional[Dict[str, Any]] = None
+    priority_drivers: Optional[List[str]] = None
+    priority_model: Optional[str] = None
 
 
 class PriorityFinding(BaseModel):
@@ -90,7 +108,9 @@ class PriorityFinding(BaseModel):
     severity: str
     asset_value: Optional[str]
     priority: str
+    likelihood_score: Optional[int] = None
     priority_reason: Optional[str]
+    priority_signals: Optional[List[str]] = None
     epss_score: Optional[float] = None
     epss_percentile: Optional[float] = None
     on_kev: bool
@@ -155,11 +175,15 @@ async def delphi_priorities(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Return the caller's highest-priority open findings according to Delphi.
+    Return the caller's highest-priority open findings according to Delphi's
+    exploitation-likelihood model.
 
     Ordering:
-        1. On CISA KEV (ransomware first, then other KEV)
-        2. EPSS score desc for everything else
+        1. Priority tier (critical > high > elevated > moderate > low > none)
+        2. Delphi likelihood_score (0-100) desc within a tier
+        3. Ransomware-flagged KEV, then other KEV, as tie-breakers
+
+    EPSS is returned for display only and never affects ordering.
     """
     from app.db.database import SessionLocal
     from app.models.asset import Asset
@@ -187,7 +211,17 @@ async def delphi_priorities(
 
         enriched: List[Dict[str, Any]] = []
         for vuln, asset in rows:
-            lookup = svc.lookup(vuln.cve_id)
+            lookup = svc.lookup(
+                vuln.cve_id,
+                cvss_score=vuln.cvss_score,
+                cvss_vector=vuln.cvss_vector,
+                detection_confidence=getattr(vuln, "detection_confidence", None),
+                exposure={
+                    "internet_facing": bool(getattr(asset, "is_public", False)),
+                    "is_live": bool(getattr(asset, "is_live", False)),
+                    "has_login_portal": bool(getattr(asset, "has_login_portal", False)),
+                },
+            )
             if not lookup.get("enriched"):
                 continue
             epss = lookup.get("epss") or {}
@@ -199,20 +233,21 @@ async def delphi_priorities(
                 "severity": vuln.severity.value if vuln.severity else "info",
                 "asset_value": asset.value,
                 "priority": lookup.get("priority") or "none",
+                "likelihood_score": lookup.get("likelihood_score"),
                 "priority_reason": lookup.get("priority_reason"),
+                "priority_signals": lookup.get("priority_signals"),
                 "epss_score": epss.get("score"),
                 "epss_percentile": epss.get("percentile"),
                 "on_kev": bool(kev),
                 "ransomware": bool(kev and (kev.get("known_ransomware_use") or "").lower() in ("known", "yes")),
             })
 
-        priority_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3, "none": 4}
         enriched.sort(
             key=lambda r: (
-                priority_rank.get(r["priority"], 5),
+                TIER_RANK.get(r["priority"], 99),
+                -(r.get("likelihood_score") or 0),
                 not r["ransomware"],
                 not r["on_kev"],
-                -(r.get("epss_score") or 0),
             )
         )
 
