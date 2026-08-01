@@ -105,13 +105,36 @@ def check_org_access(db: Session, user: User, asset_id: int) -> bool:
     return user.organization_id == asset.organization_id
 
 
-def build_vuln_response(vuln: Vulnerability) -> dict:
+def build_vuln_response(vuln: Vulnerability, db: Optional[Session] = None) -> dict:
     """Build vulnerability response with computed fields. Ensures required fields are never None."""
     d = {k: v for k, v in vuln.__dict__.items() if k != "_sa_instance_state" and k != "metadata_"}
     d["name"] = vuln.title
     d["host"] = vuln.asset.value if vuln.asset else None
     d["matched_at"] = (vuln.evidence[:200] if vuln.evidence else None)
     d["organization_id"] = vuln.asset.organization_id if vuln.asset else None
+
+    # Latest asset screenshot for analyst visual context on the findings page
+    screenshot_id = getattr(vuln.asset, "latest_screenshot_id", None) if vuln.asset else None
+    d["screenshot_id"] = screenshot_id
+    d["screenshot_page_title"] = None
+    d["screenshot_captured_at"] = None
+    if screenshot_id and db is not None:
+        from app.models.screenshot import Screenshot, ScreenshotStatus
+        shot = (
+            db.query(Screenshot)
+            .filter(
+                Screenshot.id == screenshot_id,
+                Screenshot.status == ScreenshotStatus.SUCCESS,
+            )
+            .first()
+        )
+        if shot:
+            d["screenshot_page_title"] = shot.page_title
+            d["screenshot_captured_at"] = shot.captured_at
+        else:
+            # Cached ID may be stale / failed — don't surface a broken image
+            d["screenshot_id"] = None
+
     # Surface Delphi (CISA KEV + EPSS) and Aegis Oracle enrichment so the UI
     # can show KEV / EPSS / OPES badges and sort by combined priority.
     # Everything else in metadata_ stays internal.
@@ -187,7 +210,37 @@ def list_vulnerabilities(
 
     vulns = query.order_by(Vulnerability.severity.desc(), Vulnerability.created_at.desc()).offset(skip).limit(limit).all()
 
-    return [build_vuln_response(v) for v in vulns]
+    # Batch-load screenshot metadata for listed assets (avoids N+1)
+    from app.models.screenshot import Screenshot, ScreenshotStatus
+    screenshot_ids = {
+        getattr(v.asset, "latest_screenshot_id", None)
+        for v in vulns
+        if v.asset and getattr(v.asset, "latest_screenshot_id", None)
+    }
+    shots_by_id = {}
+    if screenshot_ids:
+        shots_by_id = {
+            s.id: s
+            for s in db.query(Screenshot)
+            .filter(
+                Screenshot.id.in_(screenshot_ids),
+                Screenshot.status == ScreenshotStatus.SUCCESS,
+            )
+            .all()
+        }
+
+    responses = []
+    for v in vulns:
+        d = build_vuln_response(v)
+        sid = d.get("screenshot_id")
+        shot = shots_by_id.get(sid) if sid else None
+        if shot:
+            d["screenshot_page_title"] = shot.page_title
+            d["screenshot_captured_at"] = shot.captured_at
+        elif sid:
+            d["screenshot_id"] = None
+        responses.append(d)
+    return responses
 
 
 @router.post("/", response_model=VulnerabilityResponse, status_code=status.HTTP_201_CREATED)
@@ -269,7 +322,12 @@ def get_vulnerability(
     current_user: User = Depends(get_current_active_user)
 ):
     """Get vulnerability by ID."""
-    vuln = db.query(Vulnerability).filter(Vulnerability.id == vuln_id).first()
+    vuln = (
+        db.query(Vulnerability)
+        .options(joinedload(Vulnerability.asset))
+        .filter(Vulnerability.id == vuln_id)
+        .first()
+    )
     
     if not vuln:
         raise HTTPException(
@@ -283,7 +341,7 @@ def get_vulnerability(
             detail="Access denied"
         )
     
-    return vuln
+    return build_vuln_response(vuln, db=db)
 
 
 @router.put("/{vuln_id}", response_model=VulnerabilityResponse)

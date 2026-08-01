@@ -747,6 +747,11 @@ class ApiClient {
     return response.data;
   }
 
+  async getScreenshotStatus() {
+    const response = await this.client.get('/screenshots/status');
+    return response.data;
+  }
+
   async getScreenshotSchedules() {
     const response = await this.client.get('/screenshots/schedules');
     return response.data;

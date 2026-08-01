@@ -23,6 +23,13 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
+import {
   Shield,
   Search,
   Download,
@@ -53,6 +60,7 @@ import {
   ShieldOff,
   Bug,
   Copy,
+  Camera,
 } from 'lucide-react';
 import Link from 'next/link';
 import { api, getApiErrorMessage } from '@/lib/api';
@@ -157,6 +165,10 @@ interface Finding {
   validation_status?: string;
   last_validation_verdict?: string;
   last_validated_at?: string;
+  // Latest asset screenshot for analyst visual context
+  screenshot_id?: number | null;
+  screenshot_page_title?: string | null;
+  screenshot_captured_at?: string | null;
   // Delphi (CISA KEV + FIRST EPSS) enrichment
   delphi?: DelphiEnrichment;
   // Aegis Oracle enrichment — denormalised payload persisted by the
@@ -616,6 +628,8 @@ export default function FindingsPage() {
   const [sortMode, setSortMode] = useState<SortMode>('severity');
   const [onlyKev, setOnlyKev] = useState(false);
   const [oracleBatchBusy, setOracleBatchBusy] = useState(false);
+  const [capturingScreenshot, setCapturingScreenshot] = useState(false);
+  const [screenshotLightboxOpen, setScreenshotLightboxOpen] = useState(false);
   const { toast } = useToast();
 
   // Generate Nuclei Template state
@@ -792,9 +806,52 @@ export default function FindingsPage() {
     }
   };
 
+  const handleCaptureFindingScreenshot = async () => {
+    if (!selectedFinding?.asset_id) {
+      toast({
+        title: 'No asset linked',
+        description: 'This finding has no asset to screenshot.',
+        variant: 'destructive',
+      });
+      return;
+    }
+    setCapturingScreenshot(true);
+    try {
+      const shot = await api.captureScreenshot(selectedFinding.asset_id);
+      if (shot?.status === 'success' && shot?.id) {
+        const updated = {
+          ...selectedFinding,
+          screenshot_id: shot.id,
+          screenshot_page_title: shot.page_title ?? null,
+          screenshot_captured_at: shot.captured_at ?? null,
+        };
+        setSelectedFinding(updated);
+        setFindings((prev) =>
+          prev.map((f) => (f.id === selectedFinding.id ? { ...f, ...updated } : f)),
+        );
+        toast({ title: 'Screenshot captured', description: 'Saved and linked to this asset.' });
+      } else {
+        toast({
+          title: 'Screenshot failed',
+          description: shot?.error_message || 'Capture completed but no image was saved.',
+          variant: 'destructive',
+        });
+      }
+    } catch (err) {
+      toast({
+        title: 'Screenshot failed',
+        description: getApiErrorMessage(err, 'Could not capture screenshot. Check Playwright/EyeWitness status.'),
+        variant: 'destructive',
+      });
+    } finally {
+      setCapturingScreenshot(false);
+    }
+  };
+
   // Handle finding selection
   const handleSelectFinding = (finding: Finding) => {
     setSelectedFinding(finding);
+    setScreenshotLightboxOpen(false);
     fetchRemediation(finding.id);
   };
 
@@ -1768,11 +1825,19 @@ export default function FindingsPage() {
           </Table>
         </Card>
 
-        {/* Finding Detail Dialog */}
-        <Dialog open={!!selectedFinding} onOpenChange={() => setSelectedFinding(null)}>
-          <DialogContent className="max-w-3xl max-h-[90vh] overflow-y-auto">
-            <DialogHeader>
-              <div className="flex items-center gap-2 flex-wrap">
+        {/* Finding Detail Flyout */}
+        <Sheet
+          open={!!selectedFinding}
+          onOpenChange={(open) => {
+            if (!open) setSelectedFinding(null);
+          }}
+        >
+          <SheetContent
+            side="right"
+            className="w-full sm:max-w-xl lg:max-w-2xl xl:max-w-3xl overflow-y-auto"
+          >
+            <SheetHeader>
+              <div className="flex items-center gap-2 flex-wrap pr-8">
                 <Badge className={getSeverityBadgeClass(selectedFinding?.severity || '')}>
                   {selectedFinding?.severity}
                 </Badge>
@@ -1783,10 +1848,10 @@ export default function FindingsPage() {
                   </Badge>
                 )}
               </div>
-              <div className="flex items-center justify-between mt-2 gap-2">
-                <DialogTitle className="text-xl">
+              <div className="flex items-center justify-between mt-2 gap-2 pr-8">
+                <SheetTitle className="text-xl text-left">
                   {selectedFinding?.title || selectedFinding?.name || selectedFinding?.template_id}
-                </DialogTitle>
+                </SheetTitle>
                 <Button
                   size="sm"
                   variant="outline"
@@ -1797,10 +1862,10 @@ export default function FindingsPage() {
                   Jira
                 </Button>
               </div>
-              <DialogDescription>
+              <SheetDescription className="text-left">
                 Complete finding details and remediation information
-              </DialogDescription>
-            </DialogHeader>
+              </SheetDescription>
+            </SheetHeader>
 
             <div className="space-y-6 py-4">
               {/* Quick Info Grid */}
@@ -2085,6 +2150,83 @@ export default function FindingsPage() {
                     <Sparkles className="h-3 w-3" />
                     Generate Template
                   </Button>
+                </div>
+              )}
+
+              {/* Asset screenshot — visual context for analyst triage */}
+              {selectedFinding?.asset_id && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-sm font-medium flex items-center gap-2">
+                      <Camera className="h-4 w-4" />
+                      Asset Screenshot
+                    </p>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="h-7 text-xs"
+                      onClick={handleCaptureFindingScreenshot}
+                      disabled={capturingScreenshot}
+                    >
+                      {capturingScreenshot ? (
+                        <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
+                      ) : (
+                        <Camera className="h-3.5 w-3.5 mr-1.5" />
+                      )}
+                      {capturingScreenshot
+                        ? 'Capturing...'
+                        : selectedFinding.screenshot_id
+                          ? 'Recapture'
+                          : 'Capture'}
+                    </Button>
+                  </div>
+                  {selectedFinding.screenshot_id ? (
+                    <div className="rounded-lg border border-border bg-secondary/30 overflow-hidden">
+                      <button
+                        type="button"
+                        className="block w-full text-left"
+                        onClick={() => setScreenshotLightboxOpen(true)}
+                      >
+                        {/* eslint-disable-next-line @next/next/no-img-element */}
+                        <img
+                          src={api.getScreenshotImageUrl(selectedFinding.screenshot_id)}
+                          alt={
+                            selectedFinding.screenshot_page_title ||
+                            `Screenshot of ${selectedFinding.host || 'asset'}`
+                          }
+                          className="w-full max-h-64 object-cover object-top hover:opacity-95 transition-opacity"
+                        />
+                      </button>
+                      <div className="px-3 py-2 flex items-center justify-between gap-2 text-xs text-muted-foreground border-t border-border/60">
+                        <span className="truncate">
+                          {selectedFinding.screenshot_page_title || selectedFinding.host || 'Web asset'}
+                        </span>
+                        <div className="flex items-center gap-2 shrink-0">
+                          {selectedFinding.screenshot_captured_at && (
+                            <span>{formatDate(selectedFinding.screenshot_captured_at)}</span>
+                          )}
+                          <a
+                            href={api.getScreenshotImageUrl(selectedFinding.screenshot_id)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-primary hover:underline inline-flex items-center gap-1"
+                          >
+                            Open
+                            <ExternalLink className="h-3 w-3" />
+                          </a>
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="rounded-lg border border-dashed border-border p-4 text-center space-y-1">
+                      <p className="text-sm text-muted-foreground">
+                        No screenshot for this asset yet.
+                      </p>
+                      <p className="text-xs text-muted-foreground">
+                        Capture one to help validate what the host looks like during analysis.
+                      </p>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -2497,6 +2639,28 @@ export default function FindingsPage() {
                 </div>
               )}
             </div>
+          </SheetContent>
+        </Sheet>
+
+        {/* Screenshot lightbox */}
+        <Dialog open={screenshotLightboxOpen} onOpenChange={setScreenshotLightboxOpen}>
+          <DialogContent className="max-w-4xl p-2 sm:p-4">
+            <DialogHeader>
+              <DialogTitle className="text-base">
+                {selectedFinding?.screenshot_page_title || selectedFinding?.host || 'Asset screenshot'}
+              </DialogTitle>
+              <DialogDescription>
+                Visual context for analyst review
+              </DialogDescription>
+            </DialogHeader>
+            {selectedFinding?.screenshot_id && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={api.getScreenshotImageUrl(selectedFinding.screenshot_id)}
+                alt={selectedFinding.screenshot_page_title || selectedFinding.host || 'Screenshot'}
+                className="w-full max-h-[75vh] object-contain rounded-md"
+              />
+            )}
           </DialogContent>
         </Dialog>
 

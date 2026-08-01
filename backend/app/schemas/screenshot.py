@@ -190,12 +190,19 @@ class ScreenshotChangesResponse(BaseModel):
 
 # EyeWitness status
 class EyeWitnessStatusResponse(BaseModel):
-    """Status of EyeWitness installation."""
+    """Status of screenshot capture tooling (Playwright preferred, EyeWitness fallback)."""
     installed: bool
     version: Optional[str] = None
     path: str
     venv_path: str
     error: Optional[str] = None
+    # Expanded capture-health fields (backward compatible)
+    capture_available: bool = False
+    preferred_engine: Optional[str] = None  # "playwright" | "eyewitness" | None
+    playwright_available: bool = False
+    eyewitness_installed: bool = False
+    screenshots_dir: Optional[str] = None
+    screenshots_dir_writable: Optional[bool] = None
 
 
 
