@@ -931,6 +931,7 @@ class ScannerWorker:
                 "title": vuln.title,
                 "description": vuln.description,
                 "severity": severity,
+                "status": vuln.status.value if vuln.status else None,
                 "target": target,
                 "asset": asset_value,
                 "source_kind": source_kind,

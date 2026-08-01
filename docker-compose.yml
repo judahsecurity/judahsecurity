@@ -80,6 +80,16 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-claude-sonnet-4-6}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - MOONSHOT_API_KEY=${MOONSHOT_API_KEY:-}
+      - KIMI_MODEL=${KIMI_MODEL:-kimi-k3}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
+      # Default points at the Compose `ollama` service (enable with profile `ollama`).
+      # Host / Docker Desktop: http://host.docker.internal:11434/v1
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://ollama:11434/v1}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:14b}
+      - OLLAMA_FALLBACK_ENABLED=${OLLAMA_FALLBACK_ENABLED:-true}
       - TAVILY_API_KEY=${TAVILY_API_KEY:-}
       - AGENT_MAX_OUTPUT_TOKENS=${AGENT_MAX_OUTPUT_TOKENS:-4096}
       - AGENT_TOOL_OUTPUT_MAX_CHARS=${AGENT_TOOL_OUTPUT_MAX_CHARS:-20000}
@@ -363,6 +373,64 @@ services:
     profiles:
       - graph
 
+  # Local LLM fallback (Ollama). Enable with:
+  #   COMPOSE_PROFILES=ollama in .env
+  #   or: docker compose --profile ollama up -d
+  # Needs ~12–16 GB RAM for qwen2.5:14b (use qwen2.5:7b on smaller instances).
+  # Not published on a public interface — backend reaches it as http://ollama:11434/v1
+  ollama:
+    image: ollama/ollama:latest
+    container_name: asm_ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    # Localhost-only for admin/debug (pull status, tags). Do not open 11434 in SG.
+    ports:
+      - "127.0.0.1:11434:11434"
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    networks:
+      - asm_network
+    profiles:
+      - ollama
+
+  # One-shot model pull after Ollama is up (re-runs safely if model already present).
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: asm_ollama_init
+    depends_on:
+      ollama:
+        condition: service_started
+    environment:
+      - OLLAMA_HOST=ollama:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:14b}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        echo "Waiting for Ollama at $$OLLAMA_HOST..."
+        i=0
+        while [ $$i -lt 60 ]; do
+          if ollama list >/dev/null 2>&1; then
+            break
+          fi
+          i=$$((i + 1))
+          sleep 2
+        done
+        echo "Pulling model: $$OLLAMA_MODEL"
+        ollama pull "$$OLLAMA_MODEL"
+        echo "Ollama model ready."
+        ollama list
+    networks:
+      - asm_network
+    restart: "no"
+    profiles:
+      - ollama
+
 networks:
   asm_network:
     driver: bridge
@@ -389,4 +457,6 @@ volumes:
   letsencrypt_certs:
     driver: local
   letsencrypt_www:
+    driver: local
+  ollama_data:
     driver: local

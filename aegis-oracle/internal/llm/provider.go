@@ -49,7 +49,7 @@ type Config struct {
 
 type AnthropicConfig struct {
 	APIKey  string `yaml:"api_key"`  // or set ANTHROPIC_API_KEY
-	Model   string `yaml:"model"`    // default: "claude-sonnet-4-5"
+	Model   string `yaml:"model"`    // default: "claude-sonnet-4-6"
 	BaseURL string `yaml:"base_url"` // override for testing
 }
 
@@ -168,7 +168,7 @@ func newAnthropic(cfg AnthropicConfig) (*anthropicProvider, error) {
 	}
 	model := cfg.Model
 	if model == "" {
-		model = "claude-sonnet-4-5"
+		model = "claude-sonnet-4-6"
 	}
 	base := cfg.BaseURL
 	if base == "" {

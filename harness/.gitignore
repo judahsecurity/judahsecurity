@@ -1,0 +1,7 @@
+# Harness runtime artifacts and local envs
+runs/
+.venv/
+*.egg-info/
+__pycache__/
+.pytest_cache/
+.coverage

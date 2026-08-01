@@ -249,8 +249,12 @@ class KatanaService:
                     if path and path != '/':
                         all_endpoints.add(path)
                     
-                    # Check for JS files
-                    if path.endswith('.js') or '/js/' in path:
+                    # Check for JS files — catch modern bundler paths:
+                    #   .js / .mjs / .cjs / .jsx / .ts / .tsx extensions
+                    #   /js/, /scripts/, /_next/static/, /static/js/, /assets/ dirs
+                    _JS_EXTS = ('.js', '.mjs', '.cjs', '.jsx', '.ts', '.tsx')
+                    _JS_PATHS = ('/js/', '/scripts/', '/_next/static/', '/static/js/', '/assets/', '/bundles/', '/dist/')
+                    if path.endswith(_JS_EXTS) or any(p in path for p in _JS_PATHS):
                         all_js.add(url)
                     
                     # Extract parameters

@@ -154,6 +154,9 @@ interface Finding {
   organization_id?: number;
   scan_id?: number;
   resolved_at?: string;
+  validation_status?: string;
+  last_validation_verdict?: string;
+  last_validated_at?: string;
   // Delphi (CISA KEV + FIRST EPSS) enrichment
   delphi?: DelphiEnrichment;
   // Aegis Oracle enrichment — denormalised payload persisted by the
@@ -2249,19 +2252,22 @@ export default function FindingsPage() {
                     validationResult?.status === 'running' ? (
                       <>
                         <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                        Validating…
+                        Re-validating…
                       </>
                     ) : (
                       <>
                         <ShieldCheck className="h-4 w-4 mr-2" />
-                        Validate with agent
+                        {validationResult?.verdict || selectedFinding?.last_validation_verdict
+                          ? 'Re-validate finding'
+                          : 'Validate with agent'}
                       </>
                     )}
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  The validator agent actively re-tests this finding against the live
-                  target and returns a verdict. This sends real requests to the host.
+                  Re-tests the live target: checks whether the issue is still open, and
+                  catches nonsensical matches (e.g. LDAP on port 443). Sends real requests
+                  to the host.
                 </p>
 
                 {templatePattern && (
@@ -2331,6 +2337,21 @@ export default function FindingsPage() {
                       {validationResult.verdict === 'needs_more_evidence' && (
                         <Badge className="bg-yellow-600/20 text-yellow-400 border-yellow-600/30">
                           <AlertCircle className="h-3 w-3 mr-1" /> Needs More Evidence
+                        </Badge>
+                      )}
+                      {validationResult.still_open === true && (
+                        <Badge className="bg-orange-600/20 text-orange-300 border-orange-600/30">
+                          Still open
+                        </Badge>
+                      )}
+                      {validationResult.still_open === false && (
+                        <Badge className="bg-green-600/20 text-green-400 border-green-600/30">
+                          No longer open
+                        </Badge>
+                      )}
+                      {validationResult.logical_mismatch && (
+                        <Badge className="bg-purple-600/20 text-purple-300 border-purple-600/30">
+                          Logical mismatch
                         </Badge>
                       )}
                       {validationResult.confidence && (

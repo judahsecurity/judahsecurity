@@ -1178,7 +1178,7 @@ export default function AgentPage() {
                     {agentStatusHint && <p className="text-sm text-muted-foreground pl-7">{agentStatusHint}</p>}
                     {!agentStatusHint && (
                       <p className="text-sm text-muted-foreground pl-7">
-                        Configure <code className="bg-muted px-1 rounded">OPENAI_API_KEY</code> or <code className="bg-muted px-1 rounded">ANTHROPIC_API_KEY</code> in the backend .env, then restart.
+                        Add an LLM key under Settings → API Keys (Anthropic, OpenAI, DeepSeek, Kimi, or Groq), run local Ollama as fallback, or set the matching env var in the backend .env and restart.
                       </p>
                     )}
                   </CardContent>

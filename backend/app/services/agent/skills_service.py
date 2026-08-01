@@ -3,6 +3,7 @@ Agent Skills + ``/skill`` chat prefix routing.
 
 A "skill" is a named, bounded workflow the agent knows how to run:
 
+    * ``external-assessment`` - Full tester-methodology external engagement
     * ``web-recon``    - subdomain + HTTP + tech fingerprint
     * ``vuln-scan``    - Nuclei critical/high on known assets
     * ``js-recon``     - JS bundle deep dive for secrets / maps / DOM sinks
@@ -20,7 +21,7 @@ A "skill" is a named, bounded workflow the agent knows how to run:
 
 In chat, the user can invoke any skill with::
 
-    /skill takeover target=acme.com engines=cname,nuclei
+    /skill external-assessment target=acme.com
 
 If no ``/skill`` prefix is used, :func:`route_by_intent` asks a small LLM
 to pick the most relevant skill from the registry.
@@ -52,6 +53,27 @@ class Skill:
 
 
 SKILLS: list[Skill] = [
+    Skill(
+        id="external-assessment",
+        aliases=["external", "pentest-recon", "full-assessment", "tester", "engagement"],
+        title="External assessment (tester methodology)",
+        description=(
+            "Coordinated external engagement: passive recon → ports/TLS → content/API/JS "
+            "enum → ranked targeted testing → evidence-backed findings."
+        ),
+        playbook_id="external_assessment",
+        system_context=(
+            "You are running the EXTERNAL-ASSESSMENT skill — behave like an experienced "
+            "external penetration tester, not a tool sprayer. Work in phases (scope → "
+            "passive discovery → ports/TLS → crawl/API/JS → rank → targeted tests → "
+            "confirm/report). Call auto_select_tools after each discovery wave. Use "
+            "create_scan for bulk platform work (graphql_scan, subdomain_takeover, "
+            "js_recon, jsluice_scan, vulnerability, katana, waybackurls, paramspider) and "
+            "execute_* for interactive follow-up. Branch on evidence (GraphQL, SPA, CMS, "
+            "chatbot, dangling DNS). Every create_finding needs concrete evidence and "
+            "validate_finding first for medium+. Do not complete after Nuclei alone."
+        ),
+    ),
     Skill(
         id="web-recon",
         aliases=["webrecon", "recon", "web"],

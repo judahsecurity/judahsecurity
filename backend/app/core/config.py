@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     PDCP_API_KEY: str = ""
     
     # AI Agent Configuration (default: Claude)
-    # Supported providers: "openai", "anthropic"
+    # Supported: openai | anthropic | deepseek | kimi | groq | ollama
     AI_PROVIDER: str = "anthropic"
     
     # OpenAI Configuration
@@ -90,9 +90,37 @@ class Settings(BaseSettings):
     # Anthropic/Claude Configuration (default agent)
     # Use key from https://console.anthropic.com (API keys) — NOT Claude Code / Cursor keys
     ANTHROPIC_API_KEY: Optional[str] = None
-    ANTHROPIC_MODEL: str = "claude-sonnet-4-5"
+    ANTHROPIC_MODEL: str = "claude-sonnet-4-6"
 
-    @field_validator("ANTHROPIC_API_KEY", "OPENAI_API_KEY", mode="before")
+    # DeepSeek (OpenAI-compatible). Optional; per-org keys can also be set in the
+    # encrypted API-config store. Provider string: "deepseek".
+    DEEPSEEK_API_KEY: Optional[str] = None
+    DEEPSEEK_MODEL: str = "deepseek-chat"
+
+    # Moonshot / Kimi (OpenAI-compatible). Optional; per-org keys via API-config
+    # store (service name "kimi"). Env var matches Moonshot docs: MOONSHOT_API_KEY.
+    MOONSHOT_API_KEY: Optional[str] = None
+    KIMI_MODEL: str = "kimi-k3"
+
+    # Groq (OpenAI-compatible, free tier). Provider string: "groq".
+    GROQ_API_KEY: Optional[str] = None
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+
+    # Local Ollama (OpenAI-compatible). No cloud key required.
+    # Docker Desktop: http://host.docker.internal:11434/v1
+    OLLAMA_BASE_URL: str = "http://127.0.0.1:11434/v1"
+    OLLAMA_MODEL: str = "qwen2.5:14b"
+    # When the preferred cloud provider has no API key, try local Ollama if reachable.
+    OLLAMA_FALLBACK_ENABLED: bool = True
+
+    @field_validator(
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "MOONSHOT_API_KEY",
+        "GROQ_API_KEY",
+        mode="before",
+    )
     @classmethod
     def strip_api_keys(cls, v: Optional[str]) -> Optional[str]:
         return _strip_api_key(v)
@@ -169,6 +197,16 @@ class Settings(BaseSettings):
     DELPHI_ENRICHMENT_ENABLED: bool = True
     DELPHI_REFRESH_HOURS: int = 24  # Re-fetch KEV + EPSS after this many hours
     DELPHI_AUTO_ENRICH_ON_INGEST: bool = True  # Enrich CVEs during ingestion pipeline
+    # Extended exploitation feeds: VulnCheck KEV, Shadowserver (via CIRCL),
+    # KEVIntel attestations (via CIRCL). Disable to keep Delphi on CISA-only.
+    DELPHI_EXTENDED_KEV_ENABLED: bool = True
+    # Optional operator FIRE export (JSON). See backend/data/breach_intel/fire_cves.json.
+    DELPHI_FIRE_CVE_PATH: Optional[str] = None
+    DELPHI_BREACH_INTEL_DIR: Optional[str] = None
+
+    # Vulnerability intelligence API keys (also resolvable via api_configs / env)
+    VULNCHECK_API_TOKEN: Optional[str] = None
+    NVD_API_KEY: Optional[str] = None
 
     # Oracle (LLM analyst-grade analysis) — background enrichment at ingest.
     # Enabled: every new finding (CVE-backed or not) enqueues a non-blocking
@@ -177,10 +215,31 @@ class Settings(BaseSettings):
     # ingestion.
     ORACLE_AUTO_ENRICH_ON_INGEST: bool = True
 
+    # Detection suppression — pattern-based false-positive handling.
+    # A template is flagged for suppression review only once false-positive
+    # signals (validator verdicts + analyst feedback + manual status) span at
+    # least this many distinct hosts. Suppression is enforced only after an
+    # analyst approves the recommendation.
+    DETECTION_PATTERN_MIN_HOSTS: int = 3
+    # How many findings to auto-queue for validator review when suggested.
+    DETECTION_PATTERN_VALIDATE_SAMPLE: int = 5
+
     # Custom Nuclei templates shipped with the platform.
     # Relative to the backend/ directory; resolved to an absolute path at runtime.
     # Set to an empty string or override via env to disable custom templates.
     NUCLEI_CUSTOM_TEMPLATES_PATH: str = "nuclei-templates"
+
+    # Analyst-written / AI-generated custom Nuclei templates are stored in the
+    # `custom_nuclei_templates` DB table (source of truth) and materialized to
+    # this directory on disk so the scanner can actually run them.
+    # Relative to the backend/ directory; resolved to an absolute path at runtime.
+    NUCLEI_GENERATED_TEMPLATES_PATH: str = "nuclei-templates-generated"
+
+    # Path to the official Nuclei templates on disk (populated by
+    # `nuclei -update-templates`). Used to look up an official template's YAML for
+    # the existence check, validator diagnosis, and refinement. Leave empty to
+    # auto-detect common locations (~/.config/nuclei/nuclei-templates, ~/nuclei-templates, …).
+    NUCLEI_OFFICIAL_TEMPLATES_PATH: str = ""
     
     class Config:
         env_file = ".env"

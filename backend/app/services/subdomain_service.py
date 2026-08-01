@@ -3,7 +3,7 @@ Subdomain enumeration service for attack surface discovery.
 
 Features:
 - Recursive/multi-level subdomain enumeration
-- Multiple data sources (Subfinder, Chaos, crt.sh, DNS brute-force)
+- Multiple data sources (Subfinder, Subfaster, Chaos, crt.sh, crt.name, DNS brute-force)
 - Extended wordlists with cloud/enterprise patterns
 - Configurable recursion depth
 """
@@ -57,6 +57,31 @@ def _check_subcat_available() -> bool:
         return False
 
 SUBCAT_AVAILABLE = _check_subcat_available()
+
+
+def _check_subfaster_available() -> bool:
+    """Check if subfaster binary is available (crt.name + other fast passive sources)."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["subfaster", "-version"],
+            capture_output=True,
+            timeout=5,
+        )
+        # Some builds may only support -h; treat either as available.
+        if result.returncode == 0:
+            return True
+        result = subprocess.run(
+            ["subfaster", "-h"],
+            capture_output=True,
+            timeout=5,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+SUBFASTER_AVAILABLE = _check_subfaster_available()
 
 
 # Base subdomain wordlist
@@ -240,6 +265,7 @@ class SubdomainService:
         self.timeout = timeout
         self.use_subfinder = use_subfinder and SUBFINDER_AVAILABLE
         self.use_subcat = SUBCAT_AVAILABLE
+        self.use_subfaster = SUBFASTER_AVAILABLE
         self.organization_id = organization_id
         # With the rotator we can use Chaos if *either* env var is set or the
         # org has at least one ``pdcp`` APIConfig row — we optimistically flip
@@ -258,6 +284,11 @@ class SubdomainService:
             logger.info("Subcat is available and will be used for passive subdomain enumeration")
         else:
             logger.info("Subcat not available (pip install subcat to enable)")
+
+        if self.use_subfaster:
+            logger.info("Subfaster is available and will be used for fast passive subdomain enumeration")
+        else:
+            logger.info("Subfaster not available (install github.com/melvinsh/subfaster to enable)")
 
         if self.use_chaos:
             logger.info("Chaos is configured and will be used for passive subdomain lookup")
@@ -338,6 +369,16 @@ class SubdomainService:
                 logger.warning(f"[Depth {depth}] Shodan CTL failed for {domain}: {exc}")
                 return "shodan_ctl", []
 
+        async def _from_crt_name() -> tuple[str, list[str]]:
+            if not use_crtsh:
+                return "crt_name", []
+            logger.info(f"[Depth {depth}] Querying crt.name index for {domain}")
+            try:
+                return "crt_name", await self._query_crt_name(domain)
+            except Exception as exc:
+                logger.warning(f"[Depth {depth}] crt.name failed for {domain}: {exc}")
+                return "crt_name", []
+
         async def _from_subcat() -> tuple[str, list[str]]:
             if not self.use_subcat:
                 return "subcat", []
@@ -348,12 +389,24 @@ class SubdomainService:
                 logger.warning(f"[Depth {depth}] Subcat failed for {domain}: {exc}")
                 return "subcat", []
 
+        async def _from_subfaster() -> tuple[str, list[str]]:
+            if not self.use_subfaster:
+                return "subfaster", []
+            logger.info(f"[Depth {depth}] Running subfaster for {domain}")
+            try:
+                return "subfaster", await self._run_subfaster(domain)
+            except Exception as exc:
+                logger.warning(f"[Depth {depth}] Subfaster failed for {domain}: {exc}")
+                return "subfaster", []
+
         passive_results = await asyncio.gather(
             _from_chaos(),
             _from_subfinder(),
             _from_crtsh(),
             _from_shodan_ctl(),
+            _from_crt_name(),
             _from_subcat(),
+            _from_subfaster(),
         )
 
         for source, hosts in passive_results:
@@ -690,6 +743,63 @@ class SubdomainService:
         
         return list(set(subdomains))  # Remove duplicates
 
+    async def _run_subfaster(self, domain: str, timeout: int = 120) -> list[str]:
+        """
+        Run subfaster for fast passive subdomain enumeration.
+
+        Speed-focused subfinder fork. Default sources (no keys): thc, submd,
+        crt (crt.name), shodanct, rapiddns, hackertarget, sitedossier.
+
+        Reference: https://github.com/melvinsh/subfaster
+        """
+        subdomains = []
+
+        try:
+            # -silent is default; pass -d only. Output is one hostname per line.
+            cmd = ["subfaster", "-d", domain]
+            logger.info(f"Executing: {' '.join(cmd)}")
+
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=timeout + 30,
+            )
+
+            if stderr:
+                stderr_text = stderr.decode()[:500]
+                if "error" in stderr_text.lower():
+                    logger.warning(f"Subfaster stderr: {stderr_text}")
+                else:
+                    logger.debug(f"Subfaster output: {stderr_text}")
+
+            for line in stdout.decode().splitlines():
+                line = line.strip().lower()
+                if not line or line.startswith("#"):
+                    continue
+                for prefix in ("https://", "http://"):
+                    if line.startswith(prefix):
+                        line = line[len(prefix):]
+                        break
+                line = line.split("/")[0].split(":")[0]
+                if line.endswith(f".{domain}") or line == domain:
+                    subdomains.append(line)
+
+            logger.info(f"Subfaster found {len(subdomains)} subdomains for {domain}")
+
+        except asyncio.TimeoutError:
+            logger.warning(f"Subfaster timed out for {domain} after {timeout}s")
+        except FileNotFoundError:
+            logger.warning("Subfaster binary not found")
+        except Exception as e:
+            logger.error(f"Subfaster failed for {domain}: {e}")
+
+        return list(set(subdomains))
+
     async def _run_subcat(self, domain: str, timeout: int = 120) -> list[str]:
         """
         Run subcat for passive subdomain enumeration.
@@ -807,6 +917,43 @@ class SubdomainService:
                                 subdomains.add(hostname)
         except Exception as e:
             logger.warning(f"Shodan CTL query failed for {domain}: {e}")
+
+        return list(subdomains)
+
+    async def _query_crt_name(self, domain: str) -> list[str]:
+        """Query crt.name aggregated subdomain index.
+
+        Indexes live + historical CT, Common Crawl, CZDS, Chaos, blocklists,
+        and active probes. Free, no API key (1000 req/IP/day).
+        """
+        subdomains = set()
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.get(
+                    f"https://crt.name/v1/search?apex={domain}&format=json&dates=1",
+                    follow_redirects=True,
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    if isinstance(data, list):
+                        for entry in data:
+                            if isinstance(entry, str):
+                                hostname = entry
+                            elif isinstance(entry, dict):
+                                hostname = entry.get("sub") or entry.get("name") or ""
+                            else:
+                                continue
+                            if not isinstance(hostname, str):
+                                continue
+                            hostname = hostname.strip().lower()
+                            if hostname.startswith("*."):
+                                hostname = hostname[2:]
+                            if hostname.endswith(f".{domain}") or hostname == domain:
+                                subdomains.add(hostname)
+                elif response.status_code == 429:
+                    logger.warning(f"crt.name rate limited for {domain}")
+        except Exception as e:
+            logger.warning(f"crt.name query failed for {domain}: {e}")
 
         return list(subdomains)
     

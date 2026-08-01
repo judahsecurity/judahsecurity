@@ -71,6 +71,7 @@ def send_validation_to_sqs(validation: FindingValidation) -> bool:
 
 
 def _validation_to_dict(v: FindingValidation) -> dict:
+    raw = v.raw_output if isinstance(v.raw_output, dict) else {}
     return {
         "id": v.id,
         "vulnerability_id": v.vulnerability_id,
@@ -83,6 +84,10 @@ def _validation_to_dict(v: FindingValidation) -> dict:
         "evidence": v.evidence,
         "template_logic_issue": v.template_logic_issue,
         "error": v.error,
+        # Enhanced re-validation signals (from validator JSON / sanity short-circuit)
+        "still_open": raw.get("still_open"),
+        "logical_mismatch": raw.get("logical_mismatch"),
+        "sanity_flags": raw.get("sanity_flags"),
         "requested_by_user_id": v.requested_by_user_id,
         "created_at": v.created_at,
         "started_at": v.started_at,

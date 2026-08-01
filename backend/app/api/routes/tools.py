@@ -140,6 +140,22 @@ TOOLS = {
         "type": "builtin",
         "configured": True,
     },
+    "crt_name": {
+        "name": "crt.name",
+        "description": "Aggregated CT/DNS subdomain index (live CT, historical backfill, Chaos, CZDS, active probes) — free, 1000 req/IP/day",
+        "category": "passive",
+        "type": "builtin",
+        "configured": True,
+    },
+    "subfaster": {
+        "name": "Subfaster",
+        "description": "Fast passive subdomain enumerator (subfinder fork). Default keyless sources include crt.name, shodanct, rapiddns, thc, submd, hackertarget, sitedossier",
+        "category": "passive",
+        "type": "cli",
+        "check_command": ["subfaster", "-h"],
+        "installed": False,
+        "version": None,
+    },
     "wappalyzer": {
         "name": "Wappalyzer",
         "description": "Technology fingerprinting with 6,000+ fingerprints (CMS, frameworks, analytics, CDN, WAF, payment processors)",

@@ -1,0 +1,18 @@
+{
+  "_comment": "Illustrative flag-capture (CTF/XBEN-style) ground truth. A target is 'solved' when its flag appears anywhere in the scanner's findings. For the real 104-challenge XBOW corpus, clone xbow-engineering/validation-benchmarks and generate exact per-challenge flags with `python -m local_harness.benchmark.xben_import`. XBEN flags always match FLAG{[0-9a-f]{64}}; use `flag` for an exact match or `flag_regex` for a pattern. Run with --setup to docker up/down each challenge; only run challenges you are authorized to test.",
+
+  "demo-idor": {
+    "name": "Demo IDOR challenge (flag mode)",
+    "level": "2",
+    "tags": ["idor"],
+    "flag_regex": "FLAG\\{[0-9a-f]{64}\\}",
+    "scope": "localhost",
+    "setup": {
+      "up": "docker compose -f ./demo-idor/docker-compose.yml up --wait",
+      "down": "docker compose -f ./demo-idor/docker-compose.yml stop",
+      "compose_file": "./demo-idor/docker-compose.yml",
+      "container_port": 80,
+      "ready_timeout": 120
+    }
+  }
+}

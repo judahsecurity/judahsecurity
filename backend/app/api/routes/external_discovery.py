@@ -10,7 +10,7 @@ Provides endpoints to:
 import asyncio
 import time
 from datetime import datetime
-from typing import List, Optional
+from typing import List, Optional, Dict
 from urllib.parse import urlparse
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
 from sqlalchemy.orm import Session
@@ -67,6 +67,8 @@ from app.schemas.external_discovery import (
     ExternalDiscoveryResponse,
     SingleSourceRequest,
     SingleSourceResponse,
+    ReverseDiscoveryRequest,
+    ReverseDiscoveryResponse,
     SourceResult,
     AvailableServicesResponse,
     PAID_SERVICES_INFO,
@@ -105,6 +107,106 @@ def mask_api_key(key: str) -> str:
     return key[:4] + "*" * (len(key) - 8) + key[-4:]
 
 
+async def chain_enumerate_domains(
+    db: Session,
+    organization_id: int,
+    domains: List[str],
+    *,
+    create_assets: bool = True,
+    max_domains: int = 50,
+    skip_existing: bool = True,
+) -> Dict[str, int]:
+    """Run subdomain enumeration on freshly-discovered domains and (optionally)
+    persist the results as SUBDOMAIN assets.
+
+    Shared by the reverse-pivot and single-source discovery endpoints so a
+    newly-found domain immediately expands into its subdomains — matching the
+    behavior of the main ``/run`` flow. Bounded concurrency keeps us from
+    hammering upstream sources (crt.sh / subfinder).
+
+    Returns a summary dict: ``{"domains_enumerated", "subdomains_found", "assets_created"}``.
+    """
+    summary = {"domains_enumerated": 0, "subdomains_found": 0, "assets_created": 0}
+    unique_domains = [d for d in dict.fromkeys(domains) if d and "." in d]
+    if not unique_domains:
+        return summary
+
+    targets = unique_domains[:max_domains]
+    summary["domains_enumerated"] = len(targets)
+    subdomain_service = SubdomainService(organization_id=organization_id)
+    chain_semaphore = asyncio.Semaphore(5)
+
+    async def _enumerate_one(domain_to_enum: str):
+        async with chain_semaphore:
+            try:
+                return domain_to_enum, await subdomain_service.enumerate_subdomains(
+                    domain=domain_to_enum,
+                    use_crtsh=True,
+                    wordlist=None,
+                ), None
+            except Exception as exc:  # noqa: BLE001 - report per-domain, keep going
+                return domain_to_enum, [], exc
+
+    results = await asyncio.gather(*[_enumerate_one(d) for d in targets])
+
+    # Map each subdomain back to the domain that surfaced it (for attribution).
+    parent_of: Dict[str, str] = {}
+    for domain_to_enum, subdomains, err in results:
+        if err is not None:
+            logger.warning(f"Chained enumeration failed for {domain_to_enum}: {err}")
+            continue
+        for sub_result in subdomains:
+            parent_of.setdefault(sub_result.subdomain, domain_to_enum)
+
+    summary["subdomains_found"] = len(parent_of)
+    if not (create_assets and parent_of):
+        return summary
+
+    assets_created = 0
+    for subdomain, parent in parent_of.items():
+        existing = db.query(Asset).filter(
+            Asset.organization_id == organization_id,
+            Asset.value == subdomain,
+        ).first()
+        if existing:
+            if skip_existing:
+                continue
+            if not existing.discovery_chain:
+                existing.discovery_source = "chained_subdomain_enum"
+                existing.association_reason = (
+                    f"Found via chained subdomain enumeration from {parent}"
+                )
+                existing.association_confidence = 95
+            continue
+
+        asset = Asset(
+            name=subdomain,
+            asset_type=AssetType.SUBDOMAIN,
+            value=subdomain,
+            root_domain=extract_root_domain(subdomain),
+            organization_id=organization_id,
+            status=AssetStatus.DISCOVERED,
+            discovery_source="chained_subdomain_enum",
+            association_reason=f"Found via chained subdomain enumeration from {parent}",
+            association_confidence=95,
+            discovery_chain=[{
+                "step": 1,
+                "source": "chained_subdomain_enum",
+                "query_domain": parent,
+                "timestamp": datetime.utcnow().isoformat(),
+                "confidence": 95,
+            }],
+            tags=["source:chained_subdomain_enum"],
+        )
+        db.add(asset)
+        assets_created += 1
+
+    if assets_created:
+        db.commit()
+    summary["assets_created"] = assets_created
+    return summary
+
+
 # =============================================================================
 # API Configuration Management
 # =============================================================================
@@ -132,6 +234,31 @@ def list_available_services(
         free_services=FREE_SERVICES_INFO,
         configured_services=configured
     )
+
+
+@router.get("/reverse-pivots/{organization_id}")
+async def get_reverse_pivots(
+    organization_id: int,
+    domain: Optional[str] = None,
+    whois_preview: bool = True,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Read-only preview of what reverse-NS/MX/WHOIS discovery WOULD pivot on for
+    this organization — before any run spends provider credits.
+
+    - Nameserver/mailserver pivots are derived from config + free DNS + stored
+      records, each annotated with how many in-scope assets they recur on and
+      where they came from (config / primary_domain / sampled).
+    - Reverse-WHOIS terms are previewed via WhoisXML's free preview mode, which
+      reports the would-return domain count without spending purchase credits.
+    """
+    if not check_org_access(current_user, organization_id):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    service = ExternalDiscoveryService(db, organization_id)
+    return await service.get_reverse_pivot_plan(domain=domain, whois_preview=whois_preview)
 
 
 @router.get("/configs/{organization_id}", response_model=APIConfigListResponse)
@@ -518,6 +645,58 @@ async def run_external_discovery(
                         "timestamp": datetime.utcnow().isoformat(),
                         "confidence": 85  # Company matches are generally reliable
                     })
+        # For SecurityTrails, capture which reverse pivot matched each domain
+        elif result.source == "securitytrails" and result.raw_data:
+            pivot_map = [
+                ("domains_by_email", "registrant email", 90),
+                ("domains_by_registrar", "registrar", 75),
+                ("domains_by_ns", "shared nameserver", 85),
+                ("domains_by_mx", "shared mail server", 85),
+            ]
+            for raw_key, match_type, conf in pivot_map:
+                for match_value, domains_list in (result.raw_data.get(raw_key, {}) or {}).items():
+                    for domain in domains_list:
+                        if domain not in asset_sources:
+                            asset_sources[domain] = []
+                        asset_sources[domain].append({
+                            "step": len(asset_sources[domain]) + 1,
+                            "source": "securitytrails",
+                            "match_type": match_type,
+                            "match_value": match_value,
+                            "query_domain": request.domain,
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "confidence": conf,
+                        })
+            for domain in (result.raw_data.get("domains_associated", []) or []):
+                if domain not in asset_sources:
+                    asset_sources[domain] = []
+                asset_sources[domain].append({
+                    "step": len(asset_sources[domain]) + 1,
+                    "source": "securitytrails",
+                    "match_type": "associated domain",
+                    "match_value": request.domain,
+                    "query_domain": request.domain,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "confidence": 70,
+                })
+        # For reverse-DNS, capture which owned NS/MX matched each domain
+        elif result.source == "reverse_dns" and result.raw_data:
+            for raw_key, match_type in (("domains_by_ns", "shared nameserver"),
+                                        ("domains_by_mx", "shared mail server")):
+                for match_value, domains_list in (result.raw_data.get(raw_key, {}) or {}).items():
+                    for domain in domains_list:
+                        if domain not in asset_sources:
+                            asset_sources[domain] = []
+                        asset_sources[domain].append({
+                            "step": len(asset_sources[domain]) + 1,
+                            "source": "reverse_dns",
+                            "match_type": match_type,
+                            "match_value": match_value,
+                            "query_domain": request.domain,
+                            "timestamp": datetime.utcnow().isoformat(),
+                            # Owned infra is a strong ownership signal
+                            "confidence": 90,
+                        })
         else:
             # For other sources, just track the source
             for domain in result.domains:
@@ -580,6 +759,28 @@ async def run_external_discovery(
                     association_reason = f"Found via Whoxy reverse WHOIS - matched on {', '.join(match_details)}"
                 else:
                     association_reason = f"Found via Whoxy reverse WHOIS lookup on {request.domain}"
+            elif "securitytrails" in source_names:
+                st_matches = [s for s in sources if s.get("source") == "securitytrails"]
+                match_details = []
+                for match in st_matches:
+                    match_type = match.get("match_type", "reverse lookup")
+                    match_value = match.get("match_value", "unknown")
+                    match_details.append(f"{match_type} '{match_value}'")
+                if match_details:
+                    association_reason = f"Found via SecurityTrails reverse lookup - matched on {', '.join(match_details)}"
+                else:
+                    association_reason = f"Found via SecurityTrails reverse lookup on {request.domain}"
+            elif "reverse_dns" in source_names:
+                rd_matches = [s for s in sources if s.get("source") == "reverse_dns"]
+                match_details = []
+                for match in rd_matches:
+                    match_type = match.get("match_type", "shared infrastructure")
+                    match_value = match.get("match_value", "unknown")
+                    match_details.append(f"{match_type} '{match_value}'")
+                if match_details:
+                    association_reason = f"Shares owned infrastructure - matched on {', '.join(match_details)}"
+                else:
+                    association_reason = f"Found via reverse-NS/MX on owned infrastructure"
             elif "m365" in source_names:
                 association_reason = f"Found via Microsoft 365 federation from {request.domain}"
             elif "commoncrawl" in source_names or "commoncrawl_comprehensive" in source_names:
@@ -879,12 +1080,16 @@ async def run_single_source(
     # Map source names to methods
     source_methods = {
         "crtsh": service.discover_crtsh,
+        "shodan_ctl": service.discover_shodan_ctl,
+        "crt_name": service.discover_crt_name,
         "virustotal": service.discover_virustotal,
         "otx": service.discover_otx,
         "wayback": service.discover_wayback,
         "rapiddns": service.discover_rapiddns,
         "m365": service.discover_m365,
         "commoncrawl": service.discover_commoncrawl,
+        "securitytrails": service.discover_securitytrails,
+        "reverse_dns": lambda d: service.discover_reverse_dns(domain=d, auto_seed=True),
     }
     
     if request.source not in source_methods:
@@ -938,7 +1143,20 @@ async def run_single_source(
                 assets_created += 1
         
         db.commit()
-    
+
+    # Chain subdomain enumeration on any related domains this source surfaced
+    # (e.g. reverse_dns / m365 / securitytrails), so new domains expand into
+    # their subdomains right away instead of waiting for a scheduled sweep.
+    if request.enumerate_discovered_domains and result.success and result.domains:
+        chain_summary = await chain_enumerate_domains(
+            db,
+            request.organization_id,
+            result.domains,
+            create_assets=request.create_assets,
+            max_domains=request.max_domains_to_enumerate,
+        )
+        assets_created += chain_summary["assets_created"]
+
     return SingleSourceResponse(
         source=result.source,
         domain=request.domain,
@@ -950,6 +1168,95 @@ async def run_single_source(
         error=result.error,
         elapsed_time=result.elapsed_time,
         assets_created=assets_created
+    )
+
+
+@router.post("/run/reverse", response_model=ReverseDiscoveryResponse)
+async def run_reverse_discovery(
+    request: ReverseDiscoveryRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """
+    Run reverse-NS/MX discovery on an EXPLICITLY-selected set of pivots.
+
+    This is the "run what I previewed" companion to ``GET /reverse-pivots``:
+    the user reviews the credit-free plan, unchecks noisy/shared hosts, and
+    submits only the pivots they trust. No auto-seeding happens here — we
+    pivot on exactly the hosts provided, so the run is predictable and the
+    credit spend is bounded by the selection.
+    """
+    if not check_org_access(current_user, request.organization_id):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    if not request.nameservers and not request.mailservers:
+        raise HTTPException(
+            status_code=400,
+            detail="Select at least one nameserver or mailserver pivot to run on.",
+        )
+
+    service = ExternalDiscoveryService(db, request.organization_id)
+    result = await service.discover_reverse_dns(
+        domain=request.domain,
+        pivot_nameservers=request.nameservers,
+        pivot_mailservers=request.mailservers,
+    )
+
+    raw = result.raw_data or {}
+
+    # Create discovered domains as assets, attributed to reverse_dns.
+    assets_created = 0
+    if request.create_assets and result.success:
+        for domain in result.domains:
+            existing = db.query(Asset).filter(
+                Asset.organization_id == request.organization_id,
+                Asset.value == domain,
+            ).first()
+            if not existing:
+                asset = Asset(
+                    name=domain,
+                    asset_type=AssetType.DOMAIN,
+                    value=domain,
+                    root_domain=extract_root_domain(domain),
+                    organization_id=request.organization_id,
+                    status=AssetStatus.DISCOVERED,
+                    discovery_source="reverse_dns",
+                    association_reason="Shares owned infrastructure (reverse-NS/MX pivot)",
+                    association_confidence=85,
+                    tags=["source:reverse_dns"],
+                )
+                db.add(asset)
+                assets_created += 1
+        if assets_created:
+            db.commit()
+
+    # Chain subdomain enumeration on the domains we just found so the attack
+    # surface expands immediately (mirrors the main /run behavior).
+    chain_summary = {"subdomains_found": 0, "assets_created": 0}
+    if request.enumerate_discovered_domains and result.success and result.domains:
+        chain_summary = await chain_enumerate_domains(
+            db,
+            request.organization_id,
+            result.domains,
+            create_assets=request.create_assets,
+            max_domains=request.max_domains_to_enumerate,
+        )
+
+    return ReverseDiscoveryResponse(
+        organization_id=request.organization_id,
+        success=result.success,
+        domains=result.domains,
+        domains_by_nameserver=raw.get("domains_by_ns", {}),
+        domains_by_mailserver=raw.get("domains_by_mx", {}),
+        pivoted_nameservers=raw.get("pivoted_nameservers", []),
+        pivoted_mailservers=raw.get("pivoted_mailservers", []),
+        providers=raw.get("providers", []),
+        total_domains_found=raw.get("total_domains_found", len(result.domains)),
+        assets_created=assets_created,
+        subdomains_enumerated=chain_summary["subdomains_found"],
+        subdomain_assets_created=chain_summary["assets_created"],
+        error=result.error,
+        elapsed_time=result.elapsed_time,
     )
 
 

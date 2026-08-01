@@ -461,20 +461,28 @@ def trigger_scheduled_scan(
     
     # 4. If no explicit targets, use ALL in-scope assets and netblocks for the organization
     else:
-        # Get all in-scope assets (domains, subdomains, IPs)
-        assets = db.query(Asset).filter(
-            Asset.organization_id == schedule.organization_id,
-            Asset.in_scope == True,
-            Asset.asset_type.in_([
+        # Domain-oriented scans (subdomain enumeration, domain discovery) only
+        # make sense against domain assets — skip IPs / netblocks.
+        domain_scoped = schedule.scan_type in ("subdomain_enum", "discovery", "full_discovery")
+        if domain_scoped:
+            asset_type_filter = [AssetType.DOMAIN, AssetType.SUBDOMAIN]
+        else:
+            asset_type_filter = [
                 AssetType.DOMAIN,
                 AssetType.SUBDOMAIN,
                 AssetType.IP_ADDRESS,
                 AssetType.IP_RANGE,
-            ])
+            ]
+
+        assets = db.query(Asset).filter(
+            Asset.organization_id == schedule.organization_id,
+            Asset.in_scope == True,
+            Asset.asset_type.in_(asset_type_filter)
         ).all()
-        
-        # Get all in-scope netblocks (CIDR ranges from WhoisXML, etc.)
-        netblocks = db.query(Netblock).filter(
+
+        # Get all in-scope netblocks (CIDR ranges from WhoisXML, etc.) — not for
+        # domain-oriented scans.
+        netblocks = [] if domain_scoped else db.query(Netblock).filter(
             Netblock.organization_id == schedule.organization_id,
             Netblock.in_scope == True
         ).all()

@@ -75,9 +75,28 @@ python3 run_pentest.py --target https://example.com --vuln-mode sequential
 # Tune per-hunter turn budget (default 12)
 python3 run_pentest.py --target https://example.com --hunter-turns 20
 
+# Force enterprise perimeter hunters (Entra/Okta/SharePoint/VPN/vCenter/cloud IAM)
+python3 run_pentest.py --target https://example.com --enterprise
+
+# Force every API/framework + enterprise specialist
+python3 run_pentest.py --target https://example.com --all-specialists
+
+# Webapp-only: skip enterprise + API specialists
+python3 run_pentest.py --target https://example.com --no-enterprise --no-api-specialists
+
 # Limit tool risk ceiling
 python3 run_pentest.py --target https://example.com --max-risk medium
 ```
+
+Specialist hunters activate automatically when recon/app-mapper text matches
+signals (GraphQL, Next.js, Okta, VPN portals, AKIA keys, etc.). Files:
+
+| Module | Coverage |
+|--------|----------|
+| `agent/owasp_hunters.py` | Core 17 hunters + `create_hunters_for_engagement()` |
+| `agent/api_framework_hunters.py` | GraphQL, gRPC, WebSocket, frameworks, deserialization |
+| `agent/enterprise_hunters.py` | Entra, Okta, SharePoint, VPN, vCenter, cloud IAM, supply-chain |
+| `agent/hunt_patterns.py` | Pattern packs + kill/chain tables |
 
 ### Multi-model routing (Phase 2)
 
@@ -300,7 +319,11 @@ All configuration is environment-variable driven; no `.env` file is required.
 --model, -m MODEL          override $AEGIS_MODEL
 --max-risk {safe,low,medium,high,critical}   tool-risk ceiling (default: high)
 --vuln-mode {parallel,sequential}            vuln phase shape (default: parallel)
---hunter-turns N           per-hunter turn budget (default: 12)
+--hunter-turns N           per-hunter turn budget (default: 50)
+--enterprise               force all enterprise perimeter hunters
+--no-enterprise            disable enterprise specialists
+--all-specialists          force API/framework + enterprise specialists
+--no-api-specialists       disable GraphQL/gRPC/framework specialists
 --no-guardrails            disable legacy guardrails + Praetorium (not recommended)
 --no-tracing               disable trace capture
 --verbose, -v              DEBUG logging

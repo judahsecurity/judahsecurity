@@ -91,6 +91,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends golang \
     && go install github.com/tomnomnom/waybackurls@latest \
     && go install github.com/tomnomnom/assetfinder@latest \
     && go install github.com/lc/gau/v2/cmd/gau@latest \
+    && (go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest || echo "interactsh-client build skipped") \
+    && (GOTOOLCHAIN=go1.25.1 go install -v github.com/melvinsh/subfaster/v2/cmd/subfaster@latest || echo "subfaster build skipped") \
     && cp /root/go/bin/* /tools/
 
 # Download Gitleaks (secret scanner - Go binary)
@@ -146,7 +148,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # Copy pre-built binaries
 # Copy tools that were successfully downloaded (skips missing files gracefully)
 COPY --from=tool-downloader /tools/ /tmp/downloaded-tools/
-RUN for tool in nuclei subfinder httpx dnsx naabu katana tlsx ffuf amass masscan massdns waybackurls assetfinder gau gitleaks vulnx; do \
+RUN for tool in nuclei subfinder subfaster httpx dnsx naabu katana tlsx ffuf amass masscan massdns waybackurls assetfinder gau gitleaks vulnx interactsh-client; do \
         [ -f "/tmp/downloaded-tools/${tool}" ] && cp "/tmp/downloaded-tools/${tool}" /usr/local/bin/ && echo "installed ${tool}" || echo "skipped ${tool}"; \
     done && \
     [ -f "/tmp/downloaded-tools/chaos-client" ] && cp /tmp/downloaded-tools/chaos-client /usr/local/bin/chaos || true && \
@@ -175,9 +177,21 @@ COPY packages/ ./packages/
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
 
-# Playwright for screenshot capture (Docker/headless)
+# Browser for headless crawl + screenshots (Docker/cloud/headless).
+# Keep the managed browser inside /app so the later `chown -R appuser /app`
+# leaves it readable to the non-root runtime user.
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers
-RUN playwright install chromium && playwright install-deps chromium || true
+# Guaranteed system Chromium (from the apt install above). deep_crawl falls back
+# to CHROME_BIN if the Playwright-managed browser is ever missing at runtime.
+ENV CHROME_BIN=/usr/bin/chromium
+# Best-effort managed install; the apt chromium + CHROME_BIN fallback guarantees
+# a working browser even if this download is flaky in a cloud build.
+RUN playwright install --with-deps chromium \
+    || playwright install chromium \
+    || echo "WARNING: playwright browser install failed; deep_crawl will use CHROME_BIN=$CHROME_BIN"
+# Fail the build if NEITHER browser is present (so cloud images never ship without one).
+RUN test -x "$CHROME_BIN" || ls "$PLAYWRIGHT_BROWSERS_PATH"/chromium* >/dev/null 2>&1 \
+    || (echo "FATAL: no Chromium (managed or system) in image" && exit 1)
 
 # Install ParamSpider
 RUN pip install paramspider || echo "ParamSpider installation skipped"
@@ -205,6 +219,27 @@ RUN pip install XSStrike || echo "XSStrike installation skipped"
 
 # Install CMSeeK (CMS detection)
 RUN pip install cmseek || echo "CMSeeK installation skipped"
+
+# Retire.js (vulnerable JavaScript library detection) — needs Node.js
+RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
+    && npm install -g retire \
+    && rm -rf /var/lib/apt/lists/* || echo "Retire.js installation skipped"
+
+# jwt_tool (JWT testing & exploitation - ticarpi/jwt_tool). Wrapper on PATH so
+# `jwt_tool <token> <flags>` works from the MCP handler.
+RUN git clone --depth 1 https://github.com/ticarpi/jwt_tool.git /opt/jwt_tool \
+    && pip install --no-cache-dir pycryptodomex termcolor cprint requests \
+    && printf '#!/bin/sh\nexec python3 /opt/jwt_tool/jwt_tool.py "$@"\n' > /usr/local/bin/jwt_tool \
+    && chmod +x /usr/local/bin/jwt_tool \
+    || echo "jwt_tool installation skipped"
+
+# Semgrep (source-aware SAST — whitebox analysis of local checkouts)
+RUN pip install --no-cache-dir semgrep || echo "Semgrep installation skipped"
+
+# Trivy (container / filesystem / IaC vulnerability scanner)
+RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+        | sh -s -- -b /usr/local/bin \
+    || echo "Trivy installation skipped"
 
 # Install subcat (passive subdomain enumeration — 19 sources)
 RUN pip install subcat || echo "Subcat installation skipped"

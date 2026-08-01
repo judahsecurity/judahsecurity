@@ -62,8 +62,50 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_httpx",
             "execute_naabu",
             "execute_subfinder",
+            "execute_subfaster",
+            "execute_crtsh",
+            "execute_dnsx",
+            "execute_uncover",
             "execute_whatweb",
+            "execute_wappalyzer",
             "execute_katana",
+            "execute_gau",
+        ],
+        max_iterations=8,
+    ),
+    SpecialistProfile(
+        name="content_api",
+        role=(
+            "Content and API discovery specialist. Crawl, fuzz dirs, mine "
+            "historical URLs, find params and undocumented API routes."
+        ),
+        allowed_tools=[
+            "query_assets",
+            "execute_katana",
+            "execute_gau",
+            "execute_waybackurls",
+            "execute_deep_crawl",
+            "execute_ffuf",
+            "execute_kiterunner",
+            "execute_arjun",
+            "discover_parameters",
+            "create_scan",
+        ],
+        max_iterations=8,
+    ),
+    SpecialistProfile(
+        name="js_secrets",
+        role=(
+            "JavaScript recon specialist. Extract endpoints from bundles, "
+            "find secrets, source maps, dep-confusion, and DOM sinks."
+        ),
+        allowed_tools=[
+            "query_assets",
+            "scan_js_urls_for_secrets",
+            "execute_retirejs",
+            "execute_gitleaks",
+            "execute_trufflehog",
+            "create_scan",
         ],
     ),
     SpecialistProfile(
@@ -76,7 +118,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "query_vulnerabilities",
             "get_asset_details",
             "search_cve",
+            "search_vulnx",
             "analyze_attack_surface",
+            "rank_attack_surface",
         ],
     ),
     SpecialistProfile(
@@ -113,7 +157,25 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ),
         allowed_tools=[
             "execute_graphql_cop",
+            "execute_schemathesis",
+            "execute_kiterunner",
+            "execute_curl",
+            "create_scan",
             "query_assets",
+        ],
+    ),
+    SpecialistProfile(
+        name="takeover",
+        role=(
+            "Subdomain takeover specialist. Hunt dangling CNAMEs and "
+            "provider fingerprints; only report confirmed/likely takeovers."
+        ),
+        allowed_tools=[
+            "query_assets",
+            "execute_dnsx",
+            "execute_subfinder",
+            "create_scan",
+            "execute_nuclei",
         ],
     ),
 ]

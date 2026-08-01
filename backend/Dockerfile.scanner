@@ -86,11 +86,15 @@ RUN go install github.com/lc/gau/v2/cmd/gau@latest && \
     go install github.com/haccer/subjack@latest && \
     go install github.com/BishopFox/jsluice/cmd/jsluice@latest && \
     go install github.com/projectdiscovery/uncover/cmd/uncover@latest && \
+    go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest && \
+    go install -v github.com/melvinsh/subfaster/v2/cmd/subfaster@latest && \
     cp /root/go/bin/gau /tools/ && \
     cp /root/go/bin/puredns /tools/ && \
     cp /root/go/bin/subjack /tools/ && \
     cp /root/go/bin/jsluice /tools/ && \
-    cp /root/go/bin/uncover /tools/
+    cp /root/go/bin/uncover /tools/ && \
+    cp /root/go/bin/interactsh-client /tools/ && \
+    cp /root/go/bin/subfaster /tools/
 
 # Download Kiterunner (API endpoint brute-forcer)
 RUN ARCH=$(dpkg --print-architecture) && \
@@ -211,9 +215,33 @@ RUN curl -sSfL https://raw.githubusercontent.com/trickest/resolvers/main/resolve
 # Cloud credentials are provided at scan time via task role or config.env.
 RUN pip install --no-cache-dir prowler || echo "Prowler installation skipped"
 
-# Playwright for reliable screenshots in Docker (primary method; no display needed)
+# Retire.js (vulnerable JavaScript library detection) — needs Node.js
+RUN apt-get update && apt-get install -y --no-install-recommends nodejs npm \
+    && npm install -g retire \
+    && rm -rf /var/lib/apt/lists/* || echo "Retire.js installation skipped"
+
+# jwt_tool (JWT testing & exploitation - ticarpi/jwt_tool)
+RUN git clone --depth 1 https://github.com/ticarpi/jwt_tool.git /opt/jwt_tool \
+    && pip install --no-cache-dir pycryptodomex termcolor cprint requests \
+    && printf '#!/bin/sh\nexec python3 /opt/jwt_tool/jwt_tool.py "$@"\n' > /usr/local/bin/jwt_tool \
+    && chmod +x /usr/local/bin/jwt_tool \
+    || echo "jwt_tool installation skipped"
+
+# Semgrep (source-aware SAST — whitebox analysis of local checkouts)
+RUN pip install --no-cache-dir semgrep || echo "Semgrep installation skipped"
+
+# Trivy (container / filesystem / IaC vulnerability scanner)
+RUN curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+        | sh -s -- -b /usr/local/bin \
+    || echo "Trivy installation skipped"
+
+# Browser for reliable headless crawl + screenshots in Docker (no display needed).
+# CHROME_BIN (set below to /usr/bin/chromium) is the guaranteed system fallback
+# deep_crawl uses if the Playwright-managed browser is ever missing.
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers
-RUN playwright install chromium && playwright install-deps chromium || true
+RUN playwright install --with-deps chromium \
+    || playwright install chromium \
+    || echo "WARNING: playwright browser install failed; deep_crawl will use /usr/bin/chromium"
 
 # Install EyeWitness for screenshots (optional fallback)
 RUN git clone --depth 1 https://github.com/RedSiege/EyeWitness.git /opt/EyeWitness && \
@@ -238,6 +266,7 @@ ENV CHROMEDRIVER_PATH=/usr/bin/chromedriver
 # This ensures our Go binaries aren't overwritten by Python package CLI scripts
 COPY --from=builder /tools/nuclei /usr/local/bin/
 COPY --from=builder /tools/subfinder /usr/local/bin/
+COPY --from=builder /tools/subfaster /usr/local/bin/
 COPY --from=builder /tools/httpx /usr/local/bin/httpx
 COPY --from=builder /tools/naabu /usr/local/bin/
 COPY --from=builder /tools/dnsx /usr/local/bin/
@@ -251,6 +280,8 @@ COPY --from=builder /tools/puredns /usr/local/bin/puredns
 COPY --from=builder /tools/subjack /usr/local/bin/subjack
 COPY --from=builder /tools/jsluice /usr/local/bin/jsluice
 COPY --from=builder /tools/uncover /usr/local/bin/uncover
+# interactsh-client (OOB collaborator for blind-vuln detection)
+COPY --from=builder /tools/interactsh-client /usr/local/bin/interactsh-client
 
 # Aegis Vanguard operators (Atlas = pius, Argus = titus) built with Go 1.25
 COPY --from=praetorian-builder /praetorian-bin/pius /usr/local/bin/pius
@@ -268,11 +299,11 @@ RUN ln -sf /opt/zap/zap-baseline.py /usr/local/bin/zap-baseline.py && \
     ln -sf /opt/zap/zap.sh           /usr/local/bin/zap.sh
 
 # Ensure binaries are executable and not overwritten
-RUN chmod +x /usr/local/bin/nuclei /usr/local/bin/subfinder /usr/local/bin/httpx \
+RUN chmod +x /usr/local/bin/nuclei /usr/local/bin/subfinder /usr/local/bin/subfaster /usr/local/bin/httpx \
     /usr/local/bin/naabu /usr/local/bin/dnsx /usr/local/bin/katana /usr/local/bin/waybackurls \
     /usr/local/bin/gau /usr/local/bin/kiterunner /usr/local/bin/pius /usr/local/bin/titus \
     /usr/local/bin/trufflehog /usr/local/bin/puredns /usr/local/bin/subjack \
-    /usr/local/bin/jsluice /usr/local/bin/uncover
+    /usr/local/bin/jsluice /usr/local/bin/uncover /usr/local/bin/interactsh-client
 
 # Copy application code
 COPY . .

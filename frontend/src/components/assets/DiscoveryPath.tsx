@@ -127,6 +127,9 @@ const sourceConfig: Record<string, {
   seed: { icon: Globe, name: 'Seed Domain', colorClass: 'bg-blue-500/10 text-blue-500 border-blue-500/20' },
   whoxy: { icon: Mail, name: 'Whoxy Reverse WHOIS', colorClass: 'bg-purple-500/10 text-purple-500 border-purple-500/20' },
   crtsh: { icon: Lock, name: 'Certificate Transparency', colorClass: 'bg-green-500/10 text-green-500 border-green-500/20' },
+  crt_name: { icon: Lock, name: 'crt.name Index', colorClass: 'bg-green-500/10 text-green-500 border-green-500/20' },
+  shodan_ctl: { icon: Lock, name: 'Shodan CTL', colorClass: 'bg-green-500/10 text-green-500 border-green-500/20' },
+  subfaster: { icon: Radar, name: 'Subfaster', colorClass: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20' },
   virustotal: { icon: Shield, name: 'VirusTotal', colorClass: 'bg-red-500/10 text-red-500 border-red-500/20' },
   otx: { icon: Database, name: 'AlienVault OTX', colorClass: 'bg-orange-500/10 text-orange-500 border-orange-500/20' },
   wayback: { icon: FileText, name: 'Wayback Machine', colorClass: 'bg-amber-500/10 text-amber-500 border-amber-500/20' },
@@ -264,7 +267,7 @@ function buildAttributionChain(props: DiscoveryPathProps): Array<{
   if (props.assetType === 'subdomain') {
     // Check if discovered via certificate SAN
     const certSource = props.discoveryChain?.find(s => 
-      s.source === 'ssl_certificate' || s.source === 'crtsh'
+      s.source === 'ssl_certificate' || s.source === 'crtsh' || s.source === 'crt_name' || s.source === 'shodan_ctl'
     );
     
     let relationship = `Subdomain of ${props.rootDomain || 'parent domain'}`;
@@ -428,51 +431,48 @@ export function DiscoveryPath(props: DiscoveryPathProps) {
         </div>
       )}
       
-      {/* Attribution Chain */}
-      <div className="bg-card rounded-lg border p-4">
-        <div className="flex items-center gap-2 mb-4">
-          <Radar className="h-4 w-4 text-primary" />
-          <h4 className="font-medium">Discovery Path</h4>
-          <span className="text-sm text-muted-foreground">
-            Visual path from source to this asset
-          </span>
-          {associationConfidence && (
-            <Badge variant="outline" className="ml-auto">
-              {associationConfidence}% confidence
-            </Badge>
-          )}
+      {/* Discovery method summary */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <div className={cn(
+            "w-10 h-10 rounded-lg flex items-center justify-center border flex-shrink-0",
+            sourceInfo.colorClass
+          )}>
+            <sourceInfo.icon className="h-5 w-5" />
+          </div>
+          <div>
+            <p className="text-xs text-muted-foreground uppercase tracking-wide">Discovered via</p>
+            <p className="text-sm font-medium">{sourceInfo.name}</p>
+          </div>
         </div>
-        
-        {/* Attribution nodes */}
-        <div className="mt-4">
-          {attributionChain.map((node, index) => (
-            <AttributionNode
-              key={index}
-              entityType={node.entityType}
-              entityValue={node.entityValue}
-              relationship={node.relationship}
-              confidence={node.confidence}
-              isFirst={index === 0}
-              isLast={index === attributionChain.length - 1}
-            />
-          ))}
-        </div>
-      </div>
-      
-      {/* Discovery Method */}
-      <div className="bg-muted/50 rounded-lg p-4">
-        <div className="flex items-center gap-2">
-          <sourceInfo.icon className="h-4 w-4 text-muted-foreground" />
-          <span className="text-sm">
-            <span className="font-medium">Discovery Method:</span> {sourceInfo.name}
-          </span>
-        </div>
-        {associationReason && (
-          <p className="text-sm text-muted-foreground mt-2">
-            {associationReason}
-          </p>
+        {associationConfidence != null && (
+          <Badge variant="outline" className="text-xs">
+            {associationConfidence}% confidence
+          </Badge>
         )}
       </div>
+
+      {/* Attribution timeline */}
+      <div className="pt-1">
+        {attributionChain.map((node, index) => (
+          <AttributionNode
+            key={index}
+            entityType={node.entityType}
+            entityValue={node.entityValue}
+            relationship={node.relationship}
+            confidence={node.confidence}
+            isFirst={index === 0}
+            isLast={index === attributionChain.length - 1}
+          />
+        ))}
+      </div>
+
+      {/* Why this asset is attributed here */}
+      {associationReason && (
+        <p className="text-sm text-muted-foreground bg-muted/40 rounded-lg p-3">
+          {associationReason}
+        </p>
+      )}
       
       {/* Detailed Chain (raw data - collapsible) */}
       {discoveryChain && discoveryChain.length > 0 && (

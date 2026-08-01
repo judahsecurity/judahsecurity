@@ -1,5 +1,6 @@
 # The Force Security ASM - Makefile
-.PHONY: help build up down restart logs shell db-shell init-db clean dev dev-graph deploy
+.PHONY: help build up down restart logs shell db-shell init-db clean dev dev-graph deploy \
+	harness-install harness-test harness-batch harness-benchmark
 
 # Default target
 help:
@@ -19,6 +20,12 @@ help:
 	@echo "  clean       Remove containers, volumes, and images"
 	@echo "  dev         Start services with development tools (Adminer)"
 	@echo "  dev-graph   Start services + Neo4j graph database"
+	@echo ""
+	@echo "Aegis Harness (batch scanning + detection benchmarking):"
+	@echo "  harness-install    Install the harness (pip install -e harness[dev])"
+	@echo "  harness-test       Run the harness test suite"
+	@echo "  harness-batch      Batch-scan targets in harness REPO_LIST.txt"
+	@echo "  harness-benchmark  Benchmark scanner accuracy against the corpus"
 	@echo ""
 
 # Build Docker images
@@ -90,6 +97,21 @@ test:
 # Show service status
 status:
 	docker-compose ps
+
+# --- Aegis Harness ---------------------------------------------------------
+# Batch scanning and detection-accuracy benchmarking for the Aegis Vanguard
+# autonomous pentester. See harness/README.md.
+harness-install:
+	cd harness && pip install -e ".[dev]"
+
+harness-test:
+	cd harness && python -m pytest tests/ --cov=local_harness
+
+harness-batch:
+	cd harness && python -m local_harness.batch.run scan
+
+harness-benchmark:
+	cd harness && python -m local_harness.benchmark.run
 
 # Deploy to EC2: make deploy EC2=1.2.3.4 KEY=~/.ssh/mykey.pem
 # Only rebuilds backend + oracle; leaves db/redis/scanner untouched.

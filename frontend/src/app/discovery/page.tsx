@@ -25,6 +25,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Switch } from '@/components/ui/switch';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Search,
@@ -145,6 +146,23 @@ interface ReversePivotPlan {
   note: string;
 }
 
+interface ReverseRunResult {
+  organization_id: number;
+  success: boolean;
+  domains: string[];
+  domains_by_nameserver: Record<string, string[]>;
+  domains_by_mailserver: Record<string, string[]>;
+  pivoted_nameservers: string[];
+  pivoted_mailservers: string[];
+  providers: string[];
+  total_domains_found: number;
+  assets_created: number;
+  subdomains_enumerated: number;
+  subdomain_assets_created: number;
+  error?: string | null;
+  elapsed_time: number;
+}
+
 // Wrapper component to handle Suspense for useSearchParams
 export default function DiscoveryPage() {
   return (
@@ -227,6 +245,12 @@ function DiscoveryPageContent() {
   // Reverse-lookup pivot preview (credit-free plan of NS/MX/WHOIS pivots)
   const [reversePivots, setReversePivots] = useState<ReversePivotPlan | null>(null);
   const [reversePivotsLoading, setReversePivotsLoading] = useState(false);
+  // Which pivot hosts are selected to actually run on (default: all)
+  const [selectedNsPivots, setSelectedNsPivots] = useState<Set<string>>(new Set());
+  const [selectedMxPivots, setSelectedMxPivots] = useState<Set<string>>(new Set());
+  const [reverseRunning, setReverseRunning] = useState(false);
+  const [reverseRunResult, setReverseRunResult] = useState<ReverseRunResult | null>(null);
+  const [reverseEnumerate, setReverseEnumerate] = useState(true);
 
   // Wayback URLs state
   const [waybackRunning, setWaybackRunning] = useState(false);
@@ -416,9 +440,13 @@ function DiscoveryPageContent() {
     }
 
     setReversePivotsLoading(true);
+    setReverseRunResult(null);
     try {
       const plan = await api.getReversePivots(parseInt(selectedOrg), domain || undefined);
       setReversePivots(plan);
+      // Select all discovered pivots by default so a run works out of the box.
+      setSelectedNsPivots(new Set((plan.nameserver_pivots || []).map((p: PivotHost) => p.host)));
+      setSelectedMxPivots(new Set((plan.mailserver_pivots || []).map((p: PivotHost) => p.host)));
       const pivotCount = (plan.nameserver_pivots?.length || 0) + (plan.mailserver_pivots?.length || 0);
       toast({
         title: 'Pivot Preview Ready',
@@ -433,6 +461,68 @@ function DiscoveryPageContent() {
       });
     } finally {
       setReversePivotsLoading(false);
+    }
+  };
+
+  const toggleNsPivot = (host: string) => {
+    setSelectedNsPivots((prev) => {
+      const next = new Set(prev);
+      if (next.has(host)) next.delete(host); else next.add(host);
+      return next;
+    });
+  };
+
+  const toggleMxPivot = (host: string) => {
+    setSelectedMxPivots((prev) => {
+      const next = new Set(prev);
+      if (next.has(host)) next.delete(host); else next.add(host);
+      return next;
+    });
+  };
+
+  // Run reverse discovery on exactly the pivots the user left selected.
+  const handleRunReverseDiscovery = async () => {
+    if (!selectedOrg) return;
+    const nameservers = Array.from(selectedNsPivots);
+    const mailservers = Array.from(selectedMxPivots);
+    if (nameservers.length === 0 && mailservers.length === 0) {
+      toast({
+        title: 'No pivots selected',
+        description: 'Select at least one nameserver or mailserver to run on.',
+        variant: 'destructive',
+      });
+      return;
+    }
+
+    setReverseRunning(true);
+    setReverseRunResult(null);
+    try {
+      const result = await api.runReverseDiscovery({
+        organization_id: parseInt(selectedOrg),
+        domain: domain || undefined,
+        nameservers,
+        mailservers,
+        create_assets: createAssets,
+        enumerate_discovered_domains: reverseEnumerate,
+        max_domains_to_enumerate: maxDomainsToEnumerate,
+      });
+      setReverseRunResult(result);
+      const enumNote = reverseEnumerate && result.subdomains_enumerated > 0
+        ? ` +${result.subdomains_enumerated} subdomains enumerated.`
+        : '';
+      toast({
+        title: 'Reverse Discovery Complete',
+        description: `Found ${result.total_domains_found} domain${result.total_domains_found === 1 ? '' : 's'}. Created ${result.assets_created} new asset${result.assets_created === 1 ? '' : 's'}.${enumNote}`,
+      });
+    } catch (error: any) {
+      console.error('Reverse discovery run error:', error);
+      toast({
+        title: 'Reverse Discovery Failed',
+        description: error.response?.data?.detail || error.message || 'Failed to run reverse discovery.',
+        variant: 'destructive',
+      });
+    } finally {
+      setReverseRunning(false);
     }
   };
 
@@ -517,6 +607,8 @@ function DiscoveryPageContent() {
 
   const discoveryMethods = [
     { name: 'Certificate Transparency (crt.sh)', key: 'crtsh', description: 'SSL/TLS certificate logs', icon: '🔐', free: true },
+    { name: 'crt.name Index', key: 'crt_name', description: 'Aggregated CT/DNS subdomain index + first-seen', icon: '📇', free: true },
+    { name: 'Shodan CTL', key: 'shodan_ctl', description: 'Shodan CT hostname mirror', icon: '🛰️', free: true },
     { name: 'Wayback Machine', key: 'wayback', description: 'Historical web archives', icon: '📜', free: true },
     { name: 'RapidDNS', key: 'rapiddns', description: 'DNS enumeration', icon: '🌐', free: true },
     { name: 'Microsoft 365', key: 'm365', description: 'Federated tenant domains', icon: '☁️', free: true },
@@ -1043,25 +1135,39 @@ function DiscoveryPageContent() {
                       )}
                     </div>
 
-                    {/* Nameserver + Mailserver pivots */}
+                    {/* Nameserver + Mailserver pivots (selectable) */}
+                    {(reversePivots.nameserver_pivots.length > 0 || reversePivots.mailserver_pivots.length > 0) && (
+                      <p className="text-xs text-muted-foreground -mb-2">
+                        Check the pivots you trust, then run reverse discovery on the selection below.
+                      </p>
+                    )}
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                       <div>
                         <h4 className="font-medium text-sm mb-2 flex items-center gap-2">
                           <Server className="h-4 w-4" />
-                          Nameserver Pivots ({reversePivots.nameserver_pivots.length})
+                          Nameserver Pivots ({selectedNsPivots.size}/{reversePivots.nameserver_pivots.length})
                         </h4>
                         {reversePivots.nameserver_pivots.length > 0 ? (
                           <div className="space-y-1 max-h-64 overflow-y-auto">
                             {reversePivots.nameserver_pivots.map((p) => (
-                              <div key={p.host} className="flex items-center justify-between gap-2 p-2 bg-muted/50 rounded text-sm">
-                                <span className="font-mono truncate" title={p.host}>{p.host}</span>
+                              <label
+                                key={p.host}
+                                className="flex items-center justify-between gap-2 p-2 bg-muted/50 rounded text-sm cursor-pointer hover:bg-muted"
+                              >
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <Checkbox
+                                    checked={selectedNsPivots.has(p.host)}
+                                    onCheckedChange={() => toggleNsPivot(p.host)}
+                                  />
+                                  <span className="font-mono truncate" title={p.host}>{p.host}</span>
+                                </div>
                                 <div className="flex items-center gap-1 flex-shrink-0">
                                   <Badge variant="secondary" className="text-xs">{p.seen_on_assets} assets</Badge>
                                   {p.sources.map((s) => (
                                     <Badge key={s} variant="outline" className="text-xs">{s}</Badge>
                                   ))}
                                 </div>
-                              </div>
+                              </label>
                             ))}
                           </div>
                         ) : (
@@ -1072,20 +1178,29 @@ function DiscoveryPageContent() {
                       <div>
                         <h4 className="font-medium text-sm mb-2 flex items-center gap-2">
                           <Mail className="h-4 w-4" />
-                          Mailserver Pivots ({reversePivots.mailserver_pivots.length})
+                          Mailserver Pivots ({selectedMxPivots.size}/{reversePivots.mailserver_pivots.length})
                         </h4>
                         {reversePivots.mailserver_pivots.length > 0 ? (
                           <div className="space-y-1 max-h-64 overflow-y-auto">
                             {reversePivots.mailserver_pivots.map((p) => (
-                              <div key={p.host} className="flex items-center justify-between gap-2 p-2 bg-muted/50 rounded text-sm">
-                                <span className="font-mono truncate" title={p.host}>{p.host}</span>
+                              <label
+                                key={p.host}
+                                className="flex items-center justify-between gap-2 p-2 bg-muted/50 rounded text-sm cursor-pointer hover:bg-muted"
+                              >
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <Checkbox
+                                    checked={selectedMxPivots.has(p.host)}
+                                    onCheckedChange={() => toggleMxPivot(p.host)}
+                                  />
+                                  <span className="font-mono truncate" title={p.host}>{p.host}</span>
+                                </div>
                                 <div className="flex items-center gap-1 flex-shrink-0">
                                   <Badge variant="secondary" className="text-xs">{p.seen_on_assets} assets</Badge>
                                   {p.sources.map((s) => (
                                     <Badge key={s} variant="outline" className="text-xs">{s}</Badge>
                                   ))}
                                 </div>
-                              </div>
+                              </label>
                             ))}
                           </div>
                         ) : (
@@ -1093,6 +1208,83 @@ function DiscoveryPageContent() {
                         )}
                       </div>
                     </div>
+
+                    {/* Run on selected pivots (spends credits) */}
+                    {(reversePivots.nameserver_pivots.length > 0 || reversePivots.mailserver_pivots.length > 0) && (
+                      <div className="flex flex-wrap items-center gap-3 border-t pt-4">
+                        <Button
+                          onClick={handleRunReverseDiscovery}
+                          disabled={
+                            reverseRunning ||
+                            reversePivots.providers_available.length === 0 ||
+                            (selectedNsPivots.size === 0 && selectedMxPivots.size === 0)
+                          }
+                        >
+                          {reverseRunning ? (
+                            <>
+                              <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                              Running reverse discovery...
+                            </>
+                          ) : (
+                            <>
+                              <Play className="h-4 w-4 mr-2" />
+                              Run on {selectedNsPivots.size + selectedMxPivots.size} Selected Pivot{selectedNsPivots.size + selectedMxPivots.size === 1 ? '' : 's'}
+                            </>
+                          )}
+                        </Button>
+                        <div className="flex items-center gap-2">
+                          <Switch checked={reverseEnumerate} onCheckedChange={setReverseEnumerate} id="reverse-enumerate" />
+                          <Label htmlFor="reverse-enumerate" className="text-sm">Auto-enumerate subdomains</Label>
+                        </div>
+                        <span className="text-xs text-muted-foreground">
+                          {createAssets
+                            ? 'Discovered domains are created as assets'
+                            : 'Preview only — enable "Create Assets" in Advanced Options to import'}
+                          {reverseEnumerate ? `, then subdomains are enumerated (up to ${maxDomainsToEnumerate} domains)` : ''}
+                          . This step spends provider credits.
+                        </span>
+                      </div>
+                    )}
+
+                    {/* Reverse run results */}
+                    {reverseRunResult && (
+                      <div className="border-t pt-4 space-y-3">
+                        <h4 className="font-medium text-sm flex items-center gap-2">
+                          <CheckCircle className="h-4 w-4 text-green-500" />
+                          Reverse Discovery Results
+                        </h4>
+                        <div className="flex flex-wrap gap-2 text-sm">
+                          <Badge variant="secondary">{reverseRunResult.total_domains_found} domains found</Badge>
+                          <Badge variant="default" className="bg-green-600">{reverseRunResult.assets_created} domain assets</Badge>
+                          {reverseRunResult.subdomains_enumerated > 0 && (
+                            <Badge variant="default" className="bg-blue-600">
+                              {reverseRunResult.subdomains_enumerated} subdomains ({reverseRunResult.subdomain_assets_created} new)
+                            </Badge>
+                          )}
+                          {reverseRunResult.providers.map((p) => (
+                            <Badge key={p} variant="outline">{p}</Badge>
+                          ))}
+                          <Badge variant="outline">{reverseRunResult.elapsed_time.toFixed(1)}s</Badge>
+                        </div>
+                        {reverseRunResult.domains.length > 0 ? (
+                          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2 max-h-64 overflow-y-auto">
+                            {reverseRunResult.domains.slice(0, 150).map((d) => (
+                              <div key={d} className="p-2 bg-muted rounded text-sm font-mono truncate" title={d}>{d}</div>
+                            ))}
+                            {reverseRunResult.domains.length > 150 && (
+                              <div className="p-2 text-muted-foreground text-sm col-span-full">
+                                ...and {reverseRunResult.domains.length - 150} more
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <p className="text-sm text-muted-foreground">
+                            No domains returned for the selected pivots.
+                            {reverseRunResult.error ? ` (${reverseRunResult.error})` : ''}
+                          </p>
+                        )}
+                      </div>
+                    )}
 
                     {/* Reverse-WHOIS preview */}
                     {reversePivots.reverse_whois_preview.length > 0 && (

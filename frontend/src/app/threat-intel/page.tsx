@@ -104,7 +104,14 @@ interface Summary {
   otx_active_campaigns: number;
   oracle_analyzed: number;
   by_severity: { critical: number; high: number; medium: number; low: number };
-  by_source: { cisa_kev: number; vulncheck_kev: number; enisa_kev: number; euvd: number };
+  by_source: {
+    cisa_kev: number;
+    vulncheck_kev: number;
+    enisa_kev: number;
+    euvd: number;
+    shadowserver?: number;
+    kevintel?: number;
+  };
   multi_source_count: number;
   vulncheck_configured: boolean;
   pdcp_configured: boolean;
@@ -352,9 +359,11 @@ function OracleScoreBadge({ entry, oracleResult }: { entry: EmergingEntry; oracl
 
 const SOURCE_META: Record<string, { label: string; color: string; url: string; desc: string }> = {
   cisa_kev:    { label: 'CISA',    color: 'bg-blue-500/15 text-blue-400 border-blue-500/30',    url: 'https://www.cisa.gov/known-exploited-vulnerabilities-catalog',          desc: 'CISA Known Exploited Vulnerabilities Catalog' },
-  vulncheck_kev: { label: 'VulnCheck', color: 'bg-indigo-500/15 text-indigo-400 border-indigo-500/30', url: 'https://vulncheck.com/advisories',                               desc: 'VulnCheck KEV — aggregated from 150+ threat sources' },
+  vulncheck_kev: { label: 'VulnCheck', color: 'bg-indigo-500/15 text-indigo-400 border-indigo-500/30', url: 'https://vulncheck.com/advisories',                               desc: 'VulnCheck KEV — broadest exploitation catalog (150+ sources; primary prioritization signal)' },
   enisa_kev:   { label: 'ENISA',   color: 'bg-cyan-500/15 text-cyan-400 border-cyan-500/30',   url: 'https://github.com/enisaeu/KEV',                                        desc: 'ENISA EU CSIRT Network KEV List' },
   euvd:        { label: 'EUVD',    color: 'bg-teal-500/15 text-teal-400 border-teal-500/30',   url: 'https://euvd.enisa.europa.eu',                                          desc: 'EU Vulnerability Database — exploited-in-the-wild entries' },
+  shadowserver: { label: 'Shadowserver', color: 'bg-orange-500/15 text-orange-400 border-orange-500/30', url: 'https://www.shadowserver.org/', desc: 'Shadowserver honeypot exploited vulnerabilities (via CIRCL)' },
+  kevintel:    { label: 'KEVIntel', color: 'bg-rose-500/15 text-rose-400 border-rose-500/30', url: 'https://kevintel.com/', desc: 'KEVIntel exploitation attestations (via CIRCL KEV catalog)' },
 };
 
 function SourceBadges({ sources }: { sources: string[] }) {
@@ -766,6 +775,8 @@ export default function ThreatIntelPage() {
                 }
                 <span className="text-cyan-400">✓ ENISA EU KEV <span className="text-muted-foreground">(free)</span></span>
                 <span className="text-teal-400">✓ EUVD <span className="text-muted-foreground">(free)</span></span>
+                <span className="text-orange-400">✓ Shadowserver <span className="text-muted-foreground">(free via CIRCL)</span></span>
+                <span className="text-rose-400">✓ KEVIntel <span className="text-muted-foreground">(free via CIRCL)</span></span>
                 {!summary.pdcp_configured && (
                   <span className="text-yellow-500">⚠ PDCP — add <code className="bg-black/20 px-0.5 rounded">PDCP_API_KEY</code> for Nuclei template data (<a href="https://cloud.projectdiscovery.io" target="_blank" rel="noopener noreferrer" className="underline">free key</a>)</span>
                 )}
@@ -778,17 +789,21 @@ export default function ThreatIntelPage() {
         {summary && (
           <>
             {/* Top row: source breakdown */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-5 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
               <StatCard label="Total CVEs" value={summary.total} icon={TrendingUp}
                 color="bg-primary/10 text-primary" tooltip="Unique CVEs from all exploitation intelligence sources combined" />
               <StatCard label="CISA KEV" value={summary.by_source?.cisa_kev ?? 0} icon={Shield}
                 color="bg-blue-500/10 text-blue-400" tooltip="CVEs in the CISA Known Exploited Vulnerabilities catalog" />
               <StatCard label="VulnCheck KEV" value={summary.by_source?.vulncheck_kev ?? 0} icon={Crosshair}
-                color="bg-indigo-500/10 text-indigo-400" tooltip="CVEs in the VulnCheck KEV aggregated feed (150+ sources)" />
+                color="bg-indigo-500/10 text-indigo-400" tooltip="VulnCheck KEV — broadest exploitation catalog; primary Delphi prioritization signal" />
               <StatCard label="ENISA KEV" value={summary.by_source?.enisa_kev ?? 0} icon={AlertCircle}
                 color="bg-cyan-500/10 text-cyan-400" tooltip="CVEs in the ENISA EU CSIRT Network KEV List" />
               <StatCard label="EUVD" value={summary.by_source?.euvd ?? 0} icon={Info}
                 color="bg-teal-500/10 text-teal-400" tooltip="Exploited-in-the-wild entries from the EU Vulnerability Database" />
+              <StatCard label="Shadowserver" value={summary.by_source?.shadowserver ?? 0} icon={Activity}
+                color="bg-orange-500/10 text-orange-400" tooltip="CVEs observed in Shadowserver honeypot exploited feed" />
+              <StatCard label="KEVIntel" value={summary.by_source?.kevintel ?? 0} icon={Zap}
+                color="bg-rose-500/10 text-rose-400" tooltip="CVEs attested by KEVIntel (via CIRCL)" />
             </div>
             {/* Bottom row: signal stats */}
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
@@ -879,6 +894,8 @@ export default function ThreatIntelPage() {
               <SelectItem value="vulncheck_kev">VulnCheck only</SelectItem>
               <SelectItem value="enisa_kev">ENISA KEV only</SelectItem>
               <SelectItem value="euvd">EUVD only</SelectItem>
+              <SelectItem value="shadowserver">Shadowserver only</SelectItem>
+              <SelectItem value="kevintel">KEVIntel only</SelectItem>
             </SelectContent>
           </Select>
 

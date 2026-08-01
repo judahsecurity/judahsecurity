@@ -96,7 +96,7 @@ Project settings are stored per **organization** in the `project_settings` table
 
 ### Agent (Claude) and Per-Org Overrides
 
-- **Default LLM**: In `backend/app/core/config.py`, `AI_PROVIDER` defaults to `"anthropic"` and `ANTHROPIC_MODEL` to `"claude-sonnet-4-20250514"`, so the **default agent is Claude**.
+- **Default LLM**: In `backend/app/core/config.py`, `AI_PROVIDER` defaults to `"anthropic"` and `ANTHROPIC_MODEL` to `"claude-sonnet-4-6"`, so the **default agent is Claude**.
 - **Per-org overrides**: The `agent` module in `project_settings` stores:
   - `llm_provider`, `llm_model`
   - `max_iterations`, `require_approval_exploitation`, `require_approval_post_exploitation`, `activate_post_exploitation`, `post_exploitation_type`

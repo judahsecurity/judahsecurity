@@ -629,7 +629,10 @@ def persist_js_findings(
     scan_id: Optional[int],
     findings: list[JSFinding],
 ) -> int:
-    """Convert JS findings into Vulnerability rows. Returns count created."""
+    """Convert JS findings into Vulnerability rows and update asset app-structure.
+
+    Returns count of new vulnerability records created.
+    """
     from app.models.asset import Asset, AssetType
     from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus
 
@@ -646,6 +649,50 @@ def persist_js_findings(
     # severity so analysts can enumerate attack-surface endpoints.
     # Plain regex "endpoint" findings stay in scan.results only.
     reportable_kinds = {"secret", "sourcemap", "dep_confusion", "dom_sink", "js_path"}
+
+    # --- Collect app-structure data per hostname to write back to the asset ---
+    # Maps hostname → {endpoints, js_files, params}
+    _asset_endpoints: dict[str, set] = {}
+    _asset_js: dict[str, set] = {}
+    _asset_params: dict[str, set] = {}
+
+    for f in findings:
+        h = f.hostname
+        _asset_endpoints.setdefault(h, set())
+        _asset_js.setdefault(h, set())
+        _asset_params.setdefault(h, set())
+        if f.kind == "endpoint":
+            _asset_endpoints[h].add(f.match[:500])
+        elif f.kind == "js_path":
+            _asset_endpoints[h].add(f.match[:500])
+            for p in (f.extras or {}).get("query_params", []):
+                _asset_params[h].add(str(p))
+            for p in (f.extras or {}).get("body_params", []):
+                _asset_params[h].add(str(p))
+        if f.source_url:
+            _asset_js[h].add(f.source_url[:500])
+
+    # Write endpoint/JS/param data back to each matching asset
+    for hostname, endpoints in _asset_endpoints.items():
+        asset = (
+            db.query(Asset)
+            .filter(Asset.organization_id == organization_id, Asset.value == hostname)
+            .first()
+        )
+        if not asset:
+            continue
+        if endpoints:
+            existing_eps = list(asset.endpoints or [])
+            merged = list(dict.fromkeys(existing_eps + sorted(endpoints)))[:2000]
+            asset.endpoints = merged
+        if _asset_js.get(hostname):
+            existing_js = list(asset.js_files or [])
+            merged_js = list(dict.fromkeys(existing_js + sorted(_asset_js[hostname])))[:1000]
+            asset.js_files = merged_js
+        if _asset_params.get(hostname):
+            existing_params = list(asset.parameters or [])
+            merged_params = list(dict.fromkeys(existing_params + sorted(_asset_params[hostname])))[:1000]
+            asset.parameters = merged_params
 
     for f in findings:
         if f.kind not in reportable_kinds:

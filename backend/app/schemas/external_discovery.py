@@ -73,7 +73,7 @@ class ExternalDiscoveryRequest(BaseModel):
     organization_id: int = Field(..., description="Organization ID")
     
     # Options for what sources to use
-    include_free_sources: bool = Field(default=True, description="Include free sources (crt.sh, wayback, rapiddns, m365)")
+    include_free_sources: bool = Field(default=True, description="Include free sources (crt.sh, crt.name, shodan CTL, wayback, rapiddns, m365)")
     include_paid_sources: bool = Field(default=True, description="Include paid API sources")
     
     # Specific sources to enable/disable
@@ -244,6 +244,14 @@ class SingleSourceRequest(BaseModel):
     organization_id: int
     source: str = Field(..., description="Source to use (e.g., virustotal, wayback, crtsh)")
     create_assets: bool = Field(default=True, description="Automatically create discovered assets")
+    enumerate_discovered_domains: bool = Field(
+        default=True,
+        description="Run subdomain enumeration on any related domains this source discovers",
+    )
+    max_domains_to_enumerate: int = Field(
+        default=50,
+        description="Cap on how many discovered domains to chain-enumerate",
+    )
 
 
 class SingleSourceResponse(BaseModel):
@@ -258,6 +266,55 @@ class SingleSourceResponse(BaseModel):
     error: Optional[str] = None
     elapsed_time: float = 0.0
     assets_created: int = 0
+
+
+class ReverseDiscoveryRequest(BaseModel):
+    """Run reverse-NS/MX discovery on an explicitly-selected set of pivots.
+
+    Intended to be driven by the reverse-pivot preview: the user reviews the
+    credit-free plan, unchecks noisy hosts, and runs on exactly what remains.
+    """
+    organization_id: int = Field(..., description="Organization ID")
+    domain: Optional[str] = Field(
+        default=None,
+        description="Optional primary domain (used only for attribution/context)",
+    )
+    nameservers: List[str] = Field(
+        default_factory=list,
+        description="Nameserver hosts to reverse-pivot on (from the preview plan)",
+    )
+    mailservers: List[str] = Field(
+        default_factory=list,
+        description="Mailserver hosts to reverse-pivot on (from the preview plan)",
+    )
+    create_assets: bool = Field(default=True, description="Create discovered domains as assets")
+    enumerate_discovered_domains: bool = Field(
+        default=True,
+        description="Immediately run subdomain enumeration on each domain found via the pivots",
+    )
+    max_domains_to_enumerate: int = Field(
+        default=50,
+        description="Cap on how many discovered domains to chain-enumerate",
+    )
+
+
+class ReverseDiscoveryResponse(BaseModel):
+    """Result of a selected-pivot reverse discovery run."""
+    organization_id: int
+    success: bool
+    domains: List[str] = []
+    domains_by_nameserver: Dict[str, List[str]] = {}
+    domains_by_mailserver: Dict[str, List[str]] = {}
+    pivoted_nameservers: List[str] = []
+    pivoted_mailservers: List[str] = []
+    providers: List[str] = []
+    total_domains_found: int = 0
+    assets_created: int = 0
+    # Chained subdomain enumeration on the discovered domains
+    subdomains_enumerated: int = 0
+    subdomain_assets_created: int = 0
+    error: Optional[str] = None
+    elapsed_time: float = 0.0
 
 
 # =============================================================================
@@ -292,11 +349,15 @@ PAID_SERVICES_INFO = [
     {
         "name": "whoisxml",
         "display_name": "WhoisXML API",
-        "description": "IP ranges and CIDRs by organization name",
+        "description": "IP netblocks by org name, plus reverse-NS/MX/WHOIS domain discovery",
         "requires_key": True,
         "rate_limit": "Varies by plan",
         "website": "https://whoisxmlapi.com/",
-        "config_options": ["organization_names"],
+        "config_options": [
+            "organization_names",
+            "owned_nameservers",
+            "owned_mailservers",
+        ],
     },
     {
         "name": "whoxy",
@@ -326,10 +387,16 @@ PAID_SERVICES_INFO = [
     {
         "name": "securitytrails",
         "display_name": "SecurityTrails",
-        "description": "Historical DNS and WHOIS data",
+        "description": "Reverse lookups (NS/MX/WHOIS), associated domains, and historical WHOIS",
         "requires_key": True,
-        "rate_limit": "50/month (free)",
+        "rate_limit": "50/month (free), varies by plan",
         "website": "https://securitytrails.com/",
+        "config_options": [
+            "registration_emails",
+            "registrar_names",
+            "owned_nameservers",
+            "owned_mailservers",
+        ],
     },
 ]
 
@@ -341,6 +408,22 @@ FREE_SERVICES_INFO = [
         "requires_key": False,
         "rate_limit": "Be respectful",
         "website": "https://crt.sh/",
+    },
+    {
+        "name": "shodan_ctl",
+        "display_name": "Shodan CTL",
+        "description": "Shodan Certificate Transparency Logs hostname mirror",
+        "requires_key": False,
+        "rate_limit": "1/second recommended",
+        "website": "https://ctl.shodan.io/",
+    },
+    {
+        "name": "crt_name",
+        "display_name": "crt.name",
+        "description": "Aggregated CT/DNS subdomain index (live CT, backfill, Chaos, CZDS, probes) with first-seen dates",
+        "requires_key": False,
+        "rate_limit": "1000 requests/IP/day",
+        "website": "https://crt.name/",
     },
     {
         "name": "wayback",

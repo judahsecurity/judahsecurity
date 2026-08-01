@@ -564,7 +564,16 @@ def get_asset(
     current_user: User = Depends(get_current_active_user)
 ):
     """Get asset by ID with port services and technologies."""
-    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    asset = (
+        db.query(Asset)
+        .options(
+            selectinload(Asset.port_services),
+            selectinload(Asset.technologies),
+            selectinload(Asset.vulnerabilities),
+        )
+        .filter(Asset.id == asset_id)
+        .first()
+    )
 
     if not asset:
         raise HTTPException(

@@ -270,39 +270,50 @@ async def run_jsluice_scan(
 
 
 def build_results_summary(result: JSluiceResult) -> dict:
-    """Return the dict stored in ``scan.results`` for UI consumption."""
+    """Return the comprehensive dict stored in ``scan.results``.
+
+    Includes every JS file analyzed, all extracted paths/params, and all
+    discovered secrets so analysts can audit the full scan inventory.
+    """
+    # Deduplicated JS file list across all path source_js entries
+    js_files_list = sorted({p.source_js for p in result.paths if p.source_js})
+
+    all_paths = [
+        {
+            "url": p.url,
+            "method": p.method,
+            "query_params": p.query_params,
+            "body_params": p.body_params,
+            "url_type": p.url_type,
+            "source_js": p.source_js,
+            "has_params": bool(p.query_params or p.body_params),
+        }
+        for p in result.paths
+    ]
+
+    secrets_list = [
+        {
+            "kind": s.kind,
+            "severity": s.severity,
+            "match": (s.data.get("match") or s.data.get("key") or s.data.get("value") or "")[:80],
+            "source_js": s.source_js,
+        }
+        for s in result.secrets
+    ]
+
     return {
+        # Summary counts
         "js_files_analyzed": result.js_files_analyzed,
         "paths_found": result.paths_found,
         "params_found": result.params_found,
         "secrets_found": result.secrets_found,
         "duration_seconds": round(result.duration_seconds, 1),
-        # Include paths that carry parameter data (most useful for UI)
-        "jsluice_paths": [
-            {
-                "url": p.url,
-                "method": p.method,
-                "query_params": p.query_params,
-                "body_params": p.body_params,
-                "url_type": p.url_type,
-                "source_js": p.source_js,
-            }
-            for p in result.paths
-            if p.query_params or p.body_params
-        ][:200],
-        # Include ALL paths (capped) for completeness
-        "jsluice_all_paths": [
-            {
-                "url": p.url,
-                "method": p.method,
-                "query_params": p.query_params,
-                "body_params": p.body_params,
-                "url_type": p.url_type,
-                "source_js": p.source_js,
-            }
-            for p in result.paths
-        ][:500],
-        "errors": result.errors[:10],
+        "errors": result.errors[:20],
+        # Full inventories (capped to keep JSON column manageable)
+        "js_files": js_files_list[:500],
+        "jsluice_paths": [p for p in all_paths if p["has_params"]][:200],
+        "jsluice_all_paths": all_paths[:1000],
+        "secrets": secrets_list[:500],
     }
 
 
@@ -326,13 +337,16 @@ def persist_jsluice_findings(
     result: JSluiceResult,
 ) -> int:
     """
-    Persist jsluice paths (with params) and secrets as ``Vulnerability`` rows.
+    Persist jsluice paths and secrets as ``Vulnerability`` rows and update asset
+    app-structure fields so everything discovered is visible in the UI.
 
-    - Paths with at least one parameter are stored at **INFO** severity; they
-      represent attack-surface endpoints worth reviewing for IDOR / injection.
+    - ALL paths are written to ``asset.endpoints`` / ``asset.parameters`` /
+      ``asset.js_files`` so the App Structure tab shows the full inventory.
+    - Paths with at least one parameter also get a Vulnerability row at INFO
+      severity (attack-surface endpoint worth reviewing for IDOR / injection).
     - Secrets are stored at the severity reported by jsluice (high / critical).
 
-    Returns the number of new rows created.
+    Returns the number of new Vulnerability rows created.
     """
     from app.models.asset import Asset, AssetType
     from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus
@@ -366,10 +380,39 @@ def persist_jsluice_findings(
     now = datetime.utcnow()
     created = 0
 
-    # ── paths with parameters ──────────────────────────────────────────────
+    # ── write ALL paths + JS source files back to asset app-structure fields ──
+    # Group by hostname so we only flush each asset once.
+    from collections import defaultdict
+    _by_host_endpoints: dict = defaultdict(set)
+    _by_host_params: dict = defaultdict(set)
+    _by_host_js: dict = defaultdict(set)
+
+    for p in result.paths:
+        hostname = urlparse(p.source_js).netloc or p.source_js
+        _by_host_endpoints[hostname].add(p.url[:500])
+        _by_host_js[hostname].add(p.source_js[:500])
+        for param in p.query_params + p.body_params:
+            _by_host_params[hostname].add(str(param))
+
+    for hostname in set(list(_by_host_endpoints) + list(_by_host_js)):
+        a = _get_or_create_asset(hostname)
+        if _by_host_endpoints[hostname]:
+            existing_eps = list(a.endpoints or [])
+            merged = list(dict.fromkeys(existing_eps + sorted(_by_host_endpoints[hostname])))[:2000]
+            a.endpoints = merged
+        if _by_host_js[hostname]:
+            existing_js = list(a.js_files or [])
+            merged_js = list(dict.fromkeys(existing_js + sorted(_by_host_js[hostname])))[:1000]
+            a.js_files = merged_js
+        if _by_host_params[hostname]:
+            existing_params = list(a.parameters or [])
+            merged_params = list(dict.fromkeys(existing_params + sorted(_by_host_params[hostname])))[:1000]
+            a.parameters = merged_params
+
+    # ── paths with parameters → Vulnerability rows ─────────────────────────
     for p in result.paths:
         if not (p.query_params or p.body_params):
-            continue  # paths with no params are low-value; skip DB row
+            continue  # no params = app-structure only, no vuln row needed
 
         hostname = urlparse(p.source_js).netloc or p.source_js
         asset = _get_or_create_asset(hostname)
