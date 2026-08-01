@@ -92,9 +92,41 @@ def list_screenshots(
 def get_eyewitness_status(
     current_user: User = Depends(get_current_active_user)
 ):
-    """Check EyeWitness installation status."""
+    """Check screenshot capture health (Playwright preferred, EyeWitness fallback)."""
     service = get_eyewitness_service()
-    return service.check_installation()
+    ew = service.check_installation()
+    playwright_available = False
+    try:
+        from app.services.playwright_screenshot import _check_playwright_available
+        playwright_available = bool(_check_playwright_available())
+    except Exception:
+        playwright_available = False
+
+    screenshots_dir = service.SCREENSHOTS_DIR
+    dir_writable = None
+    try:
+        os.makedirs(screenshots_dir, exist_ok=True)
+        dir_writable = os.access(screenshots_dir, os.W_OK)
+    except Exception:
+        dir_writable = False
+
+    preferred = None
+    if playwright_available:
+        preferred = "playwright"
+    elif ew.get("installed"):
+        preferred = "eyewitness"
+
+    return {
+        **ew,
+        "installed": bool(ew.get("installed") or playwright_available),
+        "eyewitness_installed": bool(ew.get("installed")),
+        "playwright_available": playwright_available,
+        "capture_available": bool(preferred),
+        "preferred_engine": preferred,
+        "screenshots_dir": screenshots_dir,
+        "screenshots_dir_writable": dir_writable,
+        "error": None if preferred else ew.get("error") or "No screenshot engine available (install Playwright or EyeWitness)",
+    }
 
 
 # =============================================================================
@@ -110,7 +142,8 @@ async def capture_asset_screenshot(
 ):
     """
     Capture a screenshot for a single asset.
-    
+
+    Prefers Playwright (Docker/headless-friendly), falls back to EyeWitness.
     The asset must be a web-accessible type (domain, subdomain, URL).
     """
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
@@ -128,24 +161,51 @@ async def capture_asset_screenshot(
             detail=f"Asset type {asset.asset_type.value} cannot be screenshotted"
         )
     
-    # Determine URL
-    url = asset.value
-    if asset.asset_type in [AssetType.DOMAIN, AssetType.SUBDOMAIN]:
+    # Prefer live_url from HTTP probe when available (more accurate endpoint)
+    if getattr(asset, "live_url", None):
+        url = asset.live_url
+    elif asset.asset_type in [AssetType.DOMAIN, AssetType.SUBDOMAIN]:
         url = f"https://{asset.value}"
-    
+    else:
+        url = asset.value
+
     service = get_eyewitness_service()
-    
-    # Check installation
-    install_status = service.check_installation()
-    if not install_status["installed"]:
-        raise HTTPException(
-            status_code=503,
-            detail=f"EyeWitness not available: {install_status.get('error', 'Not installed')}"
+    result = None
+    capture_error = None
+
+    # Prefer Playwright (same as scanner worker path)
+    try:
+        from app.services.playwright_screenshot import (
+            capture_screenshots_playwright,
+            _check_playwright_available,
         )
-    
-    # Capture screenshot
-    config = EyeWitnessConfig(timeout=timeout)
-    result = await service.capture_single(url, asset.organization_id, config)
+        if _check_playwright_available():
+            pw_results = await capture_screenshots_playwright(
+                [url],
+                asset.organization_id,
+                timeout_ms=timeout * 1000,
+            )
+            if pw_results and pw_results[0].success:
+                result = pw_results[0]
+            elif pw_results:
+                capture_error = pw_results[0].error_message or "Playwright capture failed"
+    except Exception as e:
+        capture_error = str(e)
+
+    # Fall back to EyeWitness when Playwright is unavailable or failed
+    if result is None:
+        install_status = service.check_installation()
+        if not install_status.get("installed"):
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    capture_error
+                    or install_status.get("error")
+                    or "Screenshot capture unavailable (install Playwright or EyeWitness)"
+                ),
+            )
+        config = EyeWitnessConfig(timeout=timeout)
+        result = await service.capture_single(url, asset.organization_id, config)
     
     # Get previous screenshot for change detection
     previous_screenshot = db.query(Screenshot).filter(
@@ -180,10 +240,13 @@ async def capture_asset_screenshot(
     if previous_screenshot and result.image_hash:
         if previous_screenshot.image_hash != result.image_hash:
             screenshot.has_changed = True
-            screenshot.change_percentage = service.calculate_change_percentage(
-                previous_screenshot.image_hash,
-                result.image_hash
-            )
+            try:
+                screenshot.change_percentage = service.calculate_change_percentage(
+                    previous_screenshot.image_hash,
+                    result.image_hash
+                )
+            except Exception:
+                screenshot.change_percentage = None
             screenshot.previous_screenshot_id = previous_screenshot.id
     
     db.add(screenshot)
