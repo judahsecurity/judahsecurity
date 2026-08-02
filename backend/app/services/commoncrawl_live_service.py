@@ -329,7 +329,7 @@ class CommonCrawlLiveService:
         all_subdomains: Set[str] = set()
 
         async with httpx.AsyncClient(
-            headers={"User-Agent": "TheForce-ASM/1.0 (+https://theforce.security)"},
+            headers={"User-Agent": "Judah-ASM/1.0 (+https://judahsecurity.com)"},
             follow_redirects=True,
         ) as client:
             collections = await self._get_collections(client)
@@ -410,7 +410,7 @@ class CommonCrawlLiveService:
         all_hostnames: Set[str] = set()
 
         async with httpx.AsyncClient(
-            headers={"User-Agent": "TheForce-ASM/1.0 (+https://theforce.security)"},
+            headers={"User-Agent": "Judah-ASM/1.0 (+https://judahsecurity.com)"},
             follow_redirects=True,
         ) as client:
             collections = await self._get_collections(client)

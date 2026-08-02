@@ -3,7 +3,7 @@
 ASM Platform Bridge
 
 Client library for Aegis Vanguard agents to communicate findings back to
-The Force Security ASM platform. Handles authentication, batching,
+Judah Security ASM platform. Handles authentication, batching,
 retries, and structured finding submission.
 
 Usage inside Aegis Vanguard container:
@@ -143,7 +143,7 @@ class PoCEvidence:
 
 
 class ASMBridge:
-    """Client for submitting findings to The Force Security ASM platform."""
+    """Client for submitting findings to Judah Security ASM platform."""
 
     def __init__(
         self,

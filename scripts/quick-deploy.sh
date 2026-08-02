@@ -151,7 +151,7 @@ main() {
     echo "  - API Docs: http://${PUBLIC_IP}:8000/api/docs"
     echo
     echo "Default login:"
-    echo "  - Email:    admin@theforce.security"
+    echo "  - Email:    admin@judahsecurity.com"
     echo "  - Password: admin123"
     echo
     echo "⚠️  Change the default password immediately!"

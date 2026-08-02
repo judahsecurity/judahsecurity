@@ -1,7 +1,7 @@
-# The Force Security - Attack Surface Management
+# Judah Security - Attack Surface Management
 
 <p align="center">
-  <img src="frontend/public/logo.svg" alt="The Force Security Logo" width="120" height="120" style="filter: invert(1);">
+  <img src="frontend/public/logo.svg" alt="Judah Security Logo" width="120" height="120" style="filter: invert(1);">
 </p>
 
 <p align="center">
@@ -214,7 +214,7 @@ Automated recurring scans with flexible frequencies:
 # Create directory and clone
 sudo mkdir -p /opt/asm
 sudo chown $USER:$USER /opt/asm
-git clone https://github.com/javrav2/theforcesecurity_ASM.git /opt/asm
+git clone https://github.com/judahsecurity/judahsecurity.git /opt/asm
 cd /opt/asm
 ```
 
@@ -260,12 +260,12 @@ from app.models.user import User
 from app.core.security import get_password_hash
 
 db = SessionLocal()
-existing = db.query(User).filter(User.email == 'admin@theforce.security').first()
+existing = db.query(User).filter(User.email == 'admin@judahsecurity.com').first()
 if existing:
     print('Admin already exists')
 else:
     admin = User(
-        email='admin@theforce.security',
+        email='admin@judahsecurity.com',
         username='admin',
         hashed_password=get_password_hash('admin123'),
         full_name='Admin User',
@@ -338,7 +338,7 @@ aws cloudformation describe-stacks --stack-name asm-platform \
 # SSH and complete setup
 ssh -i your-key.pem ubuntu@<PUBLIC_IP>
 cd /opt/asm
-git clone https://github.com/javrav2/theforcesecurity_ASM.git .
+git clone https://github.com/judahsecurity/judahsecurity.git .
 ./aws/ec2-single/setup.sh
 ```
 
@@ -354,7 +354,7 @@ sudo chown $USER:$USER /opt/asm
 cd /opt/asm
 
 # Clone repository
-git clone https://github.com/javrav2/theforcesecurity_ASM.git .
+git clone https://github.com/judahsecurity/judahsecurity.git .
 
 # Create .env file (update PUBLIC_IP with your EC2 IP)
 PUBLIC_IP=$(curl -s ifconfig.me)
@@ -393,12 +393,12 @@ If you use **AWS CodeCommit** (in addition to or instead of GitHub):
 
 ```bash
 # One-time: add CodeCommit as remote (replace region and repo name)
-git remote add aws https://git-codecommit.us-east-1.amazonaws.com/v1/repos/theforcesecurity_ASM
+git remote add aws https://git-codecommit.us-east-1.amazonaws.com/v1/repos/judahsecurity
 # Push to AWS
 git push aws main
 ```
 
-**Push from your machine:** Run `git push origin main` (or `git push aws main`) in your own terminal or Cursor terminal so your GitHub/CodeCommit credentials or SSH keys are used. If push fails with "could not read Username", use SSH: `git remote set-url origin git@github.com:javrav2/theforcesecurity_ASM.git` then push again (requires [SSH key](https://docs.github.com/en/authentication/connecting-to-github-with-ssh) added to GitHub).
+**Push from your machine:** Run `git push origin main` (or `git push aws main`) in your own terminal or Cursor terminal so your GitHub/CodeCommit credentials or SSH keys are used. If push fails with "could not read Username", use SSH: `git remote set-url origin git@github.com:judahsecurity/judahsecurity.git` then push again (requires [SSH key](https://docs.github.com/en/authentication/connecting-to-github-with-ssh) added to GitHub).
 
 **2. On the EC2 instance** (single-instance / Docker Compose):
 
@@ -413,7 +413,7 @@ sudo docker compose up -d --build --force-recreate
 If you deploy with ECS and the `aws/scripts/deploy.sh` script, from your **local machine** (after pushing code to Git):
 
 ```bash
-cd /path/to/theforcesecurity_ASM/aws/scripts
+cd /path/to/judahsecurity/aws/scripts
 ./deploy.sh all prod   # builds images, pushes to ECR, updates ECS services
 ```
 
@@ -424,7 +424,7 @@ For optional env vars (e.g. `TAVILY_API_KEY`, `AGENT_TOOL_OUTPUT_MAX_CHARS`) and
 ## 📁 Project Structure
 
 ```
-theforcesecurity_ASM/
+judahsecurity/
 ├── frontend/                    # Next.js 14 Frontend
 │   ├── src/
 │   │   ├── app/                # 21 pages (dashboard, assets, agent, graph, etc.)
@@ -642,5 +642,5 @@ MIT License - See LICENSE file for details.
 ---
 
 <p align="center">
-  <strong>Made with ❤️ by The Force Security</strong>
+  <strong>Made with ❤️ by Judah Security</strong>
 </p>

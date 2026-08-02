@@ -2,7 +2,7 @@ id: salesforce-chat-detect
 
 info:
   name: Salesforce Embedded Service / Live Agent Chat Detect
-  author: theforcesecurity
+  author: judahsecurity
   severity: info
   description: |
     Detects Salesforce Embedded Service chat or Live Agent on internet-facing web assets.

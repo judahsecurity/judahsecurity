@@ -1,10 +1,10 @@
-# The Force Security ASM - Makefile
+# Judah Security ASM - Makefile
 .PHONY: help build up down restart logs shell db-shell init-db clean dev dev-graph deploy \
 	harness-install harness-test harness-batch harness-benchmark
 
 # Default target
 help:
-	@echo "The Force Security - Attack Surface Management"
+	@echo "Judah Security - Attack Surface Management"
 	@echo ""
 	@echo "Usage: make [target]"
 	@echo ""

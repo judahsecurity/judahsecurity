@@ -36,7 +36,7 @@ def init_db():
         
         # Create admin user
         admin_user = User(
-            email="admin@theforce.security",
+            email="admin@judahsecurity.com",
             username="admin",
             hashed_password=get_password_hash("admin123"),
             full_name="System Administrator",
@@ -48,7 +48,7 @@ def init_db():
         
         # Create analyst user
         analyst_user = User(
-            email="analyst@theforce.security",
+            email="analyst@judahsecurity.com",
             username="analyst",
             hashed_password=get_password_hash("analyst123"),
             full_name="Security Analyst",
@@ -59,7 +59,7 @@ def init_db():
         
         # Create viewer user
         viewer_user = User(
-            email="viewer@theforce.security",
+            email="viewer@judahsecurity.com",
             username="viewer",
             hashed_password=get_password_hash("viewer123"),
             full_name="Read Only User",

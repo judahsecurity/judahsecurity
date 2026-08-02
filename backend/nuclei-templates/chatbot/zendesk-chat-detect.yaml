@@ -2,7 +2,7 @@ id: zendesk-chat-detect
 
 info:
   name: Zendesk Chat / Web Widget Detect
-  author: theforcesecurity
+  author: judahsecurity
   severity: info
   description: |
     Detects Zendesk Chat (formerly Zopim) or the Zendesk Web Widget on internet-facing

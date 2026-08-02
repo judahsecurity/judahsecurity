@@ -62,7 +62,7 @@ REDIS_PORT=6379
 #
 # Cloudflare Turnstile setup (free):
 #   1. https://dash.cloudflare.com → Turnstile → Add site
-#   2. Add your domain (e.g. aegis.theforcesecurity.io)
+#   2. Add your domain (e.g. aegis.judahsecurity.io)
 #   3. Copy the Site Key -> CAPTCHA_SITE_KEY (public, safe for the browser)
 #      and the Secret Key -> CAPTCHA_SECRET_KEY (keep private)
 CAPTCHA_ENABLED=false
@@ -219,7 +219,7 @@ GITHUB_TOKEN=
 
 ## Production example (HTTPS + single domain)
 
-For a deployment like `https://aegis.theforcesecurity.io`:
+For a deployment like `https://aegis.judahsecurity.io`:
 
 ```bash
 # Database
@@ -231,8 +231,8 @@ POSTGRES_DB=asm_db
 SECRET_KEY=your-generated-secret-key
 
 # Frontend / API (use your real domain)
-NEXT_PUBLIC_API_URL=https://aegis.theforcesecurity.io
-CORS_ORIGINS=["https://aegis.theforcesecurity.io"]
+NEXT_PUBLIC_API_URL=https://aegis.judahsecurity.io
+CORS_ORIGINS=["https://aegis.judahsecurity.io"]
 
 # Auth hardening — enable CAPTCHA to stop credential brute-forcing.
 # Keys from Cloudflare dashboard → Turnstile (see main config block above).

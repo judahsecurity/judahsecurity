@@ -2,7 +2,7 @@ id: intercom-chat-detect
 
 info:
   name: Intercom Live Chat Detect
-  author: theforcesecurity
+  author: judahsecurity
   severity: info
   description: |
     Detects the Intercom live chat / messaging widget on internet-facing web assets.

@@ -1,4 +1,4 @@
--- The Force Security ASM - Database Initialization Script
+-- Judah Security ASM - Database Initialization Script
 -- This script runs automatically when the PostgreSQL container starts for the first time
 
 -- Enable UUID extension (useful for future enhancements)
@@ -10,7 +10,7 @@ GRANT ALL PRIVILEGES ON DATABASE asm_db TO asm_user;
 -- Log initialization
 DO $$
 BEGIN
-    RAISE NOTICE 'The Force Security ASM database initialized successfully!';
+    RAISE NOTICE 'Judah Security ASM database initialized successfully!';
 END $$;
 
 -- ============================================================================

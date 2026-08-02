@@ -1,7 +1,7 @@
 # ASM Platform - AWS Deployment Guide
 
 <p align="center">
-  <img src="frontend/public/logo.svg" alt="The Force Security Logo" width="100" height="100">
+  <img src="frontend/public/logo.svg" alt="Judah Security Logo" width="100" height="100">
 </p>
 
 <p align="center">
@@ -75,7 +75,7 @@
 │                    ▼                                              ▼                          │
 │  ┌─────────────────────────────────┐          ┌─────────────────────────────────────────┐   │
 │  │          Amazon SQS             │          │              Amazon S3                   │   │
-│  │   asm-scan-jobs                 │          │   asm-commoncrawl-theforce              │   │
+│  │   asm-scan-jobs                 │          │   asm-commoncrawl-judah              │   │
 │  │                                 │          │                                          │   │
 │  │   • Async scan job queue        │          │   • Common Crawl subdomain index        │   │
 │  │   • Visibility: 3600s           │          │   • Historical web crawl data           │   │
@@ -164,7 +164,7 @@
 |----------|---------|---------|
 | **EC2 Instance** | t3.large (min), t3.xlarge (recommended) | Application host |
 | **SQS Queue** | `asm-scan-jobs` | Async scan processing |
-| **S3 Bucket** | `asm-commoncrawl-theforce` | Subdomain index |
+| **S3 Bucket** | `asm-commoncrawl-judah` | Subdomain index |
 | **Security Group** | Ports 22, 80, 443, 8000 | Network access control |
 
 ### Docker Compose Services
@@ -243,7 +243,7 @@ ssh -i your-key.pem ubuntu@PUBLIC_IP_FROM_OUTPUT
 
 # Clone the repository
 cd /opt/asm
-git clone https://github.com/javrav2/theforcesecurity_ASM.git .
+git clone https://github.com/judahsecurity/judahsecurity.git .
 
 # Run the setup script
 chmod +x aws/ec2-single/setup.sh
@@ -325,7 +325,7 @@ sudo mkdir -p /opt/asm
 sudo chown $USER:$USER /opt/asm
 
 # Clone the repository
-git clone https://github.com/javrav2/theforcesecurity_ASM.git /opt/asm
+git clone https://github.com/judahsecurity/judahsecurity.git /opt/asm
 cd /opt/asm
 ```
 
@@ -428,12 +428,12 @@ from app.models.user import User
 from app.core.security import get_password_hash
 
 db = SessionLocal()
-existing = db.query(User).filter(User.email == 'admin@theforce.security').first()
+existing = db.query(User).filter(User.email == 'admin@judahsecurity.com').first()
 if existing:
     print('Admin already exists')
 else:
     admin = User(
-        email='admin@theforce.security',
+        email='admin@judahsecurity.com',
         username='admin',
         hashed_password=get_password_hash('admin123'),
         full_name='Admin User',
@@ -464,7 +464,7 @@ db.close()
 
 | Field | Value |
 |-------|-------|
-| **Email** | `admin@theforce.security` |
+| **Email** | `admin@judahsecurity.com` |
 | **Password** | `admin123` |
 
 ⚠️ **IMPORTANT: Change the default password immediately after first login!**
@@ -1013,6 +1013,6 @@ If you encounter issues:
 ---
 
 <p align="center">
-  <strong>Made with ❤️ by The Force Security</strong>
+  <strong>Made with ❤️ by Judah Security</strong>
 </p>
 

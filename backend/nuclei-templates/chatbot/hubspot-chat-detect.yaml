@@ -2,7 +2,7 @@ id: hubspot-chat-detect
 
 info:
   name: HubSpot Live Chat / Conversations Detect
-  author: theforcesecurity
+  author: judahsecurity
   severity: info
   description: |
     Detects the HubSpot Conversations live chat widget on internet-facing web assets.

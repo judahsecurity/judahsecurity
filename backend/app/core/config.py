@@ -69,7 +69,7 @@ class Settings(BaseSettings):
         "http://3.88.137.29:80",
         "http://3.88.137.29:3000",
         "http://3.88.137.29:8000",
-        "https://aegis.theforcesecurity.io",
+        "https://aegis.judahsecurity.io",
     ]
     
     # Pagination

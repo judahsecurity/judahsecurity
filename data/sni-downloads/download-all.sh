@@ -42,4 +42,4 @@ du -sh . 2>/dev/null
 
 echo ""
 echo "Next step: Upload to S3 with:"
-echo "  aws s3 cp . s3://theforcesecurity-asm-cloud/sni-raw/ --recursive --exclude '*' --include '*.txt'"
+echo "  aws s3 cp . s3://judahsecurity-asm-cloud/sni-raw/ --recursive --exclude '*' --include '*.txt'"

@@ -2,7 +2,7 @@ id: custom-chat-widget-detect
 
 info:
   name: Custom / Generic Chat Widget Detect
-  author: theforcesecurity
+  author: judahsecurity
   severity: info
   description: |
     Detects custom or unbranded chat widgets on internet-facing web assets using

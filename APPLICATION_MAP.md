@@ -1,7 +1,7 @@
 # Application Map
 
 <p align="center">
-  <strong>Visual overview of The Force Security ASM Platform</strong>
+  <strong>Visual overview of Judah Security ASM Platform</strong>
 </p>
 
 ---
@@ -784,5 +784,5 @@ See [aegis-vanguard/README.md](aegis-vanguard/README.md) and [aegis-vanguard/DEP
 ---
 
 <p align="center">
-  <strong>Made with ❤️ by The Force Security</strong>
+  <strong>Made with ❤️ by Judah Security</strong>
 </p>

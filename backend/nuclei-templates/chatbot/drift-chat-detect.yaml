@@ -2,7 +2,7 @@ id: drift-chat-detect
 
 info:
   name: Drift Conversational Marketing Widget Detect
-  author: theforcesecurity
+  author: judahsecurity
   severity: info
   description: |
     Detects the Drift conversational marketing / sales chatbot widget on internet-facing

@@ -2,7 +2,7 @@ id: crisp-chat-detect
 
 info:
   name: Crisp Customer Messaging Detect
-  author: theforcesecurity
+  author: judahsecurity
   severity: info
   description: |
     Detects the Crisp customer messaging / live-chat widget on internet-facing web assets.

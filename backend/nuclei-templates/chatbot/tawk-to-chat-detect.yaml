@@ -2,7 +2,7 @@ id: tawk-to-chat-detect
 
 info:
   name: Tawk.to Live Chat Detect
-  author: theforcesecurity
+  author: judahsecurity
   severity: info
   description: |
     Detects the Tawk.to free live chat widget on internet-facing web assets.

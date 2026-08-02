@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.4
-# The Force Security ASM - Backend Dockerfile (Optimized)
+# Judah Security ASM - Backend Dockerfile (Optimized)
 # Uses pre-built binaries instead of compiling for faster builds
 
 FROM python:3.11-slim AS base

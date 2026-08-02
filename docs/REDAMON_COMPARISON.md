@@ -1,4 +1,4 @@
-# RedAmon vs The Force Security ASM
+# RedAmon vs Judah Security ASM
 
 This document compares [RedAmon](https://github.com/samugit83/redamon) (AI-powered agentic red team framework) with our ASM platform and lists recommended updates we have adopted or may adopt.
 

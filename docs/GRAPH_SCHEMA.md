@@ -167,7 +167,7 @@ All queries must filter by `organization_id` so indexes are used and data is ten
 
 ## Troubleshooting: graphs not working on /graph
 
-If https://aegis.theforcesecurity.io/graph (or your deployment) shows no data or "Disconnected":
+If https://aegis.judahsecurity.io/graph (or your deployment) shows no data or "Disconnected":
 
 1. **Neo4j not configured**
    Without Neo4j you still get the **Attack Surface** tab using PostgreSQL fallback. The **Relationships**, **Discovery**, **Attack Paths**, and **Vulnerability Impact** tabs only appear when Neo4j is connected.

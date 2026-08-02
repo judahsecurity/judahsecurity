@@ -2,7 +2,7 @@ id: freshchat-detect
 
 info:
   name: Freshchat / Freshworks Widget Detect
-  author: theforcesecurity
+  author: judahsecurity
   severity: info
   description: |
     Detects the Freshchat or Freshworks unified customer messaging widget on

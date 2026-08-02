@@ -2,7 +2,7 @@ id: genesys-chat-detect
 
 info:
   name: Genesys Cloud / PureCloud Chat Detect
-  author: theforcesecurity
+  author: judahsecurity
   severity: info
   description: |
     Detects Genesys Cloud (formerly PureCloud) or Genesys Engage chat widget on

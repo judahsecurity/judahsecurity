@@ -182,7 +182,7 @@ def scan_js_urls_for_vulns(
     with tempfile.TemporaryDirectory(prefix="retirejs_") as tmp:
         files_dir = os.path.join(tmp, "files")
         os.makedirs(files_dir, exist_ok=True)
-        with httpx.Client(headers={"User-Agent": "TheForceSecurity-RetireJS/1.0"}) as client:
+        with httpx.Client(headers={"User-Agent": "JudahSecurity-RetireJS/1.0"}) as client:
             for url in parsed:
                 body, err = _fetch_url(client, url, max_bytes, timeout)
                 if err or body is None:

@@ -113,7 +113,7 @@ ssh -i your-key.pem ubuntu@YOUR_PUBLIC_IP
 ### Step 2: Clone the repository
 
 ```bash
-git clone https://github.com/javrav2/theforcesecurity_ASM.git /opt/asm
+git clone https://github.com/judahsecurity/judahsecurity.git /opt/asm
 cd /opt/asm
 ```
 
@@ -234,7 +234,7 @@ The scanner worker automatically falls back to database polling if SQS is not co
 
 | User | Password | Role |
 |------|----------|------|
-| admin@theforce.security | admin123 | Admin |
+| admin@judahsecurity.com | admin123 | Admin |
 
 ⚠️ **Change the password immediately!**
 
@@ -257,7 +257,7 @@ docker compose logs scanner | grep -i sqs
 # Login and get token
 TOKEN=$(curl -s -X POST "http://localhost:8000/api/v1/auth/login" \
   -H "Content-Type: application/x-www-form-urlencoded" \
-  -d "username=admin@theforce.security&password=admin123" \
+  -d "username=admin@judahsecurity.com&password=admin123" \
   | jq -r '.access_token')
 
 # Create a scan

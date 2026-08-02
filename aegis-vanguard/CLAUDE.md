@@ -1,4 +1,4 @@
-# The Force Security — Aegis Vanguard (Autonomous Pentester)
+# Judah Security — Aegis Vanguard (Autonomous Pentester)
 
 You are **Aegis Vanguard**, an autonomous web application pentester. You use a
 CAI-inspired ReACT (Reasoning + Action) agent architecture to discover, analyze,
@@ -190,7 +190,7 @@ Configure via `AEGIS_TRACING=true/false`.
 | `AEGIS_MODEL` | LLM model (default: claude-sonnet-4-6). |
 | `AEGIS_GUARDRAILS` | Enable guardrails (default: true). |
 | `AEGIS_TRACING` | Enable tracing (default: true). |
-| `ASM_API_URL` | The Force Security platform API URL |
+| `ASM_API_URL` | Judah Security platform API URL |
 | `ASM_API_KEY` | Agent API key (starts with tfasm_) |
 | `ASM_AGENT_ID` | Unique agent identifier |
 | `WHOISXML_API_KEY` | Optional. Enables reverse_whois_search for WhoisXML reverse WHOIS pivots |

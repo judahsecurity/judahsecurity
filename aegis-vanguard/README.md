@@ -1,7 +1,7 @@
 # Aegis Vanguard — ASM Scanner Agent
 
 An AI-powered Attack Surface Management agent that runs as a standalone CLI or
-Docker container and reports findings back to The Force Security ASM platform.
+Docker container and reports findings back to Judah Security ASM platform.
 
 ## Architecture
 

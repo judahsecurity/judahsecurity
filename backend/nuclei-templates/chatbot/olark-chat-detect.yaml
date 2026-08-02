@@ -2,7 +2,7 @@ id: olark-chat-detect
 
 info:
   name: Olark Live Chat Detect
-  author: theforcesecurity
+  author: judahsecurity
   severity: info
   description: |
     Detects the Olark live chat widget on internet-facing web assets.

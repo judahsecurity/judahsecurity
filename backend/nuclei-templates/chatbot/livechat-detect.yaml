@@ -2,7 +2,7 @@ id: livechat-detect
 
 info:
   name: LiveChat Widget Detect
-  author: theforcesecurity
+  author: judahsecurity
   severity: info
   description: |
     Detects the LiveChat.com customer support widget on internet-facing web assets.

@@ -1,6 +1,6 @@
 # Guardian-CLI Tool Parity
 
-This document maps [Guardian-CLI](https://github.com/zakirkun/guardian-cli) tools to The Force Security ASM and explains how to add more tools so the agent can use them. It also describes how agent scan findings get into the platform’s findings table.
+This document maps [Guardian-CLI](https://github.com/zakirkun/guardian-cli) tools to Judah Security ASM and explains how to add more tools so the agent can use them. It also describes how agent scan findings get into the platform’s findings table.
 
 ---
 
