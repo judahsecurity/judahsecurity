@@ -19,6 +19,8 @@
 //   - Metasploit    Weaponized exploit module detection (GitHub search).
 //   - Nuclei        Automated scan template detection (GitHub search).
 //   - PoC-in-GitHub Public PoC repos via nomi-sec/PoC-in-GitHub raw index.
+//   - Exploit-DB    Public exploit archive via offensive-security/exploitdb mirror.
+//   - CXSecurity    Public advisory/exploit index via cveshow pages (best-effort).
 //   - JVN iPedia    Japanese national vulnerability database (MyJVN API).
 //   - BDU FSTEC     Russian national vulnerability database (GitHub mirror).
 //   - ATT&CK        CVE → MITRE technique mappings (CTID Mappings Explorer).
@@ -117,10 +119,12 @@ type ExternalEnrichment struct {
 	AttackerKB AttackerKBResult `json:"attackerkb"`
 
 	// Weaponization / public exploit artifacts
-	Metasploit MetasploitResult       `json:"metasploit"`
-	Nuclei     NucleiResult           `json:"nuclei"`
-	PoCGitHub  PoCGitHubResult        `json:"poc_github"`
-	VulnCheck  VulnCheckExploitResult `json:"vulncheck"`
+	Metasploit  MetasploitResult       `json:"metasploit"`
+	Nuclei      NucleiResult           `json:"nuclei"`
+	PoCGitHub   PoCGitHubResult        `json:"poc_github"`
+	ExploitDB   ExploitDBResult        `json:"exploitdb"`
+	CXSecurity  CXSecurityResult       `json:"cxsecurity"`
+	VulnCheck   VulnCheckExploitResult `json:"vulncheck"`
 
 	// Government / national database coverage
 	Vulnrichment VulnrichmentResult `json:"vulnrichment"`
@@ -198,6 +202,14 @@ func FetchAllWithVulnCheck(ctx context.Context, cveID, vulnCheckToken string) Ex
 		{"poc_github", func() {
 			r := FetchPoCGitHub(ctx, cveID)
 			mu.Lock(); result.PoCGitHub = r; mu.Unlock()
+		}},
+		{"exploitdb", func() {
+			r := FetchExploitDB(ctx, cveID)
+			mu.Lock(); result.ExploitDB = r; mu.Unlock()
+		}},
+		{"cxsecurity", func() {
+			r := FetchCXSecurity(ctx, cveID)
+			mu.Lock(); result.CXSecurity = r; mu.Unlock()
 		}},
 		{"vulnrichment", func() {
 			r := FetchVulnrichment(ctx, cveID)
@@ -303,6 +315,41 @@ func Apply(ext ExternalEnrichment, ev *schema.ExploitationEvidence) {
 			if ev.RecentPOCDays <= 0 || ext.PoCGitHub.RecentPOCDays < ev.RecentPOCDays {
 				ev.RecentPOCDays = ext.PoCGitHub.RecentPOCDays
 			}
+		}
+	}
+	if ext.ExploitDB.Found {
+		ev.PublicPOCFound = true
+		ev.ExploitDBFound = true
+		ev.ExploitDBCount = ext.ExploitDB.ExploitCount
+		urls := make([]string, 0, len(ext.ExploitDB.Exploits))
+		for _, e := range ext.ExploitDB.Exploits {
+			if e.URL != "" {
+				urls = append(urls, e.URL)
+			}
+		}
+		ev.ExploitDBURLs = appendUniqueAll(ev.ExploitDBURLs, urls)
+		ev.PublicPOCURLs = appendUniqueAll(ev.PublicPOCURLs, urls)
+		if ev.PublicPOCCount < ext.ExploitDB.ExploitCount {
+			ev.PublicPOCCount = ext.ExploitDB.ExploitCount
+		}
+	}
+	if ext.CXSecurity.Found {
+		ev.PublicPOCFound = true
+		ev.CXSecurityFound = true
+		ev.CXSecurityCount = ext.CXSecurity.Count
+		urls := make([]string, 0, len(ext.CXSecurity.Entries)+1)
+		if ext.CXSecurity.PageURL != "" {
+			urls = append(urls, ext.CXSecurity.PageURL)
+		}
+		for _, e := range ext.CXSecurity.Entries {
+			if e.URL != "" {
+				urls = append(urls, e.URL)
+			}
+		}
+		ev.CXSecurityURLs = appendUniqueAll(ev.CXSecurityURLs, urls)
+		ev.PublicPOCURLs = appendUniqueAll(ev.PublicPOCURLs, urls)
+		if ev.PublicPOCCount < ext.CXSecurity.Count {
+			ev.PublicPOCCount = ext.CXSecurity.Count
 		}
 	}
 	if ext.VulnCheck.Found {

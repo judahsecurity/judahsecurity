@@ -57,3 +57,38 @@ func TestApplyPoCGitHubSetsEvidence(t *testing.T) {
 		t.Fatalf("PublicPOCURLs len=%d; want 2", len(ev.PublicPOCURLs))
 	}
 }
+
+func TestApplyExploitDBAndCXSecurity(t *testing.T) {
+	ext := ExternalEnrichment{
+		ExploitDB: ExploitDBResult{
+			Found:        true,
+			ExploitCount: 4,
+			Exploits: []ExploitDBHit{
+				{URL: "https://github.com/offensive-security/exploitdb/blob/main/exploits/linux/remote/1.c"},
+			},
+		},
+		CXSecurity: CXSecurityResult{
+			Found:   true,
+			Count:   2,
+			PageURL: "https://cxsecurity.com/cveshow/CVE-2021-44228/",
+			Entries: []CXSecurityHit{
+				{URL: "https://cxsecurity.com/issue/WLB-2021120001"},
+			},
+		},
+	}
+	var ev schema.ExploitationEvidence
+	Apply(ext, &ev)
+
+	if !ev.PublicPOCFound {
+		t.Fatal("expected PublicPOCFound from Exploit-DB/CXSecurity")
+	}
+	if !ev.ExploitDBFound || ev.ExploitDBCount != 4 {
+		t.Fatalf("ExploitDBFound=%v count=%d", ev.ExploitDBFound, ev.ExploitDBCount)
+	}
+	if !ev.CXSecurityFound || ev.CXSecurityCount != 2 {
+		t.Fatalf("CXSecurityFound=%v count=%d", ev.CXSecurityFound, ev.CXSecurityCount)
+	}
+	if len(ev.ExploitDBURLs) == 0 || len(ev.CXSecurityURLs) == 0 {
+		t.Fatal("expected Exploit-DB and CXSecurity URLs")
+	}
+}

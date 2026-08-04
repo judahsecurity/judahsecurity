@@ -1,4 +1,4 @@
-"""Unit tests for NVD / OSV / GHSA catalog enrichment helpers (mocked HTTP)."""
+"""Unit tests for NVD / OSV / GHSA / exploit-source catalog enrichment (mocked HTTP)."""
 
 from unittest.mock import patch
 
@@ -30,16 +30,28 @@ def test_enrich_cve_catalog_merges_sources():
         "summary": "Log4Shell",
         "vulnerabilities": [],
     }]
+    poc = {"source": "poc_github", "found": True, "count": 2, "pocs": [{"url": "https://github.com/x/y"}]}
+    repos = {"source": "github_repos", "found": True, "count": 5, "repos": []}
+    edb = {"source": "exploitdb", "found": True, "count": 3, "exploits": [{"url": "https://github.com/offensive-security/exploitdb"}]}
+    cx = {"source": "cxsecurity", "found": True, "count": 1, "entries": [{"url": "https://cxsecurity.com/cveshow/CVE-2021-44228/"}]}
 
     with patch("app.services.vuln_intel_enrichment._fetch_nvd", return_value=nvd), \
          patch("app.services.vuln_intel_enrichment._fetch_osv", return_value=osv), \
-         patch("app.services.vuln_intel_enrichment._fetch_ghsa", return_value=ghsa):
+         patch("app.services.vuln_intel_enrichment._fetch_ghsa", return_value=ghsa), \
+         patch("app.services.vuln_intel_enrichment._fetch_poc_github", return_value=poc), \
+         patch("app.services.vuln_intel_enrichment._fetch_github_repos", return_value=repos), \
+         patch("app.services.vuln_intel_enrichment._fetch_exploitdb", return_value=edb), \
+         patch("app.services.vuln_intel_enrichment._fetch_cxsecurity", return_value=cx):
         out = enrich_cve_catalog("CVE-2021-44228", use_cache=False)
 
     assert out["enriched"] is True
     assert out["nvd"]["cvss_score"] == 10.0
     assert out["osv"]["id"] == "CVE-2021-44228"
     assert out["ghsa"][0]["ghsa_id"] == "GHSA-jfh8-c2jp-5v3q"
+    assert out["exploit_sources"]["poc_github"]["found"] is True
+    assert out["exploit_sources"]["github_repos"]["found"] is True
+    assert out["exploit_sources"]["exploitdb"]["found"] is True
+    assert out["exploit_sources"]["cxsecurity"]["found"] is True
 
 
 def test_load_fire_cves_from_list(tmp_path, monkeypatch):
