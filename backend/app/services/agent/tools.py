@@ -240,6 +240,14 @@ class ASMToolsManager:
             "test_race_condition": self.test_race_condition,
             "test_saml_sso": self.test_saml_sso,
             "test_credential_spray": self.test_credential_spray,
+            # Tester-process control plane
+            "compare_requests": self.compare_requests,
+            "sync_engagement_brain": self.sync_engagement_brain,
+            "update_hypothesis": self.update_hypothesis,
+            "queue_finding_followups": self.queue_finding_followups,
+            "log_engagement_approach": self.log_engagement_approach,
+            "add_engagement_credential": self.add_engagement_credential,
+            "get_engagement_brain": self.get_engagement_brain,
         }
         # Optional: web search (RedAmon-style) when Tavily API key is set
         if getattr(settings, "TAVILY_API_KEY", None):
@@ -2403,8 +2411,14 @@ class ASMToolsManager:
         ],
         "host_header": [
             {"vuln": "Password Reset Poisoning → ATO", "severity": "critical", "why": "Reset email absolute URL uses attacker Host / X-Forwarded-Host."},
+            {"vuln": "Host-Header Tenant Isolation Bypass", "severity": "critical", "why": "Same session + peer-tenant Host/X-Forwarded-Host returns other tenant data."},
             {"vuln": "Web Cache Poisoning via Unkeyed Host", "severity": "high", "why": "Host influences cache key inconsistently across layers."},
             {"vuln": "Routing SSRF", "severity": "high", "why": "Host selects upstream → internal service or metadata access."},
+        ],
+        "default_login": [
+            {"vuln": "Authenticated CVE Exploitation", "severity": "critical", "why": "Default creds unlock post-auth nuclei templates (e.g. Grafana CVE-2024-9264)."},
+            {"vuln": "Admin API / Config Abuse", "severity": "critical", "why": "Admin session can change auth, datasources, or exfil secrets."},
+            {"vuln": "Privilege Persistence", "severity": "high", "why": "Create backdoor users/tokens before password change."},
         ],
         "saml": [
             {"vuln": "Account Takeover via Assertion Tampering", "severity": "critical", "why": "Unsigned or wrapped assertions change NameID to victim."},
@@ -2456,6 +2470,8 @@ class ASMToolsManager:
             "subdomain_takeover": "subdomain_takeover", "takeover": "subdomain_takeover",
             "hostheader": "host_header", "host_header_injection": "host_header",
             "password_reset_poisoning": "host_header",
+            "default_credentials": "default_login", "default-login": "default_login",
+            "default_creds": "default_login", "weak_password": "default_login",
             "sso": "saml", "saml_sso": "saml",
             "gql": "graphql",
         }
@@ -3442,30 +3458,14 @@ class ASMToolsManager:
             "verdict": f"CREDENTIALS FOUND: {len(hits)} valid login(s)" if hits else ("LOCKOUT DETECTED — spray aborted" if lockout_detected else "No valid credentials found"),
         }, indent=2)[:_tool_output_max_chars()]
 
-    async def replay_http_request(
+    def _resolve_request_cookies(
         self,
-        method: str = "GET",
-        url: str = "",
-        headers: Optional[Dict[str, str]] = None,
-        body: Optional[str] = None,
-        cookies: Optional[Any] = None,
-        use_auth_session: bool = True,
-        timeout: int = 25,
-    ) -> str:
-        """Replay a captured HTTP request (tester-style request tampering).
-
-        Prefer samples from the capability map (api_samples). Optionally attaches
-        cookies from the session auth handoff after deep_crawl login.
-        """
-        import httpx
-
-        if not url or not str(url).strip():
-            return "Error: url is required (e.g. from capability_map.api_samples)."
-
-        method = (method or "GET").upper().strip()
-        hdrs = {str(k): str(v) for k, v in (headers or {}).items()}
+        headers: Dict[str, str],
+        cookies: Optional[Any],
+        use_auth_session: bool,
+    ) -> Dict[str, str]:
+        hdrs = dict(headers)
         cookie_header = hdrs.get("Cookie") or hdrs.get("cookie")
-
         if use_auth_session and not cookie_header:
             sess = getattr(self, "_auth_session", None) or {}
             jar = sess.get("cookies") or []
@@ -3482,33 +3482,474 @@ class ASMToolsManager:
                     parts.append(f"{k}={v}")
             if parts:
                 hdrs["Cookie"] = "; ".join(parts[:40])
+        return hdrs
+
+    async def _http_exchange(
+        self,
+        method: str,
+        url: str,
+        headers: Optional[Dict[str, str]] = None,
+        body: Optional[str] = None,
+        cookies: Optional[Any] = None,
+        use_auth_session: bool = True,
+        timeout: int = 25,
+        follow_redirects: bool = True,
+    ) -> Dict[str, Any]:
+        import httpx
+
+        method = (method or "GET").upper().strip()
+        hdrs = {str(k): str(v) for k, v in (headers or {}).items()}
+        hdrs = self._resolve_request_cookies(hdrs, cookies, use_auth_session)
+        async with httpx.AsyncClient(
+            follow_redirects=follow_redirects, verify=False, timeout=timeout
+        ) as client:
+            resp = await client.request(method, url, headers=hdrs, content=body)
+        body_text = resp.text or ""
+        return {
+            "request": {
+                "method": method,
+                "url": url,
+                "headers": {
+                    k: ("***" if k.lower() in ("authorization", "cookie") else v)
+                    for k, v in hdrs.items()
+                },
+                "body_len": len(body or ""),
+            },
+            "response": {
+                "status": resp.status_code,
+                "headers": dict(list(resp.headers.items())[:40]),
+                "body_preview": body_text[:4000],
+                "length": len(resp.content or b""),
+            },
+            "_body_text": body_text,
+        }
+
+    async def replay_http_request(
+        self,
+        method: str = "GET",
+        url: str = "",
+        headers: Optional[Dict[str, str]] = None,
+        body: Optional[str] = None,
+        cookies: Optional[Any] = None,
+        use_auth_session: bool = True,
+        timeout: int = 25,
+    ) -> str:
+        """Replay a captured HTTP request (tester-style request tampering).
+
+        Prefer samples from the capability map (api_samples). Optionally attaches
+        cookies from the session auth handoff after deep_crawl login.
+        """
+        if not url or not str(url).strip():
+            return "Error: url is required (e.g. from capability_map.api_samples)."
 
         try:
-            async with httpx.AsyncClient(follow_redirects=True, verify=False, timeout=timeout) as client:
-                resp = await client.request(method, url, headers=hdrs, content=body)
-            body_preview = resp.text[:4000] if resp.text else ""
+            exchange = await self._http_exchange(
+                method=method,
+                url=url,
+                headers=headers,
+                body=body,
+                cookies=cookies,
+                use_auth_session=use_auth_session,
+                timeout=timeout,
+            )
             out = {
-                "request": {
-                    "method": method,
-                    "url": url,
-                    "headers": {k: ("***" if k.lower() in ("authorization", "cookie") else v)
-                                for k, v in hdrs.items()},
-                    "body_len": len(body or ""),
-                },
-                "response": {
-                    "status": resp.status_code,
-                    "headers": dict(list(resp.headers.items())[:30]),
-                    "body_preview": body_preview,
-                    "length": len(resp.content or b""),
-                },
+                "request": exchange["request"],
+                "response": exchange["response"],
                 "note": (
                     "Use this to tamper method/headers/body on captured APIs. "
+                    "Prefer compare_requests when proving authz/tenant/Host logic bugs. "
                     "Pair with execute_interactsh for blind OOB sinks."
                 ),
             }
             return json.dumps(out, indent=2)[:_tool_output_max_chars()]
         except Exception as exc:
             return f"Error replaying request: {exc}"
+
+    async def compare_requests(
+        self,
+        baseline: Dict[str, Any],
+        mutant: Dict[str, Any],
+        interest_fields: Optional[List[str]] = None,
+        use_auth_session: bool = True,
+        timeout: int = 25,
+        hypothesis_id: Optional[str] = None,
+    ) -> str:
+        """Differential HTTP proof — baseline vs one mutation (tester core loop).
+
+        Use for IDOR, host-header tenant bypass, authz, and workflow tampers.
+        A 200 alone is never enough; this tool diffs status/length/body/fields.
+
+        Args:
+            baseline: {method, url, headers?, body?, cookies?}
+            mutant: same shape; typically one trust signal changed (Host, object id, header)
+            interest_fields: optional JSON/body keys to extract and compare (owner_id, email, tenant…)
+            use_auth_session: attach deep_crawl auth cookies when Cookie absent
+            timeout: per-request timeout
+            hypothesis_id: optional engagement hypothesis to annotate with result
+        """
+        import json as _json
+        import re as _re
+
+        def _norm(spec: Optional[Dict[str, Any]], label: str) -> Dict[str, Any]:
+            if not isinstance(spec, dict):
+                raise ValueError(f"{label} must be an object with at least url")
+            url = str(spec.get("url") or "").strip()
+            if not url:
+                raise ValueError(f"{label}.url is required")
+            if not url.startswith(("http://", "https://")):
+                url = f"https://{url}"
+            return {
+                "method": spec.get("method") or "GET",
+                "url": url,
+                "headers": spec.get("headers") or {},
+                "body": spec.get("body"),
+                "cookies": spec.get("cookies"),
+            }
+
+        try:
+            b = _norm(baseline, "baseline")
+            m = _norm(mutant, "mutant")
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)}, indent=2)
+
+        try:
+            base_ex = await self._http_exchange(
+                method=b["method"],
+                url=b["url"],
+                headers=b["headers"],
+                body=b["body"],
+                cookies=b["cookies"],
+                use_auth_session=use_auth_session,
+                timeout=timeout,
+                follow_redirects=False,
+            )
+            mut_ex = await self._http_exchange(
+                method=m["method"],
+                url=m["url"],
+                headers=m["headers"],
+                body=m["body"],
+                cookies=m["cookies"],
+                use_auth_session=use_auth_session,
+                timeout=timeout,
+                follow_redirects=False,
+            )
+        except Exception as exc:
+            return json.dumps({"error": f"compare_requests failed: {exc}"}, indent=2)
+
+        def _extract_fields(text: str) -> Dict[str, Any]:
+            found: Dict[str, Any] = {}
+            if not interest_fields:
+                return found
+            # Try JSON first
+            try:
+                data = _json.loads(text)
+            except Exception:
+                data = None
+            for field_name in interest_fields:
+                if data is not None:
+                    # shallow + one-level nested
+                    if isinstance(data, dict) and field_name in data:
+                        found[field_name] = data.get(field_name)
+                        continue
+                    if isinstance(data, dict):
+                        for v in data.values():
+                            if isinstance(v, dict) and field_name in v:
+                                found[field_name] = v.get(field_name)
+                                break
+                if field_name not in found:
+                    mobj = _re.search(
+                        rf'"{_re.escape(field_name)}"\s*:\s*"?([^",\s\}}]+)"?',
+                        text or "",
+                    )
+                    if mobj:
+                        found[field_name] = mobj.group(1)
+            return found
+
+        b_body = base_ex.pop("_body_text", "")
+        m_body = mut_ex.pop("_body_text", "")
+        b_fields = _extract_fields(b_body)
+        m_fields = _extract_fields(m_body)
+
+        status_delta = mut_ex["response"]["status"] - base_ex["response"]["status"]
+        length_delta = mut_ex["response"]["length"] - base_ex["response"]["length"]
+        body_changed = b_body != m_body
+        field_deltas = {
+            k: {"baseline": b_fields.get(k), "mutant": m_fields.get(k)}
+            for k in set(b_fields) | set(m_fields)
+            if b_fields.get(k) != m_fields.get(k)
+        }
+
+        # Heuristic signals (not auto-confirm — agent must interpret)
+        signals: List[str] = []
+        if status_delta != 0:
+            signals.append(f"status_delta={status_delta}")
+        if abs(length_delta) >= 32:
+            signals.append(f"length_delta={length_delta}")
+        if body_changed:
+            signals.append("body_changed")
+        if field_deltas:
+            signals.append(f"interest_field_deltas={list(field_deltas)}")
+
+        interesting = bool(signals) and mut_ex["response"]["status"] < 400
+        verdict = "NEEDS_INTERPRETATION"
+        if interesting and field_deltas:
+            verdict = "LIKELY_IMPACT"
+        elif not body_changed and status_delta == 0 and abs(length_delta) < 16:
+            verdict = "NO_MATERIAL_DIFF"
+        elif mut_ex["response"]["status"] in (401, 403, 404) and base_ex["response"]["status"] < 400:
+            verdict = "MUTANT_DENIED"
+        elif base_ex["response"]["status"] in (401, 403) and mut_ex["response"]["status"] < 400:
+            verdict = "MUTANT_BYPASS_CANDIDATE"
+
+        out = {
+            "verdict": verdict,
+            "signals": signals,
+            "status": {
+                "baseline": base_ex["response"]["status"],
+                "mutant": mut_ex["response"]["status"],
+                "delta": status_delta,
+            },
+            "length": {
+                "baseline": base_ex["response"]["length"],
+                "mutant": mut_ex["response"]["length"],
+                "delta": length_delta,
+            },
+            "interest_fields": {"baseline": b_fields, "mutant": m_fields, "deltas": field_deltas},
+            "baseline": base_ex,
+            "mutant": mut_ex,
+            "guidance": (
+                "LIKELY_IMPACT / MUTANT_BYPASS_CANDIDATE → update_hypothesis(status='proven') "
+                "with evidence, validate_finding, create_finding, then queue_finding_followups. "
+                "NO_MATERIAL_DIFF / MUTANT_DENIED → update_hypothesis(status='killed') unless "
+                "another mutation remains. Never report on status-200 alone."
+            ),
+        }
+
+        # Annotate engagement brain if present on the tool manager
+        if hypothesis_id:
+            try:
+                from app.services.agent.engagement_brain import (
+                    engagement_brain_from_dict,
+                    update_hypothesis,
+                )
+                brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+                status = (
+                    "proven"
+                    if verdict in ("LIKELY_IMPACT", "MUTANT_BYPASS_CANDIDATE")
+                    else (
+                        "killed"
+                        if verdict in ("NO_MATERIAL_DIFF", "MUTANT_DENIED")
+                        else "in_progress"
+                    )
+                )
+                evidence = (
+                    f"compare_requests verdict={verdict}; signals={signals}; "
+                    f"status {base_ex['response']['status']}→{mut_ex['response']['status']}; "
+                    f"len {base_ex['response']['length']}→{mut_ex['response']['length']}"
+                )
+                update_hypothesis(brain, hypothesis_id, status=status, evidence=evidence)
+                self._engagement_brain = brain.to_dict()
+                out["engagement_brain"] = self._engagement_brain
+                out["hypothesis_update"] = {"id": hypothesis_id, "status": status}
+            except Exception as exc:
+                out["hypothesis_update_error"] = str(exc)
+
+        return json.dumps(out, indent=2)[:_tool_output_max_chars()]
+
+    async def sync_engagement_brain(
+        self,
+        capability_map: Optional[Dict[str, Any]] = None,
+        reset: bool = False,
+    ) -> str:
+        """Seed/refresh the engagement brain from the session capability map.
+
+        Call after execute_deep_crawl (or when the map updates) so open hypotheses
+        drive fireteam_dispatch(specialists='auto').
+        """
+        from app.services.agent.engagement_brain import (
+            engagement_brain_from_dict,
+            format_engagement_brain_for_prompt,
+            seed_hypotheses_from_capability_map,
+            specialists_from_open_hypotheses,
+        )
+
+        cmap = capability_map or getattr(self, "_capability_map", None) or {}
+        brain = (
+            engagement_brain_from_dict(None)
+            if reset
+            else engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        )
+        brain = seed_hypotheses_from_capability_map(brain, cmap if isinstance(cmap, dict) else {})
+        self._engagement_brain = brain.to_dict()
+        return json.dumps(
+            {
+                "phase": brain.phase,
+                "target": brain.target,
+                "open_hypotheses": [
+                    h.to_dict()
+                    for h in brain.hypotheses
+                    if h.status in ("open", "in_progress")
+                ],
+                "credentials_redacted": [c.redacted() for c in brain.credentials],
+                "next_steps": brain.next_steps,
+                "suggested_specialists": specialists_from_open_hypotheses(brain),
+                "prompt_view": format_engagement_brain_for_prompt(self._engagement_brain),
+                "engagement_brain": self._engagement_brain,
+            },
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def update_hypothesis(
+        self,
+        hypothesis_id: str,
+        status: str,
+        evidence: str = "",
+    ) -> str:
+        """Mark a hypothesis open|in_progress|proven|killed with evidence."""
+        from app.services.agent.engagement_brain import (
+            engagement_brain_from_dict,
+            update_hypothesis as _update,
+        )
+
+        status = (status or "").strip().lower()
+        if status not in ("open", "in_progress", "proven", "killed"):
+            return json.dumps(
+                {"error": "status must be one of open|in_progress|proven|killed"},
+                indent=2,
+            )
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        hyp = _update(brain, hypothesis_id, status=status, evidence=evidence)
+        if not hyp:
+            return json.dumps(
+                {"error": f"hypothesis not found: {hypothesis_id}", "known": [h.id for h in brain.hypotheses]},
+                indent=2,
+            )
+        self._engagement_brain = brain.to_dict()
+        return json.dumps(
+            {"updated": hyp.to_dict(), "engagement_brain": self._engagement_brain},
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def queue_finding_followups(
+        self,
+        vuln_type: str = "",
+        title: str = "",
+        target: str = "",
+        evidence: str = "",
+    ) -> str:
+        """Enqueue chain cards after a confirmed finding (creds→auth CVE, Host→tenant, …)."""
+        from app.services.agent.engagement_brain import (
+            classify_finding_type,
+            engagement_brain_from_dict,
+            queue_followups_for_finding,
+            specialists_from_open_hypotheses,
+        )
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        vtype = vuln_type or classify_finding_type(title=title, description=evidence)
+        created = queue_followups_for_finding(
+            brain,
+            vuln_type=vtype,
+            title=title,
+            target=target,
+            evidence=evidence,
+        )
+        self._engagement_brain = brain.to_dict()
+        return json.dumps(
+            {
+                "classified_as": vtype,
+                "queued": [h.to_dict() for h in created],
+                "suggested_specialists": specialists_from_open_hypotheses(brain),
+                "next_steps": brain.next_steps,
+                "engagement_brain": self._engagement_brain,
+            },
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def log_engagement_approach(
+        self,
+        technique: str,
+        target: str = "",
+        result: str = "failed",
+        detail: str = "",
+    ) -> str:
+        """Record an approach tried so the agent does not blindly repeat failures."""
+        from app.services.agent.engagement_brain import (
+            engagement_brain_from_dict,
+            log_approach,
+        )
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        rec = log_approach(
+            brain,
+            technique=technique,
+            target=target,
+            result=result,
+            detail=detail,
+        )
+        self._engagement_brain = brain.to_dict()
+        return json.dumps(
+            {"logged": rec.to_dict(), "engagement_brain": self._engagement_brain},
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def add_engagement_credential(
+        self,
+        username: str,
+        secret: str,
+        source: str = "manual",
+        valid_on: Optional[List[str]] = None,
+        secret_type: str = "password",
+        notes: str = "",
+    ) -> str:
+        """Store a working credential for authenticated follow-up hypotheses."""
+        from app.services.agent.engagement_brain import (
+            add_credential,
+            engagement_brain_from_dict,
+        )
+
+        if not username or not secret:
+            return json.dumps({"error": "username and secret are required"}, indent=2)
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        rec = add_credential(
+            brain,
+            username=username,
+            secret=secret,
+            source=source,
+            valid_on=valid_on,
+            secret_type=secret_type,
+            notes=notes,
+        )
+        self._engagement_brain = brain.to_dict()
+        return json.dumps(
+            {
+                "stored": rec.redacted(),
+                "hint": (
+                    "Use these creds for authenticated nuclei (-var username=… -var password=…) "
+                    "and queue_finding_followups(vuln_type='default_login')."
+                ),
+                "engagement_brain": self._engagement_brain,
+            },
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def get_engagement_brain(self) -> str:
+        """Return the current engagement brain (hypotheses, creds redacted, next steps)."""
+        from app.services.agent.engagement_brain import (
+            format_engagement_brain_for_prompt,
+            specialists_from_open_hypotheses,
+            engagement_brain_from_dict,
+        )
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        return json.dumps(
+            {
+                "prompt_view": format_engagement_brain_for_prompt(brain.to_dict()),
+                "suggested_specialists": specialists_from_open_hypotheses(brain),
+                "engagement_brain": brain.to_dict(),
+            },
+            indent=2,
+        )[:_tool_output_max_chars()]
 
     async def fireteam_dispatch(
         self,
@@ -3538,15 +3979,28 @@ class ASMToolsManager:
             mission_from_capability_map,
             select_specialists_for_map,
         )
+        from app.services.agent.engagement_brain import (
+            engagement_brain_from_dict,
+            format_engagement_brain_for_prompt,
+            mission_from_hypotheses,
+            seed_hypotheses_from_capability_map,
+            specialists_from_open_hypotheses,
+        )
         from app.services.agent.fireteam_service import run_fireteam
 
         cmap_raw = capability_map or getattr(self, "_capability_map", None)
         cmap = build_capability_map_from_dict(cmap_raw) if cmap_raw else None
 
-        # Resolve specialists: "auto" → capability-map selection
+        # Keep engagement brain in sync with the map before specialist selection.
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        if cmap:
+            brain = seed_hypotheses_from_capability_map(brain, cmap.to_dict())
+            self._engagement_brain = brain.to_dict()
+
+        # Resolve specialists: "auto" → open hypotheses, else capability-map selection
         auto = False
         if specialists is None:
-            auto = bool(cmap) or mode == "attack"
+            auto = bool(cmap) or mode == "attack" or bool(brain.hypotheses)
             chosen = None
         elif specialists in ("auto", ["auto"], ("auto",)):
             auto = True
@@ -3559,25 +4013,35 @@ class ASMToolsManager:
                 auto = True
                 chosen = None
 
+        selection_source = "explicit"
         if auto:
-            chosen = select_specialists_for_map(
-                cmap,
-                include_recon=(mode == "recon"),
-            )
+            open_hyps = [h for h in brain.hypotheses if h.status in ("open", "in_progress")]
+            if open_hyps and mode != "recon":
+                chosen = specialists_from_open_hypotheses(brain)
+                selection_source = "hypotheses"
+            else:
+                chosen = select_specialists_for_map(
+                    cmap,
+                    include_recon=(mode == "recon"),
+                )
+                selection_source = "capability_map"
         if not chosen:
             chosen = (
                 ["web_recon", "vuln_triage", "secrets_hunter"]
                 if mode == "recon"
                 else select_specialists_for_map(cmap)
             )
+            selection_source = selection_source if auto else "default"
 
         if not mission or not str(mission).strip():
-            if cmap and cmap.target:
+            if brain.hypotheses:
+                mission = mission_from_hypotheses(brain)
+            elif cmap and cmap.target:
                 mission = mission_from_capability_map(cmap)
             else:
                 return "Error: mission is required (or provide a capability_map)."
 
-        # Ground the mission in concrete map evidence for specialists.
+        # Ground the mission in concrete map evidence + open hypotheses.
         if cmap and cmap.ready_for_attack:
             api_preview = [
                 f"{e.get('method')} {e.get('path')}" for e in cmap.api_endpoints[:15]
@@ -3589,6 +4053,11 @@ class ASMToolsManager:
                 f"- apis: {api_preview}\n"
                 f"- forms: {cmap.forms[:8]}\n"
                 f"- hunt_queue: {cmap.ranked_hunt_queue[:8]}\n"
+            )
+        if brain.hypotheses:
+            mission = (
+                f"{mission}\n\nENGAGEMENT BRAIN:\n"
+                f"{format_engagement_brain_for_prompt(brain.to_dict())}\n"
             )
 
         target_list = list(targets or [])
@@ -3624,7 +4093,14 @@ class ASMToolsManager:
             "specialists_requested": chosen,
             "specialists_run": result.specialists_run,
             "selection_mode": "auto" if auto else "explicit",
+            "selection_source": selection_source,
             "capability_map_ready": bool(cmap and cmap.ready_for_attack),
+            "open_hypotheses": [
+                {"id": h.id, "title": h.title, "specialist": h.specialist, "status": h.status}
+                for h in brain.hypotheses
+                if h.status in ("open", "in_progress")
+            ][:12],
+            "engagement_brain": getattr(self, "_engagement_brain", None),
             "total_tool_calls": result.total_tool_calls,
             "duration_seconds": result.duration_seconds,
             "merged_summary": result.merged_summary,

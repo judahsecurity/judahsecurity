@@ -461,6 +461,7 @@ class AgentOrchestrator:
             "target_info": TargetInfo().model_dump(),
             "capability_map": None,
             "auth_session": None,
+            "engagement_brain": None,
             "awaiting_user_approval": False,
             "phase_transition_pending": None,
             "qa_history": [],
@@ -572,8 +573,12 @@ class AgentOrchestrator:
             )
 
         from app.services.agent.capability_map import format_capability_map_for_prompt
+        from app.services.agent.engagement_brain import format_engagement_brain_for_prompt
         capability_map_formatted = format_capability_map_for_prompt(
             state.get("capability_map")
+        )
+        engagement_brain_formatted = format_engagement_brain_for_prompt(
+            state.get("engagement_brain")
         )
 
         system_prompt = REACT_SYSTEM_PROMPT.format(
@@ -587,6 +592,7 @@ class AgentOrchestrator:
             todo_list=todo_list_formatted,
             target_info=target_info_formatted,
             capability_map=capability_map_formatted,
+            engagement_brain=engagement_brain_formatted,
             session_notes=session_notes,
             knowledge_context=combined_knowledge,
             qa_history=qa_history_formatted,
@@ -778,12 +784,23 @@ class AgentOrchestrator:
                         tool_args["_waf_detected"] = output[:200]
                     break
 
-        # Inject session capability map into fireteam so specialists="auto" works
-        if tool_name == "fireteam_dispatch":
+        # Inject session capability map + engagement brain into fireteam / brain tools
+        if tool_name in (
+            "fireteam_dispatch",
+            "sync_engagement_brain",
+            "compare_requests",
+            "update_hypothesis",
+            "queue_finding_followups",
+            "add_engagement_credential",
+            "log_engagement_approach",
+            "get_engagement_brain",
+        ):
             if state.get("capability_map") and not tool_args.get("capability_map"):
-                tool_args["capability_map"] = state.get("capability_map")
+                if tool_name in ("fireteam_dispatch", "sync_engagement_brain"):
+                    tool_args["capability_map"] = state.get("capability_map")
             try:
                 self.tool_manager._capability_map = state.get("capability_map")
+                self.tool_manager._engagement_brain = state.get("engagement_brain")
             except Exception:
                 pass
 
@@ -793,7 +810,11 @@ class AgentOrchestrator:
             self.tool_manager._auth_session = auth_sess
         except Exception:
             pass
-        if auth_sess and tool_name in ("execute_deep_crawl", "execute_browser", "execute_interceptor"):
+        if auth_sess and tool_name in (
+            "execute_deep_crawl",
+            "execute_browser",
+            "execute_interceptor",
+        ):
             tool_args = self._inject_auth_session(tool_name, tool_args, auth_sess)
 
         if tool_name == "replay_http_request" and state.get("capability_map"):
@@ -984,6 +1005,68 @@ class AgentOrchestrator:
                 "authenticated": step_data["auth_session"].get("authenticated"),
                 "cookie_count": len(step_data["auth_session"].get("cookies") or []),
                 "target": step_data["auth_session"].get("target"),
+            })
+
+        # Persist engagement brain updates from tester-process tools / fireteam
+        brain_update = None
+        try:
+            brain_update = getattr(self.tool_manager, "_engagement_brain", None)
+        except Exception:
+            brain_update = None
+        # Prefer explicit engagement_brain embedded in JSON tool output
+        raw_out = step_data.get("tool_output") or ""
+        if tool_name in (
+            "sync_engagement_brain",
+            "update_hypothesis",
+            "queue_finding_followups",
+            "add_engagement_credential",
+            "log_engagement_approach",
+            "compare_requests",
+            "fireteam_dispatch",
+            "get_engagement_brain",
+        ) and "engagement_brain" in raw_out:
+            try:
+                parsed = json.loads(raw_out)
+                if isinstance(parsed, dict) and parsed.get("engagement_brain"):
+                    brain_update = parsed["engagement_brain"]
+            except Exception:
+                pass
+        # Auto-seed brain when capability map first becomes ready
+        if updates.get("capability_map") and updates["capability_map"].get("ready_for_attack"):
+            try:
+                from app.services.agent.engagement_brain import (
+                    engagement_brain_from_dict,
+                    seed_hypotheses_from_capability_map,
+                )
+                brain = engagement_brain_from_dict(
+                    brain_update or state.get("engagement_brain")
+                )
+                brain = seed_hypotheses_from_capability_map(
+                    brain, updates["capability_map"]
+                )
+                brain_update = brain.to_dict()
+            except Exception:
+                logger.exception("auto-seed engagement brain failed")
+
+        if brain_update:
+            updates["engagement_brain"] = brain_update
+            try:
+                self.tool_manager._engagement_brain = brain_update
+            except Exception:
+                pass
+            open_n = len(
+                [
+                    h
+                    for h in (brain_update.get("hypotheses") or [])
+                    if h.get("status") in ("open", "in_progress")
+                ]
+            )
+            await self._emit_status({
+                "type": "engagement_brain_update",
+                "phase": brain_update.get("phase"),
+                "open_hypotheses": open_n,
+                "credentials": len(brain_update.get("credentials") or []),
+                "next_steps": (brain_update.get("next_steps") or [])[:5],
             })
 
         return updates

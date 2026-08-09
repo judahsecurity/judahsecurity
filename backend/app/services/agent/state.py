@@ -239,6 +239,8 @@ class AgentState(TypedDict, total=False):
     capability_map: Optional[Dict[str, Any]]
     # Authenticated browser session handoff (storage_state / cookies)
     auth_session: Optional[Dict[str, Any]]
+    # Tester-process control plane (hypotheses, creds, approaches, chains)
+    engagement_brain: Optional[Dict[str, Any]]
     
     # Internal state
     _current_step: Optional[Dict[str, Any]]
