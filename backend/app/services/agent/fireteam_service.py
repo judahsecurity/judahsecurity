@@ -404,7 +404,11 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "Check get_engagement_brain for credentials before nuclei. "
             "Example: execute_nuclei args='-u https://host -id grafana-default-login,CVE-2024-9264 "
             "-var username=admin -var password=prom-operator -jsonl'. "
-            "On default-login hits: add_engagement_credential + queue_finding_followups."
+            "On default-login hits: add_engagement_credential + queue_finding_followups. "
+            "For Grafana admin sessions, ALSO prove datasource-proxy SSRF: create a temporary "
+            "datasource aimed at https://kubernetes.default.svc or metadata, then "
+            "GET /api/datasources/proxy/... — report only with internal response body evidence. "
+            "Prefer read-only canaries; do not mutate cluster state."
         ),
     ),
 ]

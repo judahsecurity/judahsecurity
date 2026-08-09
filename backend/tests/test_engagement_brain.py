@@ -99,10 +99,26 @@ def test_default_login_queues_grafana_chain_and_credential():
     )
     assert created
     assert any("9264" in h.title or "Authenticated CVE" in h.title for h in created)
+    assert any("ssrf" in h.title.lower() and "aks" in h.title.lower() for h in created)
+    assert any("datasource" in h.test.lower() for h in created)
     assert brain.credentials
     assert brain.credentials[0].username == "admin"
     assert brain.credentials[0].secret == "prom-operator"
     assert "authenticated" in brain.identities
+
+
+def test_grafana_ssrf_aks_card_skipped_for_non_grafana():
+    brain = engagement_brain_from_dict(None)
+    created = queue_followups_for_finding(
+        brain,
+        vuln_type="default_login",
+        title="Jenkins default credentials admin:admin",
+        target="https://jenkins.example.com",
+        evidence="dashboard",
+    )
+    assert created  # generic auth-cve / admin-ssrf may still queue
+    assert not any("aks" in h.title.lower() for h in created)
+    assert not any("9264" in h.title for h in created)
 
 
 def test_host_header_queues_tenant_bypass_card():

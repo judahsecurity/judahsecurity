@@ -271,6 +271,47 @@ _CHAIN_CARDS: Dict[str, List[Dict[str, str]]] = {
             "priority": "critical",
             "id_suffix": "grafana-9264",
         },
+        {
+            "title": "Grafana admin → datasource-proxy SSRF into internal AKS/K8s",
+            "assumption": (
+                "Server Admin / datasources:create can point a datasource at internal URLs "
+                "(kubernetes.default.svc, metadata, cluster DNS) and read full responses via "
+                "/api/datasources/proxy when data_source_proxy_whitelist is empty"
+            ),
+            "test": (
+                "With Grafana admin session: "
+                "1) POST /api/datasources with type=prometheus|testdata URL="
+                "https://kubernetes.default.svc or http://169.254.169.254/ (or in-cluster DNS); "
+                "2) GET /api/datasources/proxy/uid/<uid>/version or /api/v1/namespaces; "
+                "3) Also try CallResource /api/datasources/uid/<uid>/resources/* if proxy whitelist blocks; "
+                "4) Prefer read-only canaries (API discovery, /version, secrets list IF authorized) — no destructive writes"
+            ),
+            "pass_criteria": (
+                "Proxy/resource response body shows internal K8s API, cloud metadata, "
+                "cluster service content, or secrets metadata proving SSRF reachability"
+            ),
+            "kill_criteria": (
+                "Datasource create denied; proxy whitelist blocks private ranges; "
+                "network policy isolates Grafana from cluster API/metadata"
+            ),
+            "specialist": "coverage",
+            "priority": "critical",
+            "id_suffix": "grafana-ssrf-aks",
+        },
+        {
+            "title": "Admin URL-fetch / webhook SSRF after default login",
+            "assumption": "Admin UI features (webhooks, alert notifications, renderers, imports) fetch attacker-chosen URLs server-side",
+            "test": (
+                "From admin session, probe URL-accepting admin features with interactsh + "
+                "safe internal canaries (metadata IP, localhost version endpoints). "
+                "compare_requests only where a baseline non-internal URL exists."
+            ),
+            "pass_criteria": "OOB hit plus internal HTTP body, or confirmed metadata/internal content",
+            "kill_criteria": "URL fetch blocked / egress filtered; OOB-only without internal body",
+            "specialist": "injection",
+            "priority": "high",
+            "id_suffix": "admin-ssrf",
+        },
     ],
     "host_header": [
         {
@@ -447,8 +488,8 @@ def queue_followups_for_finding(
     existing = {h.id for h in brain.hypotheses}
     created: List[Hypothesis] = []
     for card in _CHAIN_CARDS.get(key, []):
-        # Skip Grafana-specific card unless target/title smells like Grafana
-        if card.get("id_suffix") == "grafana-9264":
+        # Skip Grafana-specific cards unless target/title smells like Grafana
+        if str(card.get("id_suffix") or "").startswith("grafana-"):
             if "grafana" not in blob and "grafana" not in (target or "").lower():
                 continue
         hid = _hyp_id(target or brain.target, key, card.get("id_suffix") or card["title"])

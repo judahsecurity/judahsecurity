@@ -2417,6 +2417,7 @@ class ASMToolsManager:
         ],
         "default_login": [
             {"vuln": "Authenticated CVE Exploitation", "severity": "critical", "why": "Default creds unlock post-auth nuclei templates (e.g. Grafana CVE-2024-9264)."},
+            {"vuln": "Grafana Datasource-Proxy SSRF → Internal AKS/K8s", "severity": "critical", "why": "Server Admin can proxy to kubernetes.default.svc / metadata when whitelist is empty."},
             {"vuln": "Admin API / Config Abuse", "severity": "critical", "why": "Admin session can change auth, datasources, or exfil secrets."},
             {"vuln": "Privilege Persistence", "severity": "high", "why": "Create backdoor users/tokens before password change."},
         ],
