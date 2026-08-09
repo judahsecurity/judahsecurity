@@ -57,14 +57,18 @@
 │                                                                                   │
 └──────────────────────────────────────────────────────────────────────────────────┘
 
-External autonomous pentester (optional):
+External autonomous pentester + harness (optional):
 
 ┌────────────────────────────┐     POST /api/v1/ingest/*      ┌──────────────────┐
 │  Aegis Vanguard            │ ─────────────────────────────▶ │  ASM Platform    │
 │  (aegis-vanguard/)         │                                │  findings +      │
-│  ReACT recon → vuln →      │ ◀── on-demand validate_finding │  validations     │
-│  exploit → report          │                                │                  │
-└────────────────────────────┘                                └──────────────────┘
+│  ReACT + parallel hunters  │ ◀── on-demand validate_finding │  validations     │
+│  → report                  │                                │                  │
+└─────────────▲──────────────┘                                └──────────────────┘
+              │ findings.jsonl (AEGIS_FINDINGS_SINK)
+┌─────────────┴──────────────┐
+│  Aegis Harness (harness/)  │  batch scan many targets + benchmark recall/precision
+└────────────────────────────┘
 ```
 
 ## ✨ Features
@@ -118,11 +122,18 @@ Unified inventory page with three tabs:
 
 ### 🤖 AI Security Agent
 - **Conversational Interface**: Chat-based security analysis powered by Claude or GPT
+- **Tester Process**: Capability map → engagement brain (hypotheses) → specialist fireteam → `compare_requests` differentials → chain follow-ups (e.g. Grafana default login → authenticated CVE / AKS SSRF)
 - **MCP Tool Integration**: Agent can run scans, discover assets, and analyze findings through natural language
-- **Playbook Library**: Pre-built playbooks for common recon and analysis workflows
+- **Playbook Library**: Pre-built playbooks including `tester-process`, `host-tenant-bypass`, and external assessment
 - **Dual Mode**: "Assist" mode (requires approval for actions) or "Agent" mode (autonomous)
 - **WebSocket Streaming**: Real-time status updates during tool execution
 - **Knowledge Base**: Persistent agent notes and knowledge for context across sessions
+- See [docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md](docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md)
+
+### 🧪 Aegis Harness (batch + benchmarks)
+- **Batch scanning**: Drive Aegis Vanguard across many authorized targets with resumable state
+- **Detection benchmarking**: Measure recall / precision / F1 (or CTF flag success) against ground-truth corpora
+- **CI gates**: Fail builds on low recall or scan errors — see [harness/README.md](harness/README.md)
 
 ### 🕸️ Graph Visualization & Attack Paths
 - **Neo4j Integration**: Asset relationship modeling (Domain → Subdomain → IP → Port → Service → Technology → Vulnerability → CVE)
@@ -448,17 +459,19 @@ judahsecurity/
 │   └── requirements.txt
 │
 ├── aegis-vanguard/            # Aegis Vanguard: autonomous ReACT pentest agent
-│   ├── agent/                 # Orchestrator, recon/vuln/exploit/report agents, guardrails
+│   ├── agent/                 # Orchestrator, OWASP hunters, guardrails, parallel fireteam
 │   ├── run_pentest.py         # Full pentest entrypoint
 │   ├── validate_finding.py    # On-demand single-finding validator
 │   ├── asm_bridge.py          # Ingestion client → ASM platform
 │   └── DEPLOYMENT.md          # Standalone / Docker deployment guide
 │
 ├── harness/                   # Aegis Harness: batch scanning + detection benchmarking
-│   └── local_harness/         # batch/ (run many targets) + benchmark/ (accuracy vs corpus)
+│   ├── local_harness/         # batch/ + benchmark/ + ground_truth corpora
+│   ├── examples/              # CI workflow examples
+│   └── README.md              # Install, batch, benchmark, CI gates
 │
 ├── db/init/                   # Database initialization
-├── docs/                      # Technical documentation (11 guides)
+├── docs/                      # Technical documentation
 ├── aws/                       # AWS deployment configs
 │   ├── cloudformation/        # CloudFormation templates
 │   ├── terraform/            # Terraform IaC
@@ -602,17 +615,24 @@ sudo docker system prune -a -f
 
 | Document | Description |
 |----------|-------------|
+| [docs/README.md](docs/README.md) | Documentation index (agent, harness, scans, graph) |
 | [APPLICATION_MAP.md](APPLICATION_MAP.md) | Visual architecture, data flow, and database schema diagrams |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | Complete AWS deployment guide (CloudFormation, EC2, SSL) |
 | [ENV_EXAMPLE.md](ENV_EXAMPLE.md) | Environment variable reference and troubleshooting |
+| [harness/README.md](harness/README.md) | **Aegis Harness** — batch scans + detection accuracy benchmarks |
+| [docs/HARNESS.md](docs/HARNESS.md) | Short pointer + how harness relates to the platform agent |
+| [aegis-vanguard/README.md](aegis-vanguard/README.md) | Autonomous ReACT pentester (ingest + validate) |
+| [docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md](docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md) | **Tester process** — hypotheses, fireteam, differentials, chain cards |
 | [docs/RECON_WORKFLOW.md](docs/RECON_WORKFLOW.md) | Full reconnaissance pipeline (5 phases) |
 | [docs/GRAPH_SCHEMA.md](docs/GRAPH_SCHEMA.md) | Neo4j graph database schema and queries |
 | [docs/MCP_AND_TLDFINDER.md](docs/MCP_AND_TLDFINDER.md) | MCP tool server and TLDFinder setup |
+| [docs/GUARDIAN_TOOL_PARITY.md](docs/GUARDIAN_TOOL_PARITY.md) | Agent MCP tool parity vs Guardian-CLI |
 | [docs/SCAN_TYPES_AND_PROJECT_SETTINGS.md](docs/SCAN_TYPES_AND_PROJECT_SETTINGS.md) | Scan type configuration |
 | [docs/SCAN_EXECUTION_AND_RESULTS.md](docs/SCAN_EXECUTION_AND_RESULTS.md) | Scan execution flow and result handling |
 | [docs/SCAN_TROUBLESHOOTING.md](docs/SCAN_TROUBLESHOOTING.md) | Common scan issues and fixes |
 | [docs/ADHOC_AND_RECURRING_SCANS.md](docs/ADHOC_AND_RECURRING_SCANS.md) | Ad-hoc vs scheduled scan workflows |
 | [docs/GRAPH_AND_DATA_FLOW_ROADMAP.md](docs/GRAPH_AND_DATA_FLOW_ROADMAP.md) | Graph feature roadmap |
+| [docs/REDAMON_COMPARISON.md](docs/REDAMON_COMPARISON.md) | RedAmon comparison / adopted ideas |
 
 ## 🔒 Security Considerations
 

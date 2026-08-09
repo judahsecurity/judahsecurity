@@ -3,24 +3,37 @@
 An AI-powered Attack Surface Management agent that runs as a standalone CLI or
 Docker container and reports findings back to Judah Security ASM platform.
 
+For **batch scanning and detection benchmarks**, use the sibling
+[Aegis Harness](../harness/README.md). For the **in-product ASM agent** tester
+process (engagement brain, fireteam, differentials), see
+[docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md](../docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md).
+
 ## Architecture
 
 ```
 ┌─────────────────────────────────────┐     ┌──────────────────────────────────┐
 │       Aegis Vanguard Container      │     │     ASM Platform                 │
 │                                     │     │                                  │
-│  Claude Agent (ReACT pipeline)      │     │  POST /api/v1/ingest/findings    │
-│       │                             │     │       │                          │
-│       ▼                             │     │       ▼                          │
-│  scanners.py                        │────▶│  Ingestion Service               │
-│  (subfinder, naabu, nuclei, etc.)   │     │       │                          │
-│       │                             │     │       ▼                          │
-│       ▼                             │     │  Assets, Vulns, Ports → Postgres │
-│  asm_bridge.py (API client)         │     │       │                          │
-│                                     │     │       ▼                          │
-│  CLAUDE.md (agent instructions)     │     │  Dashboard (Next.js)             │
+│  ReACT multi-agent pipeline         │     │  POST /api/v1/ingest/findings    │
+│  recon → parallel OWASP hunters     │     │       │                          │
+│       → exploit → report            │     │       ▼                          │
+│       │                             │────▶│  Ingestion Service               │
+│       ▼                             │     │       │                          │
+│  scanners.py (nuclei, httpx, …)     │     │       ▼                          │
+│  asm_bridge.py (API + findings sink)│     │  Assets, Vulns → Postgres        │
+│  CLAUDE.md / agent/* hunters        │     │  Dashboard (Next.js)             │
 └─────────────────────────────────────┘     └──────────────────────────────────┘
+              │
+              │ AEGIS_FINDINGS_SINK=findings.jsonl
+              ▼
+         Aegis Harness (batch + benchmark)
 ```
+
+## Parallel hunters (fireteam)
+
+Phase 2 fans out specialist hunters (injection, XSS, auth, authz, SSRF, business
+logic, host-header, …) with surface-selected API/enterprise packs. See
+`agent/owasp_hunters.py`, `agent/hunt_patterns.py`, and `CLAUDE.md`.
 
 ## Setup
 
@@ -111,16 +124,33 @@ aegis-vanguard-03: Vulnerability scanning
 - Only allow outbound traffic to scan targets and the ASM platform
 - Use TLS for all API communication
 
+## Harness (batch + accuracy)
+
+From the monorepo:
+
+```bash
+cd ../harness
+pip install -e ".[dev]"
+python -m local_harness.batch.run scan
+python -m local_harness.benchmark.run
+```
+
+The harness sets `AEGIS_FINDINGS_SINK` so each `run_pentest.py` invocation
+writes machine-readable `findings.jsonl` for judging. Details:
+[harness/README.md](../harness/README.md).
+
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `asm_bridge.py` | Python client for the ASM platform ingestion API |
+| `asm_bridge.py` | Python client for the ASM platform ingestion API + optional findings sink |
 | `scanners.py` | Wrappers around security scanning tools |
+| `agent/` | ReACT agents, OWASP hunters, guardrails, parallel fireteam |
 | `CLAUDE.md` | Instructions for the Aegis Vanguard Claude agent |
 | `run_pentest.py` | Main ReACT pentest entrypoint |
 | `validate_finding.py` | On-demand single-finding validator |
 | `Dockerfile` | Container image with all scanning tools pre-installed |
+| `DEPLOYMENT.md` | Local Python / compose / env reference |
 
 ## API Endpoints Used
 

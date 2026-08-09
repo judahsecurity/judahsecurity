@@ -8,7 +8,34 @@ This is the black-box / DAST analogue of a source-code hunting harness: instead
 of cloning repos and running a SAST scanner, it points the live scanner at
 target URLs and measures what it finds.
 
+Platform agent (in-product) tester process — hypotheses, fireteam, chain cards —
+is documented separately: [docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md](../docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md).
+The harness evaluates **Vanguard** detection quality; use ground-truth tags that
+mirror those chain classes when you care about logic/SSRF/default-cred recall.
+
 > **Authorization:** Only scan targets you are explicitly authorized to test.
+
+---
+
+## Quick start
+
+```bash
+cd harness
+pip install -e ".[dev]"
+
+# Batch-scan an authorized target list
+python -m local_harness.batch.run scan
+
+# Benchmark against the example corpus (Juice Shop / DVWA / …)
+python -m local_harness.benchmark.run \
+  --ground-truth local_harness/benchmark/ground_truth/EXAMPLE.json
+```
+
+Artifacts: `harness/runs/` (gitignored). Offline unit tests:
+
+```bash
+python -m pytest tests/ --cov=local_harness
+```
 
 ---
 
@@ -157,6 +184,54 @@ The scanner itself still reads its own env (`ANTHROPIC_API_KEY`, `AEGIS_MODEL`,
 export AEGIS_HARNESS_SCANNER_ARGS="--fast --max-risk medium"
 ```
 
+## Measuring tester-style / chain findings
+
+Ground-truth entries can carry `tags` that align with engagement-brain chain
+classes (see platform docs). Useful tags when building corpora:
+
+| Tag / expected class | What “solved” should mean |
+|----------------------|---------------------------|
+| `default_credentials` | Working default login proven (not just login panel detect) |
+| `ssrf` | Internal/metadata body or OOB+internal impact — not DNS-only |
+| `idor` / authz | Cross-identity data access with response evidence |
+| `host_header` / tenant | Peer-tenant Host mutation with cross-tenant data |
+| CVE ids (e.g. `CVE-2024-9264`) | Authenticated exploit path when the template requires creds |
+
+Example expectation fragment:
+
+```json
+{
+  "juice-shop": {
+    "target": "http://localhost:3000",
+    "expected_findings": [
+      {"id": "default-admin", "tags": ["default_credentials"], "severity": "critical"},
+      {"id": "idor-basket", "tags": ["idor"], "severity": "high"}
+    ]
+  }
+}
+```
+
+When judging chain quality, prefer **flag** or tight expected_findings over
+loose “Nuclei info” matches — the platform agent’s engagement brain is scored
+on proven impact, not template volume.
+
+## Layout
+
+```
+harness/
+├── README.md
+├── pyproject.toml
+├── examples/
+│   └── github-actions-benchmark.yml
+├── local_harness/
+│   ├── batch/           # multi-target scan + collect
+│   ├── benchmark/       # ground_truth/, judge, tally, xben_import
+│   ├── runner.py        # subprocess driver for run_pentest.py
+│   └── findings.py      # JSONL sink parsing
+├── tests/               # offline stub-scanner suite
+└── runs/                # local artifacts (not committed)
+```
+
 ## Tests
 
 ```bash
@@ -166,3 +241,9 @@ pip install -e ".[dev]" && python -m pytest tests/ --cov=local_harness
 
 The suite uses a stub scanner (no API key, network, or tools required), so it
 validates the full batch + benchmark flow offline.
+
+## See also
+
+- [aegis-vanguard/README.md](../aegis-vanguard/README.md) — scanner under test  
+- [docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md](../docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md) — in-product agent control plane  
+- Root [README.md](../README.md) — platform overview
