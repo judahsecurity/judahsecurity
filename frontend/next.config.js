@@ -10,6 +10,7 @@ const nextConfig = {
   // Increase proxy timeout for agent requests (default is ~30s, agent can take 5 min)
   experimental: {
     proxyTimeout: 720000, // 12 minutes in ms — must exceed backend AGENT_REQUEST_TIMEOUT_SECONDS (11 min)
+    optimizePackageImports: ['lucide-react'],
   },
   // Keep HTTP connections alive longer so long-running agent calls don't drop
   httpAgentOptions: {

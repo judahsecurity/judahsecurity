@@ -1,12 +1,19 @@
 'use client';
 
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
+import dynamic from 'next/dynamic';
 import { MainLayout } from '@/components/layout/MainLayout';
 import { Header } from '@/components/layout/Header';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
-import { WorldMap } from '@/components/map/WorldMap';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import {
   Globe,
   Shield,
@@ -32,6 +39,46 @@ import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import Link from 'next/link';
 import { useToast } from '@/hooks/use-toast';
+
+const WorldMap = dynamic(
+  () => import('@/components/map/WorldMap').then((m) => m.WorldMap),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex items-center justify-center h-[420px] text-muted-foreground text-sm">
+        Loading map…
+      </div>
+    ),
+  }
+);
+
+type FindingsGroupBy =
+  | 'severity'
+  | 'status'
+  | 'organization'
+  | 'country'
+  | 'asset_type'
+  | 'root_domain';
+
+const FINDINGS_GROUP_OPTIONS: { value: FindingsGroupBy; label: string }[] = [
+  { value: 'severity', label: 'Severity' },
+  { value: 'status', label: 'Status' },
+  { value: 'organization', label: 'Organization' },
+  { value: 'country', label: 'Country' },
+  { value: 'asset_type', label: 'Asset type' },
+  { value: 'root_domain', label: 'Root domain' },
+];
+
+const GROUP_BAR_COLORS = [
+  'bg-red-600',
+  'bg-orange-500',
+  'bg-yellow-500',
+  'bg-green-500',
+  'bg-blue-500',
+  'bg-purple-500',
+  'bg-cyan-500',
+  'bg-pink-500',
+];
 
 interface DashboardStats {
   total_assets: number;
@@ -119,68 +166,116 @@ export default function DashboardPage() {
   const [remediationStats, setRemediationStats] = useState<RemediationStats | null>(null);
   const [exposureStats, setExposureStats] = useState<ExposureStats | null>(null);
   const [loading, setLoading] = useState(true);
+  const [mapLoading, setMapLoading] = useState(true);
   const [recentVulns, setRecentVulns] = useState<any[]>([]);
   const [assets, setAssets] = useState<any[]>([]);
   const [delphiPriorities, setDelphiPriorities] = useState<DelphiPriorityFinding[]>([]);
   const [delphiStatus, setDelphiStatus] = useState<DelphiStatus | null>(null);
+  const [findingsGroupBy, setFindingsGroupBy] = useState<FindingsGroupBy>('severity');
+  const [findingsGroups, setFindingsGroups] = useState<Array<{ key: string; label: string; count: number }>>([]);
+  const [groupsLoading, setGroupsLoading] = useState(false);
   const { toast } = useToast();
 
-  const fetchDashboardData = async () => {
-    setLoading(true);
+  const syncFindingsGroups = useCallback((vulnSummary: any, groupBy: FindingsGroupBy) => {
+    if (Array.isArray(vulnSummary.groups) && vulnSummary.groups.length > 0) {
+      setFindingsGroups(vulnSummary.groups);
+      return;
+    }
+    if (groupBy === 'severity' && vulnSummary.by_severity) {
+      setFindingsGroups(
+        ['critical', 'high', 'medium', 'low'].map((k) => ({
+          key: k,
+          label: k.charAt(0).toUpperCase() + k.slice(1),
+          count: vulnSummary.by_severity[k] || 0,
+        }))
+      );
+      return;
+    }
+    setFindingsGroups([]);
+  }, []);
+
+  const fetchFindingsGrouped = useCallback(async (groupBy: FindingsGroupBy) => {
+    setGroupsLoading(true);
     try {
-      const [vulnSummary, orgs, assetsData, geoAssetsData, vulns, nbSummary, remediationData, exposureData, delphiPrios, delphiStat] = await Promise.all([
-        api.getVulnerabilitiesSummary(),
-        api.getOrganizations(),
-        api.getAssets({ limit: 10000 }), // Fetch assets for stats
-        api.getAssets({ limit: 50000, has_geo: true }), // Fetch all assets with geo data for the map
-        api.getVulnerabilities({ limit: 5 }),
-        api.getNetblockSummary().catch(() => null),
-        api.getRemediationEfficiency(30).catch(() => null),
-        api.getVulnerabilityExposure().catch(() => null),
-        api.getDelphiPriorities(10, false).catch(() => []),
-        api.getDelphiStatus().catch(() => null),
-      ]);
-
-      // Use geo assets for the map
-      const geoAssetsList = geoAssetsData.items || geoAssetsData || [];
-      setAssets(geoAssetsList);
-
-      setStats({
-        total_assets: assetsData.total || (assetsData.items || assetsData || []).length || 0,
-        total_vulnerabilities: vulnSummary.total || 0,  // Excludes info findings
+      const vulnSummary = await api.getVulnerabilitiesSummary(undefined, groupBy);
+      setStats((prev) => ({
+        total_assets: prev?.total_assets || 0,
+        total_organizations: prev?.total_organizations || 0,
+        recent_scans: prev?.recent_scans || 0,
+        total_vulnerabilities: vulnSummary.total || 0,
         total_all_vulnerabilities: vulnSummary.total_all || vulnSummary.total || 0,
         info_count: vulnSummary.info_count || vulnSummary.by_severity?.info || 0,
         critical_count: vulnSummary.by_severity?.critical || 0,
         high_count: vulnSummary.by_severity?.high || 0,
         medium_count: vulnSummary.by_severity?.medium || 0,
         low_count: vulnSummary.by_severity?.low || 0,
-        total_organizations: orgs.length || 0,
+      }));
+      syncFindingsGroups(vulnSummary, groupBy);
+    } catch (error) {
+      console.error('Failed to fetch grouped findings summary:', error);
+    } finally {
+      setGroupsLoading(false);
+    }
+  }, [syncFindingsGroups]);
+
+  const fetchDashboardData = useCallback(async () => {
+    setLoading(true);
+    setMapLoading(true);
+    try {
+      // Fast path: aggregates first so cards paint without waiting on the map payload
+      const [vulnSummary, assetSummary, orgs, vulns, nbSummary, remediationData, exposureData, delphiPrios, delphiStat] =
+        await Promise.all([
+          api.getVulnerabilitiesSummary(undefined, findingsGroupBy),
+          api.getAssetsSummary(),
+          api.getOrganizations({ limit: 100 }),
+          api.getVulnerabilities({ limit: 5 }),
+          api.getNetblockSummary().catch(() => null),
+          api.getRemediationEfficiency(30).catch(() => null),
+          api.getVulnerabilityExposure().catch(() => null),
+          api.getDelphiPriorities(10, false).catch(() => []),
+          api.getDelphiStatus().catch(() => null),
+        ]);
+
+      setStats({
+        total_assets: assetSummary.total || 0,
+        total_organizations: Array.isArray(orgs) ? orgs.length : 0,
         recent_scans: 0,
+        total_vulnerabilities: vulnSummary.total || 0,
+        total_all_vulnerabilities: vulnSummary.total_all || vulnSummary.total || 0,
+        info_count: vulnSummary.info_count || vulnSummary.by_severity?.info || 0,
+        critical_count: vulnSummary.by_severity?.critical || 0,
+        high_count: vulnSummary.by_severity?.high || 0,
+        medium_count: vulnSummary.by_severity?.medium || 0,
+        low_count: vulnSummary.by_severity?.low || 0,
       });
+      syncFindingsGroups(vulnSummary, findingsGroupBy);
 
-      if (nbSummary) {
-        setNetblockStats(nbSummary);
-      }
-
-      if (remediationData) {
-        setRemediationStats(remediationData);
-      }
-
-      if (exposureData) {
-        setExposureStats(exposureData);
-      }
-
+      if (nbSummary) setNetblockStats(nbSummary);
+      if (remediationData) setRemediationStats(remediationData);
+      if (exposureData) setExposureStats(exposureData);
       setRecentVulns(vulns.items || vulns || []);
       setDelphiPriorities(Array.isArray(delphiPrios) ? delphiPrios : []);
       setDelphiStatus(delphiStat);
+      setLoading(false);
+
+      // Slow path: lean geo markers (does not block stats)
+      try {
+        const geoAssetsData = await api.getGeoAssets({ limit: 5000 });
+        setAssets(geoAssetsData.items || []);
+      } catch (error) {
+        console.error('Failed to fetch geo assets:', error);
+        setAssets([]);
+      } finally {
+        setMapLoading(false);
+      }
     } catch (error) {
       console.error('Failed to fetch dashboard data:', error);
-    } finally {
       setLoading(false);
+      setMapLoading(false);
     }
-  };
+  }, [syncFindingsGroups, findingsGroupBy]);
 
-  // Transform assets for WorldMap - only include assets with valid geo data
+  // Transform lean geo assets for WorldMap
   const mapAssets = useMemo(() => {
     return assets
       .filter((a: any) => {
@@ -191,20 +286,11 @@ export default function DashboardPage() {
         return hasValidLat && hasValidLng;
       })
       .map((a: any) => {
-        // Derive max severity from per-severity counts already on the asset
         const maxSeverity: 'critical' | 'high' | 'medium' | 'low' | null =
           (a.critical_vuln_count ?? 0) > 0 ? 'critical' :
           (a.high_vuln_count ?? 0) > 0 ? 'high' :
           (a.medium_vuln_count ?? 0) > 0 ? 'medium' :
           (a.low_vuln_count ?? 0) > 0 ? 'low' : null;
-
-        const openPorts = (a.port_services ?? [])
-          .filter((p: any) => p.state === 'open')
-          .map((p: any) => ({
-            port: p.port,
-            service: p.service ?? p.service_name ?? '',
-            isRisky: p.is_risky ?? false,
-          }));
 
         return {
           id: a.id,
@@ -212,12 +298,11 @@ export default function DashboardPage() {
           type: a.asset_type?.toLowerCase() || 'subdomain',
           findingsCount: a.vulnerability_count || 0,
           maxSeverity,
-          openPortsCount: a.open_ports_count ?? openPorts.length,
-          riskyPortsCount: a.risky_ports_count ?? openPorts.filter((p: any) => p.isRisky).length,
-          openPorts,
-          // Threat intel flags set after DNS-threat / URLhaus scans
-          dnsThreat: a.metadata_?.dns_threat_listed ?? false,
-          urlhausMalicious: a.metadata_?.urlhaus_malicious ?? false,
+          openPortsCount: a.open_ports_count ?? 0,
+          riskyPortsCount: a.risky_ports_count ?? 0,
+          openPorts: [],
+          dnsThreat: a.dns_threat ?? a.metadata_?.dns_threat_listed ?? false,
+          urlhausMalicious: a.urlhaus_malicious ?? a.metadata_?.urlhaus_malicious ?? false,
           geoLocation: {
             latitude: parseFloat(a.latitude),
             longitude: parseFloat(a.longitude),
@@ -231,7 +316,24 @@ export default function DashboardPage() {
 
   useEffect(() => {
     fetchDashboardData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- initial load only; refresh button re-runs with current group
   }, []);
+
+  const breakdownItems = useMemo(() => {
+    if (findingsGroupBy === 'severity' && (!findingsGroups.length || findingsGroups.every((g) => ['critical', 'high', 'medium', 'low'].includes(g.key)))) {
+      return [
+        { label: 'Critical', count: stats?.critical_count || 0, color: 'bg-red-600' },
+        { label: 'High', count: stats?.high_count || 0, color: 'bg-orange-500' },
+        { label: 'Medium', count: stats?.medium_count || 0, color: 'bg-yellow-500' },
+        { label: 'Low', count: stats?.low_count || 0, color: 'bg-green-500' },
+      ];
+    }
+    return findingsGroups.map((g, i) => ({
+      label: g.label || g.key,
+      count: g.count || 0,
+      color: GROUP_BAR_COLORS[i % GROUP_BAR_COLORS.length],
+    }));
+  }, [findingsGroupBy, findingsGroups, stats]);
 
   const statCards = [
     {
@@ -299,7 +401,12 @@ export default function DashboardPage() {
         {/* World Map */}
         <Card>
           <CardContent className="pt-6">
-            {mapAssets.length > 0 ? (
+            {mapLoading ? (
+              <div className="text-center py-12 text-muted-foreground">
+                <RefreshCw className="h-8 w-8 mx-auto mb-4 opacity-50 animate-spin" />
+                <p>Loading map markers…</p>
+              </div>
+            ) : mapAssets.length > 0 ? (
               <WorldMap 
                 assets={mapAssets} 
                 onAssetClick={(asset) => {
@@ -319,42 +426,65 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
 
-        {/* Severity Breakdown */}
+        {/* Findings Breakdown */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <Card>
-            <CardHeader className="flex flex-row items-center justify-between">
-              <CardTitle className="text-lg">Vulnerability Breakdown</CardTitle>
-              <Button variant="ghost" size="icon" onClick={fetchDashboardData}>
-                <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
-              </Button>
+            <CardHeader className="flex flex-row items-center justify-between gap-3">
+              <CardTitle className="text-lg">Findings Breakdown</CardTitle>
+              <div className="flex items-center gap-2">
+                <Select
+                  value={findingsGroupBy}
+                  onValueChange={(value) => {
+                    const next = value as FindingsGroupBy;
+                    setFindingsGroupBy(next);
+                    fetchFindingsGrouped(next);
+                  }}
+                >
+                  <SelectTrigger className="h-8 w-[150px]">
+                    <SelectValue placeholder="Group by" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {FINDINGS_GROUP_OPTIONS.map((opt) => (
+                      <SelectItem key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Button variant="ghost" size="icon" onClick={fetchDashboardData}>
+                  <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+                </Button>
+              </div>
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
-                {[
-                  { label: 'Critical', count: stats?.critical_count || 0, color: 'bg-red-600' },
-                  { label: 'High', count: stats?.high_count || 0, color: 'bg-orange-500' },
-                  { label: 'Medium', count: stats?.medium_count || 0, color: 'bg-yellow-500' },
-                  { label: 'Low', count: stats?.low_count || 0, color: 'bg-green-500' },
-                ].map((item) => {
-                  const total = stats?.total_vulnerabilities || 1;
-                  const percentage = (item.count / total) * 100;
-                  return (
-                    <div key={item.label} className="space-y-2">
-                      <div className="flex items-center justify-between text-sm">
-                        <span className="text-muted-foreground">{item.label}</span>
-                        <span className="font-medium">{item.count}</span>
+                {(loading || groupsLoading) && breakdownItems.length === 0 ? (
+                  <p className="text-sm text-muted-foreground text-center py-6">Loading…</p>
+                ) : (
+                  breakdownItems.map((item) => {
+                    const total = Math.max(
+                      breakdownItems.reduce((sum, row) => sum + row.count, 0),
+                      1
+                    );
+                    const percentage = (item.count / total) * 100;
+                    return (
+                      <div key={item.label} className="space-y-2">
+                        <div className="flex items-center justify-between text-sm">
+                          <span className="text-muted-foreground truncate pr-2">{item.label}</span>
+                          <span className="font-medium shrink-0">{item.count}</span>
+                        </div>
+                        <div className="h-2 bg-muted rounded-full overflow-hidden">
+                          <div
+                            className={`h-full ${item.color} rounded-full transition-all duration-500`}
+                            style={{ width: `${percentage}%` }}
+                          />
+                        </div>
                       </div>
-                      <div className="h-2 bg-muted rounded-full overflow-hidden">
-                        <div
-                          className={`h-full ${item.color} rounded-full transition-all duration-500`}
-                          style={{ width: `${percentage}%` }}
-                        />
-                      </div>
-                    </div>
-                  );
-                })}
-                {/* Info count shown separately */}
-                {stats?.info_count && stats.info_count > 0 && (
+                    );
+                  })
+                )}
+                {/* Info count shown separately when grouping by severity */}
+                {findingsGroupBy === 'severity' && stats?.info_count && stats.info_count > 0 && (
                   <div className="pt-2 border-t border-muted">
                     <div className="flex items-center justify-between text-sm text-muted-foreground">
                       <span>Informational (not counted as findings)</span>
