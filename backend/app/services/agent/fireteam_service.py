@@ -178,6 +178,136 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_nuclei",
         ],
     ),
+    # ── Attack specialists (spawned from capability map after browser walkthrough) ──
+    SpecialistProfile(
+        name="app_mapper",
+        role=(
+            "Application mapper. You already have a browser capability map. "
+            "Summarize features, trust boundaries, and the highest-value hunt "
+            "queue. Do not spray scanners — reason about what a tester would try next."
+        ),
+        allowed_tools=[
+            "query_assets",
+            "analyze_attack_surface",
+            "rank_attack_surface",
+            "save_note",
+            "execute_curl",
+        ],
+        max_iterations=4,
+        system_prompt_suffix=(
+            "Output a ranked hunt queue with concrete URLs/forms/APIs from the mission. "
+            "Call save_note(category='artifact') with the map summary."
+        ),
+    ),
+    SpecialistProfile(
+        name="auth_logic",
+        role=(
+            "Auth / session / access-control specialist. Probe login, session cookies, "
+            "forced browsing, and horizontal/vertical authz using concrete endpoints "
+            "from the capability map."
+        ),
+        allowed_tools=[
+            "execute_curl",
+            "execute_browser",
+            "execute_httpx",
+            "bypass_403",
+            "test_saml_sso",
+            "save_note",
+            "validate_finding",
+            "create_finding",
+        ],
+        max_iterations=8,
+        system_prompt_suffix=(
+            "Prefer dual-identity or anonymous-vs-auth comparisons. Never invent credentials."
+        ),
+    ),
+    SpecialistProfile(
+        name="api_authz",
+        role=(
+            "API authorization specialist. Test captured first-party APIs for IDOR, "
+            "verb tampering, missing auth, and mass assignment on concrete paths."
+        ),
+        allowed_tools=[
+            "execute_curl",
+            "execute_httpx",
+            "execute_kiterunner",
+            "execute_schemathesis",
+            "discover_parameters",
+            "execute_arjun",
+            "validate_finding",
+            "create_finding",
+            "save_note",
+        ],
+        max_iterations=8,
+    ),
+    SpecialistProfile(
+        name="injection",
+        role=(
+            "Injection specialist (SQLi/XSS/SSTI/command). Use only parameters and "
+            "forms discovered in the capability map or confirmed via arjun/discover_parameters."
+        ),
+        allowed_tools=[
+            "discover_parameters",
+            "execute_arjun",
+            "execute_sqlmap",
+            "execute_xsstrike",
+            "execute_browser",
+            "generate_injection_payloads",
+            "execute_curl",
+            "validate_finding",
+            "create_finding",
+        ],
+        max_iterations=8,
+    ),
+    SpecialistProfile(
+        name="file_upload",
+        role=(
+            "File upload specialist. Abuse upload forms/APIs from the map for "
+            "content-type bypass, path issues, and stored XSS via uploaded content."
+        ),
+        allowed_tools=[
+            "execute_curl",
+            "execute_browser",
+            "execute_httpx",
+            "validate_finding",
+            "create_finding",
+            "save_note",
+        ],
+        max_iterations=6,
+    ),
+    SpecialistProfile(
+        name="saml_sso",
+        role=(
+            "SSO / SAML / OAuth specialist. Probe authorize/callback/SAML endpoints "
+            "for open redirects, signature issues, and OIDC misconfig."
+        ),
+        allowed_tools=[
+            "test_saml_sso",
+            "execute_jwt",
+            "execute_curl",
+            "execute_browser",
+            "validate_finding",
+            "create_finding",
+        ],
+        max_iterations=6,
+    ),
+    SpecialistProfile(
+        name="spa_client",
+        role=(
+            "SPA / client-side specialist. DOM XSS, hidden client routes, and "
+            "JS-driven API abuse using the browsed pages and bundles."
+        ),
+        allowed_tools=[
+            "execute_browser",
+            "execute_deep_crawl",
+            "scan_js_urls_for_secrets",
+            "execute_retirejs",
+            "execute_curl",
+            "validate_finding",
+            "create_finding",
+        ],
+        max_iterations=6,
+    ),
 ]
 
 _SPECIALISTS_BY_NAME: dict[str, SpecialistProfile] = {s.name: s for s in DEFAULT_SPECIALISTS}

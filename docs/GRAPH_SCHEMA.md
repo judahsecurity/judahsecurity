@@ -51,10 +51,13 @@ IP    ──[HOSTED_BY]──────> HostingProvider
 | **IP**          | **HOSTED_BY**     | **HostingProvider** | **CDN/cloud routing context**             |
 | **Asset**       | **SIGNED_BY**     | **Certificate**   | **TLS certificate linkage**                 |
 | **Certificate** | **ALSO_COVERS**   | **Subdomain**     | **SAN expansion → shadow IT discovery**     |
+| **IP**          | **FORWARDS_TO**   | **IP**            | **LB reachability: VIP → pool member (F5)** |
 
 **Bold rows** are the discovery provenance relationships added in the June 2026 update.
 
 **SAME_IP_AS** is created between Subdomains that resolve to the same IP (per organization). Use it to answer "what else is on this IP?" and to reason about shared infrastructure (RedAmon-style graph robustness).
+
+**FORWARDS_TO** links an internet-facing VIP IP to internal pool-member IPs discovered via the F5 BIG-IP integration. Edge properties: `source` (`f5`), `pool`, `virtual`, `port`, `organization_id`. Use it to answer "what internal IPs are reachable from the internet through this VIP?"
 
 ## Logical connections (query patterns)
 
@@ -163,7 +166,7 @@ All queries must filter by `organization_id` so indexes are used and data is ten
 - **ASN**: Created from `asset.asn` and linked to all resolved IPs via `BELONGS_TO_ASN`.
 - **HostingProvider**: Created from `asset.hosting_provider` and linked to both the asset and its IPs via `HOSTED_BY`.
 - **Certificate**: Created from `asset.ssl_info` JSON. SAN entries are expanded into `Subdomain` nodes via `ALSO_COVERS` — this surfaces shadow IT not yet in the asset inventory.
-- **is_internet_facing** on `IP` nodes: derived from `asset.is_public`. This is the boundary marker for future internal-hop modeling when aegis-vanguard discovers internal assets.
+- **is_internet_facing** on `IP` nodes: derived from `asset.is_public`. This is the boundary marker for internal-hop modeling (e.g. F5 VIP → pool member via `FORWARDS_TO`).
 
 ## Troubleshooting: graphs not working on /graph
 

@@ -133,6 +133,12 @@ class PortScannerService:
     Supports Naabu, Masscan, and Nmap with normalized output format.
     """
     
+    # Common locations for NSE script files (Debian/Ubuntu + local installs).
+    _NSE_SCRIPT_DIRS = (
+        "/usr/share/nmap/scripts",
+        "/usr/local/share/nmap/scripts",
+    )
+
     def __init__(
         self,
         naabu_path: str = "naabu",
@@ -144,9 +150,67 @@ class PortScannerService:
         self.masscan_path = masscan_path
         self.nmap_path = nmap_path
     
-    def _validate_targets(self, targets: List[str]) -> tuple:
+    def _filter_available_nse_scripts(self, scripts: List[str]) -> tuple:
+        """
+        Keep only NSE scripts that exist on this host.
+
+        Nmap aborts the entire scan if any --script name is missing
+        (e.g. community scripts like opcua-info / dnp3-info / codesys-v2-discover
+        that are not shipped with the distro nmap package).
+        """
+        if not scripts:
+            return [], []
+
+        script_dirs = [d for d in self._NSE_SCRIPT_DIRS if os.path.isdir(d)]
+        available = []
+        missing = []
+
+        for name in scripts:
+            base = name[:-4] if name.endswith(".nse") else name
+            # Categories (e.g. "default", "discovery") are not files — pass through.
+            if "/" not in base and os.path.sep not in base and "." not in base:
+                # Could be a category or a script basename. Prefer file match;
+                # if no scripts dir is readable, keep the name and let nmap decide.
+                found = False
+                for d in script_dirs:
+                    if os.path.isfile(os.path.join(d, f"{base}.nse")):
+                        available.append(base)
+                        found = True
+                        break
+                if found:
+                    continue
+                # Known NSE category names — keep without requiring a .nse file
+                if base in {
+                    "auth", "broadcast", "brute", "default", "discovery",
+                    "dos", "exploit", "external", "fuzzer", "intrusive",
+                    "malware", "safe", "version", "vuln",
+                }:
+                    available.append(base)
+                    continue
+                if script_dirs:
+                    missing.append(base)
+                else:
+                    available.append(base)
+            else:
+                # Path-like script reference
+                if os.path.isfile(name) or any(
+                    os.path.isfile(os.path.join(d, name)) for d in script_dirs
+                ):
+                    available.append(name)
+                else:
+                    missing.append(name)
+
+        return available, missing
+
+    def _validate_targets(self, targets: List[str], ip_only: bool = False) -> tuple:
         """
         Validate and clean targets, removing invalid entries.
+        
+        Args:
+            targets: Raw target list (IPs, CIDRs, hostnames)
+            ip_only: If True, only accept IPv4 addresses/CIDRs (required for masscan,
+                     which cannot resolve hostnames and fails the whole -iL file on
+                     the first non-IP line).
         
         Returns: (valid_targets, invalid_targets)
         """
@@ -155,6 +219,7 @@ class PortScannerService:
         
         valid = []
         invalid = []
+        skipped_hostnames = 0
         
         # Domain regex - basic validation
         domain_pattern = re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z]{2,})+$')
@@ -170,7 +235,11 @@ class PortScannerService:
             
             # Check if it's a valid IP address
             try:
-                ipaddress.ip_address(target)
+                ip = ipaddress.ip_address(target)
+                # Masscan / raw scanners: skip non-routable noise that wastes probes
+                if ip_only and (ip.version != 4 or ip.is_unspecified or ip.is_loopback or ip.is_multicast):
+                    invalid.append(target)
+                    continue
                 valid.append(target)
                 continue
             except ValueError:
@@ -178,27 +247,46 @@ class PortScannerService:
             
             # Check if it's a valid CIDR
             try:
-                ipaddress.ip_network(target, strict=False)
+                network = ipaddress.ip_network(target, strict=False)
+                if ip_only and network.version != 4:
+                    invalid.append(target)
+                    continue
                 valid.append(target)
                 continue
             except ValueError:
                 pass
             
-            # Check if it's a valid domain
-            if domain_pattern.match(target):
-                valid.append(target)
-                continue
-            
-            # Check if it's a hostname (less strict)
-            if re.match(r'^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]$', target) and '.' in target:
+            # Hostnames are valid for naabu/nmap, but masscan cannot resolve them.
+            # Passing hostnames to masscan -iL aborts with:
+            #   "invalid IP address on line #1" / "FAIL: error reading from include file"
+            if domain_pattern.match(target) or (
+                re.match(r'^[a-zA-Z0-9][a-zA-Z0-9.-]*[a-zA-Z0-9]$', target) and '.' in target
+            ):
+                if ip_only:
+                    skipped_hostnames += 1
+                    continue
                 valid.append(target)
                 continue
             
             # Invalid target
             invalid.append(target)
         
+        if skipped_hostnames:
+            logger.info(
+                f"Skipped {skipped_hostnames} hostnames for masscan "
+                f"(masscan requires IPs/CIDRs; use naabu to scan hostnames)"
+            )
+            # Surface as a skip notice (not a malformed target) for callers
+            invalid.append(f"Skipped {skipped_hostnames} hostnames (masscan requires IPs/CIDRs)")
+        
         if invalid:
-            logger.warning(f"Filtered {len(invalid)} invalid targets: {invalid[:5]}{'...' if len(invalid) > 5 else ''}")
+            # Only log true invalids, not the hostname skip summary line
+            true_invalid = [t for t in invalid if not str(t).startswith("Skipped ")]
+            if true_invalid:
+                logger.warning(
+                    f"Filtered {len(true_invalid)} invalid targets: "
+                    f"{true_invalid[:5]}{'...' if len(true_invalid) > 5 else ''}"
+                )
         
         return valid, invalid
     
@@ -645,13 +733,22 @@ class PortScannerService:
                 targets, ports, rate, timeout, banner_grab
             )
         
-        # Validate targets before writing to file
-        valid_targets, invalid_targets = self._validate_targets(targets)
-        if invalid_targets:
-            result.errors.append(f"Skipped {len(invalid_targets)} invalid targets")
+        # Masscan only accepts IPs/CIDRs — hostnames abort the whole -iL file.
+        valid_targets, invalid_targets = self._validate_targets(targets, ip_only=True)
+        true_invalid = [t for t in invalid_targets if not str(t).startswith("Skipped ")]
+        for notice in invalid_targets:
+            if str(notice).startswith("Skipped "):
+                result.errors.append(notice)
+        if true_invalid:
+            result.errors.append(f"Skipped {len(true_invalid)} invalid targets")
         
         if not valid_targets:
-            result.errors.append("No valid targets to scan")
+            result.errors.append(
+                "No valid IP/CIDR targets for masscan. "
+                "Hostnames were filtered out — masscan cannot resolve DNS. "
+                "Use naabu, or target netblocks/IP assets."
+            )
+            result.duration_seconds = (datetime.utcnow() - start_time).total_seconds()
             return result
         
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as targets_file:
@@ -676,7 +773,10 @@ class PortScannerService:
             if banner_grab:
                 cmd.append("--banner")
             
-            logger.info(f"Running masscan on {len(targets)} targets with ports={ports}")
+            logger.info(
+                f"Running masscan on {len(valid_targets)} IP/CIDR targets "
+                f"(from {len(targets)} inputs) with ports={ports}"
+            )
             logger.debug(f"Masscan command: {' '.join(cmd)}")
             
             process = await asyncio.create_subprocess_exec(
@@ -783,9 +883,9 @@ class PortScannerService:
                 logger.error(f"Masscan output file not found: {output_path}")
             
             result.success = True
-            result.targets_scanned = len(targets)
-            result.hosts_scanned = targets
-            result.hosts_found = self._build_host_results(result.ports_found, targets)
+            result.targets_scanned = len(valid_targets)
+            result.hosts_scanned = valid_targets
+            result.hosts_found = self._build_host_results(result.ports_found, valid_targets)
             
         except Exception as e:
             logger.error(f"Masscan scan failed: {e}")
@@ -821,12 +921,32 @@ class PortScannerService:
         # Parse port range
         port_list = self._parse_port_spec(ports)
         
+        # Same IP-only filter as the main masscan path
+        valid_targets, invalid_targets = self._validate_targets(targets, ip_only=True)
+        for notice in invalid_targets:
+            if str(notice).startswith("Skipped "):
+                result.errors.append(notice)
+        true_invalid = [t for t in invalid_targets if not str(t).startswith("Skipped ")]
+        if true_invalid:
+            result.errors.append(f"Skipped {len(true_invalid)} invalid targets")
+        
+        if not valid_targets:
+            result.errors.append(
+                "No valid IP/CIDR targets for masscan. "
+                "Hostnames were filtered out — masscan cannot resolve DNS."
+            )
+            result.duration_seconds = (datetime.utcnow() - start_time).total_seconds()
+            return result
+        
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as targets_file:
-            targets_file.write("\n".join(targets))
+            targets_file.write("\n".join(valid_targets))
             targets_path = targets_file.name
         
         try:
-            logger.info(f"Running masscan per-port mode on {len(targets)} targets, {len(port_list)} ports")
+            logger.info(
+                f"Running masscan per-port mode on {len(valid_targets)} IP/CIDR targets, "
+                f"{len(port_list)} ports"
+            )
             
             for port in port_list:
                 with tempfile.NamedTemporaryFile(mode='w', suffix='.json', delete=False) as output_file:
@@ -865,9 +985,9 @@ class PortScannerService:
                         os.unlink(output_path)
             
             result.success = True
-            result.targets_scanned = len(targets)
-            result.hosts_scanned = targets
-            result.hosts_found = self._build_host_results(result.ports_found, targets)
+            result.targets_scanned = len(valid_targets)
+            result.hosts_scanned = valid_targets
+            result.hosts_found = self._build_host_results(result.ports_found, valid_targets)
             
         except Exception as e:
             logger.error(f"Masscan per-port scan failed: {e}")
@@ -1078,7 +1198,22 @@ class PortScannerService:
                 cmd.append("-O")
             
             if scripts:
-                cmd.extend(["--script", ",".join(scripts)])
+                available_scripts, missing_scripts = self._filter_available_nse_scripts(scripts)
+                if missing_scripts:
+                    logger.warning(
+                        "Skipping NSE scripts not installed on this host: %s",
+                        missing_scripts,
+                    )
+                    result.errors.append(
+                        f"Skipped missing NSE scripts: {', '.join(missing_scripts)}"
+                    )
+                if available_scripts:
+                    cmd.extend(["--script", ",".join(available_scripts)])
+                    logger.info("Using available NSE scripts: %s", available_scripts)
+                else:
+                    logger.warning(
+                        "No requested NSE scripts are installed; continuing without --script"
+                    )
             
             logger.info(f"Running nmap scan on {len(targets)} targets with ports={ports}")
             logger.debug(f"Nmap command: {' '.join(cmd)}")
@@ -1090,19 +1225,18 @@ class PortScannerService:
             )
             
             stdout, stderr = await process.communicate()
+            stderr_text = stderr.decode() if stderr else ""
             
             # Log any errors from nmap
             if process.returncode != 0:
-                error_msg = stderr.decode() if stderr else f"Exit code: {process.returncode}"
+                error_msg = stderr_text or f"Exit code: {process.returncode}"
                 logger.error(f"Nmap scan failed: {error_msg}")
                 result.errors.append(error_msg)
                 
                 # Check for common issues
                 if "requires root" in error_msg.lower() or "operation not permitted" in error_msg.lower():
                     result.errors.append("Nmap SYN scan requires root. Using -sT (connect scan) instead.")
-            
-            if stderr:
-                stderr_text = stderr.decode()
+            elif stderr_text:
                 logger.info(f"Nmap stderr: {stderr_text}")
             
             # Parse XML output
@@ -1113,7 +1247,18 @@ class PortScannerService:
                 logger.warning(f"Nmap output file not found: {output_path}")
                 result.errors.append("Nmap did not produce output file")
             
-            result.success = True
+            # Hard NSE/init failures leave no usable XML — treat as failed.
+            nse_fatal = (
+                process.returncode != 0
+                and (
+                    "failed to initialize the script engine" in stderr_text.lower()
+                    or "did not match a category" in stderr_text.lower()
+                    or "QUITTING" in stderr_text
+                )
+            )
+            result.success = process.returncode == 0 or (
+                not nse_fatal and bool(result.ports_found)
+            )
             result.targets_scanned = len(targets)
             result.hosts_scanned = targets
             result.hosts_found = self._build_host_results(result.ports_found, targets)

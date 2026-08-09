@@ -106,7 +106,7 @@ export default function WorkflowsPage() {
 
   return (
     <MainLayout>
-      <Header title="Workflows" subtitle="Design and run Trickest-style recon DAGs" />
+      <Header title="Loom" subtitle="Judah Loom — design and run attack-surface workflows" />
       <div className="p-6 space-y-4">
         <div className="flex flex-wrap items-center gap-3 justify-between">
           <div className="flex items-center gap-3">
@@ -137,7 +137,7 @@ export default function WorkflowsPage() {
             </Button>
           </div>
           <Button onClick={() => setCreateOpen(true)}>
-            <Plus className="h-4 w-4 mr-1" /> New workflow
+            <Plus className="h-4 w-4 mr-1" /> New Loom workflow
           </Button>
         </div>
 
@@ -177,7 +177,7 @@ export default function WorkflowsPage() {
             ))}
             {workflows.length === 0 && (
               <div className="col-span-full text-center text-muted-foreground py-16">
-                No workflows yet. Create one or seed the library.
+                No Loom workflows yet. Create one or seed the library.
               </div>
             )}
           </div>
@@ -187,7 +187,7 @@ export default function WorkflowsPage() {
       <Dialog open={createOpen} onOpenChange={setCreateOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Create workflow</DialogTitle>
+            <DialogTitle>Create Loom workflow</DialogTitle>
           </DialogHeader>
           <div className="space-y-3">
             <div className="space-y-1">

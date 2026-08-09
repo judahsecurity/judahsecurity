@@ -17,7 +17,12 @@ from app.models.user import User, UserRole
 from app.models.netblock import Netblock  # Import to ensure table creation
 from app.models.finding_exception import FindingException  # Required for Vulnerability relationship resolution
 from app.models.jira_integration import JiraIntegration, JiraTicket  # noqa: F401 — ensure tables are created
+from app.models.servicenow_integration import ServiceNowIntegration, ServiceNowDelivery  # noqa: F401 — ensure tables are created
 from app.models.censys_integration import CensysAsmIntegration  # noqa: F401 — ensure table is created
+from app.models.panorama_integration import PanoramaIntegration  # noqa: F401 — ensure table is created
+from app.models.f5_integration import F5Integration  # noqa: F401 — ensure table is created
+from app.models.akamai_integration import AkamaiWafIntegration  # noqa: F401 — ensure table is created
+from app.models.cloudflare_integration import CloudflareWafIntegration  # noqa: F401 — ensure table is created
 from app.models.custom_nuclei_template import CustomNucleiTemplate  # noqa: F401 — ensure table is created
 from app.api.routes import auth, users, organizations, assets, vulnerabilities, scans, discovery, nuclei, ports, screenshots, external_discovery, waybackurls, netblocks, labels, scan_schedules, tools, sni_discovery, scan_config, acquisitions, oracle, agent
 from app.api.routes import integrations
@@ -596,9 +601,34 @@ def apply_oracle_migrations():
         "ALTER TABLE jira_tickets ADD COLUMN IF NOT EXISTS is_associated    BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE jira_tickets ADD COLUMN IF NOT EXISTS disconnected_at  TIMESTAMP WITH TIME ZONE",
 
+        # ── ServiceNow bidirectional sync + close validation ──────────────────
+        "ALTER TABLE servicenow_integrations ADD COLUMN IF NOT EXISTS sync_enabled              BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE servicenow_integrations ADD COLUMN IF NOT EXISTS table_name                VARCHAR(100) NOT NULL DEFAULT 'incident'",
+        "ALTER TABLE servicenow_integrations ADD COLUMN IF NOT EXISTS close_state               VARCHAR(50) NOT NULL DEFAULT '6'",
+        "ALTER TABLE servicenow_integrations ADD COLUMN IF NOT EXISTS reopen_state              VARCHAR(50) NOT NULL DEFAULT '2'",
+        "ALTER TABLE servicenow_integrations ADD COLUMN IF NOT EXISTS remote_closed_states      JSONB DEFAULT '[\"6\", \"7\"]'",
+        "ALTER TABLE servicenow_integrations ADD COLUMN IF NOT EXISTS validate_on_remote_close  BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE servicenow_integrations ADD COLUMN IF NOT EXISTS accept_close_as           VARCHAR(30) NOT NULL DEFAULT 'resolved'",
+        "ALTER TABLE servicenow_integrations ADD COLUMN IF NOT EXISTS last_pull_at              TIMESTAMP WITH TIME ZONE",
+        "ALTER TABLE servicenow_deliveries ADD COLUMN IF NOT EXISTS snow_state                     VARCHAR(50)",
+        "ALTER TABLE servicenow_deliveries ADD COLUMN IF NOT EXISTS snow_state_label               VARCHAR(100)",
+        "ALTER TABLE servicenow_deliveries ADD COLUMN IF NOT EXISTS last_synced_at                 TIMESTAMP WITH TIME ZONE",
+        "ALTER TABLE servicenow_deliveries ADD COLUMN IF NOT EXISTS pending_close_validation       BOOLEAN NOT NULL DEFAULT FALSE",
+        "ALTER TABLE servicenow_deliveries ADD COLUMN IF NOT EXISTS pending_close_validation_id    INTEGER",
+        "ALTER TABLE servicenow_deliveries ADD COLUMN IF NOT EXISTS last_close_validation_verdict  VARCHAR(50)",
+
         # ── Censys ASM integration schema migrations ──────────────────────────
         "ALTER TABLE censys_asm_integrations ADD COLUMN IF NOT EXISTS continuous_sync_enabled BOOLEAN NOT NULL DEFAULT FALSE",
         "ALTER TABLE censys_asm_integrations ADD COLUMN IF NOT EXISTS sync_interval_minutes   INTEGER NOT NULL DEFAULT 360",
+
+        # ── Panorama integration — config export / air-gapped mode ────────────
+        "ALTER TABLE panorama_integrations ADD COLUMN IF NOT EXISTS connection_mode     VARCHAR(32) NOT NULL DEFAULT 'api'",
+        "ALTER TABLE panorama_integrations ADD COLUMN IF NOT EXISTS export_file_path     TEXT",
+        "ALTER TABLE panorama_integrations ADD COLUMN IF NOT EXISTS export_filename      VARCHAR(512)",
+        "ALTER TABLE panorama_integrations ADD COLUMN IF NOT EXISTS export_file_size     INTEGER",
+        "ALTER TABLE panorama_integrations ADD COLUMN IF NOT EXISTS export_uploaded_at   TIMESTAMP",
+        "ALTER TABLE panorama_integrations ALTER COLUMN panorama_host DROP NOT NULL",
+        "ALTER TABLE panorama_integrations ALTER COLUMN api_key_encrypted DROP NOT NULL",
 
         # ── Forced password reset for admin-provisioned accounts ──────────────
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE",

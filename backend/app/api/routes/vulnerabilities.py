@@ -3,17 +3,18 @@
 import json
 import logging
 import os
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import func
+from sqlalchemy import case, func
 
 from app.db.database import get_db
 from app.models.vulnerability import Vulnerability, Severity, VulnerabilityStatus
 from app.models.finding_validation import FindingValidation, ValidationStatus
 from app.models.asset import Asset
+from app.models.organization import Organization
 from app.models.user import User
 from app.schemas.vulnerability import VulnerabilityCreate, VulnerabilityUpdate, VulnerabilityResponse
 from app.api.deps import get_current_active_user, require_analyst
@@ -21,6 +22,15 @@ from app.api.deps import get_current_active_user, require_analyst
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/vulnerabilities", tags=["Vulnerabilities"])
+
+VULN_SUMMARY_GROUP_BY = {
+    "severity",
+    "status",
+    "organization",
+    "country",
+    "asset_type",
+    "root_domain",
+}
 
 # ── SQS enqueue for on-demand validation (best-effort; DB poll is the fallback) ─
 _SQS_QUEUE_URL = os.getenv("SQS_QUEUE_URL")
@@ -265,6 +275,8 @@ def create_vulnerability(
 
     # Auto-create Jira ticket if the org has an active integration with auto-create enabled
     _maybe_auto_create_jira_ticket(db, new_vuln, background_tasks, asset.organization_id)
+    # Auto-push to ServiceNow if configured
+    _maybe_auto_push_servicenow(db, new_vuln, background_tasks, asset.organization_id)
 
     return new_vuln
 
@@ -374,14 +386,24 @@ def update_vulnerability(
     db.commit()
     db.refresh(vuln)
 
-    # Sync linked Jira ticket when status changes
+    # Sync linked ITSM tickets when status changes
     if new_status and new_status != old_status:
+        status_str = new_status.value if hasattr(new_status, "value") else str(new_status)
+        changed_by = current_user.email or current_user.username or "unknown"
         _maybe_sync_jira_ticket(
             db=db,
             vuln=vuln,
             old_status=old_status,
-            new_status=new_status.value if hasattr(new_status, "value") else str(new_status),
-            changed_by=current_user.email or current_user.username or "unknown",
+            new_status=status_str,
+            changed_by=changed_by,
+            background_tasks=background_tasks,
+        )
+        _maybe_sync_servicenow(
+            db=db,
+            vuln=vuln,
+            old_status=old_status,
+            new_status=status_str,
+            changed_by=changed_by,
             background_tasks=background_tasks,
         )
 
@@ -540,52 +562,182 @@ def bulk_update_vulnerabilities(
 @router.get("/stats/summary")
 def get_vulnerabilities_summary(
     include_out_of_scope: bool = Query(False, description="Include findings on out-of-scope assets"),
+    organization_id: Optional[int] = Query(None, description="Filter to a specific organization (superuser)"),
+    group_by: Optional[str] = Query(
+        None,
+        description="Optional grouping: severity, status, organization, country, asset_type, root_domain",
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    """Get vulnerability statistics summary.
+    """Get vulnerability statistics summary via SQL aggregation.
 
     Note: 'total' count excludes informational findings.
     By default only counts findings on in-scope assets.
+    Pass ``group_by`` to also return a ``groups`` array for that dimension.
     """
-    query = db.query(Vulnerability).join(Asset)
+    empty = {
+        "total": 0,
+        "total_all": 0,
+        "info_count": 0,
+        "by_severity": {},
+        "by_status": {},
+        "group_by": group_by,
+        "groups": [],
+    }
 
-    # Organization filter
-    if not current_user.is_superuser:
+    base = db.query(Vulnerability).join(Asset)
+
+    if current_user.is_superuser:
+        if organization_id:
+            base = base.filter(Asset.organization_id == organization_id)
+    else:
         if not current_user.organization_id:
-            return {"total": 0, "by_severity": {}, "by_status": {}, "info_count": 0}
-        query = query.filter(Asset.organization_id == current_user.organization_id)
+            return empty
+        base = base.filter(Asset.organization_id == current_user.organization_id)
 
     if not include_out_of_scope:
-        query = query.filter(Asset.in_scope == True)
+        base = base.filter(Asset.in_scope == True)
 
-    vulns = query.all()
-    
-    # Calculate stats
-    by_severity = {}
-    by_status = {}
-    actionable_count = 0  # Count of non-info findings
-    info_count = 0  # Track info separately
-    
-    for vuln in vulns:
-        sev_key = vuln.severity.value.lower() if hasattr(vuln.severity, 'value') else str(vuln.severity).lower()
-        status_key = vuln.status.value if hasattr(vuln.status, 'value') else str(vuln.status)
-        
-        by_severity[sev_key] = by_severity.get(sev_key, 0) + 1
-        by_status[status_key] = by_status.get(status_key, 0) + 1
-        
-        # Only count non-info findings toward the total
-        if sev_key != 'info' and sev_key != 'informational':
-            actionable_count += 1
+    # Severity breakdown (SQL)
+    sev_rows = (
+        base.with_entities(Vulnerability.severity, func.count(Vulnerability.id))
+        .group_by(Vulnerability.severity)
+        .all()
+    )
+    by_severity: Dict[str, int] = {}
+    info_count = 0
+    actionable_count = 0
+    total_all = 0
+    for sev, count in sev_rows:
+        sev_key = sev.value.lower() if hasattr(sev, "value") else str(sev).lower()
+        by_severity[sev_key] = count
+        total_all += count
+        if sev_key in ("info", "informational"):
+            info_count += count
         else:
-            info_count += 1
-    
+            actionable_count += count
+
+    # Status breakdown (SQL)
+    status_rows = (
+        base.with_entities(Vulnerability.status, func.count(Vulnerability.id))
+        .group_by(Vulnerability.status)
+        .all()
+    )
+    by_status = {
+        (st.value if hasattr(st, "value") else str(st)): count
+        for st, count in status_rows
+    }
+
+    groups: List[Dict[str, Any]] = []
+    normalized_group = (group_by or "").strip().lower() or None
+    if normalized_group:
+        if normalized_group not in VULN_SUMMARY_GROUP_BY:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid group_by. Allowed: {', '.join(sorted(VULN_SUMMARY_GROUP_BY))}",
+            )
+
+        # Count actionable (non-info) findings in each group
+        actionable_filter = ~Vulnerability.severity.in_([Severity.INFO])
+
+        if normalized_group == "severity":
+            groups = [
+                {"key": k, "label": k, "count": v}
+                for k, v in sorted(by_severity.items(), key=lambda x: x[1], reverse=True)
+                if k not in ("info", "informational")
+            ]
+        elif normalized_group == "status":
+            status_actionable = (
+                base.with_entities(Vulnerability.status, func.count(Vulnerability.id))
+                .filter(actionable_filter)
+                .group_by(Vulnerability.status)
+                .all()
+            )
+            groups = [
+                {
+                    "key": (st.value if hasattr(st, "value") else str(st)),
+                    "label": (st.value if hasattr(st, "value") else str(st)),
+                    "count": count,
+                }
+                for st, count in sorted(status_actionable, key=lambda x: x[1], reverse=True)
+            ]
+        elif normalized_group == "organization":
+            rows = (
+                base.with_entities(Organization.id, Organization.name, func.count(Vulnerability.id))
+                .join(Organization, Organization.id == Asset.organization_id)
+                .filter(actionable_filter)
+                .group_by(Organization.id, Organization.name)
+                .order_by(func.count(Vulnerability.id).desc())
+                .limit(50)
+                .all()
+            )
+            groups = [
+                {"key": str(oid), "label": name, "count": count}
+                for oid, name, count in rows
+            ]
+        elif normalized_group == "country":
+            rows = (
+                base.with_entities(
+                    func.coalesce(Asset.country_code, Asset.country, "Unknown"),
+                    func.coalesce(Asset.country, Asset.country_code, "Unknown"),
+                    func.count(Vulnerability.id),
+                )
+                .filter(actionable_filter)
+                .group_by(
+                    func.coalesce(Asset.country_code, Asset.country, "Unknown"),
+                    func.coalesce(Asset.country, Asset.country_code, "Unknown"),
+                )
+                .order_by(func.count(Vulnerability.id).desc())
+                .limit(50)
+                .all()
+            )
+            groups = [
+                {"key": str(key or "Unknown"), "label": str(label or "Unknown"), "count": count}
+                for key, label, count in rows
+            ]
+        elif normalized_group == "asset_type":
+            rows = (
+                base.with_entities(Asset.asset_type, func.count(Vulnerability.id))
+                .filter(actionable_filter)
+                .group_by(Asset.asset_type)
+                .order_by(func.count(Vulnerability.id).desc())
+                .limit(50)
+                .all()
+            )
+            groups = [
+                {
+                    "key": (at.value if hasattr(at, "value") else str(at)),
+                    "label": (at.value if hasattr(at, "value") else str(at)),
+                    "count": count,
+                }
+                for at, count in rows
+            ]
+        elif normalized_group == "root_domain":
+            rows = (
+                base.with_entities(
+                    func.coalesce(Asset.root_domain, "Unknown"),
+                    func.count(Vulnerability.id),
+                )
+                .filter(actionable_filter)
+                .group_by(func.coalesce(Asset.root_domain, "Unknown"))
+                .order_by(func.count(Vulnerability.id).desc())
+                .limit(50)
+                .all()
+            )
+            groups = [
+                {"key": str(key), "label": str(key), "count": count}
+                for key, count in rows
+            ]
+
     return {
-        "total": actionable_count,  # Excludes info findings
-        "total_all": len(vulns),  # Includes info findings
+        "total": actionable_count,
+        "total_all": total_all,
         "info_count": info_count,
         "by_severity": by_severity,
-        "by_status": by_status
+        "by_status": by_status,
+        "group_by": normalized_group,
+        "groups": groups,
     }
 
 
@@ -706,79 +858,84 @@ def get_vulnerability_exposure(
             }
         query = query.filter(Asset.organization_id == current_user.organization_id)
     
-    # Get all open vulnerabilities (excluding info)
-    open_vulns = query.filter(
+    open_q = query.filter(
         Vulnerability.status == VulnerabilityStatus.OPEN,
-        Vulnerability.severity != Severity.INFO
-    ).all()
-    
-    # Calculate exposure score (weighted by severity)
-    severity_weights = {
-        Severity.CRITICAL: 10,
-        Severity.HIGH: 5,
-        Severity.MEDIUM: 2,
-        Severity.LOW: 1,
-        Severity.INFO: 0
+        Vulnerability.severity != Severity.INFO,
+    )
+
+    # Weighted exposure score + severity distribution in one SQL pass
+    score_row = open_q.with_entities(
+        func.count(Vulnerability.id).label("total_findings"),
+        func.sum(case(
+            (Vulnerability.severity == Severity.CRITICAL, 10),
+            (Vulnerability.severity == Severity.HIGH, 5),
+            (Vulnerability.severity == Severity.MEDIUM, 2),
+            (Vulnerability.severity == Severity.LOW, 1),
+            else_=0,
+        )).label("exposure_score"),
+        func.sum(case((Vulnerability.severity == Severity.CRITICAL, 1), else_=0)).label("critical"),
+        func.sum(case((Vulnerability.severity == Severity.HIGH, 1), else_=0)).label("high"),
+        func.sum(case((Vulnerability.severity == Severity.MEDIUM, 1), else_=0)).label("medium"),
+        func.sum(case((Vulnerability.severity == Severity.LOW, 1), else_=0)).label("low"),
+        func.count(func.distinct(Vulnerability.asset_id)).label("assets_with_vulns"),
+    ).first()
+
+    total_findings = int(score_row.total_findings or 0) if score_row else 0
+    total_exposure_score = int(score_row.exposure_score or 0) if score_row else 0
+    assets_with_vulns = int(score_row.assets_with_vulns or 0) if score_row else 0
+    severity_distribution = {
+        "critical": int(score_row.critical or 0) if score_row else 0,
+        "high": int(score_row.high or 0) if score_row else 0,
+        "medium": int(score_row.medium or 0) if score_row else 0,
+        "low": int(score_row.low or 0) if score_row else 0,
     }
-    
-    total_exposure_score = sum(severity_weights.get(v.severity, 0) for v in open_vulns)
-    
-    # Get assets with vulnerabilities
-    asset_vuln_counts: dict = {}
-    for vuln in open_vulns:
-        asset_vuln_counts[vuln.asset_id] = asset_vuln_counts.get(vuln.asset_id, 0) + 1
-    
-    assets_with_vulns = len(asset_vuln_counts)
-    
-    # Get total assets count
-    assets_query = db.query(Asset)
+
+    assets_query = db.query(func.count(Asset.id))
     if not current_user.is_superuser and current_user.organization_id:
         assets_query = assets_query.filter(Asset.organization_id == current_user.organization_id)
-    total_assets = assets_query.count()
-    
+    total_assets = assets_query.scalar() or 0
     exposure_percentage = (assets_with_vulns / total_assets * 100) if total_assets > 0 else 0
-    
-    # Severity distribution
-    severity_distribution = {
-        "critical": 0,
-        "high": 0,
-        "medium": 0,
-        "low": 0
-    }
-    for vuln in open_vulns:
-        sev_key = vuln.severity.value.lower() if hasattr(vuln.severity, 'value') else str(vuln.severity).lower()
-        if sev_key in severity_distribution:
-            severity_distribution[sev_key] += 1
-    
-    # Top vulnerable assets
-    top_assets = []
-    for asset_id, count in sorted(asset_vuln_counts.items(), key=lambda x: x[1], reverse=True)[:10]:
-        asset = db.query(Asset).filter(Asset.id == asset_id).first()
-        if asset:
-            top_assets.append({
-                "asset_id": asset_id,
-                "asset_name": asset.name or asset.value,
-                "asset_value": asset.value,
-                "vulnerability_count": count,
-                "asset_type": asset.asset_type.value if hasattr(asset.asset_type, 'value') else str(asset.asset_type)
-            })
-    
+
+    top_rows = (
+        open_q.with_entities(
+            Asset.id,
+            Asset.name,
+            Asset.value,
+            Asset.asset_type,
+            func.count(Vulnerability.id).label("vuln_count"),
+        )
+        .group_by(Asset.id, Asset.name, Asset.value, Asset.asset_type)
+        .order_by(func.count(Vulnerability.id).desc())
+        .limit(10)
+        .all()
+    )
+    top_assets = [
+        {
+            "asset_id": row.id,
+            "asset_name": row.name or row.value,
+            "asset_value": row.value,
+            "vulnerability_count": row.vuln_count,
+            "asset_type": row.asset_type.value if hasattr(row.asset_type, "value") else str(row.asset_type),
+        }
+        for row in top_rows
+    ]
+
     # Trend calculation (compare last 7 days to previous 7 days)
     now = datetime.utcnow()
     week_ago = now - timedelta(days=7)
     two_weeks_ago = now - timedelta(days=14)
-    
+
     recent_new = query.filter(
         Vulnerability.first_detected >= week_ago,
-        Vulnerability.severity != Severity.INFO
+        Vulnerability.severity != Severity.INFO,
     ).count()
-    
+
     previous_new = query.filter(
         Vulnerability.first_detected >= two_weeks_ago,
         Vulnerability.first_detected < week_ago,
-        Vulnerability.severity != Severity.INFO
+        Vulnerability.severity != Severity.INFO,
     ).count()
-    
+
     if recent_new > previous_new * 1.2:
         trend = "increasing"
     elif recent_new < previous_new * 0.8:
@@ -786,16 +943,9 @@ def get_vulnerability_exposure(
     else:
         trend = "stable"
 
-    # By source (detected_by) for attack-surface visualization: source -> count
-    by_source_query = db.query(
+    by_source_query = open_q.with_entities(
         func.coalesce(Vulnerability.detected_by, "unknown").label("source"),
-        func.count(Vulnerability.id).label("count")
-    ).join(Asset)
-    if not current_user.is_superuser and current_user.organization_id:
-        by_source_query = by_source_query.filter(Asset.organization_id == current_user.organization_id)
-    by_source_query = by_source_query.filter(
-        Vulnerability.status == VulnerabilityStatus.OPEN,
-        Vulnerability.severity != Severity.INFO
+        func.count(Vulnerability.id).label("count"),
     ).group_by(func.coalesce(Vulnerability.detected_by, "unknown")).order_by(
         func.count(Vulnerability.id).desc()
     )
@@ -803,14 +953,14 @@ def get_vulnerability_exposure(
 
     return {
         "total_exposure_score": total_exposure_score,
-        "total_findings": len(open_vulns),
+        "total_findings": total_findings,
         "assets_with_vulnerabilities": assets_with_vulns,
         "total_assets": total_assets,
         "exposure_percentage": round(exposure_percentage, 1),
         "severity_distribution": severity_distribution,
         "by_source": by_source,
         "top_vulnerable_assets": top_assets,
-        "exposure_trend": trend
+        "exposure_trend": trend,
     }
 
 
@@ -960,6 +1110,42 @@ def _maybe_auto_create_jira_ticket(
         logger.exception("Error scheduling Jira auto-create for vuln %s", vuln.id)
 
 
+def _maybe_auto_push_servicenow(
+    db: Session,
+    vuln: Vulnerability,
+    background_tasks: BackgroundTasks,
+    org_id: int,
+) -> None:
+    """Queue a ServiceNow webhook push if the org has auto-create enabled and severity qualifies."""
+    try:
+        from app.models.servicenow_integration import (
+            ServiceNowIntegration,
+            severity_meets_threshold,
+        )
+        from app.services.servicenow_service import auto_push_sync
+
+        integration = (
+            db.query(ServiceNowIntegration)
+            .filter(
+                ServiceNowIntegration.organization_id == org_id,
+                ServiceNowIntegration.is_active == True,
+                ServiceNowIntegration.auto_create_enabled == True,
+            )
+            .first()
+        )
+        if not integration or not integration.webhook_url:
+            return
+
+        vuln_severity = vuln.severity.value if vuln.severity else "info"
+        min_severity = integration.auto_create_min_severity or "high"
+        if not severity_meets_threshold(vuln_severity, min_severity):
+            return
+
+        background_tasks.add_task(auto_push_sync, integration, vuln)
+    except Exception:
+        logger.exception("Error scheduling ServiceNow auto-push for vuln %s", vuln.id)
+
+
 def _maybe_sync_jira_ticket(
     db: Session,
     vuln: Vulnerability,
@@ -1011,6 +1197,54 @@ def _maybe_sync_jira_ticket(
             )
     except Exception:
         logger.exception("Error scheduling Jira sync for vuln %s", vuln.id)
+
+
+def _maybe_sync_servicenow(
+    db: Session,
+    vuln: Vulnerability,
+    old_status: str,
+    new_status: str,
+    changed_by: str,
+    background_tasks: BackgroundTasks,
+) -> None:
+    """Queue ServiceNow Table API sync when ASM status changes for linked deliveries."""
+    try:
+        from app.models.servicenow_integration import ServiceNowDelivery, ServiceNowIntegration
+        from app.services.servicenow_service import sync_delivery_for_status_change_sync
+
+        asset = vuln.asset
+        if not asset:
+            return
+        org_id = asset.organization_id
+
+        integration = (
+            db.query(ServiceNowIntegration)
+            .filter(
+                ServiceNowIntegration.organization_id == org_id,
+                ServiceNowIntegration.is_active == True,
+                ServiceNowIntegration.sync_enabled == True,
+            )
+            .first()
+        )
+        if not integration:
+            return
+
+        deliveries = (
+            db.query(ServiceNowDelivery)
+            .filter(
+                ServiceNowDelivery.vulnerability_id == vuln.id,
+                ServiceNowDelivery.integration_id == integration.id,
+                ServiceNowDelivery.disconnected_at.is_(None),
+            )
+            .all()
+        )
+        for delivery in deliveries:
+            background_tasks.add_task(
+                sync_delivery_for_status_change_sync,
+                integration, delivery, old_status, new_status, changed_by,
+            )
+    except Exception:
+        logger.exception("Error scheduling ServiceNow sync for vuln %s", vuln.id)
 
 
 # =============================================================================

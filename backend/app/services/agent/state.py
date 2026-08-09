@@ -234,6 +234,11 @@ class AgentState(TypedDict, total=False):
     
     # Initial input (playbook)
     initial_todos: Optional[List[Dict[str, Any]]]
+
+    # Browser walkthrough → structured application understanding
+    capability_map: Optional[Dict[str, Any]]
+    # Authenticated browser session handoff (storage_state / cookies)
+    auth_session: Optional[Dict[str, Any]]
     
     # Internal state
     _current_step: Optional[Dict[str, Any]]

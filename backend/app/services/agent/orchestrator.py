@@ -459,6 +459,8 @@ class AgentOrchestrator:
             "objective_history": [],
             "original_objective": latest_message,
             "target_info": TargetInfo().model_dump(),
+            "capability_map": None,
+            "auth_session": None,
             "awaiting_user_approval": False,
             "phase_transition_pending": None,
             "qa_history": [],
@@ -569,6 +571,11 @@ class AgentOrchestrator:
                 waf_detected=waf_detected,
             )
 
+        from app.services.agent.capability_map import format_capability_map_for_prompt
+        capability_map_formatted = format_capability_map_for_prompt(
+            state.get("capability_map")
+        )
+
         system_prompt = REACT_SYSTEM_PROMPT.format(
             current_phase=phase,
             available_tools=available_tools,
@@ -579,6 +586,7 @@ class AgentOrchestrator:
             execution_trace=execution_trace_formatted,
             todo_list=todo_list_formatted,
             target_info=target_info_formatted,
+            capability_map=capability_map_formatted,
             session_notes=session_notes,
             knowledge_context=combined_knowledge,
             qa_history=qa_history_formatted,
@@ -638,7 +646,35 @@ class AgentOrchestrator:
         
         elif decision.action == "transition_phase":
             to_phase = decision.phase_transition.to_phase if decision.phase_transition else "exploitation"
-            
+            cmap = state.get("capability_map") or {}
+            map_ready = bool(cmap.get("ready_for_attack"))
+            reason = (
+                decision.phase_transition.reason
+                if decision.phase_transition
+                else ""
+            )
+            non_browser = "non-browser" in reason.lower() or "force" in reason.lower()
+            if (
+                to_phase == "exploitation"
+                and not map_ready
+                and not non_browser
+            ):
+                # Keep thinking — require browser walkthrough first (tester methodology)
+                step.thought = (
+                    (step.thought or "")
+                    + " | Capability map missing — run execute_deep_crawl before exploitation."
+                )
+                step.tool_name = None
+                updates["_current_step"] = step.model_dump()
+                updates["messages"] = [AIMessage(content=(
+                    "Before transitioning to exploitation, walk the application like a tester: "
+                    "call **execute_deep_crawl** on the primary URL (click links/menus), "
+                    "review the capability map, then **fireteam_dispatch(specialists='auto')**. "
+                    "If this target is not a web app, request the transition again with reason "
+                    "containing 'non-browser'."
+                ))]
+                return updates
+
             if to_phase == phase:
                 # Already in this phase, continue
                 pass
@@ -657,7 +693,7 @@ class AgentOrchestrator:
                 updates["phase_transition_pending"] = PhaseTransitionRequest(
                     from_phase=phase,
                     to_phase=to_phase,
-                    reason=decision.phase_transition.reason if decision.phase_transition else "",
+                    reason=reason,
                     planned_actions=decision.phase_transition.planned_actions if decision.phase_transition else [],
                     risks=decision.phase_transition.risks if decision.phase_transition else [],
                 ).model_dump()
@@ -742,12 +778,69 @@ class AgentOrchestrator:
                         tool_args["_waf_detected"] = output[:200]
                     break
 
+        # Inject session capability map into fireteam so specialists="auto" works
+        if tool_name == "fireteam_dispatch":
+            if state.get("capability_map") and not tool_args.get("capability_map"):
+                tool_args["capability_map"] = state.get("capability_map")
+            try:
+                self.tool_manager._capability_map = state.get("capability_map")
+            except Exception:
+                pass
+
+        # Auth session handoff: seed browser/deep_crawl/replay with prior login
+        auth_sess = state.get("auth_session")
+        try:
+            self.tool_manager._auth_session = auth_sess
+        except Exception:
+            pass
+        if auth_sess and tool_name in ("execute_deep_crawl", "execute_browser", "execute_interceptor"):
+            tool_args = self._inject_auth_session(tool_name, tool_args, auth_sess)
+
+        if tool_name == "replay_http_request" and state.get("capability_map"):
+            # Convenience: if only an index is provided, pull from api_samples
+            samples = (state.get("capability_map") or {}).get("api_samples") or []
+            idx = tool_args.get("sample_index")
+            if idx is not None and not tool_args.get("url") and samples:
+                try:
+                    sample = samples[int(idx)]
+                    tool_args.setdefault("method", sample.get("method") or "GET")
+                    tool_args.setdefault("url", sample.get("url") or "")
+                    tool_args.setdefault("headers", sample.get("headers") or {})
+                    if sample.get("body") and "body" not in tool_args:
+                        tool_args["body"] = sample.get("body")
+                except Exception:
+                    pass
+
+        # Soft gate: block broad active scanners until the browser capability map exists
+        # (unless the operator forces, or this is clearly a non-HTTP engagement).
+        cmap = state.get("capability_map") or {}
+        map_ready = bool(cmap.get("ready_for_attack"))
+        spray_tools = {
+            "execute_nuclei", "execute_sqlmap", "execute_xsstrike", "execute_nikto",
+            "execute_ffuf", "execute_wpscan",
+        }
+        force = bool(tool_args.get("force"))
+        if tool_name in spray_tools and not map_ready and not force:
+            step_data["tool_output"] = (
+                f"Blocked: '{tool_name}' before application capability map. "
+                "Walk the app like a tester first with execute_deep_crawl on the primary URL, "
+                "then fireteam_dispatch(specialists='auto'), then resume scanning. "
+                "Pass force=true only for intentionally non-browser targets."
+            )
+            step_data["success"] = False
+            step_data["error_message"] = "capability_map_required"
+            return {"_current_step": step_data}
+
         # Execute tool
         result = await self.tool_manager.execute(tool_name, tool_args)
         
         step_data["tool_output"] = result.get("output") or result.get("error") or ""
         step_data["success"] = result.get("success", False)
         step_data["error_message"] = result.get("error")
+        if result.get("capability_map"):
+            step_data["capability_map"] = result.get("capability_map")
+        if result.get("auth_session"):
+            step_data["auth_session"] = result.get("auth_session")
         
         logger.info(f"[{user_id}] Tool result: success={step_data['success']}")
 
@@ -856,12 +949,78 @@ class AgentOrchestrator:
                 description=vuln,
             )
         
-        return {
+        updates: Dict[str, Any] = {
             "_current_step": step_data,
             "execution_trace": execution_trace,
             "target_info": merged_target.model_dump(),
             "messages": [AIMessage(content=f"**Step {step_data.get('iteration')}** [{state.get('current_phase')}]\n\n{analysis.interpretation[:500]}")],
         }
+
+        # Persist browser walkthrough → capability map into session state
+        raw_map = step_data.get("capability_map")
+        if not raw_map and tool_name in ("execute_deep_crawl", "execute_interceptor") and step_data.get("success"):
+            # Fallback: try to recover map markers from text if structured block missing
+            raw_map = None
+        if raw_map:
+            from app.services.agent.capability_map import merge_capability_maps
+            updates["capability_map"] = merge_capability_maps(
+                state.get("capability_map"),
+                raw_map,
+            )
+            await self._emit_status({
+                "type": "capability_map_update",
+                "quality_score": updates["capability_map"].get("quality_score"),
+                "ready_for_attack": updates["capability_map"].get("ready_for_attack"),
+                "capabilities": updates["capability_map"].get("capabilities", []),
+                "ranked_hunt_queue": updates["capability_map"].get("ranked_hunt_queue", [])[:8],
+                "authenticated": updates["capability_map"].get("authenticated"),
+                "api_sample_count": len(updates["capability_map"].get("api_samples") or []),
+            })
+
+        if step_data.get("auth_session"):
+            updates["auth_session"] = step_data["auth_session"]
+            await self._emit_status({
+                "type": "auth_session_update",
+                "authenticated": step_data["auth_session"].get("authenticated"),
+                "cookie_count": len(step_data["auth_session"].get("cookies") or []),
+                "target": step_data["auth_session"].get("target"),
+            })
+
+        return updates
+
+    @staticmethod
+    def _inject_auth_session(
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        auth_sess: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Merge stored storage_state/cookies into browser/crawl tool args."""
+        if not auth_sess:
+            return tool_args
+        args = dict(tool_args or {})
+        storage = auth_sess.get("storage_state")
+        cookies = auth_sess.get("cookies")
+
+        # MCP tools usually take a single string `args` that may be JSON.
+        if "args" in args and isinstance(args.get("args"), str):
+            raw = args["args"].strip()
+            try:
+                parsed = json.loads(raw) if raw.startswith("{") else {"url": raw}
+            except Exception:
+                parsed = {"url": raw}
+            if storage and "storage_state" not in parsed and "login" not in parsed:
+                parsed["storage_state"] = storage
+            elif cookies and "cookies" not in parsed and "login" not in parsed:
+                parsed["cookies"] = cookies
+            args["args"] = json.dumps(parsed)
+            return args
+
+        # Structured dict args (browser JSON object)
+        if storage and "storage_state" not in args and "login" not in args:
+            args["storage_state"] = storage
+        elif cookies and "cookies" not in args and "login" not in args:
+            args["cookies"] = cookies
+        return args
     
     async def _await_approval_node(self, state: AgentState, config=None) -> dict:
         """Request user approval for phase transition."""

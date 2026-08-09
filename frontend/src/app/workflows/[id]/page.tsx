@@ -355,7 +355,7 @@ export default function WorkflowEditorPage() {
       <Dialog open={runOpen} onOpenChange={setRunOpen}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Run workflow</DialogTitle>
+            <DialogTitle>Run Loom workflow</DialogTitle>
           </DialogHeader>
           <div className="space-y-2">
             <Label>Seed domain</Label>

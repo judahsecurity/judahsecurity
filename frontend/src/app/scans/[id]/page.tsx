@@ -527,7 +527,8 @@ export default function ScanDetailPage() {
                 </Badge>
               ) : (
                 <Badge variant="outline" className="ml-2">
-                  {scan.targets?.length || 0} entries
+                  {scan.results?.targets_total || scan.targets_count || scan.targets?.length || 0} entries
+                  {scan.results?.targets_truncated ? ' (preview)' : ''}
                 </Badge>
               )}
             </CardTitle>

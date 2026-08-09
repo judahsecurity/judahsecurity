@@ -48,7 +48,7 @@ const navigation = [
   { name: 'Remediation', href: '/remediation', icon: Wrench },
   { name: 'Screenshots', href: '/screenshots', icon: Camera },
   { name: 'Scans', href: '/scans', icon: ScanLine },
-  { name: 'Workflows', href: '/workflows', icon: Workflow },
+  { name: 'Loom', href: '/workflows', icon: Workflow },
   { name: 'Schedules', href: '/schedules', icon: CalendarClock },
   { name: 'Ports', href: '/ports', icon: Network },
   { name: 'Discovery', href: '/discovery', icon: Search },

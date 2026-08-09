@@ -244,7 +244,7 @@ class ScannerWorker:
             if validation_messages:
                 messages.extend(validation_messages)
 
-        # Pending workflow runs (Trickest-style DAG executor)
+        # Pending Judah Loom workflow runs
         if not messages:
             workflow_messages = self.poll_database_for_workflow_runs()
             if workflow_messages:
@@ -347,7 +347,7 @@ class ScannerWorker:
             db.close()
 
     async def handle_workflow_run(self, job_data: dict):
-        """Execute a Trickest-style workflow DAG run."""
+        """Execute a Judah Loom workflow DAG run."""
         from app.models.workflow import WorkflowRun, WorkflowRunStatus
         from app.services.workflow.executor import WorkflowExecutor
 
@@ -1172,7 +1172,12 @@ class ScannerWorker:
             validation.evidence = verdict_data.get("evidence")
             validation.template_logic_issue = template_logic_issue
             validation.error = verdict_data.get("error")
-            validation.raw_output = verdict_data
+            # Preserve prior metadata (e.g. ServiceNow close-claim trigger) while
+            # storing the agent verdict payload.
+            prior_raw = validation.raw_output if isinstance(validation.raw_output, dict) else {}
+            merged_raw = dict(prior_raw)
+            merged_raw.update(verdict_data if isinstance(verdict_data, dict) else {})
+            validation.raw_output = merged_raw
             validation.completed_at = now
 
             vuln.validation_status = "completed"
@@ -1264,6 +1269,13 @@ class ScannerWorker:
                     )
                 except Exception as e:
                     logger.error(f"VALIDATE_FINDING: pattern evaluation failed: {e}")
+
+            # ServiceNow close-claim loop: accept or reject remote close based on verdict
+            try:
+                from app.services.servicenow_service import handle_close_validation_result
+                handle_close_validation_result(db, validation)
+            except Exception as e:
+                logger.error(f"VALIDATE_FINDING: ServiceNow close-validation handler failed: {e}")
 
             logger.info(
                 f"VALIDATE_FINDING: validation {validation.id} completed -> {verdict_enum.value}"
@@ -1866,7 +1878,9 @@ class ScannerWorker:
             
             # Update scan record
             if scan:
-                scan.status = ScanStatus.COMPLETED
+                scan.status = (
+                    ScanStatus.COMPLETED if result.success else ScanStatus.FAILED
+                )
                 scan.completed_at = datetime.utcnow()
                 scan.assets_discovered = len(unique_hosts)  # Live hosts with open ports
                 scan.vulnerabilities_found = findings_summary.get('findings_created', 0)
@@ -1938,9 +1952,17 @@ class ScannerWorker:
                     'import_summary': import_summary,
                     'findings_summary': findings_summary
                 }
-                # If there were scanner errors but scan "succeeded", note it
+                # Surface scanner warnings/errors (e.g. skipped missing NSE scripts)
                 if result.errors:
                     scan.error_message = "; ".join(result.errors[:3])  # First 3 errors
+                if not result.success:
+                    if not scan.error_message:
+                        scan.error_message = "Port scanner reported failure"
+                    logger.error(
+                        "Scan %s marked FAILED: %s",
+                        scan_id,
+                        (scan.error_message or "")[:200],
+                    )
                 
                 # Update netblocks that were scanned
                 # Check if any scanned targets match netblock CIDR ranges

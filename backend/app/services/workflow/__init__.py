@@ -1,4 +1,4 @@
-"""Workflow builder services — DAG execution, artifacts, tool adapters, scripts."""
+"""Judah Loom services — DAG execution, artifacts, tool adapters, scripts."""
 
 from app.services.workflow.tool_catalog import TOOL_CATALOG, get_tool, list_tools
 from app.services.workflow.seed import seed_library_workflows

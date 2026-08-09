@@ -70,6 +70,12 @@ CAPTCHA_PROVIDER=turnstile
 CAPTCHA_SITE_KEY=
 CAPTCHA_SECRET_KEY=
 
+# --- Cloudflare WAF scanner whitelist ---
+# Used by the Cloudflare WAF integration to create skip rules for scanner traffic.
+# Comma-separated public egress IPs (or CIDRs) of your scanners/workers.
+# ASM_SCANNER_EGRESS_IPS=203.0.113.10,198.51.100.0/24
+# ASM_SCANNER_USER_AGENT=JudahSecurity-ASM-Scanner/1.0
+
 # --- Rate limiting ---
 # On by default. Uses in-process memory storage (fine for a single backend
 # worker). For multiple workers/instances, point at Redis so limits are shared.

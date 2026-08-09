@@ -129,8 +129,9 @@ async def _launch_chromium(pw):
         )
 
 # Bounds — keep a single crawl cheap and predictable.
-DEFAULT_MAX_PAGES = 12
+DEFAULT_MAX_PAGES = 16
 HARD_MAX_PAGES = 40
+DEFAULT_MAX_CLICKS = 20
 PAGE_TIMEOUT_MS = 25000
 SETTLE_MS = 1200
 MAX_JS_FETCH = 40
@@ -328,6 +329,10 @@ class CrawlResult:
     forms: List[Dict[str, Any]] = field(default_factory=list)
     endpoints_from_js: Set[str] = field(default_factory=set)
     errors: List[str] = field(default_factory=list)
+    # Playwright storage_state for authenticated handoff (cookies + origins)
+    storage_state: Optional[Dict[str, Any]] = None
+    # Sample first-party XHR for replay (method/url/headers/postData)
+    api_samples: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def _check_playwright() -> bool:
@@ -623,6 +628,35 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                         if rtype == "script" or url.split("?")[0].endswith(".js"):
                             if _in_scope(urlparse(url).netloc, scope_apex):
                                 result.js_files.add(url.split("?")[0])
+                        # Keep a small sample of XHR/fetch for replay_http_request
+                        if (
+                            rtype in ("xhr", "fetch")
+                            and _in_scope(urlparse(url).netloc, scope_apex)
+                            and len(result.api_samples) < 40
+                        ):
+                            headers = {}
+                            try:
+                                raw_h = req.headers or {}
+                                for hk in (
+                                    "content-type", "accept", "authorization",
+                                    "x-requested-with", "x-csrf-token",
+                                ):
+                                    if hk in raw_h:
+                                        headers[hk] = raw_h[hk][:200]
+                            except Exception:
+                                pass
+                            sample = {
+                                "method": req.method,
+                                "url": url[:500],
+                                "headers": headers,
+                            }
+                            try:
+                                pd = req.post_data
+                                if pd:
+                                    sample["body"] = pd[:4000]
+                            except Exception:
+                                pass
+                            result.api_samples.append(sample)
                     except Exception:
                         pass
 
@@ -673,6 +707,8 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                         links, forms = await _harvest(page)
                         for f in forms:
                             if len(result.forms) < 60:
+                                f = dict(f)
+                                f.setdefault("page", page.url)
                                 result.forms.append(f)
                         for link in links:
                             absu = urljoin(page.url, link).split("#")[0]
@@ -687,6 +723,13 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                 if capture_js and result.js_files:
                     await _mine_js(context, result)
 
+                # Export session so the agent can hand off auth to execute_browser /
+                # privileged re-crawls (tester methodology: login once, reuse session).
+                try:
+                    result.storage_state = await context.storage_state()
+                except Exception as e:
+                    result.errors.append(f"storage_state: {str(e)[:120]}")
+
                 await context.close()
             finally:
                 await browser.close()
@@ -699,11 +742,39 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
             "exit_code": -1,
         }
 
+    from app.services.agent.capability_map import build_capability_map_from_crawl
+
+    cmap = build_capability_map_from_crawl(result)
+    cmap_dict = cmap.to_dict()
+    text = _format_output(result)
+    text += "\n\n" + _format_capability_map_section(cmap_dict)
+
+    auth_session = None
+    if isinstance(result.storage_state, dict) and result.storage_state:
+        cookies = result.storage_state.get("cookies") or []
+        auth_session = {
+            "target": result.target,
+            "scope": result.scope,
+            "authenticated": result.authenticated,
+            "storage_state": result.storage_state,
+            "cookies": cookies[:80],
+            "cookie_names": [c.get("name") for c in cookies[:40] if isinstance(c, dict)],
+        }
+        text += (
+            f"\n\n## Auth session export\n"
+            f"Authenticated={result.authenticated!r}. "
+            f"{len(cookies)} cookies exported for handoff to execute_browser / "
+            f"execute_deep_crawl (storage_state). Cookie names: "
+            f"{', '.join(auth_session['cookie_names'][:15]) or '(none)'}."
+        )
+
     return {
         "success": True,
-        "output": _format_output(result),
+        "output": text,
         "error": "; ".join(result.errors[:5]) if result.errors else None,
         "exit_code": 0,
+        "capability_map": cmap_dict,
+        "auth_session": auth_session,
     }
 
 
@@ -915,9 +986,12 @@ async def _drive_page(page, interact: bool) -> None:
     except Exception:
         handles = []
 
+    # Tester methodology: click as many safe interactive controls as we can
+    # afford so SPA routes/lazy bundles surface before attack planning.
+    max_clicks = DEFAULT_MAX_CLICKS
     clicked = 0
-    for h in handles[:40]:
-        if clicked >= 12:
+    for h in handles[:80]:
+        if clicked >= max_clicks:
             break
         try:
             if not await h.is_visible():
@@ -1082,8 +1156,23 @@ def _format_output(r: CrawlResult) -> str:
             lines.append(f"    {t}")
 
     lines.append(
-        "\nNext steps: probe the API endpoints (arjun/schemathesis/curl), scan the "
-        "JS bundles for secrets (scan_js_urls_for_secrets), pull source maps if exposed, "
-        "and record notable surfaces with create_finding/save_note."
+        "\nNext steps: treat this crawl as your tester walkthrough. Build attacks from "
+        "the capability map (forms/APIs/auth), spawn fireteam specialists with "
+        "specialists=\"auto\", then probe matched surfaces (arjun/schemathesis/curl, "
+        "scan_js_urls_for_secrets, validate_finding → create_finding)."
     )
     return "\n".join(lines)
+
+
+def _format_capability_map_section(cmap: Dict[str, Any]) -> str:
+    """Append a compact capability-map summary for the agent prompt/trace."""
+    try:
+        from app.services.agent.capability_map import format_capability_map_for_prompt
+        return "## Application Capability Map\n" + format_capability_map_for_prompt(cmap)
+    except Exception:
+        caps = ", ".join(cmap.get("capabilities") or []) or "(none)"
+        return (
+            f"## Application Capability Map\n"
+            f"quality={cmap.get('quality_score')} ready={cmap.get('ready_for_attack')} "
+            f"capabilities=[{caps}]"
+        )

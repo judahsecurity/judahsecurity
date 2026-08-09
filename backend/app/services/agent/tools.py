@@ -223,6 +223,8 @@ class ASMToolsManager:
             "cmseek_help": self.execute_mcp_tool,
             # Fireteam: scatter-gather specialists in parallel
             "fireteam_dispatch": self.fireteam_dispatch,
+            # Replay captured XHR/API requests (from capability map samples)
+            "replay_http_request": self.replay_http_request,
             # EvoGraph: cross-session memory lookup
             "query_prior_sessions": self.query_prior_sessions,
             # ProjectDiscovery Uncover: multi-engine search
@@ -275,17 +277,36 @@ class ASMToolsManager:
                     "error": "policy_denied",
                 }
             if gate_result.get("decision") == "confirm":
-                return {
-                    "success": False,
-                    "requires_confirmation": True,
-                    "output": (
-                        f"Tool '{tool_name}' requires operator approval. "
-                        f"Send the token below to POST /agent/confirmations/{{token}}/decide "
-                        f"with {{\"approved\": true|false}}."
-                    ),
-                    "error": "pending_confirmation",
-                    "confirmation": gate_result,
-                }
+                token = gate_result.get("token") or ""
+                # Notify the UI, then block until the operator decides.
+                try:
+                    from app.services.agent.orchestrator import _status_callback_var
+                    cb = _status_callback_var.get(None)
+                    if cb:
+                        await cb({
+                            "type": "pending_confirmation",
+                            "token": token,
+                            "tool_name": tool_name,
+                            "tool_args": gate_result.get("tool_args") or {},
+                            "expires_at": gate_result.get("expires_at"),
+                            "message": (
+                                f"Tool '{tool_name}' requires operator approval before continuing."
+                            ),
+                        })
+                except Exception as emit_err:
+                    logger.debug("Could not emit pending_confirmation: %s", emit_err)
+                from app.services.agent.confirmation_service import wait_for_decision
+                approved = await wait_for_decision(token)
+                if not approved:
+                    return {
+                        "success": False,
+                        "output": (
+                            f"Operator denied or confirmation timed out for '{tool_name}'."
+                        ),
+                        "error": "confirmation_denied",
+                        "confirmation": {**gate_result, "status": "denied"},
+                    }
+                # Approved — fall through and execute the tool.
         except Exception as _gate_err:  # fail-open on gate internal error
             logger.warning(f"Confirmation gate error (fail-open): {_gate_err}")
 
@@ -316,24 +337,27 @@ class ASMToolsManager:
 
                 max_chars = _tool_output_max_chars()
                 augur_block = result.get("augur")  # Augur reading: kept/dropped/next_steps/signals
+                capability_map = result.get("capability_map")  # deep_crawl / interceptor map
+                auth_session = result.get("auth_session")
                 if result.get("success"):
                     output = result.get("output", "")
-                    if augur_block:
-                        # Augur already capped to max_chars and appended next-step
-                        # pivots to the text. Preserve the structured block too.
-                        return {
-                            "success": True,
-                            "output": output or "Command completed.",
-                            "error": None,
-                            "augur": augur_block,
-                        }
-                    if len(output) > max_chars:
-                        output = output[:max_chars] + f"\n\n... (truncated, total {len(result.get('output', ''))} chars)"
-                    return {
+                    payload = {
                         "success": True,
                         "output": output or "Command completed.",
                         "error": None,
                     }
+                    if augur_block:
+                        payload["augur"] = augur_block
+                    if capability_map:
+                        payload["capability_map"] = capability_map
+                    if auth_session:
+                        payload["auth_session"] = auth_session
+                    if len(output) > max_chars and not augur_block:
+                        payload["output"] = (
+                            output[:max_chars]
+                            + f"\n\n... (truncated, total {len(result.get('output', ''))} chars)"
+                        )
+                    return payload
                 else:
                     err = result.get("error", "Unknown error")
                     out = result.get("output", "")
@@ -3418,28 +3442,159 @@ class ASMToolsManager:
             "verdict": f"CREDENTIALS FOUND: {len(hits)} valid login(s)" if hits else ("LOCKOUT DETECTED — spray aborted" if lockout_detected else "No valid credentials found"),
         }, indent=2)[:_tool_output_max_chars()]
 
+    async def replay_http_request(
+        self,
+        method: str = "GET",
+        url: str = "",
+        headers: Optional[Dict[str, str]] = None,
+        body: Optional[str] = None,
+        cookies: Optional[Any] = None,
+        use_auth_session: bool = True,
+        timeout: int = 25,
+    ) -> str:
+        """Replay a captured HTTP request (tester-style request tampering).
+
+        Prefer samples from the capability map (api_samples). Optionally attaches
+        cookies from the session auth handoff after deep_crawl login.
+        """
+        import httpx
+
+        if not url or not str(url).strip():
+            return "Error: url is required (e.g. from capability_map.api_samples)."
+
+        method = (method or "GET").upper().strip()
+        hdrs = {str(k): str(v) for k, v in (headers or {}).items()}
+        cookie_header = hdrs.get("Cookie") or hdrs.get("cookie")
+
+        if use_auth_session and not cookie_header:
+            sess = getattr(self, "_auth_session", None) or {}
+            jar = sess.get("cookies") or []
+            parts = []
+            for c in jar:
+                if isinstance(c, dict) and c.get("name"):
+                    parts.append(f"{c['name']}={c.get('value', '')}")
+            if isinstance(cookies, list):
+                for c in cookies:
+                    if isinstance(c, dict) and c.get("name"):
+                        parts.append(f"{c['name']}={c.get('value', '')}")
+            elif isinstance(cookies, dict):
+                for k, v in cookies.items():
+                    parts.append(f"{k}={v}")
+            if parts:
+                hdrs["Cookie"] = "; ".join(parts[:40])
+
+        try:
+            async with httpx.AsyncClient(follow_redirects=True, verify=False, timeout=timeout) as client:
+                resp = await client.request(method, url, headers=hdrs, content=body)
+            body_preview = resp.text[:4000] if resp.text else ""
+            out = {
+                "request": {
+                    "method": method,
+                    "url": url,
+                    "headers": {k: ("***" if k.lower() in ("authorization", "cookie") else v)
+                                for k, v in hdrs.items()},
+                    "body_len": len(body or ""),
+                },
+                "response": {
+                    "status": resp.status_code,
+                    "headers": dict(list(resp.headers.items())[:30]),
+                    "body_preview": body_preview,
+                    "length": len(resp.content or b""),
+                },
+                "note": (
+                    "Use this to tamper method/headers/body on captured APIs. "
+                    "Pair with execute_interactsh for blind OOB sinks."
+                ),
+            }
+            return json.dumps(out, indent=2)[:_tool_output_max_chars()]
+        except Exception as exc:
+            return f"Error replaying request: {exc}"
+
     async def fireteam_dispatch(
         self,
-        mission: str,
+        mission: str = "",
         targets: Optional[List[str]] = None,
-        specialists: Optional[List[str]] = None,
+        specialists: Optional[Any] = None,
         max_parallel: int = 4,
+        capability_map: Optional[Dict[str, Any]] = None,
+        mode: str = "attack",
     ) -> str:
         """Scatter-gather: spawn N parallel specialist sub-agents on the same mission.
 
         Args:
-            mission: Plain-English task description.
+            mission: Plain-English task description. Optional when capability_map
+                is provided (auto-built from the map).
             targets: Hostnames / URLs the specialists should focus on.
-            specialists: Names from fireteam_service.DEFAULT_SPECIALISTS. Defaults
-                to ["web_recon", "vuln_triage", "secrets_hunter"].
+            specialists: Names from fireteam_service, or ``"auto"`` / ``["auto"]``
+                to select from the capability map (tester branching). Defaults to
+                map-based attack specialists when a map is present, else recon triad.
             max_parallel: How many specialists to run concurrently.
+            capability_map: Structured map from execute_deep_crawl (optional if
+                the orchestrator injects session state).
+            mode: ``attack`` (default, map-driven hunters) or ``recon`` (legacy triad).
         """
-        from app.services.agent.fireteam_service import run_fireteam, DEFAULT_SPECIALISTS
+        from app.services.agent.capability_map import (
+            build_capability_map_from_dict,
+            mission_from_capability_map,
+            select_specialists_for_map,
+        )
+        from app.services.agent.fireteam_service import run_fireteam
 
-        if not mission or not mission.strip():
-            return "Error: mission is required."
+        cmap_raw = capability_map or getattr(self, "_capability_map", None)
+        cmap = build_capability_map_from_dict(cmap_raw) if cmap_raw else None
 
-        chosen = specialists or ["web_recon", "vuln_triage", "secrets_hunter"]
+        # Resolve specialists: "auto" → capability-map selection
+        auto = False
+        if specialists is None:
+            auto = bool(cmap) or mode == "attack"
+            chosen = None
+        elif specialists in ("auto", ["auto"], ("auto",)):
+            auto = True
+            chosen = None
+        elif isinstance(specialists, str):
+            chosen = [s.strip() for s in specialists.split(",") if s.strip()]
+        else:
+            chosen = list(specialists)
+            if chosen == ["auto"]:
+                auto = True
+                chosen = None
+
+        if auto:
+            chosen = select_specialists_for_map(
+                cmap,
+                include_recon=(mode == "recon"),
+            )
+        if not chosen:
+            chosen = (
+                ["web_recon", "vuln_triage", "secrets_hunter"]
+                if mode == "recon"
+                else select_specialists_for_map(cmap)
+            )
+
+        if not mission or not str(mission).strip():
+            if cmap and cmap.target:
+                mission = mission_from_capability_map(cmap)
+            else:
+                return "Error: mission is required (or provide a capability_map)."
+
+        # Ground the mission in concrete map evidence for specialists.
+        if cmap and cmap.ready_for_attack:
+            api_preview = [
+                f"{e.get('method')} {e.get('path')}" for e in cmap.api_endpoints[:15]
+            ]
+            mission = (
+                f"{mission}\n\nCAPABILITY MAP (use these concrete surfaces):\n"
+                f"- capabilities: {', '.join(cmap.capabilities)}\n"
+                f"- pages: {cmap.pages_visited[:12]}\n"
+                f"- apis: {api_preview}\n"
+                f"- forms: {cmap.forms[:8]}\n"
+                f"- hunt_queue: {cmap.ranked_hunt_queue[:8]}\n"
+            )
+
+        target_list = list(targets or [])
+        if not target_list and cmap and cmap.target:
+            target_list = [cmap.target]
+            target_list.extend(cmap.pages_visited[:5])
 
         # Lazy-build a cheap LLM instance. Reuse the orchestrator factory if available.
         try:
@@ -3458,15 +3613,18 @@ class ASMToolsManager:
 
         result = await run_fireteam(
             mission=mission,
-            targets=targets or [],
+            targets=target_list,
             specialists=chosen,
             llm=llm,
             tools_manager=self,
             max_parallel=max_parallel,
         )
         out = {
-            "mission": result.mission,
+            "mission": result.mission[:2000],
+            "specialists_requested": chosen,
             "specialists_run": result.specialists_run,
+            "selection_mode": "auto" if auto else "explicit",
+            "capability_map_ready": bool(cmap and cmap.ready_for_attack),
             "total_tool_calls": result.total_tool_calls,
             "duration_seconds": result.duration_seconds,
             "merged_summary": result.merged_summary,

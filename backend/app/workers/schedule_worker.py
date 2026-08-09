@@ -543,6 +543,174 @@ class ScheduleWorker:
         finally:
             db.close()
 
+    async def run_akamai_waf_syncs(self):
+        """Run continuous Akamai WAF syncs for connections whose interval is due."""
+        from app.models.akamai_integration import AkamaiWafIntegration
+        from app.services import akamai_waf_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(AkamaiWafIntegration).filter(
+                AkamaiWafIntegration.is_active == True,
+                AkamaiWafIntegration.continuous_sync_enabled == True,
+            ).all()
+
+            due = [c for c in candidates if c.is_sync_due(now)]
+            if not due:
+                return
+
+            logger.info(f"Akamai WAF: {len(due)} connection(s) due for continuous sync")
+            for integration in due:
+                try:
+                    result = await akamai_waf_service.sync_integration(db, integration)
+                    logger.info(
+                        f"Akamai WAF sync (org {integration.organization_id}, "
+                        f"'{integration.connection_name}'): {result.get('message')}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"Akamai WAF sync failed for connection {integration.id}: {exc}",
+                        exc_info=True,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.error(f"Akamai WAF continuous sync check failed: {exc}", exc_info=True)
+        finally:
+            db.close()
+
+    async def run_panorama_syncs(self):
+        """Run continuous Panorama syncs for connections whose interval is due."""
+        from app.models.panorama_integration import PanoramaIntegration
+        from app.services import panorama_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(PanoramaIntegration).filter(
+                PanoramaIntegration.is_active == True,
+                PanoramaIntegration.continuous_sync_enabled == True,
+            ).all()
+
+            due = [c for c in candidates if c.is_sync_due(now)]
+            if not due:
+                return
+
+            logger.info(f"Panorama: {len(due)} connection(s) due for continuous sync")
+            for integration in due:
+                try:
+                    result = await panorama_service.sync_integration(db, integration)
+                    logger.info(
+                        f"Panorama sync (org {integration.organization_id}, "
+                        f"'{integration.name}'): {result.get('message')}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"Panorama sync failed for connection {integration.id}: {exc}",
+                        exc_info=True,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.error(f"Panorama continuous sync check failed: {exc}", exc_info=True)
+        finally:
+            db.close()
+
+    async def run_f5_syncs(self):
+        """Run continuous F5 VIP→member reachability syncs when due."""
+        from app.models.f5_integration import F5Integration
+        from app.services import f5_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(F5Integration).filter(
+                F5Integration.is_active == True,
+                F5Integration.continuous_sync_enabled == True,
+            ).all()
+
+            due = [c for c in candidates if c.is_sync_due(now)]
+            if not due:
+                return
+
+            logger.info(f"F5: {len(due)} connection(s) due for continuous sync")
+            for integration in due:
+                try:
+                    result = await f5_service.sync_integration(db, integration)
+                    logger.info(
+                        f"F5 sync (org {integration.organization_id}, "
+                        f"'{integration.name}'): {result.get('message')}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"F5 sync failed for connection {integration.id}: {exc}",
+                        exc_info=True,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.error(f"F5 continuous sync check failed: {exc}", exc_info=True)
+        finally:
+            db.close()
+
+    async def run_cloudflare_waf_syncs(self):
+        """Run continuous Cloudflare WAF whitelist syncs when due."""
+        from app.models.cloudflare_integration import CloudflareWafIntegration
+        from app.services import cloudflare_waf_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(CloudflareWafIntegration).filter(
+                CloudflareWafIntegration.is_active == True,
+                CloudflareWafIntegration.continuous_sync_enabled == True,
+            ).all()
+
+            due = [c for c in candidates if c.is_sync_due(now)]
+            if not due:
+                return
+
+            logger.info(f"Cloudflare WAF: {len(due)} connection(s) due for whitelist sync")
+            for integration in due:
+                try:
+                    result = await cloudflare_waf_service.sync_integration(db, integration)
+                    logger.info(
+                        f"Cloudflare WAF sync (org {integration.organization_id}, "
+                        f"'{integration.connection_name}'): {result.get('message')}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"Cloudflare WAF sync failed for connection {integration.id}: {exc}",
+                        exc_info=True,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.error(f"Cloudflare WAF continuous sync check failed: {exc}", exc_info=True)
+        finally:
+            db.close()
+
     async def run(self):
         """Main worker loop."""
         logger.info("Starting schedule worker...")
@@ -557,6 +725,18 @@ class ScheduleWorker:
 
                 # Continuous Censys ASM syncs — due-check enforces per-connection cadence
                 await self.run_censys_asm_syncs()
+
+                # Continuous Akamai WAF syncs
+                await self.run_akamai_waf_syncs()
+
+                # Continuous Panorama syncs — address-object inventory import
+                await self.run_panorama_syncs()
+
+                # Continuous F5 syncs — VIP → pool-member reachability
+                await self.run_f5_syncs()
+
+                # Continuous Cloudflare WAF whitelist syncs
+                await self.run_cloudflare_waf_syncs()
 
                 # Daily CommonCrawl refresh — fire once per 24-hour window
                 now = datetime.now(timezone.utc)

@@ -30,6 +30,9 @@ You help users understand their attack surface, analyze vulnerabilities, and pro
 ## Discovered Target Information
 {target_info}
 
+## Application Capability Map (browser walkthrough)
+{capability_map}
+
 ## Session Notes (findings saved this session; use save_note for important discoveries)
 {session_notes}
 
@@ -73,40 +76,29 @@ Analyze the current state and decide on your next action. You MUST output a vali
 
 ### Guidelines
 
-**CRITICAL — Iteration budget**: You have {max_iterations} iterations total. Do NOT spend them all on discovery/enumeration. Follow this priority order:
+**CRITICAL — Tester methodology (not tool spray):** You have {max_iterations} iterations. Work like a human tester who clicks around the app, understands features/logic, then attacks what they learned.
 
-1. **Add missing targets first** — If the user provides a URL/domain/IP not in the database, immediately use **add_asset** to register it. Don't waste iterations querying assets that won't be found.
-2. **Use auto_select_tools early** — After initial reconnaissance (httpx, dnsx, wafw00f), call **auto_select_tools** to get context-aware recommendations based on discovered technologies, ports, and parameters. The tool analyzes your execution trace and tells you exactly what to run next. Follow the recommendations in priority order. Re-call it after crawl/port/tech discoveries so the plan stays current.
-3. **Think like a tester** — Every tool call should answer a question raised by prior evidence. Branch: GraphQL hints → graphql_scan; SPA → deep_crawl + JS secrets; CMS → wpscan/cmseek; dangling CNAME → subdomain_takeover; chatbot → llm_red_team. Do not spray unrelated tools.
-4. **Scan early, scan deep** — After 1-2 discovery steps (query_assets, analyze_attack_surface), move to SCANNING (execute_httpx, execute_nuclei, execute_naabu). Prioritize scanning the specific target the user asked about. Do NOT exhaustively enumerate every subdomain before scanning the seed — scan the seed first, then expand.
-5. **Record findings as you go** — Use **create_finding** immediately when you discover a vulnerability with real evidence. Prefer **validate_finding** first for medium+ issues. Don't wait until the end. The target will be auto-added to inventory if needed.
-6. **Use save_note for important discoveries** — Categories: credential, vulnerability, finding, artifact. These persist across the session.
-7. **Stay in scope** — Only analyze assets within the user's organization. Filter Cypher queries by organization_id = $org_id.
-8. **Phase restrictions** — Some tools require phase transitions. Request a transition if needed.
-9. **Complete when done** — Set action to "complete" when the objective is achieved or you're running low on iterations. For External Assessment playbooks, do NOT complete after Nuclei alone — include inventory, at least one content/API path, and tech-specific follow-ups when signals exist.
+1. **Add missing targets first** — If the user provides a URL/domain/IP not in the database, immediately use **add_asset**.
+2. **Quick reachability + tech** — execute_httpx, execute_dnsx, execute_wafw00f, execute_wappalyzer/whatweb on the seed. Do not exhaust the budget on subdomain sprawl before understanding the primary app.
+3. **Browse like a tester (mandatory for web apps)** — Call **execute_deep_crawl** on the primary URL early. It clicks safe UI controls, follows links, and builds an **Application Capability Map** (pages, forms, APIs, auth, uploads, GraphQL, websockets). Prefer authenticated crawl (`login` or session). The crawl exports an **auth_session** that is auto-injected into later **execute_browser** / privileged re-crawls.
+4. **Spawn specialists from the map** — After the capability map is ready, call **fireteam_dispatch** with `specialists="auto"` (or the suggested list). Sub-agents attack matched surfaces in parallel. Do NOT run every scanner blindly.
+5. **Replay & OOB** — Use **replay_http_request** (sample_index from api_samples) to tamper captured APIs; use **execute_interactsh** (register → plant → poll) for blind sinks. Branch: GraphQL → graphql; login/SSO → auth/saml; upload → file_upload; params → injection.
+6. **Then phase-transition + broad scanners** — Only after the map (or an explicit non-browser reason), transition to exploitation for nuclei/naabu/nikto as coverage — not as a substitute for understanding the app.
+7. **Record findings as you go** — validate_finding then create_finding with concrete evidence. Use save_note for artifacts (capability map, hunt queue).
+8. **Stay in scope** — Filter Cypher by organization_id = $org_id.
+9. **Complete when done** — Do not complete after Nuclei alone. Coverage must include browse/map (or non-browser justification), at least one mapped attack path or fireteam pass, and confirmed/negative results.
 
-**Workflow for scanning a single target (use ALL applicable steps, not just Nuclei):**
+**Workflow for a web application target:**
 1. **add_asset** (if not in DB)
-2. **execute_httpx** (probe HTTP/HTTPS — get status, title, tech, redirects)
-3. **execute_dnsx** (DNS resolution — get IPs, MX, NS, CNAME records; useful even if HTTP is down)
-4. **execute_wafw00f** (WAF detection — run BEFORE injection testing to know what protections exist)
-5. **execute_wappalyzer** or **execute_whatweb** (tech fingerprinting — identify CMS, frameworks, servers)
-5a. **execute_subfinder** / **execute_uncover** (widen surface when assessing a root domain)
-5b. **execute_deep_crawl** (for JS-heavy sites / SPAs / dashboards — interaction-first browser crawl that captures lazy-loaded JS, XHR/fetch/WebSocket/SSE traffic, and mines JS bundles for hidden API endpoints and routes that katana/gau/waybackurls miss. Run this BEFORE injection testing so you know the real API surface. Follow up by feeding discovered JS URLs to scan_js_urls_for_secrets and probing endpoints with arjun/schemathesis.)
-5c. **scan_js_urls_for_secrets** + **execute_retirejs** (feed the JS bundle URLs from katana/deep_crawl/gau into BOTH — secrets/API keys and known-CVE vulnerable libraries respectively.)
-5d. **create_scan** for graphql_scan / subdomain_takeover / js_recon / jsluice_scan when signals appear (bulk worker jobs)
-6. **transition_phase to exploitation** (required before Nuclei/Naabu/Nmap/etc.)
-7. **execute_nuclei** (comprehensive vulnerability scan — **omit -severity entirely** for the most complete scan including tech detection, misconfigs, exposures, and all CVEs)
-8. **execute_naabu** (port scan — discover open ports beyond 80/443)
-9. **execute_testssl** or **execute_sslyze** (TLS/SSL testing — check for weak ciphers, expired certs, protocol vulns)
-10. **execute_nikto** (web server vuln scan — checks 6,700+ dangerous files/CGIs/configs)
-11. **execute_browser** (headless browser — test for XSS, auth bypass, cookie manipulation, JavaScript analysis. Use for any dynamic/JS-heavy site)
-12. **discover_parameters** + **execute_arjun** (find injectable parameters)
-13. If parameters found: **execute_sqlmap**, **execute_xsstrike**, or **execute_browser** (submit_form) for injection testing
-14. **create_finding** (save confirmed results as you go — prefer validate_finding first)
-15. **complete**
+2. **execute_httpx** + **execute_dnsx** + **execute_wafw00f** + **execute_wappalyzer**
+3. **execute_deep_crawl** on the primary URL (raise max_pages if the first pass is thin). Review the capability map.
+4. **fireteam_dispatch**(mission="Attack mapped surfaces", specialists="auto", targets=[primary URL])
+5. Follow fireteam leads with targeted **execute_browser** / **execute_curl** / injection tools on *concrete* endpoints from the map
+6. **transition_phase to exploitation** (blocked until capability map is ready, unless reason contains "non-browser")
+7. **execute_nuclei** / **execute_naabu** / **execute_nikto** / TLS as coverage for remaining inventory
+8. **create_finding** / **complete**
 
-**DO NOT skip steps 3-5 and 8-11.** The user has all these tools and expects you to use them. Only skip a tool if it's clearly irrelevant (e.g. skip wpscan if no WordPress detected).
+**DO NOT** spray nuclei/sqlmap/nikto before the browser walkthrough on web apps. Skip a specialist only when the map shows no signal for it.
 
 **If the target is unreachable via HTTP (httpx/curl fail):**
 - Do NOT give up immediately. Try these alternatives:
@@ -345,6 +337,8 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
   - **SSRF detection**: Navigate and inspect network_requests in the output to see outgoing connections
   Actions: navigate, fill, click, type, execute_js, get_source, get_cookies, set_cookie, screenshot, wait, check_xss, submit_form, check_response
 - **nuclei_help**, **naabu_help**, **httpx_help**, **subfinder_help**, **dnsx_help**, **katana_help**, **tldfinder_help**, **waybackurls_help**, **nmap_help**, **masscan_help**, **ffuf_help**, **amass_help**, **whatweb_help**, **knockpy_help**, **gau_help**, **kiterunner_help**, **schemathesis_help**, **sqlmap_help**, **nikto_help**, **wafw00f_help**, **testssl_help**, **sslyze_help**, **arjun_help**, **wpscan_help**, **xsstrike_help**, **gitleaks_help**, **jwt_help**, **semgrep_help**, **trivy_help**, **cmseek_help**: Get CLI usage for each tool
+- **fireteam_dispatch**: Spawn parallel specialist sub-agents. After execute_deep_crawl, prefer specialists="auto" so hunters match the capability map (auth_logic, api_authz, injection, graphql_api, js_secrets, file_upload, saml_sso, spa_client, app_mapper, vuln_triage). Args: mission (optional if map present), targets (list), specialists ("auto" or name list), max_parallel (default 4), mode ("attack"|"recon"). Example: fireteam_dispatch(mission="Attack mapped surfaces", specialists="auto", targets=["https://target.com"])
+- **replay_http_request**: Replay/tamper a captured XHR/API request from the capability map (like Burp Repeater-lite). Args: method, url, headers (dict), body (optional), sample_index (optional int into capability_map.api_samples), use_auth_session (default true — attaches cookies from deep_crawl login). Example: replay_http_request(sample_index=0) or replay_http_request(method="GET", url="https://target.com/api/users?id=1")
 - **add_asset**: Add a target to the asset inventory. Use when the target is NOT already in the database. Args: **value** (required — hostname, domain, IP, or URL), asset_type (optional, auto-detected), description (optional). Example: add_asset(value="test-git.glensserver.com"). Once added, you can scan it and use create_finding.
 - **create_scan**: Create an async bulk scan job handled by the scanner worker. Use this instead of execute_* tools when you need to scan many targets (e.g. a list of IPs, subnets, or domains). Args: **scan_type** (required — port_scan, vulnerability, waybackurls, katana, paramspider, http_probe, technology, screenshot, login_portal, subdomain_enum, dns_resolution, discovery, full, geo_enrich, tldfinder, whatweb, llm_red_team, graphql_scan, subdomain_takeover, js_recon, jsluice_scan, commoncrawl_enum, janus_dast), **targets** (optional list of hostnames/IPs — omit to scan all org assets), name (optional), config (optional dict, e.g. {"severity": ["critical","high"]}). For chatbot discovery, use `create_scan(scan_type="technology", targets=["example.com"], config={"detect_chatbots": true})`; set `render_chatbots=true` only when you need browser-rendered DOM detection for dynamic chat bubbles. Examples: create_scan(scan_type="port_scan", targets=["10.0.0.0/24"]), create_scan(scan_type="vulnerability", targets=["example.com"]), create_scan(scan_type="llm_red_team", targets=["https://example.com"], config={"categories": ["prompt_injection","jailbreak"]}). Also: create_scan(scan_type="graphql_scan", targets=["example.com"]), create_scan(scan_type="subdomain_takeover", targets=["example.com"]), create_scan(scan_type="js_recon", targets=["example.com"]). The scan runs asynchronously — results appear on the Scans page and update asset records automatically.
 - **save_note**: Save a finding for this session (category: credential|vulnerability|finding|artifact, content: str, target: optional)
@@ -573,6 +567,8 @@ TOOL_PHASE_MAP = {
 
     # Auto tool selection
     "auto_select_tools": ["informational", "exploitation", "post_exploitation"],
+    "fireteam_dispatch": ["informational", "exploitation", "post_exploitation"],
+    "replay_http_request": ["informational", "exploitation", "post_exploitation"],
 
     # LLM Red Team Scanner
     "execute_llm_red_team": ["informational", "exploitation", "post_exploitation"],

@@ -240,6 +240,12 @@ class Settings(BaseSettings):
     # the existence check, validator diagnosis, and refinement. Leave empty to
     # auto-detect common locations (~/.config/nuclei/nuclei-templates, ~/nuclei-templates, …).
     NUCLEI_OFFICIAL_TEMPLATES_PATH: str = ""
+
+    # Cloudflare WAF scanner whitelist — egress IPs and dedicated UA used when
+    # syncing skip rules (and by scanners identifying themselves to those rules).
+    # Comma-separated IPv4/IPv6 addresses or CIDRs, e.g. "203.0.113.10,198.51.100.0/24".
+    ASM_SCANNER_EGRESS_IPS: str = ""
+    ASM_SCANNER_USER_AGENT: str = "JudahSecurity-ASM-Scanner/1.0"
     
     class Config:
         env_file = ".env"

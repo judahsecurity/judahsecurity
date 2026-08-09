@@ -6,7 +6,7 @@ import logging
 from typing import List, Optional, Dict
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, defer
 
 from app.db.database import get_db
 from app.models.scan import Scan, ScanType, ScanStatus
@@ -21,6 +21,142 @@ from app.services.nuclei_service import count_cidr_targets
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/scans", tags=["Scans"])
+
+# Keys safe to return on the scans list (polled frequently). Heavy arrays like
+# host_results / ports_data / full targets blow up the UI after large OT scans.
+_LIST_RESULT_SUMMARY_KEYS = (
+    "ports_found",
+    "ports_imported",
+    "ports_updated",
+    "live_hosts",
+    "targets_scanned",
+    "targets_original",
+    "targets_expanded",
+    "cidr_count",
+    "host_count",
+    "scanner",
+    "duration_seconds",
+    "findings_summary",
+)
+_DETAIL_TARGET_CAP = 200
+_DETAIL_HOST_RESULTS_CAP = 500
+
+
+def _slim_results_for_list(results: Optional[dict]) -> dict:
+    """Keep only summary fields from scan.results for list responses."""
+    if not results:
+        return {}
+    slim = {k: results[k] for k in _LIST_RESULT_SUMMARY_KEYS if k in results}
+    errors = results.get("errors")
+    if errors:
+        if isinstance(errors, list):
+            slim["error_count"] = len(errors)
+            slim["errors"] = [str(e)[:300] for e in errors[:2]]
+        else:
+            slim["error_count"] = 1
+            slim["errors"] = [str(errors)[:300]]
+    # Count only — do not ship or walk host_results in list responses
+    host_results = results.get("host_results")
+    if isinstance(host_results, list):
+        slim["host_results_count"] = len(host_results)
+    return slim
+
+
+def _scan_list_item(scan: Scan) -> dict:
+    """Build a lightweight scan dict for GET /scans/ (no full targets/config)."""
+    results = scan.results or {}
+    slim_results = _slim_results_for_list(results)
+
+    # Prefer stored expanded counts — never expand CIDRs across 10k+ target rows
+    targets_count = (
+        slim_results.get("targets_expanded")
+        or slim_results.get("targets_original")
+        or results.get("targets_expanded")
+        or results.get("targets_original")
+        or 0
+    )
+
+    return {
+        "id": scan.id,
+        "name": scan.name,
+        "scan_type": scan.scan_type,
+        "organization_id": scan.organization_id,
+        "organization_name": scan.organization.name if scan.organization else None,
+        # Empty on purpose — list UI uses targets_count / results.targets_expanded
+        "targets": [],
+        "config": {},
+        "status": scan.status,
+        "progress": scan.progress,
+        "assets_discovered": scan.assets_discovered,
+        "technologies_found": scan.technologies_found,
+        "vulnerabilities_found": scan.vulnerabilities_found,
+        "targets_count": targets_count,
+        "findings_count": scan.vulnerabilities_found,
+        "started_by": scan.started_by,
+        "started_at": scan.started_at,
+        "completed_at": scan.completed_at,
+        "error_message": (scan.error_message or "")[:500] or None,
+        "results": slim_results,
+        "created_at": scan.created_at,
+        "updated_at": scan.updated_at,
+    }
+
+
+def _cap_scan_detail(scan: Scan) -> dict:
+    """Cap huge arrays on GET /scans/{id} so the detail page can render."""
+    targets = scan.targets or []
+    results = dict(scan.results or {})
+    host_results = results.get("host_results")
+    if isinstance(host_results, list) and len(host_results) > _DETAIL_HOST_RESULTS_CAP:
+        results["host_results_truncated"] = True
+        results["host_results_total"] = len(host_results)
+        results["host_results"] = host_results[:_DETAIL_HOST_RESULTS_CAP]
+    if isinstance(results.get("ports_data"), list) and len(results["ports_data"]) > _DETAIL_HOST_RESULTS_CAP:
+        results["ports_data_truncated"] = True
+        results["ports_data_total"] = len(results["ports_data"])
+        results["ports_data"] = results["ports_data"][:_DETAIL_HOST_RESULTS_CAP]
+
+    targets_total = len(targets)
+    targets_out = targets
+    if targets_total > _DETAIL_TARGET_CAP:
+        targets_out = targets[:_DETAIL_TARGET_CAP]
+
+    targets_count = (
+        results.get("targets_expanded")
+        or results.get("targets_original")
+        or targets_total
+    )
+    # Only expand when the list is small enough to be cheap
+    if targets_total and targets_total <= 200 and not results.get("targets_expanded"):
+        targets_count = count_cidr_targets(targets)
+
+    return {
+        "id": scan.id,
+        "name": scan.name,
+        "scan_type": scan.scan_type,
+        "organization_id": scan.organization_id,
+        "organization_name": scan.organization.name if scan.organization else None,
+        "targets": targets_out,
+        "config": scan.config or {},
+        "status": scan.status,
+        "progress": scan.progress,
+        "assets_discovered": scan.assets_discovered,
+        "technologies_found": scan.technologies_found,
+        "vulnerabilities_found": scan.vulnerabilities_found,
+        "targets_count": targets_count,
+        "findings_count": scan.vulnerabilities_found,
+        "started_by": scan.started_by,
+        "started_at": scan.started_at,
+        "completed_at": scan.completed_at,
+        "error_message": scan.error_message,
+        "results": {
+            **results,
+            "targets_total": targets_total,
+            "targets_truncated": targets_total > _DETAIL_TARGET_CAP,
+        },
+        "created_at": scan.created_at,
+        "updated_at": scan.updated_at,
+    }
 
 # SQS Configuration
 SQS_QUEUE_URL = os.getenv("SQS_QUEUE_URL")
@@ -162,37 +298,16 @@ def list_scans(
     if status:
         query = query.filter(Scan.status == status)
     
-    scans = query.order_by(Scan.created_at.desc()).offset(skip).limit(limit).all()
-    
-    # Enrich with organization names and computed fields
-    result = []
-    for scan in scans:
-        scan_dict = {
-            "id": scan.id,
-            "name": scan.name,
-            "scan_type": scan.scan_type,
-            "organization_id": scan.organization_id,
-            "organization_name": scan.organization.name if scan.organization else None,
-            "targets": scan.targets or [],
-            "config": scan.config or {},
-            "status": scan.status,
-            "progress": scan.progress,
-            "assets_discovered": scan.assets_discovered,
-            "technologies_found": scan.technologies_found,
-            "vulnerabilities_found": scan.vulnerabilities_found,
-            "targets_count": count_cidr_targets(scan.targets) if scan.targets else 0,
-            "findings_count": scan.vulnerabilities_found,
-            "started_by": scan.started_by,
-            "started_at": scan.started_at,
-            "completed_at": scan.completed_at,
-            "error_message": scan.error_message,
-            "results": scan.results or {},
-            "created_at": scan.created_at,
-            "updated_at": scan.updated_at,
-        }
-        result.append(scan_dict)
-    
-    return result
+    # Defer full targets/config — OT scans store 10k+ targets and hang the UI
+    # when every list poll serializes them. Summary counts come from results.
+    scans = (
+        query.options(defer(Scan.targets), defer(Scan.config))
+        .order_by(Scan.created_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
+    return [_scan_list_item(scan) for scan in scans]
 
 
 @router.get("/queue/status")
@@ -856,7 +971,7 @@ def get_scan(
             detail="Access denied"
         )
     
-    return scan
+    return _cap_scan_detail(scan)
 
 
 @router.put("/{scan_id}", response_model=ScanResponse)

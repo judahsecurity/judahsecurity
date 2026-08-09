@@ -138,6 +138,7 @@ services:
       - screenshots_data:/app/data/screenshots
       - commoncrawl_data:/app/data/commoncrawl
       - sni_data:/app/data/sni-ip-ranges
+      - panorama_data:/app/data/panorama
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -331,6 +332,8 @@ services:
       backend:
         condition: service_healthy
     command: ["python", "-m", "app.workers.schedule_worker"]
+    volumes:
+      - panorama_data:/app/data/panorama
     networks:
       - asm_network
 
@@ -449,6 +452,8 @@ volumes:
   commoncrawl_data:
     driver: local
   sni_data:
+    driver: local
+  panorama_data:
     driver: local
   neo4j_data:
     driver: local

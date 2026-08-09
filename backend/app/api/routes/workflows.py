@@ -1,4 +1,4 @@
-"""Workflow builder API — CRUD, versions, scripts, runs, artifacts."""
+"""Judah Loom API — CRUD, versions, scripts, runs, artifacts."""
 
 from __future__ import annotations
 

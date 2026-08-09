@@ -847,10 +847,10 @@ export default function ScansPage() {
                       {scan.organization_name || '-'}
                     </TableCell>
                     <TableCell>
-                      {scan.targets?.length || scan.targets_count || scan.results?.targets_expanded ? (
+                      {scan.results?.targets_expanded || scan.targets_count || scan.targets?.length ? (
                         <div className="flex flex-col">
                           <span className="font-mono text-sm">
-                            {scan.results?.targets_expanded || scan.targets?.length || scan.targets_count}
+                            {scan.results?.targets_expanded || scan.targets_count || scan.targets?.length}
                           </span>
                           {scan.targets?.length && scan.targets.length <= 3 && (
                             <span className="text-xs text-muted-foreground truncate max-w-[120px]">
@@ -868,7 +868,7 @@ export default function ScansPage() {
                         const liveHosts = scan.results?.live_hosts || 
                           scan.results?.host_results?.filter((h: any) => h.is_live).length || 
                           0;
-                        const totalHosts = scan.results?.host_results?.length || scan.assets_discovered || 0;
+                        const totalHosts = scan.results?.host_results_count || scan.results?.host_results?.length || scan.assets_discovered || 0;
                         
                         if (liveHosts > 0) {
                           return (

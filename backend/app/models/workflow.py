@@ -1,4 +1,4 @@
-"""Workflow builder models — Trickest-style DAG workflows, scripts, runs, artifacts."""
+"""Judah Loom models — DAG workflows, scripts, runs, and artifacts."""
 
 import enum
 from datetime import datetime

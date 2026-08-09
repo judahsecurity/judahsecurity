@@ -1,4 +1,4 @@
--- Migration: Trickest-style workflow builder
+-- Migration: Judah Loom workflow builder
 -- Adds workflows, versions, scripts, runs, node runs, and artifacts.
 -- Enum-backed columns are VARCHAR for hand-run safety on existing DBs.
 
