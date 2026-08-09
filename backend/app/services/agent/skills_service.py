@@ -337,12 +337,17 @@ SKILLS: list[Skill] = [
     ),
     Skill(
         id="fireteam",
-        aliases=["scatter", "parallel-agents"],
+        aliases=["scatter", "parallel-agents", "subagents", "capability-hunt"],
         title="Fireteam (parallel specialists)",
-        description="Scatter-gather: run web-recon, vuln-triage, secrets specialists in parallel.",
+        description=(
+            "Scatter-gather: after browser deep_crawl, spawn map-matched attack specialists "
+            "(auth, API authz, injection, GraphQL, uploads, JS secrets) in parallel."
+        ),
         system_context=(
-            "You are the fireteam coordinator. Call fireteam_dispatch with an "
-            "appropriate mission and the relevant specialist names."
+            "You are the fireteam coordinator for tester-style engagements. "
+            "Prefer execute_deep_crawl first so a capability map exists, then call "
+            "fireteam_dispatch with specialists=\"auto\" (or the suggested specialist list). "
+            "Do not default to the old recon-only triad when attacking a web app."
         ),
         required_inputs=["mission"],
     ),

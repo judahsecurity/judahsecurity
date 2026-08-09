@@ -564,6 +564,9 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
     - {"type": "authenticated", "user_id": N}
     - {"type": "thinking", "iteration": N, "phase": "...", "thought": "..."}
     - {"type": "tool_start", "tool_name": "...", "tool_args": {...}}
+    - {"type": "capability_map_update", "quality_score": ..., "ranked_hunt_queue": [...]}
+    - {"type": "auth_session_update", "authenticated": bool, "cookie_count": N}
+    - {"type": "pending_confirmation", "token": "...", "tool_name": "..."}
     - {"type": "tool_complete", "tool_name": "...", "success": true, "output_summary": "..."}
     - {"type": "response", ...full AgentResponse fields...}
     - {"type": "error", "message": "..."}

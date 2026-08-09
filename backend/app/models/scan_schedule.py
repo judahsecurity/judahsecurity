@@ -518,7 +518,8 @@ CONTINUOUS_SCAN_TYPES = {
             "scanner": "nmap",
             "rate": 1000,
             "service_detection": True,
-            "nse_scripts": ["dnp3-info", "iec-identify"],
+            # dnp3-info is not in stock nmap; iec-identify is official (when package is new enough)
+            "nse_scripts": ["iec-identify"],
             "generate_findings": True,
             "finding_category": "ics_scada",
         },
@@ -560,10 +561,12 @@ CONTINUOUS_SCAN_TYPES = {
             "scanner": "nmap",
             "rate": 500,  # Very conservative for OT networks
             "service_detection": True,
+            # Only stock nmap NSE scripts — community scripts (dnp3-info,
+            # codesys-v2-discover, opcua-info) abort nmap if missing. Runtime
+            # filtering in PortScannerService also skips anything not installed.
             "nse_scripts": [
                 "modbus-discover", "s7-info", "enip-info", "bacnet-info",
-                "fox-info", "omron-info", "dnp3-info", "iec-identify",
-                "codesys-v2-discover", "opcua-info"
+                "fox-info", "omron-info", "iec-identify",
             ],
             "nuclei_tags": ["ics", "scada"],
             "generate_findings": True,

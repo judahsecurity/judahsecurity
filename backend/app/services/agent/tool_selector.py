@@ -688,14 +688,30 @@ class ToolSelector:
                 category="reconnaissance",
             ))
 
-        # SPA → deep crawl when static crawl is thin or SPA fingerprint present
-        if "spa" in self._target_types and "execute_deep_crawl" not in self._tools_already_run:
+        # Tester methodology: browser walkthrough early for any HTTP web target
+        if "execute_deep_crawl" not in self._tools_already_run:
+            spa_boost = "spa" in self._target_types
             recs.append(ToolRecommendation(
                 tool_name="execute_deep_crawl",
                 args_template="https://{target}",
-                priority=5,
-                rationale="SPA fingerprint — browser crawl to capture XHR/fetch/WebSocket APIs katana misses.",
+                priority=3 if spa_boost else 4,
+                rationale=(
+                    "Browse the app like a tester (click links/menus) to build a capability map "
+                    "before spraying scanners."
+                    + (" SPA fingerprint — prioritize interaction crawl." if spa_boost else "")
+                ),
                 category="reconnaissance",
+            ))
+        elif "fireteam_dispatch" not in self._tools_already_run:
+            recs.append(ToolRecommendation(
+                tool_name="fireteam_dispatch",
+                args_template='mission="Attack mapped surfaces" specialists="auto" targets=["https://{target}"]',
+                priority=3,
+                rationale=(
+                    "Capability map available — spawn attack specialists matched to "
+                    "auth/API/forms/GraphQL/uploads discovered in the browser walkthrough."
+                ),
+                category="exploitation",
             ))
 
         # Git secret scanning (if git repo indicators found)

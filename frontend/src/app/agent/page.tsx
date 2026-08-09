@@ -30,9 +30,21 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useRouter } from 'next/navigation';
 import { AttackScenarioPanel, ChainData } from '@/components/agent/AttackScenarioPanel';
+import {
+  CapabilityMapPanel,
+  CapabilityMapState,
+} from '@/components/agent/CapabilityMapPanel';
 import { api, getApiErrorMessage } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
+
+type PendingToolConfirmation = {
+  token: string;
+  tool_name: string;
+  tool_args?: Record<string, unknown>;
+  expires_at?: number;
+  message?: string;
+};
 
 // ═══════════════════════════════════════════════════════
 // Oracle types
@@ -684,6 +696,15 @@ export default function AgentPage() {
   const [chainData, setChainData] = useState<ChainData | null>(null);
   const [scenarioCollapsed, setScenarioCollapsed] = useState(false);
   const [showScenario, setShowScenario] = useState(true);
+  const [capabilityMap, setCapabilityMap] = useState<CapabilityMapState | null>(null);
+  const [mapCollapsed, setMapCollapsed] = useState(false);
+  const [authSessionInfo, setAuthSessionInfo] = useState<{
+    authenticated?: boolean | null;
+    cookie_count?: number;
+    target?: string;
+  } | null>(null);
+  const [pendingConfirmation, setPendingConfirmation] = useState<PendingToolConfirmation | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // ── Oracle state ─────────────────────────────────────────────────
@@ -773,6 +794,29 @@ export default function AgentPage() {
       setLiveSteps(prev => [...prev, data as unknown as StatusUpdate]);
     } else if (msgType === 'attack_scenario_update') {
       if (data.chain) setChainData(data.chain as ChainData);
+    } else if (msgType === 'capability_map_update') {
+      setCapabilityMap({
+        quality_score: data.quality_score as number | undefined,
+        ready_for_attack: data.ready_for_attack as boolean | undefined,
+        capabilities: data.capabilities as string[] | undefined,
+        ranked_hunt_queue: data.ranked_hunt_queue as CapabilityMapState['ranked_hunt_queue'],
+        authenticated: data.authenticated as boolean | null | undefined,
+        api_sample_count: data.api_sample_count as number | undefined,
+      });
+    } else if (msgType === 'auth_session_update') {
+      setAuthSessionInfo({
+        authenticated: data.authenticated as boolean | null | undefined,
+        cookie_count: data.cookie_count as number | undefined,
+        target: data.target as string | undefined,
+      });
+    } else if (msgType === 'pending_confirmation') {
+      setPendingConfirmation({
+        token: String(data.token || ''),
+        tool_name: String(data.tool_name || 'tool'),
+        tool_args: (data.tool_args as Record<string, unknown>) || {},
+        expires_at: data.expires_at as number | undefined,
+        message: data.message as string | undefined,
+      });
     } else if (msgType === 'response') {
       setLiveSteps([]); setLoading(false);
       appendAgentMessage({
@@ -812,7 +856,8 @@ export default function AgentPage() {
 
   const loadingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    if (loading) {
+    // Don't timeout while waiting on operator tool confirmation / phase approval.
+    if (loading && !pendingConfirmation) {
       loadingTimeoutRef.current = setTimeout(() => {
         setLoading(false); setLiveSteps([]);
         toast({ variant: 'destructive', title: 'Timeout', description: 'No response from the agent after 3 minutes.' });
@@ -822,7 +867,7 @@ export default function AgentPage() {
       clearTimeout(loadingTimeoutRef.current); loadingTimeoutRef.current = null;
     }
     return () => { if (loadingTimeoutRef.current) clearTimeout(loadingTimeoutRef.current); };
-  }, [loading]);
+  }, [loading, pendingConfirmation]);
 
   // ── Message helpers ───────────────────────────────────────────
   const appendAgentMessage = (payload: {
@@ -1301,6 +1346,79 @@ export default function AgentPage() {
                           )}
                         </div>
                       ))}
+                      {/* Per-tool confirmation (RoE / dangerous tools) */}
+                      {pendingConfirmation && (
+                        <div className="rounded-lg border border-orange-500/50 bg-orange-500/8 p-4 space-y-3">
+                          <div className="flex items-center gap-2">
+                            <ShieldAlert className="h-5 w-5 text-orange-400 shrink-0" />
+                            <div>
+                              <p className="text-sm font-semibold text-orange-300">Tool requires approval</p>
+                              <p className="text-xs text-muted-foreground">
+                                {pendingConfirmation.message
+                                  || `Approve before the agent runs ${pendingConfirmation.tool_name}.`}
+                              </p>
+                            </div>
+                          </div>
+                          <div className="rounded-md bg-muted/40 border border-border px-3 py-2">
+                            <p className="text-[10px] font-semibold uppercase tracking-widest text-muted-foreground mb-0.5">
+                              Tool
+                            </p>
+                            <p className="text-sm font-mono text-foreground/90">{pendingConfirmation.tool_name}</p>
+                          </div>
+                          <div className="flex gap-2 flex-wrap">
+                            <Button
+                              size="sm"
+                              disabled={confirmBusy}
+                              onClick={async () => {
+                                if (!pendingConfirmation.token) return;
+                                setConfirmBusy(true);
+                                try {
+                                  await api.decideAgentConfirmation(pendingConfirmation.token, true);
+                                  setPendingConfirmation(null);
+                                  toast({ title: 'Approved', description: `${pendingConfirmation.tool_name} will continue.` });
+                                } catch (e) {
+                                  toast({
+                                    variant: 'destructive',
+                                    title: 'Approval failed',
+                                    description: getApiErrorMessage(e),
+                                  });
+                                } finally {
+                                  setConfirmBusy(false);
+                                }
+                              }}
+                              className="h-8 gap-1.5 bg-green-600 hover:bg-green-700 text-white border-0"
+                            >
+                              <CheckCircle className="h-3.5 w-3.5" /> Approve tool
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={confirmBusy}
+                              onClick={async () => {
+                                if (!pendingConfirmation.token) return;
+                                setConfirmBusy(true);
+                                try {
+                                  await api.decideAgentConfirmation(pendingConfirmation.token, false, 'Operator denied');
+                                  setPendingConfirmation(null);
+                                  toast({ title: 'Denied', description: `${pendingConfirmation.tool_name} blocked.` });
+                                } catch (e) {
+                                  toast({
+                                    variant: 'destructive',
+                                    title: 'Deny failed',
+                                    description: getApiErrorMessage(e),
+                                  });
+                                } finally {
+                                  setConfirmBusy(false);
+                                }
+                              }}
+                              className="h-8 gap-1.5 border-red-500/40 text-red-400 hover:bg-red-500/10"
+                            >
+                              <XCircle className="h-3.5 w-3.5" /> Deny
+                            </Button>
+                          </div>
+                        </div>
+                      )}
+
                       {/* Approval gate — shown when agent is paused waiting for human sign-off */}
                       {messages.some(m => m.awaitingApproval && m.approvalRequest) && !loading && (() => {
                         const approvalMsg = [...messages].reverse().find(m => m.awaitingApproval && m.approvalRequest);
@@ -1437,6 +1555,16 @@ export default function AgentPage() {
                     </div>
                   </CardContent>
                 </Card>
+
+                {/* Capability map + hunt queue (browser walkthrough) */}
+                {capabilityMap && (
+                  <CapabilityMapPanel
+                    map={capabilityMap}
+                    authSession={authSessionInfo}
+                    collapsed={mapCollapsed}
+                    onToggleCollapse={() => setMapCollapsed(!mapCollapsed)}
+                  />
+                )}
 
                 {/* Attack scenario panel */}
                 {showScenario && (

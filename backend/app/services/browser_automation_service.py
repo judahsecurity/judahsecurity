@@ -118,9 +118,15 @@ async def execute_browser_actions(actions_json: str) -> Dict[str, Any]:
     if len(actions) > MAX_ACTIONS:
         actions = actions[:MAX_ACTIONS]
 
+    # Auth handoff from deep_crawl / prior browser session
+    storage_state = None if isinstance(spec, list) else spec.get("storage_state")
+    seed_cookies = None if isinstance(spec, list) else spec.get("cookies")
+    login_spec = None if isinstance(spec, list) else spec.get("login")
+
     from playwright.async_api import async_playwright
 
     session = BrowserSessionResult(success=True, actions_executed=0)
+    exported_storage_state = None
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
@@ -133,16 +139,40 @@ async def execute_browser_actions(actions_json: str) -> Dict[str, Any]:
             ],
         )
         try:
-            context = await browser.new_context(
-                viewport={"width": 1280, "height": 720},
-                ignore_https_errors=True,
-                user_agent=(
+            ctx_kwargs: Dict[str, Any] = {
+                "viewport": {"width": 1280, "height": 720},
+                "ignore_https_errors": True,
+                "user_agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/120.0.0.0 Safari/537.36"
                 ),
-            )
+            }
+            if isinstance(storage_state, dict) and storage_state:
+                ctx_kwargs["storage_state"] = storage_state
+            context = await browser.new_context(**ctx_kwargs)
+            if isinstance(seed_cookies, list) and seed_cookies and not storage_state:
+                try:
+                    await context.add_cookies(seed_cookies)
+                except Exception as e:
+                    session.errors.append(f"cookies: {str(e)[:120]}")
             page = await context.new_page()
+
+            # Optional self-service login before the action chain
+            if isinstance(login_spec, dict) and login_spec:
+                try:
+                    from app.services.deep_crawl_service import _perform_login
+                    login_result = type("R", (), {"errors": []})()
+                    ok = await _perform_login(page, login_spec, 25000, login_result)
+                    session.results.append(asdict(ActionResult(
+                        action="login",
+                        success=bool(ok),
+                        data={"authenticated": bool(ok)},
+                        error=None if ok else "; ".join(getattr(login_result, "errors", [])[:3]),
+                    )))
+                    session.actions_executed += 1
+                except Exception as e:
+                    session.errors.append(f"login: {str(e)[:200]}")
 
             page.on("console", lambda msg: session.console_logs.append(
                 f"[{msg.type}] {msg.text}"
@@ -179,17 +209,30 @@ async def execute_browser_actions(actions_json: str) -> Dict[str, Any]:
                 ]
             except Exception:
                 pass
+            try:
+                exported_storage_state = await context.storage_state()
+            except Exception:
+                exported_storage_state = None
 
             await context.close()
         finally:
             await browser.close()
 
     output = _format_session_output(session)
+    auth_session = None
+    if isinstance(exported_storage_state, dict) and exported_storage_state:
+        auth_session = {
+            "target": session.final_url,
+            "authenticated": True,
+            "storage_state": exported_storage_state,
+            "cookies": exported_storage_state.get("cookies") or [],
+        }
     return {
         "success": session.success and not session.errors,
         "output": output,
         "error": "; ".join(session.errors) if session.errors else None,
         "exit_code": 0 if not session.errors else 1,
+        "auth_session": auth_session,
     }
 
 

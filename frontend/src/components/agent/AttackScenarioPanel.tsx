@@ -10,6 +10,8 @@ import {
   CheckCircle, XCircle, AlertTriangle, Target, Loader2,
   Shield, Crosshair, Eye, ChevronLeft,
 } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import { TrustBoundaryMap, TRUST_COLORS } from './TrustBoundaryMap';
 
 const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), {
   ssr: false,
@@ -64,26 +66,33 @@ interface AttackScenarioPanelProps {
 }
 
 const NODE_COLORS: Record<string, string> = {
-  chain: '#3b82f6',
-  step: '#8b5cf6',
-  finding: '#10b981',
-  finding_info: '#06b6d4',
-  finding_low: '#22c55e',
-  finding_medium: '#f59e0b',
-  finding_high: '#ef4444',
-  finding_critical: '#dc2626',
-  failure: '#ef4444',
+  chain: TRUST_COLORS.blue,
+  step: TRUST_COLORS.purple,
+  finding: TRUST_COLORS.green,
+  finding_info: TRUST_COLORS.blue,
+  finding_low: TRUST_COLORS.green,
+  finding_medium: TRUST_COLORS.yellow,
+  finding_high: TRUST_COLORS.orange,
+  finding_critical: TRUST_COLORS.red,
+  failure: TRUST_COLORS.red,
 };
 
+/** Phase → HF-inspired trust colors */
 const PHASE_COLORS: Record<string, string> = {
-  informational: '#3b82f6',
-  reconnaissance: '#8b5cf6',
-  enumeration: '#06b6d4',
-  vulnerability_analysis: '#f59e0b',
-  exploitation: '#ef4444',
-  post_exploitation: '#dc2626',
-  reporting: '#10b981',
+  informational: TRUST_COLORS.green,
+  reconnaissance: TRUST_COLORS.green,
+  enumeration: TRUST_COLORS.gray,
+  vulnerability_analysis: TRUST_COLORS.orange,
+  exploitation: TRUST_COLORS.yellow,
+  post_exploitation: TRUST_COLORS.purple,
+  reporting: TRUST_COLORS.pink,
 };
+
+function stageColorForPhase(phase?: string): string {
+  return PHASE_COLORS[(phase || '').toLowerCase()] || TRUST_COLORS.gray;
+}
+
+type ViewMode = 'map' | 'timeline' | 'graph';
 
 export function AttackScenarioPanel({
   chainData,
@@ -95,7 +104,7 @@ export function AttackScenarioPanel({
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 400, height: 300 });
   const [selectedNode, setSelectedNode] = useState<ScenarioNode | null>(null);
-  const [viewMode, setViewMode] = useState<'graph' | 'timeline'>('timeline');
+  const [viewMode, setViewMode] = useState<ViewMode>('map');
   const [hoveredNode, setHoveredNode] = useState<ScenarioNode | null>(null);
 
   useEffect(() => {
@@ -103,40 +112,40 @@ export function AttackScenarioPanel({
       if (containerRef.current) {
         setDimensions({
           width: containerRef.current.clientWidth,
-          height: 300,
+          height: Math.max(280, containerRef.current.clientHeight || 300),
         });
       }
     };
     updateDimensions();
     window.addEventListener('resize', updateDimensions);
     return () => window.removeEventListener('resize', updateDimensions);
-  }, [collapsed]);
+  }, [collapsed, viewMode]);
 
   const graphData = useMemo(() => {
     if (!chainData) return { nodes: [], links: [] };
     return {
-      nodes: chainData.nodes.map(n => ({ ...n })),
-      links: chainData.edges.map(e => ({ ...e })),
+      nodes: chainData.nodes.map((n) => ({ ...n })),
+      links: chainData.edges.map((e) => ({ ...e })),
     };
   }, [chainData]);
 
   const steps = useMemo(() => {
     if (!chainData) return [];
     return chainData.nodes
-      .filter(n => n.type !== 'chain' && !n.type.startsWith('finding'))
+      .filter((n) => n.type !== 'chain' && !n.type.startsWith('finding'))
       .sort((a, b) => (a.properties?.iteration || 0) - (b.properties?.iteration || 0));
   }, [chainData]);
 
   const findings = useMemo(() => {
     if (!chainData) return [];
-    return chainData.nodes.filter(n => n.type.startsWith('finding'));
+    return chainData.nodes.filter((n) => n.type.startsWith('finding'));
   }, [chainData]);
 
   const phases = useMemo(() => {
-    const seen = new Set<string>();
-    return steps
-      .map(s => s.properties?.phase)
-      .filter((p): p is string => !!p && !seen.has(p) && (seen.add(p), true));
+    const seen = setWithOrder(
+      steps.map((s) => s.properties?.phase).filter((p): p is string => !!p)
+    );
+    return seen;
   }, [steps]);
 
   const paintNode = useCallback(
@@ -145,6 +154,9 @@ export function AttackScenarioPanel({
       const fontSize = 10 / globalScale;
       const isSelected = selectedNode?.id === node.id;
       const isHovered = hoveredNode?.id === node.id;
+      const color = node.type.startsWith('finding')
+        ? NODE_COLORS[node.type] || NODE_COLORS.finding
+        : stageColorForPhase(node.properties?.phase);
 
       let nodeSize = 6;
       if (node.type === 'chain') nodeSize = 10;
@@ -152,11 +164,10 @@ export function AttackScenarioPanel({
 
       ctx.beginPath();
       ctx.arc(node.x, node.y, nodeSize, 0, 2 * Math.PI);
-      ctx.fillStyle = NODE_COLORS[node.type] || '#6b7280';
-
+      ctx.fillStyle = color;
       if (isSelected || isHovered) {
-        ctx.shadowColor = ctx.fillStyle;
-        ctx.shadowBlur = 12;
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 14;
       }
       ctx.fill();
       ctx.shadowBlur = 0;
@@ -167,7 +178,7 @@ export function AttackScenarioPanel({
         ctx.stroke();
       }
 
-      ctx.font = `${fontSize}px Sans-Serif`;
+      ctx.font = `${fontSize}px ui-monospace, SFMono-Regular, Menlo, monospace`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = '#d1d5db';
@@ -183,13 +194,11 @@ export function AttackScenarioPanel({
       ctx.beginPath();
       ctx.moveTo(link.source.x, link.source.y);
       ctx.lineTo(link.target.x, link.target.y);
-
       const isProduced = link.type === 'PRODUCED';
-      ctx.strokeStyle = isProduced ? '#ef4444' : '#4b5563';
+      ctx.strokeStyle = isProduced ? TRUST_COLORS.red : '#4b5563';
       ctx.lineWidth = (isProduced ? 1.5 : 0.8) / globalScale;
       ctx.stroke();
 
-      // Arrow
       const dx = link.target.x - link.source.x;
       const dy = link.target.y - link.source.y;
       const angle = Math.atan2(dy, dx);
@@ -222,7 +231,7 @@ export function AttackScenarioPanel({
           title="Show Attack Scenario"
         >
           <ChevronLeft className="h-4 w-4" />
-          <span className="text-[10px] writing-mode-vertical" style={{ writingMode: 'vertical-lr' }}>
+          <span className="text-[10px]" style={{ writingMode: 'vertical-lr' }}>
             Attack Scenario
           </span>
         </Button>
@@ -231,41 +240,51 @@ export function AttackScenarioPanel({
   }
 
   const isEmpty = !chainData || chainData.nodes.length === 0;
+  const isRunning = chainData?.meta?.status === 'running';
 
   return (
-    <Card className="w-[420px] shrink-0 flex flex-col max-h-[calc(100vh-200px)]">
+    <Card
+      className={cn(
+        'shrink-0 flex flex-col max-h-[calc(100vh-200px)] overflow-hidden border-border/60 bg-card transition-[width] duration-300',
+        viewMode === 'map' ? 'w-[560px]' : 'w-[460px]'
+      )}
+    >
       <CardHeader className="pb-2 px-3 pt-3">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <CardTitle className="text-sm flex items-center gap-1.5">
-            <Crosshair className="h-4 w-4 text-red-500" />
+            <Crosshair className="h-4 w-4" style={{ color: TRUST_COLORS.orange }} />
             Attack Scenario
           </CardTitle>
           <div className="flex items-center gap-1">
             {chainData?.meta?.status && (
               <Badge
                 variant="outline"
-                className={`text-[10px] ${chainData.meta.status === 'running' ? 'text-yellow-500 border-yellow-500' : 'text-green-500 border-green-500'}`}
+                className={cn(
+                  'text-[10px] font-mono uppercase tracking-wide',
+                  isRunning
+                    ? 'text-amber-400 border-amber-400/60'
+                    : 'text-emerald-400 border-emerald-400/60'
+                )}
               >
                 {chainData.meta.status}
               </Badge>
             )}
             <div className="flex border rounded-md overflow-hidden">
-              <Button
-                variant={viewMode === 'timeline' ? 'secondary' : 'ghost'}
-                size="sm"
-                onClick={() => setViewMode('timeline')}
-                className="h-6 px-2 rounded-none text-[10px]"
-              >
-                Timeline
-              </Button>
-              <Button
-                variant={viewMode === 'graph' ? 'secondary' : 'ghost'}
-                size="sm"
-                onClick={() => setViewMode('graph')}
-                className="h-6 px-2 rounded-none text-[10px]"
-              >
-                Graph
-              </Button>
+              {([
+                ['map', 'Map'],
+                ['timeline', 'Timeline'],
+                ['graph', 'Force'],
+              ] as const).map(([mode, label]) => (
+                <Button
+                  key={mode}
+                  variant={viewMode === mode ? 'secondary' : 'ghost'}
+                  size="sm"
+                  onClick={() => setViewMode(mode)}
+                  className="h-6 px-2 rounded-none text-[10px]"
+                >
+                  {label}
+                </Button>
+              ))}
             </div>
             <Button variant="ghost" size="icon" className="h-6 w-6" onClick={onToggleCollapse}>
               <ChevronRight className="h-3.5 w-3.5" />
@@ -277,12 +296,16 @@ export function AttackScenarioPanel({
             {chainData.meta.objective}
           </p>
         )}
+        {viewMode === 'map' && !isEmpty && (
+          <p className="text-[10px] font-mono text-muted-foreground/80 mt-1">
+            Attack chain across trust boundaries · nodes ignite as the agent reaches them
+          </p>
+        )}
       </CardHeader>
 
       <CardContent className="p-0 flex-1 overflow-hidden flex flex-col">
-        {/* Stats bar */}
         {!isEmpty && (
-          <div className="flex gap-3 px-3 py-1.5 border-b text-[10px] text-muted-foreground">
+          <div className="flex gap-3 px-3 py-1.5 border-b text-[10px] text-muted-foreground font-mono">
             <span className="flex items-center gap-1">
               <Target className="h-3 w-3" /> {steps.length} steps
             </span>
@@ -295,29 +318,13 @@ export function AttackScenarioPanel({
           </div>
         )}
 
-        {/* Phase progress */}
-        {phases.length > 0 && (
-          <div className="flex gap-1 px-3 py-1.5 border-b overflow-x-auto">
-            {phases.map((phase, i) => (
-              <Badge
-                key={phase}
-                variant="outline"
-                className="text-[9px] shrink-0"
-                style={{ borderColor: PHASE_COLORS[phase] || '#6b7280', color: PHASE_COLORS[phase] || '#6b7280' }}
-              >
-                {phase.replace(/_/g, ' ')}
-              </Badge>
-            ))}
-          </div>
-        )}
-
         {isEmpty && !loading && (
           <div className="flex-1 flex items-center justify-center text-muted-foreground p-6">
             <div className="text-center">
               <Crosshair className="h-8 w-8 mx-auto mb-2 opacity-40" />
               <p className="text-xs">No attack scenario yet</p>
-              <p className="text-[10px] mt-1">
-                The agent will build an attack graph as it tests resources
+              <p className="text-[10px] mt-1 font-mono text-muted-foreground/70">
+                chain map builds as the agent tests
               </p>
             </div>
           </div>
@@ -329,9 +336,69 @@ export function AttackScenarioPanel({
           </div>
         )}
 
-        {/* Graph view */}
+        {/* HF-style trust-boundary attack chain map */}
+        {viewMode === 'map' && !isEmpty && (
+          <div className="flex-1 min-h-0 flex flex-col">
+            <TrustBoundaryMap
+              steps={steps}
+              findings={findings}
+              isRunning={isRunning}
+              className="flex-1 min-h-[360px]"
+            />
+            {chainData?.attack_paths && chainData.attack_paths.length > 0 && (
+              <div className="border-t px-3 py-2 max-h-[120px] overflow-y-auto space-y-1.5 bg-[#070b12]">
+                <p className="text-[10px] font-mono tracking-[0.14em] font-semibold" style={{ color: TRUST_COLORS.blue }}>
+                  GRAPH PATHS · asset topology
+                </p>
+                {chainData.attack_paths.map((path, idx) => (
+                  <div
+                    key={idx}
+                    className="rounded-lg border px-2 py-1.5 text-[10px]"
+                    style={{ borderColor: `${TRUST_COLORS.blue}55`, background: 'rgba(2,6,23,0.7)' }}
+                  >
+                    <div className="flex items-center gap-1 mb-1">
+                      <span className="font-mono" style={{ color: TRUST_COLORS.blue }}>PATH {idx + 1}</span>
+                      {path.target_cve && (
+                        <Badge variant="outline" className="text-[9px] text-rose-400 border-rose-400/50">
+                          {path.target_cve}
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1 font-mono text-slate-300">
+                      {(path.assets || path.nodes?.map((n) => n.properties?.value || '?') || []).map(
+                        (asset, ai, arr) => (
+                          <span key={ai} className="flex items-center gap-1">
+                            <span
+                              className="rounded border px-1.5 py-0.5"
+                              style={{
+                                borderColor: `${TRUST_COLORS.blue}66`,
+                                background: `${TRUST_COLORS.blue}18`,
+                              }}
+                            >
+                              {String(asset)}
+                            </span>
+                            {ai < arr.length - 1 && <span className="text-slate-500">→</span>}
+                          </span>
+                        )
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Force graph (secondary) */}
         {viewMode === 'graph' && !isEmpty && (
-          <div className="relative flex-1 min-h-[300px]" ref={containerRef}>
+          <div className="relative flex-1 min-h-[300px]" ref={containerRef}
+            style={{
+              backgroundColor: '#070b12',
+              backgroundImage:
+                'linear-gradient(rgba(148,163,184,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,0.06) 1px, transparent 1px)',
+              backgroundSize: '24px 24px',
+            }}
+          >
             <div className="absolute top-2 right-2 z-10 flex gap-1">
               <Button variant="secondary" size="icon" className="h-6 w-6 bg-background/80" onClick={() => graphRef.current?.zoom(graphRef.current.zoom() * 1.3, 300)}>
                 <ZoomIn className="h-3 w-3" />
@@ -357,7 +424,7 @@ export function AttackScenarioPanel({
                 cooldownTicks={80}
                 onEngineStop={() => graphRef.current?.zoomToFit(300, 30)}
                 enableNodeDrag={true}
-                backgroundColor="transparent"
+                backgroundColor="rgba(0,0,0,0)"
                 dagMode="td"
                 dagLevelDistance={40}
               />
@@ -383,7 +450,6 @@ export function AttackScenarioPanel({
                       className={`flex items-start gap-2 rounded-md px-2 py-1.5 cursor-pointer transition-colors hover:bg-muted/60 ${isExpanded ? 'bg-muted' : ''}`}
                       onClick={() => setSelectedNode(isExpanded ? null : step)}
                     >
-                      {/* Timeline connector */}
                       <div className="flex flex-col items-center pt-0.5 shrink-0">
                         <div
                           className="w-2 h-2 rounded-full border-2"
@@ -457,7 +523,6 @@ export function AttackScenarioPanel({
                 );
               })}
 
-              {/* Findings summary */}
               {findings.length > 0 && (
                 <div className="pt-2 border-t mt-2">
                   <p className="text-[10px] font-medium text-muted-foreground mb-1">Findings ({findings.length})</p>
@@ -470,7 +535,6 @@ export function AttackScenarioPanel({
                 </div>
               )}
 
-              {/* Neo4j Attack Paths */}
               {chainData?.attack_paths && chainData.attack_paths.length > 0 && (
                 <div className="pt-2 border-t mt-2">
                   <p className="text-[10px] font-medium text-muted-foreground mb-1 flex items-center gap-1">
@@ -488,18 +552,13 @@ export function AttackScenarioPanel({
                         )}
                       </div>
                       <div className="flex items-center gap-0.5 flex-wrap">
-                        {(path.assets || path.nodes?.map(n => n.properties?.value || n.labels?.[0] || '?') || []).map((asset, ai) => (
+                        {(path.assets || path.nodes?.map((n) => n.properties?.value || n.labels?.[0] || '?') || []).map((asset, ai) => (
                           <span key={ai} className="flex items-center gap-0.5">
                             <Badge variant="secondary" className="text-[9px]">{typeof asset === 'string' ? asset : String(asset)}</Badge>
                             {ai < ((path.assets || path.nodes || []).length - 1) && <span className="text-muted-foreground">→</span>}
                           </span>
                         ))}
                       </div>
-                      {path.relationships && (
-                        <p className="text-[9px] text-muted-foreground mt-0.5">
-                          via: {path.relationships.join(' → ')}
-                        </p>
-                      )}
                     </div>
                   ))}
                 </div>
@@ -510,4 +569,16 @@ export function AttackScenarioPanel({
       </CardContent>
     </Card>
   );
+}
+
+function setWithOrder(items: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of items) {
+    if (!seen.has(item)) {
+      seen.add(item);
+      out.push(item);
+    }
+  }
+  return out;
 }

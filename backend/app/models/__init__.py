@@ -39,6 +39,18 @@ from app.models.pentest_session import (
     ExploitCategory,
     ExploitStatus,
 )
+from app.models.workflow import (
+    Workflow,
+    WorkflowVersion,
+    WorkflowScript,
+    WorkflowRun,
+    WorkflowNodeRun,
+    WorkflowArtifact,
+    WorkflowKind,
+    WorkflowRunStatus,
+    WorkflowNodeRunStatus,
+    ScriptLanguage,
+)
 
 __all__ = [
     "User",
@@ -103,4 +115,14 @@ __all__ = [
     "PentestPhase",
     "ExploitCategory",
     "ExploitStatus",
+    "Workflow",
+    "WorkflowVersion",
+    "WorkflowScript",
+    "WorkflowRun",
+    "WorkflowNodeRun",
+    "WorkflowArtifact",
+    "WorkflowKind",
+    "WorkflowRunStatus",
+    "WorkflowNodeRunStatus",
+    "ScriptLanguage",
 ]

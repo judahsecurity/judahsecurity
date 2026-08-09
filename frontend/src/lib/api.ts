@@ -106,6 +106,61 @@ export interface JiraTicket {
   created_at: string;
 }
 
+// ── ServiceNow shared types ────────────────────────────────────────────────
+
+export interface ServiceNowIntegration {
+  id: number;
+  organization_id: number;
+  webhook_url: string;
+  username?: string;
+  has_password: boolean;
+  auto_create_enabled: boolean;
+  auto_create_min_severity?: string;
+  sync_enabled: boolean;
+  table_name: string;
+  close_state: string;
+  reopen_state: string;
+  remote_closed_states: string[];
+  validate_on_remote_close: boolean;
+  accept_close_as: string;
+  is_active: boolean;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_delivery_at?: string;
+  last_pull_at?: string;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ServiceNowDelivery {
+  id: number;
+  vulnerability_id: number;
+  snow_sys_id?: string;
+  snow_number?: string;
+  snow_url?: string;
+  snow_state?: string;
+  snow_state_label?: string;
+  last_synced_at?: string;
+  pending_close_validation: boolean;
+  pending_close_validation_id?: number;
+  last_close_validation_verdict?: string;
+  http_status?: number;
+  disconnected_at?: string;
+  created_at: string;
+}
+
+export interface ServiceNowSyncResult {
+  ok: boolean;
+  message: string;
+  state_updated?: boolean;
+  work_note_added?: boolean;
+  validation_queued?: boolean;
+  asm_status_updated?: boolean;
+  snow_state?: string;
+  snow_state_label?: string;
+}
+
 export interface JiraProject {
   key: string;
   name: string;
@@ -152,6 +207,156 @@ export interface CensysSyncResult {
   subdomains_seen: number;
   certificates_seen: number;
   risks_seen: number;
+}
+
+export interface AkamaiIntegration {
+  id: number;
+  organization_id: number;
+  connection_name: string;
+  api_host: string;
+  import_configurations: boolean;
+  import_hostnames: boolean;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AkamaiSyncResult {
+  ok: boolean;
+  message: string;
+  assets_created: number;
+  assets_updated: number;
+  configs_seen: number;
+  policies_seen: number;
+  hostnames_seen: number;
+}
+
+export interface CloudflareIntegration {
+  id: number;
+  organization_id: number;
+  connection_name: string;
+  zones: string[];
+  scanner_ips: string[];
+  scan_header_name: string;
+  scanner_user_agent: string;
+  effective_scanner_ips: string[];
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CloudflareSyncResult {
+  ok: boolean;
+  message: string;
+  zones_seen: number;
+  rules_created: number;
+  rules_updated: number;
+  rules_skipped: number;
+  rules_failed: number;
+}
+
+export type PanoramaConnectionMode = 'api' | 'config_export';
+
+export interface PanoramaIntegration {
+  id: number;
+  organization_id: number;
+  name: string;
+  connection_mode: PanoramaConnectionMode;
+  panorama_host?: string | null;
+  device_group?: string | null;
+  api_version: string;
+  verify_ssl: boolean;
+  export_filename?: string | null;
+  export_file_size?: number | null;
+  export_uploaded_at?: string | null;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PanoramaSyncResult {
+  ok: boolean;
+  message: string;
+  assets_created: number;
+  assets_updated: number;
+  addresses_seen: number;
+  address_groups_seen: number;
+  ips_imported: number;
+  cidrs_imported: number;
+  fqdns_imported: number;
+  ranges_seeded: number;
+  assets_missing_from_source: number;
+  source?: string;
+}
+
+export interface PanoramaUploadResult {
+  ok: boolean;
+  message: string;
+  filename?: string;
+  file_size?: number;
+  address_count?: number;
+  address_groups_count?: number;
+  sync?: PanoramaSyncResult | null;
+}
+
+export interface F5Integration {
+  id: number;
+  organization_id: number;
+  name: string;
+  bigip_host: string;
+  partition?: string | null;
+  verify_ssl: boolean;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface F5SyncResult {
+  ok: boolean;
+  message: string;
+  assets_created: number;
+  assets_updated: number;
+  virtuals_seen: number;
+  vips_imported: number;
+  members_imported: number;
+  mappings_seen: number;
+  assets_missing_from_source: number;
 }
 
 class ApiClient {
@@ -1766,6 +1971,23 @@ class ApiClient {
     return `${wsBase}/api/v1/agent/ws/${sessionId}`;
   }
 
+  async listAgentConfirmations(params?: { organization_id?: number; session_id?: string }) {
+    const response = await this.client.get('/agent/confirmations', { params });
+    return response.data;
+  }
+
+  async decideAgentConfirmation(
+    token: string,
+    approved: boolean,
+    reason?: string,
+  ) {
+    const response = await this.client.post(`/agent/confirmations/${token}/decide`, {
+      approved,
+      reason,
+    });
+    return response.data;
+  }
+
   // ---------------------------------------------------------------------------
   // Reports (PDF/HTML report generation)
   // ---------------------------------------------------------------------------
@@ -2013,6 +2235,140 @@ class ApiClient {
     return response.data;
   }
 
+  // ── ServiceNow Integration ─────────────────────────────────────────────────
+
+  async getServiceNowIntegration(orgId?: number): Promise<ServiceNowIntegration> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.get('/integrations/servicenow', { params });
+    return response.data;
+  }
+
+  async createServiceNowIntegration(payload: {
+    webhook_url: string;
+    username?: string;
+    password?: string;
+    auto_create_enabled?: boolean;
+    auto_create_min_severity?: string;
+    sync_enabled?: boolean;
+    table_name?: string;
+    close_state?: string;
+    reopen_state?: string;
+    remote_closed_states?: string[];
+    validate_on_remote_close?: boolean;
+    accept_close_as?: string;
+  }, orgId?: number): Promise<ServiceNowIntegration> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.post('/integrations/servicenow', payload, { params });
+    return response.data;
+  }
+
+  async updateServiceNowIntegration(payload: {
+    webhook_url?: string;
+    username?: string;
+    password?: string;
+    is_active?: boolean;
+    auto_create_enabled?: boolean;
+    auto_create_min_severity?: string;
+    sync_enabled?: boolean;
+    table_name?: string;
+    close_state?: string;
+    reopen_state?: string;
+    remote_closed_states?: string[];
+    validate_on_remote_close?: boolean;
+    accept_close_as?: string;
+  }, orgId?: number): Promise<ServiceNowIntegration> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.put('/integrations/servicenow', payload, { params });
+    return response.data;
+  }
+
+  async deleteServiceNowIntegration(orgId?: number): Promise<void> {
+    const params = orgId ? { org_id: orgId } : {};
+    await this.client.delete('/integrations/servicenow', { params });
+  }
+
+  async testServiceNowConnection(orgId?: number): Promise<{
+    ok: boolean;
+    message: string;
+    http_status?: number;
+    table_api_ok?: boolean;
+  }> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.post('/integrations/servicenow/test', undefined, { params });
+    return response.data;
+  }
+
+  async pushServiceNowVulnerability(vulnerabilityId: number, payload: {
+    include_description?: boolean;
+    include_evidence?: boolean;
+    include_remediation?: boolean;
+    include_references?: boolean;
+    include_enrichment?: boolean;
+  } = {}, orgId?: number): Promise<ServiceNowDelivery> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.post(
+      `/integrations/servicenow/vulnerabilities/${vulnerabilityId}/push`,
+      payload,
+      { params },
+    );
+    return response.data;
+  }
+
+  async getServiceNowDeliveriesForVulnerability(vulnerabilityId: number, orgId?: number): Promise<ServiceNowDelivery[]> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.get(
+      `/integrations/servicenow/vulnerabilities/${vulnerabilityId}/deliveries`,
+      { params },
+    );
+    return response.data;
+  }
+
+  async disconnectServiceNowDelivery(deliveryId: number, orgId?: number): Promise<{ ok: boolean; message: string }> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.delete(`/integrations/servicenow/deliveries/${deliveryId}`, { params });
+    return response.data;
+  }
+
+  async associateServiceNowDelivery(
+    vulnerabilityId: number,
+    payload: { sys_id?: string; number?: string },
+    orgId?: number,
+  ): Promise<ServiceNowDelivery> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.post(
+      `/integrations/servicenow/vulnerabilities/${vulnerabilityId}/associate`,
+      payload,
+      { params },
+    );
+    return response.data;
+  }
+
+  async refreshServiceNowDelivery(deliveryId: number, orgId?: number): Promise<ServiceNowSyncResult> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.post(
+      `/integrations/servicenow/deliveries/${deliveryId}/refresh`,
+      undefined,
+      { params },
+    );
+    return response.data;
+  }
+
+  async syncServiceNowVulnerability(vulnerabilityId: number, orgId?: number): Promise<ServiceNowSyncResult> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.post(
+      `/integrations/servicenow/vulnerabilities/${vulnerabilityId}/sync`,
+      undefined,
+      { params },
+    );
+    return response.data;
+  }
+
+  async pullServiceNowDeliveries(orgId?: number): Promise<ServiceNowSyncResult> {
+    const params = orgId ? { org_id: orgId } : {};
+    const response = await this.client.post('/integrations/servicenow/pull', undefined, { params });
+    return response.data;
+  }
+
   // ── Censys ASM Integration ─────────────────────────────────────────────────
 
   async getCensysIntegrations(): Promise<CensysIntegration[]> {
@@ -2057,6 +2413,329 @@ class ApiClient {
   async syncCensysIntegration(id: number): Promise<CensysSyncResult> {
     const response = await this.client.post(`/integrations/censys/${id}/sync`);
     return response.data;
+  }
+
+  // ── Akamai WAF Integration ─────────────────────────────────────────────────
+
+  async getAkamaiIntegrations(): Promise<AkamaiIntegration[]> {
+    const response = await this.client.get('/integrations/akamai');
+    return response.data;
+  }
+
+  async createAkamaiIntegration(payload: {
+    connection_name: string;
+    api_host: string;
+    client_token: string;
+    client_secret: string;
+    access_token: string;
+    import_configurations: boolean;
+    import_hostnames: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<AkamaiIntegration> {
+    const response = await this.client.post('/integrations/akamai', payload);
+    return response.data;
+  }
+
+  async updateAkamaiIntegration(id: number, payload: {
+    connection_name?: string;
+    api_host?: string;
+    client_token?: string;
+    client_secret?: string;
+    access_token?: string;
+    import_configurations?: boolean;
+    import_hostnames?: boolean;
+    is_active?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<AkamaiIntegration> {
+    const response = await this.client.put(`/integrations/akamai/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteAkamaiIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/akamai/${id}`);
+  }
+
+  async testAkamaiConnection(id: number): Promise<{ ok: boolean; message: string; configs_found?: number }> {
+    const response = await this.client.post(`/integrations/akamai/${id}/test`);
+    return response.data;
+  }
+
+  async syncAkamaiIntegration(id: number): Promise<AkamaiSyncResult> {
+    const response = await this.client.post(`/integrations/akamai/${id}/sync`);
+    return response.data;
+  }
+
+  // ── Palo Alto Panorama Integration ─────────────────────────────────────────
+
+  async getPanoramaIntegrations(): Promise<PanoramaIntegration[]> {
+    const response = await this.client.get('/integrations/panorama');
+    return response.data;
+  }
+
+  async createPanoramaIntegration(payload: {
+    name: string;
+    connection_mode?: PanoramaConnectionMode;
+    panorama_host?: string | null;
+    api_key?: string | null;
+    device_group?: string | null;
+    api_version?: string;
+    verify_ssl?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<PanoramaIntegration> {
+    const response = await this.client.post('/integrations/panorama', payload);
+    return response.data;
+  }
+
+  async updatePanoramaIntegration(id: number, payload: {
+    name?: string;
+    connection_mode?: PanoramaConnectionMode;
+    panorama_host?: string | null;
+    api_key?: string;
+    device_group?: string | null;
+    api_version?: string;
+    verify_ssl?: boolean;
+    is_active?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<PanoramaIntegration> {
+    const response = await this.client.put(`/integrations/panorama/${id}`, payload);
+    return response.data;
+  }
+
+  async deletePanoramaIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/panorama/${id}`);
+  }
+
+  async testPanoramaConnection(id: number): Promise<{ ok: boolean; message: string; address_count?: number }> {
+    const response = await this.client.post(`/integrations/panorama/${id}/test`);
+    return response.data;
+  }
+
+  async uploadPanoramaConfigExport(id: number, file: File, sync = true): Promise<PanoramaUploadResult> {
+    const form = new FormData();
+    form.append('file', file);
+    const response = await this.client.post(`/integrations/panorama/${id}/upload`, form, {
+      params: { sync },
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  }
+
+  async syncPanoramaIntegration(id: number): Promise<PanoramaSyncResult> {
+    const response = await this.client.post(`/integrations/panorama/${id}/sync`);
+    return response.data;
+  }
+
+  // ── F5 BIG-IP Reachability Integration ─────────────────────────────────────
+
+  async getF5Integrations(): Promise<F5Integration[]> {
+    const response = await this.client.get('/integrations/f5');
+    return response.data;
+  }
+
+  async createF5Integration(payload: {
+    name: string;
+    bigip_host: string;
+    username: string;
+    password: string;
+    partition?: string | null;
+    verify_ssl?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<F5Integration> {
+    const response = await this.client.post('/integrations/f5', payload);
+    return response.data;
+  }
+
+  async updateF5Integration(id: number, payload: {
+    name?: string;
+    bigip_host?: string;
+    username?: string;
+    password?: string;
+    partition?: string | null;
+    verify_ssl?: boolean;
+    is_active?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<F5Integration> {
+    const response = await this.client.put(`/integrations/f5/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteF5Integration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/f5/${id}`);
+  }
+
+  async testF5Connection(id: number): Promise<{ ok: boolean; message: string; virtual_count?: number }> {
+    const response = await this.client.post(`/integrations/f5/${id}/test`);
+    return response.data;
+  }
+
+  async syncF5Integration(id: number): Promise<F5SyncResult> {
+    const response = await this.client.post(`/integrations/f5/${id}/sync`);
+    return response.data;
+  }
+
+  // ── Cloudflare WAF Integration ─────────────────────────────────────────────
+
+  async getCloudflareIntegrations(): Promise<CloudflareIntegration[]> {
+    const response = await this.client.get('/integrations/cloudflare');
+    return response.data;
+  }
+
+  async createCloudflareIntegration(payload: {
+    connection_name: string;
+    api_token: string;
+    zones?: string[];
+    scanner_ips?: string[];
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<CloudflareIntegration> {
+    const response = await this.client.post('/integrations/cloudflare', payload);
+    return response.data;
+  }
+
+  async updateCloudflareIntegration(id: number, payload: {
+    connection_name?: string;
+    api_token?: string;
+    zones?: string[];
+    scanner_ips?: string[];
+    is_active?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<CloudflareIntegration> {
+    const response = await this.client.put(`/integrations/cloudflare/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteCloudflareIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/cloudflare/${id}`);
+  }
+
+  async testCloudflareConnection(id: number): Promise<{ ok: boolean; message: string; zones_found?: number }> {
+    const response = await this.client.post(`/integrations/cloudflare/${id}/test`);
+    return response.data;
+  }
+
+  async syncCloudflareIntegration(id: number): Promise<CloudflareSyncResult> {
+    const response = await this.client.post(`/integrations/cloudflare/${id}/sync`);
+    return response.data;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Judah Loom — DAG workflow builder
+  // ---------------------------------------------------------------------------
+
+  async getWorkflowTools() {
+    const response = await this.client.get('/workflow-tools');
+    return response.data;
+  }
+
+  async getWorkflows(params?: { organization_id?: number; kind?: string; seed_library?: boolean }) {
+    const response = await this.client.get('/workflows', { params });
+    return response.data;
+  }
+
+  async getWorkflow(id: number) {
+    const response = await this.client.get(`/workflows/${id}`);
+    return response.data;
+  }
+
+  async createWorkflow(data: {
+    name: string;
+    description?: string;
+    kind?: string;
+    organization_id: number;
+    graph?: { nodes: any[]; edges: any[]; viewport?: any };
+    input_ports?: any[];
+    output_ports?: any[];
+  }) {
+    const response = await this.client.post('/workflows', data);
+    return response.data;
+  }
+
+  async updateWorkflow(id: number, data: { name?: string; description?: string }) {
+    const response = await this.client.patch(`/workflows/${id}`, data);
+    return response.data;
+  }
+
+  async deleteWorkflow(id: number) {
+    await this.client.delete(`/workflows/${id}`);
+  }
+
+  async saveWorkflowVersion(
+    workflowId: number,
+    data: { graph: { nodes: any[]; edges: any[]; viewport?: any }; input_ports?: any[]; output_ports?: any[] }
+  ) {
+    const response = await this.client.post(`/workflows/${workflowId}/versions`, data);
+    return response.data;
+  }
+
+  async seedWorkflowLibrary(organizationId?: number) {
+    const response = await this.client.post('/workflows/seed-library', null, {
+      params: organizationId ? { organization_id: organizationId } : {},
+    });
+    return response.data;
+  }
+
+  async runWorkflow(
+    workflowId: number,
+    data?: { inputs?: Record<string, any>; continue_on_error?: boolean; version_id?: number }
+  ) {
+    const response = await this.client.post(`/workflows/${workflowId}/run`, data || {});
+    return response.data;
+  }
+
+  async getWorkflowRuns(params?: { organization_id?: number; workflow_id?: number; limit?: number }) {
+    const response = await this.client.get('/workflow-runs', { params });
+    return response.data;
+  }
+
+  async getWorkflowRun(runId: number) {
+    const response = await this.client.get(`/workflow-runs/${runId}`);
+    return response.data;
+  }
+
+  async cancelWorkflowRun(runId: number) {
+    const response = await this.client.post(`/workflow-runs/${runId}/cancel`);
+    return response.data;
+  }
+
+  async getWorkflowScripts(organizationId?: number) {
+    const response = await this.client.get('/workflow-scripts', {
+      params: organizationId ? { organization_id: organizationId } : {},
+    });
+    return response.data;
+  }
+
+  async createWorkflowScript(data: {
+    name: string;
+    description?: string;
+    language?: string;
+    source?: string;
+    organization_id: number;
+    input_ports?: any[];
+    output_ports?: any[];
+    params_schema?: Record<string, any>;
+  }) {
+    const response = await this.client.post('/workflow-scripts', data);
+    return response.data;
+  }
+
+  async updateWorkflowScript(id: number, data: Record<string, any>) {
+    const response = await this.client.patch(`/workflow-scripts/${id}`, data);
+    return response.data;
+  }
+
+  async deleteWorkflowScript(id: number) {
+    await this.client.delete(`/workflow-scripts/${id}`);
+  }
+
+  getWorkflowArtifactContentUrl(artifactId: number) {
+    return `${this.client.defaults.baseURL}/workflow-artifacts/${artifactId}/content`;
   }
 }
 

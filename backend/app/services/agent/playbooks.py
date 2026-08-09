@@ -14,6 +14,10 @@ PLAYBOOKS: List[Dict[str, Any]] = [
         "objective": (
             "Conduct a thorough external security assessment like an experienced penetration tester.\n\n"
             "OPERATING RULES (non-negotiable):\n"
+            "- Work like a human tester: browse and click the app before spraying scanners.\n"
+            "- Early on the primary web target, run execute_deep_crawl to build an Application "
+            "Capability Map (pages, forms, APIs, auth, uploads). Then fireteam_dispatch with "
+            "specialists=\"auto\" so attack sub-agents match what the browser learned.\n"
             "- Work in phases. Finish the purpose of a phase before moving on, but branch early when "
             "a high-value lead appears (login, API, GraphQL, chatbot, admin, upload, dangling DNS).\n"
             "- Call auto_select_tools after every major discovery wave so recommendations stay current.\n"
@@ -23,8 +27,8 @@ PLAYBOOKS: List[Dict[str, Any]] = [
             "subdomain_takeover, js_recon, jsluice_scan, vulnerability, waybackurls, katana, "
             "paramspider, technology). Use execute_* for interactive, targeted follow-up.\n"
             "- Stay in scope. Ask the user before destructive or authenticated testing if ROE is unclear.\n"
-            "- Do NOT complete after Nuclei alone. Coverage must include recon inventory, at least one "
-            "content/API discovery path, and tech-specific testing when signals exist.\n\n"
+            "- Do NOT complete after Nuclei alone. Coverage must include browser capability map (or "
+            "explicit non-browser justification), fireteam/mapped attacks, and tech-specific testing.\n\n"
             "**PHASE 0 — Scope & existing intel**\n"
             "1) query_assets / query_ports / query_technologies / query_vulnerabilities / get_notes "
             "for the target org. Note what is already known so you do not re-do work blindly.\n"
@@ -43,22 +47,20 @@ PLAYBOOKS: List[Dict[str, Any]] = [
             "9) Request exploitation phase, then execute_naabu (top ports) on key hosts/IPs.\n"
             "10) execute_nmap -sV on interesting non-HTTP ports; execute_testssl/sslyze on HTTPS hosts.\n"
             "11) create_scan(scan_type='port_scan') for large IP/CIDR sets instead of looping execute_*.\n\n"
-            "**PHASE 3 — Content, API, and JS enumeration**\n"
-            "12) Parallel discovery of attack surface:\n"
-            "   - execute_katana (-d 2-3 -jc) and/or create_scan(katana/waybackurls/paramspider)\n"
-            "   - execute_gau / execute_waybackurls for historical URLs and forgotten params\n"
-            "   - execute_deep_crawl on SPAs / auth-walled apps (session if provided)\n"
-            "   - execute_ffuf for dirs on high-value hosts; execute_kiterunner when API signals exist\n"
-            "   - discover_parameters + execute_arjun on interesting endpoints\n"
-            "13) JS recon: scan_js_urls_for_secrets + execute_retirejs on crawled bundles; "
-            "create_scan(scan_type='js_recon' or 'jsluice_scan') for bulk JS analysis.\n"
-            "14) If GraphQL paths/hints appear: create_scan(graphql_scan) and/or execute_graphql_cop / "
-            "schemathesis. If chatbot/AI signals: execute_llm_red_team (and garak if confirmed).\n"
-            "15) create_scan(subdomain_takeover) when many CNAMEs / NXDOMAIN / provider fingerprints appear.\n"
-            "16) Rank the surface (rank_attack_surface / analyze_attack_surface). save_note the queue.\n"
-            "17) auto_select_tools again with updated context.\n\n"
-            "**PHASE 4 — Targeted testing (tester branching)**\n"
-            "18) Work the ranked queue, highest proof-value first. Examples:\n"
+            "**PHASE 3 — Browser walkthrough & capability map (tester eyes-on)**\n"
+            "12) On each primary live web app: execute_deep_crawl (interact=true; auth session if available). "
+            "This is mandatory before broad exploitation — click menus/tabs/links and learn the app.\n"
+            "13) Supplement with execute_katana / execute_gau / waybackurls for historical coverage, "
+            "but treat the capability map as the source of truth for what the app *does*.\n"
+            "14) fireteam_dispatch(specialists=\"auto\") to spawn attack specialists from the map "
+            "(auth_logic, api_authz, injection, graphql, file_upload, js_secrets, spa_client, …).\n"
+            "15) JS recon: scan_js_urls_for_secrets + execute_retirejs on crawled bundles; "
+            "create_scan(js_recon/jsluice_scan) for bulk JS analysis when many hosts.\n"
+            "16) If GraphQL/chatbot/takeover signals appear outside the fireteam: create_scan or "
+            "targeted execute_* follow-ups.\n"
+            "17) save_note(category='artifact') with capability map + hunt queue. auto_select_tools.\n\n"
+            "**PHASE 4 — Targeted testing (tester branching from the map)**\n"
+            "18) Work the ranked hunt queue from the capability map / fireteam, highest proof-value first. Examples:\n"
             "   - WordPress → wpscan; other CMS → cmseek\n"
             "   - OpenAPI/Swagger → schemathesis; REST APIs → authz checks + kiterunner leftovers\n"
             "   - Injection candidates → sqlmap / xsstrike / browser check_xss with real params\n"
@@ -81,9 +83,9 @@ PLAYBOOKS: List[Dict[str, Any]] = [
             {"description": "Phase 1: Passive discovery (subfinder/crt/uncover) + httpx + WAF/tech", "status": "pending", "priority": "high"},
             {"description": "Phase 1b: auto_select_tools and adjust plan from discoveries", "status": "pending", "priority": "high"},
             {"description": "Phase 2: Ports (naabu/nmap) + TLS on key hosts", "status": "pending", "priority": "high"},
-            {"description": "Phase 3: Crawl/archive/params/JS/API/GraphQL/takeover as signals dictate", "status": "pending", "priority": "high"},
-            {"description": "Phase 3b: Rank attack surface; save artifact queue", "status": "pending", "priority": "high"},
-            {"description": "Phase 4: Targeted testing on ranked leads + Nuclei comprehensive", "status": "pending", "priority": "high"},
+            {"description": "Phase 3: Browser deep_crawl → capability map on primary apps", "status": "pending", "priority": "high"},
+            {"description": "Phase 3b: fireteam_dispatch(specialists=auto) from capability map", "status": "pending", "priority": "high"},
+            {"description": "Phase 4: Targeted testing on mapped leads + Nuclei coverage", "status": "pending", "priority": "high"},
             {"description": "Phase 5: Validate, create findings, queue bulk follow-ups, report", "status": "pending", "priority": "medium"},
         ],
     },
@@ -99,13 +101,11 @@ PLAYBOOKS: List[Dict[str, Any]] = [
             "3) execute_dnsx — DNS resolution (IPs, MX, NS, CNAME).\n"
             "4) execute_wafw00f — detect WAF protections before injection testing.\n"
             "5) execute_wappalyzer — fingerprint technologies (CMS, frameworks, servers).\n\n"
-            "**Phase 2 — Smart Tool Selection**\n"
-            "6) Call auto_select_tools to get context-aware tool recommendations based on what was discovered.\n"
-            "7) Follow the recommendations in priority order. The selector will recommend:\n"
-            "   - WordPress → wpscan, Other CMS → cmseek\n"
-            "   - API/Swagger → schemathesis, kiterunner\n"
-            "   - SPA/JS-heavy → katana deep crawl, browser JS analysis\n"
-            "   - AI/chatbot → llm_red_team\n\n"
+            "**Phase 2 — Browser walkthrough & specialists**\n"
+            "6) execute_deep_crawl on the primary URL — click around like a tester and build a capability map.\n"
+            "7) fireteam_dispatch(specialists=\"auto\") to spawn attack sub-agents matched to the map.\n"
+            "8) Call auto_select_tools; follow recommendations that still apply (WordPress→wpscan, "
+            "API→schemathesis, chatbot→llm_red_team).\n\n"
             "**Phase 3 — Parameter Discovery & Injection Testing**\n"
             "8) discover_parameters + execute_arjun — find all injectable params.\n"
             "9) For SQLi-prone params: execute_sqlmap with --batch --dbs.\n"

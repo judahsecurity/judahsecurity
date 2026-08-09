@@ -655,6 +655,133 @@ export default function FindingsPage() {
   const [jiraDisconnecting, setJiraDisconnecting] = useState<number | null>(null);
   const [jiraRefreshing, setJiraRefreshing] = useState<number | null>(null);
 
+  // ServiceNow push / sync state
+  const [snowDialogOpen, setSnowDialogOpen] = useState(false);
+  const [snowDialogMode, setSnowDialogMode] = useState<'push' | 'associate'>('push');
+  const [snowHasIntegration, setSnowHasIntegration] = useState<boolean | null>(null);
+  const [snowSyncEnabled, setSnowSyncEnabled] = useState(false);
+  const [snowDeliveries, setSnowDeliveries] = useState<import('@/lib/api').ServiceNowDelivery[]>([]);
+  const [snowPushing, setSnowPushing] = useState(false);
+  const [snowDisconnecting, setSnowDisconnecting] = useState<number | null>(null);
+  const [snowRefreshing, setSnowRefreshing] = useState<number | null>(null);
+  const [snowAssociateKey, setSnowAssociateKey] = useState('');
+  const [snowIncludeEvidence, setSnowIncludeEvidence] = useState(true);
+  const [snowIncludeRemediation, setSnowIncludeRemediation] = useState(true);
+  const [snowIncludeEnrichment, setSnowIncludeEnrichment] = useState(true);
+
+  const openServiceNowDialog = async (finding: Finding) => {
+    setSnowDialogOpen(true);
+    setSnowDialogMode('push');
+    setSnowDeliveries([]);
+    setSnowAssociateKey('');
+    const orgId = finding.organization_id;
+    if (!orgId) {
+      toast({
+        title: 'Could not load ServiceNow data',
+        description: 'This finding has no associated organization.',
+        variant: 'destructive',
+      });
+      setSnowDialogOpen(false);
+      return;
+    }
+    try {
+      const [integrationData, deliveriesData] = await Promise.all([
+        api.getServiceNowIntegration(orgId).catch(() => null),
+        api.getServiceNowDeliveriesForVulnerability(finding.id, orgId),
+      ]);
+      setSnowHasIntegration(integrationData !== null && integrationData.is_active);
+      setSnowSyncEnabled(!!integrationData?.sync_enabled);
+      setSnowDeliveries(deliveriesData);
+    } catch (err: any) {
+      if (err?.response?.status === 404) {
+        setSnowHasIntegration(false);
+      } else {
+        toast({ title: 'Could not load ServiceNow data', description: getApiErrorMessage(err), variant: 'destructive' });
+        setSnowDialogOpen(false);
+      }
+    }
+  };
+
+  const handlePushServiceNow = async () => {
+    if (!selectedFinding) return;
+    setSnowPushing(true);
+    try {
+      const delivery = await api.pushServiceNowVulnerability(selectedFinding.id, {
+        include_evidence: snowIncludeEvidence,
+        include_remediation: snowIncludeRemediation,
+        include_enrichment: snowIncludeEnrichment,
+      }, selectedFinding.organization_id);
+      const label = delivery.snow_number || delivery.snow_sys_id || `delivery #${delivery.id}`;
+      toast({
+        title: `Pushed to ServiceNow: ${label}`,
+        description: delivery.snow_url || `HTTP ${delivery.http_status ?? 'OK'}`,
+      });
+      setSnowDeliveries((prev) => [delivery, ...prev]);
+    } catch (err) {
+      toast({ title: 'Failed to push to ServiceNow', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setSnowPushing(false);
+    }
+  };
+
+  const handleAssociateServiceNow = async () => {
+    if (!selectedFinding || !snowAssociateKey.trim()) return;
+    setSnowPushing(true);
+    try {
+      const key = snowAssociateKey.trim();
+      const looksLikeSysId = /^[0-9a-f]{32}$/i.test(key);
+      const delivery = await api.associateServiceNowDelivery(
+        selectedFinding.id,
+        looksLikeSysId ? { sys_id: key } : { number: key.toUpperCase() },
+        selectedFinding.organization_id,
+      );
+      const label = delivery.snow_number || delivery.snow_sys_id || `#${delivery.id}`;
+      toast({ title: `Linked ServiceNow record ${label}.` });
+      setSnowDeliveries((prev) => [delivery, ...prev]);
+      setSnowAssociateKey('');
+      setSnowDialogMode('push');
+    } catch (err) {
+      toast({ title: 'Failed to associate', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setSnowPushing(false);
+    }
+  };
+
+  const handleRefreshServiceNow = async (deliveryId: number) => {
+    setSnowRefreshing(deliveryId);
+    try {
+      const result = await api.refreshServiceNowDelivery(deliveryId, selectedFinding?.organization_id);
+      toast({
+        title: result.validation_queued ? 'Close validation queued' : 'Status refreshed',
+        description: result.message,
+      });
+      if (selectedFinding?.organization_id) {
+        const deliveries = await api.getServiceNowDeliveriesForVulnerability(
+          selectedFinding.id,
+          selectedFinding.organization_id,
+        );
+        setSnowDeliveries(deliveries);
+      }
+    } catch (err) {
+      toast({ title: 'Refresh failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setSnowRefreshing(null);
+    }
+  };
+
+  const handleDisconnectServiceNow = async (deliveryId: number, label: string) => {
+    setSnowDisconnecting(deliveryId);
+    try {
+      await api.disconnectServiceNowDelivery(deliveryId, selectedFinding?.organization_id);
+      toast({ title: `ServiceNow delivery ${label} disconnected.` });
+      setSnowDeliveries((prev) => prev.filter((d) => d.id !== deliveryId));
+    } catch (err) {
+      toast({ title: 'Failed to disconnect', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setSnowDisconnecting(null);
+    }
+  };
+
   // Open Jira ticket dialog for a finding
   const openJiraDialog = async (finding: Finding, mode: 'create' | 'associate' = 'create') => {
     setJiraDialogOpen(true);
@@ -1852,15 +1979,26 @@ export default function FindingsPage() {
                 <SheetTitle className="text-xl text-left">
                   {selectedFinding?.title || selectedFinding?.name || selectedFinding?.template_id}
                 </SheetTitle>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="shrink-0 border-[#0052CC]/40 hover:bg-[#0052CC]/15 text-[#4C9AFF]"
-                  onClick={() => selectedFinding && openJiraDialog(selectedFinding)}
-                >
-                  <Ticket className="h-4 w-4 mr-1.5" />
-                  Jira
-                </Button>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="border-[#0052CC]/40 hover:bg-[#0052CC]/15 text-[#4C9AFF]"
+                    onClick={() => selectedFinding && openJiraDialog(selectedFinding)}
+                  >
+                    <Ticket className="h-4 w-4 mr-1.5" />
+                    Jira
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="border-[#81B5A1]/40 hover:bg-[#81B5A1]/15 text-[#81B5A1]"
+                    onClick={() => selectedFinding && openServiceNowDialog(selectedFinding)}
+                  >
+                    <Shield className="h-4 w-4 mr-1.5" />
+                    ServiceNow
+                  </Button>
+                </div>
               </div>
               <SheetDescription className="text-left">
                 Complete finding details and remediation information
@@ -2888,6 +3026,170 @@ export default function FindingsPage() {
                 <Button onClick={handleAssociateJiraTicket} disabled={jiraCreating || !jiraAssociateKey.trim()} className="bg-[#0052CC] hover:bg-[#0065FF] text-white">
                   {jiraCreating ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Ticket className="h-4 w-4 mr-2" />}
                   Link ticket
+                </Button>
+              )}
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        {/* ServiceNow push / sync dialog */}
+        <Dialog open={snowDialogOpen} onOpenChange={setSnowDialogOpen}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <div className="w-6 h-6 rounded bg-[#81B5A1] flex items-center justify-center shrink-0">
+                  <Shield className="w-4 h-4 text-[#1B3C34]" />
+                </div>
+                ServiceNow
+              </DialogTitle>
+              <DialogDescription className="truncate">{selectedFinding?.title || selectedFinding?.name}</DialogDescription>
+            </DialogHeader>
+
+            {snowHasIntegration !== false && (
+              <div className="flex gap-1 border-b border-border pb-2">
+                {(['push', 'associate'] as const).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setSnowDialogMode(m)}
+                    className={cn(
+                      'px-3 py-1 text-sm rounded-md transition-colors',
+                      snowDialogMode === m
+                        ? 'bg-[#81B5A1]/20 text-[#81B5A1] border border-[#81B5A1]/30'
+                        : 'text-muted-foreground hover:text-foreground hover:bg-muted/50',
+                    )}
+                  >
+                    {m === 'push' ? 'Push finding' : 'Link existing'}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            <div className="space-y-4 py-2">
+              {snowHasIntegration === false ? (
+                <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 p-4 text-sm space-y-2">
+                  <p className="text-yellow-300 font-medium flex items-center gap-2">
+                    <AlertCircle className="h-4 w-4" />ServiceNow not configured
+                  </p>
+                  <p className="text-muted-foreground">
+                    Set up the ServiceNow integration on the{' '}
+                    <a href="/integrations" className="text-primary underline">Integrations page</a>.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  {snowDeliveries.length > 0 && (
+                    <div className="space-y-1.5">
+                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Linked records</p>
+                      <div className="space-y-1.5">
+                        {snowDeliveries.map((d) => {
+                          const label = d.snow_number || d.snow_sys_id || `#${d.id}`;
+                          return (
+                            <div key={d.id} className="rounded border border-border px-2 py-1.5 text-sm space-y-1">
+                              <div className="flex items-center gap-2">
+                                {d.snow_url ? (
+                                  <a href={d.snow_url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 text-[#81B5A1] hover:underline flex-1 min-w-0">
+                                    <ExternalLink className="h-3 w-3 shrink-0" />
+                                    <span className="font-mono truncate">{label}</span>
+                                  </a>
+                                ) : (
+                                  <span className="font-mono flex-1 truncate">{label}</span>
+                                )}
+                                {d.snow_state_label && (
+                                  <Badge variant="outline" className="text-[10px] h-4 px-1 shrink-0">{d.snow_state_label}</Badge>
+                                )}
+                                {snowSyncEnabled && (
+                                  <button
+                                    onClick={() => handleRefreshServiceNow(d.id)}
+                                    disabled={snowRefreshing === d.id}
+                                    className="text-muted-foreground hover:text-foreground"
+                                    title="Refresh from ServiceNow (may queue close validation)"
+                                  >
+                                    {snowRefreshing === d.id
+                                      ? <Loader2 className="h-3 w-3 animate-spin" />
+                                      : <RefreshCw className="h-3 w-3" />}
+                                  </button>
+                                )}
+                                <button
+                                  onClick={() => handleDisconnectServiceNow(d.id, label)}
+                                  disabled={snowDisconnecting === d.id}
+                                  className="text-muted-foreground hover:text-red-400"
+                                  title="Disconnect delivery"
+                                >
+                                  {snowDisconnecting === d.id
+                                    ? <Loader2 className="h-3 w-3 animate-spin" />
+                                    : <XCircle className="h-3 w-3" />}
+                                </button>
+                              </div>
+                              {d.pending_close_validation && (
+                                <p className="text-[11px] text-yellow-400">Close-claim validation in progress…</p>
+                              )}
+                              {d.last_close_validation_verdict && !d.pending_close_validation && (
+                                <p className="text-[11px] text-muted-foreground">
+                                  Last close validation: {d.last_close_validation_verdict}
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                  {snowDialogMode === 'push' && snowDeliveries.length === 0 && (
+                    <div className="space-y-2">
+                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Include in payload</p>
+                      {[
+                        { label: 'Evidence & Proof of Concept', value: snowIncludeEvidence, set: setSnowIncludeEvidence },
+                        { label: 'Remediation', value: snowIncludeRemediation, set: setSnowIncludeRemediation },
+                        { label: 'Delphi / Oracle enrichment', value: snowIncludeEnrichment, set: setSnowIncludeEnrichment },
+                      ].map(({ label, value, set }) => (
+                        <label key={label} className="flex items-center gap-2 cursor-pointer text-sm">
+                          <Checkbox checked={value} onCheckedChange={(v) => set(!!v)} className="shrink-0" />
+                          {label}
+                        </label>
+                      ))}
+                    </div>
+                  )}
+
+                  {snowDialogMode === 'associate' && (
+                    <div className="space-y-3">
+                      <p className="text-sm text-muted-foreground">
+                        Link an existing ServiceNow incident by number (INC0012345) or sys_id so status sync and close validation can apply.
+                      </p>
+                      <Input
+                        placeholder="INC0012345 or sys_id"
+                        value={snowAssociateKey}
+                        onChange={(e) => setSnowAssociateKey(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleAssociateServiceNow()}
+                      />
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-border">
+              <Button variant="outline" onClick={() => setSnowDialogOpen(false)} disabled={snowPushing}>
+                {snowHasIntegration === false ? 'Close' : 'Cancel'}
+              </Button>
+              {snowHasIntegration !== false && snowDialogMode === 'push' && (
+                <Button
+                  onClick={handlePushServiceNow}
+                  disabled={snowPushing || snowDeliveries.length > 0}
+                  className="bg-[#81B5A1] hover:bg-[#6FA38F] text-[#1B3C34]"
+                >
+                  {snowPushing ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Shield className="h-4 w-4 mr-2" />}
+                  {snowDeliveries.length > 0 ? 'Already linked' : 'Push finding'}
+                </Button>
+              )}
+              {snowHasIntegration !== false && snowDialogMode === 'associate' && (
+                <Button
+                  onClick={handleAssociateServiceNow}
+                  disabled={snowPushing || !snowAssociateKey.trim()}
+                  className="bg-[#81B5A1] hover:bg-[#6FA38F] text-[#1B3C34]"
+                >
+                  {snowPushing ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Shield className="h-4 w-4 mr-2" />}
+                  Link record
                 </Button>
               )}
             </div>

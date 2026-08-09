@@ -275,6 +275,8 @@ def create_vulnerability(
 
     # Auto-create Jira ticket if the org has an active integration with auto-create enabled
     _maybe_auto_create_jira_ticket(db, new_vuln, background_tasks, asset.organization_id)
+    # Auto-push to ServiceNow if configured
+    _maybe_auto_push_servicenow(db, new_vuln, background_tasks, asset.organization_id)
 
     return new_vuln
 
@@ -384,14 +386,24 @@ def update_vulnerability(
     db.commit()
     db.refresh(vuln)
 
-    # Sync linked Jira ticket when status changes
+    # Sync linked ITSM tickets when status changes
     if new_status and new_status != old_status:
+        status_str = new_status.value if hasattr(new_status, "value") else str(new_status)
+        changed_by = current_user.email or current_user.username or "unknown"
         _maybe_sync_jira_ticket(
             db=db,
             vuln=vuln,
             old_status=old_status,
-            new_status=new_status.value if hasattr(new_status, "value") else str(new_status),
-            changed_by=current_user.email or current_user.username or "unknown",
+            new_status=status_str,
+            changed_by=changed_by,
+            background_tasks=background_tasks,
+        )
+        _maybe_sync_servicenow(
+            db=db,
+            vuln=vuln,
+            old_status=old_status,
+            new_status=status_str,
+            changed_by=changed_by,
             background_tasks=background_tasks,
         )
 
@@ -1098,6 +1110,42 @@ def _maybe_auto_create_jira_ticket(
         logger.exception("Error scheduling Jira auto-create for vuln %s", vuln.id)
 
 
+def _maybe_auto_push_servicenow(
+    db: Session,
+    vuln: Vulnerability,
+    background_tasks: BackgroundTasks,
+    org_id: int,
+) -> None:
+    """Queue a ServiceNow webhook push if the org has auto-create enabled and severity qualifies."""
+    try:
+        from app.models.servicenow_integration import (
+            ServiceNowIntegration,
+            severity_meets_threshold,
+        )
+        from app.services.servicenow_service import auto_push_sync
+
+        integration = (
+            db.query(ServiceNowIntegration)
+            .filter(
+                ServiceNowIntegration.organization_id == org_id,
+                ServiceNowIntegration.is_active == True,
+                ServiceNowIntegration.auto_create_enabled == True,
+            )
+            .first()
+        )
+        if not integration or not integration.webhook_url:
+            return
+
+        vuln_severity = vuln.severity.value if vuln.severity else "info"
+        min_severity = integration.auto_create_min_severity or "high"
+        if not severity_meets_threshold(vuln_severity, min_severity):
+            return
+
+        background_tasks.add_task(auto_push_sync, integration, vuln)
+    except Exception:
+        logger.exception("Error scheduling ServiceNow auto-push for vuln %s", vuln.id)
+
+
 def _maybe_sync_jira_ticket(
     db: Session,
     vuln: Vulnerability,
@@ -1149,6 +1197,54 @@ def _maybe_sync_jira_ticket(
             )
     except Exception:
         logger.exception("Error scheduling Jira sync for vuln %s", vuln.id)
+
+
+def _maybe_sync_servicenow(
+    db: Session,
+    vuln: Vulnerability,
+    old_status: str,
+    new_status: str,
+    changed_by: str,
+    background_tasks: BackgroundTasks,
+) -> None:
+    """Queue ServiceNow Table API sync when ASM status changes for linked deliveries."""
+    try:
+        from app.models.servicenow_integration import ServiceNowDelivery, ServiceNowIntegration
+        from app.services.servicenow_service import sync_delivery_for_status_change_sync
+
+        asset = vuln.asset
+        if not asset:
+            return
+        org_id = asset.organization_id
+
+        integration = (
+            db.query(ServiceNowIntegration)
+            .filter(
+                ServiceNowIntegration.organization_id == org_id,
+                ServiceNowIntegration.is_active == True,
+                ServiceNowIntegration.sync_enabled == True,
+            )
+            .first()
+        )
+        if not integration:
+            return
+
+        deliveries = (
+            db.query(ServiceNowDelivery)
+            .filter(
+                ServiceNowDelivery.vulnerability_id == vuln.id,
+                ServiceNowDelivery.integration_id == integration.id,
+                ServiceNowDelivery.disconnected_at.is_(None),
+            )
+            .all()
+        )
+        for delivery in deliveries:
+            background_tasks.add_task(
+                sync_delivery_for_status_change_sync,
+                integration, delivery, old_status, new_status, changed_by,
+            )
+    except Exception:
+        logger.exception("Error scheduling ServiceNow sync for vuln %s", vuln.id)
 
 
 # =============================================================================

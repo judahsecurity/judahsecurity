@@ -334,6 +334,14 @@ class GraphService:
         ip_addresses = getattr(asset, 'ip_addresses', None) or []
         if not ip_addresses and getattr(asset, 'ip_address', None):
             ip_addresses = [asset.ip_address]
+        # IP_ADDRESS assets often store the IP only in `value`
+        if (
+            not ip_addresses
+            and asset.asset_type == AssetType.IP_ADDRESS
+            and isinstance(asset.value, str)
+            and asset.value.strip()
+        ):
+            ip_addresses = [asset.value.strip()]
         for ip in ip_addresses:
             if ip:
                 ip_type = "ipv6" if ":" in ip else "ipv4"
@@ -765,7 +773,7 @@ class GraphService:
                     logger.debug(f"Certificate sync error for asset {asset.id}: {e}")
 
         # ===== 15. INTERNET FACING: tag IP nodes with is_internet_facing =====
-        # Marks which IPs are publicly reachable — the boundary for future internal hop modeling.
+        # Marks which IPs are publicly reachable — the boundary for internal hop modeling.
         is_public = getattr(asset, 'is_public', True)
         is_live = getattr(asset, 'is_live', False)
         for ip in ip_addresses:
@@ -774,14 +782,107 @@ class GraphService:
                     session.run("""
                         MATCH (ip:IP {address: $ip})
                         SET ip.is_internet_facing = $is_internet_facing,
-                            ip.is_live = $is_live
+                            ip.is_live = $is_live,
+                            ip.organization_id = coalesce(ip.organization_id, $org_id)
                     """, {
                         "ip": ip,
                         "is_internet_facing": is_public,
                         "is_live": is_live,
+                        "org_id": org_id,
                     })
                 except Exception:
                     pass
+
+        # ===== 16. F5 REACHABILITY: VIP IP FORWARDS_TO pool-member IP =====
+        self._sync_f5_forwards_to(session, asset, org_id, ip_addresses)
+
+    def _sync_f5_forwards_to(self, session, asset: Asset, org_id: int, ip_addresses: list) -> None:
+        """Create FORWARDS_TO edges from F5 VIP metadata or member reachable-via fields."""
+        meta = getattr(asset, "metadata_", None) or {}
+        if not isinstance(meta, dict):
+            return
+
+        try:
+            # VIP side: metadata.f5_pool_members → edges from this VIP to each member
+            members = meta.get("f5_pool_members")
+            vip_ip = None
+            if isinstance(members, list) and members:
+                vip_ip = (
+                    (ip_addresses[0] if ip_addresses else None)
+                    or meta.get("f5_destination")
+                    or (asset.value if asset.asset_type == AssetType.IP_ADDRESS else None)
+                )
+                if isinstance(vip_ip, str) and ":" in vip_ip and vip_ip.count(":") == 1 and "." in vip_ip:
+                    # destination may still include :port
+                    vip_ip = vip_ip.split(":", 1)[0]
+                if vip_ip:
+                    pool = meta.get("f5_pool")
+                    virtual = meta.get("f5_virtual_name")
+                    for member in members:
+                        if not isinstance(member, dict):
+                            continue
+                        member_ip = member.get("ip")
+                        if not member_ip or member_ip == vip_ip:
+                            continue
+                        session.run("""
+                            MERGE (vip:IP {address: $vip_ip})
+                            SET vip.organization_id = coalesce(vip.organization_id, $org_id)
+                            MERGE (member:IP {address: $member_ip})
+                            SET member.organization_id = coalesce(member.organization_id, $org_id),
+                                member.is_internet_facing = coalesce(member.is_internet_facing, false)
+                            MERGE (vip)-[r:FORWARDS_TO]->(member)
+                            SET r.source = 'f5',
+                                r.pool = $pool,
+                                r.virtual = $virtual,
+                                r.port = $port,
+                                r.organization_id = $org_id
+                        """, {
+                            "vip_ip": vip_ip,
+                            "member_ip": member_ip,
+                            "org_id": org_id,
+                            "pool": pool,
+                            "virtual": virtual,
+                            "port": member.get("port"),
+                        })
+
+            # Member side: ensure edge exists from f5_reachable_via_vip / vips
+            via_list = []
+            if isinstance(meta.get("f5_reachable_via_vips"), list):
+                via_list.extend([v for v in meta["f5_reachable_via_vips"] if isinstance(v, str)])
+            via_one = meta.get("f5_reachable_via_vip")
+            if isinstance(via_one, str) and via_one not in via_list:
+                via_list.append(via_one)
+            member_ip = (
+                (ip_addresses[0] if ip_addresses else None)
+                or (asset.value if asset.asset_type == AssetType.IP_ADDRESS else None)
+            )
+            if member_ip and via_list:
+                for vip in via_list:
+                    if not vip or vip == member_ip:
+                        continue
+                    session.run("""
+                        MERGE (vip:IP {address: $vip_ip})
+                        SET vip.organization_id = coalesce(vip.organization_id, $org_id),
+                            vip.is_internet_facing = coalesce(vip.is_internet_facing, true)
+                        MERGE (member:IP {address: $member_ip})
+                        SET member.organization_id = coalesce(member.organization_id, $org_id),
+                            member.is_internet_facing = coalesce(member.is_internet_facing, false)
+                        MERGE (vip)-[r:FORWARDS_TO]->(member)
+                        SET r.source = 'f5',
+                            r.pool = $pool,
+                            r.virtual = $virtual,
+                            r.port = $port,
+                            r.organization_id = $org_id
+                    """, {
+                        "vip_ip": vip,
+                        "member_ip": member_ip,
+                        "org_id": org_id,
+                        "pool": meta.get("f5_pool"),
+                        "virtual": meta.get("f5_virtual_name"),
+                        "port": meta.get("f5_member_port"),
+                    })
+        except Exception as e:
+            logger.debug(f"F5 FORWARDS_TO sync error for asset {getattr(asset, 'id', None)}: {e}")
     
     def _create_same_ip_links(self, session, org_id: int):
         """

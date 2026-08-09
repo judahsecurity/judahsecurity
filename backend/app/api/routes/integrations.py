@@ -1,17 +1,30 @@
-"""Integrations router — Jira (Atlassian) bidirectional integration."""
+"""Integrations router — Jira, ServiceNow, Censys, Akamai, Panorama, F5, Cloudflare."""
 
+import logging
 from datetime import datetime
 from typing import List
 
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
+
+logger = logging.getLogger(__name__)
 
 from app.api.deps import get_current_active_user, require_analyst
 from app.db.database import get_db
 from app.models.jira_integration import JiraIntegration, JiraTicket
+from app.models.servicenow_integration import ServiceNowDelivery, ServiceNowIntegration
 from app.models.censys_integration import CensysAsmIntegration
+from app.models.akamai_integration import AkamaiWafIntegration
+from app.models.panorama_integration import (
+    CONNECTION_MODE_API,
+    CONNECTION_MODE_CONFIG_EXPORT,
+    PanoramaIntegration,
+)
+from app.models.f5_integration import F5Integration
+from app.models.cloudflare_integration import CloudflareWafIntegration
 from app.models.user import User
 from app.models.vulnerability import Vulnerability
 from app.models.asset import Asset
@@ -28,6 +41,16 @@ from app.schemas.jira_schemas import (
     JiraTransitionsResponse,
     JiraSyncResult,
 )
+from app.schemas.servicenow_schemas import (
+    AssociateServiceNowDeliveryRequest,
+    CreateServiceNowDeliveryRequest,
+    ServiceNowDeliveryResponse,
+    ServiceNowIntegrationCreate,
+    ServiceNowIntegrationResponse,
+    ServiceNowIntegrationUpdate,
+    ServiceNowSyncResult,
+    ServiceNowTestConnectionResponse,
+)
 from app.schemas.censys_schemas import (
     CensysIntegrationCreate,
     CensysIntegrationResponse,
@@ -35,7 +58,44 @@ from app.schemas.censys_schemas import (
     CensysSyncResult,
     CensysTestConnectionResponse,
 )
-from app.services import jira_service, censys_asm_service
+from app.schemas.akamai_schemas import (
+    AkamaiIntegrationCreate,
+    AkamaiIntegrationResponse,
+    AkamaiIntegrationUpdate,
+    AkamaiSyncResult,
+    AkamaiTestConnectionResponse,
+)
+from app.schemas.panorama_schemas import (
+    PanoramaIntegrationCreate,
+    PanoramaIntegrationResponse,
+    PanoramaIntegrationUpdate,
+    PanoramaSyncResult,
+    PanoramaTestConnectionResponse,
+    PanoramaUploadResponse,
+)
+from app.schemas.f5_schemas import (
+    F5IntegrationCreate,
+    F5IntegrationResponse,
+    F5IntegrationUpdate,
+    F5SyncResult,
+    F5TestConnectionResponse,
+)
+from app.schemas.cloudflare_schemas import (
+    CloudflareIntegrationCreate,
+    CloudflareIntegrationResponse,
+    CloudflareIntegrationUpdate,
+    CloudflareSyncResult,
+    CloudflareTestConnectionResponse,
+)
+from app.services import (
+    jira_service,
+    censys_asm_service,
+    akamai_waf_service,
+    panorama_service,
+    f5_service,
+    cloudflare_waf_service,
+    servicenow_service,
+)
 
 router = APIRouter(prefix="/integrations", tags=["Integrations"])
 
@@ -662,3 +722,1246 @@ async def sync_censys_integration(
 
     result = await censys_asm_service.sync_integration(db, integration)
     return CensysSyncResult(**result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Palo Alto Panorama — read-only import of firewall address objects as assets
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_panorama_integration(db: Session, org_id: int, integration_id: int) -> PanoramaIntegration:
+    integration = (
+        db.query(PanoramaIntegration)
+        .filter(
+            PanoramaIntegration.id == integration_id,
+            PanoramaIntegration.organization_id == org_id,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="Panorama connection not found.")
+    return integration
+
+
+@router.get("/panorama", response_model=List[PanoramaIntegrationResponse])
+def list_panorama_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    return (
+        db.query(PanoramaIntegration)
+        .filter(PanoramaIntegration.organization_id == org_id)
+        .order_by(PanoramaIntegration.created_at.desc())
+        .all()
+    )
+
+
+@router.post("/panorama", response_model=PanoramaIntegrationResponse, status_code=status.HTTP_201_CREATED)
+async def create_panorama_integration(
+    payload: PanoramaIntegrationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+
+    existing = (
+        db.query(PanoramaIntegration)
+        .filter(
+            PanoramaIntegration.organization_id == org_id,
+            PanoramaIntegration.name == payload.name,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A Panorama connection named '{payload.name}' already exists.",
+        )
+
+    mode = payload.connection_mode or CONNECTION_MODE_API
+    last_test_ok = None
+    last_tested_at = None
+
+    if mode == CONNECTION_MODE_API:
+        result = await panorama_service.test_connection(
+            payload.panorama_host or "",
+            payload.api_key or "",
+            api_version=payload.api_version,
+            device_group=payload.device_group,
+            verify_ssl=payload.verify_ssl,
+        )
+        if not result["ok"]:
+            raise HTTPException(status_code=400, detail=result["message"])
+        last_test_ok = True
+        last_tested_at = datetime.utcnow()
+
+    integration = PanoramaIntegration(
+        organization_id=org_id,
+        name=payload.name,
+        connection_mode=mode,
+        panorama_host=payload.panorama_host,
+        device_group=payload.device_group,
+        api_version=payload.api_version,
+        verify_ssl=payload.verify_ssl,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+        last_tested_at=last_tested_at,
+        last_test_ok=last_test_ok,
+    )
+    if payload.api_key:
+        integration.set_api_key(payload.api_key)
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.put("/panorama/{integration_id}", response_model=PanoramaIntegrationResponse)
+async def update_panorama_integration(
+    integration_id: int,
+    payload: PanoramaIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_panorama_integration(db, org_id, integration_id)
+
+    data = payload.model_dump(exclude_unset=True)
+    new_key = data.pop("api_key", None)
+
+    # Allow clearing device_group by sending empty string / null.
+    if "device_group" in data:
+        dg = data["device_group"]
+        data["device_group"] = dg.strip() if isinstance(dg, str) and dg.strip() else None
+
+    for field, value in data.items():
+        setattr(integration, field, value)
+    if new_key:
+        integration.set_api_key(new_key)
+
+    mode = integration.connection_mode or CONNECTION_MODE_API
+    if mode == CONNECTION_MODE_CONFIG_EXPORT:
+        result = panorama_service.test_config_export(integration)
+    else:
+        result = await panorama_service.test_connection(
+            integration.panorama_host or "",
+            integration.get_api_key() or "",
+            api_version=integration.api_version or "v11.1",
+            device_group=integration.device_group,
+            verify_ssl=bool(integration.verify_ssl),
+        )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/panorama/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_panorama_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_panorama_integration(db, org_id, integration_id)
+    # Best-effort cleanup of stored export files.
+    if integration.export_file_path:
+        try:
+            from pathlib import Path
+
+            path = Path(integration.export_file_path)
+            if path.is_file():
+                path.unlink()
+            parent = path.parent
+            if parent.is_dir() and not any(parent.iterdir()):
+                parent.rmdir()
+        except OSError:
+            pass
+    db.delete(integration)
+    db.commit()
+
+
+@router.post("/panorama/{integration_id}/test", response_model=PanoramaTestConnectionResponse)
+async def test_panorama_connection(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_panorama_integration(db, org_id, integration_id)
+    if (integration.connection_mode or CONNECTION_MODE_API) == CONNECTION_MODE_CONFIG_EXPORT:
+        result = panorama_service.test_config_export(integration)
+    else:
+        result = await panorama_service.test_connection(
+            integration.panorama_host or "",
+            integration.get_api_key() or "",
+            api_version=integration.api_version or "v11.1",
+            device_group=integration.device_group,
+            verify_ssl=bool(integration.verify_ssl),
+        )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    db.commit()
+    return PanoramaTestConnectionResponse(**result)
+
+
+@router.post("/panorama/{integration_id}/upload", response_model=PanoramaUploadResponse)
+async def upload_panorama_config_export(
+    integration_id: int,
+    file: UploadFile = File(...),
+    sync: bool = Query(True, description="Import address objects immediately after upload."),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Upload a Panorama configuration export (.gz / .tgz / .xml) for air-gapped sync."""
+    org_id = _get_org_id(current_user)
+    integration = _get_panorama_integration(db, org_id, integration_id)
+
+    raw = await file.read()
+    try:
+        stored = panorama_service.store_export_file(
+            integration,
+            filename=file.filename or "panorama-config-export.gz",
+            data=raw,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    db.commit()
+    db.refresh(integration)
+
+    sync_result = None
+    if sync:
+        if not integration.is_active:
+            raise HTTPException(status_code=400, detail="This Panorama connection is disabled.")
+        sync_result = PanoramaSyncResult(**(await panorama_service.sync_integration(db, integration)))
+
+    return PanoramaUploadResponse(
+        ok=True,
+        message=stored["message"],
+        filename=stored.get("filename"),
+        file_size=stored.get("file_size"),
+        address_count=stored.get("address_count"),
+        address_groups_count=stored.get("address_groups_count"),
+        sync=sync_result,
+    )
+
+
+@router.post("/panorama/{integration_id}/sync", response_model=PanoramaSyncResult)
+async def sync_panorama_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Import address objects from Panorama REST or a stored configuration export."""
+    org_id = _get_org_id(current_user)
+    integration = _get_panorama_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This Panorama connection is disabled.")
+
+    result = await panorama_service.sync_integration(db, integration)
+    return PanoramaSyncResult(**result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# F5 BIG-IP — read-only VIP → pool-member reachability import
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_f5_integration(db: Session, org_id: int, integration_id: int) -> F5Integration:
+    integration = (
+        db.query(F5Integration)
+        .filter(
+            F5Integration.id == integration_id,
+            F5Integration.organization_id == org_id,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="F5 connection not found.")
+    return integration
+
+
+@router.get("/f5", response_model=List[F5IntegrationResponse])
+def list_f5_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    return (
+        db.query(F5Integration)
+        .filter(F5Integration.organization_id == org_id)
+        .order_by(F5Integration.created_at.desc())
+        .all()
+    )
+
+
+@router.post("/f5", response_model=F5IntegrationResponse, status_code=status.HTTP_201_CREATED)
+async def create_f5_integration(
+    payload: F5IntegrationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+
+    existing = (
+        db.query(F5Integration)
+        .filter(
+            F5Integration.organization_id == org_id,
+            F5Integration.name == payload.name,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"An F5 connection named '{payload.name}' already exists.",
+        )
+
+    result = await f5_service.test_connection(
+        payload.bigip_host,
+        payload.username,
+        payload.password,
+        partition=payload.partition,
+        verify_ssl=payload.verify_ssl,
+    )
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+
+    integration = F5Integration(
+        organization_id=org_id,
+        name=payload.name,
+        bigip_host=payload.bigip_host,
+        partition=payload.partition,
+        verify_ssl=payload.verify_ssl,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+        last_tested_at=datetime.utcnow(),
+        last_test_ok=True,
+    )
+    integration.set_username(payload.username)
+    integration.set_password(payload.password)
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.put("/f5/{integration_id}", response_model=F5IntegrationResponse)
+async def update_f5_integration(
+    integration_id: int,
+    payload: F5IntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_f5_integration(db, org_id, integration_id)
+
+    data = payload.model_dump(exclude_unset=True)
+    new_username = data.pop("username", None)
+    new_password = data.pop("password", None)
+
+    if "partition" in data:
+        part = data["partition"]
+        data["partition"] = part.strip() if isinstance(part, str) and part.strip() else None
+
+    for field, value in data.items():
+        setattr(integration, field, value)
+    if new_username:
+        integration.set_username(new_username)
+    if new_password:
+        integration.set_password(new_password)
+
+    result = await f5_service.test_connection(
+        integration.bigip_host or "",
+        integration.get_username() or "",
+        integration.get_password() or "",
+        partition=integration.partition,
+        verify_ssl=bool(integration.verify_ssl),
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/f5/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_f5_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_f5_integration(db, org_id, integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post("/f5/{integration_id}/test", response_model=F5TestConnectionResponse)
+async def test_f5_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_f5_integration(db, org_id, integration_id)
+    result = await f5_service.test_connection(
+        integration.bigip_host or "",
+        integration.get_username() or "",
+        integration.get_password() or "",
+        partition=integration.partition,
+        verify_ssl=bool(integration.verify_ssl),
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    if not result["ok"]:
+        integration.last_error = result["message"]
+    else:
+        integration.last_error = None
+    db.commit()
+    return F5TestConnectionResponse(**result)
+
+
+@router.post("/f5/{integration_id}/sync", response_model=F5SyncResult)
+async def sync_f5_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Import VIP → pool-member reachability mappings from F5 BIG-IP."""
+    org_id = _get_org_id(current_user)
+    integration = _get_f5_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This F5 connection is disabled.")
+
+    result = await f5_service.sync_integration(db, integration)
+    return F5SyncResult(**result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Akamai WAF — read-only import of Application Security configs & hostnames
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_akamai_integration(db: Session, org_id: int, integration_id: int) -> AkamaiWafIntegration:
+    integration = (
+        db.query(AkamaiWafIntegration)
+        .filter(
+            AkamaiWafIntegration.id == integration_id,
+            AkamaiWafIntegration.organization_id == org_id,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="Akamai WAF connection not found.")
+    return integration
+
+
+@router.get("/akamai", response_model=List[AkamaiIntegrationResponse])
+def list_akamai_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    return (
+        db.query(AkamaiWafIntegration)
+        .filter(AkamaiWafIntegration.organization_id == org_id)
+        .order_by(AkamaiWafIntegration.created_at.desc())
+        .all()
+    )
+
+
+@router.post("/akamai", response_model=AkamaiIntegrationResponse, status_code=status.HTTP_201_CREATED)
+async def create_akamai_integration(
+    payload: AkamaiIntegrationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+
+    existing = (
+        db.query(AkamaiWafIntegration)
+        .filter(
+            AkamaiWafIntegration.organization_id == org_id,
+            AkamaiWafIntegration.connection_name == payload.connection_name,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"An Akamai WAF connection named '{payload.connection_name}' already exists.",
+        )
+
+    result = await akamai_waf_service.test_connection(
+        payload.api_host,
+        payload.client_token,
+        payload.client_secret,
+        payload.access_token,
+    )
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+
+    integration = AkamaiWafIntegration(
+        organization_id=org_id,
+        connection_name=payload.connection_name,
+        api_host=payload.api_host,
+        import_configurations=payload.import_configurations,
+        import_hostnames=payload.import_hostnames,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+        last_tested_at=datetime.utcnow(),
+        last_test_ok=True,
+    )
+    integration.set_credentials(
+        client_token=payload.client_token,
+        client_secret=payload.client_secret,
+        access_token=payload.access_token,
+    )
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.put("/akamai/{integration_id}", response_model=AkamaiIntegrationResponse)
+async def update_akamai_integration(
+    integration_id: int,
+    payload: AkamaiIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_akamai_integration(db, org_id, integration_id)
+
+    data = payload.model_dump(exclude_unset=True)
+    new_client_token = data.pop("client_token", None)
+    new_client_secret = data.pop("client_secret", None)
+    new_access_token = data.pop("access_token", None)
+
+    for field, value in data.items():
+        setattr(integration, field, value)
+
+    integration.set_credentials(
+        client_token=new_client_token,
+        client_secret=new_client_secret,
+        access_token=new_access_token,
+    )
+
+    result = await akamai_waf_service.test_connection(
+        integration.api_host,
+        integration.get_client_token() or "",
+        integration.get_client_secret() or "",
+        integration.get_access_token() or "",
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/akamai/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_akamai_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_akamai_integration(db, org_id, integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post("/akamai/{integration_id}/test", response_model=AkamaiTestConnectionResponse)
+async def test_akamai_connection(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_akamai_integration(db, org_id, integration_id)
+    result = await akamai_waf_service.test_connection(
+        integration.api_host,
+        integration.get_client_token() or "",
+        integration.get_client_secret() or "",
+        integration.get_access_token() or "",
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    db.commit()
+    return AkamaiTestConnectionResponse(**result)
+
+
+@router.post("/akamai/{integration_id}/sync", response_model=AkamaiSyncResult)
+async def sync_akamai_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Pull WAF configurations, policies, and protected hostnames from Akamai."""
+    org_id = _get_org_id(current_user)
+    integration = _get_akamai_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This Akamai WAF connection is disabled.")
+
+    result = await akamai_waf_service.sync_integration(db, integration)
+    return AkamaiSyncResult(**result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Cloudflare WAF — manage scanner whitelist skip rules on Cloudflare zones
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _cloudflare_response(integration: CloudflareWafIntegration) -> CloudflareIntegrationResponse:
+    return CloudflareIntegrationResponse(
+        id=integration.id,
+        organization_id=integration.organization_id,
+        connection_name=integration.connection_name,
+        zones=integration.zones or [],
+        scanner_ips=integration.scanner_ips or [],
+        scan_header_name=integration.scan_header_name
+        or cloudflare_waf_service.DEFAULT_HEADER_NAME,
+        is_active=bool(integration.is_active),
+        continuous_sync_enabled=bool(integration.continuous_sync_enabled),
+        sync_interval_minutes=integration.sync_interval_minutes or 1440,
+        last_tested_at=integration.last_tested_at,
+        last_test_ok=integration.last_test_ok,
+        last_sync_at=integration.last_sync_at,
+        last_sync_ok=integration.last_sync_ok,
+        next_sync_at=integration.next_sync_at,
+        last_sync_stats=integration.last_sync_stats,
+        last_error=integration.last_error,
+        created_at=integration.created_at,
+        updated_at=integration.updated_at,
+        **cloudflare_waf_service.enrichment_for_response(integration),
+    )
+
+
+def _get_cloudflare_integration(
+    db: Session, org_id: int, integration_id: int
+) -> CloudflareWafIntegration:
+    integration = (
+        db.query(CloudflareWafIntegration)
+        .filter(
+            CloudflareWafIntegration.id == integration_id,
+            CloudflareWafIntegration.organization_id == org_id,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="Cloudflare WAF connection not found.")
+    return integration
+
+
+@router.get("/cloudflare", response_model=List[CloudflareIntegrationResponse])
+def list_cloudflare_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    rows = (
+        db.query(CloudflareWafIntegration)
+        .filter(CloudflareWafIntegration.organization_id == org_id)
+        .order_by(CloudflareWafIntegration.created_at.desc())
+        .all()
+    )
+    return [_cloudflare_response(r) for r in rows]
+
+
+@router.post(
+    "/cloudflare",
+    response_model=CloudflareIntegrationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_cloudflare_integration(
+    payload: CloudflareIntegrationCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+
+    existing = (
+        db.query(CloudflareWafIntegration)
+        .filter(
+            CloudflareWafIntegration.organization_id == org_id,
+            CloudflareWafIntegration.connection_name == payload.connection_name,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A Cloudflare WAF connection named '{payload.connection_name}' already exists.",
+        )
+
+    result = await cloudflare_waf_service.test_connection(payload.api_token)
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+
+    integration = CloudflareWafIntegration(
+        organization_id=org_id,
+        connection_name=payload.connection_name,
+        zones=payload.zones or [],
+        scanner_ips=payload.scanner_ips or [],
+        scan_header_name=cloudflare_waf_service.DEFAULT_HEADER_NAME,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+        last_tested_at=datetime.utcnow(),
+        last_test_ok=True,
+    )
+    integration.set_api_token(payload.api_token)
+    integration.set_scan_header_secret(cloudflare_waf_service.generate_scan_header_secret())
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+
+    # Kick off whitelist sync immediately (Praetorian behavior).
+    background_tasks.add_task(_bg_sync_cloudflare, integration.id)
+
+    return _cloudflare_response(integration)
+
+
+async def _bg_sync_cloudflare(integration_id: int) -> None:
+    from app.db.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        integration = db.query(CloudflareWafIntegration).filter(
+            CloudflareWafIntegration.id == integration_id
+        ).first()
+        if integration and integration.is_active:
+            await cloudflare_waf_service.sync_integration(db, integration)
+    except Exception as exc:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).error(
+            "Background Cloudflare WAF sync failed for %s: %s", integration_id, exc
+        )
+    finally:
+        db.close()
+
+
+@router.put("/cloudflare/{integration_id}", response_model=CloudflareIntegrationResponse)
+async def update_cloudflare_integration(
+    integration_id: int,
+    payload: CloudflareIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_cloudflare_integration(db, org_id, integration_id)
+
+    data = payload.model_dump(exclude_unset=True)
+    new_token = data.pop("api_token", None)
+    for field, value in data.items():
+        setattr(integration, field, value)
+    if new_token:
+        integration.set_api_token(new_token)
+
+    result = await cloudflare_waf_service.test_connection(integration.get_api_token() or "")
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+
+    db.commit()
+    db.refresh(integration)
+    return _cloudflare_response(integration)
+
+
+@router.delete("/cloudflare/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_cloudflare_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Disconnect the integration. Cloudflare skip rules are left in place for
+    manual cleanup (same as Praetorian — disconnect does not auto-delete rules).
+    """
+    org_id = _get_org_id(current_user)
+    integration = _get_cloudflare_integration(db, org_id, integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post("/cloudflare/{integration_id}/test", response_model=CloudflareTestConnectionResponse)
+async def test_cloudflare_connection(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_cloudflare_integration(db, org_id, integration_id)
+    result = await cloudflare_waf_service.test_connection(integration.get_api_token() or "")
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    db.commit()
+    return CloudflareTestConnectionResponse(**result)
+
+
+@router.post("/cloudflare/{integration_id}/sync", response_model=CloudflareSyncResult)
+async def sync_cloudflare_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Create or update the managed scanner whitelist skip rule on each zone."""
+    org_id = _get_org_id(current_user)
+    integration = _get_cloudflare_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This Cloudflare WAF connection is disabled.")
+
+    result = await cloudflare_waf_service.sync_integration(db, integration)
+    return CloudflareSyncResult(**result)
+
+
+# ── ServiceNow configuration ─────────────────────────────────────────────────
+
+def _get_servicenow_integration(db: Session, org_id: int) -> ServiceNowIntegration:
+    integration = (
+        db.query(ServiceNowIntegration)
+        .filter(ServiceNowIntegration.organization_id == org_id)
+        .first()
+    )
+    if not integration:
+        raise HTTPException(
+            status_code=404,
+            detail="ServiceNow integration not configured for this organization.",
+        )
+    return integration
+
+
+def _active_snow_deliveries_for_vuln(
+    db: Session, integration_id: int, vulnerability_id: int
+) -> List[ServiceNowDelivery]:
+    return (
+        db.query(ServiceNowDelivery)
+        .filter(
+            ServiceNowDelivery.vulnerability_id == vulnerability_id,
+            ServiceNowDelivery.integration_id == integration_id,
+            ServiceNowDelivery.disconnected_at.is_(None),
+        )
+        .order_by(ServiceNowDelivery.created_at.desc())
+        .all()
+    )
+
+
+@router.get("/servicenow", response_model=ServiceNowIntegrationResponse)
+def get_servicenow_integration(
+    org_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    resolved = _resolve_org_id(current_user, org_id)
+    integration = _get_servicenow_integration(db, resolved)
+    return ServiceNowIntegrationResponse(**servicenow_service.to_response_dict(integration))
+
+
+@router.post(
+    "/servicenow",
+    response_model=ServiceNowIntegrationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_servicenow_integration(
+    payload: ServiceNowIntegrationCreate,
+    org_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    resolved = _resolve_org_id(current_user, org_id)
+    if (
+        db.query(ServiceNowIntegration)
+        .filter(ServiceNowIntegration.organization_id == resolved)
+        .first()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="ServiceNow integration already exists. Use PUT to update.",
+        )
+
+    username = (payload.username or "").strip() or None
+    integration = ServiceNowIntegration(
+        organization_id=resolved,
+        webhook_url=payload.webhook_url,
+        username=username,
+        auto_create_enabled=payload.auto_create_enabled,
+        auto_create_min_severity=payload.auto_create_min_severity or "high",
+        sync_enabled=payload.sync_enabled,
+        table_name=payload.table_name or "incident",
+        close_state=payload.close_state or "6",
+        reopen_state=payload.reopen_state or "2",
+        remote_closed_states=payload.remote_closed_states or ["6", "7"],
+        validate_on_remote_close=payload.validate_on_remote_close,
+        accept_close_as=payload.accept_close_as or "resolved",
+        is_active=True,
+    )
+    if payload.password:
+        integration.set_password(payload.password)
+
+    result = await servicenow_service.test_connection(integration)
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    if not result["ok"]:
+        integration.last_error = result["message"]
+
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return ServiceNowIntegrationResponse(**servicenow_service.to_response_dict(integration))
+
+
+@router.put("/servicenow", response_model=ServiceNowIntegrationResponse)
+async def update_servicenow_integration(
+    payload: ServiceNowIntegrationUpdate,
+    org_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    resolved = _resolve_org_id(current_user, org_id)
+    integration = _get_servicenow_integration(db, resolved)
+
+    data = payload.model_dump(exclude_unset=True)
+    password = data.pop("password", None)
+    if "username" in data:
+        data["username"] = (data["username"] or "").strip() or None
+    for field, value in data.items():
+        setattr(integration, field, value)
+    if password is not None:
+        if password == "":
+            integration.password_encrypted = None
+        else:
+            integration.set_password(password)
+
+    result = await servicenow_service.test_connection(integration)
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    integration.last_error = None if result["ok"] else result["message"]
+
+    db.commit()
+    db.refresh(integration)
+    return ServiceNowIntegrationResponse(**servicenow_service.to_response_dict(integration))
+
+
+@router.delete("/servicenow", status_code=status.HTTP_204_NO_CONTENT)
+def delete_servicenow_integration(
+    org_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    resolved = _resolve_org_id(current_user, org_id)
+    integration = _get_servicenow_integration(db, resolved)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post("/servicenow/test", response_model=ServiceNowTestConnectionResponse)
+async def test_servicenow_connection(
+    org_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    resolved = _resolve_org_id(current_user, org_id)
+    integration = _get_servicenow_integration(db, resolved)
+    result = await servicenow_service.test_connection(integration)
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    integration.last_error = None if result["ok"] else result["message"]
+    db.commit()
+    return ServiceNowTestConnectionResponse(**result)
+
+
+@router.post(
+    "/servicenow/vulnerabilities/{vulnerability_id}/push",
+    response_model=ServiceNowDeliveryResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def push_vulnerability_to_servicenow(
+    vulnerability_id: int,
+    payload: CreateServiceNowDeliveryRequest,
+    org_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Manually push a vulnerability finding to ServiceNow."""
+    resolved, vuln = _resolve_org_for_vulnerability(
+        db, current_user, vulnerability_id, org_id
+    )
+    integration = _get_servicenow_integration(db, resolved)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="ServiceNow integration is disabled.")
+
+    existing = _active_snow_deliveries_for_vuln(db, integration.id, vulnerability_id)
+    if existing:
+        label = existing[0].snow_number or existing[0].snow_sys_id or f"#{existing[0].id}"
+        raise HTTPException(
+            status_code=409,
+            detail=f"A ServiceNow delivery already exists for this vulnerability: {label}",
+        )
+
+    try:
+        result = await servicenow_service.push_vulnerability(
+            integration,
+            vuln,
+            include_description=payload.include_description,
+            include_evidence=payload.include_evidence,
+            include_remediation=payload.include_remediation,
+            include_references=payload.include_references,
+            include_enrichment=payload.include_enrichment,
+        )
+    except ValueError as exc:
+        integration.last_error = str(exc)[:1000]
+        db.commit()
+        raise HTTPException(status_code=502, detail=str(exc))
+    except Exception as exc:
+        integration.last_error = str(exc)[:1000]
+        db.commit()
+        raise HTTPException(status_code=502, detail=f"ServiceNow webhook error: {exc}")
+
+    delivery = ServiceNowDelivery(
+        integration_id=integration.id,
+        vulnerability_id=vulnerability_id,
+        snow_sys_id=result.get("snow_sys_id"),
+        snow_number=result.get("snow_number"),
+        snow_url=result.get("snow_url"),
+        snow_state=result.get("snow_state"),
+        snow_state_label=result.get("snow_state_label"),
+        http_status=result.get("http_status"),
+        response_body=result.get("response_body"),
+    )
+    integration.last_delivery_at = datetime.utcnow()
+    integration.last_error = None
+    db.add(delivery)
+    db.commit()
+    db.refresh(delivery)
+    return delivery
+
+
+@router.post(
+    "/servicenow/vulnerabilities/{vulnerability_id}/associate",
+    response_model=ServiceNowDeliveryResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def associate_servicenow_record(
+    vulnerability_id: int,
+    payload: AssociateServiceNowDeliveryRequest,
+    org_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Link an existing ServiceNow incident to a vulnerability for sync."""
+    if not payload.sys_id and not payload.number:
+        raise HTTPException(status_code=400, detail="Provide sys_id or number.")
+
+    resolved, vuln = _resolve_org_for_vulnerability(
+        db, current_user, vulnerability_id, org_id
+    )
+    integration = _get_servicenow_integration(db, resolved)
+
+    try:
+        detail = await servicenow_service.get_record(
+            integration,
+            sys_id=payload.sys_id,
+            number=payload.number if not payload.sys_id else None,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"ServiceNow Table API error: {exc}")
+
+    delivery = ServiceNowDelivery(
+        integration_id=integration.id,
+        vulnerability_id=vuln.id,
+        snow_sys_id=detail.get("sys_id"),
+        snow_number=detail.get("number"),
+        snow_url=detail.get("url"),
+        snow_state=detail.get("state"),
+        snow_state_label=detail.get("state_label"),
+        last_synced_at=datetime.utcnow(),
+        http_status=200,
+    )
+    db.add(delivery)
+    db.commit()
+    db.refresh(delivery)
+    return delivery
+
+
+@router.get(
+    "/servicenow/vulnerabilities/{vulnerability_id}/deliveries",
+    response_model=List[ServiceNowDeliveryResponse],
+)
+def list_servicenow_deliveries_for_vulnerability(
+    vulnerability_id: int,
+    org_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    resolved, _vuln = _resolve_org_for_vulnerability(
+        db, current_user, vulnerability_id, org_id
+    )
+    try:
+        integration = _get_servicenow_integration(db, resolved)
+    except HTTPException:
+        return []
+    return _active_snow_deliveries_for_vuln(db, integration.id, vulnerability_id)
+
+
+@router.post(
+    "/servicenow/vulnerabilities/{vulnerability_id}/sync",
+    response_model=ServiceNowSyncResult,
+)
+async def sync_servicenow_vulnerability_status(
+    vulnerability_id: int,
+    org_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Push the current ASM status to linked ServiceNow records (ASM → ServiceNow)."""
+    resolved, vuln = _resolve_org_for_vulnerability(
+        db, current_user, vulnerability_id, org_id
+    )
+    integration = _get_servicenow_integration(db, resolved)
+    if not integration.sync_enabled:
+        raise HTTPException(status_code=400, detail="ServiceNow sync is not enabled.")
+
+    deliveries = _active_snow_deliveries_for_vuln(db, integration.id, vulnerability_id)
+    if not deliveries:
+        raise HTTPException(status_code=404, detail="No active ServiceNow deliveries for this finding.")
+
+    delivery = deliveries[0]
+    new_status = vuln.status.value if vuln.status else "open"
+    result = await servicenow_service.sync_delivery_for_status_change(
+        integration=integration,
+        delivery=delivery,
+        old_status="open",
+        new_status=new_status,
+        changed_by=current_user.email or current_user.username or "unknown",
+    )
+    if result.get("state_updated"):
+        delivery.snow_state = result.get("snow_state")
+        delivery.snow_state_label = result.get("snow_state_label")
+        delivery.last_synced_at = datetime.utcnow()
+        db.commit()
+    return ServiceNowSyncResult(**result)
+
+
+@router.post(
+    "/servicenow/deliveries/{delivery_id}/refresh",
+    response_model=ServiceNowSyncResult,
+)
+async def refresh_servicenow_delivery(
+    delivery_id: int,
+    org_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Pull ServiceNow state (ServiceNow → ASM). May queue close-claim validation."""
+    delivery = (
+        db.query(ServiceNowDelivery)
+        .options(joinedload(ServiceNowDelivery.integration))
+        .filter(ServiceNowDelivery.id == delivery_id)
+        .first()
+    )
+    if not delivery:
+        raise HTTPException(status_code=404, detail="Delivery not found.")
+
+    resolved = _resolve_org_id(current_user, org_id)
+    if delivery.integration.organization_id != resolved and not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Access denied.")
+
+    integration = delivery.integration
+    try:
+        result = await servicenow_service.refresh_delivery(
+            db, integration, delivery, apply_remote_close=True
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"ServiceNow refresh failed: {exc}")
+
+    integration.last_pull_at = datetime.utcnow()
+    db.commit()
+    return ServiceNowSyncResult(**result)
+
+
+@router.post("/servicenow/pull", response_model=ServiceNowSyncResult)
+async def pull_all_servicenow_deliveries(
+    org_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Refresh all active ServiceNow deliveries for the org (ServiceNow → ASM)."""
+    resolved = _resolve_org_id(current_user, org_id)
+    integration = _get_servicenow_integration(db, resolved)
+    if not integration.sync_enabled:
+        raise HTTPException(status_code=400, detail="ServiceNow sync is not enabled.")
+
+    deliveries = (
+        db.query(ServiceNowDelivery)
+        .filter(
+            ServiceNowDelivery.integration_id == integration.id,
+            ServiceNowDelivery.disconnected_at.is_(None),
+            or_(
+                ServiceNowDelivery.snow_sys_id.isnot(None),
+                ServiceNowDelivery.snow_number.isnot(None),
+            ),
+        )
+        .all()
+    )
+
+    validated = 0
+    refreshed = 0
+    errors = 0
+    for delivery in deliveries:
+        try:
+            result = await servicenow_service.refresh_delivery(
+                db, integration, delivery, apply_remote_close=True
+            )
+            refreshed += 1
+            if result.get("validation_queued"):
+                validated += 1
+        except Exception:
+            errors += 1
+            logger.exception("ServiceNow pull failed for delivery %s", delivery.id)
+
+    integration.last_pull_at = datetime.utcnow()
+    db.commit()
+    return ServiceNowSyncResult(
+        ok=errors == 0,
+        message=(
+            f"Refreshed {refreshed} delivery(ies); "
+            f"{validated} close-claim validation(s) queued; {errors} error(s)."
+        ),
+        validation_queued=validated > 0,
+    )
+
+
+@router.delete("/servicenow/deliveries/{delivery_id}", status_code=status.HTTP_200_OK)
+def disconnect_servicenow_delivery(
+    delivery_id: int,
+    org_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    delivery = (
+        db.query(ServiceNowDelivery)
+        .options(joinedload(ServiceNowDelivery.integration))
+        .filter(ServiceNowDelivery.id == delivery_id)
+        .first()
+    )
+    if not delivery:
+        raise HTTPException(status_code=404, detail="Delivery not found.")
+
+    resolved = _resolve_org_id(current_user, org_id)
+    if delivery.integration.organization_id != resolved and not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Access denied.")
+
+    delivery.disconnected_at = datetime.utcnow()
+    db.commit()
+    label = delivery.snow_number or delivery.snow_sys_id or f"#{delivery.id}"
+    return {"ok": True, "message": f"ServiceNow delivery {label} disconnected."}
