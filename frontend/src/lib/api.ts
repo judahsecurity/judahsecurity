@@ -2037,6 +2037,119 @@ class ApiClient {
     const response = await this.client.post(`/integrations/censys/${id}/sync`);
     return response.data;
   }
+
+  // ---------------------------------------------------------------------------
+  // Workflows (Trickest-style DAG builder)
+  // ---------------------------------------------------------------------------
+
+  async getWorkflowTools() {
+    const response = await this.client.get('/workflow-tools');
+    return response.data;
+  }
+
+  async getWorkflows(params?: { organization_id?: number; kind?: string; seed_library?: boolean }) {
+    const response = await this.client.get('/workflows', { params });
+    return response.data;
+  }
+
+  async getWorkflow(id: number) {
+    const response = await this.client.get(`/workflows/${id}`);
+    return response.data;
+  }
+
+  async createWorkflow(data: {
+    name: string;
+    description?: string;
+    kind?: string;
+    organization_id: number;
+    graph?: { nodes: any[]; edges: any[]; viewport?: any };
+    input_ports?: any[];
+    output_ports?: any[];
+  }) {
+    const response = await this.client.post('/workflows', data);
+    return response.data;
+  }
+
+  async updateWorkflow(id: number, data: { name?: string; description?: string }) {
+    const response = await this.client.patch(`/workflows/${id}`, data);
+    return response.data;
+  }
+
+  async deleteWorkflow(id: number) {
+    await this.client.delete(`/workflows/${id}`);
+  }
+
+  async saveWorkflowVersion(
+    workflowId: number,
+    data: { graph: { nodes: any[]; edges: any[]; viewport?: any }; input_ports?: any[]; output_ports?: any[] }
+  ) {
+    const response = await this.client.post(`/workflows/${workflowId}/versions`, data);
+    return response.data;
+  }
+
+  async seedWorkflowLibrary(organizationId?: number) {
+    const response = await this.client.post('/workflows/seed-library', null, {
+      params: organizationId ? { organization_id: organizationId } : {},
+    });
+    return response.data;
+  }
+
+  async runWorkflow(
+    workflowId: number,
+    data?: { inputs?: Record<string, any>; continue_on_error?: boolean; version_id?: number }
+  ) {
+    const response = await this.client.post(`/workflows/${workflowId}/run`, data || {});
+    return response.data;
+  }
+
+  async getWorkflowRuns(params?: { organization_id?: number; workflow_id?: number; limit?: number }) {
+    const response = await this.client.get('/workflow-runs', { params });
+    return response.data;
+  }
+
+  async getWorkflowRun(runId: number) {
+    const response = await this.client.get(`/workflow-runs/${runId}`);
+    return response.data;
+  }
+
+  async cancelWorkflowRun(runId: number) {
+    const response = await this.client.post(`/workflow-runs/${runId}/cancel`);
+    return response.data;
+  }
+
+  async getWorkflowScripts(organizationId?: number) {
+    const response = await this.client.get('/workflow-scripts', {
+      params: organizationId ? { organization_id: organizationId } : {},
+    });
+    return response.data;
+  }
+
+  async createWorkflowScript(data: {
+    name: string;
+    description?: string;
+    language?: string;
+    source?: string;
+    organization_id: number;
+    input_ports?: any[];
+    output_ports?: any[];
+    params_schema?: Record<string, any>;
+  }) {
+    const response = await this.client.post('/workflow-scripts', data);
+    return response.data;
+  }
+
+  async updateWorkflowScript(id: number, data: Record<string, any>) {
+    const response = await this.client.patch(`/workflow-scripts/${id}`, data);
+    return response.data;
+  }
+
+  async deleteWorkflowScript(id: number) {
+    await this.client.delete(`/workflow-scripts/${id}`);
+  }
+
+  getWorkflowArtifactContentUrl(artifactId: number) {
+    return `${this.client.defaults.baseURL}/workflow-artifacts/${artifactId}/content`;
+  }
 }
 
 export const api = new ApiClient();

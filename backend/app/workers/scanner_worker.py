@@ -243,6 +243,12 @@ class ScannerWorker:
             validation_messages = self.poll_database_for_validations()
             if validation_messages:
                 messages.extend(validation_messages)
+
+        # Pending workflow runs (Trickest-style DAG executor)
+        if not messages:
+            workflow_messages = self.poll_database_for_workflow_runs()
+            if workflow_messages:
+                messages.extend(workflow_messages)
         
         # If no messages from either source, wait before next poll
         if not messages:
@@ -289,6 +295,114 @@ class ScannerWorker:
             logger.error(f"Error polling validations: {e}")
             db.rollback()
             return []
+        finally:
+            db.close()
+
+    def poll_database_for_workflow_runs(self):
+        """Claim pending workflow runs and return WORKFLOW_RUN job messages."""
+        from app.models.workflow import WorkflowRun, WorkflowRunStatus
+
+        db = self.get_db_session()
+        if not db:
+            return []
+        try:
+            pending = (
+                db.query(WorkflowRun)
+                .filter(WorkflowRun.status == WorkflowRunStatus.PENDING)
+                .order_by(WorkflowRun.created_at.asc())
+                .limit(2)
+                .all()
+            )
+            messages = []
+            for run in pending:
+                # Claim immediately to avoid double pickup
+                run.status = WorkflowRunStatus.RUNNING
+                run.started_at = datetime.utcnow()
+                run.current_step = "claimed"
+                db.commit()
+                job_data = {
+                    "job_type": "WORKFLOW_RUN",
+                    "workflow_run_id": run.id,
+                    "organization_id": run.organization_id,
+                    "workflow_id": run.workflow_id,
+                    "version_id": run.version_id,
+                }
+                messages.append(
+                    {
+                        "MessageId": f"db-wf-{run.id}",
+                        "ReceiptHandle": f"db-wf-{run.id}",
+                        "Body": json.dumps(job_data),
+                    }
+                )
+                logger.info("Claimed workflow run %s", run.id)
+            return messages
+        except Exception as e:
+            logger.error("Error polling workflow runs: %s", e)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return []
+        finally:
+            db.close()
+
+    async def handle_workflow_run(self, job_data: dict):
+        """Execute a Trickest-style workflow DAG run."""
+        from app.models.workflow import WorkflowRun, WorkflowRunStatus
+        from app.services.workflow.executor import WorkflowExecutor
+
+        run_id = job_data.get("workflow_run_id")
+        if not run_id:
+            logger.error("WORKFLOW_RUN missing workflow_run_id")
+            return
+
+        db = self.get_db_session()
+        if not db:
+            logger.error("No database connection for workflow run %s", run_id)
+            return
+        try:
+            run = db.query(WorkflowRun).filter(WorkflowRun.id == run_id).first()
+            if not run:
+                logger.error("WorkflowRun %s not found", run_id)
+                return
+            if run.status in (
+                WorkflowRunStatus.COMPLETED,
+                WorkflowRunStatus.FAILED,
+                WorkflowRunStatus.CANCELLED,
+            ):
+                logger.info("WorkflowRun %s already %s; skipping", run_id, run.status.value)
+                return
+            # Avoid double-execution if another worker already progressed this run
+            if (
+                run.status == WorkflowRunStatus.RUNNING
+                and run.current_step
+                and run.current_step not in ("claimed", "pending")
+                and (run.progress or 0) > 0
+            ):
+                logger.info("WorkflowRun %s already in progress; skipping", run_id)
+                return
+            if run.status == WorkflowRunStatus.PENDING:
+                run.status = WorkflowRunStatus.RUNNING
+                run.started_at = datetime.utcnow()
+                run.current_step = "claimed"
+                db.commit()
+
+            executor = WorkflowExecutor(db, self)
+            await executor.execute(run_id)
+        except Exception as e:
+            logger.exception("Workflow run %s failed: %s", run_id, e)
+            try:
+                run = db.query(WorkflowRun).filter(WorkflowRun.id == run_id).first()
+                if run and run.status not in (
+                    WorkflowRunStatus.COMPLETED,
+                    WorkflowRunStatus.CANCELLED,
+                ):
+                    run.status = WorkflowRunStatus.FAILED
+                    run.error_message = str(e)[:2000]
+                    run.completed_at = datetime.utcnow()
+                    db.commit()
+            except Exception:
+                db.rollback()
         finally:
             db.close()
     
@@ -771,6 +885,8 @@ class ScannerWorker:
                     await self.handle_bgp_lookup(body)
                 elif job_type == 'VALIDATE_FINDING':
                     await self.handle_validate_finding(body)
+                elif job_type == 'WORKFLOW_RUN':
+                    await self.handle_workflow_run(body)
                 else:
                     logger.warning(f"Unknown job type: {job_type}")
                     if scan_id:

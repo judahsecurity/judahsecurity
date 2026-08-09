@@ -43,6 +43,15 @@ from app.api.routes import llm_red_team as llm_red_team_router
 from app.api.routes import detection_feedback as detection_feedback_router
 from app.api.routes import detection_suppression as detection_suppression_router
 from app.api.routes import recon as recon_router
+from app.api.routes import workflows as workflows_router
+from app.models.workflow import (  # noqa: F401 — ensure workflow tables are created
+    Workflow,
+    WorkflowVersion,
+    WorkflowScript,
+    WorkflowRun,
+    WorkflowNodeRun,
+    WorkflowArtifact,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -170,6 +179,7 @@ app.include_router(mitre_router.router, prefix=settings.API_PREFIX)
 app.include_router(llm_red_team_router.router, prefix=settings.API_PREFIX)
 app.include_router(detection_feedback_router.router, prefix=settings.API_PREFIX)
 app.include_router(detection_suppression_router.router, prefix=settings.API_PREFIX)
+app.include_router(workflows_router.router, prefix=settings.API_PREFIX)
 
 
 # ── Scoring pipeline lifecycle ────────────────────────────────────────────────
