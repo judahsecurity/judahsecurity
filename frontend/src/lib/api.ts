@@ -267,8 +267,8 @@ class ApiClient {
   }
 
   // Organizations
-  async getOrganizations() {
-    const response = await this.client.get('/organizations/');
+  async getOrganizations(params?: { skip?: number; limit?: number }) {
+    const response = await this.client.get('/organizations/', { params });
     return response.data;
   }
 
@@ -356,10 +356,23 @@ class ApiClient {
     return response.data;
   }
 
-  async getAssetsSummary(organizationId?: number) {
+  async getAssetsSummary(organizationId?: number, groupBy?: string) {
     const response = await this.client.get('/assets/stats/summary', {
-      params: organizationId ? { organization_id: organizationId } : {},
+      params: {
+        ...(organizationId ? { organization_id: organizationId } : {}),
+        ...(groupBy ? { group_by: groupBy } : {}),
+      },
     });
+    return response.data;
+  }
+
+  /** Lean geo payload for the dashboard world map (not full asset documents). */
+  async getGeoAssets(params?: {
+    organization_id?: number;
+    skip?: number;
+    limit?: number;
+  }) {
+    const response = await this.client.get('/assets/geo', { params });
     return response.data;
   }
 
@@ -375,9 +388,17 @@ class ApiClient {
     return response.data;
   }
 
-  async getFindingsSummary(organizationId?: number) {
+  async getFindingsSummary(params?: {
+    organizationId?: number;
+    groupBy?: string;
+    includeOutOfScope?: boolean;
+  }) {
     const response = await this.client.get('/vulnerabilities/stats/summary', {
-      params: organizationId ? { organization_id: organizationId } : {},
+      params: {
+        ...(params?.organizationId ? { organization_id: params.organizationId } : {}),
+        ...(params?.groupBy ? { group_by: params.groupBy } : {}),
+        ...(params?.includeOutOfScope ? { include_out_of_scope: true } : {}),
+      },
     });
     return response.data;
   }
@@ -393,8 +414,8 @@ class ApiClient {
     return this.getFindings(params);
   }
 
-  async getVulnerabilitiesSummary(organizationId?: number) {
-    return this.getFindingsSummary(organizationId);
+  async getVulnerabilitiesSummary(organizationId?: number, groupBy?: string) {
+    return this.getFindingsSummary({ organizationId, groupBy });
   }
 
   async getVulnerabilitiesForAsset(assetId: number, params?: { skip?: number; limit?: number }) {

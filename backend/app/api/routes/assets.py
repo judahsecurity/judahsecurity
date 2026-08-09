@@ -1,17 +1,18 @@
 """Asset routes for attack surface management."""
 
 import logging
-from typing import List, Optional, Literal
+from typing import Dict, List, Optional, Literal, Any
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
-from sqlalchemy.orm import Session, joinedload, selectinload
-from sqlalchemy import func, case
+from sqlalchemy.orm import Session, joinedload, selectinload, noload
+from sqlalchemy import func, case, inspect as sa_inspect
 
 from app.db.database import get_db
 from app.models.asset import Asset, AssetType, AssetStatus
 from app.models.port_service import PortService, PortState
 from app.models.scan import Scan, ScanType, ScanStatus
-from app.models.vulnerability import Vulnerability, VulnerabilityStatus
+from app.models.vulnerability import Vulnerability, VulnerabilityStatus, Severity
+from app.models.organization import Organization
 from app.models.user import User
 from app.schemas.asset import (
     AssetCreate, AssetUpdate, AssetResponse, 
@@ -24,12 +25,76 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/assets", tags=["Assets"])
 
+ASSET_SUMMARY_GROUP_BY = {
+    "type",
+    "status",
+    "country",
+    "organization",
+    "root_domain",
+}
+
 
 def check_org_access(user: User, org_id: int) -> bool:
     """Check if user has access to organization."""
     if user.is_superuser:
         return True
     return user.organization_id == org_id
+
+
+def _empty_vuln_counts() -> Dict[str, int]:
+    return {
+        "vulnerability_count": 0,
+        "critical_vuln_count": 0,
+        "high_vuln_count": 0,
+        "medium_vuln_count": 0,
+        "low_vuln_count": 0,
+    }
+
+
+def _batch_vuln_counts(db: Session, asset_ids: List[int]) -> Dict[int, Dict[str, int]]:
+    """Aggregate open (non-resolved) vulnerability counts per asset in one query."""
+    if not asset_ids:
+        return {}
+
+    rows = (
+        db.query(
+            Vulnerability.asset_id,
+            Vulnerability.severity,
+            func.count(Vulnerability.id),
+        )
+        .filter(
+            Vulnerability.asset_id.in_(asset_ids),
+            Vulnerability.status != VulnerabilityStatus.RESOLVED,
+        )
+        .group_by(Vulnerability.asset_id, Vulnerability.severity)
+        .all()
+    )
+
+    counts: Dict[int, Dict[str, int]] = {}
+    for asset_id, severity, count in rows:
+        bucket = counts.setdefault(asset_id, _empty_vuln_counts())
+        bucket["vulnerability_count"] += count
+        sev = severity.value.lower() if hasattr(severity, "value") else str(severity).lower()
+        if sev == "critical":
+            bucket["critical_vuln_count"] += count
+        elif sev == "high":
+            bucket["high_vuln_count"] += count
+        elif sev == "medium":
+            bucket["medium_vuln_count"] += count
+        elif sev == "low":
+            bucket["low_vuln_count"] += count
+    return counts
+
+
+def _org_filter_for_user(current_user: User, organization_id: Optional[int]):
+    """Return an Asset org filter clause, or None for unscoped superuser."""
+    if current_user.is_superuser:
+        if organization_id:
+            return Asset.organization_id == organization_id
+        return None
+    if not current_user.organization_id:
+        return False  # sentinel: no access
+    return Asset.organization_id == current_user.organization_id
 
 
 def _close_findings_for_asset(db: Session, asset_id: int) -> int:
@@ -65,11 +130,17 @@ def _close_findings_for_asset(db: Session, asset_id: int) -> int:
     return len(findings)
 
 
-def build_asset_response(asset: Asset) -> dict:
+def build_asset_response(
+    asset: Asset,
+    vuln_counts: Optional[Dict[str, int]] = None,
+) -> dict:
     """Build asset response with port service information.
     
     Explicitly builds the response dict to avoid SQLAlchemy internal state
     and handle missing database columns gracefully.
+
+    Pass precomputed ``vuln_counts`` from ``_batch_vuln_counts`` for list
+    endpoints so we never lazy-load ``asset.vulnerabilities`` (N+1).
     """
     # Build port service summaries
     port_summaries = []
@@ -111,27 +182,36 @@ def build_asset_response(asset: Asset) -> dict:
         except Exception:
             return default
     
-    # Calculate vulnerability counts
-    vuln_count = 0
-    critical_vulns = 0
-    high_vulns = 0
-    medium_vulns = 0
-    low_vulns = 0
-    try:
-        from app.models.vulnerability import Severity
-        for vuln in asset.vulnerabilities:
-            if vuln.status.value != 'resolved':
-                vuln_count += 1
-                if vuln.severity == Severity.CRITICAL:
-                    critical_vulns += 1
-                elif vuln.severity == Severity.HIGH:
-                    high_vulns += 1
-                elif vuln.severity == Severity.MEDIUM:
-                    medium_vulns += 1
-                elif vuln.severity == Severity.LOW:
-                    low_vulns += 1
-    except Exception:
-        pass
+    # Vulnerability counts — prefer batch counts; never lazy-load the relationship
+    if vuln_counts is not None:
+        vuln_count = vuln_counts.get("vulnerability_count", 0)
+        critical_vulns = vuln_counts.get("critical_vuln_count", 0)
+        high_vulns = vuln_counts.get("high_vuln_count", 0)
+        medium_vulns = vuln_counts.get("medium_vuln_count", 0)
+        low_vulns = vuln_counts.get("low_vuln_count", 0)
+    else:
+        vuln_count = 0
+        critical_vulns = 0
+        high_vulns = 0
+        medium_vulns = 0
+        low_vulns = 0
+        try:
+            insp = sa_inspect(asset)
+            # Only walk the relationship when it is already loaded in this session
+            if "vulnerabilities" not in insp.unloaded:
+                for vuln in asset.vulnerabilities:
+                    if getattr(vuln.status, "value", str(vuln.status)) != "resolved":
+                        vuln_count += 1
+                        if vuln.severity == Severity.CRITICAL:
+                            critical_vulns += 1
+                        elif vuln.severity == Severity.HIGH:
+                            high_vulns += 1
+                        elif vuln.severity == Severity.MEDIUM:
+                            medium_vulns += 1
+                        elif vuln.severity == Severity.LOW:
+                            low_vulns += 1
+        except Exception:
+            pass
     
     # Get organization name from relationship
     org_name = None
@@ -262,14 +342,14 @@ def list_assets(
     current_user: User = Depends(get_current_active_user)
 ):
     """List assets with filtering options. By default excludes IP_RANGE/CIDR blocks (use netblocks endpoint for those)."""
-    # Use eager loading to avoid N+1 queries - only load what we need
+    # Use eager loading to avoid N+1 queries - only load what we need.
+    # Explicitly noload vulnerabilities/screenshots so serializers cannot lazy-load them.
     query = db.query(Asset).options(
         selectinload(Asset.port_services),
         selectinload(Asset.technologies),
         selectinload(Asset.organization),
-        # Don't load vulnerabilities and screenshots for list - too slow
-        # selectinload(Asset.vulnerabilities),
-        # selectinload(Asset.screenshots),
+        noload(Asset.vulnerabilities),
+        noload(Asset.screenshots),
     )
     
     # Organization filter
@@ -358,6 +438,17 @@ def list_assets(
         count_query = count_query.filter(Asset.in_scope == True)
     elif in_scope is False:
         count_query = count_query.filter(Asset.in_scope == False)
+    if has_geo is True:
+        count_query = count_query.filter(
+            Asset.latitude != None,
+            Asset.latitude != '',
+            Asset.longitude != None,
+            Asset.longitude != ''
+        )
+    elif has_geo is False:
+        count_query = count_query.filter(
+            (Asset.latitude == None) | (Asset.latitude == '')
+        )
     
     total_count = count_query.scalar() or 0
     
@@ -385,9 +476,14 @@ def list_assets(
             
             filtered_assets.append(asset)
         assets = filtered_assets
+
+    vuln_by_asset = _batch_vuln_counts(db, [a.id for a in assets])
     
     return PaginatedAssetsResponse(
-        items=[build_asset_response(asset) for asset in assets],
+        items=[
+            build_asset_response(asset, vuln_counts=vuln_by_asset.get(asset.id, _empty_vuln_counts()))
+            for asset in assets
+        ],
         total=total_count,
         skip=skip,
         limit=limit,
@@ -554,6 +650,123 @@ def get_assets_geo_stats_early(
         "by_city": dict(sorted(by_city.items(), key=lambda x: x[1], reverse=True)[:20]),
         "coverage_percent": round(with_geo / total * 100, 1) if total > 0 else 0,
         "available_regions": get_all_regions()
+    }
+
+
+@router.get("/geo")
+def list_geo_assets(
+    organization_id: Optional[int] = None,
+    skip: int = Query(0, ge=0),
+    limit: int = Query(5000, ge=1, le=20000),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Lean geo payload for the world map.
+
+    Returns only map fields plus SQL-aggregated vuln/port counts — not full
+    asset documents. Prefer this over ``GET /assets/?has_geo=true``.
+    """
+    org_filter = _org_filter_for_user(current_user, organization_id)
+    if org_filter is False:
+        return {"items": [], "total": 0, "skip": skip, "limit": limit, "has_more": False}
+
+    geo_filter = (
+        Asset.latitude.isnot(None),
+        Asset.latitude != "",
+        Asset.longitude.isnot(None),
+        Asset.longitude != "",
+        Asset.asset_type != AssetType.IP_RANGE,
+    )
+
+    count_q = db.query(func.count(Asset.id)).filter(*geo_filter)
+    if org_filter is not None:
+        count_q = count_q.filter(org_filter)
+    total = count_q.scalar() or 0
+
+    vuln_subq = (
+        db.query(
+            Vulnerability.asset_id.label("asset_id"),
+            func.count(Vulnerability.id).label("vuln_count"),
+            func.sum(case((Vulnerability.severity == Severity.CRITICAL, 1), else_=0)).label("critical"),
+            func.sum(case((Vulnerability.severity == Severity.HIGH, 1), else_=0)).label("high"),
+            func.sum(case((Vulnerability.severity == Severity.MEDIUM, 1), else_=0)).label("medium"),
+            func.sum(case((Vulnerability.severity == Severity.LOW, 1), else_=0)).label("low"),
+        )
+        .filter(Vulnerability.status != VulnerabilityStatus.RESOLVED)
+        .group_by(Vulnerability.asset_id)
+        .subquery()
+    )
+
+    port_subq = (
+        db.query(
+            PortService.asset_id.label("asset_id"),
+            func.sum(case((PortService.state == PortState.OPEN, 1), else_=0)).label("open_ports"),
+            func.sum(case((PortService.is_risky == True, 1), else_=0)).label("risky_ports"),
+        )
+        .group_by(PortService.asset_id)
+        .subquery()
+    )
+
+    query = (
+        db.query(
+            Asset.id,
+            Asset.name,
+            Asset.value,
+            Asset.asset_type,
+            Asset.latitude,
+            Asset.longitude,
+            Asset.city,
+            Asset.country,
+            Asset.country_code,
+            Asset.metadata_,
+            func.coalesce(vuln_subq.c.vuln_count, 0).label("vuln_count"),
+            func.coalesce(vuln_subq.c.critical, 0).label("critical"),
+            func.coalesce(vuln_subq.c.high, 0).label("high"),
+            func.coalesce(vuln_subq.c.medium, 0).label("medium"),
+            func.coalesce(vuln_subq.c.low, 0).label("low"),
+            func.coalesce(port_subq.c.open_ports, 0).label("open_ports"),
+            func.coalesce(port_subq.c.risky_ports, 0).label("risky_ports"),
+        )
+        .outerjoin(vuln_subq, Asset.id == vuln_subq.c.asset_id)
+        .outerjoin(port_subq, Asset.id == port_subq.c.asset_id)
+        .filter(*geo_filter)
+    )
+    if org_filter is not None:
+        query = query.filter(org_filter)
+
+    rows = query.order_by(Asset.id.asc()).offset(skip).limit(limit).all()
+
+    items = []
+    for row in rows:
+        meta = row.metadata_ or {}
+        asset_type = row.asset_type.value if hasattr(row.asset_type, "value") else str(row.asset_type)
+        items.append({
+            "id": row.id,
+            "name": row.name,
+            "value": row.value,
+            "asset_type": asset_type,
+            "latitude": row.latitude,
+            "longitude": row.longitude,
+            "city": row.city,
+            "country": row.country,
+            "country_code": row.country_code,
+            "vulnerability_count": int(row.vuln_count or 0),
+            "critical_vuln_count": int(row.critical or 0),
+            "high_vuln_count": int(row.high or 0),
+            "medium_vuln_count": int(row.medium or 0),
+            "low_vuln_count": int(row.low or 0),
+            "open_ports_count": int(row.open_ports or 0),
+            "risky_ports_count": int(row.risky_ports or 0),
+            "dns_threat": bool(meta.get("dns_threat_listed")),
+            "urlhaus_malicious": bool(meta.get("urlhaus_malicious")),
+        })
+
+    return {
+        "items": items,
+        "total": total,
+        "skip": skip,
+        "limit": limit,
+        "has_more": (skip + len(items)) < total,
     }
 
 
@@ -827,22 +1040,29 @@ def delete_out_of_scope_assets(
 @router.get("/stats/summary")
 def get_assets_summary(
     organization_id: Optional[int] = None,
+    group_by: Optional[str] = Query(
+        None,
+        description="Optional grouping dimension: type, status, country, organization, root_domain",
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
     """Get asset statistics summary including port information.
     
     OPTIMIZED: Uses SQL aggregations instead of loading all assets into memory.
+    Pass ``group_by`` to also return a ``groups`` array for that dimension.
     """
     # Build base filter for organization
-    org_filter = None
-    if current_user.is_superuser:
-        if organization_id:
-            org_filter = Asset.organization_id == organization_id
-    else:
-        if not current_user.organization_id:
-            return {"total": 0, "by_type": {}, "by_status": {}, "ports": {}}
-        org_filter = Asset.organization_id == current_user.organization_id
+    org_filter = _org_filter_for_user(current_user, organization_id)
+    if org_filter is False:
+        return {
+            "total": 0,
+            "by_type": {},
+            "by_status": {},
+            "ports": {},
+            "group_by": group_by,
+            "groups": [],
+        }
     
     # Get total count and aggregated stats in ONE query
     base_query = db.query(
@@ -906,6 +1126,63 @@ def get_assets_summary(
         risky_assets_query = risky_assets_query.filter(org_filter)
     
     assets_with_risky_ports = risky_assets_query.scalar() or 0
+
+    groups: List[Dict[str, Any]] = []
+    normalized_group = (group_by or "").strip().lower() or None
+    if normalized_group:
+        if normalized_group not in ASSET_SUMMARY_GROUP_BY:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid group_by. Allowed: {', '.join(sorted(ASSET_SUMMARY_GROUP_BY))}",
+            )
+        if normalized_group == "type":
+            groups = [
+                {"key": k, "label": k, "count": v}
+                for k, v in sorted(by_type.items(), key=lambda x: x[1], reverse=True)
+            ]
+        elif normalized_group == "status":
+            groups = [
+                {"key": k, "label": k, "count": v}
+                for k, v in sorted(by_status.items(), key=lambda x: x[1], reverse=True)
+            ]
+        elif normalized_group == "country":
+            gq = db.query(
+                func.coalesce(Asset.country_code, Asset.country, "Unknown").label("key"),
+                func.coalesce(Asset.country, Asset.country_code, "Unknown").label("label"),
+                func.count(Asset.id),
+            ).group_by(
+                func.coalesce(Asset.country_code, Asset.country, "Unknown"),
+                func.coalesce(Asset.country, Asset.country_code, "Unknown"),
+            )
+            if org_filter is not None:
+                gq = gq.filter(org_filter)
+            groups = [
+                {"key": str(row[0] or "Unknown"), "label": str(row[1] or "Unknown"), "count": row[2]}
+                for row in gq.order_by(func.count(Asset.id).desc()).limit(50).all()
+            ]
+        elif normalized_group == "organization":
+            gq = (
+                db.query(Organization.id, Organization.name, func.count(Asset.id))
+                .join(Asset, Asset.organization_id == Organization.id)
+                .group_by(Organization.id, Organization.name)
+            )
+            if org_filter is not None:
+                gq = gq.filter(org_filter)
+            groups = [
+                {"key": str(row[0]), "label": row[1], "count": row[2]}
+                for row in gq.order_by(func.count(Asset.id).desc()).limit(50).all()
+            ]
+        elif normalized_group == "root_domain":
+            gq = db.query(
+                func.coalesce(Asset.root_domain, "Unknown"),
+                func.count(Asset.id),
+            ).group_by(func.coalesce(Asset.root_domain, "Unknown"))
+            if org_filter is not None:
+                gq = gq.filter(org_filter)
+            groups = [
+                {"key": str(row[0]), "label": str(row[0]), "count": row[1]}
+                for row in gq.order_by(func.count(Asset.id).desc()).limit(50).all()
+            ]
     
     return {
         "total": stats.total or 0,
@@ -927,7 +1204,9 @@ def get_assets_summary(
             "risky_ports": port_stats.risky_ports or 0 if port_stats else 0,
             "assets_with_ports": port_stats.assets_with_ports or 0 if port_stats else 0,
             "assets_with_risky_ports": assets_with_risky_ports
-        }
+        },
+        "group_by": normalized_group,
+        "groups": groups,
     }
 
 
