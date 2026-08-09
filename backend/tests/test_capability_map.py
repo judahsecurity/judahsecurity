@@ -1,0 +1,124 @@
+"""Tests for tester-style application capability map + specialist dispatch."""
+
+from types import SimpleNamespace
+
+from app.services.agent.capability_map import (
+    build_capability_map_from_crawl,
+    build_capability_map_from_dict,
+    format_capability_map_for_prompt,
+    merge_capability_maps,
+    select_specialists_for_map,
+)
+
+
+def _fake_crawl(**overrides):
+    base = dict(
+        target="https://app.example.com",
+        scope="example.com",
+        authenticated=False,
+        pages_visited=[
+            "https://app.example.com/",
+            "https://app.example.com/login",
+            "https://app.example.com/admin",
+            "https://app.example.com/search",
+        ],
+        forms=[
+            {
+                "method": "POST",
+                "action": "/login",
+                "inputs": ["username", "password"],
+                "page": "https://app.example.com/login",
+            },
+            {
+                "method": "POST",
+                "action": "/upload",
+                "inputs": ["file", "title"],
+                "page": "https://app.example.com/upload",
+            },
+            {
+                "method": "GET",
+                "action": "/search",
+                "inputs": ["q"],
+                "page": "https://app.example.com/search",
+            },
+        ],
+        api_calls={
+            "app.example.com": {
+                "GET /api/users?id=1",
+                "POST /api/graphql",
+                "GET /oauth/authorize",
+            }
+        },
+        js_files={"https://app.example.com/static/app.js", "https://app.example.com/static/vendor.js"},
+        endpoints_from_js={"/api/v1/items", "/graphql"},
+        websockets={"wss://app.example.com/ws"},
+        sse=set(),
+        source_maps=set(),
+        third_party={"cdn.example.net"},
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_build_capability_map_detects_surfaces():
+    cmap = build_capability_map_from_crawl(_fake_crawl())
+    assert cmap.ready_for_attack is True
+    assert cmap.quality_score >= 0.35
+    assert "auth" in cmap.capabilities
+    assert "api" in cmap.capabilities
+    assert "graphql" in cmap.capabilities
+    assert "file_upload" in cmap.capabilities
+    assert "search" in cmap.capabilities
+    assert cmap.has_login_form is True
+    assert cmap.has_upload is True
+    assert any(h["hunt"] == "auth_logic" for h in cmap.ranked_hunt_queue)
+    assert any(h["hunt"] == "graphql" for h in cmap.ranked_hunt_queue)
+
+
+def test_select_specialists_auto_from_map():
+    cmap = build_capability_map_from_crawl(_fake_crawl())
+    names = select_specialists_for_map(cmap)
+    assert "app_mapper" in names
+    assert "auth_logic" in names or "saml_sso" in names
+    assert "graphql_api" in names
+    assert "vuln_triage" in names
+    assert len(names) <= 6
+
+
+def test_thin_map_not_ready():
+    cmap = build_capability_map_from_crawl(
+        _fake_crawl(
+            pages_visited=[],
+            forms=[],
+            api_calls={},
+            js_files=set(),
+            endpoints_from_js=set(),
+            websockets=set(),
+        )
+    )
+    assert cmap.ready_for_attack is False
+    names = select_specialists_for_map(cmap)
+    assert "app_mapper" in names
+    assert "js_secrets" in names
+
+
+def test_merge_and_format():
+    a = build_capability_map_from_crawl(_fake_crawl()).to_dict()
+    b = build_capability_map_from_dict({
+        "target": "https://app.example.com",
+        "pages_visited": ["https://app.example.com/settings"],
+        "api_endpoints": [{"host": "app.example.com", "method": "PUT", "path": "/api/profile"}],
+        "forms": [],
+        "js_files": [],
+        "js_endpoints": [],
+        "websockets": [],
+        "sse": [],
+        "source_maps": [],
+        "third_party": [],
+    })
+    merged = merge_capability_maps(a, b)
+    assert "https://app.example.com/settings" in merged["pages_visited"]
+    assert any(e.get("path") == "/api/profile" for e in merged["api_endpoints"])
+    text = format_capability_map_for_prompt(merged)
+    assert "Suggested fireteam" in text
+    assert "Capabilities:" in text
