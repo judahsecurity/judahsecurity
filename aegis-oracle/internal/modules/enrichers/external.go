@@ -19,6 +19,7 @@
 //   - Metasploit    Weaponized exploit module detection (GitHub search).
 //   - Nuclei        Automated scan template detection (GitHub search).
 //   - PoC-in-GitHub Public PoC repos via nomi-sec/PoC-in-GitHub raw index.
+//   - trickest/cve  Broader GitHub PoC aggregator (Markdown per CVE).
 //   - Exploit-DB    Public exploit archive via offensive-security/exploitdb mirror.
 //   - CXSecurity    Public advisory/exploit index via cveshow pages (best-effort).
 //   - JVN iPedia    Japanese national vulnerability database (MyJVN API).
@@ -122,6 +123,7 @@ type ExternalEnrichment struct {
 	Metasploit  MetasploitResult       `json:"metasploit"`
 	Nuclei      NucleiResult           `json:"nuclei"`
 	PoCGitHub   PoCGitHubResult        `json:"poc_github"`
+	Trickest    TrickestResult         `json:"trickest"`
 	ExploitDB   ExploitDBResult        `json:"exploitdb"`
 	CXSecurity  CXSecurityResult       `json:"cxsecurity"`
 	VulnCheck   VulnCheckExploitResult `json:"vulncheck"`
@@ -202,6 +204,10 @@ func FetchAllWithVulnCheck(ctx context.Context, cveID, vulnCheckToken string) Ex
 		{"poc_github", func() {
 			r := FetchPoCGitHub(ctx, cveID)
 			mu.Lock(); result.PoCGitHub = r; mu.Unlock()
+		}},
+		{"trickest", func() {
+			r := FetchTrickest(ctx, cveID)
+			mu.Lock(); result.Trickest = r; mu.Unlock()
 		}},
 		{"exploitdb", func() {
 			r := FetchExploitDB(ctx, cveID)
@@ -315,6 +321,25 @@ func Apply(ext ExternalEnrichment, ev *schema.ExploitationEvidence) {
 			if ev.RecentPOCDays <= 0 || ext.PoCGitHub.RecentPOCDays < ev.RecentPOCDays {
 				ev.RecentPOCDays = ext.PoCGitHub.RecentPOCDays
 			}
+		}
+	}
+	if ext.Trickest.Found {
+		ev.PublicPOCFound = true
+		ev.TrickestFound = true
+		ev.TrickestCount = ext.Trickest.POCCount
+		urls := make([]string, 0, len(ext.Trickest.POCs))
+		for _, p := range ext.Trickest.POCs {
+			if p.URL != "" {
+				urls = append(urls, p.URL)
+			}
+		}
+		ev.TrickestURLs = appendUniqueAll(ev.TrickestURLs, urls)
+		ev.PublicPOCURLs = appendUniqueAll(ev.PublicPOCURLs, urls)
+		// Prefer unique merged URL count when trickest adds coverage beyond nomi-sec.
+		if len(ev.PublicPOCURLs) > ev.PublicPOCCount {
+			ev.PublicPOCCount = len(ev.PublicPOCURLs)
+		} else if ev.PublicPOCCount < ext.Trickest.POCCount {
+			ev.PublicPOCCount = ext.Trickest.POCCount
 		}
 	}
 	if ext.ExploitDB.Found {

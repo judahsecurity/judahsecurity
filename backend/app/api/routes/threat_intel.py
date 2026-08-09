@@ -13,7 +13,7 @@ Enriched with:
   - Detection coverage via ProjectDiscovery PDCP (optional key)
   - Active campaign signals via AlienVault OTX (free)
   - NVD / OSV / GHSA first-party CVE metadata (on CVE detail)
-  - Public exploit indexes: PoC-in-GitHub, GitHub repos, Exploit-DB, CXSecurity
+  - Public exploit indexes: PoC-in-GitHub, trickest/cve, GitHub repos, Exploit-DB, CXSecurity
   - Oracle OPES analysis from local DB
 """
 
@@ -867,8 +867,8 @@ async def get_cve_detail(
 ):
     """
     Full enrichment for a single CVE: PDCP data + OTX + NVD/OSV/GHSA catalog
-    metadata + public exploit indexes (PoC-in-GitHub, GitHub repos, Exploit-DB,
-    CXSecurity) + any Oracle analysis on record.
+    metadata + public exploit indexes (PoC-in-GitHub, trickest/cve, GitHub repos,
+    Exploit-DB, CXSecurity) + any Oracle analysis on record.
     """
     cve_id = cve_id.upper().strip()
     pdcp_key = _get_pdcp_key(db, organization_id)
@@ -1032,6 +1032,11 @@ async def get_threat_intel_stats(
             "poc_github": {
                 "configured": True,
                 "description": "nomi-sec/PoC-in-GitHub — indexed public PoC repositories (free)",
+                "key_source": "none_required",
+            },
+            "trickest": {
+                "configured": True,
+                "description": "trickest/cve — broader GitHub PoC aggregator Markdown index (free)",
                 "key_source": "none_required",
             },
             "github_repos": {

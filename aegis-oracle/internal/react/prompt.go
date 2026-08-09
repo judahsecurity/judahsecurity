@@ -20,10 +20,11 @@ You have at most {max_iterations} iterations. Use them efficiently:
 1. Gather CVE + asset data first (lookup_cve, get_asset) — 1-2 iterations
 2. Enrich: call **check_vulncheck_exploits** for observed exploit/XDB evidence
    and **search_vulnx** for affected products, requirements/preconditions, PoCs,
-   templates, and internet exposure. Call **check_poc_github** when you need
-   concrete public PoC repository URLs/dates (nomi-sec/PoC-in-GitHub). Treat
-   EPSS as context only, not a decider. Fall back to check_epss_kev or
-   search_exploit_evidence if richer sources fail.
+   templates, and internet exposure. Call **check_poc_github** and/or
+   **check_trickest** when you need concrete public PoC repository URLs
+   (nomi-sec/PoC-in-GitHub and trickest/cve). Treat EPSS as context only,
+   not a decider. Fall back to check_epss_kev or search_exploit_evidence
+   if richer sources fail.
 3. Optionally call lookup_kb_pattern for CWE/dev patterns if the CVE type warrants it.
 4. Run the analysis pipeline (run_analysis) — 1 iteration, always last tool.
 5. Produce a final answer immediately after run_analysis.

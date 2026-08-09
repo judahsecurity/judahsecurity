@@ -6,6 +6,7 @@ Catalog metadata:
 
 Public exploit / PoC sources (aligned with Aegis Oracle enrichers):
   - nomi-sec/PoC-in-GitHub
+  - trickest/cve (broader GitHub PoC aggregator)
   - GitHub repo search (CVE in name)
   - Exploit-DB (offensive-security/exploitdb mirror)
   - CXSecurity cveshow
@@ -35,9 +36,15 @@ NVD_URL = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 OSV_URL = "https://api.osv.dev/v1/vulns"
 GHSA_URL = "https://api.github.com/advisories"
 POC_GITHUB_RAW = "https://raw.githubusercontent.com/nomi-sec/PoC-in-GitHub/master"
+TRICKEST_CVE_RAW = "https://raw.githubusercontent.com/trickest/cve/main"
 GITHUB_SEARCH_REPOS = "https://api.github.com/search/repositories"
 GITHUB_SEARCH_CODE = "https://api.github.com/search/code"
 CXSECURITY_CVE_SHOW = "https://cxsecurity.com/cveshow"
+_GITHUB_REPO_RE = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)")
+_TRICKEST_SKIP_REPOS = {
+    "blob", "tree", "raw", "commit", "issues", "pull", "wiki",
+    "releases", "actions", "projects", "settings",
+}
 
 _CACHE_TTL_SECONDS = 6 * 3600
 _cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
@@ -273,6 +280,61 @@ def _fetch_poc_github(cve_id: str) -> Dict[str, Any]:
         return {"source": "poc_github", "found": False, "note": str(exc)}
 
 
+def _extract_github_repos_from_md(md: str) -> List[Dict[str, str]]:
+    """Extract unique github.com/owner/repo links from Markdown text."""
+    seen: Dict[str, Dict[str, str]] = {}
+    for match in _GITHUB_REPO_RE.finditer(md or ""):
+        owner = match.group(1).removesuffix(".git")
+        repo = match.group(2).removesuffix(".git")
+        if not owner or not repo or repo.lower() in _TRICKEST_SKIP_REPOS:
+            continue
+        full_name = f"{owner}/{repo}"
+        if full_name in seen:
+            continue
+        seen[full_name] = {
+            "full_name": full_name,
+            "url": f"https://github.com/{full_name}",
+        }
+    return sorted(seen.values(), key=lambda r: r["full_name"])
+
+
+def _extract_trickest_repos(md: str) -> List[Dict[str, str]]:
+    """Extract unique github.com/owner/repo links from trickest Markdown."""
+    # Prefer the #### Github section when present; fall back to full doc.
+    idx = md.find("#### Github")
+    if idx >= 0:
+        repos = _extract_github_repos_from_md(md[idx:])
+        if repos:
+            return repos
+    return _extract_github_repos_from_md(md)
+
+
+def _fetch_trickest(cve_id: str) -> Dict[str, Any]:
+    """trickest/cve Markdown index (same source as Aegis Oracle / exploit-availability-check)."""
+    year = _cve_year(cve_id)
+    if not year:
+        return {"source": "trickest", "found": False, "note": "unparseable CVE year"}
+    url = f"{TRICKEST_CVE_RAW}/{year}/{cve_id}.md"
+    try:
+        status, body = _http_get(url, timeout=12, accept="text/plain, text/markdown, */*")
+        if status == 404:
+            return {"source": "trickest", "found": False, "count": 0, "pocs": []}
+        if status != 200:
+            return {"source": "trickest", "found": False, "note": f"HTTP {status}"}
+        md = body.decode("utf-8", errors="replace")
+        pocs = _extract_trickest_repos(md)
+        return {
+            "source": "trickest",
+            "found": bool(pocs),
+            "count": len(pocs),
+            "pocs": pocs[:25],
+            "note": "trickest/cve",
+        }
+    except Exception as exc:
+        logger.debug("trickest/cve lookup failed for %s: %s", cve_id, exc)
+        return {"source": "trickest", "found": False, "note": str(exc)}
+
+
 def _fetch_github_repos(cve_id: str, github_token: Optional[str] = None) -> Dict[str, Any]:
     """GitHub repository search for CVE-named / described PoC repos."""
     try:
@@ -429,13 +491,14 @@ def enrich_cve_catalog(
             if hit and (now - hit[0]) < _CACHE_TTL_SECONDS:
                 return hit[1]
 
-    with ThreadPoolExecutor(max_workers=7) as pool:
+    with ThreadPoolExecutor(max_workers=8) as pool:
         fut_nvd = pool.submit(_fetch_nvd, cve, nvd_api_key)
         fut_osv = pool.submit(_fetch_osv, cve)
         fut_ghsa = pool.submit(_fetch_ghsa, cve, github_token)
-        fut_poc = fut_repos = fut_edb = fut_cx = None
+        fut_poc = fut_trickest = fut_repos = fut_edb = fut_cx = None
         if include_exploit_sources:
             fut_poc = pool.submit(_fetch_poc_github, cve)
+            fut_trickest = pool.submit(_fetch_trickest, cve)
             fut_repos = pool.submit(_fetch_github_repos, cve, github_token)
             fut_edb = pool.submit(_fetch_exploitdb, cve, github_token)
             fut_cx = pool.submit(_fetch_cxsecurity, cve)
@@ -444,9 +507,17 @@ def enrich_cve_catalog(
         osv = fut_osv.result()
         ghsa = fut_ghsa.result()
         exploit_sources: Dict[str, Any] = {}
-        if include_exploit_sources and fut_poc and fut_repos and fut_edb and fut_cx:
+        if (
+            include_exploit_sources
+            and fut_poc
+            and fut_trickest
+            and fut_repos
+            and fut_edb
+            and fut_cx
+        ):
             exploit_sources = {
                 "poc_github": fut_poc.result(),
+                "trickest": fut_trickest.result(),
                 "github_repos": fut_repos.result(),
                 "exploitdb": fut_edb.result(),
                 "cxsecurity": fut_cx.result(),

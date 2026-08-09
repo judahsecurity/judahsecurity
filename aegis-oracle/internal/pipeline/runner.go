@@ -449,11 +449,12 @@ func summarizeExploitationEvidence(e schema.ExploitationEvidence) []string {
 		out = append(out, fmt.Sprintf("AttackerKB attacker_value %d/5 — practitioner community rates this highly valuable", e.AttackerKBValue))
 	}
 	if e.PublicPOCFound {
+		src := "nomi-sec/PoC-in-GitHub and/or trickest/cve"
 		switch {
 		case e.PublicPOCCount > 1:
-			out = append(out, fmt.Sprintf("Public PoC repos — %d GitHub PoC(s) indexed (nomi-sec/PoC-in-GitHub)", e.PublicPOCCount))
+			out = append(out, fmt.Sprintf("Public PoC repos — %d GitHub PoC(s) indexed (%s)", e.PublicPOCCount, src))
 		default:
-			out = append(out, "Public PoC repo indexed (nomi-sec/PoC-in-GitHub)")
+			out = append(out, fmt.Sprintf("Public PoC repo indexed (%s)", src))
 		}
 	}
 	if e.RecentPOCDays > 0 && e.RecentPOCDays <= 30 {
