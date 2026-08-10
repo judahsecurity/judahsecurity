@@ -93,7 +93,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends golang \
     && go install github.com/lc/gau/v2/cmd/gau@latest \
     && (go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest || echo "interactsh-client build skipped") \
     && (GOTOOLCHAIN=go1.25.1 go install -v github.com/melvinsh/subfaster/v2/cmd/subfaster@latest || echo "subfaster build skipped") \
+    && (go install github.com/hahwul/dalfox/v2@latest || echo "dalfox build skipped") \
     && cp /root/go/bin/* /tools/
+
+# Feroxbuster (Rust — download release binary)
+RUN ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = "arm64" ]; then FX_ARCH="aarch64"; else FX_ARCH="x86_64"; fi && \
+    (wget -q "https://github.com/epi052/feroxbuster/releases/download/v2.11.0/${FX_ARCH}-linux-feroxbuster.zip" -O /tmp/ferox.zip && \
+     unzip -o -q /tmp/ferox.zip -d /tmp/ferox && \
+     find /tmp/ferox -type f -name feroxbuster -exec cp {} /tools/ \; && \
+     rm -rf /tmp/ferox /tmp/ferox.zip) || echo "feroxbuster download skipped"
 
 # Download Gitleaks (secret scanner - Go binary)
 RUN ARCH=$(dpkg --print-architecture) && \
@@ -143,12 +152,16 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     libxcomposite1 \
     libxdamage1 \
     libxrandr2 \
-    git
+    git \
+    jq \
+    openssl \
+    openssh-client \
+    hydra
 
 # Copy pre-built binaries
 # Copy tools that were successfully downloaded (skips missing files gracefully)
 COPY --from=tool-downloader /tools/ /tmp/downloaded-tools/
-RUN for tool in nuclei subfinder subfaster httpx dnsx naabu katana tlsx ffuf amass masscan massdns waybackurls assetfinder gau gitleaks vulnx interactsh-client; do \
+RUN for tool in nuclei subfinder subfaster httpx dnsx naabu katana tlsx ffuf amass masscan massdns waybackurls assetfinder gau gitleaks vulnx interactsh-client dalfox feroxbuster; do \
         [ -f "/tmp/downloaded-tools/${tool}" ] && cp "/tmp/downloaded-tools/${tool}" /usr/local/bin/ && echo "installed ${tool}" || echo "skipped ${tool}"; \
     done && \
     [ -f "/tmp/downloaded-tools/chaos-client" ] && cp /tmp/downloaded-tools/chaos-client /usr/local/bin/chaos || true && \
@@ -252,6 +265,14 @@ RUN mkdir -p /root/.subcat && printf '# Subcat API keys\n# virustotal:\n#   - YO
 # Install Nikto (web server scanner)
 RUN apt-get update && apt-get install -y --no-install-recommends nikto \
     && rm -rf /var/lib/apt/lists/* || echo "Nikto installation skipped"
+
+# WhatWeb (tech fingerprint — was vanguard-only)
+RUN git clone --depth 1 https://github.com/urbanadventurer/WhatWeb.git /opt/whatweb \
+    && ln -sf /opt/whatweb/whatweb /usr/local/bin/whatweb \
+    || echo "WhatWeb installation skipped"
+
+# Commix (command injection)
+RUN pip install --no-cache-dir commix || echo "Commix installation skipped"
 
 # Install testssl.sh (TLS/SSL testing)
 RUN git clone --depth 1 https://github.com/drwetter/testssl.sh.git /opt/testssl \

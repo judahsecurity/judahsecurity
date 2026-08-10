@@ -70,6 +70,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_wappalyzer",
             "execute_katana",
             "execute_gau",
+            "execute_feroxbuster",
         ],
         max_iterations=8,
     ),
@@ -86,6 +87,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_waybackurls",
             "execute_deep_crawl",
             "execute_ffuf",
+            "execute_feroxbuster",
             "execute_kiterunner",
             "execute_arjun",
             "discover_parameters",
@@ -104,7 +106,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "scan_js_urls_for_secrets",
             "execute_retirejs",
             "execute_gitleaks",
-            "execute_trufflehog",
+            "execute_hermes",
             "create_scan",
         ],
     ),
@@ -130,7 +132,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "exposed source maps, github secrets, and dependency-confusion."
         ),
         allowed_tools=[
-            "execute_trufflehog",
+            "execute_hermes",
+            "execute_argus",
             "scan_js_urls_for_secrets",
             "execute_gitleaks",
             "query_assets",
@@ -144,9 +147,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ),
         allowed_tools=[
             "query_assets",
-            "execute_prowler",
-            "execute_scoutsuite",
+            "execute_themis",
             "search_cve",
+            "analyze_attack_surface",
         ],
     ),
     SpecialistProfile(
@@ -156,12 +159,15 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "for introspection, verbose errors, CSRF, batching DoS."
         ),
         allowed_tools=[
-            "execute_graphql_cop",
             "execute_schemathesis",
             "execute_kiterunner",
             "execute_curl",
+            "compare_requests",
             "create_scan",
             "query_assets",
+            "update_hypothesis",
+            "validate_finding",
+            "create_finding",
         ],
     ),
     SpecialistProfile(
@@ -212,6 +218,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_httpx",
             "bypass_403",
             "test_saml_sso",
+            "test_credential_spray",
+            "execute_hydra",
+            "execute_jwt",
             "compare_requests",
             "add_engagement_credential",
             "queue_finding_followups",
@@ -314,6 +323,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_arjun",
             "execute_sqlmap",
             "execute_xsstrike",
+            "execute_dalfox",
+            "execute_commix",
             "execute_browser",
             "generate_injection_payloads",
             "execute_curl",
@@ -518,13 +529,21 @@ async def _run_specialist(
         summary="",
     )
 
+    from app.services.agent.specialist_skills import skill_pack_for
+
+    skill_pack = skill_pack_for(profile.name)
+    suffix_parts = [profile.system_prompt_suffix.strip()] if profile.system_prompt_suffix else []
+    if skill_pack:
+        suffix_parts.append(skill_pack)
+    suffix = "\n\n".join(suffix_parts)
+
     sys_prompt = _SPECIALIST_SYSTEM_PROMPT.format(
         role=profile.role,
         mission=mission,
         targets=", ".join(targets) or "<see analyze_attack_surface output>",
         tool_list="\n".join(f"  - {t}" for t in profile.allowed_tools),
         max_iter=profile.max_iterations,
-        suffix=profile.system_prompt_suffix,
+        suffix=suffix,
     )
 
     messages: list = [SystemMessage(content=sys_prompt)]

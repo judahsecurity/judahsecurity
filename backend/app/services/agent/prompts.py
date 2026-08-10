@@ -338,6 +338,10 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **execute_nikto**: Web server vulnerability scanner (exploitation phase). Checks 6,700+ dangerous CGIs, outdated servers, insecure configs, and default files. Example: execute_nikto(args="-h https://target.com -Format json")
 - **execute_wpscan**: WordPress vulnerability scanner (exploitation phase). Detects WP version, plugins, themes, users, and known vulnerabilities. Use when WordPress is detected. Example: execute_wpscan(args="--url https://target.com --enumerate vp,vt,u")
 - **execute_xsstrike**: Advanced XSS scanner (exploitation phase). Uses fuzzy matching, context analysis, and smart payload generation to find reflected, stored, and DOM XSS. Example: execute_xsstrike(args='-u "https://target.com/search?q=test"') or execute_xsstrike(args='-u "https://target.com/search?q=test" --crawl')
+- **execute_dalfox**: Fast XSS scanner/verifier (exploitation). Prefer for confirmation after xsstrike or on reflected params. Example: execute_dalfox(args='url "https://target.com/search?q=test" --skip-bav')
+- **execute_commix**: OS command-injection automation (exploitation). Use only on high-signal params. Example: execute_commix(args='--url="https://target.com/ping?host=1" --batch')
+- **execute_hydra**: Bounded credential testing (exploitation). Always use tiny lists + -f. Prefer test_credential_spray for light web sprays.
+- **execute_feroxbuster**: Recursive content discovery (informational/exploitation). Complement to ffuf.
 - **execute_schemathesis**: API fuzzer for OpenAPI/GraphQL schemas. Reads the schema and auto-generates test cases to find 500 errors, validation issues, and security flaws. Point it at the OpenAPI spec URL. Example: execute_schemathesis(args="run https://target.com/openapi.json --checks all") or execute_schemathesis(args="run https://target.com/graphql --checks all")
 - **execute_jwt**: JWT testing and exploitation (jwt_tool). Decodes claims and runs the auth-bypass playbook: alg:none / blank signature, key confusion (RS256→HS256), weak HMAC secret cracking, and 'jku'/'kid' injection. Feed it a JWT you captured from a cookie, Authorization header, or JS bundle. Pass the raw token plus jwt_tool flags (do NOT use -T, the interactive tamper menu). Examples: execute_jwt(args="<JWT>") (decode + scan), execute_jwt(args="<JWT> -X a") (alg:none), execute_jwt(args="<JWT> -C -d /usr/share/wordlists/rockyou.txt") (crack HMAC secret), execute_jwt(args="<JWT> -X k -pk public.pem") (key confusion). If you forge a valid token, verify the bypass with execute_curl/execute_browser, then create_finding.
 - **execute_interactsh**: Out-of-band (OOB) collaborator for BLIND vulnerabilities that produce no visible response — blind SSRF, blind XXE, blind SQLi/command injection, blind RCE, and OOB exfiltration. Backed by interactsh-client. Workflow: (1) execute_interactsh(args="register") → returns a unique **payload_domain**/**payload_url** and a **session_id**; (2) plant that payload in a suspected sink (SSRF url param, XXE SYSTEM entity, Host/Referer/X-Forwarded-For header, template/command arg, email or webhook field) — you can also pass it as the `collaborator_url` to **generate_injection_payloads**; (3) execute_interactsh(args="poll <session_id>") → any DNS/HTTP/SMTP callback = a CONFIRMED interaction (real finding). Also: execute_interactsh(args="list") and execute_interactsh(args="stop <session_id>"). Self-hosted server: execute_interactsh(args="register --server oob.mydomain.com --token <t>"). Sessions persist across calls and auto-expire after ~1h. Poll a few seconds after injecting; some callbacks (e.g. async jobs) arrive later.
@@ -606,6 +610,24 @@ TOOL_PHASE_MAP = {
     "wpscan_help": ["informational", "exploitation", "post_exploitation"],
     "execute_xsstrike": ["exploitation", "post_exploitation"],
     "xsstrike_help": ["informational", "exploitation", "post_exploitation"],
+    "execute_dalfox": ["exploitation", "post_exploitation"],
+    "dalfox_help": ["informational", "exploitation", "post_exploitation"],
+    "execute_commix": ["exploitation", "post_exploitation"],
+    "commix_help": ["informational", "exploitation", "post_exploitation"],
+    "execute_hydra": ["exploitation", "post_exploitation"],
+    "hydra_help": ["informational", "exploitation", "post_exploitation"],
+    "execute_feroxbuster": ["informational", "exploitation", "post_exploitation"],
+    "feroxbuster_help": ["informational", "exploitation", "post_exploitation"],
+    "execute_themis": ["informational", "exploitation", "post_exploitation"],
+    "themis_help": ["informational", "exploitation", "post_exploitation"],
+    "execute_hermes": ["informational", "exploitation", "post_exploitation"],
+    "hermes_help": ["informational", "exploitation", "post_exploitation"],
+    "execute_atlas": ["informational", "exploitation", "post_exploitation"],
+    "atlas_help": ["informational", "exploitation", "post_exploitation"],
+    "execute_argus": ["informational", "exploitation", "post_exploitation"],
+    "argus_help": ["informational", "exploitation", "post_exploitation"],
+    "execute_janus": ["informational", "exploitation", "post_exploitation"],
+    "janus_help": ["informational", "exploitation", "post_exploitation"],
     # Informational/passive scanners
     "execute_wafw00f": ["informational", "exploitation", "post_exploitation"],
     "wafw00f_help": ["informational", "exploitation", "post_exploitation"],

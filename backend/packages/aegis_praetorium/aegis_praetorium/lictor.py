@@ -144,6 +144,8 @@ _DESTRUCTIVE_FLAGS: Dict[str, List[str]] = {
     "xsstrike": ["--blind"],
     "browser": ["evaluate_xss_payload"],
     "ffuf": ["-x http://", "-x https://"],
+    "hydra": ["-e nsr"],  # empty/null/reverse sprays without explicit lists
+    "commix": ["--os-shell", "--os-pwn"],
 }
 
 # Centralize tool defaults that used to be in individual handlers.
@@ -151,6 +153,8 @@ _SAFE_DEFAULTS: Dict[str, List[str]] = {
     "sqlmap": ["--batch"],
     "wpscan": ["--no-banner"],
     "nikto": ["-Tuning", "1234567"],
+    "commix": ["--batch"],
+    "hydra": ["-f"],
 }
 
 
