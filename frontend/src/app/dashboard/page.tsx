@@ -52,6 +52,19 @@ const WorldMap = dynamic(
   }
 );
 
+const PrioritizationFunnelCard = dynamic(
+  () =>
+    import('@/components/dashboard/PrioritizationFunnelCard').then(
+      (m) => m.PrioritizationFunnelCard
+    ),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="h-[420px] rounded-lg border border-orange-500/20 bg-card animate-pulse" />
+    ),
+  }
+);
+
 type FindingsGroupBy =
   | 'severity'
   | 'status'
@@ -653,6 +666,9 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
 
+        {/* Prioritization value (Sankey) — demo data until funnel API lands */}
+        <PrioritizationFunnelCard demo />
+
         {/* Remediation Efficiency & Vulnerability Exposure */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {/* Remediation Efficiency */}
@@ -773,40 +789,50 @@ export default function DashboardPage() {
                 </div>
               </div>
               
-              {/* Severity Distribution */}
+              {/* Severity Distribution — each label shares flex width with its color segment */}
               <div className="mb-4">
                 <p className="text-sm text-muted-foreground mb-2">Open Vulnerabilities by Severity</p>
-                <div className="flex gap-2">
-                  <div className="flex-1 h-4 bg-red-600 rounded" 
-                    style={{ 
-                      flex: exposureStats?.severity_distribution?.critical || 0.1 
-                    }} 
-                    title={`Critical: ${exposureStats?.severity_distribution?.critical || 0}`}
-                  />
-                  <div className="flex-1 h-4 bg-orange-500 rounded" 
-                    style={{ 
-                      flex: exposureStats?.severity_distribution?.high || 0.1 
-                    }}
-                    title={`High: ${exposureStats?.severity_distribution?.high || 0}`}
-                  />
-                  <div className="flex-1 h-4 bg-yellow-500 rounded" 
-                    style={{ 
-                      flex: exposureStats?.severity_distribution?.medium || 0.1 
-                    }}
-                    title={`Medium: ${exposureStats?.severity_distribution?.medium || 0}`}
-                  />
-                  <div className="flex-1 h-4 bg-green-500 rounded" 
-                    style={{ 
-                      flex: exposureStats?.severity_distribution?.low || 0.1 
-                    }}
-                    title={`Low: ${exposureStats?.severity_distribution?.low || 0}`}
-                  />
-                </div>
-                <div className="flex justify-between text-xs text-muted-foreground mt-1">
-                  <span>Critical: {exposureStats?.severity_distribution?.critical || 0}</span>
-                  <span>High: {exposureStats?.severity_distribution?.high || 0}</span>
-                  <span>Medium: {exposureStats?.severity_distribution?.medium || 0}</span>
-                  <span>Low: {exposureStats?.severity_distribution?.low || 0}</span>
+                <div className="flex gap-1.5">
+                  {(
+                    [
+                      {
+                        key: 'critical',
+                        label: 'Critical',
+                        color: 'bg-red-600',
+                        count: exposureStats?.severity_distribution?.critical || 0,
+                      },
+                      {
+                        key: 'high',
+                        label: 'High',
+                        color: 'bg-orange-500',
+                        count: exposureStats?.severity_distribution?.high || 0,
+                      },
+                      {
+                        key: 'medium',
+                        label: 'Medium',
+                        color: 'bg-yellow-500',
+                        count: exposureStats?.severity_distribution?.medium || 0,
+                      },
+                      {
+                        key: 'low',
+                        label: 'Low',
+                        color: 'bg-green-500',
+                        count: exposureStats?.severity_distribution?.low || 0,
+                      },
+                    ] as const
+                  ).map((seg) => (
+                    <div
+                      key={seg.key}
+                      className="min-w-0 flex flex-col gap-1"
+                      style={{ flexGrow: Math.max(seg.count, 1), flexBasis: 0 }}
+                      title={`${seg.label}: ${seg.count}`}
+                    >
+                      <div className={`h-4 rounded ${seg.color}`} />
+                      <span className="text-[10px] sm:text-xs text-muted-foreground truncate leading-tight">
+                        {seg.label}: {seg.count}
+                      </span>
+                    </div>
+                  ))}
                 </div>
               </div>
 
