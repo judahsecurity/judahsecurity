@@ -19,16 +19,30 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "- Do not spray Nuclei; hand off to attack specialists."
     ),
     "auth_logic": (
-        "SKILL PACK — authentication testing:\n"
+        "SKILL PACK — authentication testing (Ezra):\n"
         "- Enumerate login/session/password-reset from the map.\n"
         "- Prove with compare_requests (anonymous vs auth; role A vs role B).\n"
-        "- Default/weak login: add_engagement_credential + queue_finding_followups("
+        "- Default/weak login: prefer handing sprays to credential_assault (Samson); "
+        "if you hit creds yourself: add_engagement_credential + queue_finding_followups("
         "vuln_type='default_login').\n"
         "- Auth bypass: path/header/method mutations one at a time; bypass_403 only "
         "on concrete 403 paths.\n"
-        "- Prefer execute_hydra only with tiny username/password lists and --exit-on-success; "
-        "otherwise use test_credential_spray.\n"
         "- Never invent credentials; never spray large dictionaries."
+    ),
+    "credential_assault": (
+        "SKILL PACK — credential assault (Samson):\n"
+        "- Only mapped login forms / known product default lists (Grafana, Tomcat, …).\n"
+        "- test_credential_spray or execute_hydra with tiny lists + -f.\n"
+        "- On success: add_engagement_credential + queue_finding_followups("
+        "vuln_type='default_login') + validate_finding → create_finding.\n"
+        "- No rockyou, no unbounded hydra, no invented passwords."
+    ),
+    "finding_judge": (
+        "SKILL PACK — finding judge (Solomon):\n"
+        "- Re-run validate_finding on each proposed medium+ finding.\n"
+        "- Authz/IDOR: require anon/A/B identity discipline.\n"
+        "- DROP theoretical / status-only / missing-evidence cards.\n"
+        "- create_finding only after SUBMIT; sanitize_evidence first when secrets present."
     ),
     "api_authz": (
         "SKILL PACK — IDOR / BOLA proof:\n"

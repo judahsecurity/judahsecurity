@@ -99,6 +99,8 @@ class ASMToolsManager:
     def __init__(self):
         self.tools = self._register_tools()
         self._mcp_server = None
+        # Solomon judge receipts: validate_finding SUBMIT → create_finding gate
+        self._finding_receipts: Dict[str, Dict[str, Any]] = {}
     
     def _get_mcp_server(self):
         """Lazy load MCP server."""
@@ -1671,10 +1673,24 @@ class ASMToolsManager:
         remediation: Optional[str] = None,
         **kwargs: Any,
     ) -> str:
-        """Create a vulnerability/finding in the findings table for the current organization. Use this so discoveries appear in the UI findings list. target = hostname, domain, or URL that must match an existing asset's value (use query_assets to find). severity = critical|high|medium|low|info."""
+        """Create a vulnerability/finding in the findings table for the current organization. Use this so discoveries appear in the UI findings list. target = hostname, domain, or URL that must match an existing asset's value (use query_assets to find). severity = critical|high|medium|low|info. Medium+ requires prior validate_finding SUBMIT (Solomon judge gate)."""
+        from app.services.agent.finding_gate import consume_or_check_receipt
+
         _, org_id = get_tenant_context()
         if not org_id:
             return "Error: No organization context. create_finding requires an active session."
+
+        # Solomon / Praetorian-style demonstrated-compromise gate
+        ok, gate_msg = consume_or_check_receipt(
+            getattr(self, "_finding_receipts", {}),
+            title=title or "",
+            target=target,
+            severity=severity or "info",
+            require=not bool(kwargs.get("skip_judge_gate")),
+        )
+        if not ok:
+            return gate_msg
+
         # Normalize target for asset lookup: strip scheme and path
         target_clean = (target or "").strip()
         if target_clean.startswith(("http://", "https://")):
@@ -2653,6 +2669,20 @@ class ASMToolsManager:
             verdict = "DROP"
             verdict_detail = "Fundamental issues — likely to be rejected. Address all failing questions."
 
+        receipt_id = None
+        if verdict == "SUBMIT":
+            from app.services.agent.finding_gate import record_submit_receipt
+
+            if not hasattr(self, "_finding_receipts") or self._finding_receipts is None:
+                self._finding_receipts = {}
+            receipt_id = record_submit_receipt(
+                self._finding_receipts,
+                title=title or "",
+                target=target,
+                severity=severity or "info",
+                score=f"{score}/{total}",
+            )
+
         return json.dumps({
             "title": title,
             "severity": severity,
@@ -2660,10 +2690,16 @@ class ASMToolsManager:
             "score": f"{score}/{total}",
             "verdict": verdict,
             "verdict_detail": verdict_detail,
+            "receipt_id": receipt_id,
             "questions": questions,
             "has_evidence": bool(evidence),
             "has_remediation": bool(remediation),
             "has_cve": bool(cve_id),
+            "next_step": (
+                "create_finding with the same title/target is now unlocked for medium+"
+                if receipt_id
+                else "Do not create_finding until verdict is SUBMIT"
+            ),
         }, indent=2)
 
     async def bypass_403(
@@ -4091,6 +4127,19 @@ class ASMToolsManager:
                 from langchain_openai import ChatOpenAI
                 llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
+        from app.services.agent.aegis_pantheon import epithet_for, pantheon_line
+        from app.services.agent.fireteam_service import get_specialist
+        from app.services.agent.operation_directive import directives_from_hypotheses
+
+        profiles = {n: get_specialist(n) for n in chosen if get_specialist(n)}
+        default_target = target_list[0] if target_list else (cmap.target if cmap else "")
+        directives = directives_from_hypotheses(
+            brain=brain,
+            profiles_by_name=profiles,
+            specialists=chosen,
+            default_target=default_target or "",
+        )
+
         result = await run_fireteam(
             mission=mission,
             targets=target_list,
@@ -4098,10 +4147,18 @@ class ASMToolsManager:
             llm=llm,
             tools_manager=self,
             max_parallel=max_parallel,
+            directives=directives,
         )
         out = {
+            "commander": pantheon_line("orchestrator"),
             "mission": result.mission[:2000],
             "specialists_requested": chosen,
+            "specialists_epithets": {
+                n: epithet_for(n) for n in chosen
+            },
+            "operation_directives": {
+                n: d.to_dict() for n, d in directives.items()
+            },
             "specialists_run": result.specialists_run,
             "selection_mode": "auto" if auto else "explicit",
             "selection_source": selection_source,
@@ -4118,6 +4175,7 @@ class ASMToolsManager:
             "reports": [
                 {
                     "specialist": r.specialist,
+                    "epithet": epithet_for(r.specialist),
                     "role": r.role,
                     "summary": r.summary,
                     "key_findings": r.key_findings,
