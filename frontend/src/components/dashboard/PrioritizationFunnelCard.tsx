@@ -81,21 +81,21 @@ function buildDemoData(): { nodes: FunnelNode[]; links: FunnelLink[] } {
   return { nodes, links };
 }
 
-function SankeyNode({
-  x,
-  y,
-  width,
-  height,
-  payload,
-  containerWidth,
-}: {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  payload: FunnelNode & { value?: number };
+/** Recharts injects layout props when cloning this element — keep them optional for build. */
+function SankeyNode(props: {
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  payload?: FunnelNode & { value?: number };
   containerWidth?: number;
 }) {
+  const x = props.x ?? 0;
+  const y = props.y ?? 0;
+  const width = props.width ?? 0;
+  const height = props.height ?? 0;
+  const payload = props.payload ?? { name: '', kind: 'filtered' as NodeKind, stage: 0 };
+  const { containerWidth } = props;
   const kind = (payload.kind ?? 'filtered') as NodeKind;
   const fill = COLORS[kind];
   const isRight = typeof containerWidth === 'number' && x + width > containerWidth / 2;
@@ -146,27 +146,26 @@ function SankeyNode({
   );
 }
 
-function SankeyLink({
-  sourceX,
-  targetX,
-  sourceY,
-  targetY,
-  sourceControlX,
-  targetControlX,
-  linkWidth,
-  payload,
-}: {
-  sourceX: number;
-  targetX: number;
-  sourceY: number;
-  targetY: number;
-  sourceControlX: number;
-  targetControlX: number;
-  linkWidth: number;
-  payload: FunnelLink;
+function SankeyLink(props: {
+  sourceX?: number;
+  targetX?: number;
+  sourceY?: number;
+  targetY?: number;
+  sourceControlX?: number;
+  targetControlX?: number;
+  linkWidth?: number;
+  payload?: FunnelLink;
 }) {
+  const sourceX = props.sourceX ?? 0;
+  const targetX = props.targetX ?? 0;
+  const sourceY = props.sourceY ?? 0;
+  const targetY = props.targetY ?? 0;
+  const sourceControlX = props.sourceControlX ?? sourceX;
+  const targetControlX = props.targetControlX ?? targetX;
+  const linkWidth = props.linkWidth ?? 1;
+  const payload = props.payload;
   const [hover, setHover] = useState(false);
-  const kind = (payload.kind ?? 'filtered') as NodeKind;
+  const kind = (payload?.kind ?? 'filtered') as NodeKind;
   const d = `
     M${sourceX},${sourceY}
     C${sourceControlX},${sourceY} ${targetControlX},${targetY} ${targetX},${targetY}
@@ -267,8 +266,8 @@ export function PrioritizationFunnelCard({ demo = true }: PrioritizationFunnelCa
               nodePadding={28}
               linkCurvature={0.55}
               margin={{ top: 16, right: 72, bottom: 16, left: 56 }}
-              node={<SankeyNode />}
-              link={<SankeyLink />}
+              node={(nodeProps: object) => <SankeyNode {...(nodeProps as object)} />}
+              link={(linkProps: object) => <SankeyLink {...(linkProps as object)} />}
               sort={false}
             >
               <Tooltip
