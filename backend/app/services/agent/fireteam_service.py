@@ -25,7 +25,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Iterable, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
@@ -45,6 +45,16 @@ class SpecialistProfile:
     max_iterations: int = 6
     max_tools_per_iteration: int = 4
     system_prompt_suffix: str = ""
+    epithet: str = ""  # Aegis pantheon display name (Samson, Daniel, …)
+
+    def __post_init__(self) -> None:
+        if not self.epithet:
+            try:
+                from app.services.agent.aegis_pantheon import epithet_for
+
+                self.epithet = epithet_for(self.name)
+            except Exception:
+                self.epithet = self.name.replace("_", " ").title()
 
 
 DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
@@ -234,7 +244,34 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         system_prompt_suffix=(
             "Prefer compare_requests (anonymous vs auth). On default/weak login success: "
             "add_engagement_credential + queue_finding_followups(vuln_type='default_login'). "
-            "Never invent credentials."
+            "Never invent credentials. Hand large sprays to credential_assault (Samson)."
+        ),
+    ),
+    SpecialistProfile(
+        name="credential_assault",
+        role=(
+            "Credential assault specialist (Samson). Prove default/weak/known credentials on "
+            "mapped login forms with tiny lists; stash working creds and enqueue post-auth chains."
+        ),
+        allowed_tools=[
+            "execute_httpx",
+            "execute_curl",
+            "execute_browser",
+            "test_credential_spray",
+            "execute_hydra",
+            "add_engagement_credential",
+            "queue_finding_followups",
+            "update_hypothesis",
+            "log_engagement_approach",
+            "validate_finding",
+            "create_finding",
+            "save_note",
+        ],
+        max_iterations=8,
+        system_prompt_suffix=(
+            "Tiny lists only (defaults / known product creds). Always hydra -f / exit on success. "
+            "On hit: add_engagement_credential + queue_finding_followups(vuln_type='default_login') "
+            "+ validate_finding before create_finding. Never invent credentials; no rockyou."
         ),
     ),
     SpecialistProfile(
@@ -422,6 +459,31 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "Prefer read-only canaries; do not mutate cluster state."
         ),
     ),
+    SpecialistProfile(
+        name="finding_judge",
+        role=(
+            "Finding judge (Solomon). Adversarial review of proposed findings — "
+            "require demonstrated impact, identity discipline for authz, and SUBMIT "
+            "verdicts. Does not exploit; improves or kills weak cards."
+        ),
+        allowed_tools=[
+            "validate_finding",
+            "sanitize_evidence",
+            "compare_requests",
+            "get_engagement_brain",
+            "update_hypothesis",
+            "log_engagement_approach",
+            "get_notes",
+            "save_note",
+            "create_finding",
+        ],
+        max_iterations=6,
+        system_prompt_suffix=(
+            "Re-score each proposed finding with validate_finding. Only create_finding "
+            "after SUBMIT. Kill theoretical / status-only / identity-less IDOR claims. "
+            "Prefer sanitize_evidence before publish."
+        ),
+    ),
 ]
 
 _SPECIALISTS_BY_NAME: dict[str, SpecialistProfile] = {s.name: s for s in DEFAULT_SPECIALISTS}
@@ -473,13 +535,16 @@ class FireteamResult:
 
 
 _SPECIALIST_SYSTEM_PROMPT = """\
-You are a specialist sub-agent in an attack-surface management platform.
-You work as part of a fireteam: other specialists with different roles are
-running in parallel. Stay strictly in your lane.
+You are {epithet}, a specialist sub-agent in Judah Security's Aegis fireteam.
+Other specialists run in parallel. Stay strictly in your lane.
+You MUST NOT call fireteam_dispatch or spawn sub-agents.
 
-ROLE: {role}
+EPITHET / ROLE: {epithet} — {role}
 
-MISSION:
+OPERATION DIRECTIVE:
+{directive}
+
+SHARED MISSION CONTEXT:
 {mission}
 
 TARGETS: {targets}
@@ -488,8 +553,9 @@ AVAILABLE TOOLS (allowlist -- you MAY NOT call anything else):
 {tool_list}
 
 INSTRUCTIONS:
-1. Think briefly about which tool(s) will most quickly achieve the mission.
-2. Respond ONLY with a JSON object of this shape:
+1. Obey the operation directive (goal, PASS/KILL, hypothesis ids).
+2. Think briefly about which tool(s) will most quickly prove or kill the hypothesis.
+3. Respond ONLY with a JSON object of this shape:
 
    {{
      "tool_calls": [
@@ -499,7 +565,7 @@ INSTRUCTIONS:
      "reasoning": "one-line rationale"
    }}
 
-3. When you have enough evidence, respond with:
+4. When you have enough evidence, respond with:
 
    {{
      "done": true,
@@ -507,8 +573,8 @@ INSTRUCTIONS:
      "key_findings": ["bullet", "bullet", "bullet"]
    }}
 
-4. Do not exceed {max_iter} iterations. If you're unsure, finish with
-   ``done: true`` and explain what you'd need to continue.
+5. Medium+ findings: call validate_finding first; create_finding only on SUBMIT.
+6. Do not exceed {max_iter} iterations. If unsure, finish with done=true.
 
 {suffix}
 """
@@ -520,15 +586,20 @@ async def _run_specialist(
     targets: Iterable[str],
     llm: Any,
     tools_manager: Any,
+    directive: Any = None,
 ) -> SpecialistReport:
     start = datetime.utcnow()
     report = SpecialistReport(
         specialist=profile.name,
-        role=profile.role,
+        role=f"{profile.epithet}: {profile.role}",
         mission=mission,
         summary="",
     )
 
+    from app.services.agent.operation_directive import (
+        OperationDirective,
+        merge_directive_into_mission,
+    )
     from app.services.agent.specialist_skills import skill_pack_for
 
     skill_pack = skill_pack_for(profile.name)
@@ -537,12 +608,27 @@ async def _run_specialist(
         suffix_parts.append(skill_pack)
     suffix = "\n\n".join(suffix_parts)
 
+    if isinstance(directive, OperationDirective):
+        directive_block = directive.to_prompt_block()
+        mission_for_prompt = merge_directive_into_mission(mission, None)  # directive shown separately
+        max_iter = directive.max_iterations or profile.max_iterations
+    else:
+        directive_block = (
+            f"Goal: execute your role ({profile.epithet}) against the shared mission.\n"
+            f"PASS: demonstrated impact with evidence.\n"
+            f"KILL: no impact after disciplined probes."
+        )
+        mission_for_prompt = mission
+        max_iter = profile.max_iterations
+
     sys_prompt = _SPECIALIST_SYSTEM_PROMPT.format(
+        epithet=profile.epithet or profile.name,
         role=profile.role,
-        mission=mission,
+        directive=directive_block,
+        mission=mission_for_prompt,
         targets=", ".join(targets) or "<see analyze_attack_surface output>",
         tool_list="\n".join(f"  - {t}" for t in profile.allowed_tools),
-        max_iter=profile.max_iterations,
+        max_iter=max_iter,
         suffix=suffix,
     )
 
@@ -686,13 +772,16 @@ async def run_fireteam(
     tools_manager: Any,
     max_parallel: int = 4,
     progress_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
+    directives: Optional[Dict[str, Any]] = None,
 ) -> FireteamResult:
     """Run a fireteam in parallel and return the merged result.
 
     ``specialists`` may contain either string names from :data:`DEFAULT_SPECIALISTS`
     or fully custom :class:`SpecialistProfile` instances (for ad-hoc missions).
+    ``directives`` maps specialist name → OperationDirective (optional).
     """
     start = datetime.utcnow()
+    directives = directives or {}
 
     resolved: list[SpecialistProfile] = []
     for s in specialists:
@@ -713,15 +802,23 @@ async def run_fireteam(
 
     async def _run(p: SpecialistProfile) -> SpecialistReport:
         async with sem:
+            label = f"{p.epithet} ({p.name})" if p.epithet else p.name
             if progress_callback:
                 try:
-                    await progress_callback(p.name, "started")
+                    await progress_callback(label, "started")
                 except Exception:
                     pass
-            rep = await _run_specialist(p, mission, targets_list, llm, tools_manager)
+            rep = await _run_specialist(
+                p,
+                mission,
+                targets_list,
+                llm,
+                tools_manager,
+                directive=directives.get(p.name),
+            )
             if progress_callback:
                 try:
-                    await progress_callback(p.name, "done")
+                    await progress_callback(label, "done")
                 except Exception:
                     pass
             return rep
@@ -746,7 +843,7 @@ async def run_fireteam(
 
 
 def _merge_reports(mission: str, reports: list[SpecialistReport]) -> str:
-    lines: list[str] = [f"# Fireteam debrief — {mission}\n"]
+    lines: list[str] = [f"# Aegis fireteam debrief (Joshua) — {mission}\n"]
     for r in reports:
         lines.append(f"## {r.specialist} ({r.role})")
         if r.error:

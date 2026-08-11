@@ -89,6 +89,30 @@ def test_injection_and_auth_have_new_arsenal_tools():
     assert "execute_feroxbuster" in allowlists["content_api"]
 
 
+def test_credential_assault_and_finding_judge_exist():
+    allowlists = _specialist_allowlists_from_ast()
+    assert "credential_assault" in allowlists
+    assert "finding_judge" in allowlists
+    assert "execute_hydra" in allowlists["credential_assault"]
+    assert "validate_finding" in allowlists["finding_judge"]
+    assert "fireteam_dispatch" not in allowlists["credential_assault"]
+    assert "fireteam_dispatch" not in allowlists["finding_judge"]
+
+
+def test_pantheon_covers_specialists():
+    path = _AGENT_DIR / "aegis_pantheon.py"
+    spec = importlib.util.spec_from_file_location("pantheon_under_test", path)
+    mod = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(mod)
+    for name in _specialist_allowlists_from_ast():
+        assert name in mod.PANTHEON, f"missing pantheon entry for {name}"
+        assert mod.epithet_for(name)
+
+
 def test_fireteam_injects_skill_pack_helper():
     src = (_AGENT_DIR / "fireteam_service.py").read_text()
     assert "skill_pack_for" in src
+    assert "OperationDirective" in src or "directive" in src
+    assert "finding_judge" in src
+    assert "credential_assault" in src

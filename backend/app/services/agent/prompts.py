@@ -361,7 +361,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **get_notes**: Get session notes (optional category filter)
 - **query_prior_sessions**: Pull prior session findings, failed attempts, and lessons learned for this organization from EvoGraph memory. Args: max_chains, max_findings, max_failures.
 - **sanitize_evidence**: Redact cookies, bearer tokens, API keys, private keys, passwords, emails, SSNs, payment cards, and common secret fields before create_finding/reporting. Args: evidence (required raw text), preserve_last (optional, default 4).
-- **create_finding**: Add a finding to the platform findings table. Args: title, description, severity (critical|high|medium|low|info), target (hostname/domain/URL — will be auto-added to inventory if not found), optional: evidence, cve_id, remediation. Findings appear in the UI. Prefer running **validate_finding** first for medium+ issues.
+- **create_finding**: Add a finding to the platform findings table. Args: title, description, severity (critical|high|medium|low|info), target (hostname/domain/URL — will be auto-added to inventory if not found), optional: evidence, cve_id, remediation. Findings appear in the UI. **Solomon judge gate:** medium+ requires a prior **validate_finding** verdict of SUBMIT for the same title/target (receipt unlocks create_finding).
 - **execute_llm_red_team**: Run AI/LLM red team security scan against chatbot endpoints on a target URL. Tests for prompt injection, jailbreak, data exfiltration, SSRF, system prompt leakage, excessive agency, hallucination, and harmful content generation. Auto-discovers chatbot API endpoints. Args: **target_url** (required), categories (optional comma-separated: prompt_injection,jailbreak,data_exfiltration,ssrf_tool_abuse,system_prompt_leakage,excessive_agency,hallucination,harmful_content), endpoint_url (optional — direct chatbot API URL if known), message_field (optional — JSON field name, default "message"), max_payloads (optional int). Example: execute_llm_red_team(target_url="https://example.com"), execute_llm_red_team(target_url="https://example.com", endpoint_url="https://example.com/api/chat", categories="prompt_injection,jailbreak"). Findings are auto-created in the platform.
 
 ### Auto Tool Selection
@@ -426,7 +426,7 @@ These tools implement specialized offensive test workflows and require the explo
   Args: **title** (required), **description** (required), severity (critical/high/medium/low/info, default medium),
   target (optional), evidence (optional request/response snippet), cve_id (optional), remediation (optional).
   Returns a score (X/7), verdict (SUBMIT / IMPROVE / DROP), and per-question feedback.
-  Use BEFORE create_finding to ensure findings are submission-quality.
+  Use BEFORE create_finding — SUBMIT issues a receipt that unlocks create_finding for medium+.
   Example: validate_finding(title="IDOR on /api/users/{id}", description="...", severity="high", evidence="GET /api/users/2 returns user B's data")
 
 - **detect_bug_chains**: Given a confirmed vulnerability, return follow-on bug classes that commonly chain with it.

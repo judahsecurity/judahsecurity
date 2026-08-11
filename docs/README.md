@@ -7,6 +7,8 @@ Technical docs for the Judah Security ASM platform, AI agent, and Aegis tooling.
 | Doc | Topic |
 |-----|--------|
 | [TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md](./TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md) | In-product **tester process** — engagement brain, fireteam, differentials, chain cards |
+| [AEGIS_ARCHITECTURE.md](./AEGIS_ARCHITECTURE.md) | Praetorian-competitive agent architecture (Joshua / fireteam / Solomon) |
+| [AEGIS_PANTHEON.md](./AEGIS_PANTHEON.md) | Judah / biblical epithets for specialists |
 | [PRAETORIAN_ARSENAL_PARITY.md](./PRAETORIAN_ARSENAL_PARITY.md) | Tool arsenal gap matrix vs Praetorian-style 118-capability slide |
 | [HARNESS.md](./HARNESS.md) | Pointer to **Aegis Harness** (batch + detection benchmarks) |
 | [../harness/README.md](../harness/README.md) | Full harness guide (install, CI gates, ground-truth tags) |

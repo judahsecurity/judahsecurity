@@ -156,6 +156,15 @@ _HUNT_CARDS: Dict[str, Dict[str, str]] = {
         "specialist": "auth_logic",
         "priority": "high",
     },
+    "credential_assault": {
+        "title": "Default / weak credential assault",
+        "assumption": "Login forms accept product default or weak credentials",
+        "test": "Tiny known-default lists via test_credential_spray or bounded hydra (-f) on mapped login",
+        "pass_criteria": "Working session with verified credentials (stash + follow-up chains)",
+        "kill_criteria": "Defaults rejected; lockout without success; no inventing passwords",
+        "specialist": "credential_assault",
+        "priority": "high",
+    },
     "api_authz": {
         "title": "API object/tenant authorization gap (IDOR/BOLA)",
         "assumption": "Object IDs or tenant context are not enforced server-side",
@@ -414,6 +423,12 @@ def seed_hypotheses_from_capability_map(
     if len(hosts) >= 2 or any(re.match(r"^[a-z0-9-]+\.[a-z0-9-]+\.", h) for h in hosts):
         hunt_names.insert(0, "host_tenant")
 
+    # Login surface → dedicated Samson credential assault card
+    if (
+        cmap.get("has_login_form") or cmap.get("has_auth")
+    ) and "credential_assault" not in hunt_names:
+        hunt_names.insert(0, "credential_assault")
+
     # Forms / multi-step UI → business logic card
     if len(cmap.get("forms") or []) >= 2 and "business_logic" not in hunt_names:
         hunt_names.append("business_logic")
@@ -606,7 +621,12 @@ def specialists_from_open_hypotheses(
             selected.append(h.specialist)
         if len(selected) >= max_specialists - 1:
             break
-    if "vuln_triage" not in selected:
+    # Always close with Solomon (finding judge) for demonstrated-compromise bar
+    if "finding_judge" not in selected:
+        if len(selected) >= max_specialists:
+            selected = selected[: max_specialists - 1]
+        selected.append("finding_judge")
+    elif "vuln_triage" not in selected and len(selected) < max_specialists:
         selected.append("vuln_triage")
     return selected[:max_specialists]
 

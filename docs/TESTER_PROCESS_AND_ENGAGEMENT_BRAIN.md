@@ -10,6 +10,9 @@ Related code:
 | Capability map | `backend/app/services/agent/capability_map.py` |
 | Fireteam specialists | `backend/app/services/agent/fireteam_service.py` |
 | Specialist skill packs | `backend/app/services/agent/specialist_skills.py` |
+| Pantheon epithets | `backend/app/services/agent/aegis_pantheon.py` |
+| Operation directives | `backend/app/services/agent/operation_directive.py` |
+| Finding judge gate | `backend/app/services/agent/finding_gate.py` |
 | Tools (`compare_requests`, brain APIs) | `backend/app/services/agent/tools.py` |
 | Orchestrator injection | `backend/app/services/agent/orchestrator.py` |
 | Skills / playbooks | `skills_service.py`, `playbooks.py` |

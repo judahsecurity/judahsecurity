@@ -235,6 +235,13 @@ def _build_hunt_queue(cmap: CapabilityMap) -> List[Dict[str, str]]:
         })
 
     if cmap.has_auth or cmap.has_login_form:
+        add(
+            "high",
+            "credential_assault",
+            "Login form present — Samson: default/weak credential assault with tiny lists",
+            next((p for p in cmap.pages_visited if _OAUTH_RE.search(p)), "")
+            or (cmap.forms[0].get("action") if cmap.forms else ""),
+        )
         add("high", "auth_logic", "Login/auth surface discovered — probe authz and session logic",
             next((p for p in cmap.pages_visited if _OAUTH_RE.search(p)), "")
             or (cmap.forms[0].get("action") if cmap.forms else ""))
@@ -327,6 +334,7 @@ def _score_map(cmap: CapabilityMap) -> float:
 # Attack-oriented specialists (complement existing recon profiles in fireteam_service)
 ATTACK_SPECIALIST_NAMES = [
     "app_mapper",
+    "credential_assault",
     "auth_logic",
     "api_authz",
     "host_tenant",
@@ -338,6 +346,7 @@ ATTACK_SPECIALIST_NAMES = [
     "saml_sso",
     "spa_client",
     "coverage",
+    "finding_judge",
     "vuln_triage",
 ]
 
@@ -358,6 +367,7 @@ def select_specialists_for_map(
 
     selected: List[str] = ["app_mapper"]
     hunt_to_specialist = {
+        "credential_assault": "credential_assault",
         "auth_logic": "auth_logic",
         "saml_sso": "saml_sso",
         "graphql": "graphql_api",
@@ -380,7 +390,12 @@ def select_specialists_for_map(
         if len(selected) >= max_specialists - 1:
             break
 
-    if "vuln_triage" not in selected:
+    # Close with Solomon (finding judge) — demonstrated-compromise bar
+    if "finding_judge" not in selected:
+        if len(selected) >= max_specialists:
+            selected = selected[: max_specialists - 1]
+        selected.append("finding_judge")
+    elif "vuln_triage" not in selected and len(selected) < max_specialists:
         selected.append("vuln_triage")
     if include_recon and "web_recon" not in selected:
         selected.insert(0, "web_recon")
