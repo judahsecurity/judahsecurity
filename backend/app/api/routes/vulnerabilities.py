@@ -876,6 +876,12 @@ def get_prioritization_funnel(
     """
     empty = {
         "stages": ["Scanner", "Delphi", "OPES", "Priority"],
+        "columns": [
+            {"name": "Scanner", "critical": 0, "high": 0, "filtered": 0},
+            {"name": "Delphi", "critical": 0, "high": 0, "filtered": 0},
+            {"name": "OPES", "critical": 0, "high": 0, "filtered": 0},
+            {"name": "Priority", "critical": 0, "high": 0, "filtered": 0},
+        ],
         "nodes": [],
         "links": [],
         "summary": {
@@ -964,6 +970,10 @@ def get_prioritization_funnel(
                 elif p_bucket == "high":
                     out_h += 1
 
+    filt_d = (input_c + input_h) - (delphi_c + delphi_h)
+    filt_o = (delphi_c + delphi_h) - (opes_c + opes_h)
+    filt_p = (opes_c + opes_h) - (out_c + out_h)
+
     # Node indices: Crit/High per stage, Filtered at stages 1–3
     # 0 Crit-S, 1 High-S,
     # 2 Crit-D, 3 High-D, 4 Filt-D,
@@ -974,13 +984,13 @@ def get_prioritization_funnel(
         {"name": "High", "kind": "high", "stage": 0, "count": input_h},
         {"name": "Critical", "kind": "critical", "stage": 1, "count": delphi_c},
         {"name": "High", "kind": "high", "stage": 1, "count": delphi_h},
-        {"name": "Filtered out", "kind": "filtered", "stage": 1},
+        {"name": "Filtered out", "kind": "filtered", "stage": 1, "count": max(0, filt_d)},
         {"name": "Critical", "kind": "critical", "stage": 2, "count": opes_c},
         {"name": "High", "kind": "high", "stage": 2, "count": opes_h},
-        {"name": "Filtered out", "kind": "filtered", "stage": 2},
+        {"name": "Filtered out", "kind": "filtered", "stage": 2, "count": max(0, filt_o)},
         {"name": "Critical", "kind": "critical", "stage": 3, "count": out_c},
         {"name": "High", "kind": "high", "stage": 3, "count": out_h},
-        {"name": "Filtered out", "kind": "filtered", "stage": 3},
+        {"name": "Filtered out", "kind": "filtered", "stage": 3, "count": max(0, filt_p)},
     ]
 
     idx = {
@@ -1023,14 +1033,58 @@ def get_prioritization_funnel(
     add_links(d_to_o, 1, 2)
     add_links(o_to_p, 2, 3)
 
+    # Chain Filtered sinks so Recharts does not collapse them to the rightmost column
+    # (nodes with no outgoing links are forced to maxDepth).
+    if filt_d > 0:
+        links.append(
+            {"source": 4, "target": 7, "value": max(0, filt_d), "kind": "filtered"}
+        )
+    if filt_d + filt_o > 0:
+        links.append(
+            {
+                "source": 7,
+                "target": 10,
+                "value": max(0, filt_d) + max(0, filt_o),
+                "kind": "filtered",
+            }
+        )
+
     input_total = input_c + input_h
     output_total = out_c + out_h
     reduction_pct = (
         int(round((1 - (output_total / input_total)) * 100)) if input_total else 0
     )
 
+    columns = [
+        {
+            "name": "Scanner",
+            "critical": input_c,
+            "high": input_h,
+            "filtered": 0,
+        },
+        {
+            "name": "Delphi",
+            "critical": delphi_c,
+            "high": delphi_h,
+            "filtered": max(0, filt_d),
+        },
+        {
+            "name": "OPES",
+            "critical": opes_c,
+            "high": opes_h,
+            "filtered": max(0, filt_o),
+        },
+        {
+            "name": "Priority",
+            "critical": out_c,
+            "high": out_h,
+            "filtered": max(0, filt_p),
+        },
+    ]
+
     return {
         "stages": ["Scanner", "Delphi", "OPES", "Priority"],
+        "columns": columns,
         "nodes": nodes,
         "links": links,
         "summary": {

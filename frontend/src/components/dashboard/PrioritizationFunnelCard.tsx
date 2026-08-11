@@ -2,28 +2,11 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
-import { Layer, Rectangle, ResponsiveContainer, Sankey, Tooltip } from 'recharts';
 import { ArrowRight, Filter, Loader2, Target } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api';
-import { formatNumber } from '@/lib/utils';
-
-type NodeKind = 'critical' | 'high' | 'filtered';
-
-interface FunnelNode {
-  name: string;
-  kind: NodeKind;
-  stage: number;
-  count?: number;
-}
-
-interface FunnelLink {
-  source: number;
-  target: number;
-  value: number;
-  kind: NodeKind;
-}
+import { cn, formatNumber } from '@/lib/utils';
 
 interface FunnelSummary {
   input_critical: number;
@@ -35,127 +18,85 @@ interface FunnelSummary {
   reduction_pct: number;
 }
 
+interface FunnelColumn {
+  name: string;
+  critical: number;
+  high: number;
+  filtered: number;
+}
+
 interface FunnelResponse {
-  stages: string[];
-  nodes: FunnelNode[];
-  links: FunnelLink[];
+  stages?: string[];
+  columns?: FunnelColumn[];
   summary: FunnelSummary;
 }
 
-const COLORS: Record<NodeKind, string> = {
-  critical: '#ef4444',
-  high: '#f97316',
-  filtered: '#3f4555',
-};
+const SEGMENT_META = [
+  { key: 'critical' as const, label: 'Critical', bar: 'bg-red-500', text: 'text-red-400', glow: 'shadow-[0_0_12px_rgba(239,68,68,0.35)]' },
+  { key: 'high' as const, label: 'High', bar: 'bg-orange-500', text: 'text-orange-400', glow: 'shadow-[0_0_12px_rgba(249,115,22,0.3)]' },
+  { key: 'filtered' as const, label: 'Filtered out', bar: 'bg-slate-600/80', text: 'text-slate-400', glow: '' },
+];
 
-const LINK_COLORS: Record<NodeKind, string> = {
-  critical: 'rgba(239, 68, 68, 0.45)',
-  high: 'rgba(249, 115, 22, 0.4)',
-  filtered: 'rgba(63, 69, 85, 0.55)',
-};
-
-const DEFAULT_STAGES = ['Scanner', 'Delphi', 'OPES', 'Priority'];
-
-/** Recharts injects layout props when cloning this element — keep them optional for build. */
-function SankeyNode(props: {
-  x?: number;
-  y?: number;
-  width?: number;
-  height?: number;
-  payload?: FunnelNode & { value?: number };
-  containerWidth?: number;
+function StageColumn({
+  column,
+  maxTotal,
+}: {
+  column: FunnelColumn;
+  maxTotal: number;
 }) {
-  const x = props.x ?? 0;
-  const y = props.y ?? 0;
-  const width = props.width ?? 0;
-  const height = props.height ?? 0;
-  const payload = props.payload ?? { name: '', kind: 'filtered' as NodeKind, stage: 0 };
-  const { containerWidth } = props;
-  const kind = (payload.kind ?? 'filtered') as NodeKind;
-  const fill = COLORS[kind];
-  const isRight = typeof containerWidth === 'number' && x + width > containerWidth / 2;
-  const label = payload.count != null ? String(payload.count) : payload.name;
-  const showName = kind === 'filtered' && height > 28;
+  const total = column.critical + column.high + column.filtered;
+  // Keep Critical → High → Filtered vertical order; scale column height by volume
+  const columnHeight = Math.max(72, Math.round((total / Math.max(maxTotal, 1)) * 220));
 
   return (
-    <Layer>
-      <Rectangle
-        x={x}
-        y={y}
-        width={width}
-        height={height}
-        fill={fill}
-        fillOpacity={kind === 'filtered' ? 0.85 : 1}
-        radius={[2, 2, 2, 2] as unknown as number}
-        style={
-          kind !== 'filtered'
-            ? { filter: `drop-shadow(0 0 6px ${fill}88)` }
-            : undefined
-        }
-      />
-      {height > 14 && (
-        <text
-          x={isRight ? x - 8 : x + width + 8}
-          y={y + height / 2}
-          textAnchor={isRight ? 'end' : 'start'}
-          dominantBaseline="middle"
-          className="fill-foreground"
-          style={{ fontSize: 12, fontWeight: 600 }}
-        >
-          {label}
-        </text>
-      )}
-      {showName && (
-        <text
-          x={isRight ? x - 8 : x + width + 8}
-          y={y + height / 2 + 14}
-          textAnchor={isRight ? 'end' : 'start'}
-          dominantBaseline="middle"
-          className="fill-muted-foreground"
-          style={{ fontSize: 10 }}
-        >
-          Filtered out
-        </text>
-      )}
-    </Layer>
-  );
-}
-
-function SankeyLink(props: {
-  sourceX?: number;
-  targetX?: number;
-  sourceY?: number;
-  targetY?: number;
-  sourceControlX?: number;
-  targetControlX?: number;
-  linkWidth?: number;
-  payload?: FunnelLink;
-}) {
-  const sourceX = props.sourceX ?? 0;
-  const targetX = props.targetX ?? 0;
-  const sourceY = props.sourceY ?? 0;
-  const targetY = props.targetY ?? 0;
-  const sourceControlX = props.sourceControlX ?? sourceX;
-  const targetControlX = props.targetControlX ?? targetX;
-  const linkWidth = props.linkWidth ?? 1;
-  const payload = props.payload;
-  const [hover, setHover] = useState(false);
-  const kind = (payload?.kind ?? 'filtered') as NodeKind;
-  const d = `
-    M${sourceX},${sourceY}
-    C${sourceControlX},${sourceY} ${targetControlX},${targetY} ${targetX},${targetY}
-  `;
-
-  return (
-    <path
-      d={d}
-      fill="none"
-      stroke={LINK_COLORS[kind]}
-      strokeWidth={linkWidth}
-      strokeOpacity={hover ? 0.9 : 0.7}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-    />
+    <div className="flex flex-col min-w-0 flex-1">
+      <p className="text-[11px] font-medium tracking-wide uppercase text-muted-foreground text-center mb-2">
+        {column.name}
+      </p>
+      <div
+        className="relative flex flex-col gap-1 rounded-md bg-[#0b0f17] border border-border/40 p-1.5"
+        style={{ height: columnHeight }}
+      >
+        {SEGMENT_META.map((seg) => {
+          const count = column[seg.key];
+          if (seg.key === 'filtered' && count <= 0 && column.name === 'Scanner') {
+            return null;
+          }
+          const flexGrow = Math.max(count, count > 0 ? 1 : 0.15);
+          return (
+            <div
+              key={seg.key}
+              className={cn(
+                'relative min-h-[4px] rounded-sm flex items-center px-2 overflow-hidden',
+                seg.bar,
+                count > 0 && seg.glow
+              )}
+              style={{ flexGrow, flexBasis: 0, opacity: count > 0 ? 1 : 0.25 }}
+              title={`${seg.label}: ${count}`}
+            >
+              {count > 0 && (
+                <span className="text-[11px] font-semibold text-white/95 tabular-nums drop-shadow">
+                  {formatNumber(count)}
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      <div className="mt-2 space-y-0.5 text-[10px] text-muted-foreground">
+        <p>
+          <span className="text-red-400">Crit</span> {formatNumber(column.critical)}
+        </p>
+        <p>
+          <span className="text-orange-400">High</span> {formatNumber(column.high)}
+        </p>
+        {column.filtered > 0 && (
+          <p>
+            <span className="text-slate-400">Filtered</span> {formatNumber(column.filtered)}
+          </p>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -189,19 +130,17 @@ export function PrioritizationFunnelCard() {
     };
   }, []);
 
-  const chartData = useMemo(() => {
-    if (!funnel?.nodes?.length) return { nodes: [] as FunnelNode[], links: [] as FunnelLink[] };
-    // Drop zero-value links so Recharts doesn't draw empty ribbons
-    const links = (funnel.links || []).filter((l) => (l.value || 0) > 0);
-    return { nodes: funnel.nodes as FunnelNode[], links: links as FunnelLink[] };
+  const columns = useMemo(() => {
+    if (funnel?.columns?.length) return funnel.columns;
+    return [];
   }, [funnel]);
 
   const summary = funnel?.summary;
-  const stages = funnel?.stages?.length ? funnel.stages : DEFAULT_STAGES;
   const inputTotal = summary?.input_total ?? 0;
   const outputTotal = summary?.output_total ?? 0;
   const reductionPct = summary?.reduction_pct ?? 0;
-  const hasData = inputTotal > 0 && chartData.links.length > 0;
+  const maxTotal = Math.max(...columns.map((c) => c.critical + c.high + c.filtered), 1);
+  const hasData = inputTotal > 0 && columns.length > 0;
 
   return (
     <Card className="border-orange-500/20 overflow-hidden">
@@ -212,7 +151,7 @@ export function PrioritizationFunnelCard() {
             Prioritization Value
           </CardTitle>
           <p className="text-sm text-muted-foreground mt-1">
-            Live open Critical/High → Delphi likelihood → OPES asset priority
+            Live open Critical/High reduced by Delphi likelihood and OPES asset priority
           </p>
         </div>
         <Link href="/findings">
@@ -230,7 +169,7 @@ export function PrioritizationFunnelCard() {
           </div>
         ) : error ? (
           <div className="rounded-md border border-destructive/30 bg-destructive/5 px-4 py-8 text-center text-sm text-muted-foreground">
-            Could not load live funnel data. Rebuild/restart the backend if this endpoint is new.
+            Could not load live funnel data. Pull latest and rebuild backend + frontend.
           </div>
         ) : !hasData ? (
           <div className="rounded-md border border-border/50 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
@@ -267,65 +206,16 @@ export function PrioritizationFunnelCard() {
               </div>
             </div>
 
-            <div className="grid grid-cols-4 gap-2 px-1 text-[11px] text-muted-foreground">
-              {stages.map((stage) => (
-                <div key={stage} className="text-center font-medium tracking-wide uppercase">
-                  {stage}
-                </div>
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+              {columns.map((column) => (
+                <StageColumn key={column.name} column={column} maxTotal={maxTotal} />
               ))}
             </div>
 
-            <div className="h-[280px] w-full rounded-md bg-[#0b0f17] border border-border/40">
-              <ResponsiveContainer width="100%" height="100%">
-                <Sankey
-                  data={chartData}
-                  nodeWidth={14}
-                  nodePadding={28}
-                  linkCurvature={0.55}
-                  iterations={0}
-                  margin={{ top: 16, right: 72, bottom: 16, left: 56 }}
-                  node={(nodeProps: object) => <SankeyNode {...(nodeProps as object)} />}
-                  link={(linkProps: object) => <SankeyLink {...(linkProps as object)} />}
-                  sort={false}
-                >
-                  <Tooltip
-                    content={({ payload }) => {
-                      if (!payload?.length) return null;
-                      const item = payload[0]?.payload as
-                        | (FunnelNode & { value?: number })
-                        | FunnelLink
-                        | undefined;
-                      if (!item) return null;
-                      const value =
-                        'value' in item && typeof item.value === 'number'
-                          ? item.value
-                          : 'count' in item
-                            ? item.count
-                            : undefined;
-                      const label =
-                        'name' in item && item.name
-                          ? item.name
-                          : 'kind' in item
-                            ? String(item.kind)
-                            : 'Flow';
-                      return (
-                        <div className="rounded-md border bg-popover px-3 py-2 text-xs shadow-md">
-                          <p className="font-medium capitalize">{label}</p>
-                          {value != null && (
-                            <p className="text-muted-foreground">{formatNumber(value)} findings</p>
-                          )}
-                        </div>
-                      );
-                    }}
-                  />
-                </Sankey>
-              </ResponsiveContainer>
-            </div>
-
             <p className="text-xs text-muted-foreground">
-              Filtered out = demoted by Delphi likelihood or OPES (reachability, exploit evidence,
-              detection confidence, asset criticality). Final Priority keeps OPES Critical plus
-              High when KEV-listed or OPES ≥ 7.0.
+              Each column is ordered Critical → High → Filtered out. Filtered out means demoted by
+              Delphi or OPES (reachability, exploit evidence, confidence, asset criticality). Final
+              Priority keeps OPES Critical plus High when KEV-listed or OPES ≥ 7.0.
             </p>
           </>
         )}
