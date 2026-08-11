@@ -1,20 +1,13 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { Layer, Rectangle, ResponsiveContainer, Sankey, Tooltip } from 'recharts';
-import { ArrowRight, Filter, Target } from 'lucide-react';
+import { ArrowRight, Filter, Loader2, Target } from 'lucide-react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
-
-/** Demo numbers matching the reference Sankey — replace with API data later. */
-export const DEMO_FUNNEL = {
-  stages: ['Scanner', 'Delphi', 'OPES', 'Priority'] as const,
-  input: { critical: 291, high: 573 },
-  output: { critical: 6, high: 11 },
-};
 
 type NodeKind = 'critical' | 'high' | 'filtered';
 
@@ -32,6 +25,23 @@ interface FunnelLink {
   kind: NodeKind;
 }
 
+interface FunnelSummary {
+  input_critical: number;
+  input_high: number;
+  output_critical: number;
+  output_high: number;
+  input_total: number;
+  output_total: number;
+  reduction_pct: number;
+}
+
+interface FunnelResponse {
+  stages: string[];
+  nodes: FunnelNode[];
+  links: FunnelLink[];
+  summary: FunnelSummary;
+}
+
 const COLORS: Record<NodeKind, string> = {
   critical: '#ef4444',
   high: '#f97316',
@@ -44,43 +54,7 @@ const LINK_COLORS: Record<NodeKind, string> = {
   filtered: 'rgba(63, 69, 85, 0.55)',
 };
 
-function buildDemoData(): { nodes: FunnelNode[]; links: FunnelLink[] } {
-  // Vertical order per column: Critical (top) → High → Filtered out (bottom).
-  // iterations=0 + sort=false keeps this order (relaxation would shuffle by mass).
-  const nodes: FunnelNode[] = [
-    { name: 'Critical', kind: 'critical', stage: 0, count: 291 },
-    { name: 'High', kind: 'high', stage: 0, count: 573 },
-    { name: 'Critical', kind: 'critical', stage: 1, count: 136 },
-    { name: 'High', kind: 'high', stage: 1, count: 375 },
-    { name: 'Filtered out', kind: 'filtered', stage: 1 },
-    { name: 'Critical', kind: 'critical', stage: 2, count: 9 },
-    { name: 'High', kind: 'high', stage: 2, count: 26 },
-    { name: 'Filtered out', kind: 'filtered', stage: 2 },
-    { name: 'Critical', kind: 'critical', stage: 3, count: 6 },
-    { name: 'High', kind: 'high', stage: 3, count: 11 },
-    { name: 'Filtered out', kind: 'filtered', stage: 3 },
-  ];
-
-  const links: FunnelLink[] = [
-    // Scanner → Delphi (priority flows first, then demotions into Filtered)
-    { source: 0, target: 2, value: 136, kind: 'critical' },
-    { source: 1, target: 3, value: 375, kind: 'high' },
-    { source: 0, target: 4, value: 155, kind: 'filtered' },
-    { source: 1, target: 4, value: 198, kind: 'filtered' },
-    // Delphi → OPES
-    { source: 2, target: 5, value: 9, kind: 'critical' },
-    { source: 3, target: 6, value: 26, kind: 'high' },
-    { source: 2, target: 7, value: 127, kind: 'filtered' },
-    { source: 3, target: 7, value: 349, kind: 'filtered' },
-    // OPES → Priority
-    { source: 5, target: 8, value: 6, kind: 'critical' },
-    { source: 6, target: 9, value: 11, kind: 'high' },
-    { source: 5, target: 10, value: 3, kind: 'filtered' },
-    { source: 6, target: 10, value: 15, kind: 'filtered' },
-  ];
-
-  return { nodes, links };
-}
+const DEFAULT_STAGES = ['Scanner', 'Delphi', 'OPES', 'Priority'];
 
 /** Recharts injects layout props when cloning this element — keep them optional for build. */
 function SankeyNode(props: {
@@ -185,16 +159,49 @@ function SankeyLink(props: {
   );
 }
 
-interface PrioritizationFunnelCardProps {
-  /** When true, shows demo data + example badge. Swap for live API later. */
-  demo?: boolean;
-}
+export function PrioritizationFunnelCard() {
+  const [funnel, setFunnel] = useState<FunnelResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-export function PrioritizationFunnelCard({ demo = true }: PrioritizationFunnelCardProps) {
-  const data = useMemo(() => buildDemoData(), []);
-  const inputTotal = DEMO_FUNNEL.input.critical + DEMO_FUNNEL.input.high;
-  const outputTotal = DEMO_FUNNEL.output.critical + DEMO_FUNNEL.output.high;
-  const reductionPct = Math.round((1 - outputTotal / inputTotal) * 100);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const data = await api.getPrioritizationFunnel();
+        if (!cancelled) setFunnel(data);
+      } catch (err: unknown) {
+        if (!cancelled) {
+          const message =
+            err && typeof err === 'object' && 'message' in err
+              ? String((err as { message?: string }).message)
+              : 'Failed to load prioritization funnel';
+          setError(message);
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const chartData = useMemo(() => {
+    if (!funnel?.nodes?.length) return { nodes: [] as FunnelNode[], links: [] as FunnelLink[] };
+    // Drop zero-value links so Recharts doesn't draw empty ribbons
+    const links = (funnel.links || []).filter((l) => (l.value || 0) > 0);
+    return { nodes: funnel.nodes as FunnelNode[], links: links as FunnelLink[] };
+  }, [funnel]);
+
+  const summary = funnel?.summary;
+  const stages = funnel?.stages?.length ? funnel.stages : DEFAULT_STAGES;
+  const inputTotal = summary?.input_total ?? 0;
+  const outputTotal = summary?.output_total ?? 0;
+  const reductionPct = summary?.reduction_pct ?? 0;
+  const hasData = inputTotal > 0 && chartData.links.length > 0;
 
   return (
     <Card className="border-orange-500/20 overflow-hidden">
@@ -203,17 +210,9 @@ export function PrioritizationFunnelCard({ demo = true }: PrioritizationFunnelCa
           <CardTitle className="text-lg flex items-center gap-2">
             <Target className="h-5 w-5 text-orange-400" />
             Prioritization Value
-            {demo && (
-              <Badge
-                variant="outline"
-                className="text-[10px] font-normal bg-amber-500/10 text-amber-300 border-amber-500/30"
-              >
-                Example data
-              </Badge>
-            )}
           </CardTitle>
           <p className="text-sm text-muted-foreground mt-1">
-            Scanner Critical/High → Delphi likelihood → OPES asset priority
+            Live open Critical/High → Delphi likelihood → OPES asset priority
           </p>
         </div>
         <Link href="/findings">
@@ -224,92 +223,112 @@ export function PrioritizationFunnelCard({ demo = true }: PrioritizationFunnelCa
       </CardHeader>
 
       <CardContent className="space-y-4">
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-          <div className="rounded-md bg-muted/40 px-3 py-2">
-            <p className="text-[11px] text-muted-foreground">Scanner Critical/High</p>
-            <p className="text-xl font-semibold tabular-nums">{formatNumber(inputTotal)}</p>
+        {loading ? (
+          <div className="flex items-center justify-center gap-2 py-16 text-muted-foreground text-sm">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Loading prioritization funnel…
           </div>
-          <div className="rounded-md bg-muted/40 px-3 py-2">
-            <p className="text-[11px] text-muted-foreground">Prioritized</p>
-            <p className="text-xl font-semibold tabular-nums text-orange-400">
-              {formatNumber(outputTotal)}
-            </p>
+        ) : error ? (
+          <div className="rounded-md border border-destructive/30 bg-destructive/5 px-4 py-8 text-center text-sm text-muted-foreground">
+            Could not load live funnel data. Rebuild/restart the backend if this endpoint is new.
           </div>
-          <div className="rounded-md bg-muted/40 px-3 py-2">
-            <p className="text-[11px] text-muted-foreground flex items-center gap-1">
-              <Filter className="h-3 w-3" /> Noise reduced
-            </p>
-            <p className="text-xl font-semibold tabular-nums text-emerald-400">{reductionPct}%</p>
+        ) : !hasData ? (
+          <div className="rounded-md border border-border/50 bg-muted/20 px-4 py-8 text-center text-sm text-muted-foreground">
+            No open Critical/High findings to prioritize yet.
           </div>
-          <div className="rounded-md bg-muted/40 px-3 py-2">
-            <p className="text-[11px] text-muted-foreground">Final mix</p>
-            <p className="text-sm font-medium mt-1">
-              <span className="text-red-400">{DEMO_FUNNEL.output.critical} Critical</span>
-              <span className="text-muted-foreground"> · </span>
-              <span className="text-orange-400">{DEMO_FUNNEL.output.high} High</span>
-            </p>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-4 gap-2 px-1 text-[11px] text-muted-foreground">
-          {DEMO_FUNNEL.stages.map((stage) => (
-            <div key={stage} className="text-center font-medium tracking-wide uppercase">
-              {stage}
+        ) : (
+          <>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="rounded-md bg-muted/40 px-3 py-2">
+                <p className="text-[11px] text-muted-foreground">Scanner Critical/High</p>
+                <p className="text-xl font-semibold tabular-nums">{formatNumber(inputTotal)}</p>
+              </div>
+              <div className="rounded-md bg-muted/40 px-3 py-2">
+                <p className="text-[11px] text-muted-foreground">Prioritized</p>
+                <p className="text-xl font-semibold tabular-nums text-orange-400">
+                  {formatNumber(outputTotal)}
+                </p>
+              </div>
+              <div className="rounded-md bg-muted/40 px-3 py-2">
+                <p className="text-[11px] text-muted-foreground flex items-center gap-1">
+                  <Filter className="h-3 w-3" /> Noise reduced
+                </p>
+                <p className="text-xl font-semibold tabular-nums text-emerald-400">
+                  {reductionPct}%
+                </p>
+              </div>
+              <div className="rounded-md bg-muted/40 px-3 py-2">
+                <p className="text-[11px] text-muted-foreground">Final mix</p>
+                <p className="text-sm font-medium mt-1">
+                  <span className="text-red-400">{summary?.output_critical ?? 0} Critical</span>
+                  <span className="text-muted-foreground"> · </span>
+                  <span className="text-orange-400">{summary?.output_high ?? 0} High</span>
+                </p>
+              </div>
             </div>
-          ))}
-        </div>
 
-        <div className="h-[280px] w-full rounded-md bg-[#0b0f17] border border-border/40">
-          <ResponsiveContainer width="100%" height="100%">
-            <Sankey
-              data={data}
-              nodeWidth={14}
-              nodePadding={28}
-              linkCurvature={0.55}
-              iterations={0}
-              margin={{ top: 16, right: 72, bottom: 16, left: 56 }}
-              node={(nodeProps: object) => <SankeyNode {...(nodeProps as object)} />}
-              link={(linkProps: object) => <SankeyLink {...(linkProps as object)} />}
-              sort={false}
-            >
-              <Tooltip
-                content={({ payload }) => {
-                  if (!payload?.length) return null;
-                  const item = payload[0]?.payload as
-                    | (FunnelNode & { value?: number })
-                    | FunnelLink
-                    | undefined;
-                  if (!item) return null;
-                  const value =
-                    'value' in item && typeof item.value === 'number'
-                      ? item.value
-                      : 'count' in item
-                        ? item.count
-                        : undefined;
-                  const label =
-                    'name' in item && item.name
-                      ? item.name
-                      : 'kind' in item
-                        ? String(item.kind)
-                        : 'Flow';
-                  return (
-                    <div className="rounded-md border bg-popover px-3 py-2 text-xs shadow-md">
-                      <p className="font-medium capitalize">{label}</p>
-                      {value != null && (
-                        <p className="text-muted-foreground">{formatNumber(value)} findings</p>
-                      )}
-                    </div>
-                  );
-                }}
-              />
-            </Sankey>
-          </ResponsiveContainer>
-        </div>
+            <div className="grid grid-cols-4 gap-2 px-1 text-[11px] text-muted-foreground">
+              {stages.map((stage) => (
+                <div key={stage} className="text-center font-medium tracking-wide uppercase">
+                  {stage}
+                </div>
+              ))}
+            </div>
 
-        <p className="text-xs text-muted-foreground">
-          Filtered out = demoted by reachability, exploit evidence, detection confidence, or asset
-          criticality — severity unchanged, priority lowered.
-        </p>
+            <div className="h-[280px] w-full rounded-md bg-[#0b0f17] border border-border/40">
+              <ResponsiveContainer width="100%" height="100%">
+                <Sankey
+                  data={chartData}
+                  nodeWidth={14}
+                  nodePadding={28}
+                  linkCurvature={0.55}
+                  iterations={0}
+                  margin={{ top: 16, right: 72, bottom: 16, left: 56 }}
+                  node={(nodeProps: object) => <SankeyNode {...(nodeProps as object)} />}
+                  link={(linkProps: object) => <SankeyLink {...(linkProps as object)} />}
+                  sort={false}
+                >
+                  <Tooltip
+                    content={({ payload }) => {
+                      if (!payload?.length) return null;
+                      const item = payload[0]?.payload as
+                        | (FunnelNode & { value?: number })
+                        | FunnelLink
+                        | undefined;
+                      if (!item) return null;
+                      const value =
+                        'value' in item && typeof item.value === 'number'
+                          ? item.value
+                          : 'count' in item
+                            ? item.count
+                            : undefined;
+                      const label =
+                        'name' in item && item.name
+                          ? item.name
+                          : 'kind' in item
+                            ? String(item.kind)
+                            : 'Flow';
+                      return (
+                        <div className="rounded-md border bg-popover px-3 py-2 text-xs shadow-md">
+                          <p className="font-medium capitalize">{label}</p>
+                          {value != null && (
+                            <p className="text-muted-foreground">{formatNumber(value)} findings</p>
+                          )}
+                        </div>
+                      );
+                    }}
+                  />
+                </Sankey>
+              </ResponsiveContainer>
+            </div>
+
+            <p className="text-xs text-muted-foreground">
+              Filtered out = demoted by Delphi likelihood or OPES (reachability, exploit evidence,
+              detection confidence, asset criticality). Final Priority keeps OPES Critical plus
+              High when KEV-listed or OPES ≥ 7.0.
+            </p>
+          </>
+        )}
       </CardContent>
     </Card>
   );

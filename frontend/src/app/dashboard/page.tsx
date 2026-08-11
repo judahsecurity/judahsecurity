@@ -411,8 +411,8 @@ export default function DashboardPage() {
           ))}
         </div>
 
-        {/* Prioritization value (Sankey) — demo data until funnel API lands */}
-        <PrioritizationFunnelCard demo />
+        {/* Prioritization value (Sankey) — live scanner → Delphi → OPES funnel */}
+        <PrioritizationFunnelCard />
 
         {/* World Map */}
         <Card>

@@ -832,6 +832,219 @@ def get_vulnerabilities_summary(
     }
 
 
+def _bucket_delphi(priority: Optional[str]) -> str:
+    p = (priority or "none").strip().lower()
+    if p == "critical":
+        return "critical"
+    if p == "high":
+        return "high"
+    return "filtered"
+
+
+def _bucket_opes(category: Optional[str], scanner: str) -> str:
+    """Map OPES category to Crit/High/Filtered. Unscored falls back to scanner."""
+    c = (category or "").strip().lower()
+    if not c:
+        return scanner if scanner in ("critical", "high") else "filtered"
+    if c in ("urgent", "critical"):
+        return "critical"
+    if c == "high":
+        return "high"
+    return "filtered"
+
+
+def _bucket_priority(opes_bucket: str, opes_score: Optional[float], on_kev: bool) -> str:
+    """Final priority: OPES critical always; OPES high only if KEV or score >= 7."""
+    if opes_bucket == "critical":
+        return "critical"
+    if opes_bucket == "high" and (on_kev or (opes_score is not None and opes_score >= 7.0)):
+        return "high"
+    return "filtered"
+
+
+@router.get("/stats/prioritization-funnel")
+def get_prioritization_funnel(
+    include_out_of_scope: bool = Query(False),
+    organization_id: Optional[int] = Query(None, description="Filter to a specific organization (superuser)"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Sankey funnel: open scanner Critical/High → Delphi → OPES → Priority.
+
+    Shows how custom scoring demotes scanner Critical/High into a smaller
+    actionable set. Returns Recharts-ready ``nodes`` / ``links`` plus summary.
+    """
+    empty = {
+        "stages": ["Scanner", "Delphi", "OPES", "Priority"],
+        "nodes": [],
+        "links": [],
+        "summary": {
+            "input_critical": 0,
+            "input_high": 0,
+            "output_critical": 0,
+            "output_high": 0,
+            "input_total": 0,
+            "output_total": 0,
+            "reduction_pct": 0,
+        },
+    }
+
+    base = db.query(Vulnerability).join(Asset)
+
+    if current_user.is_superuser:
+        if organization_id:
+            base = base.filter(Asset.organization_id == organization_id)
+    else:
+        if not current_user.organization_id:
+            return empty
+        base = base.filter(Asset.organization_id == current_user.organization_id)
+
+    if not include_out_of_scope:
+        base = base.filter(Asset.in_scope == True)
+
+    rows = (
+        base.filter(
+            Vulnerability.status == VulnerabilityStatus.OPEN,
+            Vulnerability.severity.in_([Severity.CRITICAL, Severity.HIGH]),
+        )
+        .with_entities(
+            Vulnerability.severity,
+            Vulnerability.oracle_opes_category,
+            Vulnerability.oracle_opes_score,
+            Vulnerability.metadata_,
+        )
+        .all()
+    )
+
+    # Transition counters between stage buckets
+    # keys: (from_kind, to_kind) at each hop
+    s_to_d: Dict[tuple, int] = {}
+    d_to_o: Dict[tuple, int] = {}
+    o_to_p: Dict[tuple, int] = {}
+    input_c = input_h = 0
+    delphi_c = delphi_h = 0
+    opes_c = opes_h = 0
+    out_c = out_h = 0
+
+    for severity, opes_cat, opes_score, meta in rows:
+        scanner = severity.value.lower() if hasattr(severity, "value") else str(severity).lower()
+        if scanner == "critical":
+            input_c += 1
+        elif scanner == "high":
+            input_h += 1
+        else:
+            continue
+
+        meta = meta or {}
+        delphi = meta.get("delphi") if isinstance(meta, dict) else {}
+        delphi = delphi if isinstance(delphi, dict) else {}
+        d_bucket = _bucket_delphi(delphi.get("priority"))
+        on_kev = bool(delphi.get("kev"))
+        o_bucket = _bucket_opes(opes_cat, scanner)
+        p_bucket = _bucket_priority(o_bucket, opes_score, on_kev)
+
+        s_to_d[(scanner, d_bucket)] = s_to_d.get((scanner, d_bucket), 0) + 1
+        if d_bucket == "critical":
+            delphi_c += 1
+        elif d_bucket == "high":
+            delphi_h += 1
+
+        # Only findings that remain Crit/High at Delphi continue the colored track;
+        # demotions still feed Filtered at this hop via s_to_d.
+        if d_bucket in ("critical", "high"):
+            d_to_o[(d_bucket, o_bucket)] = d_to_o.get((d_bucket, o_bucket), 0) + 1
+            if o_bucket == "critical":
+                opes_c += 1
+            elif o_bucket == "high":
+                opes_h += 1
+            if o_bucket in ("critical", "high"):
+                o_to_p[(o_bucket, p_bucket)] = o_to_p.get((o_bucket, p_bucket), 0) + 1
+                if p_bucket == "critical":
+                    out_c += 1
+                elif p_bucket == "high":
+                    out_h += 1
+
+    # Node indices: Crit/High per stage, Filtered at stages 1–3
+    # 0 Crit-S, 1 High-S,
+    # 2 Crit-D, 3 High-D, 4 Filt-D,
+    # 5 Crit-O, 6 High-O, 7 Filt-O,
+    # 8 Crit-P, 9 High-P, 10 Filt-P
+    nodes = [
+        {"name": "Critical", "kind": "critical", "stage": 0, "count": input_c},
+        {"name": "High", "kind": "high", "stage": 0, "count": input_h},
+        {"name": "Critical", "kind": "critical", "stage": 1, "count": delphi_c},
+        {"name": "High", "kind": "high", "stage": 1, "count": delphi_h},
+        {"name": "Filtered out", "kind": "filtered", "stage": 1},
+        {"name": "Critical", "kind": "critical", "stage": 2, "count": opes_c},
+        {"name": "High", "kind": "high", "stage": 2, "count": opes_h},
+        {"name": "Filtered out", "kind": "filtered", "stage": 2},
+        {"name": "Critical", "kind": "critical", "stage": 3, "count": out_c},
+        {"name": "High", "kind": "high", "stage": 3, "count": out_h},
+        {"name": "Filtered out", "kind": "filtered", "stage": 3},
+    ]
+
+    idx = {
+        (0, "critical"): 0,
+        (0, "high"): 1,
+        (1, "critical"): 2,
+        (1, "high"): 3,
+        (1, "filtered"): 4,
+        (2, "critical"): 5,
+        (2, "high"): 6,
+        (2, "filtered"): 7,
+        (3, "critical"): 8,
+        (3, "high"): 9,
+        (3, "filtered"): 10,
+    }
+
+    links: List[Dict[str, Any]] = []
+
+    def add_links(transitions: Dict[tuple, int], from_stage: int, to_stage: int) -> None:
+        # Emit Crit/High retained flows first, then filtered
+        for src_kind in ("critical", "high"):
+            for dst_kind in ("critical", "high", "filtered"):
+                value = transitions.get((src_kind, dst_kind), 0)
+                if value <= 0:
+                    continue
+                kind = dst_kind if dst_kind != "filtered" else "filtered"
+                # Cross-severity demotion (crit→high) keeps destination color
+                if dst_kind in ("critical", "high"):
+                    kind = dst_kind
+                links.append(
+                    {
+                        "source": idx[(from_stage, src_kind)],
+                        "target": idx[(to_stage, dst_kind)],
+                        "value": value,
+                        "kind": kind,
+                    }
+                )
+
+    add_links(s_to_d, 0, 1)
+    add_links(d_to_o, 1, 2)
+    add_links(o_to_p, 2, 3)
+
+    input_total = input_c + input_h
+    output_total = out_c + out_h
+    reduction_pct = (
+        int(round((1 - (output_total / input_total)) * 100)) if input_total else 0
+    )
+
+    return {
+        "stages": ["Scanner", "Delphi", "OPES", "Priority"],
+        "nodes": nodes,
+        "links": links,
+        "summary": {
+            "input_critical": input_c,
+            "input_high": input_h,
+            "output_critical": out_c,
+            "output_high": out_h,
+            "input_total": input_total,
+            "output_total": output_total,
+            "reduction_pct": max(0, reduction_pct),
+        },
+    }
+
+
 @router.get("/stats/remediation-efficiency")
 def get_remediation_efficiency(
     days: int = Query(30, ge=1, le=365),

@@ -645,6 +645,16 @@ class ApiClient {
     return response.data;
   }
 
+  async getPrioritizationFunnel(params?: { organizationId?: number; includeOutOfScope?: boolean }) {
+    const response = await this.client.get('/vulnerabilities/stats/prioritization-funnel', {
+      params: {
+        ...(params?.organizationId ? { organization_id: params.organizationId } : {}),
+        ...(params?.includeOutOfScope ? { include_out_of_scope: true } : {}),
+      },
+    });
+    return response.data;
+  }
+
   async getVulnerability(vulnId: number) {
     const response = await this.client.get(`/vulnerabilities/${vulnId}`);
     return response.data;
@@ -1162,6 +1172,40 @@ class ApiClient {
       params: { in_scope: inScope, cascade_to_subdomains: cascadeToSubdomains }
     });
     return response.data;
+  }
+
+  async cleanupUnattributedPaas(params: {
+    organization_id: number;
+    action?: 'preview' | 'out_of_scope' | 'delete';
+    confirm?: boolean;
+    include_already_out_of_scope?: boolean;
+  }) {
+    const response = await this.client.post('/assets/cleanup-unattributed-paas', null, {
+      params: {
+        organization_id: params.organization_id,
+        action: params.action ?? 'preview',
+        confirm: params.confirm ?? false,
+        include_already_out_of_scope: params.include_already_out_of_scope ?? false,
+      },
+    });
+    return response.data as {
+      organization_id: number;
+      action: string;
+      matched: number;
+      updated: number;
+      deleted: number;
+      findings_closed: number;
+      attribution_tokens: string[];
+      preview: Array<{
+        id: number;
+        value: string;
+        asset_type?: string;
+        in_scope?: boolean;
+        discovery_source?: string;
+        reason: string;
+        paas_suffix?: string;
+      }>;
+    };
   }
 
   async deleteAssetWithSubdomains(assetId: number, confirm: boolean = false) {
