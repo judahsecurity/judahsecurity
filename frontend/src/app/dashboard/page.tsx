@@ -411,6 +411,9 @@ export default function DashboardPage() {
           ))}
         </div>
 
+        {/* Prioritization value (Sankey) — demo data until funnel API lands */}
+        <PrioritizationFunnelCard demo />
+
         {/* World Map */}
         <Card>
           <CardContent className="pt-6">
@@ -665,9 +668,6 @@ export default function DashboardPage() {
             )}
           </CardContent>
         </Card>
-
-        {/* Prioritization value (Sankey) — demo data until funnel API lands */}
-        <PrioritizationFunnelCard demo />
 
         {/* Remediation Efficiency & Vulnerability Exposure */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
