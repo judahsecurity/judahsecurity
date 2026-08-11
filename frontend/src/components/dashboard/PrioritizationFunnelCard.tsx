@@ -45,7 +45,8 @@ const LINK_COLORS: Record<NodeKind, string> = {
 };
 
 function buildDemoData(): { nodes: FunnelNode[]; links: FunnelLink[] } {
-  // Column layout mirrors the reference: Critical/High thin out; filtered absorbs the rest.
+  // Vertical order per column: Critical (top) → High → Filtered out (bottom).
+  // iterations=0 + sort=false keeps this order (relaxation would shuffle by mass).
   const nodes: FunnelNode[] = [
     { name: 'Critical', kind: 'critical', stage: 0, count: 291 },
     { name: 'High', kind: 'high', stage: 0, count: 573 },
@@ -61,20 +62,20 @@ function buildDemoData(): { nodes: FunnelNode[]; links: FunnelLink[] } {
   ];
 
   const links: FunnelLink[] = [
-    // Scanner → Delphi
+    // Scanner → Delphi (priority flows first, then demotions into Filtered)
     { source: 0, target: 2, value: 136, kind: 'critical' },
-    { source: 0, target: 4, value: 155, kind: 'filtered' },
     { source: 1, target: 3, value: 375, kind: 'high' },
+    { source: 0, target: 4, value: 155, kind: 'filtered' },
     { source: 1, target: 4, value: 198, kind: 'filtered' },
     // Delphi → OPES
     { source: 2, target: 5, value: 9, kind: 'critical' },
-    { source: 2, target: 7, value: 127, kind: 'filtered' },
     { source: 3, target: 6, value: 26, kind: 'high' },
+    { source: 2, target: 7, value: 127, kind: 'filtered' },
     { source: 3, target: 7, value: 349, kind: 'filtered' },
     // OPES → Priority
     { source: 5, target: 8, value: 6, kind: 'critical' },
-    { source: 5, target: 10, value: 3, kind: 'filtered' },
     { source: 6, target: 9, value: 11, kind: 'high' },
+    { source: 5, target: 10, value: 3, kind: 'filtered' },
     { source: 6, target: 10, value: 15, kind: 'filtered' },
   ];
 
@@ -265,6 +266,7 @@ export function PrioritizationFunnelCard({ demo = true }: PrioritizationFunnelCa
               nodeWidth={14}
               nodePadding={28}
               linkCurvature={0.55}
+              iterations={0}
               margin={{ top: 16, right: 72, bottom: 16, left: 56 }}
               node={(nodeProps: object) => <SankeyNode {...(nodeProps as object)} />}
               link={(linkProps: object) => <SankeyLink {...(linkProps as object)} />}

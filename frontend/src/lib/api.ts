@@ -586,6 +586,8 @@ class ApiClient {
     organization_id?: number; 
     asset_id?: number;
     severity?: string;
+    /** OPES priority category — preferred over scanner severity for triage filters */
+    opes_category?: string;
     skip?: number; 
     limit?: number;
   }) {
@@ -613,6 +615,7 @@ class ApiClient {
     organization_id?: number; 
     asset_id?: number;
     severity?: string;
+    opes_category?: string;
     skip?: number; 
     limit?: number;
   }) {
@@ -1496,8 +1499,8 @@ class ApiClient {
   }
 
   // Generic methods for direct API calls
-  async get(url: string, params?: any) {
-    return this.client.get(url, { params });
+  async get(url: string, params?: any, config?: { timeout?: number; headers?: Record<string, string> }) {
+    return this.client.get(url, { params, ...config });
   }
 
   async post(url: string, data?: any, config?: { params?: any; headers?: Record<string, string> }) {

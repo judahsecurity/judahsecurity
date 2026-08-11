@@ -199,7 +199,33 @@ interface OracleEnrichment {
   };
 }
 
-type SortMode = 'severity' | 'delphi' | 'recent' | 'cvss';
+type SortMode = 'opes' | 'severity' | 'delphi' | 'recent' | 'cvss';
+
+const opesSortRank: Record<string, number> = {
+  urgent: 0,
+  critical: 1,
+  high: 2,
+  medium: 3,
+  low: 4,
+  informational: 5,
+  info: 5,
+};
+
+/** Effective priority for display/sort: OPES category, else scanner severity. */
+function effectivePriority(finding: {
+  severity?: string;
+  oracle?: { opes_category?: string; opes_score?: number | null } | null;
+}): string {
+  const opes = finding.oracle?.opes_category?.toLowerCase();
+  if (opes) return opes === 'urgent' ? 'critical' : opes;
+  const sev = (finding.severity || 'info').toLowerCase();
+  return sev === 'info' ? 'informational' : sev;
+}
+
+function priorityBadgeLabel(category: string): string {
+  if (category === 'informational' || category === 'info') return 'info';
+  return category;
+}
 
 // Matches the backend's TIER_RANK in delphi_enrichment_service.py.
 const delphiPriorityRank: Record<string, number> = {
@@ -625,7 +651,7 @@ export default function FindingsPage() {
   const [bulkUpdating, setBulkUpdating] = useState(false);
   const [assignDialogOpen, setAssignDialogOpen] = useState(false);
   const [assignee, setAssignee] = useState('');
-  const [sortMode, setSortMode] = useState<SortMode>('severity');
+  const [sortMode, setSortMode] = useState<SortMode>('opes');
   const [onlyKev, setOnlyKev] = useState(false);
   const [oracleBatchBusy, setOracleBatchBusy] = useState(false);
   const [capturingScreenshot, setCapturingScreenshot] = useState(false);
@@ -1347,7 +1373,8 @@ export default function FindingsPage() {
       // Fetch findings and summary in parallel
       const [findingsData, summaryData] = await Promise.all([
         api.getFindings({
-          severity: selectedSeverity || undefined,
+          // Top chips filter by OPES priority score (scanner severity as unscored fallback)
+          opes_category: selectedSeverity || undefined,
           limit: 100,
         }),
         api.getFindingsSummary(),
@@ -1478,6 +1505,14 @@ export default function FindingsPage() {
       return true;
     })
     .sort((a, b) => {
+      if (sortMode === 'opes') {
+        const aRank = opesSortRank[effectivePriority(a)] ?? 5;
+        const bRank = opesSortRank[effectivePriority(b)] ?? 5;
+        if (aRank !== bRank) return aRank - bRank;
+        const aScore = a.oracle?.opes_score ?? -1;
+        const bScore = b.oracle?.opes_score ?? -1;
+        if (aScore !== bScore) return bScore - aScore;
+      }
       if (sortMode === 'delphi') {
         const aRansom = isRansomwareKev(a.delphi?.kev) ? 0 : 1;
         const bRansom = isRansomwareKev(b.delphi?.kev) ? 0 : 1;
@@ -1514,13 +1549,14 @@ export default function FindingsPage() {
   const kevCount = findings.filter((f) => f.delphi?.kev).length;
   const ransomwareCount = findings.filter((f) => isRansomwareKev(f.delphi?.kev)).length;
 
-  // Calculate severity counts
+  // Priority chip counts — OPES category (falls back to scanner severity when unscored)
+  const opesCounts = stats?.by_opes_category || {};
   const severityCounts: Record<Severity, number> = {
-    critical: stats?.by_severity?.critical || 0,
-    high: stats?.by_severity?.high || 0,
-    medium: stats?.by_severity?.medium || 0,
-    low: stats?.by_severity?.low || 0,
-    info: stats?.by_severity?.info || 0,
+    critical: opesCounts.critical || 0,
+    high: opesCounts.high || 0,
+    medium: opesCounts.medium || 0,
+    low: opesCounts.low || 0,
+    info: opesCounts.informational || opesCounts.info || 0,
   };
 
   const totalCount = stats?.total || findings.length;
@@ -1546,8 +1582,12 @@ export default function FindingsPage() {
       <Header title="Findings" subtitle="Security vulnerabilities and issues discovered in your assets" />
 
       <div className="p-6 space-y-6">
-        {/* Severity Filter Pills */}
-        <div className="flex flex-wrap gap-2">
+        {/* Priority Filter Pills — OPES score (scanner severity only when unscored) */}
+        <div className="space-y-2">
+          <p className="text-xs text-muted-foreground">
+            Filter by OPES priority score
+          </p>
+          <div className="flex flex-wrap gap-2">
           <button
             onClick={() => handleSeverityFilter(null)}
             className={cn(
@@ -1580,6 +1620,7 @@ export default function FindingsPage() {
               </button>
             );
           })}
+          </div>
         </div>
 
         {/* Search and Actions */}
@@ -1600,7 +1641,13 @@ export default function FindingsPage() {
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="severity">Sort: Severity</SelectItem>
+                <SelectItem value="opes">
+                  <span className="flex items-center gap-2">
+                    <Sparkles className="h-3.5 w-3.5 text-orange-400" />
+                    Sort: OPES priority
+                  </span>
+                </SelectItem>
+                <SelectItem value="severity">Sort: Scanner severity</SelectItem>
                 <SelectItem value="delphi">
                   <span className="flex items-center gap-2">
                     <Sparkles className="h-3.5 w-3.5 text-purple-400" />
@@ -1778,7 +1825,7 @@ export default function FindingsPage() {
                     aria-label="Select all"
                   />
                 </TableHead>
-                <TableHead className="w-[100px]">Severity</TableHead>
+                <TableHead className="w-[110px]">Priority</TableHead>
                 <TableHead>Finding</TableHead>
                 <TableHead>Host</TableHead>
                 <TableHead className="w-[140px]">Status</TableHead>
@@ -1829,9 +1876,28 @@ export default function FindingsPage() {
                       />
                     </TableCell>
                     <TableCell>
-                      <Badge className={getSeverityBadgeClass(finding.severity)}>
-                        {finding.severity}
-                      </Badge>
+                      {(() => {
+                        const priority = effectivePriority(finding);
+                        const label = priorityBadgeLabel(priority);
+                        const scanner = (finding.severity || '').toLowerCase();
+                        const diverges =
+                          Boolean(finding.oracle?.opes_category) &&
+                          scanner &&
+                          scanner !== label &&
+                          !(scanner === 'info' && label === 'info');
+                        return (
+                          <div className="flex flex-col gap-0.5">
+                            <Badge className={getSeverityBadgeClass(label === 'info' ? 'info' : label)}>
+                              {label}
+                            </Badge>
+                            {diverges && (
+                              <span className="text-[10px] text-muted-foreground truncate">
+                                Scanner: {finding.severity}
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-col gap-1">
@@ -1965,9 +2031,27 @@ export default function FindingsPage() {
           >
             <SheetHeader>
               <div className="flex items-center gap-2 flex-wrap pr-8">
-                <Badge className={getSeverityBadgeClass(selectedFinding?.severity || '')}>
-                  {selectedFinding?.severity}
-                </Badge>
+                {(() => {
+                  const priority = selectedFinding
+                    ? effectivePriority(selectedFinding)
+                    : 'info';
+                  const label = priorityBadgeLabel(priority);
+                  const score = selectedFinding?.oracle?.opes_score;
+                  return (
+                    <Badge className={getSeverityBadgeClass(label === 'info' ? 'info' : label)}>
+                      {label}
+                      {score != null ? ` · ${score.toFixed(1)}` : ''}
+                    </Badge>
+                  );
+                })()}
+                {selectedFinding?.oracle?.opes_category &&
+                  selectedFinding.severity &&
+                  selectedFinding.severity.toLowerCase() !==
+                    priorityBadgeLabel(effectivePriority(selectedFinding)) && (
+                    <Badge variant="outline" className="text-muted-foreground">
+                      Scanner: {selectedFinding.severity}
+                    </Badge>
+                  )}
                 {selectedFinding?.status && getStatusBadge(selectedFinding.status)}
                 {selectedFinding?.cvss_score && (
                   <Badge variant="outline" className="font-mono">

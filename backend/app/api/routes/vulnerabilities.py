@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session, joinedload
-from sqlalchemy import case, func
+from sqlalchemy import and_, case, func, or_
 
 from app.db.database import get_db
 from app.models.vulnerability import Vulnerability, Severity, VulnerabilityStatus
@@ -175,9 +175,67 @@ def build_vuln_response(vuln: Vulnerability, db: Optional[Session] = None) -> di
     return d
 
 
+def _scanner_severity_as_opes(category: str):
+    """Map OPES category chip → scanner Severity for unenriched fallback."""
+    if category in ("informational", "info"):
+        return Severity.INFO
+    try:
+        return Severity(category)
+    except ValueError:
+        return None
+
+
+def _opes_category_match(category: str):
+    """Match OPES category, with scanner-severity fallback when unscored.
+
+    ``urgent`` is folded into ``critical`` (manual override). ``info`` chips
+    map to OPES ``informational``.
+    """
+    normalized = (category or "").strip().lower()
+    if normalized == "info":
+        normalized = "informational"
+
+    opes_values = [normalized]
+    if normalized == "critical":
+        opes_values.append("urgent")
+
+    scanner_sev = _scanner_severity_as_opes(normalized)
+    clauses = [Vulnerability.oracle_opes_category.in_(opes_values)]
+    if scanner_sev is not None:
+        clauses.append(
+            and_(
+                Vulnerability.oracle_opes_category.is_(None),
+                Vulnerability.severity == scanner_sev,
+            )
+        )
+    return or_(*clauses)
+
+
+def _effective_opes_category_expr():
+    """COALESCE(oracle_opes_category, scanner severity mapped to OPES labels)."""
+    return func.lower(
+        func.coalesce(
+            Vulnerability.oracle_opes_category,
+            case(
+                (Vulnerability.severity == Severity.INFO, "informational"),
+                (Vulnerability.severity == Severity.CRITICAL, "critical"),
+                (Vulnerability.severity == Severity.HIGH, "high"),
+                (Vulnerability.severity == Severity.MEDIUM, "medium"),
+                (Vulnerability.severity == Severity.LOW, "low"),
+                else_="informational",
+            ),
+        )
+    )
+
+
 @router.get("/", response_model=List[VulnerabilityResponse])
 def list_vulnerabilities(
     severity: Optional[Severity] = None,
+    opes_category: Optional[str] = Query(
+        None,
+        description="Filter by OPES priority category (urgent/critical/high/medium/low/informational). "
+        "Falls back to scanner severity when a finding is not yet Oracle-enriched.",
+    ),
     status: Optional[VulnerabilityStatus] = None,
     asset_id: Optional[int] = None,
     cve_id: Optional[str] = None,
@@ -208,8 +266,10 @@ def list_vulnerabilities(
     if not include_out_of_scope:
         query = query.filter(Asset.in_scope == True)
 
-    # Apply filters
-    if severity:
+    # Apply filters — OPES score is the primary priority filter when provided
+    if opes_category:
+        query = query.filter(_opes_category_match(opes_category.strip().lower()))
+    elif severity:
         query = query.filter(Vulnerability.severity == severity)
     if status:
         query = query.filter(Vulnerability.status == status)
@@ -218,7 +278,20 @@ def list_vulnerabilities(
     if cve_id:
         query = query.filter(Vulnerability.cve_id == cve_id)
 
-    vulns = query.order_by(Vulnerability.severity.desc(), Vulnerability.created_at.desc()).offset(skip).limit(limit).all()
+    vulns = (
+        query.order_by(
+            case(
+                (Vulnerability.oracle_opes_score.is_(None), 1),
+                else_=0,
+            ),
+            Vulnerability.oracle_opes_score.desc().nullslast(),
+            Vulnerability.severity.desc(),
+            Vulnerability.created_at.desc(),
+        )
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
 
     # Batch-load screenshot metadata for listed assets (avoids N+1)
     from app.models.screenshot import Screenshot, ScreenshotStatus
@@ -581,6 +654,7 @@ def get_vulnerabilities_summary(
         "total_all": 0,
         "info_count": 0,
         "by_severity": {},
+        "by_opes_category": {},
         "by_status": {},
         "group_by": group_by,
         "groups": [],
@@ -599,7 +673,7 @@ def get_vulnerabilities_summary(
     if not include_out_of_scope:
         base = base.filter(Asset.in_scope == True)
 
-    # Severity breakdown (SQL)
+    # Severity breakdown (SQL) — scanner severity
     sev_rows = (
         base.with_entities(Vulnerability.severity, func.count(Vulnerability.id))
         .group_by(Vulnerability.severity)
@@ -617,6 +691,22 @@ def get_vulnerabilities_summary(
             info_count += count
         else:
             actionable_count += count
+
+    # OPES priority breakdown (effective = OPES category, else scanner severity)
+    effective_opes = _effective_opes_category_expr()
+    opes_rows = (
+        base.with_entities(effective_opes, func.count(Vulnerability.id))
+        .group_by(effective_opes)
+        .all()
+    )
+    by_opes_category: Dict[str, int] = {}
+    for cat, count in opes_rows:
+        key = (cat or "informational").lower()
+        if key == "urgent":
+            key = "critical"
+        if key == "info":
+            key = "informational"
+        by_opes_category[key] = by_opes_category.get(key, 0) + count
 
     # Status breakdown (SQL)
     status_rows = (
@@ -735,6 +825,7 @@ def get_vulnerabilities_summary(
         "total_all": total_all,
         "info_count": info_count,
         "by_severity": by_severity,
+        "by_opes_category": by_opes_category,
         "by_status": by_status,
         "group_by": normalized_group,
         "groups": groups,
