@@ -9,6 +9,7 @@ Related code:
 | Engagement brain | `backend/app/services/agent/engagement_brain.py` |
 | Capability map | `backend/app/services/agent/capability_map.py` |
 | Fireteam specialists | `backend/app/services/agent/fireteam_service.py` |
+| Specialist skill packs | `backend/app/services/agent/specialist_skills.py` |
 | Tools (`compare_requests`, brain APIs) | `backend/app/services/agent/tools.py` |
 | Orchestrator injection | `backend/app/services/agent/orchestrator.py` |
 | Skills / playbooks | `skills_service.py`, `playbooks.py` |

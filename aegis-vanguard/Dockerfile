@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y \
     curl wget git unzip jq python3 python3-pip python3-venv \
     dnsutils nmap masscan libpcap-dev whois \
     nikto ruby ruby-dev build-essential libffi-dev \
+    openssl openssh-client hydra \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Go toolchain (for ProjectDiscovery + Praetorian tools) ──────────
@@ -31,8 +32,18 @@ RUN go install -v github.com/owasp-amass/amass/v4/...@master \
     && go install -v github.com/tomnomnom/waybackurls@latest \
     && go install -v github.com/lc/gau/v2/cmd/gau@latest \
     && go install -v github.com/ffuf/ffuf/v2@latest \
+    && go install -v github.com/hahwul/dalfox/v2@latest \
     && go install -v github.com/s0md3v/smap/cmd/smap@latest \
     && go install -v github.com/BishopFox/jsluice/cmd/jsluice@latest
+
+# ── Feroxbuster (Rust release) ───────────────────────────────────────
+RUN ARCH=$(dpkg --print-architecture) && \
+    if [ "$ARCH" = "arm64" ]; then FX_ARCH="aarch64"; else FX_ARCH="x86_64"; fi && \
+    (wget -q "https://github.com/epi052/feroxbuster/releases/download/v2.11.0/${FX_ARCH}-linux-feroxbuster.zip" -O /tmp/ferox.zip && \
+     unzip -o -q /tmp/ferox.zip -d /tmp/ferox && \
+     find /tmp/ferox -type f -name feroxbuster -exec cp {} /usr/local/bin/ \; && \
+     chmod +x /usr/local/bin/feroxbuster && \
+     rm -rf /tmp/ferox /tmp/ferox.zip) || echo "feroxbuster download skipped"
 
 # ── Aegis Vanguard: Atlas + Argus (Praetorian-backed) ───────────────
 # Atlas (pius binary):  organizational asset cartographer — 24+ OSINT
@@ -113,6 +124,9 @@ RUN git clone --depth 1 https://github.com/intruder-io/autoswagger.git /opt/auto
 # ── sqlmap ───────────────────────────────────────────────────────────
 RUN git clone --depth 1 https://github.com/sqlmapproject/sqlmap.git /opt/sqlmap \
     && ln -s /opt/sqlmap/sqlmap.py /usr/local/bin/sqlmap
+
+# ── Commix (command injection) ───────────────────────────────────────
+RUN python3 -m pip install --break-system-packages commix || echo "commix skipped"
 
 # ── WPScan (Ruby gem) ───────────────────────────────────────────────
 RUN gem install wpscan --no-document

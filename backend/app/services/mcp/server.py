@@ -1042,7 +1042,127 @@ class MCPServer:
             phase="informational",
             handler=self._xsstrike_help,
         ))
-        
+
+        # Dalfox - XSS scanner / verifier (hahwul/dalfox)
+        self.registry.register(MCPTool(
+            name="execute_dalfox",
+            description=(
+                "Run Dalfox for fast XSS scanning and verification (reflected/stored/DOM). "
+                "Stronger confirmation than XSStrike for many targets. "
+                "Example: 'url \"https://target.com/search?q=test\" --skip-bav' "
+                "or 'url \"https://target.com/search?q=test\" --mining-dict'."
+            ),
+            tool_type=ToolType.EXPLOIT,
+            parameters={
+                "args": {
+                    "type": "string",
+                    "description": "Dalfox CLI arguments (e.g. 'url \"https://target.com/search?q=test\"')",
+                }
+            },
+            required_params=["args"],
+            phase="exploitation",
+            handler=self._execute_dalfox,
+        ))
+        self.registry.register(MCPTool(
+            name="dalfox_help",
+            description="Get Dalfox command usage and options.",
+            tool_type=ToolType.QUERY,
+            parameters={},
+            required_params=[],
+            phase="informational",
+            handler=self._dalfox_help,
+        ))
+
+        # Commix - command injection
+        self.registry.register(MCPTool(
+            name="execute_commix",
+            description=(
+                "Run Commix to detect and confirm OS command injection on HTTP parameters. "
+                "Use only on high-signal params from the capability map. "
+                "Example: '--url=\"https://target.com/ping?host=127.0.0.1\" --batch'."
+            ),
+            tool_type=ToolType.EXPLOIT,
+            parameters={
+                "args": {
+                    "type": "string",
+                    "description": "Commix CLI arguments (always include --batch)",
+                }
+            },
+            required_params=["args"],
+            phase="exploitation",
+            handler=self._execute_commix,
+        ))
+        self.registry.register(MCPTool(
+            name="commix_help",
+            description="Get Commix command usage and options.",
+            tool_type=ToolType.QUERY,
+            parameters={},
+            required_params=[],
+            phase="informational",
+            handler=self._commix_help,
+        ))
+
+        # Hydra - credential brute (bounded)
+        self.registry.register(MCPTool(
+            name="execute_hydra",
+            description=(
+                "Run THC-Hydra for protocol/login credential testing. "
+                "Prefer tiny username/password lists and always use -f (exit on first success). "
+                "Example: '-L users.txt -P pass.txt target.com http-post-form "
+                "\"/login:user=^USER^&pass=^PASS^:F=Invalid\" -f -t 4'. "
+                "For light web sprays prefer test_credential_spray."
+            ),
+            tool_type=ToolType.EXPLOIT,
+            parameters={
+                "args": {
+                    "type": "string",
+                    "description": "Hydra CLI arguments (include -f; keep -t small)",
+                }
+            },
+            required_params=["args"],
+            phase="exploitation",
+            handler=self._execute_hydra,
+        ))
+        self.registry.register(MCPTool(
+            name="hydra_help",
+            description="Get Hydra command usage and options.",
+            tool_type=ToolType.QUERY,
+            parameters={},
+            required_params=[],
+            phase="informational",
+            handler=self._hydra_help,
+        ))
+
+        # Feroxbuster - recursive content discovery
+        self.registry.register(MCPTool(
+            name="execute_feroxbuster",
+            description=(
+                "Run Feroxbuster for recursive content / directory discovery. "
+                "Complement to ffuf when deeper recursion is needed. "
+                "Example: '-u https://target.com -w /usr/share/seclists/Discovery/Web-Content/common.txt "
+                "-t 20 --silent -q'."
+            ),
+            tool_type=ToolType.SCAN,
+            parameters={
+                "args": {
+                    "type": "string",
+                    "description": "Feroxbuster CLI arguments",
+                }
+            },
+            required_params=["args"],
+            phase="informational",
+            handler=self._execute_feroxbuster,
+        ))
+        self.registry.register(MCPTool(
+            name="feroxbuster_help",
+            description="Get Feroxbuster command usage and options.",
+            tool_type=ToolType.QUERY,
+            parameters={},
+            required_params=[],
+            phase="informational",
+            handler=self._feroxbuster_help,
+        ))
+
         # Gitleaks - secret scanning
         self.registry.register(MCPTool(
             name="execute_gitleaks",
@@ -2016,6 +2136,39 @@ class MCPServer:
     
     async def _xsstrike_help(self) -> Dict[str, Any]:
         return await self._run_command(["xsstrike", "-h"], timeout=MCP_HELP_TIMEOUT)
+
+    async def _execute_dalfox(self, args: str) -> Dict[str, Any]:
+        cmd = ["dalfox"] + self._parse_args(args)
+        return await self._run_command(cmd, timeout=600)
+
+    async def _dalfox_help(self) -> Dict[str, Any]:
+        return await self._run_command(["dalfox", "--help"], timeout=MCP_HELP_TIMEOUT)
+
+    async def _execute_commix(self, args: str) -> Dict[str, Any]:
+        cmd = ["commix"] + self._parse_args(args)
+        if "--batch" not in args:
+            cmd.append("--batch")
+        return await self._run_command(cmd, timeout=600)
+
+    async def _commix_help(self) -> Dict[str, Any]:
+        return await self._run_command(["commix", "--help"], timeout=MCP_HELP_TIMEOUT)
+
+    async def _execute_hydra(self, args: str) -> Dict[str, Any]:
+        cmd = ["hydra"] + self._parse_args(args)
+        # Exit on first success; keep agent sprays bounded.
+        if "-f" not in args.split() and "--exit-on-first" not in args:
+            cmd.append("-f")
+        return await self._run_command(cmd, timeout=600)
+
+    async def _hydra_help(self) -> Dict[str, Any]:
+        return await self._run_command(["hydra", "-h"], timeout=MCP_HELP_TIMEOUT)
+
+    async def _execute_feroxbuster(self, args: str) -> Dict[str, Any]:
+        cmd = ["feroxbuster"] + self._parse_args(args)
+        return await self._run_command(cmd, timeout=600)
+
+    async def _feroxbuster_help(self) -> Dict[str, Any]:
+        return await self._run_command(["feroxbuster", "--help"], timeout=MCP_HELP_TIMEOUT)
     
     async def _execute_gitleaks(self, args: str) -> Dict[str, Any]:
         cmd = ["gitleaks"] + self._parse_args(args)
@@ -2243,6 +2396,8 @@ class MCPServer:
         "execute_knockpy": "knockpy", "execute_gau": "gau",
         "execute_kiterunner": "kr", "execute_arjun": "arjun",
         "execute_xsstrike": "xsstrike", "execute_sqlmap": "sqlmap",
+        "execute_dalfox": "dalfox", "execute_commix": "commix",
+        "execute_hydra": "hydra", "execute_feroxbuster": "feroxbuster",
         "execute_gitleaks": "gitleaks", "execute_cmseek": "cmseek",
         "execute_testssl": "testssl", "execute_sslyze": "sslyze",
         "execute_nikto": "nikto", "execute_wafw00f": "wafw00f",

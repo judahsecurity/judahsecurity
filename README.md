@@ -623,6 +623,7 @@ sudo docker system prune -a -f
 | [docs/HARNESS.md](docs/HARNESS.md) | Short pointer + how harness relates to the platform agent |
 | [aegis-vanguard/README.md](aegis-vanguard/README.md) | Autonomous ReACT pentester (ingest + validate) |
 | [docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md](docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md) | **Tester process** — hypotheses, fireteam, differentials, chain cards |
+| [docs/PRAETORIAN_ARSENAL_PARITY.md](docs/PRAETORIAN_ARSENAL_PARITY.md) | Tool arsenal parity vs Praetorian-style slide (WEB/NETWORK focus) |
 | [docs/RECON_WORKFLOW.md](docs/RECON_WORKFLOW.md) | Full reconnaissance pipeline (5 phases) |
 | [docs/GRAPH_SCHEMA.md](docs/GRAPH_SCHEMA.md) | Neo4j graph database schema and queries |
 | [docs/MCP_AND_TLDFINDER.md](docs/MCP_AND_TLDFINDER.md) | MCP tool server and TLDFinder setup |
