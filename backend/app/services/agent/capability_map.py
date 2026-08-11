@@ -251,6 +251,29 @@ def _build_hunt_queue(cmap: CapabilityMap) -> List[Dict[str, str]]:
     if cmap.has_api:
         add("high", "api_authz", "First-party APIs captured — IDOR/authz and verb tampering",
             cmap.api_endpoints[0].get("path", "") if cmap.api_endpoints else "")
+    # Multi-host / subdomain pages → host-header tenant isolation card
+    hosts = set()
+    for p in cmap.pages_visited:
+        m = re.match(r"https?://([^/]+)", str(p))
+        if m:
+            hosts.add(m.group(1).lower())
+    for e in cmap.api_endpoints:
+        if e.get("host"):
+            hosts.add(str(e["host"]).lower())
+    if len(hosts) >= 2 or any(re.match(r"^[a-z0-9-]+\.[a-z0-9-]+\.", h) for h in hosts):
+        add(
+            "high",
+            "host_tenant",
+            "Multiple hosts/subdomains — test Host/X-Forwarded-Host tenant isolation with same session",
+            ", ".join(sorted(hosts)[:4]),
+        )
+    if len(cmap.forms) >= 2:
+        add(
+            "medium",
+            "business_logic",
+            "Multiple forms/workflows — step skip, mass assignment, state tamper",
+            (cmap.forms[0].get("action") if cmap.forms else "") or "",
+        )
     if cmap.param_rich_paths or cmap.has_search:
         add("high", "injection", "Query/body params or search forms — SQLi/XSS/SSTI candidates",
             (cmap.param_rich_paths[0] if cmap.param_rich_paths else "search"))
@@ -269,7 +292,14 @@ def _build_hunt_queue(cmap: CapabilityMap) -> List[Dict[str, str]]:
     if not queue and cmap.pages_visited:
         add("medium", "baseline_web", "Browsable UI with limited signals — baseline web vulns + nuclei",
             cmap.pages_visited[0])
-    return queue[:12]
+    if cmap.pages_visited or cmap.api_endpoints:
+        add(
+            "medium",
+            "coverage",
+            "After logic hunts — Nuclei/misconfig/CVE coverage (authenticated if creds exist)",
+            cmap.target or (cmap.pages_visited[0] if cmap.pages_visited else ""),
+        )
+    return queue[:14]
 
 
 def _score_map(cmap: CapabilityMap) -> float:
@@ -299,12 +329,15 @@ ATTACK_SPECIALIST_NAMES = [
     "app_mapper",
     "auth_logic",
     "api_authz",
+    "host_tenant",
+    "business_logic",
     "injection",
     "graphql_api",
     "js_secrets",
     "file_upload",
     "saml_sso",
     "spa_client",
+    "coverage",
     "vuln_triage",
 ]
 
@@ -330,9 +363,12 @@ def select_specialists_for_map(
         "graphql": "graphql_api",
         "file_upload": "file_upload",
         "api_authz": "api_authz",
+        "host_tenant": "host_tenant",
+        "business_logic": "business_logic",
         "injection": "injection",
         "js_secrets": "js_secrets",
         "spa_client": "spa_client",
+        "coverage": "coverage",
         "admin_surface": "auth_logic",
         "realtime": "api_authz",
         "baseline_web": "injection",

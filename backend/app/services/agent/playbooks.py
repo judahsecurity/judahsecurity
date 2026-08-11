@@ -4,6 +4,65 @@ from typing import List, Dict, Any, Optional
 
 PLAYBOOKS: List[Dict[str, Any]] = [
     {
+        "id": "tester_process",
+        "name": "Tester Process (Hypotheses + Differentials)",
+        "description": (
+            "Engagement-brain orchestrator loop: map → hypotheses → specialist fireteam → "
+            "compare_requests proof → chain follow-ups → coverage."
+        ),
+        "objective": (
+            "Run a tester-process engagement (not a scanner spray).\n\n"
+            "CONTROL LOOP:\n"
+            "1) Observe — execute_deep_crawl on the primary web target.\n"
+            "2) Hypothesize — sync_engagement_brain (seeds authz/Host-tenant/injection/… cards).\n"
+            "3) Dispatch — fireteam_dispatch(specialists='auto') from open hypotheses "
+            "(host_tenant, api_authz, auth_logic, business_logic, injection, coverage…).\n"
+            "4) Mutate one variable — compare_requests(baseline, mutant) for logic proofs.\n"
+            "5) Prove or kill — update_hypothesis(status=proven|killed) with differential evidence.\n"
+            "6) Chain — queue_finding_followups on confirmed hits "
+            "(default_login → authenticated CVE; host_header → tenant bypass).\n"
+            "7) Coverage leftovers — execute_nuclei (use -var username/password from "
+            "engagement credentials when present).\n\n"
+            "RULES:\n"
+            "- Status 200 alone is never a finding — show field/body differentials.\n"
+            "- Prefer 3–6 specialists, not every hunter.\n"
+            "- validate_finding before create_finding for medium+.\n"
+            "- Complete with proven/killed hypotheses, not Nuclei-only coverage.\n"
+        ),
+        "initial_todos": [
+            {"description": "Deep crawl primary app → capability map", "status": "pending", "priority": "high"},
+            {"description": "sync_engagement_brain — seed open hypotheses", "status": "pending", "priority": "high"},
+            {"description": "fireteam_dispatch(specialists=auto) from hypotheses", "status": "pending", "priority": "high"},
+            {"description": "compare_requests proofs; update_hypothesis proven/killed", "status": "pending", "priority": "high"},
+            {"description": "queue_finding_followups + authenticated coverage", "status": "pending", "priority": "high"},
+            {"description": "validate_finding → create_finding → report", "status": "pending", "priority": "medium"},
+        ],
+    },
+    {
+        "id": "host_tenant_bypass",
+        "name": "Host-Header Tenant Isolation Bypass",
+        "description": (
+            "Prove cross-tenant access via Host / X-Forwarded-Host mutation under a fixed session."
+        ),
+        "objective": (
+            "Test host-header tenant isolation bypass like a human tester.\n\n"
+            "1) Identify peer tenant hosts (from map, DNS, or user).\n"
+            "2) Obtain/reuse session for tenant A (deep_crawl login or provided cookies).\n"
+            "3) compare_requests: baseline Host=tenant-A vs mutant Host=tenant-B (same Cookie); "
+            "repeat with X-Forwarded-Host.\n"
+            "4) PASS only if tenant B data/fields appear under session A.\n"
+            "5) update_hypothesis + validate_finding + create_finding; "
+            "queue_finding_followups(vuln_type='host_header').\n"
+            "Kill on connection/vhost reject or unchanged tenant A body.\n"
+        ),
+        "initial_todos": [
+            {"description": "Identify tenant A/B hostnames", "status": "pending", "priority": "high"},
+            {"description": "Establish tenant A session", "status": "pending", "priority": "high"},
+            {"description": "compare_requests Host / X-Forwarded-Host differentials", "status": "pending", "priority": "high"},
+            {"description": "Validate, record finding, queue follow-ups", "status": "pending", "priority": "medium"},
+        ],
+    },
+    {
         "id": "external_assessment",
         "name": "External Assessment (Tester Methodology)",
         "description": (
@@ -16,8 +75,8 @@ PLAYBOOKS: List[Dict[str, Any]] = [
             "OPERATING RULES (non-negotiable):\n"
             "- Work like a human tester: browse and click the app before spraying scanners.\n"
             "- Early on the primary web target, run execute_deep_crawl to build an Application "
-            "Capability Map (pages, forms, APIs, auth, uploads). Then fireteam_dispatch with "
-            "specialists=\"auto\" so attack sub-agents match what the browser learned.\n"
+            "Capability Map (pages, forms, APIs, auth, uploads). Then sync_engagement_brain and "
+            "fireteam_dispatch with specialists=\"auto\" so attack sub-agents match open hypotheses.\n"
             "- Work in phases. Finish the purpose of a phase before moving on, but branch early when "
             "a high-value lead appears (login, API, GraphQL, chatbot, admin, upload, dangling DNS).\n"
             "- Call auto_select_tools after every major discovery wave so recommendations stay current.\n"
@@ -52,8 +111,9 @@ PLAYBOOKS: List[Dict[str, Any]] = [
             "This is mandatory before broad exploitation — click menus/tabs/links and learn the app.\n"
             "13) Supplement with execute_katana / execute_gau / waybackurls for historical coverage, "
             "but treat the capability map as the source of truth for what the app *does*.\n"
-            "14) fireteam_dispatch(specialists=\"auto\") to spawn attack specialists from the map "
-            "(auth_logic, api_authz, injection, graphql, file_upload, js_secrets, spa_client, …).\n"
+            "14) sync_engagement_brain then fireteam_dispatch(specialists=\"auto\") to spawn "
+            "specialists from open hypotheses (auth_logic, api_authz, host_tenant, business_logic, "
+            "injection, coverage, …). Prove with compare_requests; queue_finding_followups on hits.\n"
             "15) JS recon: scan_js_urls_for_secrets + execute_retirejs on crawled bundles; "
             "create_scan(js_recon/jsluice_scan) for bulk JS analysis when many hosts.\n"
             "16) If GraphQL/chatbot/takeover signals appear outside the fireteam: create_scan or "

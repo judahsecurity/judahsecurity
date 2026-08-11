@@ -2,6 +2,8 @@
 
 This document outlines improvements we can adopt from [RedAmon](https://github.com/samugit83/redamon) (AI-powered agentic red team framework) that fit our **defensive ASM** scope. RedAmon focuses on offensive automation; we focus on attack surface discovery, vulnerability management, and remediation—so we adapt ideas that improve agent UX, reliability, and intelligence without adding exploitation features.
 
+**Shipped since this note:** the in-product **tester process** (engagement brain, fireteam, `compare_requests`, chain cards) is documented in [TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md](./TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md). Batch/detection measurement is in [HARNESS.md](./HARNESS.md) / [harness/README.md](../harness/README.md).
+
 ---
 
 ## 1. **Streaming / Long-Running Requests (High impact)**

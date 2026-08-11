@@ -4,6 +4,7 @@ Agent Skills + ``/skill`` chat prefix routing.
 A "skill" is a named, bounded workflow the agent knows how to run:
 
     * ``external-assessment`` - Full tester-methodology external engagement
+    * ``tester-process`` - Hypothesis queue + compare_requests + specialist fireteam
     * ``web-recon``    - subdomain + HTTP + tech fingerprint
     * ``vuln-scan``    - Nuclei critical/high on known assets
     * ``js-recon``     - JS bundle deep dive for secrets / maps / DOM sinks
@@ -15,6 +16,7 @@ A "skill" is a named, bounded workflow the agent knows how to run:
     * ``api-authz-validation`` - Prove API authz gaps with minimal requests
     * ``idor-validation`` - Validate BOLA / IDOR with response comparison
     * ``dual-identity-authz`` - Anonymous / A / B authz matrix
+    * ``host-tenant-bypass`` - Host-header tenant isolation differentials
     * ``nextjs-stack`` / ``springboot-stack`` / ``laravel-stack`` - Tech-conditional hunts
     * ``spa-api-discovery`` - Hidden APIs from JS bundles
     * ``evidence-hygiene`` - Redact sensitive evidence before reporting
@@ -72,6 +74,60 @@ SKILLS: list[Skill] = [
             "execute_* for interactive follow-up. Branch on evidence (GraphQL, SPA, CMS, "
             "chatbot, dangling DNS). Every create_finding needs concrete evidence and "
             "validate_finding first for medium+. Do not complete after Nuclei alone."
+        ),
+    ),
+    Skill(
+        id="tester-process",
+        aliases=[
+            "tester",
+            "hypothesis",
+            "engagement-brain",
+            "logic-bugs",
+            "compare-requests",
+        ],
+        title="Tester process (hypotheses + differentials)",
+        description=(
+            "Orchestrator loop: capability map → hypothesis queue → specialist fireteam → "
+            "compare_requests proof → chain follow-ups → coverage leftovers."
+        ),
+        playbook_id="tester_process",
+        system_context=(
+            "You are running the TESTER-PROCESS skill. "
+            "1) execute_deep_crawl on the primary web target. "
+            "2) sync_engagement_brain to seed open hypotheses. "
+            "3) fireteam_dispatch(specialists='auto') — specialists come from open cards "
+            "(auth_logic, api_authz, host_tenant, business_logic, injection, coverage…). "
+            "4) Prove logic/authz with compare_requests (baseline vs one mutation). "
+            "5) update_hypothesis(proven|killed); on confirm queue_finding_followups "
+            "(default_login→authenticated CVE; host_header→tenant bypass). "
+            "6) Only then run nuclei coverage; use add_engagement_credential + -var when creds exist. "
+            "Do not spray scanners before hypotheses exist."
+        ),
+    ),
+    Skill(
+        id="host-tenant-bypass",
+        aliases=[
+            "host-tenant",
+            "tenant-isolation",
+            "host-header-tenant",
+            "tenant-bypass",
+        ],
+        title="Host-header tenant isolation bypass",
+        description=(
+            "Prove cross-tenant access by keeping session A and mutating Host / "
+            "X-Forwarded-Host to peer tenant B."
+        ),
+        playbook_id="host_tenant_bypass",
+        system_context=(
+            "You are running the HOST-TENANT-BYPASS skill. "
+            "1) Identify tenant-routing hosts (tenant-a.app / tenant-b.app). "
+            "2) Authenticate as tenant A (or use auth_session). "
+            "3) compare_requests: baseline Host=A vs mutant Host=B (same cookies); "
+            "also try X-Forwarded-Host. "
+            "4) PASS only if response contains tenant B objects/PII. "
+            "5) update_hypothesis + validate_finding + create_finding; "
+            "queue_finding_followups(vuln_type='host_header'). "
+            "Kill on vhost reject or unchanged tenant A body."
         ),
     ),
     Skill(
@@ -345,8 +401,8 @@ SKILLS: list[Skill] = [
         ),
         system_context=(
             "You are the fireteam coordinator for tester-style engagements. "
-            "Prefer execute_deep_crawl first so a capability map exists, then call "
-            "fireteam_dispatch with specialists=\"auto\" (or the suggested specialist list). "
+            "Prefer execute_deep_crawl → sync_engagement_brain so hypotheses exist, then call "
+            "fireteam_dispatch with specialists=\"auto\" (selected from open hypothesis cards). "
             "Do not default to the old recon-only triad when attacking a web app."
         ),
         required_inputs=["mission"],

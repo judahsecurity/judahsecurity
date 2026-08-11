@@ -204,7 +204,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         role=(
             "Auth / session / access-control specialist. Probe login, session cookies, "
             "forced browsing, and horizontal/vertical authz using concrete endpoints "
-            "from the capability map."
+            "from the capability map and open engagement hypotheses."
         ),
         allowed_tools=[
             "execute_curl",
@@ -212,13 +212,20 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_httpx",
             "bypass_403",
             "test_saml_sso",
+            "compare_requests",
+            "add_engagement_credential",
+            "queue_finding_followups",
+            "update_hypothesis",
+            "log_engagement_approach",
             "save_note",
             "validate_finding",
             "create_finding",
         ],
         max_iterations=8,
         system_prompt_suffix=(
-            "Prefer dual-identity or anonymous-vs-auth comparisons. Never invent credentials."
+            "Prefer compare_requests (anonymous vs auth). On default/weak login success: "
+            "add_engagement_credential + queue_finding_followups(vuln_type='default_login'). "
+            "Never invent credentials."
         ),
     ),
     SpecialistProfile(
@@ -234,11 +241,67 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_schemathesis",
             "discover_parameters",
             "execute_arjun",
+            "compare_requests",
+            "update_hypothesis",
+            "queue_finding_followups",
+            "log_engagement_approach",
             "validate_finding",
             "create_finding",
             "save_note",
         ],
         max_iterations=8,
+        system_prompt_suffix=(
+            "Prove with compare_requests across identities/object IDs. "
+            "Status 200 alone is not a finding — show other-user fields."
+        ),
+    ),
+    SpecialistProfile(
+        name="host_tenant",
+        role=(
+            "Host-header / tenant-isolation specialist. Keep the same session and mutate "
+            "Host or X-Forwarded-Host toward a peer tenant to prove cross-tenant access."
+        ),
+        allowed_tools=[
+            "compare_requests",
+            "execute_curl",
+            "replay_http_request",
+            "update_hypothesis",
+            "queue_finding_followups",
+            "log_engagement_approach",
+            "validate_finding",
+            "create_finding",
+            "save_note",
+        ],
+        max_iterations=8,
+        system_prompt_suffix=(
+            "Baseline = tenant A host + session A. Mutant = peer tenant Host/X-Forwarded-Host "
+            "with the SAME cookies. PASS only if tenant B data appears. "
+            "Kill on vhost reject or unchanged tenant A body. "
+            "On proven: queue_finding_followups(vuln_type='host_header')."
+        ),
+    ),
+    SpecialistProfile(
+        name="business_logic",
+        role=(
+            "Business-logic specialist. Abuse workflows: step skipping, price/quantity "
+            "tamper, mass assignment, insecure state transitions on mapped forms/APIs."
+        ),
+        allowed_tools=[
+            "compare_requests",
+            "replay_http_request",
+            "execute_curl",
+            "execute_browser",
+            "update_hypothesis",
+            "log_engagement_approach",
+            "validate_finding",
+            "create_finding",
+            "save_note",
+        ],
+        max_iterations=8,
+        system_prompt_suffix=(
+            "Mutate one control at a time. Demonstrate expected vs actual state; "
+            "do not complete fraudulent transactions — prove the bypass."
+        ),
     ),
     SpecialistProfile(
         name="injection",
@@ -254,6 +317,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_browser",
             "generate_injection_payloads",
             "execute_curl",
+            "compare_requests",
+            "update_hypothesis",
+            "log_engagement_approach",
             "validate_finding",
             "create_finding",
         ],
@@ -269,6 +335,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_curl",
             "execute_browser",
             "execute_httpx",
+            "update_hypothesis",
             "validate_finding",
             "create_finding",
             "save_note",
@@ -286,6 +353,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_jwt",
             "execute_curl",
             "execute_browser",
+            "compare_requests",
+            "update_hypothesis",
             "validate_finding",
             "create_finding",
         ],
@@ -303,10 +372,44 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "scan_js_urls_for_secrets",
             "execute_retirejs",
             "execute_curl",
+            "compare_requests",
+            "update_hypothesis",
             "validate_finding",
             "create_finding",
         ],
         max_iterations=6,
+    ),
+    SpecialistProfile(
+        name="coverage",
+        role=(
+            "Coverage / known-vuln specialist. Run Nuclei and related scanners AFTER "
+            "logic hunts. If engagement credentials exist, prefer authenticated templates "
+            "(-var username/password) for default-login and post-auth CVEs."
+        ),
+        allowed_tools=[
+            "execute_nuclei",
+            "execute_nikto",
+            "execute_httpx",
+            "execute_curl",
+            "get_engagement_brain",
+            "queue_finding_followups",
+            "update_hypothesis",
+            "add_engagement_credential",
+            "validate_finding",
+            "create_finding",
+            "save_note",
+        ],
+        max_iterations=8,
+        system_prompt_suffix=(
+            "Check get_engagement_brain for credentials before nuclei. "
+            "Example: execute_nuclei args='-u https://host -id grafana-default-login,CVE-2024-9264 "
+            "-var username=admin -var password=prom-operator -jsonl'. "
+            "On default-login hits: add_engagement_credential + queue_finding_followups. "
+            "For Grafana admin sessions, ALSO prove datasource-proxy SSRF: create a temporary "
+            "datasource aimed at https://kubernetes.default.svc or metadata, then "
+            "GET /api/datasources/proxy/... — report only with internal response body evidence. "
+            "Prefer read-only canaries; do not mutate cluster state."
+        ),
     ),
 ]
 

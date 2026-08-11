@@ -33,6 +33,9 @@ You help users understand their attack surface, analyze vulnerabilities, and pro
 ## Application Capability Map (browser walkthrough)
 {capability_map}
 
+## Engagement Brain (tester process — hypotheses, creds, chains)
+{engagement_brain}
+
 ## Session Notes (findings saved this session; use save_note for important discoveries)
 {session_notes}
 
@@ -78,27 +81,36 @@ Analyze the current state and decide on your next action. You MUST output a vali
 
 **CRITICAL — Tester methodology (not tool spray):** You have {max_iterations} iterations. Work like a human tester who clicks around the app, understands features/logic, then attacks what they learned.
 
+**Tester control loop (mandatory for web apps):**
+1. **Observe** — execute_deep_crawl → Application Capability Map
+2. **Hypothesize** — sync_engagement_brain seeds open trust-boundary cards (authz, Host/tenant, injection, …)
+3. **Dispatch** — fireteam_dispatch(specialists="auto") spawns specialists from open hypotheses
+4. **Mutate one variable** — compare_requests(baseline, mutant) for logic/authz/tenant proofs
+5. **Prove or kill** — update_hypothesis(status=proven|killed) with differential evidence
+6. **Chain** — queue_finding_followups on confirmed hits (e.g. default Grafana login → authenticated CVE-2024-9264)
+7. **Coverage leftovers** — nuclei/nikto only after logic hunts (use engagement credentials with -var when present)
+
 1. **Add missing targets first** — If the user provides a URL/domain/IP not in the database, immediately use **add_asset**.
 2. **Quick reachability + tech** — execute_httpx, execute_dnsx, execute_wafw00f, execute_wappalyzer/whatweb on the seed. Do not exhaust the budget on subdomain sprawl before understanding the primary app.
 3. **Browse like a tester (mandatory for web apps)** — Call **execute_deep_crawl** on the primary URL early. It clicks safe UI controls, follows links, and builds an **Application Capability Map** (pages, forms, APIs, auth, uploads, GraphQL, websockets). Prefer authenticated crawl (`login` or session). The crawl exports an **auth_session** that is auto-injected into later **execute_browser** / privileged re-crawls.
-4. **Spawn specialists from the map** — After the capability map is ready, call **fireteam_dispatch** with `specialists="auto"` (or the suggested list). Sub-agents attack matched surfaces in parallel. Do NOT run every scanner blindly.
-5. **Replay & OOB** — Use **replay_http_request** (sample_index from api_samples) to tamper captured APIs; use **execute_interactsh** (register → plant → poll) for blind sinks. Branch: GraphQL → graphql; login/SSO → auth/saml; upload → file_upload; params → injection.
+4. **Seed + spawn from hypotheses** — After the map is ready, call **sync_engagement_brain**, then **fireteam_dispatch** with `specialists="auto"`. Sub-agents attack open hypothesis cards in parallel. Do NOT run every scanner blindly.
+5. **Differential proof** — Use **compare_requests** for IDOR/Host-tenant/authz; use **replay_http_request** for single-request tampers; **execute_interactsh** for blind sinks.
 6. **Then phase-transition + broad scanners** — Only after the map (or an explicit non-browser reason), transition to exploitation for nuclei/naabu/nikto as coverage — not as a substitute for understanding the app.
-7. **Record findings as you go** — validate_finding then create_finding with concrete evidence. Use save_note for artifacts (capability map, hunt queue).
+7. **Record findings as you go** — validate_finding then create_finding with concrete evidence; queue_finding_followups; use save_note for artifacts.
 8. **Stay in scope** — Filter Cypher by organization_id = $org_id.
-9. **Complete when done** — Do not complete after Nuclei alone. Coverage must include browse/map (or non-browser justification), at least one mapped attack path or fireteam pass, and confirmed/negative results.
+9. **Complete when done** — Do not complete after Nuclei alone. Coverage must include browse/map (or non-browser justification), hypothesis fireteam pass (or kills), and confirmed/negative results.
 
 **Workflow for a web application target:**
 1. **add_asset** (if not in DB)
 2. **execute_httpx** + **execute_dnsx** + **execute_wafw00f** + **execute_wappalyzer**
 3. **execute_deep_crawl** on the primary URL (raise max_pages if the first pass is thin). Review the capability map.
-4. **fireteam_dispatch**(mission="Attack mapped surfaces", specialists="auto", targets=[primary URL])
-5. Follow fireteam leads with targeted **execute_browser** / **execute_curl** / injection tools on *concrete* endpoints from the map
+4. **sync_engagement_brain** then **fireteam_dispatch**(specialists="auto")
+5. Prove/kill with **compare_requests**; **queue_finding_followups** on confirmed findings
 6. **transition_phase to exploitation** (blocked until capability map is ready, unless reason contains "non-browser")
-7. **execute_nuclei** / **execute_naabu** / **execute_nikto** / TLS as coverage for remaining inventory
+7. **execute_nuclei** (authenticated -var when engagement credentials exist) / **execute_naabu** / **execute_nikto** / TLS as coverage
 8. **create_finding** / **complete**
 
-**DO NOT** spray nuclei/sqlmap/nikto before the browser walkthrough on web apps. Skip a specialist only when the map shows no signal for it.
+**DO NOT** spray nuclei/sqlmap/nikto before the browser walkthrough on web apps. Skip a specialist only when the map/hypotheses show no signal for it.
 
 **If the target is unreachable via HTTP (httpx/curl fail):**
 - Do NOT give up immediately. Try these alternatives:
@@ -337,7 +349,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
   - **SSRF detection**: Navigate and inspect network_requests in the output to see outgoing connections
   Actions: navigate, fill, click, type, execute_js, get_source, get_cookies, set_cookie, screenshot, wait, check_xss, submit_form, check_response
 - **nuclei_help**, **naabu_help**, **httpx_help**, **subfinder_help**, **dnsx_help**, **katana_help**, **tldfinder_help**, **waybackurls_help**, **nmap_help**, **masscan_help**, **ffuf_help**, **amass_help**, **whatweb_help**, **knockpy_help**, **gau_help**, **kiterunner_help**, **schemathesis_help**, **sqlmap_help**, **nikto_help**, **wafw00f_help**, **testssl_help**, **sslyze_help**, **arjun_help**, **wpscan_help**, **xsstrike_help**, **gitleaks_help**, **jwt_help**, **semgrep_help**, **trivy_help**, **cmseek_help**: Get CLI usage for each tool
-- **fireteam_dispatch**: Spawn parallel specialist sub-agents. After execute_deep_crawl, prefer specialists="auto" so hunters match the capability map (auth_logic, api_authz, injection, graphql_api, js_secrets, file_upload, saml_sso, spa_client, app_mapper, vuln_triage). Args: mission (optional if map present), targets (list), specialists ("auto" or name list), max_parallel (default 4), mode ("attack"|"recon"). Example: fireteam_dispatch(mission="Attack mapped surfaces", specialists="auto", targets=["https://target.com"])
+- **fireteam_dispatch**: Spawn parallel specialist sub-agents. After sync_engagement_brain / deep_crawl, prefer specialists="auto" so hunters match open hypotheses (auth_logic, api_authz, host_tenant, business_logic, injection, coverage, …). Args: mission (optional if map/brain present), targets (list), specialists ("auto" or name list), max_parallel (default 4), mode ("attack"|"recon"). Example: fireteam_dispatch(specialists="auto", targets=["https://target.com"])
 - **replay_http_request**: Replay/tamper a captured XHR/API request from the capability map (like Burp Repeater-lite). Args: method, url, headers (dict), body (optional), sample_index (optional int into capability_map.api_samples), use_auth_session (default true — attaches cookies from deep_crawl login). Example: replay_http_request(sample_index=0) or replay_http_request(method="GET", url="https://target.com/api/users?id=1")
 - **add_asset**: Add a target to the asset inventory. Use when the target is NOT already in the database. Args: **value** (required — hostname, domain, IP, or URL), asset_type (optional, auto-detected), description (optional). Example: add_asset(value="test-git.glensserver.com"). Once added, you can scan it and use create_finding.
 - **create_scan**: Create an async bulk scan job handled by the scanner worker. Use this instead of execute_* tools when you need to scan many targets (e.g. a list of IPs, subnets, or domains). Args: **scan_type** (required — port_scan, vulnerability, waybackurls, katana, paramspider, http_probe, technology, screenshot, login_portal, subdomain_enum, dns_resolution, discovery, full, geo_enrich, tldfinder, whatweb, llm_red_team, graphql_scan, subdomain_takeover, js_recon, jsluice_scan, commoncrawl_enum, janus_dast), **targets** (optional list of hostnames/IPs — omit to scan all org assets), name (optional), config (optional dict, e.g. {"severity": ["critical","high"]}). For chatbot discovery, use `create_scan(scan_type="technology", targets=["example.com"], config={"detect_chatbots": true})`; set `render_chatbots=true` only when you need browser-rendered DOM detection for dynamic chat bubbles. Examples: create_scan(scan_type="port_scan", targets=["10.0.0.0/24"]), create_scan(scan_type="vulnerability", targets=["example.com"]), create_scan(scan_type="llm_red_team", targets=["https://example.com"], config={"categories": ["prompt_injection","jailbreak"]}). Also: create_scan(scan_type="graphql_scan", targets=["example.com"]), create_scan(scan_type="subdomain_takeover", targets=["example.com"]), create_scan(scan_type="js_recon", targets=["example.com"]). The scan runs asynchronously — results appear on the Scans page and update asset records automatically.
@@ -466,6 +478,18 @@ These tools implement specialized offensive test workflows and require the explo
   success_indicators (optional list), failure_indicators (optional list), **authorized** (MUST be True).
   Returns hits, lockout status, and per-attempt results (passwords are redacted in output).
   Example: test_credential_spray(login_url="https://target.com/login", usernames=["admin","user@example.com"], passwords=["Spring2026!"], authorized=True)
+
+- **compare_requests**: Differential HTTP proof (baseline vs one mutation). Core tool for logic/authz/tenant bugs.
+  Args: **baseline** (object: method/url/headers/body), **mutant** (same shape — change Host, object id, etc.),
+  interest_fields (optional list e.g. ["owner_id","email","tenant"]), use_auth_session (default true),
+  hypothesis_id (optional — auto-annotates engagement brain).
+  Verdicts: LIKELY_IMPACT | MUTANT_BYPASS_CANDIDATE | NO_MATERIAL_DIFF | MUTANT_DENIED | NEEDS_INTERPRETATION.
+  Example: compare_requests(baseline={{"method":"GET","url":"https://a.app/api/me"}}, mutant={{"method":"GET","url":"https://a.app/api/me","headers":{{"Host":"b.app"}}}})
+
+- **sync_engagement_brain**: Seed open hypotheses from the capability map (call after deep_crawl).
+- **update_hypothesis**: Mark hypothesis open|in_progress|proven|killed with evidence.
+- **queue_finding_followups**: After a confirmed finding, enqueue chain cards (default_login→auth CVE, host_header→tenant bypass).
+- **add_engagement_credential** / **log_engagement_approach** / **get_engagement_brain**: Persist creds, tried approaches, inspect brain.
 """
 
     exploitation_tools = """
@@ -616,6 +640,15 @@ TOOL_PHASE_MAP = {
     "test_race_condition": ["exploitation", "post_exploitation"],
     "test_saml_sso": ["exploitation", "post_exploitation"],
     "test_credential_spray": ["exploitation", "post_exploitation"],
+
+    # Tester-process control plane
+    "compare_requests": ["exploitation", "post_exploitation"],
+    "sync_engagement_brain": ["informational", "exploitation", "post_exploitation"],
+    "update_hypothesis": ["informational", "exploitation", "post_exploitation"],
+    "queue_finding_followups": ["informational", "exploitation", "post_exploitation"],
+    "log_engagement_approach": ["informational", "exploitation", "post_exploitation"],
+    "add_engagement_credential": ["informational", "exploitation", "post_exploitation"],
+    "get_engagement_brain": ["informational", "exploitation", "post_exploitation"],
 
     # Legacy scanning tools
     "run_nuclei_scan": ["informational", "exploitation", "post_exploitation"],
