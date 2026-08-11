@@ -411,9 +411,6 @@ export default function DashboardPage() {
           ))}
         </div>
 
-        {/* Prioritization value (Sankey) — live scanner → Delphi → OPES funnel */}
-        <PrioritizationFunnelCard />
-
         {/* World Map */}
         <Card>
           <CardContent className="pt-6">
@@ -441,6 +438,9 @@ export default function DashboardPage() {
             )}
           </CardContent>
         </Card>
+
+        {/* Prioritization value — live scanner → Delphi → OPES funnel */}
+        <PrioritizationFunnelCard />
 
         {/* Findings Breakdown */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
