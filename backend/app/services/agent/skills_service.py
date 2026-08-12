@@ -87,21 +87,22 @@ SKILLS: list[Skill] = [
         ],
         title="Tester process (hypotheses + differentials)",
         description=(
-            "Orchestrator loop: capability map → hypothesis queue → specialist fireteam → "
-            "compare_requests proof → chain follow-ups → coverage leftovers."
+            "Orchestrator loop: crawl observations → methodology cards (CWE/CAPEC) → "
+            "specialist fireteam → compare_requests proof → chain follow-ups → coverage."
         ),
         playbook_id="tester_process",
         system_context=(
             "You are running the TESTER-PROCESS skill. "
             "1) execute_deep_crawl on the primary web target. "
-            "2) sync_engagement_brain to seed open hypotheses. "
-            "3) fireteam_dispatch(specialists='auto') — specialists come from open cards "
-            "(auth_logic, api_authz, host_tenant, business_logic, injection, coverage…). "
+            "2) sync_engagement_brain to seed observation→methodology hypothesis cards "
+            "(CWE/CAPEC/OWASP-tagged tests from forms/APIs/auth/params seen). "
+            "3) fireteam_dispatch(specialists='auto') — specialists receive methodology "
+            "directives and must prove/kill each card. "
             "4) Prove logic/authz with compare_requests (baseline vs one mutation). "
             "5) update_hypothesis(proven|killed); on confirm queue_finding_followups "
             "(default_login→authenticated CVE; host_header→tenant bypass). "
             "6) Only then run nuclei coverage; use add_engagement_credential + -var when creds exist. "
-            "Do not spray scanners before hypotheses exist."
+            "Do not spray scanners before methodology cards exist."
         ),
     ),
     Skill(
@@ -204,14 +205,21 @@ SKILLS: list[Skill] = [
     ),
     Skill(
         id="llm-redteam",
-        aliases=["llmredteam", "ai-redteam", "chatbot"],
+        aliases=["llmredteam", "ai-redteam", "chatbot", "agent-tools", "mcp-tools"],
         title="LLM / chatbot red team",
-        description="OWASP LLM Top-10 evaluation against discovered chatbot endpoints.",
+        description=(
+            "OWASP LLM Top-10 evaluation against chatbot/agent endpoints, including "
+            "tool enumeration (AI port scan) and parameter abuse."
+        ),
         scan_type="llm_red_team",
         playbook_id="llm_red_team",
         system_context=(
-            "You are running the LLM-REDTEAM skill. Discover chat endpoints, confirm "
-            "them with a benign message, then call execute_llm_red_team."
+            "You are running the LLM-REDTEAM skill. Discover chat/agent endpoints, "
+            "confirm with a benign message, then call execute_llm_red_team. "
+            "For tool-using agents: enumerate tools/schemas first (tool_enumeration) — "
+            "tools define the attack surface; each parameter is an injection point "
+            "(user_id→IDOR, email→phishing/PII, refund→fraud, send_now→immediate action). "
+            "Then run remaining categories."
         ),
     ),
     Skill(

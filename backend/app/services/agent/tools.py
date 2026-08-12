@@ -260,6 +260,8 @@ class ASMToolsManager:
             "log_engagement_approach": self.log_engagement_approach,
             "add_engagement_credential": self.add_engagement_credential,
             "get_engagement_brain": self.get_engagement_brain,
+            "get_methodology_progress": self.get_methodology_progress,
+            "ingest_urls_into_map": self.ingest_urls_into_map,
         }
         # Optional: web search (RedAmon-style) when Tavily API key is set
         if getattr(settings, "TAVILY_API_KEY", None):
@@ -1298,6 +1300,16 @@ class ASMToolsManager:
         cwes = data.get("cwe") or []
         if cwes:
             lines.append(f"**CWEs**: {', '.join(cwes)}")
+            try:
+                from app.services.vuln_intel_enrichment import build_cwe_intel
+                for row in build_cwe_intel([str(c) for c in cwes])[:5]:
+                    capecs = ", ".join(c.get("id", "") for c in (row.get("capec") or [])[:4])
+                    lines.append(
+                        f"  - {row.get('cwe_id')}: {row.get('name') or ''}"
+                        + (f" → {capecs}" if capecs else "")
+                    )
+            except Exception:
+                pass
 
         return "\n".join(lines)
 
@@ -1723,7 +1735,50 @@ class ASMToolsManager:
             db.add(vuln)
             db.commit()
             db.refresh(vuln)
-            return f"Finding created: id={vuln.id}, title={vuln.title[:60]}..., severity={vuln.severity.value}, asset={asset.value}"
+            msg = (
+                f"Finding created: id={vuln.id}, title={vuln.title[:60]}..., "
+                f"severity={vuln.severity.value}, asset={asset.value}"
+            )
+            # CVE→CWE loop-back into engagement brain methodologies
+            if vuln.cve_id:
+                try:
+                    from app.services.vuln_intel_enrichment import enrich_cve_catalog
+                    from app.services.agent.engagement_brain import (
+                        engagement_brain_from_dict,
+                        boost_methodologies_for_cwes,
+                    )
+                    catalog = enrich_cve_catalog(
+                        vuln.cve_id, use_cache=True, include_exploit_sources=False
+                    )
+                    cwes = list(catalog.get("cwes") or [])
+                    if cwes:
+                        brain = engagement_brain_from_dict(
+                            getattr(self, "_engagement_brain", None)
+                        )
+                        boosted = boost_methodologies_for_cwes(
+                            brain,
+                            cwes,
+                            cve_id=vuln.cve_id,
+                            evidence=title,
+                        )
+                        self._engagement_brain = brain.to_dict()
+                        if boosted:
+                            msg += (
+                                f" | CVE→CWE loop-back boosted "
+                                f"{len(boosted)} methodology card(s): "
+                                + ", ".join(
+                                    (h.methodology_id or h.id) for h in boosted[:4]
+                                )
+                            )
+                        if catalog.get("cwe_intel"):
+                            names = [
+                                f"{r.get('cwe_id')} ({r.get('name')})"
+                                for r in catalog["cwe_intel"][:3]
+                            ]
+                            msg += f" | CWEs: {', '.join(names)}"
+                except Exception:
+                    logger.debug("create_finding CVE→CWE loop-back failed", exc_info=True)
+            return msg
         except Exception as e:
             db.rollback()
             logger.exception("create_finding failed")
@@ -1875,7 +1930,7 @@ class ASMToolsManager:
         create_findings: bool = True,
         **kwargs: Any,
     ) -> str:
-        """Run LLM red team scan against chatbot/AI endpoints on a target URL. Tests for prompt injection, jailbreak, data exfiltration, SSRF, excessive agency, and more. Optionally auto-discovers chat endpoints. If endpoint_url is provided, it will be tested directly. categories = prompt_injection|system_prompt_leakage|data_exfiltration|jailbreak|ssrf_tool_abuse|excessive_agency|hallucination|harmful_content (comma-separated or list; omit for all). Returns a formatted report of findings."""
+        """Run LLM red team scan against chatbot/AI endpoints on a target URL. Tests for prompt injection, jailbreak, data exfiltration, SSRF, excessive agency, tool_enumeration (enumerate agent tools then abuse params), and more. Optionally auto-discovers chat endpoints. If endpoint_url is provided, it will be tested directly. categories = prompt_injection|system_prompt_leakage|data_exfiltration|jailbreak|ssrf_tool_abuse|excessive_agency|tool_enumeration|hallucination|harmful_content (comma-separated or list; omit for all). Returns a formatted report of findings."""
         from app.services.llm_red_team.scanner import (
             run_scan, ScanConfig, ChatEndpoint, format_scan_report, build_finding_data,
         )
@@ -3883,13 +3938,20 @@ class ASMToolsManager:
         title: str = "",
         target: str = "",
         evidence: str = "",
+        cve_id: str = "",
+        cwe_ids: Optional[List[str]] = None,
     ) -> str:
-        """Enqueue chain cards after a confirmed finding (creds→auth CVE, Host→tenant, …)."""
+        """Enqueue chain cards after a confirmed finding (creds→auth CVE, Host→tenant, …).
+
+        Optional cve_id / cwe_ids trigger CVE→CWE loop-back: boost open methodology
+        cards that share those weakness IDs.
+        """
         from app.services.agent.engagement_brain import (
             classify_finding_type,
             engagement_brain_from_dict,
             queue_followups_for_finding,
             specialists_from_open_hypotheses,
+            boost_methodologies_for_cwes,
         )
 
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
@@ -3901,11 +3963,35 @@ class ASMToolsManager:
             target=target,
             evidence=evidence,
         )
+
+        cwe_intel = []
+        boosted = []
+        resolved_cwes = list(cwe_ids or [])
+        if cve_id and not resolved_cwes:
+            try:
+                from app.services.vuln_intel_enrichment import enrich_cve_catalog
+                catalog = enrich_cve_catalog(cve_id, use_cache=True, include_exploit_sources=False)
+                resolved_cwes = list(catalog.get("cwes") or [])
+                cwe_intel = list(catalog.get("cwe_intel") or [])
+            except Exception as exc:
+                logger.debug("CVE→CWE enrich failed for %s: %s", cve_id, exc)
+        if resolved_cwes:
+            boosted = boost_methodologies_for_cwes(
+                brain,
+                resolved_cwes,
+                cve_id=cve_id or "",
+                evidence=evidence or title,
+            )
+
         self._engagement_brain = brain.to_dict()
         return json.dumps(
             {
                 "classified_as": vtype,
                 "queued": [h.to_dict() for h in created],
+                "cve_id": cve_id or None,
+                "cwes": resolved_cwes,
+                "cwe_intel": cwe_intel[:5],
+                "boosted_methodologies": [h.to_dict() for h in boosted],
                 "suggested_specialists": specialists_from_open_hypotheses(brain),
                 "next_steps": brain.next_steps,
                 "engagement_brain": self._engagement_brain,
@@ -3986,14 +4072,108 @@ class ASMToolsManager:
             format_engagement_brain_for_prompt,
             specialists_from_open_hypotheses,
             engagement_brain_from_dict,
+            methodology_progress,
+            format_methodology_progress_for_prompt,
         )
 
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cmap = getattr(self, "_capability_map", None) or {}
+        progress = methodology_progress(brain, cmap=cmap if isinstance(cmap, dict) else {})
         return json.dumps(
             {
                 "prompt_view": format_engagement_brain_for_prompt(brain.to_dict()),
+                "methodology_progress": progress,
+                "methodology_checklist": format_methodology_progress_for_prompt(progress),
                 "suggested_specialists": specialists_from_open_hypotheses(brain),
                 "engagement_brain": brain.to_dict(),
+            },
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def get_methodology_progress(self) -> str:
+        """Return the observation→methodology assessment checklist and readiness gates."""
+        from app.services.agent.engagement_brain import (
+            engagement_brain_from_dict,
+            methodology_progress,
+            format_methodology_progress_for_prompt,
+        )
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cmap = getattr(self, "_capability_map", None) or {}
+        progress = methodology_progress(brain, cmap=cmap if isinstance(cmap, dict) else {})
+        return json.dumps(
+            {
+                "progress": progress,
+                "prompt_view": format_methodology_progress_for_prompt(progress),
+            },
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def ingest_urls_into_map(
+        self,
+        urls: Optional[Any] = None,
+        source: str = "passive",
+        target: str = "",
+        resync_brain: bool = True,
+    ) -> str:
+        """
+        Merge katana/gau/wayback/httpx URL lists into the capability map so methodologies
+        update from passive crawl observations (not only Playwright deep_crawl).
+
+        urls: newline/comma-separated string, JSON array, or list of URL strings.
+        """
+        from app.services.agent.capability_map import ingest_passive_urls
+        from app.services.agent.engagement_brain import (
+            engagement_brain_from_dict,
+            seed_hypotheses_from_capability_map,
+            methodology_progress,
+        )
+
+        raw = urls
+        parsed: List[str] = []
+        if isinstance(raw, list):
+            parsed = [str(u) for u in raw]
+        elif isinstance(raw, str):
+            text = raw.strip()
+            if text.startswith("["):
+                try:
+                    loaded = json.loads(text)
+                    if isinstance(loaded, list):
+                        parsed = [str(u) for u in loaded]
+                except Exception:
+                    parsed = []
+            if not parsed:
+                parsed = [p.strip() for p in _re.split(r"[\n,]+", text) if p.strip()]
+        if not parsed:
+            return json.dumps({"error": "urls required (list or newline/comma-separated)"}, indent=2)
+
+        existing = getattr(self, "_capability_map", None)
+        merged = ingest_passive_urls(
+            existing if isinstance(existing, dict) else None,
+            parsed,
+            target=target or (existing or {}).get("target", "") if isinstance(existing, dict) else target,
+            source=source,
+        )
+        self._capability_map = merged
+        brain_out = None
+        if resync_brain:
+            brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            brain = seed_hypotheses_from_capability_map(brain, merged)
+            self._engagement_brain = brain.to_dict()
+            brain_out = self._engagement_brain
+        progress = methodology_progress(
+            getattr(self, "_engagement_brain", None), cmap=merged
+        )
+        return json.dumps(
+            {
+                "ingested": len(parsed),
+                "source": source,
+                "pages": len(merged.get("pages_visited") or []),
+                "apis": len(merged.get("api_endpoints") or []),
+                "methodologies": len(merged.get("methodologies") or []),
+                "methodology_progress": progress,
+                "capability_map": merged,
+                "engagement_brain": brain_out,
             },
             indent=2,
         )[:_tool_output_max_chars()]

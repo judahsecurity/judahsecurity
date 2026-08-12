@@ -49,10 +49,13 @@ class CapabilityMap:
     has_admin: bool = False
     has_oauth_sso: bool = False
     has_spa_signals: bool = False
+    has_ai_agent: bool = False
     param_rich_paths: List[str] = field(default_factory=list)
 
     capabilities: List[str] = field(default_factory=list)
     ranked_hunt_queue: List[Dict[str, str]] = field(default_factory=list)
+    # Observation → concrete methodologies (CWE/CAPEC/OWASP-tagged test cards)
+    methodologies: List[Dict[str, Any]] = field(default_factory=list)
     quality_score: float = 0.0
     ready_for_attack: bool = False
     notes: List[str] = field(default_factory=list)
@@ -74,6 +77,17 @@ _OAUTH_RE = re.compile(
     re.I,
 )
 _SPA_HINTS = re.compile(r"(_next/|react|vue|angular|webpack|vite|spa)", re.I)
+# Chatbots / copilots / MCP-style agent tool surfaces (AI attack surface)
+_AI_AGENT_RE = re.compile(
+    r"("
+    r"/api/chat|/api/message|/api/ask|/api/completions|/v1/chat|/v1/messages|"
+    r"chatbot|copilot|assistant|/mcp\b|model.?context.?protocol|"
+    r"openai|anthropic|langchain|langgraph|function.?call|tool.?call|"
+    r"intercom|drift|zendesk.?chat|crisp\.chat|tawk\.to|livechat|freshchat|"
+    r"helpscout|olark|hubspot.?chat|genesys|salesforce.?chat"
+    r")",
+    re.I,
+)
 
 
 def build_capability_map_from_crawl(crawl: Any) -> CapabilityMap:
@@ -161,6 +175,8 @@ def finalize_capability_map(cmap: CapabilityMap) -> CapabilityMap:
         or _AUTH_INPUTS.search(inputs_blob)
     )
     cmap.has_spa_signals = bool(_SPA_HINTS.search(combined)) or len(cmap.js_files) >= 3
+    third_blob = " ".join(cmap.third_party or [])
+    cmap.has_ai_agent = bool(_AI_AGENT_RE.search(f"{combined} {third_blob}"))
 
     # Parameter-looking paths (query strings or REST-ish ids)
     param_paths: List[str] = []
@@ -178,6 +194,8 @@ def finalize_capability_map(cmap: CapabilityMap) -> CapabilityMap:
         caps.append("browsable_ui")
     if cmap.has_spa_signals:
         caps.append("spa")
+    if cmap.has_ai_agent:
+        caps.append("ai_agent")
     if cmap.has_api:
         caps.append("api")
     if cmap.has_graphql:
@@ -208,7 +226,24 @@ def finalize_capability_map(cmap: CapabilityMap) -> CapabilityMap:
         caps.append("forms")
     cmap.capabilities = caps
 
-    cmap.ranked_hunt_queue = _build_hunt_queue(cmap)
+    # Observation → methodologies first; hunt queue collapses those + legacy hunts
+    from app.services.agent.methodology_catalog import (
+        methodologies_from_capability_map,
+        methodologies_to_hunt_queue,
+    )
+
+    methods = methodologies_from_capability_map(cmap)
+    cmap.methodologies = [m.to_dict() for m in methods]
+    method_queue = methodologies_to_hunt_queue(methods)
+    legacy_queue = _build_hunt_queue(cmap)
+    # Prefer methodology-backed hunts; append legacy hunts not already covered
+    seen_hunts = {h.get("hunt") for h in method_queue}
+    merged_queue = list(method_queue)
+    for h in legacy_queue:
+        if h.get("hunt") not in seen_hunts:
+            merged_queue.append(h)
+            seen_hunts.add(h.get("hunt"))
+    cmap.ranked_hunt_queue = merged_queue[:14]
     cmap.quality_score = _score_map(cmap)
     # Ready when we actually browsed something useful — not just a blank fail.
     cmap.ready_for_attack = (
@@ -296,6 +331,18 @@ def _build_hunt_queue(cmap: CapabilityMap) -> List[Dict[str, str]]:
     if cmap.has_spa_signals:
         add("medium", "spa_client", "SPA signals — DOM XSS, client routing, hidden API routes",
             cmap.pages_visited[0] if cmap.pages_visited else "")
+    if cmap.has_ai_agent:
+        add(
+            "high",
+            "agent_tools",
+            "AI/chatbot/agent surface — enumerate tools (AI port scan), then abuse params "
+            "(user_id→IDOR, email→phishing, refund→fraud, send_now→immediate action)",
+            next(
+                (p for p in (cmap.pages_visited + [e.get("path", "") for e in cmap.api_endpoints])
+                  if _AI_AGENT_RE.search(str(p))),
+                "chat",
+            ),
+        )
     if not queue and cmap.pages_visited:
         add("medium", "baseline_web", "Browsable UI with limited signals — baseline web vulns + nuclei",
             cmap.pages_visited[0])
@@ -321,6 +368,8 @@ def _score_map(cmap: CapabilityMap) -> float:
         score += 0.07
     if cmap.has_graphql or cmap.has_upload:
         score += 0.05
+    if cmap.has_ai_agent:
+        score += 0.12  # chatbot/agent surface is high-value even with few pages
     if cmap.authenticated is True:
         score += 0.05
     return round(min(1.0, score), 3)
@@ -345,6 +394,7 @@ ATTACK_SPECIALIST_NAMES = [
     "file_upload",
     "saml_sso",
     "spa_client",
+    "agent_tools",
     "coverage",
     "finding_judge",
     "vuln_triage",
@@ -362,8 +412,13 @@ def select_specialists_for_map(
         cmap = build_capability_map_from_dict(cmap)
     if not cmap or not cmap.ready_for_attack:
         # Thin map: still map + secrets + triage, avoid spray.
-        return (["app_mapper", "js_secrets", "vuln_triage"] if not include_recon
-                else ["web_recon", "js_secrets", "vuln_triage"])[:max_specialists]
+        # If an AI/chat surface is already visible, prioritize tool enumeration.
+        if cmap and getattr(cmap, "has_ai_agent", False):
+            thin = ["app_mapper", "agent_tools", "vuln_triage"]
+        else:
+            thin = ["app_mapper", "js_secrets", "vuln_triage"]
+        return (thin if not include_recon
+                else ["web_recon"] + thin[1:])[:max_specialists]
 
     selected: List[str] = ["app_mapper"]
     hunt_to_specialist = {
@@ -378,6 +433,7 @@ def select_specialists_for_map(
         "injection": "injection",
         "js_secrets": "js_secrets",
         "spa_client": "spa_client",
+        "agent_tools": "agent_tools",
         "coverage": "coverage",
         "admin_surface": "auth_logic",
         "realtime": "api_authz",
@@ -435,7 +491,10 @@ def format_capability_map_for_prompt(cmap: Optional[CapabilityMap | Dict[str, An
         for f in cmap.forms[:6]:
             inputs = ",".join((f.get("inputs") or [])[:8])
             lines.append(f"  - {f.get('method')} {f.get('action') or '(self)'} inputs=[{inputs}]")
-    if cmap.ranked_hunt_queue:
+    if cmap.methodologies:
+        from app.services.agent.methodology_catalog import format_methodologies_for_prompt
+        lines.append(format_methodologies_for_prompt(cmap.methodologies))
+    elif cmap.ranked_hunt_queue:
         lines.append("Ranked hunt queue (spawn specialists for these):")
         for i, h in enumerate(cmap.ranked_hunt_queue[:8], 1):
             lines.append(f"  {i}. [{h.get('priority')}] {h.get('hunt')}: {h.get('why')}")
@@ -499,3 +558,74 @@ def merge_capability_maps(
         api_samples=_uniq(list(old.api_samples) + list(new.api_samples))[:60],
     )
     return finalize_capability_map(merged).to_dict()
+
+
+def ingest_passive_urls(
+    existing: Optional[Dict[str, Any]],
+    urls: Iterable[str],
+    *,
+    target: str = "",
+    source: str = "passive",
+) -> Dict[str, Any]:
+    """
+    Merge katana/gau/wayback/httpx URL lists into the capability map.
+
+    Passive URLs enrich pages/API/JS signals so methodologies fire even when
+    Playwright deep_crawl missed a path.
+    """
+    url_list = [str(u).strip() for u in (urls or []) if str(u).strip()]
+    if not url_list:
+        return existing or finalize_capability_map(CapabilityMap(target=target)).to_dict()
+
+    pages: List[str] = []
+    apis: List[Dict[str, str]] = []
+    js_files: List[str] = []
+    js_endpoints: List[str] = []
+
+    for raw in url_list[:400]:
+        u = raw
+        if not u.startswith(("http://", "https://", "/")):
+            # bare path
+            if u.startswith("api/") or "/api/" in u:
+                apis.append({"host": "", "method": "GET", "path": u if u.startswith("/") else f"/{u}"})
+            else:
+                pages.append(u)
+            continue
+        lower = u.lower()
+        path = u
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(u)
+            path = parsed.path or "/"
+            if parsed.query:
+                path = f"{path}?{parsed.query}"
+            host = parsed.netloc or ""
+        except Exception:
+            host = ""
+        if any(lower.endswith(ext) for ext in (".js", ".mjs", ".map")):
+            if lower.endswith(".map"):
+                continue
+            js_files.append(u)
+            continue
+        if re.search(r"/api/|/graphql|/gql\b|/v\d+/|swagger|openapi", path, re.I):
+            apis.append({"host": host, "method": "GET", "path": path})
+        elif "?" in path or re.search(r"/\d{1,12}(?:/|$)", path):
+            apis.append({"host": host, "method": "GET", "path": path})
+            pages.append(u)
+        else:
+            pages.append(u)
+        if "/api/" in path or path.startswith("/api"):
+            js_endpoints.append(path)
+
+    existing_target = ""
+    if isinstance(existing, dict):
+        existing_target = str(existing.get("target") or "")
+    patch = CapabilityMap(
+        target=target or existing_target,
+        pages_visited=pages[:80],
+        api_endpoints=apis[:200],
+        js_files=js_files[:80],
+        js_endpoints=js_endpoints[:80],
+        notes=[f"Ingested {len(url_list)} URLs from {source}"],
+    )
+    return merge_capability_maps(existing, finalize_capability_map(patch))

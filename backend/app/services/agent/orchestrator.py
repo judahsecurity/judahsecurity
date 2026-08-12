@@ -647,6 +647,46 @@ class AgentOrchestrator:
         
         # Handle actions
         if decision.action == "complete":
+            reason = (decision.completion_reason or "").lower()
+            force_complete = (
+                "force complete" in reason
+                or "defer methodologies" in reason
+                or "defer remaining" in reason
+                or "non-browser" in reason
+            )
+            brain_state = state.get("engagement_brain") or {}
+            cmap = state.get("capability_map") or {}
+            webby = bool(cmap) or any(
+                t in (state.get("objective") or "").lower()
+                for t in ("http", "https", "web", "app", "url")
+            )
+            if webby and not force_complete:
+                try:
+                    from app.services.agent.engagement_brain import methodology_progress
+                    progress = methodology_progress(brain_state, cmap=cmap)
+                    if not progress.get("ready_to_complete"):
+                        blockers = progress.get("blockers") or []
+                        blocker_txt = "; ".join(
+                            f"{b.get('methodology_id') or b.get('id')}: {b.get('title')}"
+                            for b in blockers[:5]
+                        ) or "methodology cards not seeded"
+                        step.thought = (
+                            (step.thought or "")
+                            + " | Complete blocked — unresolved high-priority methodologies."
+                        )
+                        step.tool_name = None
+                        updates["_current_step"] = step.model_dump()
+                        updates["messages"] = [AIMessage(content=(
+                            "Cannot complete yet — application assessment methodology incomplete.\n"
+                            f"{progress.get('summary')}\n"
+                            f"Blocking: {blocker_txt}\n\n"
+                            "Prove or kill those cards (update_hypothesis), then complete. "
+                            "Or set completion_reason to include 'defer methodologies' / "
+                            "'force complete' if intentionally skipping."
+                        ))]
+                        return updates
+                except Exception:
+                    logger.exception("methodology complete-gate failed")
             updates["task_complete"] = True
             updates["completion_reason"] = decision.completion_reason or "Task completed"
         
@@ -675,9 +715,35 @@ class AgentOrchestrator:
                 updates["messages"] = [AIMessage(content=(
                     "Before transitioning to exploitation, walk the application like a tester: "
                     "call **execute_deep_crawl** on the primary URL (click links/menus), "
-                    "review the capability map, then **fireteam_dispatch(specialists='auto')**. "
+                    "review the capability map / methodology cards, then "
+                    "**sync_engagement_brain** + **fireteam_dispatch(specialists='auto')**. "
                     "If this target is not a web app, request the transition again with reason "
                     "containing 'non-browser'."
+                ))]
+                return updates
+
+            # Soft nudge: exploitation with map but no methodology cards
+            brain_state = state.get("engagement_brain") or {}
+            has_method_cards = any(
+                (h.get("source") == "methodology") or h.get("methodology_id")
+                for h in (brain_state.get("hypotheses") or [])
+            ) or bool(cmap.get("methodologies"))
+            if (
+                to_phase == "exploitation"
+                and map_ready
+                and not has_method_cards
+                and not non_browser
+            ):
+                step.thought = (
+                    (step.thought or "")
+                    + " | Methodology cards missing — sync_engagement_brain before exploitation spray."
+                )
+                step.tool_name = None
+                updates["_current_step"] = step.model_dump()
+                updates["messages"] = [AIMessage(content=(
+                    "Capability map exists but methodology cards are not seeded. "
+                    "Call **sync_engagement_brain** so observation→methodology hypotheses "
+                    "(CWE/CAPEC-tagged) drive the fireteam, then transition again."
                 ))]
                 return updates
 
@@ -832,7 +898,7 @@ class AgentOrchestrator:
                 except Exception:
                     pass
 
-        # Soft gate: block broad active scanners until the browser capability map exists
+        # Soft gate: block broad active scanners until capability map + methodology cards exist
         # (unless the operator forces, or this is clearly a non-HTTP engagement).
         cmap = state.get("capability_map") or {}
         map_ready = bool(cmap.get("ready_for_attack"))
@@ -845,12 +911,43 @@ class AgentOrchestrator:
             step_data["tool_output"] = (
                 f"Blocked: '{tool_name}' before application capability map. "
                 "Walk the app like a tester first with execute_deep_crawl on the primary URL, "
-                "then fireteam_dispatch(specialists='auto'), then resume scanning. "
+                "then sync_engagement_brain + fireteam_dispatch(specialists='auto'), then resume scanning. "
                 "Pass force=true only for intentionally non-browser targets."
             )
             step_data["success"] = False
             step_data["error_message"] = "capability_map_required"
             return {"_current_step": step_data}
+
+        if tool_name in spray_tools and map_ready and not force:
+            brain_state = state.get("engagement_brain") or {}
+            try:
+                from app.services.agent.engagement_brain import methodology_progress
+                progress = methodology_progress(brain_state, cmap=cmap)
+                if not progress.get("seeded"):
+                    step_data["tool_output"] = (
+                        f"Blocked: '{tool_name}' before methodology cards are seeded. "
+                        "Call sync_engagement_brain so observation→methodology hypotheses exist, "
+                        "run fireteam_dispatch on high-priority cards, then resume coverage. "
+                        "Pass force=true to override."
+                    )
+                    step_data["success"] = False
+                    step_data["error_message"] = "methodology_required"
+                    return {"_current_step": step_data}
+                if not progress.get("ready_for_coverage_spray"):
+                    blockers = progress.get("blockers") or []
+                    blocker_txt = ", ".join(
+                        (b.get("methodology_id") or b.get("title") or "?") for b in blockers[:4]
+                    ) or "high-priority methodology cards"
+                    step_data["tool_output"] = (
+                        f"Blocked: '{tool_name}' while high-priority methodologies are unresolved "
+                        f"({blocker_txt}). Prove/kill those cards first (fireteam / compare_requests / "
+                        "update_hypothesis), then run coverage scanners. Pass force=true to override."
+                    )
+                    step_data["success"] = False
+                    step_data["error_message"] = "methodology_incomplete"
+                    return {"_current_step": step_data}
+            except Exception:
+                logger.exception("methodology spray-gate failed")
 
         # Execute tool
         result = await self.tool_manager.execute(tool_name, tool_args)
@@ -862,6 +959,15 @@ class AgentOrchestrator:
             step_data["capability_map"] = result.get("capability_map")
         if result.get("auth_session"):
             step_data["auth_session"] = result.get("auth_session")
+
+        # ingest_urls_into_map / sync tools return JSON with capability_map embedded
+        if tool_name in ("ingest_urls_into_map", "sync_engagement_brain") and not step_data.get("capability_map"):
+            try:
+                parsed_out = json.loads(step_data.get("tool_output") or "")
+                if isinstance(parsed_out, dict) and parsed_out.get("capability_map"):
+                    step_data["capability_map"] = parsed_out["capability_map"]
+            except Exception:
+                pass
         
         logger.info(f"[{user_id}] Tool result: success={step_data['success']}")
 
@@ -1024,6 +1130,8 @@ class AgentOrchestrator:
             "compare_requests",
             "fireteam_dispatch",
             "get_engagement_brain",
+            "get_methodology_progress",
+            "ingest_urls_into_map",
         ) and "engagement_brain" in raw_out:
             try:
                 parsed = json.loads(raw_out)

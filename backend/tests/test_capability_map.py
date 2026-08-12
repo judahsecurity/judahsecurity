@@ -81,8 +81,33 @@ def test_select_specialists_auto_from_map():
     assert "app_mapper" in names
     assert "auth_logic" in names or "saml_sso" in names
     assert "graphql_api" in names
-    assert "vuln_triage" in names
+    assert "finding_judge" in names or "vuln_triage" in names
     assert len(names) <= 6
+
+
+def test_ai_agent_surface_hunts_agent_tools():
+    cmap = build_capability_map_from_crawl(
+        _fake_crawl(
+            pages_visited=[
+                "https://app.example.com/",
+                "https://app.example.com/support",
+            ],
+            forms=[],
+            api_calls={
+                "app.example.com": {
+                    "POST /api/chat",
+                    "GET /api/v1/messages",
+                }
+            },
+            endpoints_from_js={"/api/chat", "/mcp"},
+            websockets=set(),
+        )
+    )
+    assert cmap.has_ai_agent is True
+    assert "ai_agent" in cmap.capabilities
+    assert any(h["hunt"] == "agent_tools" for h in cmap.ranked_hunt_queue)
+    names = select_specialists_for_map(cmap, max_specialists=8)
+    assert "agent_tools" in names
 
 
 def test_thin_map_not_ready():

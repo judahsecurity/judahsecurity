@@ -466,6 +466,134 @@ def _fetch_cxsecurity(cve_id: str) -> Dict[str, Any]:
         return {"source": "cxsecurity", "found": False, "page_url": page_url, "note": str(exc)}
 
 
+def _normalize_cwe(raw: Any) -> Optional[str]:
+    if raw is None:
+        return None
+    s = str(raw).strip().upper().replace("_", "-")
+    if not s:
+        return None
+    if s.startswith("CWE-"):
+        return s
+    m = re.search(r"(\d+)", s)
+    return f"CWE-{m.group(1)}" if m else None
+
+
+def _collect_cwes_from_catalog(
+    nvd: Optional[Dict[str, Any]],
+    osv: Optional[Dict[str, Any]],
+    ghsa: List[Dict[str, Any]],
+) -> List[str]:
+    """Union CWE IDs from NVD (primary) and any OSV/GHSA database_specific hints."""
+    found: List[str] = []
+
+    def _add(val: Any) -> None:
+        if isinstance(val, (list, tuple)):
+            for item in val:
+                _add(item)
+            return
+        cid = _normalize_cwe(val)
+        if cid and cid not in found:
+            found.append(cid)
+
+    if isinstance(nvd, dict):
+        _add(nvd.get("cwes"))
+    if isinstance(osv, dict):
+        db = osv.get("database_specific") or {}
+        if isinstance(db, dict):
+            _add(db.get("cwe_ids") or db.get("cwes") or db.get("CWE"))
+        _add(osv.get("cwe_ids") or osv.get("cwes"))
+    for g in ghsa or []:
+        if not isinstance(g, dict):
+            continue
+        _add(g.get("cwe_ids") or g.get("cwes"))
+    return found
+
+
+def build_cwe_intel(cwe_ids: List[str]) -> List[Dict[str, Any]]:
+    """
+    Map CVE-linked CWEs to names, mitigations, and CAPEC attack patterns.
+
+    Uses in-process CWE fallback + MITRE CWE→CAPEC table (no network required).
+    Optionally deepens from CWEService if already loaded.
+    """
+    if not cwe_ids:
+        return []
+
+    try:
+        from app.services.cwe_service import CWE_FALLBACK, CWEService
+    except Exception:  # pragma: no cover
+        CWE_FALLBACK = {}
+        CWEService = None  # type: ignore
+
+    try:
+        from app.services.mitre_enrichment_service import CWE_TO_CAPEC
+    except Exception:  # pragma: no cover
+        CWE_TO_CAPEC = {}
+
+    out: List[Dict[str, Any]] = []
+    for raw in cwe_ids:
+        cid = _normalize_cwe(raw)
+        if not cid:
+            continue
+        name = None
+        description = None
+        mitigations: List[Dict[str, Any]] = []
+        url = f"https://cwe.mitre.org/data/definitions/{cid.replace('CWE-', '')}.html"
+
+        info = CWE_FALLBACK.get(cid) if isinstance(CWE_FALLBACK, dict) else None
+        if info is None and CWEService is not None and getattr(CWEService, "_loaded", False):
+            try:
+                info = CWEService.get(cid)
+            except Exception:
+                info = None
+        if info is not None:
+            name = getattr(info, "name", None) or (info.get("name") if isinstance(info, dict) else None)
+            description = getattr(info, "description", None) if not isinstance(info, dict) else info.get("description")
+            url = getattr(info, "url", None) or (info.get("url") if isinstance(info, dict) else url) or url
+            mits = getattr(info, "mitigations", None) if not isinstance(info, dict) else info.get("mitigations")
+            for m in mits or []:
+                if hasattr(m, "description"):
+                    mitigations.append({
+                        "description": m.description,
+                        "phase": getattr(m, "phase", None),
+                        "effectiveness": getattr(m, "effectiveness", None),
+                    })
+                elif isinstance(m, dict):
+                    mitigations.append({
+                        "description": m.get("description"),
+                        "phase": m.get("phase"),
+                        "effectiveness": m.get("effectiveness"),
+                    })
+
+        mapping = CWE_TO_CAPEC.get(cid) or {}
+        capec_ids = list(mapping.get("capec_ids") or [])
+        attack_patterns = list(mapping.get("attack_patterns") or [])
+        attack_techniques = list(mapping.get("attack_techniques") or [])
+        if not name:
+            name = mapping.get("description") or cid
+
+        capecs = []
+        for i, capec_id in enumerate(capec_ids):
+            pattern_name = attack_patterns[i] if i < len(attack_patterns) else "Unknown"
+            capecs.append({
+                "id": capec_id,
+                "name": pattern_name,
+                "url": f"https://capec.mitre.org/data/definitions/{str(capec_id).replace('CAPEC-', '')}.html",
+            })
+
+        out.append({
+            "cwe_id": cid,
+            "name": name,
+            "description": description,
+            "url": url,
+            "mitigations": mitigations[:6],
+            "capec": capecs,
+            "attack_techniques": attack_techniques,
+            "source": "nvd+cwe+capec",
+        })
+    return out
+
+
 def enrich_cve_catalog(
     cve_id: str,
     *,
@@ -477,7 +605,8 @@ def enrich_cve_catalog(
     """
     First-party CVE metadata from NVD + OSV + GHSA, plus public exploit indexes.
 
-    Returns a dict with keys: cve_id, nvd, osv, ghsa, exploit_sources, enriched.
+    Returns a dict with keys: cve_id, nvd, osv, ghsa, exploit_sources,
+    cwes, cwe_intel, enriched.
     """
     cve = _normalize_cve(cve_id)
     if not cve:
@@ -559,6 +688,8 @@ def enrich_cve_catalog(
     exploit_found = any(
         isinstance(v, dict) and v.get("found") for v in exploit_sources.values()
     )
+    cwes = _collect_cwes_from_catalog(nvd, osv, ghsa if isinstance(ghsa, list) else [])
+    cwe_intel = build_cwe_intel(cwes)
     result = {
         "cve_id": cve,
         "enriched": bool(nvd or osv or ghsa or exploit_found),
@@ -566,6 +697,8 @@ def enrich_cve_catalog(
         "osv": osv,
         "ghsa": ghsa,
         "exploit_sources": exploit_sources,
+        "cwes": cwes,
+        "cwe_intel": cwe_intel,
     }
     with _lock:
         _cache[cache_key] = (now, result)

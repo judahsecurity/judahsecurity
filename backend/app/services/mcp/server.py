@@ -1551,7 +1551,7 @@ class MCPServer:
                 },
                 "categories": {
                     "type": "string",
-                    "description": "Comma-separated attack categories (prompt_injection,jailbreak,data_exfiltration,ssrf_tool_abuse,system_prompt_leakage,excessive_agency,hallucination,harmful_content). Omit for all."
+                    "description": "Comma-separated attack categories (prompt_injection,jailbreak,data_exfiltration,ssrf_tool_abuse,system_prompt_leakage,excessive_agency,tool_enumeration,hallucination,harmful_content). Omit for all."
                 },
                 "endpoint_url": {
                     "type": "string",

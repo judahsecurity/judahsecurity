@@ -12,28 +12,34 @@ PLAYBOOKS: List[Dict[str, Any]] = [
         ),
         "objective": (
             "Run a tester-process engagement (not a scanner spray).\n\n"
-            "CONTROL LOOP:\n"
+            "CONTROL LOOP (mandatory methodology):\n"
             "1) Observe — execute_deep_crawl on the primary web target.\n"
-            "2) Hypothesize — sync_engagement_brain (seeds authz/Host-tenant/injection/… cards).\n"
-            "3) Dispatch — fireteam_dispatch(specialists='auto') from open hypotheses "
-            "(host_tenant, api_authz, auth_logic, business_logic, injection, coverage…).\n"
-            "4) Mutate one variable — compare_requests(baseline, mutant) for logic proofs.\n"
-            "5) Prove or kill — update_hypothesis(status=proven|killed) with differential evidence.\n"
-            "6) Chain — queue_finding_followups on confirmed hits "
-            "(default_login → authenticated CVE; host_header → tenant bypass).\n"
-            "7) Coverage leftovers — execute_nuclei (use -var username/password from "
-            "engagement credentials when present).\n\n"
+            "2) Enrich — execute_katana/gau then ingest_urls_into_map so passive URLs "
+            "update methodologies.\n"
+            "3) Hypothesize — sync_engagement_brain seeds observation→methodology cards "
+            "(CWE/CAPEC/OWASP-tagged: login→creds, search→XSS, APIs→IDOR, …).\n"
+            "4) Dispatch — fireteam_dispatch(specialists='auto') from open methodology cards.\n"
+            "5) Mutate one variable — compare_requests(baseline, mutant) for logic proofs.\n"
+            "6) Prove or kill — update_hypothesis(status=proven|killed); check "
+            "get_methodology_progress until high-priority cards are resolved.\n"
+            "7) Chain — queue_finding_followups on confirmed hits "
+            "(default_login → authenticated CVE; host_header → tenant bypass; pass cve_id for CWE loop-back).\n"
+            "8) Coverage leftovers — execute_nuclei only after methodology progress allows "
+            "(use -var username/password from engagement credentials when present).\n\n"
             "RULES:\n"
             "- Status 200 alone is never a finding — show field/body differentials.\n"
             "- Prefer 3–6 specialists, not every hunter.\n"
             "- validate_finding before create_finding for medium+.\n"
-            "- Complete with proven/killed hypotheses, not Nuclei-only coverage.\n"
+            "- Do NOT complete while high-priority methodology cards are open "
+            "(unless completion_reason includes 'defer methodologies').\n"
+            "- Complete with proven/killed methodologies + coverage summary, not Nuclei-only.\n"
         ),
         "initial_todos": [
-            {"description": "Deep crawl primary app → capability map", "status": "pending", "priority": "high"},
-            {"description": "sync_engagement_brain — seed open hypotheses", "status": "pending", "priority": "high"},
-            {"description": "fireteam_dispatch(specialists=auto) from hypotheses", "status": "pending", "priority": "high"},
+            {"description": "Deep crawl primary app → capability map + methodologies", "status": "pending", "priority": "high"},
+            {"description": "ingest_urls_into_map from katana/gau; sync_engagement_brain", "status": "pending", "priority": "high"},
+            {"description": "fireteam_dispatch(specialists=auto) from methodology cards", "status": "pending", "priority": "high"},
             {"description": "compare_requests proofs; update_hypothesis proven/killed", "status": "pending", "priority": "high"},
+            {"description": "get_methodology_progress — clear high-priority blockers", "status": "pending", "priority": "high"},
             {"description": "queue_finding_followups + authenticated coverage", "status": "pending", "priority": "high"},
             {"description": "validate_finding → create_finding → report", "status": "pending", "priority": "medium"},
         ],
@@ -109,33 +115,38 @@ PLAYBOOKS: List[Dict[str, Any]] = [
             "**PHASE 3 — Browser walkthrough & capability map (tester eyes-on)**\n"
             "12) On each primary live web app: execute_deep_crawl (interact=true; auth session if available). "
             "This is mandatory before broad exploitation — click menus/tabs/links and learn the app.\n"
-            "13) Supplement with execute_katana / execute_gau / waybackurls for historical coverage, "
-            "but treat the capability map as the source of truth for what the app *does*.\n"
+            "13) Supplement with execute_katana / execute_gau / waybackurls, then "
+            "ingest_urls_into_map so passive URLs refresh methodologies. "
+            "Treat the capability map + methodology checklist as the source of truth.\n"
             "14) sync_engagement_brain then fireteam_dispatch(specialists=\"auto\") to spawn "
-            "specialists from open hypotheses (auth_logic, api_authz, host_tenant, business_logic, "
-            "injection, coverage, …). Prove with compare_requests; queue_finding_followups on hits.\n"
+            "specialists from open methodology cards (CWE/CAPEC-tagged). Prove with "
+            "compare_requests; queue_finding_followups on hits (include cve_id when known).\n"
             "15) JS recon: scan_js_urls_for_secrets + execute_retirejs on crawled bundles; "
             "create_scan(js_recon/jsluice_scan) for bulk JS analysis when many hosts.\n"
             "16) If GraphQL/chatbot/takeover signals appear outside the fireteam: create_scan or "
             "targeted execute_* follow-ups.\n"
-            "17) save_note(category='artifact') with capability map + hunt queue. auto_select_tools.\n\n"
-            "**PHASE 4 — Targeted testing (tester branching from the map)**\n"
-            "18) Work the ranked hunt queue from the capability map / fireteam, highest proof-value first. Examples:\n"
+            "17) get_methodology_progress — do not finish Phase 3 until high-priority cards are "
+            "proven/killed (coverage card may remain open). save_note with checklist. "
+            "auto_select_tools.\n\n"
+            "**PHASE 4 — Targeted testing (tester branching from methodologies)**\n"
+            "18) Work open methodology cards / ranked hunt queue, highest proof-value first. Examples:\n"
             "   - WordPress → wpscan; other CMS → cmseek\n"
             "   - OpenAPI/Swagger → schemathesis; REST APIs → authz checks + kiterunner leftovers\n"
             "   - Injection candidates → sqlmap / xsstrike / browser check_xss with real params\n"
             "   - Auth/SSO/admin → careful curl/browser proofs; dual-identity only if creds provided\n"
             "   - Unkeyed cache / Host header leads → test_cache_poisoning\n"
             "   - Next.js / Spring / Laravel fingerprints → corresponding stack skills/playbooks\n"
-            "19) execute_nuclei without -severity on primary live URLs (comprehensive). "
+            "19) execute_nuclei without -severity on primary live URLs only after "
+            "get_methodology_progress.ready_for_coverage_spray (or force=true). "
             "Follow with create_scan(vulnerability) for remaining host inventory.\n"
             "20) execute_nikto on key web servers when still within iteration budget.\n\n"
             "**PHASE 5 — Confirm, record, report**\n"
             "21) For each solid lead: sanitize_evidence → validate_finding → create_finding "
-            "(concrete request/response, impact, remediation). detect_bug_chains on confirmed vulns.\n"
+            "(concrete request/response, impact, remediation; include cve_id). detect_bug_chains.\n"
             "22) Queue any remaining bulk gaps with create_scan before completing.\n"
-            "23) Complete with: scope covered, tools run, live inventory summary, confirmed findings, "
-            "hypotheses not proven, and recommended next engagement steps.\n\n"
+            "23) Complete only when high-priority methodologies are resolved (or completion_reason "
+            "includes 'defer methodologies'): scope covered, checklist status, confirmed findings, "
+            "and recommended next steps.\n\n"
             "Think like a tester: every tool call should answer a question raised by prior evidence."
         ),
         "initial_todos": [
@@ -143,10 +154,10 @@ PLAYBOOKS: List[Dict[str, Any]] = [
             {"description": "Phase 1: Passive discovery (subfinder/crt/uncover) + httpx + WAF/tech", "status": "pending", "priority": "high"},
             {"description": "Phase 1b: auto_select_tools and adjust plan from discoveries", "status": "pending", "priority": "high"},
             {"description": "Phase 2: Ports (naabu/nmap) + TLS on key hosts", "status": "pending", "priority": "high"},
-            {"description": "Phase 3: Browser deep_crawl → capability map on primary apps", "status": "pending", "priority": "high"},
-            {"description": "Phase 3b: fireteam_dispatch(specialists=auto) from capability map", "status": "pending", "priority": "high"},
-            {"description": "Phase 4: Targeted testing on mapped leads + Nuclei coverage", "status": "pending", "priority": "high"},
-            {"description": "Phase 5: Validate, create findings, queue bulk follow-ups, report", "status": "pending", "priority": "medium"},
+            {"description": "Phase 3: Browser deep_crawl → methodologies on primary apps", "status": "pending", "priority": "high"},
+            {"description": "Phase 3b: ingest_urls_into_map + fireteam from methodology cards", "status": "pending", "priority": "high"},
+            {"description": "Phase 4: Prove/kill methodologies; Nuclei only after checklist allows", "status": "pending", "priority": "high"},
+            {"description": "Phase 5: Validate, findings, methodology checklist clear, report", "status": "pending", "priority": "medium"},
         ],
     },
     {
@@ -383,7 +394,10 @@ PLAYBOOKS: List[Dict[str, Any]] = [
             "4) If chat endpoints are found, use execute_curl to send a test message ('Hello') and confirm the endpoint responds like an AI chatbot.\n"
             "5) Identify the API contract: request format (JSON field name for messages), authentication requirements, response structure.\n\n"
             "**Phase 3 — Automated Red Team Testing**\n"
-            "6) Run execute_llm_red_team against confirmed chatbot endpoints. Test all categories or focus based on risk:\n"
+            "6) Run execute_llm_red_team against confirmed chatbot/agent endpoints. "
+            "For tool-using agents, start with tool_enumeration (AI port scan), then other categories:\n"
+            "   - tool_enumeration: List tools/schemas; abuse email→phishing, refund→fraud, "
+            "DB→exfil; parameter abuse (user_id→IDOR, send_now→immediate action)\n"
             "   - prompt_injection: Can the system prompt be overridden?\n"
             "   - system_prompt_leakage: Can hidden instructions be extracted?\n"
             "   - data_exfiltration: Can PII or internal data be leaked?\n"

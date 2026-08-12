@@ -1,11 +1,12 @@
 # Tester Process & Engagement Brain
 
-How the ASM AI agent works like a human tester: **observe → hypothesize → dispatch specialists → differential proof → chain follow-ups → coverage leftovers**.
+How the ASM AI agent works like a human tester: **observe → methodology cards (CWE/CAPEC) → dispatch specialists → differential proof → chain follow-ups → coverage leftovers**.
 
 Related code:
 
 | Piece | Path |
 |-------|------|
+| Methodology catalog | `backend/app/services/agent/methodology_catalog.py` |
 | Engagement brain | `backend/app/services/agent/engagement_brain.py` |
 | Capability map | `backend/app/services/agent/capability_map.py` |
 | Fireteam specialists | `backend/app/services/agent/fireteam_service.py` |
@@ -16,7 +17,7 @@ Related code:
 | Tools (`compare_requests`, brain APIs) | `backend/app/services/agent/tools.py` |
 | Orchestrator injection | `backend/app/services/agent/orchestrator.py` |
 | Skills / playbooks | `skills_service.py`, `playbooks.py` |
-| Tests | `backend/tests/test_engagement_brain.py` |
+| Tests | `backend/tests/test_methodology_catalog.py`, `test_engagement_brain.py` |
 
 Standalone pentester (parallel fireteam): [`aegis-vanguard/`](../aegis-vanguard/README.md)  
 Batch / accuracy harness: [`harness/README.md`](../harness/README.md)
@@ -26,28 +27,32 @@ Batch / accuracy harness: [`harness/README.md`](../harness/README.md)
 ## Control loop
 
 ```text
-execute_deep_crawl
+execute_deep_crawl (+ katana/gau → ingest_urls_into_map)
         │
         ▼
-sync_engagement_brain          ← seeds open hypothesis cards from capability map
+sync_engagement_brain          ← seeds CWE/CAPEC methodology cards from observations
         │
         ▼
-fireteam_dispatch(auto)        ← 3–6 specialists from open hypotheses
+fireteam_dispatch(auto)        ← specialists get methodology directives
         │
         ▼
 compare_requests               ← baseline vs one mutation (logic/authz/tenant)
         │
         ▼
-update_hypothesis(proven|killed)
+update_hypothesis(proven|killed) + get_methodology_progress
         │
         ▼
-queue_finding_followups        ← chain cards (creds → auth CVE / SSRF / …)
+queue_finding_followups        ← chain cards + CVE→CWE loop-back
         │
         ▼
-coverage Nuclei (-var if creds) → validate_finding → create_finding
+coverage Nuclei (gated until high-pri methodologies progress) → validate → create_finding
+        │
+        ▼
+complete                       ← blocked while high-pri methodology cards remain open
 ```
 
 **Rule:** scanners find candidates; specialists prove impact. Status `200` alone is never a finding.
+**Gates:** Nuclei/sqlmap/etc. require a capability map + seeded methodologies; `complete` requires high-priority methodology cards proven/killed (or `completion_reason` includes `defer methodologies`).
 
 ---
 

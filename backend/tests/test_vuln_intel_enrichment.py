@@ -50,6 +50,9 @@ def test_enrich_cve_catalog_merges_sources():
     assert out["nvd"]["cvss_score"] == 10.0
     assert out["osv"]["id"] == "CVE-2021-44228"
     assert out["ghsa"][0]["ghsa_id"] == "GHSA-jfh8-c2jp-5v3q"
+    assert out["cwes"] == ["CWE-502"]
+    assert out["cwe_intel"][0]["cwe_id"] == "CWE-502"
+    assert out["cwe_intel"][0]["capec"]
     assert out["exploit_sources"]["poc_github"]["found"] is True
     assert out["exploit_sources"]["trickest"]["found"] is True
     assert out["exploit_sources"]["github_repos"]["found"] is True

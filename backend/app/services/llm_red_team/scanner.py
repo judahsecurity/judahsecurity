@@ -527,6 +527,14 @@ def build_finding_data(
             "4. Implement rate limiting on automated actions\n"
             "5. Log and audit all actions taken by the AI agent"
         ),
+        "tool_enumeration": (
+            "1. Do not expose tool names/schemas to untrusted users; treat enumeration as recon\n"
+            "2. Least-privilege tools: no email/refund/DB unless required; separate read vs write tools\n"
+            "3. Authorize every tool parameter (user_id, account_id) against the caller — prevent IDOR\n"
+            "4. Require human confirmation for side-effect flags (send_now, confirm, dry_run=false)\n"
+            "5. Audit tool invocations with full args; block PII dumps and cross-tenant queries\n"
+            "6. Allowlist recipients/domains for messaging tools; never send attacker-controlled content"
+        ),
         "hallucination": (
             "1. Ground model responses with retrieval-augmented generation (RAG)\n"
             "2. Implement fact-checking on generated responses\n"

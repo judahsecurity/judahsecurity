@@ -36,8 +36,12 @@ class Hypothesis:
     priority: str = "high"  # high | medium | low
     target: str = ""
     evidence: str = ""
-    source: str = "map"  # map | chain | manual | finding
+    source: str = "map"  # map | chain | manual | finding | methodology
     parent_finding: str = ""
+    methodology_id: str = ""
+    cwe_ids: List[str] = field(default_factory=list)
+    capec_ids: List[str] = field(default_factory=list)
+    owasp: str = ""
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -255,6 +259,33 @@ _HUNT_CARDS: Dict[str, Dict[str, str]] = {
         "specialist": "coverage",
         "priority": "medium",
     },
+    "admin_surface": {
+        "title": "Admin / management surface exposure",
+        "assumption": "Admin paths are reachable without sufficient auth or leak privileged functions",
+        "test": "Forced-browse admin paths anonymous vs auth; check default creds; map privileged APIs",
+        "pass_criteria": "Unauth/admin function access or default-cred admin session",
+        "kill_criteria": "Admin consistently gated; no privileged leak",
+        "specialist": "auth_logic",
+        "priority": "medium",
+    },
+    "realtime": {
+        "title": "WebSocket / SSE channel abuse",
+        "assumption": "Realtime channels lack auth on upgrade or accept injected messages",
+        "test": "Connect without/with weak auth; attempt cross-user subscription and message injection",
+        "pass_criteria": "Unauth channel data or cross-user message impact",
+        "kill_criteria": "Upgrade requires auth; messages scoped to identity",
+        "specialist": "api_authz",
+        "priority": "medium",
+    },
+    "baseline_web": {
+        "title": "Baseline web vulnerability checks",
+        "assumption": "Browsable UI may have common web flaws despite thin signals",
+        "test": "Baseline XSS/open-redirect/header checks on browsed pages + light nuclei",
+        "pass_criteria": "Concrete finding with response evidence",
+        "kill_criteria": "No actionable issues after baseline probes",
+        "specialist": "injection",
+        "priority": "medium",
+    },
 }
 
 
@@ -395,7 +426,7 @@ def seed_hypotheses_from_capability_map(
     brain: EngagementBrain,
     cmap: Optional[Dict[str, Any]],
 ) -> EngagementBrain:
-    """Seed open hypotheses from the capability map hunt queue."""
+    """Seed open hypotheses from observation methodologies + capability map hunt queue."""
     if not cmap:
         return brain
     brain.target = brain.target or str(cmap.get("target") or "")
@@ -405,6 +436,48 @@ def seed_hypotheses_from_capability_map(
         brain.phase = "map" if not cmap.get("ready_for_attack") else "attack"
 
     existing = {h.id for h in brain.hypotheses}
+    covered_hunts: set[str] = set()
+
+    # Prefer observation → methodology cards (specific CWE/CAPEC-tagged tests)
+    methodologies = list(cmap.get("methodologies") or [])
+    if not methodologies:
+        try:
+            from app.services.agent.methodology_catalog import methodologies_from_capability_map
+            methodologies = [m.to_dict() for m in methodologies_from_capability_map(cmap)]
+        except Exception:
+            methodologies = []
+
+    for m in methodologies:
+        if not isinstance(m, dict) or not m.get("id"):
+            continue
+        mid = str(m["id"])
+        hid = _hyp_id(brain.target, "method", mid)
+        if hid in existing:
+            covered_hunts.add(str(m.get("hunt") or ""))
+            continue
+        brain.hypotheses.append(
+            Hypothesis(
+                id=hid,
+                title=str(m.get("title") or mid),
+                assumption=str(m.get("assumption") or ""),
+                test=str(m.get("test") or ""),
+                pass_criteria=str(m.get("pass_criteria") or ""),
+                kill_criteria=str(m.get("kill_criteria") or ""),
+                specialist=str(m.get("specialist") or "injection"),
+                priority=str(m.get("priority") or "high"),
+                target=brain.target,
+                evidence=str(m.get("evidence") or "")[:500],
+                source="methodology",
+                methodology_id=mid,
+                cwe_ids=list(m.get("cwe_ids") or []),
+                capec_ids=list(m.get("capec_ids") or []),
+                owasp=str(m.get("owasp") or ""),
+            )
+        )
+        existing.add(hid)
+        if m.get("hunt"):
+            covered_hunts.add(str(m["hunt"]))
+
     queue = list(cmap.get("ranked_hunt_queue") or [])
     # Always consider coverage after logic hunts when map is attack-ready.
     hunt_names = [q.get("hunt") for q in queue if q.get("hunt")]
@@ -433,11 +506,15 @@ def seed_hypotheses_from_capability_map(
     if len(cmap.get("forms") or []) >= 2 and "business_logic" not in hunt_names:
         hunt_names.append("business_logic")
 
+    # Legacy hunt cards only for hunts not already covered by a methodology card
     for hunt in hunt_names:
-        card = _HUNT_CARDS.get(str(hunt))
+        hunt_key = str(hunt)
+        if hunt_key in covered_hunts:
+            continue
+        card = _HUNT_CARDS.get(hunt_key)
         if not card:
             continue
-        hid = _hyp_id(brain.target, hunt, card["title"])
+        hid = _hyp_id(brain.target, hunt_key, card["title"])
         if hid in existing:
             continue
         evidence = ""
@@ -675,13 +752,20 @@ def format_engagement_brain_for_prompt(
         lines.append("Open hypothesis queue (dispatch specialists for these):")
         pri = {"critical": 0, "high": 1, "medium": 2, "low": 3}
         for h in sorted(open_hyps, key=lambda x: pri.get(x.priority, 9))[:10]:
+            method_bit = f" method={h.methodology_id}" if h.methodology_id else ""
+            cwe_bit = f" CWE={','.join(h.cwe_ids[:4])}" if h.cwe_ids else ""
             lines.append(
-                f"  - [{h.priority}/{h.status}] id={h.id} specialist={h.specialist} | {h.title}"
+                f"  - [{h.priority}/{h.status}] id={h.id} specialist={h.specialist}"
+                f"{method_bit}{cwe_bit} | {h.title}"
             )
             lines.append(f"      assumption: {h.assumption}")
             lines.append(f"      test: {h.test}")
             lines.append(f"      pass: {h.pass_criteria}")
             lines.append(f"      kill: {h.kill_criteria}")
+            if h.owasp:
+                lines.append(f"      owasp: {h.owasp}")
+            if h.capec_ids:
+                lines.append(f"      capec: {', '.join(h.capec_ids[:4])}")
 
     if proven:
         lines.append("Proven:")
@@ -703,8 +787,14 @@ def format_engagement_brain_for_prompt(
         f"Suggested fireteam from hypotheses: fireteam_dispatch(specialists={specs!r}) "
         "or specialists=\"auto\""
     )
+    # Methodology assessment checklist
+    try:
+        progress = methodology_progress(brain)
+        lines.append(format_methodology_progress_for_prompt(progress))
+    except Exception:
+        pass
     lines.append(
-        "Process: map → open hypotheses → spawn specialists → compare_requests proof → "
+        "Process: observe → methodology cards → spawn specialists → compare_requests proof → "
         "update_hypothesis → queue_finding_followups → coverage leftovers → report."
     )
     return "\n".join(lines)
@@ -746,14 +836,221 @@ def classify_finding_type(title: str = "", description: str = "", tags: Optional
 
 
 # ---------------------------------------------------------------------------
+# Methodology progress / assessment readiness
+# ---------------------------------------------------------------------------
+
+
+_HIGH_PRI = {"critical", "high"}
+# Coverage leftovers are expected last — do not block complete on them alone.
+_COVERAGE_METHOD_IDS = {"coverage_known_vulns"}
+_COVERAGE_HUNTS = {"coverage"}
+
+
+def methodology_progress(
+    brain: EngagementBrain | Dict[str, Any] | None,
+    *,
+    cmap: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Summarize methodology-card progress for gates and prompts.
+
+    ready_for_coverage: map ready + at least one methodology/map card seeded
+    ready_to_complete: no unresolved high-priority non-coverage methodology cards
+    """
+    if isinstance(brain, dict) or brain is None:
+        brain = engagement_brain_from_dict(brain)
+
+    cards = [
+        h for h in brain.hypotheses
+        if h.source in ("methodology", "map") or h.methodology_id
+    ]
+    open_cards = [h for h in cards if h.status in ("open", "in_progress")]
+    proven = [h for h in cards if h.status == "proven"]
+    killed = [h for h in cards if h.status == "killed"]
+
+    def _is_coverage(h: Hypothesis) -> bool:
+        mid = (h.methodology_id or "").lower()
+        if mid in _COVERAGE_METHOD_IDS:
+            return True
+        if "coverage" in (h.title or "").lower() and h.specialist == "coverage":
+            return True
+        return False
+
+    blocking = [
+        h for h in open_cards
+        if h.priority in _HIGH_PRI and not _is_coverage(h)
+    ]
+    open_coverage = [h for h in open_cards if _is_coverage(h)]
+
+    map_ready = bool((cmap or {}).get("ready_for_attack")) if cmap else False
+    has_method_cards = bool(cards) or bool((cmap or {}).get("methodologies"))
+    seeded = has_method_cards or bool(brain.hypotheses)
+
+    checklist = []
+    for h in sorted(
+        cards,
+        key=lambda x: ({"critical": 0, "high": 1, "medium": 2, "low": 3}.get(x.priority, 9), x.title),
+    ):
+        checklist.append({
+            "id": h.id,
+            "methodology_id": h.methodology_id or "",
+            "title": h.title,
+            "status": h.status,
+            "priority": h.priority,
+            "specialist": h.specialist,
+            "cwe_ids": list(h.cwe_ids or []),
+            "owasp": h.owasp or "",
+        })
+
+    ready_for_coverage = map_ready and seeded and (
+        # Prefer: high-pri logic cards resolved OR still open but brain exists
+        # Coverage may run in parallel with remaining medium cards after fireteam started.
+        len(proven) + len(killed) > 0 or len(blocking) == 0 or len(cards) > 0
+    )
+    # Stricter: coverage spray should wait until no high-pri blockers OR fireteam attempted
+    ready_for_coverage_spray = seeded and (
+        len(blocking) == 0 or any(h.status == "in_progress" for h in cards) or len(proven) + len(killed) > 0
+    )
+
+    ready_to_complete = seeded and len(blocking) == 0
+    blockers = [
+        {
+            "id": h.id,
+            "methodology_id": h.methodology_id,
+            "title": h.title,
+            "specialist": h.specialist,
+            "priority": h.priority,
+            "status": h.status,
+        }
+        for h in blocking[:12]
+    ]
+
+    return {
+        "seeded": seeded,
+        "map_ready": map_ready,
+        "total_cards": len(cards),
+        "open": len(open_cards),
+        "proven": len(proven),
+        "killed": len(killed),
+        "blocking_high_priority": len(blocking),
+        "open_coverage": len(open_coverage),
+        "ready_for_coverage": ready_for_coverage,
+        "ready_for_coverage_spray": ready_for_coverage_spray or (map_ready and seeded and len(blocking) == 0),
+        "ready_to_complete": ready_to_complete,
+        "blockers": blockers,
+        "checklist": checklist,
+        "summary": (
+            f"Methodologies: {len(proven)} proven, {len(killed)} killed, "
+            f"{len(open_cards)} open ({len(blocking)} high-priority blocking complete)"
+        ),
+    }
+
+
+def format_methodology_progress_for_prompt(progress: Dict[str, Any]) -> str:
+    if not progress or not progress.get("seeded"):
+        return (
+            "Methodology checklist: not seeded yet. Run execute_deep_crawl → "
+            "sync_engagement_brain before coverage or complete."
+        )
+    lines = [
+        progress.get("summary") or "Methodology progress:",
+        f"ready_for_coverage_spray={progress.get('ready_for_coverage_spray')}  "
+        f"ready_to_complete={progress.get('ready_to_complete')}",
+    ]
+    blockers = progress.get("blockers") or []
+    if blockers:
+        lines.append("Blocking (prove or kill before complete):")
+        for b in blockers[:8]:
+            lines.append(
+                f"  - [{b.get('priority')}/{b.get('status')}] {b.get('methodology_id') or b.get('id')}: "
+                f"{b.get('title')} → {b.get('specialist')}"
+            )
+    checklist = progress.get("checklist") or []
+    if checklist:
+        lines.append("Full methodology checklist:")
+        for c in checklist[:14]:
+            cwes = ",".join((c.get("cwe_ids") or [])[:3])
+            mid = c.get("methodology_id") or "—"
+            lines.append(
+                f"  - [{c.get('status')}] {mid} | {c.get('title')}"
+                + (f" (CWE {cwes})" if cwes else "")
+            )
+    if progress.get("ready_to_complete"):
+        lines.append("All high-priority methodology cards resolved — safe to complete after coverage/report.")
+    else:
+        lines.append(
+            "Do NOT complete yet. Prove/kill blocking cards (or completion_reason must include "
+            "'defer methodologies' / 'force complete')."
+        )
+    return "\n".join(lines)
+
+
+def boost_methodologies_for_cwes(
+    brain: EngagementBrain,
+    cwe_ids: Iterable[str],
+    *,
+    cve_id: str = "",
+    evidence: str = "",
+) -> List[Hypothesis]:
+    """
+    CVE→CWE loop-back: raise priority / annotate open methodology cards that share CWEs.
+
+    Returns hypotheses that were boosted or annotated.
+    """
+    wanted = {str(c).upper() if str(c).upper().startswith("CWE-") else f"CWE-{c}" for c in cwe_ids if c}
+    # Also accept bare numbers already normalized above
+    wanted = {c if c.startswith("CWE-") else f"CWE-{c}" for c in wanted}
+    touched: List[Hypothesis] = []
+    note = f"CVE {cve_id} maps to {', '.join(sorted(wanted)[:6])}" if cve_id else ""
+    for h in brain.hypotheses:
+        if h.status not in ("open", "in_progress"):
+            continue
+        card_cwes = {str(c).upper() for c in (h.cwe_ids or [])}
+        if not card_cwes.intersection(wanted):
+            continue
+        if h.priority not in ("critical",):
+            if h.priority == "low":
+                h.priority = "high"
+            elif h.priority == "medium":
+                h.priority = "high"
+        if note and note not in (h.evidence or ""):
+            h.evidence = ((h.evidence + " | ") if h.evidence else "") + note
+            if evidence:
+                h.evidence = (h.evidence + f"; {evidence[:200]}")[:2000]
+        h.updated_at = datetime.now(timezone.utc).isoformat()
+        touched.append(h)
+    if touched:
+        brain.next_steps = _derive_next_steps(brain)
+        # Prepend CVE-driven next step
+        brain.next_steps.insert(
+            0,
+            f"CVE→CWE loop-back: prioritize {', '.join(h.methodology_id or h.id for h in touched[:4])} "
+            f"(shared CWEs with {cve_id or 'finding'})",
+        )
+        brain.next_steps = brain.next_steps[:8]
+    return touched
+
+
+# ---------------------------------------------------------------------------
 # internals
 # ---------------------------------------------------------------------------
 
 
 def _derive_next_steps(brain: EngagementBrain) -> List[str]:
     steps: List[str] = []
+    progress = methodology_progress(brain)
+    blocking = progress.get("blockers") or []
+    if blocking:
+        steps.append(
+            "Prove/kill blocking methodologies: "
+            + ", ".join(
+                f"{b.get('specialist')}({b.get('methodology_id') or b.get('id')})"
+                for b in blocking[:4]
+            )
+        )
+        steps.append("Use compare_requests for any authz/tenant/Host hypothesis before create_finding")
     open_hyps = [h for h in brain.hypotheses if h.status == "open"]
-    if open_hyps:
+    if open_hyps and not blocking:
         top = sorted(
             open_hyps,
             key=lambda h: {"critical": 0, "high": 1, "medium": 2, "low": 3}.get(h.priority, 9),
@@ -762,16 +1059,17 @@ def _derive_next_steps(brain: EngagementBrain) -> List[str]:
             "fireteam_dispatch(specialists='auto') for: "
             + ", ".join(f"{h.specialist}({h.id})" for h in top)
         )
-        steps.append("Use compare_requests for any authz/tenant/Host hypothesis before create_finding")
     if brain.credentials:
         steps.append(
             "Authenticated coverage: execute_nuclei with -var username/password from engagement credentials"
         )
-    proven_chains = [h for h in brain.hypotheses if h.status == "proven" and h.source == "map"]
+    proven_chains = [h for h in brain.hypotheses if h.status == "proven" and h.source in ("map", "methodology")]
     if proven_chains and not any(h.source == "chain" and h.status == "open" for h in brain.hypotheses):
         steps.append("Call queue_finding_followups on proven findings to enqueue chain cards")
+    if progress.get("ready_to_complete"):
+        steps.append("High-priority methodologies resolved — finish coverage leftovers then complete")
     if not steps:
-        steps.append("execute_deep_crawl → sync_engagement_brain to seed hypotheses")
+        steps.append("execute_deep_crawl → sync_engagement_brain to seed methodology cards")
     return steps[:8]
 
 

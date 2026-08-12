@@ -82,13 +82,15 @@ Analyze the current state and decide on your next action. You MUST output a vali
 **CRITICAL — Tester methodology (not tool spray):** You have {max_iterations} iterations. Work like a human tester who clicks around the app, understands features/logic, then attacks what they learned.
 
 **Tester control loop (mandatory for web apps):**
-1. **Observe** — execute_deep_crawl → Application Capability Map
-2. **Hypothesize** — sync_engagement_brain seeds open trust-boundary cards (authz, Host/tenant, injection, …)
-3. **Dispatch** — fireteam_dispatch(specialists="auto") spawns specialists from open hypotheses
-4. **Mutate one variable** — compare_requests(baseline, mutant) for logic/authz/tenant proofs
-5. **Prove or kill** — update_hypothesis(status=proven|killed) with differential evidence
-6. **Chain** — queue_finding_followups on confirmed hits (e.g. default Grafana login → authenticated CVE-2024-9264)
-7. **Coverage leftovers** — nuclei/nikto only after logic hunts (use engagement credentials with -var when present)
+1. **Observe** — execute_deep_crawl → Application Capability Map + observation→methodology cards (CWE/CAPEC/OWASP-tagged)
+2. **Enrich** — katana/gau → ingest_urls_into_map so passive URLs refresh methodologies
+3. **Hypothesize** — sync_engagement_brain seeds open methodology cards from what was observed
+4. **Dispatch** — fireteam_dispatch(specialists="auto") spawns specialists ordered by those methodologies
+5. **Mutate one variable** — compare_requests(baseline, mutant) for logic/authz/tenant proofs
+6. **Prove or kill** — update_hypothesis; get_methodology_progress until high-priority cards clear
+7. **Chain** — queue_finding_followups on confirmed hits (include cve_id for CVE→CWE loop-back)
+8. **Coverage leftovers** — nuclei/nikto only when methodology progress allows (or force=true)
+9. **Complete** — blocked while high-priority methodologies are open (unless 'defer methodologies')
 
 1. **Add missing targets first** — If the user provides a URL/domain/IP not in the database, immediately use **add_asset**.
 2. **Quick reachability + tech** — execute_httpx, execute_dnsx, execute_wafw00f, execute_wappalyzer/whatweb on the seed. Do not exhaust the budget on subdomain sprawl before understanding the primary app.
@@ -362,7 +364,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **query_prior_sessions**: Pull prior session findings, failed attempts, and lessons learned for this organization from EvoGraph memory. Args: max_chains, max_findings, max_failures.
 - **sanitize_evidence**: Redact cookies, bearer tokens, API keys, private keys, passwords, emails, SSNs, payment cards, and common secret fields before create_finding/reporting. Args: evidence (required raw text), preserve_last (optional, default 4).
 - **create_finding**: Add a finding to the platform findings table. Args: title, description, severity (critical|high|medium|low|info), target (hostname/domain/URL — will be auto-added to inventory if not found), optional: evidence, cve_id, remediation. Findings appear in the UI. **Solomon judge gate:** medium+ requires a prior **validate_finding** verdict of SUBMIT for the same title/target (receipt unlocks create_finding).
-- **execute_llm_red_team**: Run AI/LLM red team security scan against chatbot endpoints on a target URL. Tests for prompt injection, jailbreak, data exfiltration, SSRF, system prompt leakage, excessive agency, hallucination, and harmful content generation. Auto-discovers chatbot API endpoints. Args: **target_url** (required), categories (optional comma-separated: prompt_injection,jailbreak,data_exfiltration,ssrf_tool_abuse,system_prompt_leakage,excessive_agency,hallucination,harmful_content), endpoint_url (optional — direct chatbot API URL if known), message_field (optional — JSON field name, default "message"), max_payloads (optional int). Example: execute_llm_red_team(target_url="https://example.com"), execute_llm_red_team(target_url="https://example.com", endpoint_url="https://example.com/api/chat", categories="prompt_injection,jailbreak"). Findings are auto-created in the platform.
+- **execute_llm_red_team**: Run AI/LLM red team security scan against chatbot/agent endpoints. Tests prompt injection, jailbreak, data exfiltration, SSRF, system prompt leakage, excessive agency, tool_enumeration (tools = attack surface; params = injection points), hallucination, harmful content. Auto-discovers chatbot API endpoints. Args: **target_url** (required), categories (optional comma-separated: prompt_injection,jailbreak,data_exfiltration,ssrf_tool_abuse,system_prompt_leakage,excessive_agency,tool_enumeration,hallucination,harmful_content), endpoint_url (optional — direct chatbot API URL if known), message_field (optional — JSON field name, default "message"), max_payloads (optional int). Example: execute_llm_red_team(target_url="https://example.com"), execute_llm_red_team(target_url="https://example.com", endpoint_url="https://example.com/api/chat", categories="tool_enumeration,excessive_agency"). Findings are auto-created in the platform.
 
 ### Auto Tool Selection
 - **auto_select_tools**: Analyze the current assessment state and get prioritized tool recommendations based on discovered technologies, ports, parameters, and WAF presence. Call this EARLY in your assessment to get a smart tool chain tailored to the target. Returns ranked recommendations with rationale for each tool. Args: **target** (required — hostname or URL). Example: auto_select_tools(target="example.com"). The tool reads your accumulated target_info and execution trace automatically.
@@ -490,10 +492,12 @@ These tools implement specialized offensive test workflows and require the explo
   Verdicts: LIKELY_IMPACT | MUTANT_BYPASS_CANDIDATE | NO_MATERIAL_DIFF | MUTANT_DENIED | NEEDS_INTERPRETATION.
   Example: compare_requests(baseline={{"method":"GET","url":"https://a.app/api/me"}}, mutant={{"method":"GET","url":"https://a.app/api/me","headers":{{"Host":"b.app"}}}})
 
-- **sync_engagement_brain**: Seed open hypotheses from the capability map (call after deep_crawl).
+- **sync_engagement_brain**: Seed observation→methodology hypothesis cards from the capability map (call after deep_crawl / ingest_urls_into_map).
 - **update_hypothesis**: Mark hypothesis open|in_progress|proven|killed with evidence.
-- **queue_finding_followups**: After a confirmed finding, enqueue chain cards (default_login→auth CVE, host_header→tenant bypass).
-- **add_engagement_credential** / **log_engagement_approach** / **get_engagement_brain**: Persist creds, tried approaches, inspect brain.
+- **queue_finding_followups**: After a confirmed finding, enqueue chain cards; optional **cve_id** / **cwe_ids** boost related methodology cards (CVE→CWE loop-back).
+- **get_methodology_progress**: Assessment checklist — ready_for_coverage_spray / ready_to_complete / blockers.
+- **ingest_urls_into_map**: Merge katana/gau/wayback/httpx URL lists into the capability map and refresh methodologies.
+- **add_engagement_credential** / **log_engagement_approach** / **get_engagement_brain**: Persist creds, tried approaches, inspect brain + checklist.
 """
 
     exploitation_tools = """
@@ -671,6 +675,8 @@ TOOL_PHASE_MAP = {
     "log_engagement_approach": ["informational", "exploitation", "post_exploitation"],
     "add_engagement_credential": ["informational", "exploitation", "post_exploitation"],
     "get_engagement_brain": ["informational", "exploitation", "post_exploitation"],
+    "get_methodology_progress": ["informational", "exploitation", "post_exploitation"],
+    "ingest_urls_into_map": ["informational", "exploitation", "post_exploitation"],
 
     # Legacy scanning tools
     "run_nuclei_scan": ["informational", "exploitation", "post_exploitation"],
