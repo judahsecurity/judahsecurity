@@ -31,14 +31,18 @@ from app.core.config import settings
 from app.models.api_config import ExternalService, resolve_api_key
 from app.services.vuln_intel_enrichment import enrich_cve_catalog
 from app.services.vuln_intel_feeds import (
+    CISA_KEV_URLS,
     fetch_kevintel_attestations,
     fetch_shadowserver_exploited,
+    fetch_shadowserver_from_circl_kev,
+    fetch_vulncheck_kev,
 )
 
 router = APIRouter(prefix="/threat-intel", tags=["threat-intel"])
 logger = logging.getLogger(__name__)
 
 _HTTP_TIMEOUT = 20.0
+_ENRICH_CONCURRENCY = 8
 
 
 def _get_vulncheck_token(db: Session, org_id: int | None = None) -> str:
@@ -52,117 +56,78 @@ def _get_pdcp_key(db: Session, org_id: int | None = None) -> str:
 # ── VulnCheck KEV ─────────────────────────────────────────────────────────────
 
 async def _fetch_vulncheck_kev(client: httpx.AsyncClient, days: int, token: str) -> list[dict]:
-    """Fetch VulnCheck KEV entries, paginating until the cutoff date is passed.
-
-    Uses cursor-based pagination so the full KEV dataset is available for
-    longer time windows. Stops fetching as soon as every entry on the current
-    page pre-dates the cutoff (VulnCheck sorts descending by date_added).
+    """
+    Fetch VulnCheck KEV via the shared disk-cached loader (correct start_cursor
+    pagination). Filters to the requested day window for the emerging feed.
     """
     if not token:
         return []
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-        "User-Agent": "aegis-oracle/1.0",
-    }
-    # days=0 means "all time" — fetch everything
     cutoff = (
         datetime.now(timezone.utc) - timedelta(days=days)
         if days > 0
         else datetime.min.replace(tzinfo=timezone.utc)
     )
+    try:
+        refresh_hours = int(getattr(settings, "DELPHI_REFRESH_HOURS", 24))
+        mapped = await asyncio.to_thread(
+            fetch_vulncheck_kev,
+            token,
+            force=False,
+            refresh_hours=refresh_hours,
+        )
+    except Exception as exc:
+        logger.warning("VulnCheck KEV fetch failed: %s", exc)
+        return []
 
-    all_entries: list[dict] = []
-    cursor: str | None = None
-    page_limit = 500  # max VulnCheck allows per page
-    max_pages = 10    # safety cap (~5 000 entries)
-
-    for _ in range(max_pages):
-        # VulnCheck index API accepts sort=_timestamp|date_added (not camelCase).
-        params: dict = {"sort": "date_added", "order": "desc", "limit": page_limit}
-        if cursor:
-            params["cursor"] = cursor
-
+    entries: list[dict] = []
+    for cve, entry in mapped.items():
+        date_str = entry.get("date_added") or ""
         try:
-            resp = await client.get(
-                "https://api.vulncheck.com/v3/index/vulncheck-kev",
-                headers=headers,
-                params=params,
-                timeout=_HTTP_TIMEOUT,
-            )
-            resp.raise_for_status()
-            payload = resp.json()
-        except Exception as exc:
-            logger.warning("VulnCheck KEV fetch failed: %s", exc)
-            break
-
-        entries = payload.get("data", []) or []
-        if not entries:
-            break
-
-        page_done = False
-        for entry in entries:
-            date_str = entry.get("dateAdded") or entry.get("date_added") or ""
-            cves = entry.get("cve", []) or []
-            if not cves:
+            added = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
+            if added.tzinfo is None:
+                added = added.replace(tzinfo=timezone.utc)
+            if added < cutoff:
                 continue
-
-            try:
-                added = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-                if added < cutoff:
-                    page_done = True
-                    break
-            except ValueError:
-                pass
-
-            # Extract CVSS — VulnCheck may nest it several ways
-            cvss_obj = entry.get("cvss") or entry.get("cvssMetrics") or {}
-            cvss_score = (
-                cvss_obj.get("v3Score")
-                or cvss_obj.get("cvssV3Score")
-                or cvss_obj.get("baseScore")
-                or entry.get("cvssV3Score")
-                or entry.get("cvss_v3_score")
-            )
-            all_entries.append({
-                "cve_id": cves[0] if cves else "",
-                "all_cves": cves,
-                "date_added": date_str,
-                "vendor_project": entry.get("vendorProject", ""),
-                "product": entry.get("product", ""),
-                "vulnerability_name": entry.get("vulnerabilityName", ""),
-                "short_description": entry.get("shortDescription", ""),
-                "known_ransomware_use": entry.get("knownRansomwareUse", "Unknown"),
-                "kev_sources": ["vulncheck_kev"],
-                "cvss_score": float(cvss_score) if cvss_score is not None else None,
-            })
-
-        if page_done:
-            break
-
-        # Follow cursor for next page (_meta.next_cursor per VulnCheck v3 docs)
-        meta = payload.get("_meta") or payload.get("meta") or {}
-        cursor = payload.get("_next") or payload.get("cursor") or meta.get("next_cursor")
-        if not cursor:
-            break
-
-    return all_entries
+        except ValueError:
+            # Keep undated rows for all-time queries only.
+            if days > 0:
+                continue
+        entries.append({
+            "cve_id": cve,
+            "all_cves": entry.get("all_cves") or [cve],
+            "date_added": date_str,
+            "vendor_project": entry.get("vendor_project", ""),
+            "product": entry.get("product", ""),
+            "vulnerability_name": entry.get("vulnerability_name", ""),
+            "short_description": entry.get("short_description", ""),
+            "known_ransomware_use": entry.get("known_ransomware_use", "Unknown"),
+            "kev_sources": ["vulncheck_kev"],
+            "cvss_score": entry.get("cvss_score"),
+        })
+    return entries
 
 
 # ── CISA KEV ──────────────────────────────────────────────────────────────────
 
 async def _fetch_cisa_kev(client: httpx.AsyncClient, cutoff: datetime) -> list[dict]:
     """Fetch CISA Known Exploited Vulnerabilities catalog (free, no auth)."""
-    try:
-        resp = await client.get(
-            "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
-            headers={"User-Agent": "aegis-oracle/1.0", "Accept": "application/json"},
-            timeout=30.0,
-        )
-        resp.raise_for_status()
-        vulns = resp.json().get("vulnerabilities", [])
-    except Exception:
+    vulns: list = []
+    for url in CISA_KEV_URLS:
+        try:
+            resp = await client.get(
+                url,
+                headers={"User-Agent": "aegis-oracle/1.0", "Accept": "application/json"},
+                timeout=30.0,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            vulns = payload.get("vulnerabilities", []) if isinstance(payload, dict) else []
+            if vulns:
+                break
+        except Exception as exc:
+            logger.debug("CISA KEV fetch failed for %s: %s", url, exc)
+            continue
+    if not vulns:
         return []
 
     entries = []
@@ -192,109 +157,240 @@ async def _fetch_cisa_kev(client: httpx.AsyncClient, cutoff: datetime) -> list[d
         })
     return entries
 
+# ── ENISA EU KEV (CNW EUKEV) ──────────────────────────────────────────────────
 
-# ── ENISA EU KEV ───────────────────────────────────────────────────────────────
+_ENISA_EUKEV_URLS = (
+    # Current official CNW EUKEV dump (enisaeu/KEV CSV repo was removed).
+    "https://raw.githubusercontent.com/enisaeu/CNW/refs/heads/main/advisories/eukev/eukev.json",
+    "https://raw.githubusercontent.com/enisaeu/CNW/main/advisories/eukev/eukev.json",
+)
+
+
+def _parse_enisa_date(date_str: str) -> datetime | None:
+    """Parse ENISA date strings like 2026/07/31 or ISO timestamps."""
+    raw = (date_str or "").strip()
+    if not raw:
+        return None
+    for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S"):
+        try:
+            dt = datetime.strptime(raw.replace("Z", "+0000"), fmt) if "%z" in fmt else datetime.strptime(raw, fmt)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except ValueError:
+            continue
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except ValueError:
+        return None
+
 
 async def _fetch_enisa_kev(client: httpx.AsyncClient, cutoff: datetime) -> list[dict]:
-    """Fetch ENISA EU CSIRT Network KEV list (free, no auth)."""
-    try:
-        resp = await client.get(
-            "https://raw.githubusercontent.com/enisaeu/KEV/main/CSV/KEV.csv",
-            headers={"User-Agent": "aegis-oracle/1.0"},
-            timeout=20.0,
-        )
-        resp.raise_for_status()
-        lines = resp.text.strip().splitlines()
-    except Exception:
-        return []
-
-    if not lines:
-        return []
-
-    import csv, io
-    reader = csv.DictReader(io.StringIO("\n".join(lines)))
-    entries = []
-    for row in reader:
-        cve_id = (row.get("CVE ID") or row.get("cveID") or row.get("CVE") or "").strip()
-        if not cve_id or not cve_id.startswith("CVE-"):
-            continue
-        date_str = (row.get("Date Added") or row.get("dateAdded") or "").strip()
-        try:
-            added = datetime.fromisoformat(date_str)
-            if added.tzinfo is None:
-                added = added.replace(tzinfo=timezone.utc)
-            if added < cutoff:
-                continue
-        except ValueError:
-            pass
-        entries.append({
-            "cve_id": cve_id.upper(),
-            "all_cves": [cve_id.upper()],
-            "date_added": date_str,
-            "vendor_project": row.get("Vendor/Project", ""),
-            "product": row.get("Product", ""),
-            "vulnerability_name": row.get("Vulnerability Name", ""),
-            "short_description": row.get("Short Description", ""),
-            "known_ransomware_use": "Unknown",
-            "kev_sources": ["enisa_kev"],
-        })
-    return entries
-
-
-# ── EUVD (EU Vulnerability Database) ──────────────────────────────────────────
-
-async def _fetch_euvd(client: httpx.AsyncClient, cutoff: datetime) -> list[dict]:
-    """Fetch ENISA EUVD exploited-in-the-wild entries (free, no auth)."""
-    entries = []
-    page = 1
-    per_page = 100
-    max_pages = 20
-    for _ in range(max_pages):
+    """Fetch ENISA CNW EUKEV list (free, no auth) — JSON dump from enisaeu/CNW."""
+    data = None
+    for url in _ENISA_EUKEV_URLS:
         try:
             resp = await client.get(
-                "https://euvd.enisa.europa.eu/api/v1/exploited",
-                params={"page": page, "size": per_page},
+                url,
                 headers={"User-Agent": "aegis-oracle/1.0", "Accept": "application/json"},
                 timeout=20.0,
             )
             if resp.status_code == 404:
-                break
+                continue
             resp.raise_for_status()
             data = resp.json()
-        except Exception:
             break
+        except Exception as exc:
+            logger.debug("ENISA EUKEV fetch failed for %s: %s", url, exc)
+            continue
+    if data is None:
+        return []
 
-        items = data if isinstance(data, list) else data.get("results", data.get("data", []))
-        if not items:
-            break
+    rows = data if isinstance(data, list) else data.get("vulnerabilities") or data.get("data") or []
+    entries = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        cve_id = (row.get("cveID") or row.get("CVE ID") or row.get("cve_id") or row.get("CVE") or "").strip()
+        if not cve_id or not cve_id.upper().startswith("CVE-"):
+            continue
+        date_str = (
+            row.get("dateReported")
+            or row.get("dateAdded")
+            or row.get("Date Added")
+            or row.get("date_added")
+            or ""
+        ).strip()
+        added = _parse_enisa_date(date_str)
+        if added is not None and added < cutoff:
+            continue
+        ransomware = "Unknown"
+        exploitation = (row.get("exploitationType") or "").strip().lower()
+        if "ransomware" in exploitation:
+            ransomware = "Known"
+        entries.append({
+            "cve_id": cve_id.upper(),
+            "all_cves": [cve_id.upper()],
+            "date_added": date_str,
+            "vendor_project": row.get("vendorProject") or row.get("Vendor/Project") or "",
+            "product": row.get("product") or row.get("Product") or "",
+            "vulnerability_name": (
+                row.get("vulnerabilityName")
+                or row.get("Vulnerability Name")
+                or (row.get("shortDescription") or "")[:120]
+            ),
+            "short_description": row.get("shortDescription") or row.get("Short Description") or "",
+            "known_ransomware_use": ransomware,
+            "kev_sources": ["enisa_kev"],
+            "euvd_id": row.get("euvdID") or "",
+            "exploitation_type": row.get("exploitationType") or "",
+        })
+    return entries
 
+# ── EUVD (EU Vulnerability Database) ──────────────────────────────────────────
+
+def _euvd_cve_ids(item: dict) -> list[str]:
+    """Extract CVE IDs from an EUVD record (aliases / nested fields)."""
+    found: list[str] = []
+    for key in ("aliases", "assigner", "cve", "cves"):
+        val = item.get(key)
+        if isinstance(val, list):
+            for v in val:
+                s = str(v).strip().upper()
+                if s.startswith("CVE-"):
+                    found.append(s)
+        elif isinstance(val, str) and val.strip().upper().startswith("CVE-"):
+            found.append(val.strip().upper())
+    for key in ("id", "euvdId", "cveId", "cve_id"):
+        s = str(item.get(key) or "").strip().upper()
+        if s.startswith("CVE-"):
+            found.append(s)
+    # Deduplicate preserving order
+    out: list[str] = []
+    seen = set()
+    for cve in found:
+        if cve not in seen:
+            seen.add(cve)
+            out.append(cve)
+    return out
+
+
+async def _fetch_euvd(client: httpx.AsyncClient, cutoff: datetime) -> list[dict]:
+    """
+    Fetch ENISA EUVD exploited-in-the-wild entries (free, no auth).
+
+    Uses euvdservices.enisa.europa.eu (the old euvd.enisa.europa.eu/api/v1/*
+    paths now serve the SPA HTML shell).
+    """
+    headers = {"User-Agent": "aegis-oracle/1.0", "Accept": "application/json"}
+    entries: list[dict] = []
+    seen: set[str] = set()
+
+    async def _ingest_items(items: list) -> None:
         for item in items:
-            cve_id = (item.get("id") or item.get("euvdId") or item.get("cveId") or "").strip()
-            if not cve_id or not cve_id.startswith("CVE-"):
+            if not isinstance(item, dict):
                 continue
-            date_str = (item.get("datePublished") or item.get("dateAdded") or item.get("published") or "").strip()
-            try:
-                added = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
-                if added < cutoff:
+            cves = _euvd_cve_ids(item)
+            if not cves:
+                continue
+            date_str = (
+                item.get("datePublished")
+                or item.get("dateUpdated")
+                or item.get("dateAdded")
+                or item.get("published")
+                or item.get("exploitedSince")
+                or ""
+            )
+            date_str = str(date_str).strip()
+            added = _parse_enisa_date(date_str) if date_str else None
+            if added is not None and added < cutoff:
+                continue
+            vendors = item.get("enisaIdVendor") or item.get("vendor") or []
+            products = item.get("enisaIdProduct") or item.get("product") or []
+            vendor = ""
+            product = ""
+            if isinstance(vendors, list) and vendors:
+                vendor = str((vendors[0] or {}).get("name") if isinstance(vendors[0], dict) else vendors[0])
+            elif isinstance(vendors, str):
+                vendor = vendors
+            if isinstance(products, list) and products:
+                product = str((products[0] or {}).get("name") if isinstance(products[0], dict) else products[0])
+            elif isinstance(products, str):
+                product = products
+            desc = str(item.get("description") or item.get("summary") or "")
+            for cve_id in cves:
+                if cve_id in seen:
                     continue
-            except ValueError:
-                pass
-            entries.append({
-                "cve_id": cve_id.upper(),
-                "all_cves": [cve_id.upper()],
-                "date_added": date_str,
-                "vendor_project": item.get("vendorProject", ""),
-                "product": item.get("product", ""),
-                "vulnerability_name": item.get("summary", item.get("description", ""))[:120],
-                "short_description": item.get("summary", item.get("description", ""))[:300],
-                "known_ransomware_use": "Unknown",
-                "kev_sources": ["euvd"],
-            })
+                seen.add(cve_id)
+                entries.append({
+                    "cve_id": cve_id,
+                    "all_cves": [cve_id],
+                    "date_added": date_str,
+                    "vendor_project": vendor,
+                    "product": product,
+                    "vulnerability_name": desc[:120],
+                    "short_description": desc[:300],
+                    "known_ransomware_use": "Unknown",
+                    "kev_sources": ["euvd"],
+                    "euvd_id": item.get("id") or item.get("euvd_id") or "",
+                })
 
-        total = data.get("total", len(items)) if isinstance(data, dict) else len(items)
-        if page * per_page >= total or len(items) < per_page:
+    # 1) Convenience exploited list (small fixed batch — always try)
+    try:
+        resp = await client.get(
+            "https://euvdservices.enisa.europa.eu/api/exploitedvulnerabilities",
+            headers=headers,
+            timeout=20.0,
+        )
+        if resp.status_code == 200 and "application/json" in (resp.headers.get("content-type") or ""):
+            data = resp.json()
+            items = data if isinstance(data, list) else data.get("items") or data.get("data") or []
+            await _ingest_items(items if isinstance(items, list) else [])
+    except Exception as exc:
+        logger.debug("EUVD exploitedvulnerabilities failed: %s", exc)
+
+    # 2) Search pagination for fuller exploited coverage
+    page = 0
+    per_page = 100
+    for _ in range(25):
+        try:
+            resp = await client.get(
+                "https://euvdservices.enisa.europa.eu/api/search",
+                params={"exploited": "true", "page": page, "size": per_page},
+                headers=headers,
+                timeout=20.0,
+            )
+            if resp.status_code in (403, 404):
+                break
+            if resp.status_code != 200:
+                break
+            ctype = resp.headers.get("content-type") or ""
+            if "application/json" not in ctype:
+                break
+            data = resp.json()
+        except Exception as exc:
+            logger.debug("EUVD search page %s failed: %s", page, exc)
+            break
+
+        items = (
+            data if isinstance(data, list)
+            else data.get("items") or data.get("content") or data.get("data") or data.get("results") or []
+        )
+        if not isinstance(items, list) or not items:
+            break
+        await _ingest_items(items)
+        total = 0
+        if isinstance(data, dict):
+            total = int(data.get("totalElements") or data.get("total") or data.get("totalResults") or 0)
+        if total and (page + 1) * per_page >= total:
+            break
+        if len(items) < per_page:
             break
         page += 1
+        await asyncio.sleep(0.35)  # ENISA rate-limit courtesy
 
     return entries
 
@@ -303,39 +399,70 @@ async def _fetch_euvd(client: httpx.AsyncClient, cutoff: datetime) -> list[dict]
 
 async def _fetch_shadowserver(cutoff: datetime) -> list[dict]:
     """
-    Shadowserver honeypot-exploited CVEs via CIRCL (cached on disk).
+    Shadowserver honeypot-exploited CVEs via CIRCL.
 
-    Only included for all-time queries (cutoff at datetime.min). Dated windows
-    would otherwise flood the feed with historical honeypot CVEs that have no
-    reliable per-CVE dateAdded. Shadowserver still floors Delphi priority on
-    findings enrichment regardless.
+    Prefer CIRCL KEV assertions (dated, gcve-eu-kev compatible). Fall back to the
+    undated sightings set for all-time queries when the KEV catalog is empty.
     """
-    if cutoff > datetime.min.replace(tzinfo=timezone.utc):
-        return []
+    refresh_hours = int(getattr(settings, "DELPHI_REFRESH_HOURS", 24))
+    entries: list[dict] = []
     try:
-        refresh_hours = int(getattr(settings, "DELPHI_REFRESH_HOURS", 24))
-        cves = await asyncio.to_thread(
-            fetch_shadowserver_exploited,
+        mapped = await asyncio.to_thread(
+            fetch_shadowserver_from_circl_kev,
             force=False,
             refresh_hours=refresh_hours,
         )
-    except Exception:
-        return []
-    return [
-        {
-            "cve_id": cve,
-            "all_cves": [cve],
-            "date_added": "",
-            "vendor_project": "",
-            "product": "",
-            "vulnerability_name": "",
-            "short_description": "Observed in Shadowserver honeypot exploited-vulnerabilities feed",
-            "known_ransomware_use": "Unknown",
-            "kev_sources": ["shadowserver"],
-        }
-        for cve in sorted(cves)
-    ]
+        for cve, entry in mapped.items():
+            date_str = entry.get("date_added") or ""
+            try:
+                added = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
+                if added.tzinfo is None:
+                    added = added.replace(tzinfo=timezone.utc)
+                if added < cutoff:
+                    continue
+            except ValueError:
+                # Undated CIRCL rows only for all-time windows.
+                if cutoff > datetime.min.replace(tzinfo=timezone.utc):
+                    continue
+            entries.append({
+                "cve_id": cve,
+                "all_cves": [cve],
+                "date_added": date_str,
+                "vendor_project": entry.get("vendor_project", ""),
+                "product": entry.get("product", ""),
+                "vulnerability_name": entry.get("vulnerability_name", ""),
+                "short_description": (entry.get("short_description") or "Observed in Shadowserver honeypot feed")[:300],
+                "known_ransomware_use": entry.get("known_ransomware_use", "Unknown"),
+                "kev_sources": ["shadowserver"],
+            })
+    except Exception as exc:
+        logger.debug("Shadowserver CIRCL-KEV fetch failed: %s", exc)
 
+    # Sightings fallback for all-time only (no reliable per-CVE dates).
+    if not entries and cutoff <= datetime.min.replace(tzinfo=timezone.utc):
+        try:
+            cves = await asyncio.to_thread(
+                fetch_shadowserver_exploited,
+                force=False,
+                refresh_hours=refresh_hours,
+            )
+            entries = [
+                {
+                    "cve_id": cve,
+                    "all_cves": [cve],
+                    "date_added": "",
+                    "vendor_project": "",
+                    "product": "",
+                    "vulnerability_name": "",
+                    "short_description": "Observed in Shadowserver honeypot exploited-vulnerabilities feed",
+                    "known_ransomware_use": "Unknown",
+                    "kev_sources": ["shadowserver"],
+                }
+                for cve in sorted(cves)
+            ]
+        except Exception:
+            return []
+    return entries
 
 # ── KEVIntel (CIRCL KEV catalog) ───────────────────────────────────────────────
 
@@ -458,15 +585,18 @@ async def _fetch_pdcp_cve(client: httpx.AsyncClient, cve_id: str, pdcp_key: str)
 async def _fetch_pdcp_batch(
     client: httpx.AsyncClient, cve_ids: list[str], pdcp_key: str
 ) -> dict[str, dict]:
-    """Fetch PDCP enrichment for a batch of CVEs concurrently."""
+    """Fetch PDCP enrichment for a batch of CVEs with bounded concurrency."""
     if not pdcp_key or not cve_ids:
         return {}
-    tasks = {cve_id: _fetch_pdcp_cve(client, cve_id, pdcp_key) for cve_id in cve_ids}
-    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
-    return {
-        cve_id: (r if isinstance(r, dict) else {})
-        for cve_id, r in zip(tasks.keys(), results)
-    }
+    sem = asyncio.Semaphore(_ENRICH_CONCURRENCY)
+    out: dict[str, dict] = {}
+
+    async def _one(cve_id: str) -> None:
+        async with sem:
+            out[cve_id] = await _fetch_pdcp_cve(client, cve_id, pdcp_key)
+
+    await asyncio.gather(*[_one(cid) for cid in cve_ids], return_exceptions=True)
+    return out
 
 
 # ── OTX pulse count ───────────────────────────────────────────────────────────
@@ -487,17 +617,26 @@ async def _fetch_otx_pulse_count(client: httpx.AsyncClient, cve_id: str) -> int:
 
 
 async def _fetch_otx_batch(
-    client: httpx.AsyncClient, cve_ids: list[str]
+    client: httpx.AsyncClient, cve_ids: list[str], *, max_cves: int = 40
 ) -> dict[str, int]:
-    """OTX pulse counts for a batch, concurrently."""
-    results = await asyncio.gather(
-        *[_fetch_otx_pulse_count(client, cid) for cid in cve_ids],
-        return_exceptions=True,
-    )
-    return {
-        cid: (r if isinstance(r, int) else 0)
-        for cid, r in zip(cve_ids, results)
-    }
+    """
+    OTX pulse counts with bounded concurrency.
+
+    AlienVault OTX is ~5–12s per CVE and rate-limits under fan-out. The emerging
+    list endpoint disables this by default; CVE detail fetches OTX on demand.
+    """
+    if not cve_ids:
+        return {}
+    targets = cve_ids[: max(0, max_cves)]
+    sem = asyncio.Semaphore(_ENRICH_CONCURRENCY)
+    out: dict[str, int] = {cid: 0 for cid in cve_ids}
+
+    async def _one(cve_id: str) -> None:
+        async with sem:
+            out[cve_id] = await _fetch_otx_pulse_count(client, cve_id)
+
+    await asyncio.gather(*[_one(cid) for cid in targets], return_exceptions=True)
+    return out
 
 
 # ── FIRST.org EPSS (free, no key) ────────────────────────────────────────────
@@ -682,7 +821,11 @@ async def get_emerging_vulnerabilities(
     severity: Optional[str] = Query(None, description="Filter by severity (critical,high,medium,low)"),
     detection: Optional[str] = Query(None, description="Filter: nuclei_template | poc_available | remote_no_template | no_detection"),
     source: Optional[str] = Query(None, description="Filter by source(s): cisa_kev,vulncheck_kev,enisa_kev,euvd,shadowserver,kevintel (comma-separated)"),
-    limit: int = Query(500, ge=1, le=5000),
+    limit: int = Query(500, ge=1, le=2000),
+    include_otx: bool = Query(
+        False,
+        description="Enrich with AlienVault OTX pulse counts. Off by default — OTX is slow (~10s/CVE) and loads on CVE detail instead.",
+    ),
     organization_id: Optional[int] = Query(None, description="Org whose stored API keys to use; omit to use any available key"),
     db: Session = Depends(get_db),
     _current_user=Depends(get_current_active_user),
@@ -691,19 +834,13 @@ async def get_emerging_vulnerabilities(
     Returns CVEs from ALL exploitation intelligence sources merged by CVE ID:
       - CISA KEV          (free)
       - VulnCheck KEV     (requires VULNCHECK_API_TOKEN)
-      - ENISA EU KEV      (free)
+      - ENISA EU KEV      (free — CNW EUKEV JSON)
       - EUVD              (free)
       - Shadowserver      (free via CIRCL)
       - KEVIntel          (free via CIRCL)
 
-    Each entry includes kev_sources showing which feeds flagged that CVE.
-    CVEs appearing in multiple independent sources have higher exploitation confidence.
-
-    Detection tiers (most to least detectable):
-      nuclei_template      — Nuclei template exists; auto-detection possible
-      poc_available        — Public PoC; manual verification possible
-      remote_no_template   — Remotely exploitable but no auto-detection tooling
-      no_detection         — No known public detection method
+    OTX campaign pulses are deferred to GET /threat-intel/cve/{id} by default so
+    this list endpoint stays fast enough for the Vulnerability Intel UI.
     """
     vulncheck_token = _get_vulncheck_token(db, organization_id)
     pdcp_key = _get_pdcp_key(db, organization_id)
@@ -715,8 +852,30 @@ async def get_emerging_vulnerabilities(
         else datetime.min.replace(tzinfo=timezone.utc)
     )
 
-    async with httpx.AsyncClient() as client:
-        # Fetch all exploitation sources in parallel
+    empty_summary = {
+        "total": 0,
+        "with_nuclei_template": 0,
+        "with_poc": 0,
+        "remote_exploitable": 0,
+        "ransomware_associated": 0,
+        "otx_active_campaigns": 0,
+        "oracle_analyzed": 0,
+        "by_severity": {"critical": 0, "high": 0, "medium": 0, "low": 0},
+        "by_source": {
+            "cisa_kev": 0,
+            "vulncheck_kev": 0,
+            "enisa_kev": 0,
+            "euvd": 0,
+            "shadowserver": 0,
+            "kevintel": 0,
+        },
+        "multi_source_count": 0,
+        "vulncheck_configured": bool(vulncheck_token),
+        "pdcp_configured": bool(pdcp_key),
+        "otx_deferred": not include_otx,
+    }
+
+    async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=10.0)) as client:
         (
             vulncheck_entries,
             cisa_entries,
@@ -733,7 +892,6 @@ async def get_emerging_vulnerabilities(
             _fetch_kevintel(cutoff),
         )
 
-        # Merge all sources by CVE ID, combining kev_sources tags
         merged_entries = _merge_intel_sources([
             vulncheck_entries,
             cisa_entries,
@@ -748,37 +906,26 @@ async def get_emerging_vulnerabilities(
                 "total": 0,
                 "days": days,
                 "entries": [],
-                "summary": {
-                    "total": 0,
-                    "with_nuclei_template": 0,
-                    "with_poc": 0,
-                    "remote_exploitable": 0,
-                    "ransomware_associated": 0,
-                    "otx_active_campaigns": 0,
-                    "oracle_analyzed": 0,
-                    "by_severity": {"critical": 0, "high": 0, "medium": 0, "low": 0},
-                    "by_source": {
-                        "cisa_kev": 0,
-                        "vulncheck_kev": 0,
-                        "enisa_kev": 0,
-                        "euvd": 0,
-                        "shadowserver": 0,
-                        "kevintel": 0,
-                    },
-                    "multi_source_count": 0,
-                    "vulncheck_configured": bool(vulncheck_token),
-                    "pdcp_configured": bool(pdcp_key),
-                },
+                "summary": empty_summary,
             }
 
         cve_ids = [e["cve_id"] for e in merged_entries if e["cve_id"]][:limit]
 
-        # Concurrent enrichment: PDCP + OTX + EPSS in parallel
-        pdcp_map, otx_map, epss_map = await asyncio.gather(
-            _fetch_pdcp_batch(client, cve_ids, pdcp_key),
-            _fetch_otx_batch(client, cve_ids),
-            _fetch_epss_batch(client, cve_ids),
-        )
+        async def _empty_otx() -> dict[str, int]:
+            return {}
+
+        try:
+            pdcp_map, otx_map, epss_map = await asyncio.wait_for(
+                asyncio.gather(
+                    _fetch_pdcp_batch(client, cve_ids, pdcp_key),
+                    _fetch_otx_batch(client, cve_ids) if include_otx else _empty_otx(),
+                    _fetch_epss_batch(client, cve_ids),
+                ),
+                timeout=45.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning("threat-intel emerging enrichment timed out after 45s; returning feed-only data")
+            pdcp_map, otx_map, epss_map = {}, {}, {}
 
     # Oracle DB lookup (sync, local DB — no HTTP)
     oracle_map = _get_oracle_analysis_for_cves(db, cve_ids)
@@ -848,6 +995,7 @@ async def get_emerging_vulnerabilities(
         "multi_source_count": sum(1 for e in entries if len(e.get("kev_sources", [])) > 1),
         "vulncheck_configured": bool(vulncheck_token),
         "pdcp_configured": bool(pdcp_key),
+        "otx_deferred": not include_otx,
     }
 
     return {

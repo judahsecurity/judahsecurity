@@ -30,6 +30,12 @@ logger = logging.getLogger(__name__)
 CIRCL_BASE = "https://vulnerability.circl.lu/api"
 VULNCHECK_KEV_URL = "https://api.vulncheck.com/v3/index/vulncheck-kev"
 SHADOWSERVER_SIGHTING_SOURCE = "honeypot/exploited-vulnerabilities"
+KEVINTEL_API_URL = "https://kevintel.com/api/v1/kevs"
+CISA_KEV_URLS = (
+    "https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json",
+    # GitHub mirror maintained by CISA (fallback when cisa.gov is slow/blocked)
+    "https://raw.githubusercontent.com/cisagov/kev-data/main/known_exploited_vulnerabilities.json",
+)
 
 
 def _cache_dir() -> str:
@@ -68,16 +74,37 @@ def _write_json(path: str, payload: Any) -> None:
 
 # ── VulnCheck KEV ──────────────────────────────────────────────────────────────
 
+def _vulncheck_next_cursor(payload: Dict[str, Any]) -> Optional[str]:
+    """Extract next page cursor from VulnCheck v3 index responses."""
+    meta = payload.get("_meta") or payload.get("meta") or {}
+    cursor = (
+        meta.get("next_cursor")
+        or payload.get("_next")
+        or payload.get("cursor")
+        or meta.get("cursor")
+    )
+    if cursor is None:
+        return None
+    cursor_s = str(cursor).strip()
+    return cursor_s or None
+
+
 def fetch_vulncheck_kev(
     token: str,
     *,
     force: bool = False,
     refresh_hours: int = 24,
-    max_pages: int = 20,
+    max_pages: int = 80,
+    page_limit: int = 300,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Return {CVE-ID: entry} for VulnCheck KEV. Empty dict when no token.
-    Caches the full mapped payload on disk.
+
+    Uses VulnCheck v3 cursor pagination correctly:
+      1st page: start_cursor=true
+      next pages: cursor=<\_meta.next_cursor>
+
+    Caches the full mapped payload on disk so Delphi + threat-intel share one pull.
     """
     path = os.path.join(_cache_dir(), "vulncheck_kev.json")
     if not token:
@@ -103,43 +130,80 @@ def fetch_vulncheck_kev(
     mapped: Dict[str, Dict[str, Any]] = {}
     cursor: Optional[str] = None
     try:
-        for _ in range(max_pages):
-            # VulnCheck index API accepts sort=_timestamp|date_added (not camelCase).
-            params = {"sort": "date_added", "order": "desc", "limit": 500}
+        for page_idx in range(max_pages):
+            # Docs: https://docs.vulncheck.com/api/v3/indice
+            # SDK requires start_cursor=true on the first page of a session.
+            params: Dict[str, Any] = {
+                "sort": "date_added",
+                "order": "desc",
+                "limit": page_limit,
+            }
             if cursor:
                 params["cursor"] = cursor
+            else:
+                params["start_cursor"] = "true"
             url = VULNCHECK_KEV_URL + "?" + urllib.parse.urlencode(params)
-            payload = _http_get_json(url, headers=headers, timeout=60)
+            payload = _http_get_json(url, headers=headers, timeout=90)
+            if not isinstance(payload, dict):
+                logger.warning("Vuln intel: unexpected VulnCheck payload type %s", type(payload))
+                break
             entries = payload.get("data") or []
             if not entries:
                 break
             for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
                 cves = entry.get("cve") or []
+                if not cves:
+                    # Some rows use id=CVE-...
+                    maybe = str(entry.get("id") or "").strip().upper()
+                    if maybe.startswith("CVE-"):
+                        cves = [maybe]
                 if not cves:
                     continue
                 cve = str(cves[0]).strip().upper()
                 if not cve.startswith("CVE-"):
                     continue
+                cvss_obj = entry.get("cvss") or entry.get("cvssMetrics") or {}
+                if not isinstance(cvss_obj, dict):
+                    cvss_obj = {}
+                cvss_score = (
+                    cvss_obj.get("v3Score")
+                    or cvss_obj.get("cvssV3Score")
+                    or cvss_obj.get("baseScore")
+                    or entry.get("cvssV3Score")
+                    or entry.get("cvss_v3_score")
+                )
                 mapped[cve] = {
                     "cve_id": cve,
-                    "all_cves": [str(c).upper() for c in cves],
+                    "all_cves": [str(c).upper() for c in cves if str(c).upper().startswith("CVE-")],
                     "date_added": entry.get("dateAdded") or entry.get("date_added"),
                     "vendor_project": entry.get("vendorProject") or "",
                     "product": entry.get("product") or "",
                     "vulnerability_name": entry.get("vulnerabilityName") or "",
                     "short_description": entry.get("shortDescription") or "",
                     "known_ransomware_use": entry.get("knownRansomwareUse") or "Unknown",
+                    "cvss_score": float(cvss_score) if cvss_score is not None else None,
                     "source": "vulncheck_kev",
                 }
+            cursor = _vulncheck_next_cursor(payload)
             meta = payload.get("_meta") or payload.get("meta") or {}
-            cursor = (
-                payload.get("_next")
-                or payload.get("cursor")
-                or meta.get("next_cursor")
-            )
+            total_docs = meta.get("total_documents")
+            if page_idx == 0 and total_docs:
+                logger.info(
+                    "Vuln intel: VulnCheck KEV reports %s total documents",
+                    total_docs,
+                )
             if not cursor:
                 break
-        _write_json(path, {"fetched_at": datetime.now(timezone.utc).isoformat(), "entries": mapped})
+        _write_json(
+            path,
+            {
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "count": len(mapped),
+                "entries": mapped,
+            },
+        )
         logger.info("Vuln intel: cached %d VulnCheck KEV entries", len(mapped))
     except Exception as exc:
         logger.warning("Vuln intel: VulnCheck KEV fetch failed (%s); using stale cache", exc)
@@ -150,7 +214,6 @@ def fetch_vulncheck_kev(
             except Exception:
                 return mapped
     return mapped
-
 
 # ── Shadowserver via CIRCL sightings ───────────────────────────────────────────
 
@@ -214,20 +277,37 @@ def fetch_shadowserver_exploited(
     return cves
 
 
-# ── KEVIntel via CIRCL KEV catalog ─────────────────────────────────────────────
+# ── CIRCL KEV catalog (KEVIntel + Shadowserver assertions) ─────────────────────
 
-def fetch_kevintel_attestations(
+def _circl_kev_date(row: Dict[str, Any], detail: Dict[str, Any]) -> str:
+    ts = row.get("timestamps") or {}
+    return (
+        detail.get("added_date")
+        or ts.get("asserted_at")
+        or ts.get("first_seen_at")
+        or ts.get("last_seen_at")
+        or ""
+    )
+
+
+def fetch_circl_kev_by_source(
+    source: str,
     *,
     force: bool = False,
     refresh_hours: int = 24,
-    max_pages: int = 20,
-    per_page: int = 500,
+    max_pages: int = 40,
+    per_page: int = 200,
 ) -> Dict[str, Dict[str, Any]]:
     """
-    Return {CVE-ID: entry} for CVEs attested by KEVIntel in the CIRCL KEV catalog.
-    Free public feed — no KEVIntel Pro API key required.
+    Return {CVE-ID: entry} for CIRCL KEV assertions whose evidence includes `source`.
+
+    Aligns with gcve-eu-kev sources that land in Vulnerability-Lookup:
+      - kevintel
+      - shadowserver
+      - cisa-kev / enisa-cnw-kev (also present, but we pull those natively)
     """
-    path = os.path.join(_cache_dir(), "kevintel_circl.json")
+    source_l = (source or "").strip().lower()
+    path = os.path.join(_cache_dir(), f"circl_kev_{source_l or 'all'}.json")
     if not force and _cache_fresh(path, refresh_hours):
         try:
             data = _read_json(path)
@@ -244,39 +324,50 @@ def fetch_kevintel_attestations(
             if not rows:
                 break
             for row in rows:
+                if not isinstance(row, dict):
+                    continue
                 evidence = row.get("evidence") or []
-                sources = {str(ev.get("source") or "").lower() for ev in evidence}
-                if "kevintel" not in sources:
+                match = None
+                for ev in evidence:
+                    if str(ev.get("source") or "").lower() == source_l:
+                        match = ev
+                        break
+                if match is None:
                     continue
                 vuln = ((row.get("vulnerability") or {}).get("vulnId") or "").strip().upper()
                 if not vuln.startswith("CVE-"):
                     continue
-                # Prefer the kevintel evidence block for metadata.
-                detail = {}
-                for ev in evidence:
-                    if str(ev.get("source") or "").lower() == "kevintel":
-                        detail = ev.get("details") or {}
-                        break
+                detail = match.get("details") or {}
+                if not isinstance(detail, dict):
+                    detail = {}
                 mapped[vuln] = {
                     "cve_id": vuln,
-                    "date_added": detail.get("added_date") or (row.get("timestamps") or {}).get("asserted_at"),
-                    "vendor_project": detail.get("vendor") or "",
+                    "date_added": _circl_kev_date(row, detail),
+                    "vendor_project": detail.get("vendor") or detail.get("vendorProject") or "",
                     "product": detail.get("product") or "",
-                    "vulnerability_name": detail.get("title") or "",
+                    "vulnerability_name": detail.get("title") or detail.get("vulnerabilityName") or "",
                     "short_description": (row.get("scope") or {}).get("notes") or "",
-                    "known_ransomware_use": "Known" if str(detail.get("used_in_malware") or "").lower() in ("yes", "true", "known") else "Unknown",
-                    "confidence": next((ev.get("confidence") for ev in evidence if str(ev.get("source") or "").lower() == "kevintel"), None),
+                    "known_ransomware_use": (
+                        "Known"
+                        if str(detail.get("used_in_malware") or detail.get("exploitationType") or "").lower()
+                        in ("yes", "true", "known", "ransomware")
+                        else "Unknown"
+                    ),
+                    "confidence": match.get("confidence"),
                     "not_yet_in_cisa_kev": bool(detail.get("not_yet_in_cisa_kev")),
-                    "source": "kevintel",
+                    "source": source_l,
                 }
             meta = payload.get("metadata") or {}
             total = int(meta.get("count") or 0)
             if page * per_page >= total:
                 break
-        _write_json(path, {"fetched_at": datetime.now(timezone.utc).isoformat(), "entries": mapped})
-        logger.info("Vuln intel: cached %d KEVIntel attestations", len(mapped))
+        _write_json(
+            path,
+            {"fetched_at": datetime.now(timezone.utc).isoformat(), "count": len(mapped), "entries": mapped},
+        )
+        logger.info("Vuln intel: cached %d CIRCL KEV entries for source=%s", len(mapped), source_l)
     except Exception as exc:
-        logger.warning("Vuln intel: KEVIntel/CIRCL fetch failed (%s); using stale cache", exc)
+        logger.warning("Vuln intel: CIRCL KEV (%s) fetch failed (%s); using stale cache", source_l, exc)
         if os.path.exists(path):
             try:
                 data = _read_json(path)
@@ -285,6 +376,120 @@ def fetch_kevintel_attestations(
                 return mapped
     return mapped
 
+
+def fetch_kevintel_direct(
+    *,
+    force: bool = False,
+    refresh_hours: int = 24,
+    max_pages: int = 100,
+    per_page: int = 100,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Prefer the first-party KEVIntel API (https://kevintel.com/api/v1/kevs),
+    matching gcve-eu-kev. Falls back to empty dict on failure so CIRCL can cover.
+    """
+    path = os.path.join(_cache_dir(), "kevintel_direct.json")
+    if not force and _cache_fresh(path, refresh_hours):
+        try:
+            data = _read_json(path)
+            return {k: v for k, v in (data.get("entries") or {}).items()}
+        except Exception:
+            pass
+
+    mapped: Dict[str, Dict[str, Any]] = {}
+    try:
+        page = 1
+        for _ in range(max_pages):
+            qs = urllib.parse.urlencode({"per_page": per_page, "page": page})
+            payload = _http_get_json(f"{KEVINTEL_API_URL}?{qs}", timeout=60)
+            # Live API returns {"kevs":[...], "pagination":{...}}.
+            # Some deployments currently return an OpenAPI "filters" schema — treat as failure.
+            if not isinstance(payload, dict) or "filters" in payload and "kevs" not in payload:
+                raise ValueError("KEVIntel API returned schema/docs instead of kevs data")
+            kevs = payload.get("kevs") or []
+            if not isinstance(kevs, list) or not kevs:
+                break
+            for item in kevs:
+                if not isinstance(item, dict):
+                    continue
+                cve = str(item.get("cve_id") or "").strip().upper()
+                if not cve.startswith("CVE-"):
+                    continue
+                mapped[cve] = {
+                    "cve_id": cve,
+                    "date_added": item.get("added_date") or "",
+                    "vendor_project": item.get("vendor") or "",
+                    "product": item.get("product") or "",
+                    "vulnerability_name": item.get("title") or "",
+                    "short_description": item.get("title") or "",
+                    "known_ransomware_use": (
+                        "Known"
+                        if str(item.get("used_in_malware") or "").lower() in ("yes", "true", "known")
+                        else "Unknown"
+                    ),
+                    "not_yet_in_cisa_kev": bool(item.get("not_yet_in_cisa_kev")),
+                    "cvss_score": item.get("cvss_score"),
+                    "source": "kevintel",
+                }
+            pagination = payload.get("pagination") or {}
+            next_page = pagination.get("next_page")
+            if not next_page:
+                break
+            page = int(next_page)
+        if mapped:
+            _write_json(
+                path,
+                {"fetched_at": datetime.now(timezone.utc).isoformat(), "count": len(mapped), "entries": mapped},
+            )
+            logger.info("Vuln intel: cached %d KEVIntel direct entries", len(mapped))
+    except Exception as exc:
+        logger.warning("Vuln intel: KEVIntel direct fetch failed (%s)", exc)
+        if os.path.exists(path):
+            try:
+                data = _read_json(path)
+                return {k: v for k, v in (data.get("entries") or {}).items()}
+            except Exception:
+                return {}
+        return {}
+    return mapped
+
+
+def fetch_kevintel_attestations(
+    *,
+    force: bool = False,
+    refresh_hours: int = 24,
+    max_pages: int = 40,
+    per_page: int = 200,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Return {CVE-ID: entry} for KEVIntel attestations.
+
+    Prefers kevintel.com (gcve-eu-kev path); falls back to CIRCL Vulnerability-Lookup
+    KEV catalog evidence source=kevintel.
+    """
+    direct = fetch_kevintel_direct(force=force, refresh_hours=refresh_hours)
+    if direct:
+        return direct
+    return fetch_circl_kev_by_source(
+        "kevintel",
+        force=force,
+        refresh_hours=refresh_hours,
+        max_pages=max_pages,
+        per_page=per_page,
+    )
+
+
+def fetch_shadowserver_from_circl_kev(
+    *,
+    force: bool = False,
+    refresh_hours: int = 24,
+) -> Dict[str, Dict[str, Any]]:
+    """Shadowserver honeypot KEV assertions via CIRCL (dated, unlike raw sightings)."""
+    return fetch_circl_kev_by_source(
+        "shadowserver",
+        force=force,
+        refresh_hours=refresh_hours,
+    )
 
 # ── FIRE + breach-intel overlays ───────────────────────────────────────────────
 
