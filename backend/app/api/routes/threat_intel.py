@@ -680,19 +680,21 @@ async def _fetch_epss_batch(
 def _get_oracle_analysis_for_cves(db: Session, cve_ids: list[str]) -> dict[str, dict]:
     """
     Look up any existing Oracle enrichment results for these CVE IDs.
-    Returns a map of cve_id → {opes_score, opes_category, delphi_priority, ...}
+
+    Uses the promoted oracle_* columns on vulnerabilities (not legacy
+    opes_score / delphi_priority names that are not on the ORM model).
     """
     if not cve_ids:
         return {}
     try:
-        from app.main import Vulnerability  # local import to avoid circular deps
+        from app.models.vulnerability import Vulnerability
 
         rows = (
             db.query(
                 Vulnerability.cve_id,
-                Vulnerability.opes_score,
-                Vulnerability.opes_category,
-                Vulnerability.delphi_priority,
+                Vulnerability.oracle_opes_score,
+                Vulnerability.oracle_opes_category,
+                Vulnerability.oracle_attack_path,
                 Vulnerability.severity,
                 Vulnerability.cvss_score,
             )
@@ -702,11 +704,12 @@ def _get_oracle_analysis_for_cves(db: Session, cve_ids: list[str]) -> dict[str, 
         result: dict[str, dict] = {}
         for row in rows:
             if row.cve_id and row.cve_id not in result:
+                sev = row.severity.value if hasattr(row.severity, "value") else row.severity
                 result[row.cve_id] = {
-                    "opes_score": row.opes_score,
-                    "opes_category": row.opes_category,
-                    "delphi_priority": row.delphi_priority,
-                    "severity": row.severity,
+                    "opes_score": row.oracle_opes_score,
+                    "opes_category": row.oracle_opes_category,
+                    "delphi_priority": row.oracle_attack_path,
+                    "severity": sev,
                     "cvss_score": row.cvss_score,
                 }
         return result
@@ -1123,16 +1126,24 @@ async def analyze_kev_cve(
 
     # If this CVE exists as a Vulnerability in the DB, persist the result
     try:
-        from app.main import Vulnerability  # avoid circular import
+        from app.models.vulnerability import Vulnerability
         vuln = db.query(Vulnerability).filter(Vulnerability.cve_id == cve_id).first()
         if vuln:
             meta = dict(vuln.metadata_) if isinstance(vuln.metadata_, dict) else {}
             meta["oracle"] = result
             vuln.metadata_ = meta
-            if opes.get("score") is not None:
-                vuln.opes_score = opes["score"]
+            if opes.get("score") is not None and isinstance(opes.get("score"), (int, float)):
+                vuln.oracle_opes_score = float(opes["score"])
             if opes.get("category"):
-                vuln.opes_category = opes["category"]
+                vuln.oracle_opes_category = str(opes["category"])
+            if opes.get("label"):
+                vuln.oracle_opes_label = str(opes["label"])
+            if opes.get("confidence"):
+                vuln.oracle_opes_confidence = str(opes["confidence"])
+            if result.get("attack_path_class"):
+                vuln.oracle_attack_path = result["attack_path_class"]
+            vuln.oracle_enriched_at = datetime.utcnow()
+            vuln.oracle_analysis_status = result.get("analysis_status") or "complete"
             db.commit()
     except Exception:
         pass  # non-fatal — return result regardless
