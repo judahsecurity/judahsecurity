@@ -110,7 +110,8 @@ class Settings(BaseSettings):
     # Docker Desktop: http://host.docker.internal:11434/v1
     OLLAMA_BASE_URL: str = "http://127.0.0.1:11434/v1"
     OLLAMA_MODEL: str = "qwen2.5:14b"
-    # When the preferred cloud provider has no API key, try local Ollama if reachable.
+    # When the preferred cloud provider has no API key, OR a cloud call fails
+    # with credit/quota/billing errors, try local Ollama if reachable.
     OLLAMA_FALLBACK_ENABLED: bool = True
 
     @field_validator(

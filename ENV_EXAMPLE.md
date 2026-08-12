@@ -116,16 +116,26 @@ ANTHROPIC_MODEL=claude-sonnet-4-6
 # Aegis Vanguard (autonomous pentest agent + on-demand finding validator)
 # Code lives in aegis-vanguard/. See aegis-vanguard/DEPLOYMENT.md.
 # =============================================================================
-# How the scanner worker invokes validate_finding.py: docker | subprocess
-# AEGIS_VALIDATOR_MODE=docker
-# AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
+# How the scanner worker revalidates findings:
+#   native (default) — replay original detector / steps_to_reproduce on the
+#                      scanner (nuclei template, TCP/HTTP probes). No Docker.
+#   docker           — `docker run aegis-vanguard:latest` (needs CLI + sock)
+#   subprocess       — run aegis-vanguard/validate_finding.py in-process
+#   auto             — native first; escalate to docker/subprocess if inconclusive
+AEGIS_VALIDATOR_MODE=native
+AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
 # AEGIS_VANGUARD_PATH=/path/to/aegis-vanguard   # only for subprocess mode
 # AEGIS_VALIDATE_MAX_TURNS=20
 # AEGIS_VALIDATE_TIMEOUT=900
 # Agent-side (also used inside the Vanguard container):
 # AEGIS_MODEL=claude-sonnet-4-6
+# AEGIS_LLM_BACKEND=auto
 # AEGIS_GUARDRAILS=true
 # AEGIS_TRACING=true
+# If Anthropic/OpenAI credits run out, Vanguard retries on local Ollama when
+# reachable (same OLLAMA_* vars as the platform agent; disable with
+# OLLAMA_FALLBACK_ENABLED=false).
+# DOCKER_SOCK=/var/run/docker.sock   # only needed for docker mode
 
 # DeepSeek (OpenAI-compatible). Optional. Provider string in task_models: "deepseek"
 # Get key at: https://platform.deepseek.com/
@@ -151,8 +161,10 @@ ANTHROPIC_MODEL=claude-sonnet-4-6
 #   docker compose --profile ollama up -d
 # Host / Docker Desktop instead: OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
 # Smaller instances: OLLAMA_MODEL=qwen2.5:7b  (~8 GB RAM). 14b needs ~12–16 GB.
-# When a preferred cloud provider has no API key, the agent falls back to Ollama
-# if it is reachable (disable with OLLAMA_FALLBACK_ENABLED=false).
+# When a preferred cloud provider has no API key, OR a cloud call fails with
+# credit/quota/billing errors (e.g. Anthropic "credit balance is too low"),
+# the agent falls back to Ollama if it is reachable
+# (disable with OLLAMA_FALLBACK_ENABLED=false).
 # COMPOSE_PROFILES=ollama
 # OLLAMA_BASE_URL=http://ollama:11434/v1
 # OLLAMA_MODEL=qwen2.5:14b

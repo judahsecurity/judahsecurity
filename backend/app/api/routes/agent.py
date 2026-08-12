@@ -118,6 +118,26 @@ def _handle_agent_error(result_error: str):
             status_code=503,
             detail="The AI provider (Anthropic/Claude) is temporarily overloaded. Please try again in a few minutes."
         )
+    if any(
+        m in err
+        for m in (
+            "credit balance",
+            "insufficient_quota",
+            "insufficient quota",
+            "exceeded your current quota",
+            "purchase credits",
+            "plans & billing",
+            "out of credits",
+        )
+    ):
+        raise HTTPException(
+            status_code=402,
+            detail=(
+                "Cloud LLM credits are exhausted. Top up the provider, or enable local "
+                "Ollama fallback (COMPOSE_PROFILES=ollama, OLLAMA_FALLBACK_ENABLED=true) "
+                "and restart the backend."
+            ),
+        )
     raise HTTPException(status_code=500, detail=result_error)
 
 

@@ -11,8 +11,10 @@ Resolution precedence for a task, most specific first:
 2. Per-org agent config legacy ``llm_provider`` + ``llm_model``
 3. Global defaults from ``settings`` (AI_PROVIDER + that provider's model)
 
-If the preferred cloud provider has no API key and ``OLLAMA_FALLBACK_ENABLED``
-is on, the router falls back to a reachable local Ollama instance.
+Ollama fallback (when ``OLLAMA_FALLBACK_ENABLED`` is on and Ollama is reachable):
+
+- Preferred cloud provider has no API key → resolve to Ollama immediately
+- Cloud call fails with credit/quota/billing errors → retry once on Ollama
 
 Keys are resolved separately per provider and passed only to the SDK client.
 """
@@ -21,11 +23,18 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
+from typing import Any, List, Optional
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
+from langchain_core.callbacks import (
+    AsyncCallbackManagerForLLMRun,
+    CallbackManagerForLLMRun,
+)
 from langchain_core.language_models.chat_models import BaseChatModel
+from langchain_core.messages import BaseMessage
+from langchain_core.outputs import ChatResult
+from pydantic import ConfigDict, Field
 
 from app.core.config import settings
 from app.models.api_config import (
@@ -54,6 +63,28 @@ ALL_TASKS = (LLMTask.REASONING, LLMTask.OFFENSIVE, LLMTask.REPORT)
 # Cache Ollama reachability briefly so we don't probe on every LLM call.
 _OLLAMA_REACHABLE_CACHE: dict[str, tuple[bool, float]] = {}
 _OLLAMA_REACHABLE_TTL_SECONDS = 30.0
+
+# Substrings that indicate the cloud provider rejected the call for billing /
+# quota reasons (not transient overload). Matched case-insensitively against
+# the exception message + type name.
+_CREDIT_QUOTA_MARKERS = (
+    "credit balance is too low",
+    "credit balance",
+    "plans & billing",
+    "plans and billing",
+    "purchase credits",
+    "insufficient_quota",
+    "insufficient quota",
+    "exceeded your current quota",
+    "exceeded your quota",
+    "billing hard limit",
+    "billing_not_active",
+    "payment required",
+    "usage limit",
+    "quota exceeded",
+    "out of credits",
+    "no credits",
+)
 
 
 def _settings_key_for_provider(provider: str) -> Optional[str]:
@@ -151,6 +182,124 @@ def ollama_is_reachable(timeout: float = 0.75) -> bool:
     return ok
 
 
+def is_llm_credit_or_quota_error(exc: BaseException) -> bool:
+    """True when a provider rejected the call for billing / quota / credits."""
+    parts = [str(exc), type(exc).__name__]
+    cause = getattr(exc, "__cause__", None)
+    if cause is not None:
+        parts.append(str(cause))
+        parts.append(type(cause).__name__)
+    # Anthropic / OpenAI SDK errors often stash the body on `.body` or `.message`
+    for attr in ("message", "body", "response"):
+        val = getattr(exc, attr, None)
+        if val is not None:
+            parts.append(str(val))
+    haystack = " ".join(parts).lower()
+    if any(marker in haystack for marker in _CREDIT_QUOTA_MARKERS):
+        return True
+    # HTTP 402 Payment Required
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    if status == 402:
+        return True
+    return False
+
+
+def _ollama_fallback_model_name() -> str:
+    return (
+        getattr(settings, "OLLAMA_MODEL", None)
+        or DEFAULT_MODEL_BY_PROVIDER[ExternalService.OLLAMA]
+    )
+
+
+def ollama_fallback_available() -> bool:
+    """True when credit/key fallback to Ollama is enabled and the daemon responds."""
+    if not getattr(settings, "OLLAMA_FALLBACK_ENABLED", True):
+        return False
+    return ollama_is_reachable()
+
+
+def build_ollama_chat_model(
+    *,
+    temperature: Optional[float] = 0,
+    max_tokens: Optional[int] = None,
+    timeout: Optional[float] = 120,
+    max_retries: int = 2,
+) -> BaseChatModel:
+    """Construct the configured local Ollama chat model."""
+    return build_chat_model(
+        ExternalService.OLLAMA,
+        _ollama_fallback_model_name(),
+        "ollama",
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        max_retries=max_retries,
+    )
+
+
+class CreditFallbackChatModel(BaseChatModel):
+    """Try ``primary``; on cloud credit/quota errors, retry once with ``fallback``.
+
+    Used so Anthropic/OpenAI keys that exist but are out of credits still land
+    on a reachable local Ollama model instead of failing the agent run.
+    """
+
+    primary: Any = Field(exclude=True)
+    fallback: Any = Field(exclude=True)
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    @property
+    def _llm_type(self) -> str:
+        return "credit-fallback"
+
+    def _generate(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        try:
+            return self.primary._generate(
+                messages, stop=stop, run_manager=run_manager, **kwargs
+            )
+        except Exception as exc:
+            if not is_llm_credit_or_quota_error(exc):
+                raise
+            logger.warning(
+                "Cloud LLM credit/quota failure; falling back to Ollama (%s): %s",
+                _ollama_fallback_model_name(),
+                exc,
+            )
+            return self.fallback._generate(
+                messages, stop=stop, run_manager=run_manager, **kwargs
+            )
+
+    async def _agenerate(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        try:
+            return await self.primary._agenerate(
+                messages, stop=stop, run_manager=run_manager, **kwargs
+            )
+        except Exception as exc:
+            if not is_llm_credit_or_quota_error(exc):
+                raise
+            logger.warning(
+                "Cloud LLM credit/quota failure; falling back to Ollama (%s): %s",
+                _ollama_fallback_model_name(),
+                exc,
+            )
+            return await self.fallback._agenerate(
+                messages, stop=stop, run_manager=run_manager, **kwargs
+            )
+
+
 def _maybe_fallback_to_ollama(
     provider: str,
     model: str,
@@ -173,15 +322,40 @@ def _maybe_fallback_to_ollama(
         )
         return provider, model, api_key
 
-    fallback_model = (
-        getattr(settings, "OLLAMA_MODEL", None)
-        or DEFAULT_MODEL_BY_PROVIDER[ExternalService.OLLAMA]
-    )
+    fallback_model = _ollama_fallback_model_name()
     logger.warning(
         "No API key for provider=%s; falling back to local Ollama model=%s",
         provider, fallback_model,
     )
     return ExternalService.OLLAMA, fallback_model, "ollama"
+
+
+def _attach_credit_fallback(
+    primary: BaseChatModel,
+    provider: str,
+    *,
+    temperature: Optional[float],
+    max_tokens: Optional[int],
+    timeout: Optional[float],
+    max_retries: int,
+) -> BaseChatModel:
+    """Wrap ``primary`` so credit/quota errors retry on Ollama when available."""
+    if provider == ExternalService.OLLAMA:
+        return primary
+    if not ollama_fallback_available():
+        return primary
+    fallback = build_ollama_chat_model(
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        max_retries=max_retries,
+    )
+    logger.info(
+        "Attached Ollama credit/quota fallback (%s) behind provider=%s",
+        _ollama_fallback_model_name(),
+        provider,
+    )
+    return CreditFallbackChatModel(primary=primary, fallback=fallback)
 
 
 def get_llm_for_task(
@@ -199,6 +373,9 @@ def get_llm_for_task(
 
     Pass ``agent_config`` if already loaded to avoid a second DB read; otherwise
     it is fetched from ``MODULE_AGENT`` project settings.
+
+    When Ollama is reachable, cloud models are wrapped so a credit/quota failure
+    automatically retries on the local model.
     """
     if agent_config is None:
         agent_config = _load_agent_config(db, organization_id)
@@ -214,10 +391,18 @@ def get_llm_for_task(
         task, organization_id, provider, model,
     )
 
-    return build_chat_model(
+    primary = build_chat_model(
         provider, model, api_key,
         temperature=temperature, max_tokens=max_tokens,
         timeout=timeout, max_retries=max_retries,
+    )
+    return _attach_credit_fallback(
+        primary,
+        provider,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        timeout=timeout,
+        max_retries=max_retries,
     )
 
 

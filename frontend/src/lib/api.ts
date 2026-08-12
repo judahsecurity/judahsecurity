@@ -21,6 +21,12 @@ export function getApiErrorMessage(error: any, fallback: string = 'An error occu
     return 'The request timed out. The agent may still be running — check back shortly.';
   }
 
+  // Cloud LLM credits exhausted (Ollama fallback may also have been unavailable)
+  if (status === 402) {
+    if (typeof detail === 'string' && detail.trim()) return detail;
+    return 'Cloud LLM credits are exhausted. Top up the provider or enable local Ollama fallback.';
+  }
+
   // AI provider (e.g. Anthropic) overloaded - 529 or 503 with overloaded message
   if (status === 529 || status === 503) {
     if (typeof detail === 'string' && (detail.toLowerCase().includes('overloaded') || detail.includes('try again')))

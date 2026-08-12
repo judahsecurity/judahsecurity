@@ -35,6 +35,77 @@ from agent.tools import ToolDef, ToolRegistry
 from agent.guardrails import GuardrailEngine
 from agent.tracing import Tracer, TokenUsage
 
+# Cloud billing / quota signals (Anthropic, OpenAI, etc.) that should trigger
+# a local Ollama retry when OLLAMA_FALLBACK_ENABLED is on.
+_CREDIT_QUOTA_MARKERS = (
+    "credit balance is too low",
+    "credit balance",
+    "plans & billing",
+    "plans and billing",
+    "purchase credits",
+    "insufficient_quota",
+    "insufficient quota",
+    "exceeded your current quota",
+    "exceeded your quota",
+    "billing hard limit",
+    "billing_not_active",
+    "payment required",
+    "usage limit",
+    "quota exceeded",
+    "out of credits",
+    "no credits",
+)
+
+
+def _is_credit_or_quota_error(exc: BaseException) -> bool:
+    parts = [str(exc), type(exc).__name__]
+    cause = getattr(exc, "__cause__", None)
+    if cause is not None:
+        parts.extend([str(cause), type(cause).__name__])
+    for attr in ("message", "body", "response"):
+        val = getattr(exc, attr, None)
+        if val is not None:
+            parts.append(str(val))
+    haystack = " ".join(parts).lower()
+    if any(m in haystack for m in _CREDIT_QUOTA_MARKERS):
+        return True
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
+    return status == 402
+
+
+def _ollama_fallback_enabled() -> bool:
+    return os.environ.get("OLLAMA_FALLBACK_ENABLED", "true").lower() not in (
+        "0", "false", "no", "off",
+    )
+
+
+def _ollama_api_base() -> str:
+    base = (
+        os.environ.get("OLLAMA_API_BASE")
+        or os.environ.get("OLLAMA_BASE_URL")
+        or "http://127.0.0.1:11434"
+    ).rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    return base
+
+
+def _ollama_litellm_model() -> str:
+    model = os.environ.get("OLLAMA_MODEL") or "qwen2.5:14b"
+    if "/" in model:
+        return model
+    return f"ollama/{model}"
+
+
+def _ollama_is_reachable(timeout: float = 0.75) -> bool:
+    try:
+        from urllib.request import urlopen
+        url = f"{_ollama_api_base()}/api/tags"
+        with urlopen(url, timeout=timeout) as resp:  # nosec B310 — local admin URL
+            return 200 <= getattr(resp, "status", 200) < 300
+    except Exception:
+        return False
+
 # Aegis Praetorium — shared guard layer (Lictor / Censor / Augur). Imported
 # lazily-tolerantly so a missing install does not break the agent on dev
 # machines that haven't pip-installed the package.
@@ -429,23 +500,60 @@ class AgentRunner:
         messages: List[dict],
     ):
         backend = self._backend_for_model(model)
-        if backend == "anthropic":
-            return self.client.messages.create(
+        try:
+            if backend == "anthropic":
+                return self.client.messages.create(
+                    model=model,
+                    max_tokens=8192,
+                    temperature=agent.temperature,
+                    system=system_prompt,
+                    tools=tools_schemas,
+                    messages=messages,
+                )
+
+            return self._call_litellm(
                 model=model,
-                max_tokens=8192,
-                temperature=agent.temperature,
-                system=system_prompt,
-                tools=tools_schemas,
+                agent=agent,
+                system_prompt=system_prompt,
+                tools_schemas=tools_schemas,
                 messages=messages,
             )
+        except Exception as exc:
+            if not self._should_fallback_to_ollama(model, exc):
+                raise
+            ollama_model = _ollama_litellm_model()
+            logger.warning(
+                "Cloud LLM credit/quota failure on model=%s; falling back to %s: %s",
+                model, ollama_model, exc,
+            )
+            return self._call_litellm(
+                model=ollama_model,
+                agent=agent,
+                system_prompt=system_prompt,
+                tools_schemas=tools_schemas,
+                messages=messages,
+                api_base=_ollama_api_base(),
+            )
 
-        return self._call_litellm(
-            model=model,
-            agent=agent,
-            system_prompt=system_prompt,
-            tools_schemas=tools_schemas,
-            messages=messages,
-        )
+    def _should_fallback_to_ollama(self, model: str, exc: BaseException) -> bool:
+        if not _ollama_fallback_enabled():
+            return False
+        if model.startswith("ollama/") or model.startswith("ollama_chat/"):
+            return False
+        if not _is_credit_or_quota_error(exc):
+            return False
+        if litellm is None:
+            logger.warning(
+                "Ollama credit fallback requested but litellm is not installed"
+            )
+            return False
+        if not _ollama_is_reachable():
+            logger.warning(
+                "Ollama credit fallback requested but daemon not reachable at %s",
+                _ollama_api_base(),
+            )
+            return False
+        return True
 
     def _call_litellm(
         self,
@@ -455,18 +563,23 @@ class AgentRunner:
         system_prompt: str,
         tools_schemas: List[dict],
         messages: List[dict],
+        api_base: Optional[str] = None,
     ):
         """Call any LiteLLM-supported provider and normalize to Anthropic-like blocks."""
         llm_messages = self._to_litellm_messages(system_prompt, messages)
         llm_tools = self._to_litellm_tools(tools_schemas)
 
-        response = litellm.completion(
-            model=model,
-            messages=llm_messages,
-            tools=llm_tools or None,
-            max_tokens=8192,
-            temperature=agent.temperature,
-        )
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "messages": llm_messages,
+            "tools": llm_tools or None,
+            "max_tokens": 8192,
+            "temperature": agent.temperature,
+        }
+        if api_base:
+            kwargs["api_base"] = api_base
+
+        response = litellm.completion(**kwargs)
 
         choice = response.choices[0]
         message = choice.message

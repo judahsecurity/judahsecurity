@@ -292,6 +292,9 @@ All configuration is environment-variable driven; no `.env` file is required.
 | `AEGIS_MODEL_AUTH`      | —                                   | Override model for auth hunter                    |
 | `AEGIS_MODEL_AUTHZ`     | —                                   | Override model for authz hunter                   |
 | `AEGIS_MODEL_SSRF`      | —                                   | Override model for SSRF hunter                    |
+| `OLLAMA_FALLBACK_ENABLED` | `true`                            | On cloud credit/quota errors, retry via local Ollama |
+| `OLLAMA_MODEL`          | `qwen2.5:14b`                       | Local model used for credit/quota fallback        |
+| `OLLAMA_BASE_URL` / `OLLAMA_API_BASE` | `http://127.0.0.1:11434` | Ollama daemon base (LiteLLM strips trailing `/v1`) |
 | `AEGIS_TRACING`         | `true`                              | Enable OpenTelemetry-style span capture           |
 | `AEGIS_GUARDRAILS`      | `true`                              | Enable legacy regex guardrail engine              |
 | `AEGIS_LICTOR_ENABLED`  | `true`                              | Praetorium Lictor pre/post hooks                  |

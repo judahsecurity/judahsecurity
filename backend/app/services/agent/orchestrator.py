@@ -210,6 +210,20 @@ class AgentOrchestrator:
             return
         
         self._setup_llm()
+        # If the default cloud provider is out of credits, retry on Ollama when reachable.
+        try:
+            from app.services.agent.model_router import _attach_credit_fallback
+            if self.llm is not None and self._provider:
+                self.llm = _attach_credit_fallback(
+                    self.llm,
+                    self._provider,
+                    temperature=0,
+                    max_tokens=settings.AGENT_MAX_OUTPUT_TOKENS,
+                    timeout=120,
+                    max_retries=2,
+                )
+        except Exception:
+            logger.debug("Could not attach Ollama credit fallback to default LLM", exc_info=True)
         self._setup_tools()
         self._build_graph()
         self._initialized = True
