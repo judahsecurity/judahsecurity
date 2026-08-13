@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 current_user_id: ContextVar[Optional[int]] = ContextVar('current_user_id', default=None)
 current_organization_id: ContextVar[Optional[int]] = ContextVar('current_organization_id', default=None)
 current_session_id: ContextVar[Optional[str]] = ContextVar('current_session_id', default=None)
+# Seed URL/host from the user objective — used when LLMs omit execute_* args
+current_seed_target: ContextVar[Optional[str]] = ContextVar('current_seed_target', default=None)
 
 
 def set_tenant_context(user_id: int, organization_id: int, session_id: Optional[str] = None) -> None:
@@ -39,6 +41,11 @@ def set_tenant_context(user_id: int, organization_id: int, session_id: Optional[
     current_organization_id.set(organization_id)
     if session_id is not None:
         current_session_id.set(session_id)
+
+
+def set_seed_target(target: Optional[str]) -> None:
+    """Remember the engagement seed URL for empty execute_* arg recovery."""
+    current_seed_target.set((target or "").strip() or None)
 
 
 def get_tenant_context() -> tuple:
@@ -454,6 +461,33 @@ class ASMToolsManager:
     
     async def execute(self, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool with the given arguments."""
+        tool_args = dict(tool_args or {}) if isinstance(tool_args, dict) else {}
+
+        # Normalize execute_* BEFORE the confirmation gate so approvals show
+        # real CLI args and empty-{} LLM calls never reach MCP.
+        if tool_name.startswith("execute_"):
+            fallback = str(tool_args.pop("_fallback_target", "") or "")
+            if not fallback:
+                fallback = getattr(self, "_fallback_target", "") or ""
+            if not fallback:
+                fallback = current_seed_target.get() or ""
+            tool_args = normalize_execute_tool_args(
+                tool_name,
+                tool_args,
+                fallback_target=fallback,
+            )
+            if not (tool_args.get("args") or "").strip():
+                return {
+                    "success": False,
+                    "output": (
+                        f"Error: Missing required parameter: args\n\n"
+                        f"HINT: {tool_name} requires tool_args like "
+                        f'{{"args": "-u https://target.com -json"}}. '
+                        f"Do not call it with empty tool_args."
+                    ),
+                    "error": "Missing required parameter: args",
+                }
+
         # -- Per-tool confirmation gate ---------------------------------------
         # Consult the org's agent confirmation policy. Dangerous tools
         # (execute_*, create_scan, ...) either pause for a human ``approve`` or
@@ -508,30 +542,6 @@ class ASMToolsManager:
         if tool_name.startswith("execute_") or tool_name.endswith("_help"):
             try:
                 mcp = self._get_mcp_server()
-                # Normalize: MCP execute_* tools expect {"args": "<cli string>"}.
-                # LLMs often pass {}, {"url": "..."}, or {"args": null}.
-                if tool_name.startswith("execute_"):
-                    fallback = ""
-                    if isinstance(tool_args, dict):
-                        fallback = str(tool_args.pop("_fallback_target", "") or "")
-                    if not fallback:
-                        fallback = getattr(self, "_fallback_target", "") or ""
-                    tool_args = normalize_execute_tool_args(
-                        tool_name,
-                        tool_args,
-                        fallback_target=fallback,
-                    )
-                    if not (tool_args.get("args") or "").strip():
-                        return {
-                            "success": False,
-                            "output": (
-                                f"Error: Missing required parameter: args\n\n"
-                                f"HINT: {tool_name} requires tool_args like "
-                                f'{{"args": "-u https://target.com -json"}}. '
-                                f"Do not call it with empty tool_args."
-                            ),
-                            "error": "Missing required parameter: args",
-                        }
                 result = await mcp.call_tool(tool_name, tool_args)
 
                 max_chars = _tool_output_max_chars()
@@ -575,11 +585,27 @@ class ASMToolsManager:
                     }
             except Exception as e:
                 logger.error(f"MCP tool execution failed: {tool_name} - {e}")
+                err_txt = str(e)
+                # Only append the args-shape HINT when the failure is actually about params
+                args_related = any(
+                    m in err_txt.lower()
+                    for m in (
+                        "missing required",
+                        "unexpected keyword",
+                        "required parameter",
+                        "got an unexpected",
+                    )
+                )
+                hint = (
+                    f"\n\nHINT: All execute_* tools accept a single 'args' parameter with CLI arguments. "
+                    f"Example: {tool_name}(args=\"-u https://target.com\")"
+                    if args_related
+                    else ""
+                )
                 return {
                     "success": False,
-                    "output": f"Error: {e}\n\nHINT: All execute_* tools accept a single 'args' parameter with CLI arguments. "
-                              f"Example: {tool_name}(args=\"-u https://target.com\")",
-                    "error": str(e)
+                    "output": f"Error: {e}{hint}",
+                    "error": err_txt,
                 }
         
         # Regular ASM tool

@@ -55,6 +55,26 @@ READONLY_TOOLS = {
     "web_search",
 }
 
+# Passive / light recon: always auto-allow unless explicitly denied.
+# Prevents assessment kickoff from stalling on approve-every-httpx.
+SAFE_RECON_TOOLS = {
+    "execute_httpx",
+    "execute_dnsx",
+    "execute_wafw00f",
+    "execute_wappalyzer",
+    "execute_whatweb",
+    "execute_curl",
+    "execute_katana",
+    "execute_gau",
+    "execute_waybackurls",
+    "execute_crtsh",
+    "execute_crt_name",
+    "execute_subfinder",
+    "execute_subfaster",
+    "httpx_help",
+    "dnsx_help",
+}
+
 
 @dataclass
 class PendingConfirmation:
@@ -258,8 +278,19 @@ async def gate(
     policy_map = policy_cfg.get("tool_confirmation_policy") or {}
     decision = _resolve_decision(policy_map, tool_name)
 
-    # RoE escalates "auto" -> "confirm" for non-readonly tools when enabled.
-    if decision == "auto" and _roe_requires_confirmation(organization_id) and tool_name not in READONLY_TOOLS:
+    # Light recon must not block assessment kickoff behind approve dialogs.
+    # Explicit "deny" still wins; everything else becomes auto for SAFE_RECON_TOOLS.
+    if tool_name in SAFE_RECON_TOOLS and decision != "deny":
+        decision = "auto"
+
+    # RoE escalates "auto" -> "confirm" for non-readonly tools when enabled,
+    # but keep SAFE_RECON_TOOLS auto so httpx/dns fingerprinting can start.
+    if (
+        decision == "auto"
+        and _roe_requires_confirmation(organization_id)
+        and tool_name not in READONLY_TOOLS
+        and tool_name not in SAFE_RECON_TOOLS
+    ):
         decision = "confirm"
 
     if decision == "deny":

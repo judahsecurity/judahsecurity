@@ -489,10 +489,15 @@ class AgentOrchestrator:
         # when the LLM omits tool_args.args (common empty-{} failure loop).
         target_info = TargetInfo().model_dump()
         try:
-            from app.services.agent.tools import extract_seed_target
+            from app.services.agent.tools import extract_seed_target, set_seed_target
             seed = extract_seed_target(latest_message)
             if seed:
                 target_info["primary_target"] = seed
+                set_seed_target(seed)
+                try:
+                    self.tool_manager._fallback_target = seed
+                except Exception:
+                    pass
         except Exception:
             pass
         
@@ -675,6 +680,45 @@ class AgentOrchestrator:
             "tool_name": decision.tool_name,
         })
         
+        # Fill execute_* args at decision time so empty {} never reaches the UI/gate
+        tool_args_for_step = decision.tool_args if decision.action == "use_tool" else None
+        if (
+            decision.action == "use_tool"
+            and decision.tool_name
+            and decision.tool_name.startswith("execute_")
+        ):
+            try:
+                from app.services.agent.tools import (
+                    extract_seed_target,
+                    normalize_execute_tool_args,
+                    set_seed_target,
+                )
+                seed = (target_info_raw.get("primary_target") or "").strip()
+                if not seed:
+                    seed = extract_seed_target(
+                        " ".join(
+                            [
+                                current_objective or "",
+                                state.get("original_objective") or "",
+                                decision.thought or "",
+                                decision.reasoning or "",
+                            ]
+                        )
+                    )
+                if seed:
+                    set_seed_target(seed)
+                    try:
+                        self.tool_manager._fallback_target = seed
+                    except Exception:
+                        pass
+                tool_args_for_step = normalize_execute_tool_args(
+                    decision.tool_name,
+                    decision.tool_args,
+                    fallback_target=seed,
+                )
+            except Exception as fill_err:
+                logger.debug("Could not pre-fill execute args: %s", fill_err)
+
         # Create execution step
         step = ExecutionStep(
             iteration=iteration,
@@ -682,7 +726,7 @@ class AgentOrchestrator:
             thought=decision.thought,
             reasoning=decision.reasoning,
             tool_name=decision.tool_name if decision.action == "use_tool" else None,
-            tool_args=decision.tool_args if decision.action == "use_tool" else None,
+            tool_args=tool_args_for_step,
         )
         
         # Update todo list
@@ -869,13 +913,31 @@ class AgentOrchestrator:
             seed_target = ""
         if seed_target:
             try:
+                from app.services.agent.tools import set_seed_target
+                set_seed_target(seed_target)
                 self.tool_manager._fallback_target = seed_target
             except Exception:
                 pass
 
         # Preview-normalize execute_* so the UI shows the real CLI args
         if tool_name.startswith("execute_"):
-            from app.services.agent.tools import normalize_execute_tool_args
+            from app.services.agent.tools import (
+                extract_seed_target,
+                normalize_execute_tool_args,
+            )
+            if not seed_target:
+                seed_target = extract_seed_target(
+                    f"{step_data.get('thought') or ''} "
+                    f"{step_data.get('reasoning') or ''} "
+                    f"{state.get('original_objective') or ''}"
+                )
+                if seed_target:
+                    try:
+                        from app.services.agent.tools import set_seed_target
+                        set_seed_target(seed_target)
+                        self.tool_manager._fallback_target = seed_target
+                    except Exception:
+                        pass
             tool_args = normalize_execute_tool_args(
                 tool_name, tool_args, fallback_target=seed_target,
             )

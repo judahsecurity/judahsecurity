@@ -282,7 +282,23 @@ def default_agent_config():
         # (e.g. ``execute_*``). Values: "auto" (run), "confirm" (pause & ask),
         # "deny" (refuse outright). More specific patterns win.
         "tool_confirmation_policy": {
+            # Active/destructive tools need approval; light recon is auto
+            # (also enforced in confirmation_service.SAFE_RECON_TOOLS).
             "execute_*": "confirm",
+            "execute_httpx": "auto",
+            "execute_dnsx": "auto",
+            "execute_wafw00f": "auto",
+            "execute_wappalyzer": "auto",
+            "execute_whatweb": "auto",
+            "execute_curl": "auto",
+            "execute_katana": "auto",
+            "execute_gau": "auto",
+            "execute_waybackurls": "auto",
+            "execute_crtsh": "auto",
+            "execute_crt_name": "auto",
+            "execute_subfinder": "auto",
+            "execute_subfaster": "auto",
+            "execute_deep_crawl": "confirm",
             "execute_llm_red_team": "confirm",
             "execute_metasploit*": "deny",
             "execute_sqlmap*": "confirm",
