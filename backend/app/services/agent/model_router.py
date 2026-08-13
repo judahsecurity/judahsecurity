@@ -221,6 +221,11 @@ def ollama_is_reachable(timeout: float = 0.75) -> bool:
     return ok
 
 
+def clear_ollama_reachability_cache() -> None:
+    """Force the next Ollama probe to hit the network."""
+    _OLLAMA_REACHABLE_CACHE.clear()
+
+
 def is_llm_credit_or_quota_error(exc: BaseException) -> bool:
     """True when a provider rejected the call for billing / quota / bad API key.
 
@@ -237,12 +242,17 @@ def is_llm_credit_or_quota_error(exc: BaseException) -> bool:
         val = getattr(exc, attr, None)
         if val is not None:
             parts.append(str(val))
+    for arg in getattr(exc, "args", ()) or ():
+        parts.append(str(arg))
     haystack = " ".join(parts).lower()
     if any(marker in haystack for marker in _CREDIT_QUOTA_MARKERS):
         return True
     # HTTP 402 Payment Required, 401 Unauthorized (invalid key)
     status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
     if status in (401, 402):
+        return True
+    name = type(exc).__name__.lower()
+    if "authentication" in name or "permissiondenied" in name:
         return True
     return False
 
@@ -309,6 +319,9 @@ class ResilientFallbackChatModel(BaseChatModel):
 
     Product rule: tell the customer their preferred LLM is out of credits, but
     keep the agent functional via another configured cloud key or local Ollama.
+
+    If no fallbacks were attached at construction time (Ollama was still starting),
+    we re-probe and lazily attach Ollama on the first credit/auth failure.
     """
 
     primary: Any = Field(exclude=True)
@@ -318,9 +331,38 @@ class ResilientFallbackChatModel(BaseChatModel):
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
+    def model_post_init(self, __context: Any) -> None:
+        object.__setattr__(self, "_lazy_ollama_attempted", False)
+
     @property
     def _llm_type(self) -> str:
         return "resilient-fallback"
+
+    def _ensure_lazy_ollama(self) -> None:
+        """On demand: if chain has no Ollama yet, probe and append it."""
+        if getattr(self, "_lazy_ollama_attempted", False):
+            return
+        object.__setattr__(self, "_lazy_ollama_attempted", True)
+        labels = list(self.fallback_labels or [])
+        if any(str(l).startswith("ollama:") for l in labels) or (
+            self.primary_label or ""
+        ).startswith("ollama:"):
+            return
+        clear_ollama_reachability_cache()
+        if not ollama_fallback_available():
+            logger.warning(
+                "Cloud LLM failed and Ollama is not reachable at %s — cannot degrade",
+                getattr(settings, "OLLAMA_BASE_URL", ""),
+            )
+            return
+        try:
+            ollama = build_ollama_chat_model()
+            label = f"ollama:{_ollama_fallback_model_name()}"
+            object.__setattr__(self, "fallbacks", list(self.fallbacks or []) + [ollama])
+            object.__setattr__(self, "fallback_labels", labels + [label])
+            logger.info("Lazily attached Ollama fallback %s after cloud failure", label)
+        except Exception:
+            logger.warning("Failed to lazily build Ollama fallback", exc_info=True)
 
     def _chain(self) -> List[Any]:
         return [self.primary, *list(self.fallbacks or [])]
@@ -331,6 +373,99 @@ class ResilientFallbackChatModel(BaseChatModel):
             labels.append("fallback")
         return labels
 
+    def _run_chain_sync(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]],
+        run_manager: Optional[CallbackManagerForLLMRun],
+        **kwargs: Any,
+    ) -> ChatResult:
+        last_exc: Optional[BaseException] = None
+        attempted_lazy = False
+        while True:
+            chain = self._chain()
+            labels = self._labels()
+            for i, llm in enumerate(chain):
+                try:
+                    return llm._generate(
+                        messages, stop=stop, run_manager=run_manager, **kwargs
+                    )
+                except Exception as exc:
+                    last_exc = exc
+                    if not is_llm_credit_or_quota_error(exc):
+                        raise
+                    # Last pre-built option failed — try lazy Ollama once.
+                    if i >= len(chain) - 1:
+                        if not attempted_lazy:
+                            attempted_lazy = True
+                            self._ensure_lazy_ollama()
+                            if len(self._chain()) > len(chain):
+                                note_llm_degraded(
+                                    _customer_friendly_degrade_message(
+                                        labels[i], self._labels()[-1]
+                                    )
+                                )
+                                break  # restart while-loop with extended chain
+                        raise
+                    next_label = labels[i + 1]
+                    logger.warning(
+                        "LLM provider %s failed (%s); continuing with %s",
+                        labels[i], exc, next_label,
+                    )
+                    note_llm_degraded(
+                        _customer_friendly_degrade_message(labels[i], next_label)
+                    )
+            else:
+                break
+        assert last_exc is not None
+        raise last_exc
+
+    async def _run_chain_async(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]],
+        run_manager: Optional[AsyncCallbackManagerForLLMRun],
+        **kwargs: Any,
+    ) -> ChatResult:
+        last_exc: Optional[BaseException] = None
+        attempted_lazy = False
+        while True:
+            chain = self._chain()
+            labels = self._labels()
+            for i, llm in enumerate(chain):
+                try:
+                    return await llm._agenerate(
+                        messages, stop=stop, run_manager=run_manager, **kwargs
+                    )
+                except Exception as exc:
+                    last_exc = exc
+                    if not is_llm_credit_or_quota_error(exc):
+                        raise
+                    if i >= len(chain) - 1:
+                        if not attempted_lazy:
+                            attempted_lazy = True
+                            self._ensure_lazy_ollama()
+                            if len(self._chain()) > len(chain):
+                                note_llm_degraded(
+                                    _customer_friendly_degrade_message(
+                                        labels[i], self._labels()[-1]
+                                    )
+                                )
+                                break
+                        raise
+                    next_label = labels[i + 1]
+                    logger.warning(
+                        "LLM provider %s failed (%s); continuing with %s",
+                        labels[i], exc, next_label,
+                    )
+                    note_llm_degraded(
+                        _customer_friendly_degrade_message(labels[i], next_label)
+                    )
+            else:
+                break
+        assert last_exc is not None
+        raise last_exc
+
     def _generate(
         self,
         messages: List[BaseMessage],
@@ -338,28 +473,7 @@ class ResilientFallbackChatModel(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
-        chain = self._chain()
-        labels = self._labels()
-        last_exc: Optional[BaseException] = None
-        for i, llm in enumerate(chain):
-            try:
-                return llm._generate(
-                    messages, stop=stop, run_manager=run_manager, **kwargs
-                )
-            except Exception as exc:
-                last_exc = exc
-                if i >= len(chain) - 1 or not is_llm_credit_or_quota_error(exc):
-                    raise
-                next_label = labels[i + 1]
-                logger.warning(
-                    "LLM provider %s failed (%s); continuing with %s",
-                    labels[i], exc, next_label,
-                )
-                note_llm_degraded(
-                    _customer_friendly_degrade_message(labels[i], next_label)
-                )
-        assert last_exc is not None
-        raise last_exc
+        return self._run_chain_sync(messages, stop, run_manager, **kwargs)
 
     async def _agenerate(
         self,
@@ -368,28 +482,7 @@ class ResilientFallbackChatModel(BaseChatModel):
         run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
-        chain = self._chain()
-        labels = self._labels()
-        last_exc: Optional[BaseException] = None
-        for i, llm in enumerate(chain):
-            try:
-                return await llm._agenerate(
-                    messages, stop=stop, run_manager=run_manager, **kwargs
-                )
-            except Exception as exc:
-                last_exc = exc
-                if i >= len(chain) - 1 or not is_llm_credit_or_quota_error(exc):
-                    raise
-                next_label = labels[i + 1]
-                logger.warning(
-                    "LLM provider %s failed (%s); continuing with %s",
-                    labels[i], exc, next_label,
-                )
-                note_llm_degraded(
-                    _customer_friendly_degrade_message(labels[i], next_label)
-                )
-        assert last_exc is not None
-        raise last_exc
+        return await self._run_chain_async(messages, stop, run_manager, **kwargs)
 
 
 # Back-compat alias for earlier import sites.
@@ -493,8 +586,14 @@ def _attach_credit_fallback(
     organization_id: Optional[int] = None,
     model: Optional[str] = None,
 ) -> BaseChatModel:
-    """Wrap ``primary`` so credit/auth failures cascade to other providers / Ollama."""
+    """Wrap ``primary`` so credit/auth failures cascade to other providers / Ollama.
+
+    Always wraps non-Ollama primaries — even when no fallbacks are pre-built —
+    so a later lazy Ollama probe can still rescue an invalid/out-of-credit key.
+    """
     if provider == ExternalService.OLLAMA:
+        return primary
+    if isinstance(primary, ResilientFallbackChatModel):
         return primary
 
     fallbacks, labels = _build_runtime_fallback_models(
@@ -506,13 +605,11 @@ def _attach_credit_fallback(
         timeout=timeout,
         max_retries=max_retries,
     )
-    if not fallbacks:
-        return primary
 
     primary_label = f"{provider}:{model}" if model else provider
     logger.info(
-        "Attached resilient LLM fallbacks behind %s -> %s",
-        primary_label, labels,
+        "Attached resilient LLM wrapper behind %s (prebuilt fallbacks=%s)",
+        primary_label, labels or ["(lazy ollama on failure)"],
     )
     return ResilientFallbackChatModel(
         primary=primary,

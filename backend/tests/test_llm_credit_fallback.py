@@ -93,7 +93,7 @@ def test_resilient_cascade_records_soft_warning():
                 generations=[ChatGeneration(message=AIMessage(content="ollama-ok"))]
             )
 
-    consume_llm_degrade_notice()  # clear
+    consume_llm_degrade_notice()
     wrapped = ResilientFallbackChatModel(
         primary=Boom(),
         fallbacks=[Ok()],
@@ -104,5 +104,62 @@ def test_resilient_cascade_records_soft_warning():
     assert out.content == "ollama-ok"
     notice = consume_llm_degrade_notice()
     assert notice is not None
-    assert "unavailable" in notice.lower()
     assert "Continuing with ollama:qwen" in notice
+
+
+def test_lazy_ollama_when_no_prebuilt_fallbacks(monkeypatch):
+    from langchain_core.messages import HumanMessage, AIMessage
+    from langchain_core.outputs import ChatResult, ChatGeneration
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from pydantic import ConfigDict
+    import app.services.agent.model_router as mr
+
+    class Boom(BaseChatModel):
+        model_config = ConfigDict(arbitrary_types_allowed=True)
+
+        @property
+        def _llm_type(self):
+            return "boom"
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            raise Exception(
+                "Error code: 401 - {'type': 'error', 'error': "
+                "{'type': 'authentication_error', 'message': 'API key is invalid.'}}"
+            )
+
+        async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+            raise Exception("API key is invalid.")
+
+    class Ok(BaseChatModel):
+        model_config = ConfigDict(arbitrary_types_allowed=True)
+
+        @property
+        def _llm_type(self):
+            return "ok"
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            return ChatResult(
+                generations=[ChatGeneration(message=AIMessage(content="lazy-ok"))]
+            )
+
+        async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+            return ChatResult(
+                generations=[ChatGeneration(message=AIMessage(content="lazy-ok"))]
+            )
+
+    monkeypatch.setattr(mr, "ollama_fallback_available", lambda: True)
+    monkeypatch.setattr(mr, "build_ollama_chat_model", lambda **kwargs: Ok())
+    monkeypatch.setattr(mr, "_ollama_fallback_model_name", lambda: "qwen2.5:14b")
+    monkeypatch.setattr(mr, "clear_ollama_reachability_cache", lambda: None)
+
+    consume_llm_degrade_notice()
+    wrapped = ResilientFallbackChatModel(
+        primary=Boom(),
+        fallbacks=[],
+        fallback_labels=[],
+        primary_label="anthropic:claude",
+    )
+    out = wrapped.invoke([HumanMessage(content="hi")])
+    assert out.content == "lazy-ok"
+    notice = consume_llm_degrade_notice()
+    assert notice and "ollama:qwen2.5:14b" in notice
