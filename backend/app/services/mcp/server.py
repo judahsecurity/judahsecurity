@@ -1724,8 +1724,26 @@ class MCPServer:
         return await self._run_command(["naabu", "-h"], timeout=MCP_HELP_TIMEOUT)
     
     async def _execute_httpx(self, args: str) -> Dict[str, Any]:
-        cmd = ["httpx"] + self._parse_args(args)
+        # Prefer ProjectDiscovery httpx — pip's httpx package installs a Python
+        # CLI at /usr/local/bin/httpx that rejects PD flags like -u / -tech-detect.
+        cmd = [self._projectdiscovery_httpx_bin()] + self._parse_args(args)
         return await self._run_command(cmd, timeout=300)
+
+    @staticmethod
+    def _projectdiscovery_httpx_bin() -> str:
+        import os
+        import shutil
+        candidates = [
+            os.environ.get("PD_HTTPX_BIN") or "",
+            "/opt/projectdiscovery/httpx",
+            "/usr/local/bin/pd-httpx",
+            shutil.which("pd-httpx") or "",
+            shutil.which("httpx") or "httpx",
+        ]
+        for path in candidates:
+            if path and os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
+        return "httpx"
     
     async def _execute_subfinder(self, args: str) -> Dict[str, Any]:
         cmd = ["subfinder"] + self._parse_args(args)
@@ -2388,7 +2406,7 @@ class MCPServer:
     # checks still run against the args string.
     _HANDLER_BINARY: Dict[str, str] = {
         "execute_nuclei": "nuclei", "execute_naabu": "naabu",
-        "execute_httpx": "httpx", "execute_subfinder": "subfinder",
+        "execute_httpx": "pd-httpx", "execute_subfinder": "subfinder",
         "execute_subfaster": "subfaster",
         "execute_dnsx": "dnsx", "execute_katana": "katana",
         "execute_curl": "curl", "execute_nmap": "nmap",

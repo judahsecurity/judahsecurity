@@ -161,9 +161,14 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # Copy pre-built binaries
 # Copy tools that were successfully downloaded (skips missing files gracefully)
 COPY --from=tool-downloader /tools/ /tmp/downloaded-tools/
-RUN for tool in nuclei subfinder subfaster httpx dnsx naabu katana tlsx ffuf amass masscan massdns waybackurls assetfinder gau gitleaks vulnx interactsh-client dalfox feroxbuster; do \
+RUN mkdir -p /opt/projectdiscovery && \
+    for tool in nuclei subfinder subfaster httpx dnsx naabu katana tlsx ffuf amass masscan massdns waybackurls assetfinder gau gitleaks vulnx interactsh-client dalfox feroxbuster; do \
         [ -f "/tmp/downloaded-tools/${tool}" ] && cp "/tmp/downloaded-tools/${tool}" /usr/local/bin/ && echo "installed ${tool}" || echo "skipped ${tool}"; \
     done && \
+    # Keep a durable copy of ProjectDiscovery httpx — pip's httpx package later
+    # installs a Python CLI that would otherwise overwrite /usr/local/bin/httpx.
+    [ -f /usr/local/bin/httpx ] && cp /usr/local/bin/httpx /opt/projectdiscovery/httpx && \
+        cp /usr/local/bin/httpx /usr/local/bin/pd-httpx && chmod +x /opt/projectdiscovery/httpx /usr/local/bin/pd-httpx || true && \
     [ -f "/tmp/downloaded-tools/chaos-client" ] && cp /tmp/downloaded-tools/chaos-client /usr/local/bin/chaos || true && \
     [ -f "/tmp/downloaded-tools/kr" ] && cp /tmp/downloaded-tools/kr /usr/local/bin/kiterunner || true && \
     rm -rf /tmp/downloaded-tools && \
@@ -190,7 +195,14 @@ COPY packages/ ./packages/
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r requirements.txt
 
-# Browser for headless crawl + screenshots (Docker/cloud/headless).
+# Restore ProjectDiscovery httpx after pip (Python httpx CLI would shadow it).
+RUN if [ -x /opt/projectdiscovery/httpx ]; then \
+      cp /opt/projectdiscovery/httpx /usr/local/bin/httpx && \
+      cp /opt/projectdiscovery/httpx /usr/local/bin/pd-httpx && \
+      chmod +x /usr/local/bin/httpx /usr/local/bin/pd-httpx && \
+      echo "restored ProjectDiscovery httpx"; \
+    fi
+ENV PD_HTTPX_BIN=/opt/projectdiscovery/httpx
 # Keep the managed browser inside /app so the later `chown -R appuser /app`
 # leaves it readable to the non-root runtime user.
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright-browsers
