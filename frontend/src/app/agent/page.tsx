@@ -829,6 +829,12 @@ export default function AgentPage() {
         awaiting_question: data.awaiting_question as boolean,
         question_request: data.question_request as Record<string, unknown>,
       });
+      if (typeof data.warning === 'string' && data.warning.trim()) {
+        toast({
+          title: 'AI provider degraded',
+          description: data.warning,
+        });
+      }
       if (data.awaiting_question) setPendingAnswer(true);
       loadConversations();
       if (sid) api.getAgentSessionChain(sid, true).then(setChainData).catch(() => {});
@@ -916,6 +922,9 @@ export default function AgentPage() {
         if (!sent) {
           const data = await api.answerAgentQuestion(sid, q || displayContent);
           setLoading(false); appendAgentMessage(data);
+          if (typeof data.warning === 'string' && data.warning.trim()) {
+            toast({ title: 'AI provider degraded', description: data.warning });
+          }
           if (data.awaiting_question) setPendingAnswer(true);
           loadConversations();
         }
@@ -930,6 +939,9 @@ export default function AgentPage() {
           setLoading(false);
           if (data.session_id) setSessionId(data.session_id);
           appendAgentMessage(data);
+          if (typeof data.warning === 'string' && data.warning.trim()) {
+            toast({ title: 'AI provider degraded', description: data.warning });
+          }
           if (data.awaiting_question) setPendingAnswer(true);
           if (data.error) toast({ variant: 'destructive', title: 'Agent error', description: data.error });
           loadConversations();

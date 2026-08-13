@@ -785,6 +785,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                         "approval_request": result.approval_request,
                         "awaiting_question": result.awaiting_question,
                         "question_request": result.question_request,
+                        "warning": getattr(result, "warning", None),
                     })
             
             elif msg_type == "approval":
@@ -834,6 +835,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                         "execution_trace_summary": result.execution_trace_summary,
                         "awaiting_approval": result.awaiting_approval,
                         "approval_request": result.approval_request,
+                        "warning": getattr(result, "warning", None),
                     })
             
             elif msg_type == "answer":
@@ -890,6 +892,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                         "execution_trace_summary": result.execution_trace_summary,
                         "awaiting_question": result.awaiting_question,
                         "question_request": result.question_request,
+                        "warning": getattr(result, "warning", None),
                     })
             
             elif msg_type == "ping":
