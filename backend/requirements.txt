@@ -23,7 +23,9 @@ python-dotenv==1.0.0
 
 # HTTP client for scanning
 httpx==0.25.2
-aiohttp==3.9.1
+# openai>=1.x vendors httpx_aiohttp and needs aiohttp.SocketTimeoutError (aiohttp>=3.10).
+# Stay below 3.14.0/3.14.1 (keepalive pool poisoning); 3.14.2+ is fine too.
+aiohttp==3.13.5
 
 # DNS and network discovery
 dnspython==2.4.2
