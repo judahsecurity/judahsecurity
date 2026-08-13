@@ -201,16 +201,22 @@ class AgentOrchestrator:
         
         logger.info("Initializing AgentOrchestrator...")
         
-        # Check for available API keys
+        # Check for available API keys / local Ollama so the product can run
+        # even when a customer's preferred cloud provider has no credits.
+        from app.services.agent.model_router import ollama_fallback_available
+
         has_openai = bool(settings.OPENAI_API_KEY)
         has_anthropic = bool(settings.ANTHROPIC_API_KEY)
+        has_ollama = ollama_fallback_available()
         
-        if not has_openai and not has_anthropic:
-            logger.warning("No AI API key configured (OPENAI_API_KEY or ANTHROPIC_API_KEY) - AI agent will not function")
+        if not has_openai and not has_anthropic and not has_ollama:
+            logger.warning(
+                "No AI API key configured and Ollama is not reachable — AI agent will not function"
+            )
             return
         
         self._setup_llm()
-        # If the default cloud provider is out of credits, retry on Ollama when reachable.
+        # Cascade to other cloud keys / Ollama when preferred provider is out of credits.
         try:
             from app.services.agent.model_router import _attach_credit_fallback
             if self.llm is not None and self._provider:
@@ -221,9 +227,10 @@ class AgentOrchestrator:
                     max_tokens=settings.AGENT_MAX_OUTPUT_TOKENS,
                     timeout=120,
                     max_retries=2,
+                    model=getattr(settings, f"{self._provider.upper()}_MODEL", None),
                 )
         except Exception:
-            logger.debug("Could not attach Ollama credit fallback to default LLM", exc_info=True)
+            logger.debug("Could not attach resilient LLM fallback to default LLM", exc_info=True)
         self._setup_tools()
         self._build_graph()
         self._initialized = True
@@ -246,7 +253,25 @@ class AgentOrchestrator:
             # Fallback to OpenAI if available
             self._setup_openai()
         else:
-            raise ValueError("No valid AI provider configuration found")
+            # Last resort: local Ollama so the product still boots without cloud keys
+            from app.services.agent.model_router import (
+                build_ollama_chat_model,
+                ollama_fallback_available,
+                _ollama_fallback_model_name,
+            )
+            if not ollama_fallback_available():
+                raise ValueError("No valid AI provider configuration found")
+            self.llm = build_ollama_chat_model(
+                temperature=0,
+                max_tokens=settings.AGENT_MAX_OUTPUT_TOKENS,
+                timeout=120,
+                max_retries=2,
+            )
+            self._provider = "ollama"
+            logger.info(
+                "Setting up Ollama LLM (no cloud keys): %s",
+                _ollama_fallback_model_name(),
+            )
     
     def _setup_openai(self) -> None:
         """Initialize OpenAI LLM."""
@@ -1626,6 +1651,9 @@ class AgentOrchestrator:
                 break
         
         step = state.get("_current_step", {})
+
+        from app.services.agent.model_router import consume_llm_degrade_notice
+        warning = consume_llm_degrade_notice()
         
         return InvokeResponse(
             answer=final_answer,
@@ -1640,6 +1668,7 @@ class AgentOrchestrator:
             approval_request=state.get("phase_transition_pending"),
             awaiting_question=state.get("awaiting_user_question", False),
             question_request=state.get("pending_question"),
+            warning=warning,
         )
 
 

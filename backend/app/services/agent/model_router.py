@@ -11,10 +11,12 @@ Resolution precedence for a task, most specific first:
 2. Per-org agent config legacy ``llm_provider`` + ``llm_model``
 3. Global defaults from ``settings`` (AI_PROVIDER + that provider's model)
 
-Ollama fallback (when ``OLLAMA_FALLBACK_ENABLED`` is on and Ollama is reachable):
+Resilience (keep the product usable when a customer's preferred LLM is down):
 
-- Preferred cloud provider has no API key → resolve to Ollama immediately
-- Cloud call fails with credit/quota/billing errors → retry once on Ollama
+- Preferred cloud provider has no API key → try other configured cloud keys, then Ollama
+- Cloud call fails with credit/quota/billing/auth errors → retry remaining cloud
+  providers that have keys, then Ollama
+- Soft degrade notice is recorded (ContextVar) so the API can warn without failing
 
 Keys are resolved separately per provider and passed only to the SDK client.
 """
@@ -23,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import time
+from contextvars import ContextVar
 from typing import Any, List, Optional
 from urllib.parse import urlparse
 from urllib.request import urlopen
@@ -51,6 +54,24 @@ from app.services.agent.llm_factory import (
 logger = logging.getLogger(__name__)
 
 
+# Soft notice when a call degraded to a fallback provider (request-scoped).
+_llm_degrade_notice: ContextVar[Optional[str]] = ContextVar(
+    "llm_degrade_notice", default=None
+)
+
+
+def note_llm_degraded(message: str) -> None:
+    """Record a customer-visible soft warning for the current request."""
+    _llm_degrade_notice.set(message)
+
+
+def consume_llm_degrade_notice() -> Optional[str]:
+    """Return and clear any degrade notice for this request."""
+    notice = _llm_degrade_notice.get()
+    _llm_degrade_notice.set(None)
+    return notice
+
+
 # ── Task categories ───────────────────────────────────────────────────────
 class LLMTask:
     REASONING = "reasoning"   # agent planning / analysis / orchestration
@@ -60,13 +81,23 @@ class LLMTask:
 
 ALL_TASKS = (LLMTask.REASONING, LLMTask.OFFENSIVE, LLMTask.REPORT)
 
+# Prefer these clouds (in order) when the primary is unavailable / out of credits.
+_CLOUD_FALLBACK_ORDER = (
+    ExternalService.OPENAI,
+    ExternalService.GROQ,
+    ExternalService.DEEPSEEK,
+    ExternalService.KIMI,
+    ExternalService.OPENROUTER,
+    ExternalService.ANTHROPIC,
+)
+
 # Cache Ollama reachability briefly so we don't probe on every LLM call.
 _OLLAMA_REACHABLE_CACHE: dict[str, tuple[bool, float]] = {}
 _OLLAMA_REACHABLE_TTL_SECONDS = 30.0
 
 # Substrings that indicate the cloud provider rejected the call for billing /
 # quota / auth reasons (not transient overload). Matched case-insensitively
-# against the exception message + type name. These trigger Ollama fallback.
+# against the exception message + type name. These trigger provider cascade.
 _CREDIT_QUOTA_MARKERS = (
     "credit balance is too low",
     "credit balance",
@@ -84,7 +115,7 @@ _CREDIT_QUOTA_MARKERS = (
     "quota exceeded",
     "out of credits",
     "no credits",
-    # Invalid / revoked / missing cloud keys — fall back to Ollama when reachable
+    # Invalid / revoked / missing cloud keys — keep serving via another provider
     "authentication_error",
     "api key is invalid",
     "invalid api key",
@@ -216,6 +247,22 @@ def is_llm_credit_or_quota_error(exc: BaseException) -> bool:
     return False
 
 
+def _default_model_for_provider(provider: str) -> str:
+    if provider == ExternalService.ANTHROPIC:
+        return getattr(settings, "ANTHROPIC_MODEL", None) or DEFAULT_MODEL_BY_PROVIDER[provider]
+    if provider == ExternalService.OPENAI:
+        return getattr(settings, "OPENAI_MODEL", None) or DEFAULT_MODEL_BY_PROVIDER[provider]
+    if provider == ExternalService.DEEPSEEK:
+        return getattr(settings, "DEEPSEEK_MODEL", None) or DEFAULT_MODEL_BY_PROVIDER[provider]
+    if provider == ExternalService.KIMI:
+        return getattr(settings, "KIMI_MODEL", None) or DEFAULT_MODEL_BY_PROVIDER[provider]
+    if provider == ExternalService.GROQ:
+        return getattr(settings, "GROQ_MODEL", None) or DEFAULT_MODEL_BY_PROVIDER[provider]
+    if provider == ExternalService.OLLAMA:
+        return _ollama_fallback_model_name()
+    return DEFAULT_MODEL_BY_PROVIDER.get(provider, "")
+
+
 def _ollama_fallback_model_name() -> str:
     return (
         getattr(settings, "OLLAMA_MODEL", None)
@@ -249,21 +296,40 @@ def build_ollama_chat_model(
     )
 
 
-class CreditFallbackChatModel(BaseChatModel):
-    """Try ``primary``; on cloud credit/quota errors, retry once with ``fallback``.
+def _customer_friendly_degrade_message(failed_provider: str, next_label: str) -> str:
+    return (
+        f"Your preferred AI provider ({failed_provider}) is unavailable "
+        f"(credits exhausted or invalid API key). Continuing with {next_label} "
+        f"so the product keeps working — top up or update the key when you can."
+    )
 
-    Used so Anthropic/OpenAI keys that exist but are out of credits still land
-    on a reachable local Ollama model instead of failing the agent run.
+
+class ResilientFallbackChatModel(BaseChatModel):
+    """Try ``primary``, then each ``fallbacks`` entry on credit/quota/auth errors.
+
+    Product rule: tell the customer their preferred LLM is out of credits, but
+    keep the agent functional via another configured cloud key or local Ollama.
     """
 
     primary: Any = Field(exclude=True)
-    fallback: Any = Field(exclude=True)
+    fallbacks: List[Any] = Field(default_factory=list, exclude=True)
+    fallback_labels: List[str] = Field(default_factory=list, exclude=True)
+    primary_label: str = "cloud"
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     @property
     def _llm_type(self) -> str:
-        return "credit-fallback"
+        return "resilient-fallback"
+
+    def _chain(self) -> List[Any]:
+        return [self.primary, *list(self.fallbacks or [])]
+
+    def _labels(self) -> List[str]:
+        labels = [self.primary_label, *list(self.fallback_labels or [])]
+        while len(labels) < len(self._chain()):
+            labels.append("fallback")
+        return labels
 
     def _generate(
         self,
@@ -272,21 +338,28 @@ class CreditFallbackChatModel(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
-        try:
-            return self.primary._generate(
-                messages, stop=stop, run_manager=run_manager, **kwargs
-            )
-        except Exception as exc:
-            if not is_llm_credit_or_quota_error(exc):
-                raise
-            logger.warning(
-                "Cloud LLM credit/quota failure; falling back to Ollama (%s): %s",
-                _ollama_fallback_model_name(),
-                exc,
-            )
-            return self.fallback._generate(
-                messages, stop=stop, run_manager=run_manager, **kwargs
-            )
+        chain = self._chain()
+        labels = self._labels()
+        last_exc: Optional[BaseException] = None
+        for i, llm in enumerate(chain):
+            try:
+                return llm._generate(
+                    messages, stop=stop, run_manager=run_manager, **kwargs
+                )
+            except Exception as exc:
+                last_exc = exc
+                if i >= len(chain) - 1 or not is_llm_credit_or_quota_error(exc):
+                    raise
+                next_label = labels[i + 1]
+                logger.warning(
+                    "LLM provider %s failed (%s); continuing with %s",
+                    labels[i], exc, next_label,
+                )
+                note_llm_degraded(
+                    _customer_friendly_degrade_message(labels[i], next_label)
+                )
+        assert last_exc is not None
+        raise last_exc
 
     async def _agenerate(
         self,
@@ -295,21 +368,32 @@ class CreditFallbackChatModel(BaseChatModel):
         run_manager: Optional[AsyncCallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
-        try:
-            return await self.primary._agenerate(
-                messages, stop=stop, run_manager=run_manager, **kwargs
-            )
-        except Exception as exc:
-            if not is_llm_credit_or_quota_error(exc):
-                raise
-            logger.warning(
-                "Cloud LLM credit/quota failure; falling back to Ollama (%s): %s",
-                _ollama_fallback_model_name(),
-                exc,
-            )
-            return await self.fallback._agenerate(
-                messages, stop=stop, run_manager=run_manager, **kwargs
-            )
+        chain = self._chain()
+        labels = self._labels()
+        last_exc: Optional[BaseException] = None
+        for i, llm in enumerate(chain):
+            try:
+                return await llm._agenerate(
+                    messages, stop=stop, run_manager=run_manager, **kwargs
+                )
+            except Exception as exc:
+                last_exc = exc
+                if i >= len(chain) - 1 or not is_llm_credit_or_quota_error(exc):
+                    raise
+                next_label = labels[i + 1]
+                logger.warning(
+                    "LLM provider %s failed (%s); continuing with %s",
+                    labels[i], exc, next_label,
+                )
+                note_llm_degraded(
+                    _customer_friendly_degrade_message(labels[i], next_label)
+                )
+        assert last_exc is not None
+        raise last_exc
+
+
+# Back-compat alias for earlier import sites.
+CreditFallbackChatModel = ResilientFallbackChatModel
 
 
 def _maybe_fallback_to_ollama(
@@ -339,7 +423,62 @@ def _maybe_fallback_to_ollama(
         "No API key for provider=%s; falling back to local Ollama model=%s",
         provider, fallback_model,
     )
+    note_llm_degraded(
+        _customer_friendly_degrade_message(provider, f"ollama:{fallback_model}")
+    )
     return ExternalService.OLLAMA, fallback_model, "ollama"
+
+
+def _build_runtime_fallback_models(
+    *,
+    skip_provider: str,
+    db=None,
+    organization_id: Optional[int] = None,
+    temperature: Optional[float],
+    max_tokens: Optional[int],
+    timeout: Optional[float],
+    max_retries: int,
+) -> tuple[List[BaseChatModel], List[str]]:
+    """Build ordered alternate models: other cloud keys, then Ollama."""
+    models: List[BaseChatModel] = []
+    labels: List[str] = []
+    seen = {skip_provider}
+
+    for provider in _CLOUD_FALLBACK_ORDER:
+        if provider in seen:
+            continue
+        api_key = None
+        if db is not None:
+            api_key = resolve_llm_key(db, provider, organization_id)
+        api_key = api_key or _settings_key_for_provider(provider)
+        if not api_key:
+            continue
+        model_name = _default_model_for_provider(provider)
+        try:
+            models.append(
+                build_chat_model(
+                    provider, model_name, api_key,
+                    temperature=temperature, max_tokens=max_tokens,
+                    timeout=timeout, max_retries=max_retries,
+                )
+            )
+            labels.append(f"{provider}:{model_name}")
+            seen.add(provider)
+        except Exception:
+            logger.debug("Could not build fallback model for %s", provider, exc_info=True)
+
+    if ExternalService.OLLAMA not in seen and ollama_fallback_available():
+        models.append(
+            build_ollama_chat_model(
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
+                max_retries=max_retries,
+            )
+        )
+        labels.append(f"ollama:{_ollama_fallback_model_name()}")
+
+    return models, labels
 
 
 def _attach_credit_fallback(
@@ -350,24 +489,37 @@ def _attach_credit_fallback(
     max_tokens: Optional[int],
     timeout: Optional[float],
     max_retries: int,
+    db=None,
+    organization_id: Optional[int] = None,
+    model: Optional[str] = None,
 ) -> BaseChatModel:
-    """Wrap ``primary`` so credit/quota errors retry on Ollama when available."""
+    """Wrap ``primary`` so credit/auth failures cascade to other providers / Ollama."""
     if provider == ExternalService.OLLAMA:
         return primary
-    if not ollama_fallback_available():
-        return primary
-    fallback = build_ollama_chat_model(
+
+    fallbacks, labels = _build_runtime_fallback_models(
+        skip_provider=provider,
+        db=db,
+        organization_id=organization_id,
         temperature=temperature,
         max_tokens=max_tokens,
         timeout=timeout,
         max_retries=max_retries,
     )
+    if not fallbacks:
+        return primary
+
+    primary_label = f"{provider}:{model}" if model else provider
     logger.info(
-        "Attached Ollama credit/quota fallback (%s) behind provider=%s",
-        _ollama_fallback_model_name(),
-        provider,
+        "Attached resilient LLM fallbacks behind %s -> %s",
+        primary_label, labels,
     )
-    return CreditFallbackChatModel(primary=primary, fallback=fallback)
+    return ResilientFallbackChatModel(
+        primary=primary,
+        fallbacks=fallbacks,
+        fallback_labels=labels,
+        primary_label=primary_label,
+    )
 
 
 def get_llm_for_task(
@@ -386,8 +538,8 @@ def get_llm_for_task(
     Pass ``agent_config`` if already loaded to avoid a second DB read; otherwise
     it is fetched from ``MODULE_AGENT`` project settings.
 
-    When Ollama is reachable, cloud models are wrapped so a credit/quota failure
-    automatically retries on the local model.
+    Cloud models are wrapped so credit/quota/auth failure cascades to other
+    configured providers and then local Ollama — the product keeps working.
     """
     if agent_config is None:
         agent_config = _load_agent_config(db, organization_id)
@@ -396,6 +548,20 @@ def get_llm_for_task(
     provider, model = parse_model_spec(spec)
 
     api_key = resolve_llm_key(db, provider, organization_id) or _settings_key_for_provider(provider)
+
+    # If preferred has no key, jump to another cloud with a key before Ollama.
+    if not api_key and provider not in KEYLESS_LLM_PROVIDERS:
+        for alt in _CLOUD_FALLBACK_ORDER:
+            if alt == provider:
+                continue
+            alt_key = resolve_llm_key(db, alt, organization_id) or _settings_key_for_provider(alt)
+            if alt_key:
+                provider, model, api_key = alt, _default_model_for_provider(alt), alt_key
+                note_llm_degraded(
+                    _customer_friendly_degrade_message(spec, f"{provider}:{model}")
+                )
+                break
+
     provider, model, api_key = _maybe_fallback_to_ollama(provider, model, api_key)
 
     logger.info(
@@ -415,6 +581,9 @@ def get_llm_for_task(
         max_tokens=max_tokens,
         timeout=timeout,
         max_retries=max_retries,
+        db=db,
+        organization_id=organization_id,
+        model=model,
     )
 
 

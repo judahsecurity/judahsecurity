@@ -187,6 +187,8 @@ class InvokeResponse(BaseModel):
     awaiting_question: bool = False
     question_request: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    # Soft notice when preferred LLM was unavailable but a fallback kept serving
+    warning: Optional[str] = None
 
 
 class AgentState(TypedDict, total=False):

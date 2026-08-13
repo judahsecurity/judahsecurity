@@ -1,6 +1,10 @@
-"""Tests for cloud credit/quota → Ollama fallback helpers."""
+"""Tests for cloud credit/quota/auth → resilient LLM fallback helpers."""
 
-from app.services.agent.model_router import is_llm_credit_or_quota_error
+from app.services.agent.model_router import (
+    ResilientFallbackChatModel,
+    is_llm_credit_or_quota_error,
+    consume_llm_degrade_notice,
+)
 
 
 class _FakeStatusError(Exception):
@@ -51,3 +55,54 @@ def test_ignores_overloaded_and_generic_errors():
     assert is_llm_credit_or_quota_error(Exception("529 overloaded_error")) is False
     assert is_llm_credit_or_quota_error(Exception("connection reset by peer")) is False
     assert is_llm_credit_or_quota_error(ValueError("invalid tool args")) is False
+
+
+def test_resilient_cascade_records_soft_warning():
+    from langchain_core.messages import HumanMessage, AIMessage
+    from langchain_core.outputs import ChatResult, ChatGeneration
+    from langchain_core.language_models.chat_models import BaseChatModel
+    from pydantic import ConfigDict
+
+    class Boom(BaseChatModel):
+        model_config = ConfigDict(arbitrary_types_allowed=True)
+
+        @property
+        def _llm_type(self):
+            return "boom"
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            raise Exception("Your credit balance is too low to access the Anthropic API")
+
+        async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+            raise Exception("Your credit balance is too low to access the Anthropic API")
+
+    class Ok(BaseChatModel):
+        model_config = ConfigDict(arbitrary_types_allowed=True)
+
+        @property
+        def _llm_type(self):
+            return "ok"
+
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            return ChatResult(
+                generations=[ChatGeneration(message=AIMessage(content="ollama-ok"))]
+            )
+
+        async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+            return ChatResult(
+                generations=[ChatGeneration(message=AIMessage(content="ollama-ok"))]
+            )
+
+    consume_llm_degrade_notice()  # clear
+    wrapped = ResilientFallbackChatModel(
+        primary=Boom(),
+        fallbacks=[Ok()],
+        fallback_labels=["ollama:qwen"],
+        primary_label="anthropic:claude",
+    )
+    out = wrapped.invoke([HumanMessage(content="hi")])
+    assert out.content == "ollama-ok"
+    notice = consume_llm_degrade_notice()
+    assert notice is not None
+    assert "unavailable" in notice.lower()
+    assert "Continuing with ollama:qwen" in notice
