@@ -248,6 +248,15 @@ services:
       - NUCLEI_RUNTIME_SECONDS_PER_HOST=${NUCLEI_RUNTIME_SECONDS_PER_HOST:-18}
       - NUCLEI_MAX_RUNTIME_CAP_SECONDS=${NUCLEI_MAX_RUNTIME_CAP_SECONDS:-2700}
       - NUCLEI_MAX_TARGETS_PER_SCAN=${NUCLEI_MAX_TARGETS_PER_SCAN:-75}
+      # Finding validation — native replay of the original detector / steps
+      # on this scanner (no Docker). Override with docker|subprocess|auto if needed.
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - AEGIS_VALIDATOR_MODE=${AEGIS_VALIDATOR_MODE:-native}
+      - AEGIS_VANGUARD_IMAGE=${AEGIS_VANGUARD_IMAGE:-aegis-vanguard:latest}
+      - AEGIS_VANGUARD_PATH=${AEGIS_VANGUARD_PATH:-}
+      - AEGIS_MODEL=${AEGIS_MODEL:-claude-sonnet-4-6}
+      - AEGIS_VALIDATE_MAX_TURNS=${AEGIS_VALIDATE_MAX_TURNS:-20}
+      - AEGIS_VALIDATE_TIMEOUT=${AEGIS_VALIDATE_TIMEOUT:-900}
       # --- Authenticated crawl credentials (optional) ---
       # Same as the backend: referenced by deep_crawl login as env:/secret: refs.
       # - TARGET_USER=${TARGET_USER:-}
@@ -266,6 +275,8 @@ services:
       - nuclei_templates:/home/appuser/.config/nuclei
       - scan_outputs:/app/outputs
       - screenshots_data:/app/data/screenshots
+      # Host Docker daemon — required for AEGIS_VALIDATOR_MODE=docker
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
     networks:
       - asm_network
     cap_add:

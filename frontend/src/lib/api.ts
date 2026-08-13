@@ -224,6 +224,59 @@ export interface CensysSyncResult {
   risks_seen: number;
 }
 
+// ── HackerOne shared types ─────────────────────────────────────────────────
+
+export interface HackerOneIntegration {
+  id: number;
+  organization_id: number;
+  connection_name: string;
+  api_identifier: string;
+  import_vulnerabilities: boolean;
+  import_scopes: boolean;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface HackerOneSyncResult {
+  ok: boolean;
+  message: string;
+  assets_created: number;
+  assets_updated: number;
+  vulns_created: number;
+  vulns_updated: number;
+  programs_seen: number;
+  scopes_seen: number;
+  reports_seen: number;
+  reports_skipped: number;
+}
+
+export interface HackerOneReportLink {
+  id: number;
+  vulnerability_id: number;
+  integration_id: number;
+  hackerone_report_id: string;
+  hackerone_report_url: string;
+  hackerone_program?: string;
+  hackerone_title?: string;
+  hackerone_state?: string;
+  hackerone_severity?: string;
+  hackerone_reporter?: string;
+  is_associated: boolean;
+  disconnected_at?: string;
+  created_at: string;
+  updated_at?: string;
+}
+
 export interface AkamaiIntegration {
   id: number;
   organization_id: number;
@@ -725,7 +778,7 @@ class ApiClient {
     return response.data;
   }
 
-  // Finding validation (Aegis Vanguard validator agent)
+  // Finding validation (native detector / steps replay on scanner)
   async validateFinding(vulnId: number) {
     const response = await this.client.post(`/vulnerabilities/${vulnId}/validate`);
     return response.data;
@@ -2474,6 +2527,101 @@ class ApiClient {
 
   async syncCensysIntegration(id: number): Promise<CensysSyncResult> {
     const response = await this.client.post(`/integrations/censys/${id}/sync`);
+    return response.data;
+  }
+
+  // ── HackerOne Integration ──────────────────────────────────────────────────
+
+  async getHackerOneIntegrations(orgId?: number): Promise<HackerOneIntegration[]> {
+    const params = orgId ? { org_id: orgId } : undefined;
+    const response = await this.client.get('/integrations/hackerone', { params });
+    return response.data;
+  }
+
+  async createHackerOneIntegration(payload: {
+    connection_name: string;
+    api_identifier: string;
+    api_token: string;
+    import_vulnerabilities: boolean;
+    import_scopes: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<HackerOneIntegration> {
+    const response = await this.client.post('/integrations/hackerone', payload);
+    return response.data;
+  }
+
+  async updateHackerOneIntegration(id: number, payload: {
+    connection_name?: string;
+    api_identifier?: string;
+    api_token?: string;
+    import_vulnerabilities?: boolean;
+    import_scopes?: boolean;
+    is_active?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<HackerOneIntegration> {
+    const response = await this.client.put(`/integrations/hackerone/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteHackerOneIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/hackerone/${id}`);
+  }
+
+  async testHackerOneConnection(id: number): Promise<{ ok: boolean; message: string; program_count?: number }> {
+    const response = await this.client.post(`/integrations/hackerone/${id}/test`);
+    return response.data;
+  }
+
+  async syncHackerOneIntegration(id: number): Promise<HackerOneSyncResult> {
+    const response = await this.client.post(`/integrations/hackerone/${id}/sync`);
+    return response.data;
+  }
+
+  async associateHackerOneReport(
+    vulnerabilityId: number,
+    reportIdOrUrl: string,
+    orgId?: number,
+    integrationId?: number,
+  ): Promise<HackerOneReportLink> {
+    const params = orgId ? { org_id: orgId } : undefined;
+    const response = await this.client.post(
+      `/integrations/hackerone/vulnerabilities/${vulnerabilityId}/associate`,
+      {
+        report_id_or_url: reportIdOrUrl,
+        ...(integrationId ? { integration_id: integrationId } : {}),
+      },
+      { params },
+    );
+    return response.data;
+  }
+
+  async getHackerOneReportsForVulnerability(
+    vulnerabilityId: number,
+    orgId?: number,
+  ): Promise<HackerOneReportLink[]> {
+    const params = orgId ? { org_id: orgId } : undefined;
+    const response = await this.client.get(
+      `/integrations/hackerone/vulnerabilities/${vulnerabilityId}/reports`,
+      { params },
+    );
+    return response.data;
+  }
+
+  async disconnectHackerOneReport(linkId: number, orgId?: number): Promise<{ ok: boolean; message: string }> {
+    const params = orgId ? { org_id: orgId } : undefined;
+    const response = await this.client.delete(`/integrations/hackerone/reports/${linkId}`, { params });
+    return response.data;
+  }
+
+  async refreshHackerOneReport(linkId: number, orgId?: number): Promise<HackerOneReportLink> {
+    const params = orgId ? { org_id: orgId } : undefined;
+    const response = await this.client.post(
+      `/integrations/hackerone/reports/${linkId}/refresh`,
+      undefined,
+      { params },
+    );
     return response.data;
   }
 

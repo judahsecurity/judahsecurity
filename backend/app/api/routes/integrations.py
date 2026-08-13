@@ -1,4 +1,4 @@
-"""Integrations router — Jira, ServiceNow, Censys, Akamai, Panorama, F5, Cloudflare."""
+"""Integrations router — Jira, ServiceNow, Censys, HackerOne, Akamai, Panorama, F5, Cloudflare."""
 
 import logging
 from datetime import datetime
@@ -17,6 +17,7 @@ from app.db.database import get_db
 from app.models.jira_integration import JiraIntegration, JiraTicket
 from app.models.servicenow_integration import ServiceNowDelivery, ServiceNowIntegration
 from app.models.censys_integration import CensysAsmIntegration
+from app.models.hackerone_integration import HackerOneIntegration, HackerOneReportLink
 from app.models.akamai_integration import AkamaiWafIntegration
 from app.models.panorama_integration import (
     CONNECTION_MODE_API,
@@ -58,6 +59,15 @@ from app.schemas.censys_schemas import (
     CensysSyncResult,
     CensysTestConnectionResponse,
 )
+from app.schemas.hackerone_schemas import (
+    AssociateHackerOneReportRequest,
+    HackerOneIntegrationCreate,
+    HackerOneIntegrationResponse,
+    HackerOneIntegrationUpdate,
+    HackerOneReportLinkResponse,
+    HackerOneSyncResult,
+    HackerOneTestConnectionResponse,
+)
 from app.schemas.akamai_schemas import (
     AkamaiIntegrationCreate,
     AkamaiIntegrationResponse,
@@ -90,6 +100,7 @@ from app.schemas.cloudflare_schemas import (
 from app.services import (
     jira_service,
     censys_asm_service,
+    hackerone_service,
     akamai_waf_service,
     panorama_service,
     f5_service,
@@ -722,6 +733,424 @@ async def sync_censys_integration(
 
     result = await censys_asm_service.sync_integration(db, integration)
     return CensysSyncResult(**result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# HackerOne — read-only import of bug bounty reports & program scopes
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_hackerone_integration(
+    db: Session, org_id: int, integration_id: int
+) -> HackerOneIntegration:
+    integration = (
+        db.query(HackerOneIntegration)
+        .filter(
+            HackerOneIntegration.id == integration_id,
+            HackerOneIntegration.organization_id == org_id,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="HackerOne connection not found.")
+    return integration
+
+
+@router.get("/hackerone", response_model=List[HackerOneIntegrationResponse])
+def list_hackerone_integrations(
+    org_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    if org_id is not None:
+        if current_user.is_superuser:
+            resolved = org_id
+        elif current_user.organization_id == org_id:
+            resolved = org_id
+        else:
+            raise HTTPException(status_code=403, detail="Access denied.")
+    else:
+        resolved = _get_org_id(current_user)
+    return (
+        db.query(HackerOneIntegration)
+        .filter(HackerOneIntegration.organization_id == resolved)
+        .order_by(HackerOneIntegration.created_at.desc())
+        .all()
+    )
+
+
+@router.post(
+    "/hackerone",
+    response_model=HackerOneIntegrationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_hackerone_integration(
+    payload: HackerOneIntegrationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+
+    existing = (
+        db.query(HackerOneIntegration)
+        .filter(
+            HackerOneIntegration.organization_id == org_id,
+            HackerOneIntegration.connection_name == payload.connection_name,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A HackerOne connection named '{payload.connection_name}' already exists.",
+        )
+
+    result = await hackerone_service.test_connection(
+        payload.api_identifier, payload.api_token
+    )
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+
+    integration = HackerOneIntegration(
+        organization_id=org_id,
+        connection_name=payload.connection_name,
+        api_identifier=payload.api_identifier.strip(),
+        import_vulnerabilities=payload.import_vulnerabilities,
+        import_scopes=payload.import_scopes,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+        last_tested_at=datetime.utcnow(),
+        last_test_ok=True,
+    )
+    integration.set_api_token(payload.api_token)
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.put("/hackerone/{integration_id}", response_model=HackerOneIntegrationResponse)
+async def update_hackerone_integration(
+    integration_id: int,
+    payload: HackerOneIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_hackerone_integration(db, org_id, integration_id)
+
+    data = payload.model_dump(exclude_unset=True)
+    new_token = data.pop("api_token", None)
+    for field, value in data.items():
+        setattr(integration, field, value)
+    if new_token:
+        integration.set_api_token(new_token)
+
+    result = await hackerone_service.test_connection(
+        integration.api_identifier, integration.get_api_token()
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/hackerone/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_hackerone_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_hackerone_integration(db, org_id, integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post(
+    "/hackerone/{integration_id}/test",
+    response_model=HackerOneTestConnectionResponse,
+)
+async def test_hackerone_connection(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_hackerone_integration(db, org_id, integration_id)
+    result = await hackerone_service.test_connection(
+        integration.api_identifier, integration.get_api_token()
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    db.commit()
+    return HackerOneTestConnectionResponse(**result)
+
+
+@router.post("/hackerone/{integration_id}/sync", response_model=HackerOneSyncResult)
+async def sync_hackerone_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Pull the latest reports and/or scopes from HackerOne and import them."""
+    org_id = _get_org_id(current_user)
+    integration = _get_hackerone_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This HackerOne connection is disabled.")
+
+    result = await hackerone_service.sync_integration(db, integration)
+    return HackerOneSyncResult(**result)
+
+
+def _get_active_hackerone_integration(
+    db: Session,
+    org_id: int,
+    integration_id: Optional[int] = None,
+) -> HackerOneIntegration:
+    """Resolve an active HackerOne connection for the org (optional explicit id)."""
+    query = db.query(HackerOneIntegration).filter(
+        HackerOneIntegration.organization_id == org_id,
+        HackerOneIntegration.is_active == True,  # noqa: E712
+    )
+    if integration_id is not None:
+        query = query.filter(HackerOneIntegration.id == integration_id)
+    integration = query.order_by(HackerOneIntegration.created_at.desc()).first()
+    if not integration:
+        raise HTTPException(
+            status_code=404,
+            detail="No active HackerOne connection found. Configure one on the Integrations page.",
+        )
+    return integration
+
+
+def _active_h1_links_for_vuln(
+    db: Session, organization_id: int, vulnerability_id: int
+) -> List[HackerOneReportLink]:
+    return (
+        db.query(HackerOneReportLink)
+        .join(HackerOneIntegration)
+        .filter(
+            HackerOneReportLink.vulnerability_id == vulnerability_id,
+            HackerOneReportLink.disconnected_at.is_(None),
+            HackerOneIntegration.organization_id == organization_id,
+        )
+        .order_by(HackerOneReportLink.created_at.desc())
+        .all()
+    )
+
+
+def _h1_link_and_integration_for_user(
+    db: Session,
+    user: User,
+    link_id: int,
+    org_id_override: Optional[int] = None,
+) -> tuple:
+    link = (
+        db.query(HackerOneReportLink)
+        .options(joinedload(HackerOneReportLink.integration))
+        .filter(HackerOneReportLink.id == link_id)
+        .first()
+    )
+    if not link or not link.integration:
+        raise HTTPException(status_code=404, detail="HackerOne report link not found.")
+
+    integration = link.integration
+    if org_id_override is not None:
+        resolved = _resolve_org_id(user, org_id_override)
+        if integration.organization_id != resolved:
+            raise HTTPException(status_code=404, detail="HackerOne report link not found.")
+    elif not user.is_superuser:
+        if not user.organization_id or user.organization_id != integration.organization_id:
+            raise HTTPException(status_code=403, detail="Access denied.")
+    return link, integration
+
+
+@router.post(
+    "/hackerone/vulnerabilities/{vulnerability_id}/associate",
+    response_model=HackerOneReportLinkResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def associate_hackerone_report(
+    vulnerability_id: int,
+    payload: AssociateHackerOneReportRequest,
+    org_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Link an existing HackerOne report to a finding (read-only; does not modify H1)."""
+    resolved, vuln = _resolve_org_for_vulnerability(db, current_user, vulnerability_id, org_id)
+    integration = _get_active_hackerone_integration(db, resolved, payload.integration_id)
+
+    report_id = hackerone_service.parse_report_id(payload.report_id_or_url)
+    if not report_id:
+        raise HTTPException(
+            status_code=400,
+            detail="Could not parse a HackerOne report ID. Use a numeric ID or https://hackerone.com/reports/{id}.",
+        )
+
+    # Verify the report exists via the HackerOne API
+    client = hackerone_service.HackerOneClient(
+        integration.api_identifier, integration.get_api_token()
+    )
+    fetched = await client.get_report(report_id)
+    if not fetched:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not verify HackerOne report {report_id}. Check the ID and API token permissions.",
+        )
+    report, included = fetched
+    summary = hackerone_service.summarize_report(report, included)
+
+    # Reject duplicate active link for this vuln+report
+    existing = (
+        db.query(HackerOneReportLink)
+        .filter(
+            HackerOneReportLink.vulnerability_id == vulnerability_id,
+            HackerOneReportLink.hackerone_report_id == report_id,
+            HackerOneReportLink.disconnected_at.is_(None),
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Report {report_id} is already linked to this finding.",
+        )
+
+    link = hackerone_service.upsert_report_link(
+        db,
+        integration,
+        vulnerability_id,
+        report_id=report_id,
+        report_url=summary.get("report_url"),
+        program=summary.get("program"),
+        title=summary.get("title"),
+        state=summary.get("state"),
+        severity=summary.get("severity"),
+        reporter=summary.get("reporter"),
+        is_associated=True,
+    )
+
+    # Mirror into vulnerability metadata + references for visibility elsewhere
+    meta = dict(vuln.metadata_ or {})
+    meta.update(
+        {
+            "hackerone_report_id": report_id,
+            "hackerone_report_url": summary.get("report_url"),
+            "hackerone_state": summary.get("state"),
+            "hackerone_program": summary.get("program"),
+            "hackerone_reporter": summary.get("reporter"),
+            "source": meta.get("source") or "hackerone",
+        }
+    )
+    vuln.metadata_ = meta
+    report_url = summary.get("report_url")
+    if report_url:
+        refs = list(vuln.references or [])
+        if report_url not in refs:
+            refs.append(report_url)
+            vuln.references = refs
+
+    # Optionally align finding status with HackerOne state
+    if summary.get("state"):
+        mapped = hackerone_service._map_status(summary["state"])
+        vuln.status = mapped
+        if mapped.value == "resolved" and not vuln.resolved_at:
+            vuln.resolved_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(link)
+    return link
+
+
+@router.get(
+    "/hackerone/vulnerabilities/{vulnerability_id}/reports",
+    response_model=List[HackerOneReportLinkResponse],
+)
+def list_hackerone_reports_for_vulnerability(
+    vulnerability_id: int,
+    org_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    resolved, _vuln = _resolve_org_for_vulnerability(db, current_user, vulnerability_id, org_id)
+    return _active_h1_links_for_vuln(db, resolved, vulnerability_id)
+
+
+@router.delete("/hackerone/reports/{link_id}", status_code=status.HTTP_200_OK)
+def disconnect_hackerone_report(
+    link_id: int,
+    org_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Unlink a HackerOne report from the finding (does not modify HackerOne)."""
+    link, _integration = _h1_link_and_integration_for_user(db, current_user, link_id, org_id)
+    if link.disconnected_at:
+        return {"ok": True, "message": "Report link already disconnected."}
+    link.disconnected_at = datetime.utcnow()
+    db.commit()
+    return {"ok": True, "message": f"Disconnected HackerOne report {link.hackerone_report_id}."}
+
+
+@router.post(
+    "/hackerone/reports/{link_id}/refresh",
+    response_model=HackerOneReportLinkResponse,
+)
+async def refresh_hackerone_report(
+    link_id: int,
+    org_id: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Refresh report state/severity from HackerOne and update the linked finding status."""
+    link, integration = _h1_link_and_integration_for_user(db, current_user, link_id, org_id)
+    if link.disconnected_at:
+        raise HTTPException(status_code=400, detail="This report link is disconnected.")
+
+    client = hackerone_service.HackerOneClient(
+        integration.api_identifier, integration.get_api_token()
+    )
+    fetched = await client.get_report(link.hackerone_report_id)
+    if not fetched:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not refresh HackerOne report {link.hackerone_report_id}.",
+        )
+    report, included = fetched
+    summary = hackerone_service.summarize_report(report, included)
+
+    link.hackerone_state = summary.get("state")
+    link.hackerone_severity = summary.get("severity")
+    link.hackerone_reporter = summary.get("reporter") or link.hackerone_reporter
+    link.hackerone_program = summary.get("program") or link.hackerone_program
+    link.hackerone_title = summary.get("title") or link.hackerone_title
+    link.hackerone_report_url = summary.get("report_url") or link.hackerone_report_url
+    link.updated_at = datetime.utcnow()
+
+    vuln = (
+        db.query(Vulnerability)
+        .filter(Vulnerability.id == link.vulnerability_id)
+        .first()
+    )
+    if vuln and summary.get("state"):
+        mapped = hackerone_service._map_status(summary["state"])
+        vuln.status = mapped
+        if mapped.value == "resolved" and not vuln.resolved_at:
+            vuln.resolved_at = datetime.utcnow()
+        meta = dict(vuln.metadata_ or {})
+        meta["hackerone_state"] = summary.get("state")
+        meta["hackerone_report_id"] = link.hackerone_report_id
+        meta["hackerone_report_url"] = link.hackerone_report_url
+        vuln.metadata_ = meta
+
+    db.commit()
+    db.refresh(link)
+    return link
 
 
 # ══════════════════════════════════════════════════════════════════════════════

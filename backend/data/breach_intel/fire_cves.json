@@ -1,0 +1,6 @@
+{
+  "description": "FIRE (Financial Risk Exposure) CVEs from insurance carrier loss data (Zywave via cvedata.com). Populate this file from your FIRE export — the open-source list is empty because the underlying data is proprietary. Format: {\"cves\": [\"CVE-YYYY-NNNN\", ...]}",
+  "source": "cvedata.com / Zywave",
+  "updated": null,
+  "cves": []
+}

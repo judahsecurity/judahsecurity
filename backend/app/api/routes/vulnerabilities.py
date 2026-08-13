@@ -1622,11 +1622,12 @@ def validate_finding(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_analyst),
 ):
-    """Queue an on-demand validation of this finding by the Aegis Vanguard validator agent.
+    """Queue an on-demand revalidation of this finding.
 
-    The agent actively re-tests the live target and writes a verdict back to the
-    finding. Returns the queued FindingValidation record; poll
-    GET /vulnerabilities/{id}/validation for the result.
+    The scanner worker replays the original detection path (nuclei template,
+    port probes, or stored steps_to_reproduce / evidence) against the live
+    target and writes a verdict back. Returns the queued FindingValidation
+    record; poll GET /vulnerabilities/{id}/validation for the result.
     """
     vuln = db.query(Vulnerability).filter(Vulnerability.id == vuln_id).first()
     if not vuln:

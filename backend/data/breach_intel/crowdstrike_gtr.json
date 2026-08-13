@@ -1,0 +1,6 @@
+{
+  "description": "Optional overlay — CVEs from CrowdStrike Global Threat Report. Merged with the built-in Delphi set on load. Leave empty to use only the code defaults.",
+  "source": "CrowdStrike Global Threat Report",
+  "updated": null,
+  "cves": []
+}

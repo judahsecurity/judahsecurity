@@ -553,14 +553,22 @@ def trigger_scheduled_scan(
         "cleanup": ScanType.CLEANUP,
     }
     
-    scan_type = scan_type_map.get(schedule.scan_type, ScanType.VULNERABILITY)
+    if schedule.scan_type not in scan_type_map:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown schedule scan_type '{schedule.scan_type}'",
+        )
+    scan_type = scan_type_map[schedule.scan_type]
     
-    # Build config
+    # Build config — merge profile defaults so ICS NSE/ports survive thin configs
+    profile_defaults = CONTINUOUS_SCAN_TYPES.get(schedule.scan_type, {}).get("default_config", {})
     config = {
+        **profile_defaults,
         **(schedule.config or {}),
         **(request.override_config if request and request.override_config else {}),
         "triggered_by_schedule": schedule.id,
         "schedule_name": schedule.name,
+        "schedule_scan_type": schedule.scan_type,
     }
     
     # For critical_ports scans, use masscan for speed on CIDR blocks
@@ -569,6 +577,24 @@ def trigger_scheduled_scan(
         config["generate_findings"] = True
         config["scanner"] = config.get("scanner", "masscan")  # Masscan is faster for CIDR blocks
         config["rate"] = config.get("rate", 10000)  # 10k packets/sec default
+
+    ics_port_types = {
+        "ics_ot_ports", "ics_plc_scan", "ics_scada_scan",
+        "ics_building_automation", "ics_full_discovery",
+    }
+    if schedule.scan_type in ics_port_types:
+        config["generate_findings"] = True
+        if schedule.scan_type in ("ics_ot_ports", "ics_full_discovery"):
+            config["ports"] = config.get("ports") or ",".join(str(p) for p in ALL_ICS_OT_PORTS)
+        if schedule.scan_type == "ics_ot_ports":
+            config["scanner"] = config.get("scanner", "masscan")
+            config["rate"] = config.get("rate", 5000)
+        elif schedule.scan_type == "ics_full_discovery":
+            config["scanner"] = config.get("scanner", "nmap")
+            config["rate"] = config.get("rate", 500)
+            config["run_nuclei"] = config.get("run_nuclei", True)
+            if not config.get("nuclei_tags") and not config.get("tags"):
+                config["nuclei_tags"] = ["ics", "scada"]
     
     # Calculate target statistics (total IPs from CIDRs, etc.)
     target_stats = calculate_target_stats(targets)

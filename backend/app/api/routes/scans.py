@@ -622,10 +622,19 @@ def create_adhoc_scan(
         config["rate"] = config.get("rate", 10000)
     
     # Special handling for ICS/OT scans
-    if request.scan_type in ["ics_ot_ports", "ics_full_discovery"]:
-        config["ports"] = config.get("ports", ",".join(str(p) for p in ALL_ICS_OT_PORTS))
+    if request.scan_type in [
+        "ics_ot_ports", "ics_plc_scan", "ics_scada_scan",
+        "ics_building_automation", "ics_full_discovery",
+    ]:
         config["generate_findings"] = True
-        config["finding_category"] = "ics_ot"
+        config["finding_category"] = config.get("finding_category") or "ics_ot"
+        if request.scan_type in ["ics_ot_ports", "ics_full_discovery"]:
+            config["ports"] = config.get("ports") or ",".join(str(p) for p in ALL_ICS_OT_PORTS)
+        if request.scan_type == "ics_full_discovery":
+            config["scanner"] = config.get("scanner", "nmap")
+            config["run_nuclei"] = config.get("run_nuclei", True)
+            if not config.get("nuclei_tags") and not config.get("tags"):
+                config["nuclei_tags"] = ["ics", "scada"]
     
     # Create the scan
     new_scan = Scan(

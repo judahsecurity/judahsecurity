@@ -1,0 +1,6 @@
+{
+  "description": "Optional overlay — CVEs from Mandiant M-Trends reports. Merged with the built-in Delphi set on load. Leave empty to use only the code defaults.",
+  "source": "Mandiant M-Trends",
+  "updated": null,
+  "cves": []
+}

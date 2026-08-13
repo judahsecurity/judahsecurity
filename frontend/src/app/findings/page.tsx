@@ -695,6 +695,15 @@ export default function FindingsPage() {
   const [snowIncludeRemediation, setSnowIncludeRemediation] = useState(true);
   const [snowIncludeEnrichment, setSnowIncludeEnrichment] = useState(true);
 
+  // HackerOne report linking state
+  const [h1DialogOpen, setH1DialogOpen] = useState(false);
+  const [h1HasIntegration, setH1HasIntegration] = useState<boolean | null>(null);
+  const [h1Links, setH1Links] = useState<import('@/lib/api').HackerOneReportLink[]>([]);
+  const [h1AssociateKey, setH1AssociateKey] = useState('');
+  const [h1Linking, setH1Linking] = useState(false);
+  const [h1Disconnecting, setH1Disconnecting] = useState<number | null>(null);
+  const [h1Refreshing, setH1Refreshing] = useState<number | null>(null);
+
   const openServiceNowDialog = async (finding: Finding) => {
     setSnowDialogOpen(true);
     setSnowDialogMode('push');
@@ -805,6 +814,91 @@ export default function FindingsPage() {
       toast({ title: 'Failed to disconnect', description: getApiErrorMessage(err), variant: 'destructive' });
     } finally {
       setSnowDisconnecting(null);
+    }
+  };
+
+  const openHackerOneDialog = async (finding: Finding) => {
+    setH1DialogOpen(true);
+    setH1Links([]);
+    setH1AssociateKey('');
+    const orgId = finding.organization_id;
+    if (!orgId) {
+      toast({
+        title: 'Could not load HackerOne data',
+        description: 'This finding has no associated organization.',
+        variant: 'destructive',
+      });
+      setH1DialogOpen(false);
+      return;
+    }
+    try {
+      const [integrations, links] = await Promise.all([
+        api.getHackerOneIntegrations(orgId).catch(() => []),
+        api.getHackerOneReportsForVulnerability(finding.id, orgId),
+      ]);
+      const active = (integrations || []).filter((i) => i.is_active);
+      setH1HasIntegration(active.length > 0);
+      setH1Links(links || []);
+    } catch (err) {
+      toast({ title: 'Could not load HackerOne data', description: getApiErrorMessage(err), variant: 'destructive' });
+    }
+  };
+
+  const handleAssociateHackerOne = async () => {
+    if (!selectedFinding || !h1AssociateKey.trim()) return;
+    setH1Linking(true);
+    try {
+      const link = await api.associateHackerOneReport(
+        selectedFinding.id,
+        h1AssociateKey.trim(),
+        selectedFinding.organization_id,
+      );
+      toast({ title: `Linked HackerOne report #${link.hackerone_report_id}.` });
+      setH1AssociateKey('');
+      setH1Links((prev) => [link, ...prev.filter((l) => l.id !== link.id)]);
+      // Refresh finding so status mapping is reflected
+      if (selectedFinding.id) {
+        try {
+          const updated = await api.getVulnerability(selectedFinding.id);
+          setSelectedFinding({ ...selectedFinding, ...updated });
+        } catch { /* ignore */ }
+      }
+    } catch (err) {
+      toast({ title: 'Failed to link report', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setH1Linking(false);
+    }
+  };
+
+  const handleRefreshHackerOne = async (linkId: number) => {
+    setH1Refreshing(linkId);
+    try {
+      const updated = await api.refreshHackerOneReport(linkId, selectedFinding?.organization_id);
+      setH1Links((prev) => prev.map((l) => (l.id === linkId ? updated : l)));
+      toast({ title: `Refreshed report #${updated.hackerone_report_id}`, description: updated.hackerone_state || undefined });
+      if (selectedFinding?.id) {
+        try {
+          const finding = await api.getVulnerability(selectedFinding.id);
+          setSelectedFinding({ ...selectedFinding, ...finding });
+        } catch { /* ignore */ }
+      }
+    } catch (err) {
+      toast({ title: 'Refresh failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setH1Refreshing(null);
+    }
+  };
+
+  const handleDisconnectHackerOne = async (linkId: number, reportId: string) => {
+    setH1Disconnecting(linkId);
+    try {
+      await api.disconnectHackerOneReport(linkId, selectedFinding?.organization_id);
+      toast({ title: `Disconnected HackerOne report #${reportId}.` });
+      setH1Links((prev) => prev.filter((l) => l.id !== linkId));
+    } catch (err) {
+      toast({ title: 'Failed to disconnect', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setH1Disconnecting(null);
     }
   };
 
@@ -1050,7 +1144,7 @@ export default function FindingsPage() {
     await handleStatusChange(findingId, newStatus);
   };
 
-  // ── Finding validation (Aegis Vanguard validator agent) ────────────────────────
+    // ── Finding validation (native detector / steps replay) ─────────────────────
   const [validationResult, setValidationResult] = useState<any>(null);
   const [validating, setValidating] = useState(false);
   const [detectionIssueText, setDetectionIssueText] = useState('');
@@ -1135,7 +1229,8 @@ export default function FindingsPage() {
       setValidationResult(initial);
       toast({
         title: 'Validation queued',
-        description: 'The validator agent is re-testing the finding against the live target.',
+        description:
+          'Replaying the original detection steps against the live target on the scanner.',
       });
       await pollValidation(findingId);
     } catch (err: any) {
@@ -2082,6 +2177,15 @@ export default function FindingsPage() {
                     <Shield className="h-4 w-4 mr-1.5" />
                     ServiceNow
                   </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="border-[#494649]/40 hover:bg-[#494649]/20 text-foreground"
+                    onClick={() => selectedFinding && openHackerOneDialog(selectedFinding)}
+                  >
+                    <Bug className="h-4 w-4 mr-1.5" />
+                    HackerOne
+                  </Button>
                 </div>
               </div>
               <SheetDescription className="text-left">
@@ -2621,17 +2725,16 @@ export default function FindingsPage() {
                     ) : (
                       <>
                         <ShieldCheck className="h-4 w-4 mr-2" />
-                        {validationResult?.verdict || selectedFinding?.last_validation_verdict
-                          ? 'Re-validate finding'
-                          : 'Validate with agent'}
+                        Re-validate finding
                       </>
                     )}
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Re-tests the live target: checks whether the issue is still open, and
-                  catches nonsensical matches (e.g. LDAP on port 443). Sends real requests
-                  to the host.
+                  Replays the original detection path on the live target: nuclei
+                  template re-run, port probes, or the finding’s steps to reproduce.
+                  Confirms whether the issue is still open and catches bad matches
+                  (e.g. LDAP on port 443).
                 </p>
 
                 {templatePattern && (
@@ -3274,6 +3377,118 @@ export default function FindingsPage() {
                 >
                   {snowPushing ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Shield className="h-4 w-4 mr-2" />}
                   Link record
+                </Button>
+              )}
+            </div>
+          </DialogContent>
+        </Dialog>
+
+        {/* HackerOne report link dialog */}
+        <Dialog open={h1DialogOpen} onOpenChange={(v) => { if (!h1Linking) setH1DialogOpen(v); }}>
+          <DialogContent className="max-w-md">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <div className="w-6 h-6 rounded bg-[#494649] flex items-center justify-center shrink-0">
+                  <Bug className="w-4 h-4 text-white" />
+                </div>
+                HackerOne
+              </DialogTitle>
+              <DialogDescription className="truncate">{selectedFinding?.title || selectedFinding?.name}</DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-4 py-2">
+              {h1HasIntegration === false ? (
+                <div className="rounded-lg border border-yellow-500/30 bg-yellow-500/10 p-4 text-sm space-y-2">
+                  <p className="text-yellow-300 font-medium flex items-center gap-2">
+                    <AlertCircle className="h-4 w-4" />HackerOne not configured
+                  </p>
+                  <p className="text-muted-foreground">
+                    Set up the HackerOne integration on the{' '}
+                    <a href="/integrations" className="text-primary underline">Integrations page</a>.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  {h1Links.length > 0 && (
+                    <div className="space-y-1.5">
+                      <p className="text-xs font-medium text-muted-foreground uppercase tracking-wider">Linked reports</p>
+                      <div className="space-y-1.5">
+                        {h1Links.map((l) => (
+                          <div key={l.id} className="flex items-center gap-2 rounded border border-border px-2 py-1.5 text-sm">
+                            <a
+                              href={l.hackerone_report_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex items-center gap-1.5 text-primary hover:underline flex-1 min-w-0"
+                            >
+                              <ExternalLink className="h-3 w-3 shrink-0" />
+                              <span className="font-mono truncate">#{l.hackerone_report_id}</span>
+                            </a>
+                            {l.hackerone_state && (
+                              <Badge variant="outline" className="text-[10px] h-4 px-1 shrink-0">{l.hackerone_state}</Badge>
+                            )}
+                            {l.hackerone_severity && (
+                              <Badge variant="outline" className="text-[10px] h-4 px-1 shrink-0 capitalize">{l.hackerone_severity}</Badge>
+                            )}
+                            {l.is_associated && (
+                              <Badge variant="outline" className="text-[10px] h-4 px-1 shrink-0 text-muted-foreground">linked</Badge>
+                            )}
+                            <button
+                              onClick={() => handleRefreshHackerOne(l.id)}
+                              disabled={h1Refreshing === l.id}
+                              className="text-muted-foreground hover:text-foreground"
+                              title="Refresh status from HackerOne"
+                            >
+                              {h1Refreshing === l.id
+                                ? <Loader2 className="h-3 w-3 animate-spin" />
+                                : <RefreshCw className="h-3 w-3" />}
+                            </button>
+                            <button
+                              onClick={() => handleDisconnectHackerOne(l.id, l.hackerone_report_id)}
+                              disabled={h1Disconnecting === l.id}
+                              className="text-muted-foreground hover:text-red-400"
+                              title="Disconnect report"
+                            >
+                              {h1Disconnecting === l.id
+                                ? <Loader2 className="h-3 w-3 animate-spin" />
+                                : <XCircle className="h-3 w-3" />}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="space-y-3">
+                    <p className="text-sm text-muted-foreground">
+                      Link an existing HackerOne report to this finding. The report is not modified in HackerOne; status can be refreshed from H1.
+                    </p>
+                    <div className="space-y-1.5">
+                      <label className="text-sm font-medium">Report ID or URL</label>
+                      <Input
+                        placeholder="e.g. 1234567 or https://hackerone.com/reports/1234567"
+                        value={h1AssociateKey}
+                        onChange={(e) => setH1AssociateKey(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleAssociateHackerOne()}
+                      />
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-border">
+              <Button variant="outline" onClick={() => setH1DialogOpen(false)} disabled={h1Linking}>
+                {h1HasIntegration === false ? 'Close' : 'Cancel'}
+              </Button>
+              {h1HasIntegration !== false && (
+                <Button
+                  onClick={handleAssociateHackerOne}
+                  disabled={h1Linking || !h1AssociateKey.trim()}
+                  className="bg-[#494649] hover:bg-[#5a5759] text-white"
+                >
+                  {h1Linking ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Bug className="h-4 w-4 mr-2" />}
+                  Link report
                 </Button>
               )}
             </div>

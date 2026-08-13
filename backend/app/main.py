@@ -19,6 +19,7 @@ from app.models.finding_exception import FindingException  # Required for Vulner
 from app.models.jira_integration import JiraIntegration, JiraTicket  # noqa: F401 — ensure tables are created
 from app.models.servicenow_integration import ServiceNowIntegration, ServiceNowDelivery  # noqa: F401 — ensure tables are created
 from app.models.censys_integration import CensysAsmIntegration  # noqa: F401 — ensure table is created
+from app.models.hackerone_integration import HackerOneIntegration, HackerOneReportLink  # noqa: F401 — ensure tables are created
 from app.models.panorama_integration import PanoramaIntegration  # noqa: F401 — ensure table is created
 from app.models.f5_integration import F5Integration  # noqa: F401 — ensure table is created
 from app.models.akamai_integration import AkamaiWafIntegration  # noqa: F401 — ensure table is created

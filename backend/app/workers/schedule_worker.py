@@ -20,7 +20,13 @@ from sqlalchemy.orm import sessionmaker, Session
 # Add app to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from app.models.scan_schedule import ScanSchedule, ScheduleFrequency, CONTINUOUS_SCAN_TYPES, ALL_CRITICAL_PORTS
+from app.models.scan_schedule import (
+    ScanSchedule,
+    ScheduleFrequency,
+    CONTINUOUS_SCAN_TYPES,
+    ALL_CRITICAL_PORTS,
+    ALL_ICS_OT_PORTS,
+)
 from app.models.scan import Scan, ScanType, ScanStatus
 from app.models.asset import Asset, AssetType
 from app.models.label import Label
@@ -29,12 +35,23 @@ from app.api.routes.scans import send_scan_to_sqs
 
 # Scan types that require IPv4 only (don't support IPv6)
 IPV4_ONLY_SCAN_TYPES = [
-    "port_scan", "masscan", "critical_ports", 
+    "port_scan", "masscan", "critical_ports",
+    "ics_ot_ports", "ics_plc_scan", "ics_scada_scan",
+    "ics_building_automation", "ics_full_discovery",
     "http_probe", "screenshot", "login_portal",
     "nuclei", "nuclei_critical", "nuclei_high", "nuclei_critical_high",
-    "nuclei_medium", "nuclei_low_info", "vulnerability", "technology",
+    "nuclei_medium", "nuclei_low_info", "nuclei_ics", "vulnerability", "technology",
     "katana", "paramspider", "waybackurls",
 ]
+
+# ICS/OT schedule types → port scan (nmap/masscan + NSE). Not Nuclei.
+ICS_PORT_SCAN_TYPES = {
+    "ics_ot_ports",
+    "ics_plc_scan",
+    "ics_scada_scan",
+    "ics_building_automation",
+    "ics_full_discovery",
+}
 
 
 def filter_ipv6_targets(targets: list, scan_type: str) -> tuple:
@@ -294,7 +311,10 @@ class ScheduleWorker:
             db.commit()
             return
         
-        # Map schedule scan_type to ScanType enum
+        # Map schedule scan_type to ScanType enum.
+        # ICS profiles are PORT_SCAN (nmap/masscan + NSE). Only nuclei_ics is Nuclei.
+        # Unknown types must NOT default to VULNERABILITY — that misrouted ICS
+        # full discovery into Nuclei sharding (timeouts, 0 findings).
         scan_type_map = {
             "nuclei": ScanType.VULNERABILITY,
             "nuclei_critical": ScanType.VULNERABILITY,
@@ -302,10 +322,16 @@ class ScheduleWorker:
             "nuclei_critical_high": ScanType.VULNERABILITY,
             "nuclei_medium": ScanType.VULNERABILITY,
             "nuclei_low_info": ScanType.VULNERABILITY,
+            "nuclei_ics": ScanType.VULNERABILITY,
             "vulnerability": ScanType.VULNERABILITY,
             "port_scan": ScanType.PORT_SCAN,
             "masscan": ScanType.PORT_SCAN,
             "critical_ports": ScanType.PORT_SCAN,
+            "ics_ot_ports": ScanType.PORT_SCAN,
+            "ics_plc_scan": ScanType.PORT_SCAN,
+            "ics_scada_scan": ScanType.PORT_SCAN,
+            "ics_building_automation": ScanType.PORT_SCAN,
+            "ics_full_discovery": ScanType.PORT_SCAN,
             "discovery": ScanType.DISCOVERY,
             "full_discovery": ScanType.DISCOVERY,  # Alias for discovery
             "full": ScanType.FULL,
@@ -322,14 +348,27 @@ class ScheduleWorker:
             "commoncrawl_enum": ScanType.COMMONCRAWL_ENUM,
             "cleanup": ScanType.CLEANUP,
         }
+
+        if schedule.scan_type not in scan_type_map:
+            logger.error(
+                f"Unknown schedule scan_type '{schedule.scan_type}' for schedule "
+                f"{schedule.id} ({schedule.name}); skipping (refusing Nuclei default)"
+            )
+            schedule.last_error = f"Unknown scan_type: {schedule.scan_type}"
+            schedule.next_run_at = schedule.calculate_next_run()
+            db.commit()
+            return
+
+        scan_type = scan_type_map[schedule.scan_type]
         
-        scan_type = scan_type_map.get(schedule.scan_type, ScanType.VULNERABILITY)
-        
-        # Build config
+        # Build config — merge profile defaults so ICS NSE/ports survive thin schedule configs
+        profile_defaults = CONTINUOUS_SCAN_TYPES.get(schedule.scan_type, {}).get("default_config", {})
         config = {
+            **profile_defaults,
             **(schedule.config or {}),
             "triggered_by_schedule": schedule.id,
             "schedule_name": schedule.name,
+            "schedule_scan_type": schedule.scan_type,
         }
         
         # ParamSpider batch rotation: archive mining can't cover thousands of
@@ -378,6 +417,21 @@ class ScheduleWorker:
             config["generate_findings"] = True
             config["scanner"] = config.get("scanner", "masscan")  # Masscan is faster for CIDR blocks
             config["rate"] = config.get("rate", 10000)  # 10k packets/sec default
+
+        # ICS/OT: ensure ports + findings; full discovery keeps nmap + NSE from profile
+        if schedule.scan_type in ICS_PORT_SCAN_TYPES:
+            config["generate_findings"] = True
+            if schedule.scan_type in ("ics_ot_ports", "ics_full_discovery"):
+                config["ports"] = config.get("ports") or ",".join(str(p) for p in ALL_ICS_OT_PORTS)
+            if schedule.scan_type == "ics_ot_ports":
+                config["scanner"] = config.get("scanner", "masscan")
+                config["rate"] = config.get("rate", 5000)
+            elif schedule.scan_type == "ics_full_discovery":
+                config["scanner"] = config.get("scanner", "nmap")
+                config["rate"] = config.get("rate", 500)
+                config["run_nuclei"] = config.get("run_nuclei", True)
+                if not config.get("nuclei_tags") and not config.get("tags"):
+                    config["nuclei_tags"] = ["ics", "scada"]
         
         # Create the scan
         scan = Scan(
@@ -540,6 +594,48 @@ class ScheduleWorker:
                         pass
         except Exception as exc:
             logger.error(f"Censys ASM continuous sync check failed: {exc}", exc_info=True)
+        finally:
+            db.close()
+
+    async def run_hackerone_syncs(self):
+        """Run continuous HackerOne syncs for connections whose interval is due."""
+        from app.models.hackerone_integration import HackerOneIntegration
+        from app.services import hackerone_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(HackerOneIntegration).filter(
+                HackerOneIntegration.is_active == True,
+                HackerOneIntegration.continuous_sync_enabled == True,
+            ).all()
+
+            due = [c for c in candidates if c.is_sync_due(now)]
+            if not due:
+                return
+
+            logger.info(f"HackerOne: {len(due)} connection(s) due for continuous sync")
+            for integration in due:
+                try:
+                    result = await hackerone_service.sync_integration(db, integration)
+                    logger.info(
+                        f"HackerOne sync (org {integration.organization_id}, "
+                        f"'{integration.connection_name}'): {result.get('message')}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"HackerOne sync failed for connection {integration.id}: {exc}",
+                        exc_info=True,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.error(f"HackerOne continuous sync check failed: {exc}", exc_info=True)
         finally:
             db.close()
 
@@ -725,6 +821,9 @@ class ScheduleWorker:
 
                 # Continuous Censys ASM syncs — due-check enforces per-connection cadence
                 await self.run_censys_asm_syncs()
+
+                # Continuous HackerOne bug bounty syncs
+                await self.run_hackerone_syncs()
 
                 # Continuous Akamai WAF syncs
                 await self.run_akamai_waf_syncs()

@@ -53,6 +53,7 @@ class ToolType(str, Enum):
     QUERY = "query"
     ANALYZE = "analyze"
     EXPLOIT = "exploit"
+    UTILITY = "utility"
 
 
 @dataclass

@@ -493,11 +493,13 @@ class ScannerWorker:
                     'targets': pending_scan.targets or [],
                     'config': config,
                     'is_scheduled': is_scheduled,
-                    # Extract common config fields for easier access
+                    # Extract common config fields for easier access.
+                    # ICS full discovery stores tags as nuclei_tags until the
+                    # post-port-scan Nuclei child is queued with tags=...
                     'scanner': config.get('scanner', 'naabu'),
                     'ports': config.get('ports'),
                     'severity': config.get('severity'),
-                    'tags': config.get('tags'),
+                    'tags': config.get('tags') or config.get('nuclei_tags'),
                     'exclude_tags': config.get('exclude_tags'),
                     'service_detection': config.get('service_detection', True),
                     'domain': pending_scan.targets[0] if pending_scan.targets else None,
@@ -913,15 +915,20 @@ class ScannerWorker:
             # For DB messages, the scan status will be set to FAILED by handlers
     
     async def handle_validate_finding(self, job_data: dict):
-        """Validate a single finding by invoking the Aegis Vanguard validator agent.
+        """Validate a single finding by replaying the original detection path.
 
-        Invokes aegis-vanguard/validate_finding.py (via `docker run` of the
-        Aegis Vanguard image by default, or a local subprocess when
-        AEGIS_VALIDATOR_MODE=subprocess). The agent actively re-tests the
-        live target and returns a structured JSON verdict, which is written back
-        to the FindingValidation row and denormalized onto the Vulnerability.
-        A false positive attributed to the template's own logic also records a
-        DetectionFeedback entry with a generated upstream bug report.
+        Default (AEGIS_VALIDATOR_MODE=native): re-run the detector that produced
+        the finding on this scanner worker — nuclei template replay, TCP/HTTP
+        probes of claimed host:ports, and reproduction steps from
+        steps_to_reproduce / evidence / description. No Docker required.
+
+        Optional modes:
+          - docker / subprocess — Aegis Vanguard LLM validator
+          - auto — native first, escalate to Vanguard when inconclusive
+
+        Writes the structured verdict back to FindingValidation and denormalizes
+        onto the Vulnerability. A false positive attributed to template logic
+        also records DetectionFeedback.
         """
         import subprocess
         from pathlib import Path
@@ -1017,9 +1024,24 @@ class ScannerWorker:
                 source_kind = "secret"
             elif detected_by in (
                 "nuclei", "graphql_scanner", "takeover_scanner", "js_recon",
-                "jsluice", "agent", "llm_red_team", "auto_discovery",
+                "jsluice", "auto_discovery",
             ):
                 source_kind = "web"
+            elif detected_by in ("agent", "llm_red_team"):
+                # Agent findings span web and network; prefer network when the
+                # title/description clearly claims non-HTTP services/ports.
+                blob = f"{vuln.title or ''} {vuln.description or ''}".lower()
+                network_markers = (
+                    "mysql", "postgres", "mongodb", "redis", "elasticsearch",
+                    "couchdb", "mssql", "oracle", "ldap", "smb", "rdp", "ftp",
+                    "port 1433", "port 3306", "port 5432", "port 27017",
+                    "port 9200", "unauthenticated database", "exposed to the internet",
+                )
+                source_kind = (
+                    "network_service"
+                    if any(m in blob for m in network_markers)
+                    else "web"
+                )
             else:
                 source_kind = "generic"
 
@@ -1078,30 +1100,16 @@ class ScannerWorker:
                 scope = host
 
             # Build the validator invocation.
-            mode = os.getenv("AEGIS_VALIDATOR_MODE", "docker").lower()
+            # native (default) — replay original detector / steps on this scanner
+            # docker / subprocess — Aegis Vanguard LLM validator (optional)
+            # auto — native first; escalate to docker/subprocess only if native
+            #        returns needs_more_evidence and that backend is available
+            import shutil
+
+            mode = os.getenv("AEGIS_VALIDATOR_MODE", "native").lower()
             max_turns = os.getenv("AEGIS_VALIDATE_MAX_TURNS", "20")
             timeout_sec = int(os.getenv("AEGIS_VALIDATE_TIMEOUT", "900"))
-            cwd = None
-            if mode == "subprocess":
-                vanguard_path = os.getenv("AEGIS_VANGUARD_PATH") or str(
-                    Path(__file__).resolve().parents[3] / "aegis-vanguard"
-                )
-                cmd = [
-                    "python3", os.path.join(vanguard_path, "validate_finding.py"),
-                    "--finding-json", "-", "--max-turns", str(max_turns),
-                ]
-                cwd = vanguard_path
-            else:
-                image = os.getenv("AEGIS_VANGUARD_IMAGE", "aegis-vanguard:latest")
-                cmd = [
-                    "docker", "run", "--rm", "-i",
-                    "-e", "ANTHROPIC_API_KEY", "-e", "AEGIS_MODEL",
-                    image,
-                    "python3", "/agent/validate_finding.py",
-                    "--finding-json", "-", "--max-turns", str(max_turns),
-                ]
-            if scope:
-                cmd += ["--scope", scope]
+            docker_bin = shutil.which("docker")
 
             logger.info(
                 f"VALIDATE_FINDING: validating vuln {vuln.id} (source={source_kind}, "
@@ -1109,38 +1117,107 @@ class ScannerWorker:
                 f"on {target} via {mode}"
             )
 
-            def _run():
-                return subprocess.run(
-                    cmd,
-                    input=finding_json,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_sec,
-                    cwd=cwd,
-                    env=os.environ.copy(),
-                )
-
             verdict_data = None
             run_error = None
-            try:
+
+            async def _run_native():
+                from app.services.finding_revalidation_service import revalidate_finding
+                return await revalidate_finding(finding_payload)
+
+            async def _run_vanguard(vanguard_mode: str):
+                cwd = None
+                if vanguard_mode == "subprocess":
+                    vanguard_path = os.getenv("AEGIS_VANGUARD_PATH") or str(
+                        Path(__file__).resolve().parents[3] / "aegis-vanguard"
+                    )
+                    cmd = [
+                        "python3", os.path.join(vanguard_path, "validate_finding.py"),
+                        "--finding-json", "-", "--max-turns", str(max_turns),
+                    ]
+                    cwd = vanguard_path
+                else:
+                    if not docker_bin:
+                        raise FileNotFoundError("docker")
+                    image = os.getenv("AEGIS_VANGUARD_IMAGE", "aegis-vanguard:latest")
+                    cmd = [
+                        docker_bin, "run", "--rm", "-i",
+                        "-e", "ANTHROPIC_API_KEY", "-e", "AEGIS_MODEL",
+                        "-e", "AEGIS_LLM_BACKEND",
+                        "-e", "OPENAI_API_KEY",
+                        "-e", "OLLAMA_BASE_URL", "-e", "OLLAMA_API_BASE",
+                        "-e", "OLLAMA_MODEL", "-e", "OLLAMA_FALLBACK_ENABLED",
+                        image,
+                        "python3", "/agent/validate_finding.py",
+                        "--finding-json", "-", "--max-turns", str(max_turns),
+                    ]
+                if scope:
+                    cmd += ["--scope", scope]
+
+                def _run():
+                    return subprocess.run(
+                        cmd,
+                        input=finding_json,
+                        capture_output=True,
+                        text=True,
+                        timeout=timeout_sec,
+                        cwd=cwd,
+                        env=os.environ.copy(),
+                    )
+
                 proc = await asyncio.to_thread(_run)
                 stdout = proc.stdout or ""
                 if JSON_START in stdout and JSON_END in stdout:
                     chunk = stdout.split(JSON_START, 1)[1].split(JSON_END, 1)[0].strip()
-                    try:
-                        verdict_data = json.loads(chunk)
-                    except json.JSONDecodeError as e:
-                        run_error = f"unparseable_verdict: {e}"
+                    return json.loads(chunk)
+                logger.warning(
+                    f"VALIDATE_FINDING: no verdict sentinels in output. "
+                    f"stderr tail: {(proc.stderr or '')[-500:]}"
+                )
+                raise RuntimeError("no_verdict_in_output")
+
+            try:
+                if mode in ("native", "auto"):
+                    verdict_data = await _run_native()
+                    # Escalate to Vanguard only when native is inconclusive and a
+                    # Vanguard backend is explicitly available / requested via auto.
+                    if (
+                        mode == "auto"
+                        and isinstance(verdict_data, dict)
+                        and verdict_data.get("verdict") == "needs_more_evidence"
+                    ):
+                        vanguard_mode = "docker" if docker_bin else (
+                            "subprocess" if os.getenv("AEGIS_VANGUARD_PATH") else None
+                        )
+                        if vanguard_mode:
+                            logger.info(
+                                f"VALIDATE_FINDING: native inconclusive; escalating to {vanguard_mode}"
+                            )
+                            try:
+                                verdict_data = await _run_vanguard(vanguard_mode)
+                            except Exception as escalate_err:
+                                logger.warning(
+                                    f"VALIDATE_FINDING: vanguard escalate failed, "
+                                    f"keeping native verdict: {escalate_err}"
+                                )
+                elif mode == "subprocess":
+                    verdict_data = await _run_vanguard("subprocess")
                 else:
-                    run_error = "no_verdict_in_output"
-                    logger.warning(
-                        f"VALIDATE_FINDING: no verdict sentinels in output. "
-                        f"stderr tail: {(proc.stderr or '')[-500:]}"
-                    )
+                    # docker (legacy) or unknown → docker
+                    verdict_data = await _run_vanguard("docker")
             except subprocess.TimeoutExpired:
                 run_error = "validator_timeout"
             except FileNotFoundError as e:
-                run_error = f"invocation_failed: {e}"
+                missing = getattr(e, "filename", None) or str(e)
+                if "docker" in str(missing).lower() or "docker" in str(e).lower():
+                    run_error = (
+                        "invocation_failed: docker not found — set "
+                        "AEGIS_VALIDATOR_MODE=native (default) to replay "
+                        "detection steps on the scanner"
+                    )
+                else:
+                    run_error = f"invocation_failed: {e}"
+            except json.JSONDecodeError as e:
+                run_error = f"unparseable_verdict: {e}"
             except Exception as e:
                 run_error = f"validator_error: {e}"
 
@@ -1338,6 +1415,65 @@ class ScannerWorker:
             return 1
         except Exception as e:
             logger.error(f"Failed to queue Nuclei follow-up scan: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return 0
+
+    def _queue_ics_nuclei_after_port_scan(self, db, parent_scan, hosts_with_open_ports, config):
+        """Queue host-scoped Nuclei ICS follow-up after a successful ICS port scan.
+
+        Only hosts that had open ICS/OT ports are scanned — never the full
+        original target list (avoids Nuclei timeouts on hundreds of web hosts).
+        """
+        if not parent_scan or not hosts_with_open_ports:
+            return 0
+        if not (config or {}).get("run_nuclei"):
+            return 0
+
+        try:
+            import re
+            parent_name = parent_scan.name or "ICS/OT discovery"
+            base_name = re.sub(r"\s*\(part \d+\)\s*$", "", parent_name).strip() or "ICS/OT discovery"
+            tags = config.get("nuclei_tags") or config.get("tags") or ["ics", "scada"]
+            if isinstance(tags, str):
+                tags = [t.strip() for t in tags.split(",") if t.strip()]
+            severity = config.get("severity") or ["critical", "high", "medium"]
+            rate_limit = config.get("rate_limit", 50)
+
+            nuclei_targets = sorted({h for h in hosts_with_open_ports if h})
+            follow_config = {
+                "tags": tags,
+                "nuclei_tags": tags,
+                "severity": severity,
+                "rate_limit": rate_limit,
+                "timeout": config.get("timeout", 15),
+                "skip_asset_precreate": True,
+                "triggered_by_ics_port_scan": parent_scan.id,
+                "schedule_name": config.get("schedule_name"),
+                "triggered_by_schedule": config.get("triggered_by_schedule"),
+                "schedule_scan_type": config.get("schedule_scan_type"),
+            }
+            # Drop port-scan-only keys so Nuclei job data stays clean
+            child = Scan(
+                name=f"{base_name} - Nuclei ICS",
+                scan_type=ScanType.VULNERABILITY,
+                organization_id=parent_scan.organization_id,
+                targets=nuclei_targets,
+                config=follow_config,
+                started_by=parent_scan.started_by or "system",
+                status=ScanStatus.PENDING,
+            )
+            db.add(child)
+            db.commit()
+            logger.info(
+                f"Queued ICS Nuclei follow-up for scan {parent_scan.id}: "
+                f"{len(nuclei_targets)} host(s) with open ports, tags={tags}"
+            )
+            return 1
+        except Exception as e:
+            logger.error(f"Failed to queue ICS Nuclei follow-up: {e}", exc_info=True)
             try:
                 db.rollback()
             except Exception:
@@ -2101,6 +2237,41 @@ class ScannerWorker:
                 # Trigger graph sync after port scan (updates port relationships)
                 if organization_id and len(result.ports_found) > 0:
                     trigger_graph_sync(organization_id)
+
+                # ICS full discovery: after nmap/NSE, queue Nuclei only on hosts
+                # that actually had open ports (config.run_nuclei + nuclei_tags).
+                if (
+                    result.success
+                    and config.get("run_nuclei")
+                    and unique_hosts
+                    and scan
+                ):
+                    queued = self._queue_ics_nuclei_after_port_scan(
+                        db, scan, unique_hosts, config
+                    )
+                    if queued and scan.results is not None:
+                        # Re-attach results note (previous commit already done)
+                        try:
+                            scan = db.query(Scan).filter(Scan.id == scan_id).first()
+                            if scan:
+                                results = dict(scan.results or {})
+                                results["nuclei_follow_up_queued"] = True
+                                results["nuclei_follow_up_hosts"] = len(unique_hosts)
+                                scan.results = results
+                                db.commit()
+                        except Exception as note_err:
+                            logger.warning(
+                                f"Scan {scan_id}: could not record nuclei follow-up note: {note_err}"
+                            )
+                            try:
+                                db.rollback()
+                            except Exception:
+                                pass
+                elif config.get("run_nuclei") and not unique_hosts:
+                    logger.info(
+                        f"Scan {scan_id}: run_nuclei set but no open ports; "
+                        f"skipping ICS Nuclei follow-up"
+                    )
                 
             except Exception as commit_error:
                 logger.error(f"Scan {scan_id}: Failed to commit results: {commit_error}", exc_info=True)

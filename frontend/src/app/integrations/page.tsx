@@ -42,12 +42,14 @@ import {
   Download,
   RotateCw,
   Shield,
+  Bug,
 } from 'lucide-react';
 import {
   api,
   getApiErrorMessage,
   type JiraIntegration,
   type CensysIntegration,
+  type HackerOneIntegration,
   type AkamaiIntegration,
   type PanoramaIntegration,
   type F5Integration,
@@ -531,6 +533,436 @@ function CensysSection() {
             </DialogTitle>
             <DialogDescription>
               This removes the stored API key for <strong>{deleteTarget?.workspace_name}</strong>. Assets and findings already imported are kept.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={busyId === deleteTarget?.id}>
+              {busyId === deleteTarget?.id ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              Remove
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
+  );
+}
+
+interface HackerOneFormState {
+  connection_name: string;
+  api_identifier: string;
+  api_token: string;
+  import_vulnerabilities: boolean;
+  import_scopes: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+}
+
+const defaultHackerOneForm: HackerOneFormState = {
+  connection_name: '',
+  api_identifier: '',
+  api_token: '',
+  import_vulnerabilities: true,
+  import_scopes: true,
+  continuous_sync_enabled: false,
+  sync_interval_minutes: 360,
+};
+
+const HACKERONE_SYNC_INTERVALS: { value: number; label: string }[] = [
+  { value: 60, label: 'Every hour' },
+  { value: 360, label: 'Every 6 hours' },
+  { value: 720, label: 'Every 12 hours' },
+  { value: 1440, label: 'Every 24 hours' },
+];
+
+function formatHackerOneInterval(minutes: number): string {
+  const match = HACKERONE_SYNC_INTERVALS.find(i => i.value === minutes);
+  if (match) return match.label;
+  if (minutes % 1440 === 0) return `Every ${minutes / 1440} day(s)`;
+  if (minutes % 60 === 0) return `Every ${minutes / 60} hour(s)`;
+  return `Every ${minutes} min`;
+}
+
+function HackerOneSection() {
+  const { toast } = useToast();
+  const [integrations, setIntegrations] = useState<HackerOneIntegration[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [editing, setEditing] = useState<HackerOneIntegration | null>(null);
+  const [form, setForm] = useState<HackerOneFormState>(defaultHackerOneForm);
+  const [saving, setSaving] = useState(false);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<HackerOneIntegration | null>(null);
+
+  useEffect(() => { load(); }, []);
+
+  async function load() {
+    setLoading(true);
+    try {
+      setIntegrations(await api.getHackerOneIntegrations());
+    } catch {
+      setIntegrations([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function openCreate() {
+    setEditing(null);
+    setForm(defaultHackerOneForm);
+    setSetupOpen(true);
+  }
+
+  function openEdit(integration: HackerOneIntegration) {
+    setEditing(integration);
+    setForm({
+      connection_name: integration.connection_name,
+      api_identifier: integration.api_identifier,
+      api_token: '',
+      import_vulnerabilities: integration.import_vulnerabilities,
+      import_scopes: integration.import_scopes,
+      continuous_sync_enabled: integration.continuous_sync_enabled,
+      sync_interval_minutes: integration.sync_interval_minutes,
+    });
+    setSetupOpen(true);
+  }
+
+  async function handleSave() {
+    if (!form.connection_name.trim()) {
+      toast({ title: 'Connection name is required.', variant: 'destructive' });
+      return;
+    }
+    if (!form.api_identifier.trim()) {
+      toast({ title: 'API Identifier is required.', variant: 'destructive' });
+      return;
+    }
+    if (!editing && !form.api_token.trim()) {
+      toast({ title: 'API Token is required when adding a connection.', variant: 'destructive' });
+      return;
+    }
+    setSaving(true);
+    try {
+      if (editing) {
+        await api.updateHackerOneIntegration(editing.id, {
+          connection_name: form.connection_name,
+          api_identifier: form.api_identifier,
+          ...(form.api_token ? { api_token: form.api_token } : {}),
+          import_vulnerabilities: form.import_vulnerabilities,
+          import_scopes: form.import_scopes,
+          continuous_sync_enabled: form.continuous_sync_enabled,
+          sync_interval_minutes: form.sync_interval_minutes,
+        });
+        toast({ title: 'HackerOne connection updated.' });
+      } else {
+        await api.createHackerOneIntegration({
+          connection_name: form.connection_name,
+          api_identifier: form.api_identifier,
+          api_token: form.api_token,
+          import_vulnerabilities: form.import_vulnerabilities,
+          import_scopes: form.import_scopes,
+          continuous_sync_enabled: form.continuous_sync_enabled,
+          sync_interval_minutes: form.sync_interval_minutes,
+        });
+        toast({ title: 'HackerOne connection added.' });
+      }
+      setSetupOpen(false);
+      await load();
+    } catch (err) {
+      toast({ title: 'Failed to save', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleTest(integration: HackerOneIntegration) {
+    setBusyId(integration.id);
+    try {
+      const result = await api.testHackerOneConnection(integration.id);
+      toast({
+        title: result.ok ? 'Connection OK' : 'Connection failed',
+        description: result.message,
+        variant: result.ok ? undefined : 'destructive',
+      });
+      await load();
+    } catch (err) {
+      toast({ title: 'Test failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleSync(integration: HackerOneIntegration) {
+    setBusyId(integration.id);
+    try {
+      const result = await api.syncHackerOneIntegration(integration.id);
+      toast({
+        title: result.ok ? 'Sync complete' : 'Sync failed',
+        description: result.message,
+        variant: result.ok ? undefined : 'destructive',
+      });
+      await load();
+    } catch (err) {
+      toast({ title: 'Sync failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleDelete() {
+    if (!deleteTarget) return;
+    setBusyId(deleteTarget.id);
+    try {
+      await api.deleteHackerOneIntegration(deleteTarget.id);
+      setDeleteTarget(null);
+      toast({ title: 'HackerOne connection removed.' });
+      await load();
+    } catch (err) {
+      toast({ title: 'Failed to remove', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <Card className="border border-border">
+      <CardHeader className="flex flex-row items-center gap-4 space-y-0 pb-3">
+        <div className="w-10 h-10 rounded-lg bg-[#494649] flex items-center justify-center shrink-0">
+          <Bug className="w-5 h-5 text-white" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <CardTitle className="text-base">HackerOne</CardTitle>
+          <CardDescription className="text-sm">
+            Import bug bounty reports as findings and eligible program scopes as assets. Read-only.
+          </CardDescription>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {loading ? (
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+          ) : integrations.length > 0 ? (
+            <Badge variant="outline" className="bg-green-500/10 text-green-400 border-green-500/30">
+              <CheckCircle2 className="h-3 w-3 mr-1" />
+              {integrations.length} connection{integrations.length > 1 ? 's' : ''}
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="text-muted-foreground">Not configured</Badge>
+          )}
+        </div>
+      </CardHeader>
+
+      <CardContent className="space-y-4">
+        {integrations.length > 0 ? (
+          <div className="space-y-3">
+            {integrations.map((c) => (
+              <div key={c.id} className="rounded-lg border border-border p-3 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <p className="font-medium text-sm truncate">{c.connection_name}</p>
+                      {!c.is_active && <Badge variant="outline" className="text-muted-foreground text-xs">Disabled</Badge>}
+                      {c.last_test_ok === false && (
+                        <Badge variant="outline" className="bg-red-500/10 text-red-400 border-red-500/30 text-xs">
+                          <AlertCircle className="h-3 w-3 mr-1" />Auth issue
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1 text-xs text-muted-foreground">
+                      <span>API ID: {c.api_identifier}</span>
+                      <span>Import: {[c.import_scopes && 'Scopes', c.import_vulnerabilities && 'Reports'].filter(Boolean).join(' + ') || 'Nothing'}</span>
+                      {c.continuous_sync_enabled ? (
+                        <span className="inline-flex items-center gap-1 text-green-400">
+                          <RotateCw className="h-3 w-3" />
+                          Auto-sync {formatHackerOneInterval(c.sync_interval_minutes).toLowerCase()}
+                        </span>
+                      ) : (
+                        <span>Auto-sync off</span>
+                      )}
+                      {c.last_sync_at && (
+                        <span>
+                          Last sync: {new Date(c.last_sync_at).toLocaleString()}
+                          {c.last_sync_ok === true && <span className="text-green-400"> — OK</span>}
+                          {c.last_sync_ok === false && <span className="text-red-400"> — Failed</span>}
+                        </span>
+                      )}
+                      {c.continuous_sync_enabled && c.next_sync_at && (
+                        <span>Next: {new Date(c.next_sync_at).toLocaleString()}</span>
+                      )}
+                    </div>
+                    {c.last_sync_ok && c.last_sync_stats && (
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {c.last_sync_stats.assets_created ?? 0} new assets, {c.last_sync_stats.vulns_created ?? 0} new reports
+                        {typeof c.last_sync_stats.programs_seen === 'number' && (
+                          <> across {c.last_sync_stats.programs_seen} program(s)</>
+                        )}.
+                      </p>
+                    )}
+                    {c.last_sync_ok === false && c.last_error && (
+                      <p className="text-xs text-red-400 mt-1 truncate">{c.last_error}</p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" variant="outline" onClick={() => handleSync(c)} disabled={busyId === c.id || !c.is_active}>
+                    {busyId === c.id ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Download className="h-4 w-4 mr-2" />}
+                    Sync now
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => handleTest(c)} disabled={busyId === c.id}>
+                    <RefreshCw className="h-4 w-4 mr-2" />Test
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => openEdit(c)}>
+                    <Settings2 className="h-4 w-4 mr-2" />Edit
+                  </Button>
+                  <Button size="sm" variant="outline" className="border-red-600/30 hover:bg-red-600/20 text-red-400" onClick={() => setDeleteTarget(c)}>
+                    <Trash2 className="h-4 w-4 mr-2" />Remove
+                  </Button>
+                </div>
+              </div>
+            ))}
+            <Button size="sm" variant="outline" onClick={openCreate}>
+              <Plus className="h-4 w-4 mr-2" />Add another connection
+            </Button>
+          </div>
+        ) : (
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+            <p className="text-sm text-muted-foreground flex-1">
+              Connect HackerOne to ingest researcher-reported vulnerabilities alongside the rest of your attack surface.
+            </p>
+            <Button onClick={openCreate}>
+              <Plug className="h-4 w-4 mr-2" />Connect HackerOne
+            </Button>
+          </div>
+        )}
+      </CardContent>
+
+      <Dialog open={setupOpen} onOpenChange={(v) => { if (!saving) setSetupOpen(v); }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Bug className="h-5 w-5" />
+              {editing ? 'Edit HackerOne connection' : 'Connect HackerOne'}
+            </DialogTitle>
+            <DialogDescription>
+              Create an API token in HackerOne Settings → API Tokens. Credentials are validated against your programs before saving.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Connection name</label>
+              <Input
+                placeholder="e.g. Production"
+                value={form.connection_name}
+                onChange={(e) => setForm(f => ({ ...f, connection_name: e.target.value }))}
+              />
+              <p className="text-xs text-muted-foreground">A label to identify this connection.</p>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">API Identifier</label>
+              <Input
+                placeholder="Your HackerOne API identifier"
+                value={form.api_identifier}
+                onChange={(e) => setForm(f => ({ ...f, api_identifier: e.target.value }))}
+                autoComplete="username"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">
+                API Token{editing && <span className="text-muted-foreground font-normal"> (leave blank to keep existing)</span>}
+              </label>
+              <Input
+                type="password"
+                placeholder={editing ? '••••••••••••' : 'Paste your API token'}
+                value={form.api_token}
+                onChange={(e) => setForm(f => ({ ...f, api_token: e.target.value }))}
+                autoComplete="current-password"
+              />
+              <a href="https://hackerone.com/settings/api_token/edit" target="_blank" rel="noopener noreferrer" className="text-xs text-primary hover:underline inline-flex items-center gap-1">
+                Get your API token <ExternalLink className="h-3 w-3" />
+              </a>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">What to import</label>
+              <div className="flex items-start gap-3 rounded-lg border border-border p-3">
+                <Checkbox
+                  id="h1-scopes"
+                  checked={form.import_scopes}
+                  onCheckedChange={(v) => setForm(f => ({ ...f, import_scopes: !!v }))}
+                  className="mt-0.5 shrink-0"
+                />
+                <label htmlFor="h1-scopes" className="text-sm cursor-pointer">
+                  <span className="font-medium">Import program scopes</span>
+                  <p className="text-xs text-muted-foreground mt-0.5">Eligible URLs, domains, IPs, and CIDRs as in-scope assets.</p>
+                </label>
+              </div>
+              <div className="flex items-start gap-3 rounded-lg border border-border p-3">
+                <Checkbox
+                  id="h1-vulns"
+                  checked={form.import_vulnerabilities}
+                  onCheckedChange={(v) => setForm(f => ({ ...f, import_vulnerabilities: !!v }))}
+                  className="mt-0.5 shrink-0"
+                />
+                <label htmlFor="h1-vulns" className="text-sm cursor-pointer">
+                  <span className="font-medium">Import vulnerability reports</span>
+                  <p className="text-xs text-muted-foreground mt-0.5">Bug bounty findings with severity, CWE, and status mapping.</p>
+                </label>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Continuous sync</label>
+              <div className="flex items-start gap-3 rounded-lg border border-border p-3">
+                <Checkbox
+                  id="h1-continuous"
+                  checked={form.continuous_sync_enabled}
+                  onCheckedChange={(v) => setForm(f => ({ ...f, continuous_sync_enabled: !!v }))}
+                  className="mt-0.5 shrink-0"
+                />
+                <label htmlFor="h1-continuous" className="text-sm cursor-pointer">
+                  <span className="font-medium flex items-center gap-2">
+                    <RotateCw className="h-4 w-4 text-green-400" />
+                    Automatically re-sync on a schedule
+                  </span>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Keeps findings current by pulling new HackerOne reports and scopes in the background.
+                  </p>
+                </label>
+              </div>
+              {form.continuous_sync_enabled && (
+                <div className="space-y-1.5 pl-1">
+                  <label className="text-sm font-medium">Sync frequency</label>
+                  <Select
+                    value={String(form.sync_interval_minutes)}
+                    onValueChange={(v) => setForm(f => ({ ...f, sync_interval_minutes: Number(v) }))}
+                  >
+                    <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {HACKERONE_SYNC_INTERVALS.map(i => (
+                        <SelectItem key={i.value} value={String(i.value)}>{i.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2 pt-2 border-t border-border">
+            <Button variant="outline" onClick={() => setSetupOpen(false)} disabled={saving}>Cancel</Button>
+            <Button onClick={handleSave} disabled={saving}>
+              {saving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              {editing ? 'Save changes' : 'Connect'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!deleteTarget} onOpenChange={(v) => { if (!v) setDeleteTarget(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-400">
+              <Trash2 className="h-5 w-5" />Remove connection
+            </DialogTitle>
+            <DialogDescription>
+              This removes the stored HackerOne credentials for <strong>{deleteTarget?.connection_name}</strong>. Assets and findings already imported are kept.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="gap-2">
@@ -2774,6 +3206,9 @@ export default function IntegrationsPage() {
 
         {/* Censys ASM Integration Card */}
         <CensysSection />
+
+        {/* HackerOne Bug Bounty Integration Card */}
+        <HackerOneSection />
 
         {/* Akamai WAF Integration Card */}
         <AkamaiSection />
