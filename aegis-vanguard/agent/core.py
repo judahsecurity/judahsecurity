@@ -35,8 +35,8 @@ from agent.tools import ToolDef, ToolRegistry
 from agent.guardrails import GuardrailEngine
 from agent.tracing import Tracer, TokenUsage
 
-# Cloud billing / quota signals (Anthropic, OpenAI, etc.) that should trigger
-# a local Ollama retry when OLLAMA_FALLBACK_ENABLED is on.
+# Cloud billing / quota / auth signals (Anthropic, OpenAI, etc.) that should
+# trigger a local Ollama retry when OLLAMA_FALLBACK_ENABLED is on.
 _CREDIT_QUOTA_MARKERS = (
     "credit balance is too low",
     "credit balance",
@@ -54,6 +54,13 @@ _CREDIT_QUOTA_MARKERS = (
     "quota exceeded",
     "out of credits",
     "no credits",
+    "authentication_error",
+    "api key is invalid",
+    "invalid api key",
+    "invalid x-api-key",
+    "incorrect api key",
+    "invalid_api_key",
+    "unauthorized",
 )
 
 
@@ -70,7 +77,7 @@ def _is_credit_or_quota_error(exc: BaseException) -> bool:
     if any(m in haystack for m in _CREDIT_QUOTA_MARKERS):
         return True
     status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
-    return status == 402
+    return status in (401, 402)
 
 
 def _ollama_fallback_enabled() -> bool:

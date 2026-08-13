@@ -27,6 +27,15 @@ export function getApiErrorMessage(error: any, fallback: string = 'An error occu
     return 'Cloud LLM credits are exhausted. Top up the provider or enable local Ollama fallback.';
   }
 
+  // Cloud LLM API key invalid (agent route); leave other 401s (JWT, etc.) alone
+  if (
+    status === 401 &&
+    typeof detail === 'string' &&
+    /api key|anthropic|openai|ollama|llm/i.test(detail)
+  ) {
+    return detail;
+  }
+
   // AI provider (e.g. Anthropic) overloaded - 529 or 503 with overloaded message
   if (status === 529 || status === 503) {
     if (typeof detail === 'string' && (detail.toLowerCase().includes('overloaded') || detail.includes('try again')))

@@ -65,8 +65,8 @@ _OLLAMA_REACHABLE_CACHE: dict[str, tuple[bool, float]] = {}
 _OLLAMA_REACHABLE_TTL_SECONDS = 30.0
 
 # Substrings that indicate the cloud provider rejected the call for billing /
-# quota reasons (not transient overload). Matched case-insensitively against
-# the exception message + type name.
+# quota / auth reasons (not transient overload). Matched case-insensitively
+# against the exception message + type name. These trigger Ollama fallback.
 _CREDIT_QUOTA_MARKERS = (
     "credit balance is too low",
     "credit balance",
@@ -84,6 +84,14 @@ _CREDIT_QUOTA_MARKERS = (
     "quota exceeded",
     "out of credits",
     "no credits",
+    # Invalid / revoked / missing cloud keys — fall back to Ollama when reachable
+    "authentication_error",
+    "api key is invalid",
+    "invalid api key",
+    "invalid x-api-key",
+    "incorrect api key",
+    "invalid_api_key",
+    "unauthorized",
 )
 
 
@@ -183,7 +191,11 @@ def ollama_is_reachable(timeout: float = 0.75) -> bool:
 
 
 def is_llm_credit_or_quota_error(exc: BaseException) -> bool:
-    """True when a provider rejected the call for billing / quota / credits."""
+    """True when a provider rejected the call for billing / quota / bad API key.
+
+    Auth failures are included so a revoked or invalid Anthropic/OpenAI key
+    still falls through to local Ollama when fallback is enabled.
+    """
     parts = [str(exc), type(exc).__name__]
     cause = getattr(exc, "__cause__", None)
     if cause is not None:
@@ -197,9 +209,9 @@ def is_llm_credit_or_quota_error(exc: BaseException) -> bool:
     haystack = " ".join(parts).lower()
     if any(marker in haystack for marker in _CREDIT_QUOTA_MARKERS):
         return True
-    # HTTP 402 Payment Required
+    # HTTP 402 Payment Required, 401 Unauthorized (invalid key)
     status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
-    if status == 402:
+    if status in (401, 402):
         return True
     return False
 

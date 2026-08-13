@@ -162,7 +162,8 @@ AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
 # Host / Docker Desktop instead: OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
 # Smaller instances: OLLAMA_MODEL=qwen2.5:7b  (~8 GB RAM). 14b needs ~12–16 GB.
 # When a preferred cloud provider has no API key, OR a cloud call fails with
-# credit/quota/billing errors (e.g. Anthropic "credit balance is too low"),
+# credit/quota/billing errors OR an invalid API key
+# (e.g. Anthropic "credit balance is too low" / "API key is invalid"),
 # the agent falls back to Ollama if it is reachable
 # (disable with OLLAMA_FALLBACK_ENABLED=false).
 # COMPOSE_PROFILES=ollama

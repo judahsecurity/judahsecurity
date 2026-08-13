@@ -138,6 +138,25 @@ def _handle_agent_error(result_error: str):
                 "and restart the backend."
             ),
         )
+    if any(
+        m in err
+        for m in (
+            "authentication_error",
+            "api key is invalid",
+            "invalid api key",
+            "invalid x-api-key",
+            "incorrect api key",
+            "invalid_api_key",
+        )
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail=(
+                "Cloud LLM API key is invalid. Update ANTHROPIC_API_KEY / OPENAI_API_KEY "
+                "in .env, or enable local Ollama fallback "
+                "(COMPOSE_PROFILES=ollama, OLLAMA_FALLBACK_ENABLED=true) and restart."
+            ),
+        )
     raise HTTPException(status_code=500, detail=result_error)
 
 
