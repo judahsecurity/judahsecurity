@@ -7,7 +7,7 @@ Pydantic models and TypedDict definitions for the AI agent state machine.
 import json
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Literal, TypedDict
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def utc_now() -> datetime:
@@ -145,6 +145,31 @@ class LLMDecision(BaseModel):
     user_question: Optional[UserQuestion] = None
     completion_reason: Optional[str] = None
     updated_todo_list: List[TodoItem] = Field(default_factory=list)
+
+    @field_validator("tool_args", mode="before")
+    @classmethod
+    def coerce_tool_args(cls, v: Any) -> Optional[Dict[str, Any]]:
+        """Local models often emit tool_args as a bare CLI string or nested oddly."""
+        if v is None or v == "":
+            return None
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return {}
+            # JSON object string
+            if s.startswith("{"):
+                try:
+                    parsed = json.loads(s)
+                    if isinstance(parsed, dict):
+                        return parsed
+                except Exception:
+                    pass
+            return {"args": s}
+        if isinstance(v, list):
+            return {"args": " ".join(str(x) for x in v)}
+        return {"args": str(v)}
 
 
 class OutputAnalysis(BaseModel):

@@ -57,7 +57,7 @@ Analyze the current state and decide on your next action. You MUST output a vali
   "reasoning": "Why you're taking this action",
   "action": "use_tool|complete|transition_phase|ask_user",
   "tool_name": "name of tool to use (only for use_tool action)",
-  "tool_args": {{}},
+  "tool_args": {{"args": "-u https://target.com -json -tech-detect -status-code -title"}},
   "phase_transition": {{
     "to_phase": "exploitation|post_exploitation",
     "reason": "why transition is needed",
@@ -80,6 +80,8 @@ Analyze the current state and decide on your next action. You MUST output a vali
 ### Guidelines
 
 **CRITICAL — Tester methodology (not tool spray):** You have {max_iterations} iterations. Work like a human tester who clicks around the app, understands features/logic, then attacks what they learned.
+
+**URL in → assessment starts:** If the user pastes a site (`https://www.emulate3d.com/`, `www.emulate3d.com`, or `emulate3d.com`), that IS the primary target. Immediately: (1) add_asset if needed, (2) quick httpx/tech probe with a non-empty `tool_args.args`, (3) **execute_deep_crawl** to learn what a user can click and what the page does (nav, products, contact/demo forms, resources, auth). Do not stall retrying the same tool with empty args. The capability map (pages, forms, APIs, third-party widgets) is the recon deliverable before nuclei spray.
 
 **Tester control loop (mandatory for web apps):**
 1. **Observe** — execute_deep_crawl → Application Capability Map + observation→methodology cards (CWE/CAPEC/OWASP-tagged)
@@ -298,7 +300,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **search_vulnx**: Deep CVE intelligence lookup by ID — returns CVSS, EPSS, CISA/VulnCheck KEV, PoC URLs, HackerOne report count, Nuclei template name, internet exposure (Shodan/Fofa), affected products, requirements/preconditions, and remediation guidance. Use when you already have a CVE ID and need to understand it in depth. Args: cve_id (e.g. "CVE-2021-44228")
 - **vulnx_query**: Search the ProjectDiscovery vulnerability database by technology, severity, or exploit status. Use this to DISCOVER relevant CVEs when you know the target's tech stack but not the specific CVE — e.g. after httpx/wappalyzer reveals the target runs Spring Boot 3.1.x or Node.js 20.x. Supports rich boolean queries: 'spring && severity:critical && is_remote:true', 'nodejs && is_kev:true', 'apache && cvss_score:>8.0 && age_in_days:<90'. Args: query (string), limit (int, default 10), sort_by (cvss_score|epss_score|cve_created_at)
 - **web_search** (if configured): Search the web for CVE/exploit research. Args: query (required), max_results (optional, default 5). Requires TAVILY_API_KEY in .env.
-**IMPORTANT**: Most execute_* tools take ONE parameter: **args** (a string of CLI arguments). Example: execute_httpx(args="-u https://target.com -json -tech-detect"). **scan_js_urls_for_secrets** is an exception: it takes **urls** (string) and optional **max_urls** (integer). Do NOT pass url/target/host as separate parameters to execute_* tools.
+**CRITICAL — execute_* tool_args must never be empty `{{}}`.** Most execute_* tools take ONE parameter: **args** (a string of CLI arguments). Correct: `"tool_args": {{"args": "-u https://www.emulate3d.com/ -json -tech-detect -status-code -title"}}`. Wrong: `"tool_args": {{}}` or `"tool_args": {{"url": "..."}}` (url-only is accepted as a fallback, but prefer `args`). **scan_js_urls_for_secrets** is an exception: it takes **urls** (string) and optional **max_urls** (integer).
 
 - **execute_httpx**: HTTP prober. Example: execute_httpx(args="-u https://target.com -json -tech-detect -status-code -title")
 - **execute_subfinder**: Subdomain discovery. Example: execute_subfinder(args="-d example.com -json -silent")

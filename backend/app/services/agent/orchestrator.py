@@ -484,6 +484,17 @@ class AgentOrchestrator:
         
         todo_list = state.get("initial_todos") if state.get("initial_todos") else []
         mode = state.get("mode") or "assist"
+
+        # Seed primary_target from the user's message so execute_* can recover
+        # when the LLM omits tool_args.args (common empty-{} failure loop).
+        target_info = TargetInfo().model_dump()
+        try:
+            from app.services.agent.tools import extract_seed_target
+            seed = extract_seed_target(latest_message)
+            if seed:
+                target_info["primary_target"] = seed
+        except Exception:
+            pass
         
         return {
             "current_iteration": 0,
@@ -497,7 +508,7 @@ class AgentOrchestrator:
             "current_objective_index": 0,
             "objective_history": [],
             "original_objective": latest_message,
-            "target_info": TargetInfo().model_dump(),
+            "target_info": target_info,
             "capability_map": None,
             "auth_session": None,
             "engagement_brain": None,
@@ -831,16 +842,50 @@ class AgentOrchestrator:
         
         step_data = state.get("_current_step") or {}
         tool_name = step_data.get("tool_name")
-        tool_args = step_data.get("tool_args") or {}
+        tool_args = dict(step_data.get("tool_args") or {})
         phase = state.get("current_phase", "informational")
         iteration = state.get("current_iteration", 0)
+
+        if not tool_name:
+            step_data["tool_output"] = "Error: No tool specified"
+            step_data["success"] = False
+            return {"_current_step": step_data}
+
+        # Resolve seed URL/host for execute_* arg recovery (empty tool_args loop)
+        seed_target = ""
+        try:
+            ti = state.get("target_info") or {}
+            seed_target = (ti.get("primary_target") or "").strip()
+            if not seed_target:
+                cmap = state.get("capability_map") or {}
+                if isinstance(cmap, dict):
+                    seed_target = (cmap.get("target") or "").strip()
+            if not seed_target:
+                from app.services.agent.tools import extract_seed_target
+                seed_target = extract_seed_target(
+                    state.get("original_objective") or ""
+                )
+        except Exception:
+            seed_target = ""
+        if seed_target:
+            try:
+                self.tool_manager._fallback_target = seed_target
+            except Exception:
+                pass
+
+        # Preview-normalize execute_* so the UI shows the real CLI args
+        if tool_name.startswith("execute_"):
+            from app.services.agent.tools import normalize_execute_tool_args
+            tool_args = normalize_execute_tool_args(
+                tool_name, tool_args, fallback_target=seed_target,
+            )
 
         # Redacted view for streaming + trace persistence so credentials the
         # operator hands the agent (or inline login secrets) never leak into the
         # UI, execution trace, or cross-session learning store.
         safe_args = redact_tool_args(tool_args)
 
-        logger.info(f"[{user_id}] Executing tool: {tool_name}")
+        logger.info(f"[{user_id}] Executing tool: {tool_name} args={safe_args}")
 
         await self._emit_status({
             "type": "tool_start",
@@ -848,11 +893,6 @@ class AgentOrchestrator:
             "tool_args": safe_args,
             "iteration": iteration,
         })
-        
-        if not tool_name:
-            step_data["tool_output"] = "Error: No tool specified"
-            step_data["success"] = False
-            return {"_current_step": step_data}
         
         # Set tenant context (including session_id for save_note)
         if org_id:
@@ -989,6 +1029,31 @@ class AgentOrchestrator:
                 logger.exception("methodology spray-gate failed")
 
         # Execute tool
+        # Break identical execute_* failure loops (empty args / same error)
+        if tool_name and tool_name.startswith("execute_"):
+            recent = state.get("execution_trace") or []
+            same_fail = 0
+            for prev in reversed(recent[-6:]):
+                if prev.get("tool_name") != tool_name:
+                    break
+                if prev.get("success"):
+                    break
+                out = str(prev.get("tool_output") or "")
+                if "Missing required parameter" in out or "expects a single 'args'" in out:
+                    same_fail += 1
+                else:
+                    break
+            if same_fail >= 2 and seed_target:
+                # Force a concrete CLI string so we stop burning iterations
+                from app.services.agent.tools import _default_args_for_tool
+                forced = _default_args_for_tool(tool_name, seed_target)
+                if forced:
+                    tool_args = {"args": forced}
+                    logger.warning(
+                        "[%s] Breaking %s empty-args loop; forcing args=%s",
+                        user_id, tool_name, forced,
+                    )
+
         result = await self.tool_manager.execute(tool_name, tool_args)
         
         step_data["tool_output"] = result.get("output") or result.get("error") or ""

@@ -46,6 +46,178 @@ def get_tenant_context() -> tuple:
     return current_user_id.get(), current_organization_id.get()
 
 
+_URL_IN_TEXT_RE = _re.compile(
+    r"https?://[^\s<>\"']+|www\.[^\s<>\"']+",
+    _re.I,
+)
+_DOMAIN_IN_TEXT_RE = _re.compile(
+    r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,})\b",
+    _re.I,
+)
+
+
+def extract_seed_target(text: str) -> str:
+    """Pull the first URL or domain from free text (user objective / tool args)."""
+    if not text or not isinstance(text, str):
+        return ""
+    m = _URL_IN_TEXT_RE.search(text)
+    if m:
+        url = m.group(0).rstrip(").,;]")
+        if url.lower().startswith("www."):
+            url = "https://" + url
+        return url
+    # Prefer domains that look like real hosts (skip common words)
+    skip = {"example.com", "target.com", "localhost", "github.com"}
+    for m in _DOMAIN_IN_TEXT_RE.finditer(text):
+        host = m.group(0).lower().rstrip(".")
+        if host in skip or host.endswith(".png") or host.endswith(".jpg"):
+            continue
+        return f"https://{host}"
+    return ""
+
+
+def _default_args_for_tool(tool_name: str, target: str) -> str:
+    """Build a sensible CLI args string when the LLM omits ``args``."""
+    target = (target or "").strip()
+    if not target:
+        return ""
+    # Domain-only tools
+    host = target
+    if "://" in host:
+        try:
+            from urllib.parse import urlparse
+            host = urlparse(target).hostname or target
+        except Exception:
+            host = target.replace("https://", "").replace("http://", "").split("/")[0]
+
+    name = tool_name.replace("execute_", "")
+    if name in ("httpx",):
+        return f"-u {target} -json -tech-detect -status-code -title -follow-redirects"
+    if name in ("nuclei", "katana", "ffuf", "sqlmap", "dalfox", "xsstrike", "arjun", "cmseek"):
+        return f"-u {target}"
+    if name in ("nikto",):
+        return f"-h {target} -Format json"
+    if name in ("wpscan",):
+        return f"--url {target} --enumerate vp,vt,u"
+    if name in ("subfinder", "subfaster", "dnsx", "tldfinder"):
+        return f"-d {host}"
+    if name in ("naabu", "nmap", "masscan"):
+        return f"-host {host}" if name == "naabu" else host
+    if name in ("wafw00f", "whatweb", "wappalyzer", "testssl", "curl"):
+        if name == "curl":
+            return f"-sI {target}"
+        if name == "whatweb":
+            return f"{target} -a 1"
+        return target
+    if name in ("deep_crawl", "interceptor"):
+        return target
+    # Generic: prefer -u for HTTP-ish tools
+    if any(x in name for x in ("http", "web", "crawl", "scan")):
+        return f"-u {target}"
+    return target
+
+
+def normalize_execute_tool_args(
+    tool_name: str,
+    tool_args: Optional[Dict[str, Any]],
+    *,
+    fallback_target: str = "",
+) -> Dict[str, Any]:
+    """Normalize LLM tool args into MCP ``{\"args\": \"<cli>\"}`` shape.
+
+    LLMs frequently call ``execute_httpx`` with ``{}``, ``{\"url\": \"...\"}``,
+    or ``{\"args\": null}``. Empty args cause a missing-parameter failure loop.
+    """
+    raw = dict(tool_args or {}) if isinstance(tool_args, dict) else {}
+    # Drop internal keys
+    for k in list(raw.keys()):
+        if k.startswith("_"):
+            raw.pop(k, None)
+
+    args_val = raw.get("args", None)
+
+    # Already a usable CLI string
+    if isinstance(args_val, str) and args_val.strip():
+        return {"args": args_val.strip()}
+
+    # args as list of tokens
+    if isinstance(args_val, (list, tuple)):
+        joined = " ".join(str(x).strip() for x in args_val if str(x).strip())
+        if joined:
+            return {"args": joined}
+
+    # args as nested dict → flatten
+    parts: List[str] = []
+    source = args_val if isinstance(args_val, dict) else raw
+
+    if isinstance(source, dict):
+        for k, v in source.items():
+            if k == "args" or v is None:
+                continue
+            sv = str(v).strip() if not isinstance(v, (list, dict)) else ""
+            if isinstance(v, (list, tuple)):
+                sv = " ".join(str(x).strip() for x in v if str(x).strip())
+            if not sv:
+                continue
+            key = str(k).lower().strip()
+            if key in ("url", "target", "host", "domain", "u", "uri", "website", "site"):
+                if sv.startswith("-"):
+                    parts.insert(0, sv)
+                elif tool_name in (
+                    "execute_subfinder", "execute_subfaster", "execute_dnsx", "execute_tldfinder",
+                ):
+                    host = sv.replace("https://", "").replace("http://", "").split("/")[0]
+                    parts.insert(0, f"-d {host}")
+                elif tool_name in (
+                    "execute_wafw00f", "execute_whatweb", "execute_wappalyzer",
+                    "execute_testssl", "execute_deep_crawl", "execute_interceptor",
+                ):
+                    parts.insert(0, sv if "://" in sv or tool_name == "execute_whatweb" else sv)
+                elif tool_name == "execute_curl":
+                    parts.insert(0, sv)
+                elif tool_name == "execute_nikto":
+                    parts.insert(0, f"-h {sv}")
+                else:
+                    parts.insert(0, f"-u {sv}" if not sv.startswith("-u") else sv)
+            elif key in ("flags", "options", "arguments", "command", "cli"):
+                parts.append(sv)
+            elif key in ("json", "tech-detect", "status-code", "title", "silent", "follow-redirects"):
+                flag = key if key.startswith("-") else f"-{key}"
+                if sv.lower() in ("1", "true", "yes", ""):
+                    parts.append(flag)
+                else:
+                    parts.append(f"{flag} {sv}")
+            else:
+                # Unknown keys: if value looks like a URL, treat as target
+                if "://" in sv or sv.startswith("www."):
+                    parts.insert(0, f"-u {sv}" if "://" in sv or tool_name.startswith("execute_http") else sv)
+                elif sv.startswith("-"):
+                    parts.append(sv)
+
+    if parts:
+        normalized = {"args": " ".join(parts)}
+        logger.info("Normalized MCP args for %s: %s", tool_name, normalized)
+        return normalized
+
+    # Last resort: seed from fallback target / any URL buried in values
+    seed = (fallback_target or "").strip()
+    if not seed:
+        blob = " ".join(str(v) for v in raw.values() if v is not None)
+        seed = extract_seed_target(blob)
+    if seed:
+        default = _default_args_for_tool(tool_name, seed)
+        if default:
+            normalized = {"args": default}
+            logger.info(
+                "Filled empty MCP args for %s from seed target %s → %s",
+                tool_name, seed, normalized,
+            )
+            return normalized
+
+    # Keep empty args key so MCP returns a clear missing/empty error (not KeyError)
+    return {"args": ""} if tool_name.startswith("execute_") else raw
+
+
 def _format_vulnx_search_output(raw_json: str, query: str) -> str:
     """Format vulnx search JSON output into a compact analyst-readable summary."""
     import json as _json
@@ -337,24 +509,29 @@ class ASMToolsManager:
             try:
                 mcp = self._get_mcp_server()
                 # Normalize: MCP execute_* tools expect {"args": "<cli string>"}.
-                # LLMs often pass {"url": "...", "target": "..."} instead.
-                if tool_name.startswith("execute_") and "args" not in tool_args and tool_args:
-                    parts = []
-                    for k, v in tool_args.items():
-                        sv = str(v).strip()
-                        if not sv:
-                            continue
-                        if k in ("url", "target", "host", "domain"):
-                            if not sv.startswith("-"):
-                                parts.insert(0, f"-u {sv}" if "http" in tool_name else sv)
-                            else:
-                                parts.insert(0, sv)
-                        elif k in ("flags", "options", "arguments", "command"):
-                            parts.append(sv)
-                        else:
-                            parts.append(sv)
-                    tool_args = {"args": " ".join(parts)} if parts else {"args": ""}
-                    logger.info(f"Normalized MCP args for {tool_name}: {tool_args}")
+                # LLMs often pass {}, {"url": "..."}, or {"args": null}.
+                if tool_name.startswith("execute_"):
+                    fallback = ""
+                    if isinstance(tool_args, dict):
+                        fallback = str(tool_args.pop("_fallback_target", "") or "")
+                    if not fallback:
+                        fallback = getattr(self, "_fallback_target", "") or ""
+                    tool_args = normalize_execute_tool_args(
+                        tool_name,
+                        tool_args,
+                        fallback_target=fallback,
+                    )
+                    if not (tool_args.get("args") or "").strip():
+                        return {
+                            "success": False,
+                            "output": (
+                                f"Error: Missing required parameter: args\n\n"
+                                f"HINT: {tool_name} requires tool_args like "
+                                f'{{"args": "-u https://target.com -json"}}. '
+                                f"Do not call it with empty tool_args."
+                            ),
+                            "error": "Missing required parameter: args",
+                        }
                 result = await mcp.call_tool(tool_name, tool_args)
 
                 max_chars = _tool_output_max_chars()
@@ -1683,9 +1860,13 @@ class ASMToolsManager:
         evidence: Optional[str] = None,
         cve_id: Optional[str] = None,
         remediation: Optional[str] = None,
+        steps_to_reproduce: Optional[str] = None,
+        proof_of_concept: Optional[str] = None,
+        affected_component: Optional[str] = None,
+        impact: Optional[str] = None,
         **kwargs: Any,
     ) -> str:
-        """Create a vulnerability/finding in the findings table for the current organization. Use this so discoveries appear in the UI findings list. target = hostname, domain, or URL that must match an existing asset's value (use query_assets to find). severity = critical|high|medium|low|info. Medium+ requires prior validate_finding SUBMIT (Solomon judge gate)."""
+        """Create a vulnerability/finding in the findings table for the current organization. Use this so discoveries appear in the UI findings list. target = hostname, domain, or URL that must match an existing asset's value (use query_assets to find). severity = critical|high|medium|low|info. Medium+ requires prior validate_finding SUBMIT (Solomon judge gate). Include steps_to_reproduce and evidence so later revalidation can replay the detection."""
         from app.services.agent.finding_gate import consume_or_check_receipt
 
         _, org_id = get_tenant_context()
@@ -1722,6 +1903,10 @@ class ASMToolsManager:
             if auto_added:
                 db.flush()
                 logger.info(f"create_finding auto-added asset: {asset.value} (id={asset.id})")
+            steps = steps_to_reproduce or kwargs.get("steps_to_reproduce")
+            poc = proof_of_concept or kwargs.get("proof_of_concept") or kwargs.get("poc")
+            component = affected_component or kwargs.get("affected_component")
+            impact_text = impact or kwargs.get("impact")
             vuln = Vulnerability(
                 title=(title or "Agent finding")[:500],
                 description=(description or "")[:10000] if description else None,
@@ -1731,6 +1916,10 @@ class ASMToolsManager:
                 evidence=(evidence or "")[:5000] if evidence else None,
                 cve_id=(cve_id or "").strip() or None,
                 remediation=(remediation or "")[:5000] if remediation else None,
+                steps_to_reproduce=(str(steps)[:10000] if steps else None),
+                proof_of_concept=(str(poc)[:10000] if poc else None),
+                affected_component=(str(component)[:1000] if component else None),
+                impact=(str(impact_text)[:5000] if impact_text else None),
             )
             db.add(vuln)
             db.commit()
