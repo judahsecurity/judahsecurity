@@ -706,6 +706,8 @@ export default function AgentPage() {
   const [pendingConfirmation, setPendingConfirmation] = useState<PendingToolConfirmation | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const lastAgentActivityRef = useRef<number>(Date.now());
+  const toolInFlightRef = useRef(false);
 
   // ── Oracle state ─────────────────────────────────────────────────
   const [findings, setFindings] = useState<OracleFinding[]>([]);
@@ -788,6 +790,21 @@ export default function AgentPage() {
 
   const handleWsMessage = useCallback((data: Record<string, unknown>, sid: string) => {
     const msgType = data.type as string;
+    // Any agent progress resets the idle UI timeout (deep_crawl can run many minutes).
+    if (
+      [
+        'thinking', 'tool_start', 'tool_complete', 'response', 'error',
+        'pending_confirmation', 'capability_map_update', 'auth_session_update',
+        'attack_scenario_update', 'authenticated', 'pong',
+      ].includes(msgType)
+    ) {
+      lastAgentActivityRef.current = Date.now();
+    }
+    if (msgType === 'tool_start') {
+      toolInFlightRef.current = true;
+    } else if (msgType === 'tool_complete' || msgType === 'response' || msgType === 'error') {
+      toolInFlightRef.current = false;
+    }
     if (msgType === 'authenticated') {
       wsAuthenticatedRef.current = true; setConnectionMode('websocket');
     } else if (['thinking', 'tool_start', 'tool_complete'].includes(msgType)) {
@@ -860,19 +877,41 @@ export default function AgentPage() {
     return () => clearInterval(interval);
   }, []);
 
-  const loadingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const loadingTimeoutRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // Idle with no WS progress. While a tool is in-flight (e.g. deep_crawl),
+  // do not fire — only complain after silence once the tool finishes streaming
+  // or after a hard ceiling.
+  const AGENT_IDLE_TIMEOUT_MS = 15 * 60_000;
+  const AGENT_HARD_TIMEOUT_MS = 45 * 60_000;
+
   useEffect(() => {
     // Don't timeout while waiting on operator tool confirmation / phase approval.
     if (loading && !pendingConfirmation) {
-      loadingTimeoutRef.current = setTimeout(() => {
+      lastAgentActivityRef.current = Date.now();
+      const startedAt = Date.now();
+      loadingTimeoutRef.current = setInterval(() => {
+        const now = Date.now();
+        if (toolInFlightRef.current && now - startedAt < AGENT_HARD_TIMEOUT_MS) {
+          // Long-running tool still active — keep waiting.
+          return;
+        }
+        if (now - lastAgentActivityRef.current < AGENT_IDLE_TIMEOUT_MS) return;
         setLoading(false); setLiveSteps([]);
-        toast({ variant: 'destructive', title: 'Timeout', description: 'No response from the agent after 3 minutes.' });
-        appendAgentMessage({ answer: 'Error: No response received within 3 minutes. Please try again.' });
-      }, 180_000);
+        toolInFlightRef.current = false;
+        toast({
+          variant: 'destructive',
+          title: 'Timeout',
+          description: 'No agent activity for 15 minutes. The run may still be going — check logs or retry.',
+        });
+        appendAgentMessage({
+          answer: 'Error: No agent activity for 15 minutes. Long tools (deep crawl, nuclei) can take a while — if the status still shows a running tool, wait or check backend logs.',
+        });
+      }, 15_000);
     } else if (loadingTimeoutRef.current) {
-      clearTimeout(loadingTimeoutRef.current); loadingTimeoutRef.current = null;
+      clearInterval(loadingTimeoutRef.current); loadingTimeoutRef.current = null;
     }
-    return () => { if (loadingTimeoutRef.current) clearTimeout(loadingTimeoutRef.current); };
+    return () => { if (loadingTimeoutRef.current) clearInterval(loadingTimeoutRef.current); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading, pendingConfirmation]);
 
   // ── Message helpers ───────────────────────────────────────────
