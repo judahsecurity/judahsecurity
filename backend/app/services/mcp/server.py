@@ -1327,9 +1327,10 @@ class MCPServer:
             description=(
                 "Preferred interaction-first web recon. Preference: online Mac Interceptor "
                 "worker → Ubuntu Interceptor worker → local interceptor CLI → Playwright "
-                "deep_crawl fallback. Real Interceptor drives Chrome/Brave with the "
-                "Hacker-Valley extension (non-CDP). Builds Application Capability Map. "
-                "Pass a bare URL or JSON (url, max_pages, scope, prefer, login, cookies…)."
+                "deep_crawl fallback. Workers prefer native `interceptor spider` when the "
+                "binary supports it (max-pages/depth/robots/sitemap/max-clicks), else the "
+                "open/act/net verb-loop. Builds Application Capability Map. "
+                "Pass a bare URL or JSON (url, max_pages, depth, prefer, robots, sitemap, …)."
             ),
             tool_type=ToolType.SCAN,
             parameters={

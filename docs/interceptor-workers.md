@@ -9,6 +9,8 @@ ASM prefers real [Hacker-Valley-Media/Interceptor](https://github.com/Hacker-Val
 3. Local `interceptor` CLI on the agent host (rare)
 4. Playwright **deep_crawl**
 
+On each Interceptor host, the worker prefers **native `interceptor spider`** (Windows skill / newer builds) with flags like `--max-pages`, `--depth`, `--robots`, `--sitemap`, `--max-clicks`. If the binary has no `spider` verb, it falls back to the open/act/net verb-loop.
+
 ## Architecture
 
 ```
