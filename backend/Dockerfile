@@ -258,6 +258,20 @@ RUN git clone --depth 1 https://github.com/ticarpi/jwt_tool.git /opt/jwt_tool \
     && chmod +x /usr/local/bin/jwt_tool \
     || echo "jwt_tool installation skipped"
 
+# OWASP API Security Testing Framework (ASTF) — complements detected APIs with
+# OWASP API Top 10 / GraphQL / gRPC / JWT structural scans (Java 21+).
+# Prefer v2.0.1; fall back to v1.0.0. Wrapper: `astf …` on PATH.
+RUN apt-get update && apt-get install -y --no-install-recommends openjdk-21-jre-headless \
+    && mkdir -p /opt/astf \
+    && (curl -fsSL -o /opt/astf/astf.jar \
+          "https://github.com/OWASP/www-project-api-security-testing-framework/releases/download/v2.0.1/astf-v2.0.1.jar" \
+        || curl -fsSL -o /opt/astf/astf.jar \
+          "https://github.com/OWASP/www-project-api-security-testing-framework/releases/download/v1.0.0/astf-v1.0.0.jar") \
+    && printf '#!/bin/sh\nexec java -jar /opt/astf/astf.jar "$@"\n' > /usr/local/bin/astf \
+    && chmod +x /usr/local/bin/astf \
+    && rm -rf /var/lib/apt/lists/* \
+    || echo "ASTF installation skipped"
+
 # Semgrep (source-aware SAST — whitebox analysis of local checkouts)
 RUN pip install --no-cache-dir semgrep || echo "Semgrep installation skipped"
 
@@ -305,6 +319,16 @@ RUN nuclei -update-templates || true
 # Copy application code LAST (changes most frequently)
 COPY . .
 
+# Final restore of ProjectDiscovery httpx — later pip installs (paramspider,
+# sqlmap, etc.) can reinstall the Python httpx console script and overwrite
+# /usr/local/bin/httpx again.
+RUN if [ -x /opt/projectdiscovery/httpx ]; then \
+      cp /opt/projectdiscovery/httpx /usr/local/bin/httpx && \
+      cp /opt/projectdiscovery/httpx /usr/local/bin/pd-httpx && \
+      chmod +x /usr/local/bin/httpx /usr/local/bin/pd-httpx /opt/projectdiscovery/httpx && \
+      /usr/local/bin/httpx -version; \
+    fi
+
 # Create non-root user
 RUN adduser --disabled-password --gecos '' appuser \
     && chown -R appuser:appuser /app \
@@ -317,6 +341,7 @@ RUN adduser --disabled-password --gecos '' appuser \
 
 USER appuser
 ENV PATH="/usr/local/bin:${PATH}"
+ENV PD_HTTPX_BIN=/opt/projectdiscovery/httpx
 
 EXPOSE 8000
 

@@ -846,7 +846,7 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
         add(Methodology(
             id="openapi_unauth_account_lookup",
             title="Unauth OpenAPI account lookup (security: {} / email → role)",
-            hunt="api_authz",
+            hunt="unauth_account_lookup",
             specialist="api_authz",
             priority="critical",
             assumption=(
@@ -927,6 +927,40 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             owasp="A01:2021 Broken Access Control",
             evidence=ev,
             why="First-party APIs captured",
+        ))
+
+    if has_api or _OPENAPI_RE.search(combined) or has_graphql:
+        api_base = (
+            next((p for p in pages if re.search(r"/api|/graphql|/swagger|/openapi", str(p), re.I)), None)
+            or (g("target") if g("target") else None)
+            or (pages[0] if pages else "https://target")
+        )
+        add(Methodology(
+            id="owasp_api_astf",
+            title="OWASP API Top 10 structural scan (ASTF)",
+            hunt="api_authz",
+            specialist="api_authz",
+            priority="high",
+            assumption=(
+                "Detected REST/OpenAPI/GraphQL surfaces have structural API Top 10 issues "
+                "(BOLA/BFLA, JWT weakness, missing auth, GraphQL abuse) that ASTF can flag"
+            ),
+            test=(
+                "execute_astf on the API base URL (include bearer token when session exists). "
+                "Triage CRITICAL/HIGH findings; prove with compare_requests / replay_http_request "
+                "before create_finding. Complements dual-identity authz — does not replace it."
+            ),
+            pass_criteria=(
+                "ASTF CRITICAL/HIGH finding reproduced with dual-identity or unauth differential evidence"
+            ),
+            kill_criteria=(
+                "ASTF clean on in-scope API base, or flagged issues fail dual-identity reproduction"
+            ),
+            cwe_ids=["CWE-639", "CWE-862", "CWE-284", "CWE-347"],
+            capec_ids=["CAPEC-1", "CAPEC-122"],
+            owasp="API1:2023 Broken Object Level Authorization",
+            evidence=str(api_base),
+            why="API/OpenAPI/GraphQL surface observed — run complementary ASTF Top 10 scan",
         ))
 
     # Multi-host → tenant isolation
@@ -1406,7 +1440,7 @@ def methodologies_to_hunt_queue(methodologies: Sequence[Methodology]) -> List[Di
             "methodology_id": m.id,
             "cwe_ids": ",".join(m.cwe_ids),
         })
-    return queue[:14]
+    return queue[:18]
 
 
 def format_methodologies_for_prompt(methodologies: Optional[Sequence[Any]]) -> str:

@@ -109,6 +109,10 @@ def test_methodologies_from_rich_crawl():
     assert "openapi_schema_authz" in ids
     assert "openapi_mass_assignment" in ids
     assert "openapi_unauth_account_lookup" in ids
+    assert "owasp_api_astf" in ids
+    astf = next(m for m in methods if m.id == "owasp_api_astf")
+    assert "execute_astf" in astf.test
+    assert "compare_requests" in astf.test
     ma = next(m for m in methods if m.id == "openapi_mass_assignment")
     assert "CWE-915" in ma.cwe_ids
     assert "readOnly" in ma.test or "readonly" in ma.test.lower()
@@ -119,6 +123,7 @@ def test_methodologies_from_rich_crawl():
     assert xss.capec_ids
     assert cmap.methodologies
     assert any(h.get("methodology_id") for h in cmap.ranked_hunt_queue)
+    assert any(h.get("hunt") == "unauth_account_lookup" for h in cmap.ranked_hunt_queue)
 
 
 def test_seed_hypotheses_uses_methodology_cards():
@@ -458,10 +463,12 @@ def test_api_schema_path_seeds_mass_assignment_methodology():
     assert "/api/schema" in ma.test or "readOnly" in ma.test
     assert "openapi_unauth_account_lookup" in ids
     acct = next(m for m in methods if m.id == "openapi_unauth_account_lookup")
+    assert acct.hunt == "unauth_account_lookup"
     assert "CWE-204" in acct.cwe_ids
     assert "do not kill" in acct.kill_criteria.lower() or "unavailable" in acct.kill_criteria.lower()
     assert "401" in acct.test and "500" in acct.test
     assert "aegis-enum-canary@example.invalid" in acct.test
+    assert any(h.get("hunt") == "unauth_account_lookup" for h in cmap.ranked_hunt_queue)
 
 
 def test_auth_account_path_seeds_unauth_lookup_methodology():
@@ -482,6 +489,8 @@ def test_auth_account_path_seeds_unauth_lookup_methodology():
     assert "CWE-862" in acct.cwe_ids
     assert "do not kill" in acct.kill_criteria.lower() or "unavailable" in acct.kill_criteria.lower()
     assert "do not spray" in acct.test.lower() or "one canary" in acct.test.lower()
+    assert acct.hunt == "unauth_account_lookup"
+    assert any(h.get("hunt") == "unauth_account_lookup" for h in cmap.ranked_hunt_queue)
 
 
 def test_keycloak_hostname_seeds_cors_web_origins_methodology():

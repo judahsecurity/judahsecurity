@@ -204,6 +204,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ),
         allowed_tools=[
             "execute_schemathesis",
+            "execute_astf",
             "execute_kiterunner",
             "execute_curl",
             "compare_requests",
@@ -328,6 +329,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_httpx",
             "execute_kiterunner",
             "execute_schemathesis",
+            "execute_astf",
             "discover_parameters",
             "execute_arjun",
             "compare_requests",

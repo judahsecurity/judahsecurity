@@ -142,7 +142,10 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "ICS users. 500 vs sibling 401 is SUBMIT. ACAO * is extra. "
         "queue_finding_followups(vuln_type='unauth_account_lookup'). Kill only lookup "
         "401/403 or JWT-required generic boolean.\n"
-        "- On proven read IDOR: queue_finding_followups(vuln_type='idor') for write/export."
+        "- On proven read IDOR: queue_finding_followups(vuln_type='idor') for write/export.\n"
+        "- When REST/OpenAPI/GraphQL is mapped: execute_astf on the API base (with bearer token "
+        "if available) for complementary OWASP API Top 10 coverage; prove CRITICAL/HIGH with "
+        "compare_requests before create_finding."
     ),
     "host_tenant": (
         "SKILL PACK — tenant isolation:\n"
@@ -266,7 +269,7 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
     "graphql_api": (
         "SKILL PACK — GraphQL:\n"
         "- Probe /graphql paths; check introspection, suggestions, batching, CSRF on GET.\n"
-        "- Prefer execute_schemathesis + execute_curl; prove authz with compare_requests."
+        "- Prefer execute_astf + execute_schemathesis + execute_curl; prove authz with compare_requests."
     ),
     "web_recon": (
         "SKILL PACK — recon:\n"

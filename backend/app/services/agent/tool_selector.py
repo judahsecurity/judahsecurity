@@ -438,6 +438,18 @@ class ToolSelector:
                 category="api",
             ))
             recs.append(ToolRecommendation(
+                tool_name="execute_astf",
+                args_template='{"url":"https://{target}","token":""}',
+                priority=6,
+                rationale=(
+                    "API surface detected — run OWASP ASTF (API Top 10 / GraphQL / JWT) as "
+                    "complementary structural coverage. Pass bearer token when authed. "
+                    "Prove CRITICAL/HIGH with compare_requests before create_finding."
+                ),
+                phase_required="exploitation",
+                category="api",
+            ))
+            recs.append(ToolRecommendation(
                 tool_name="execute_schemathesis",
                 args_template="run https://{target}/openapi.json --checks all",
                 priority=8,

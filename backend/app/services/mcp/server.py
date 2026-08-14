@@ -812,6 +812,44 @@ class MCPServer:
             phase="informational",
             handler=self._schemathesis_help,
         ))
+
+        # OWASP ASTF — API Top 10 complementary scanner for detected APIs
+        self.registry.register(MCPTool(
+            name="execute_astf",
+            description=(
+                "OWASP API Security Testing Framework (ASTF) — complementary scanner for "
+                "APIs already discovered in crawl/recon. Covers OWASP API Security Top 10 "
+                "2023 structural checks (BOLA/BFLA, mass assignment signals, JWT attacks, "
+                "missing auth, rate-limit heuristics) plus GraphQL / gRPC / mTLS depth. "
+                "Use AFTER execute_interceptor/deep_crawl (or OpenAPI discovery) when the "
+                "capability map shows REST/OpenAPI/GraphQL — not as a substitute for "
+                "compare_requests dual-identity proofs. Pass API base URL; include --token "
+                "when you have a bearer. Treat CRITICAL/HIGH hits as hypotheses to prove."
+            ),
+            tool_type=ToolType.SCAN,
+            parameters={
+                "args": {
+                    "type": "string",
+                    "description": (
+                        "Bare API base URL, CLI flags, or JSON: "
+                        '{"url":"https://api.target.com","token":"<jwt>"} or '
+                        '"-u https://api.target.com --token <jwt> -f JSON"'
+                    ),
+                }
+            },
+            required_params=["args"],
+            phase="exploitation",
+            handler=self._execute_astf,
+        ))
+        self.registry.register(MCPTool(
+            name="astf_help",
+            description="Show ASTF availability and common flags for execute_astf.",
+            tool_type=ToolType.QUERY,
+            parameters={},
+            required_params=[],
+            phase="informational",
+            handler=self._astf_help,
+        ))
         
         # SQLMap - SQL injection automation
         self.registry.register(MCPTool(
@@ -2055,6 +2093,51 @@ class MCPServer:
     
     async def _schemathesis_help(self) -> Dict[str, Any]:
         return await self._run_command(["schemathesis", "run", "--help"], timeout=MCP_HELP_TIMEOUT)
+
+    async def _execute_astf(self, args: str) -> Dict[str, Any]:
+        """OWASP ASTF — complementary OWASP API Top 10 scan for detected APIs."""
+        try:
+            from app.services.astf_service import run_astf
+            return await run_astf(args)
+        except ImportError as e:
+            return {
+                "success": False,
+                "output": "",
+                "error": f"ASTF service not available: {e}",
+                "exit_code": -1,
+            }
+        except Exception as e:
+            logger.error(f"ASTF failed: {e}")
+            return {
+                "success": False,
+                "output": "",
+                "error": f"ASTF error: {e}",
+                "exit_code": -1,
+            }
+
+    async def _astf_help(self) -> Dict[str, Any]:
+        from app.services.astf_service import _resolve_jar, _resolve_java
+
+        jar = _resolve_jar()
+        java = _resolve_java()
+        help_txt = (
+            "OWASP API Security Testing Framework (ASTF)\n"
+            "https://github.com/OWASP/www-project-api-security-testing-framework\n\n"
+            f"java: {java or 'NOT FOUND'}\n"
+            f"jar/wrapper: {jar or 'NOT FOUND'}\n\n"
+            "Usage via execute_astf:\n"
+            '  execute_astf(args="https://api.target.com")\n'
+            '  execute_astf(args=\'{"url":"https://api.target.com","token":"<bearer>"}\')\n'
+            '  execute_astf(args="-u https://api.target.com --token <jwt> -v")\n\n'
+            "When: after crawl/OpenAPI shows APIs. Complement — prove hits with compare_requests.\n"
+            "Traceability: docs/TRACEABILITY.md (VAmPI/crAPI/DVGA live matrix)."
+        )
+        return {
+            "success": bool(jar and (java or jar == "astf")),
+            "output": help_txt,
+            "error": None if jar else "astf_not_installed",
+            "exit_code": 0 if jar else 1,
+        }
     
     async def _execute_deep_crawl(self, args: str) -> Dict[str, Any]:
         """Interaction-first deep crawl with passive client-side traffic capture."""
@@ -2424,6 +2507,7 @@ class MCPServer:
         "execute_testssl": "testssl", "execute_sslyze": "sslyze",
         "execute_nikto": "nikto", "execute_wafw00f": "wafw00f",
         "execute_wpscan": "wpscan", "execute_schemathesis": "schemathesis",
+        "execute_astf": "astf",
         "execute_tldfinder": "tldfinder", "execute_waybackurls": "waybackurls",
         "execute_hermes": "trufflehog", "execute_themis": "prowler",
         "execute_atlas": "pius", "execute_argus": "titus",
