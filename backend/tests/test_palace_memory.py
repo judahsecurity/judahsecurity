@@ -61,6 +61,7 @@ def _session(monkeypatch):
     Session = sessionmaker(bind=engine, autocommit=False, autoflush=False)
     monkeypatch.setattr(pm, "SessionLocal", Session)
     monkeypatch.setattr(pm, "ensure_knowledge_mined", lambda *_a, **_k: None)
+    monkeypatch.setattr(pm, "ensure_conversations_mined", lambda *_a, **_k: None)
     return Session
 
 
@@ -210,3 +211,92 @@ def test_org_cannot_see_other_org_via_global_wing_spoof(monkeypatch):
     )
     hits = pm.search_memory(3, "secret finding tenant nine")
     assert not any("tenant nine" in (h.get("snippet") or "") for h in hits)
+
+
+def test_mine_conversation_redacts_and_is_searchable(monkeypatch):
+    Session = _session(monkeypatch)
+    pm.mine_conversation_turn(
+        4,
+        "user",
+        "Assess api.acme.com again; password=hunter2 should never be stored in palace.",
+        session_id="sess-conv",
+    )
+    db = Session()
+    try:
+        rows = db.query(AgentPalaceDrawer).filter_by(organization_id=4).all()
+        assert len(rows) == 1
+        assert rows[0].room == "conversation"
+        assert "hunter2" not in rows[0].content
+        assert "api.acme.com" in rows[0].content
+    finally:
+        db.close()
+    hits = pm.search_memory(4, "api.acme.com assess", room="conversation")
+    assert hits
+    assert "api.acme.com" in hits[0]["snippet"]
+
+
+def test_mine_conversation_skips_short_and_system_roles(monkeypatch):
+    Session = _session(monkeypatch)
+    assert pm.mine_conversation_turn(4, "user", "ok") == []
+    assert pm.mine_conversation_turn(4, "system", "a" * 80) == []
+    db = Session()
+    try:
+        assert db.query(AgentPalaceDrawer).count() == 0
+    finally:
+        db.close()
+
+
+def test_persist_engagement_brain_omits_credentials(monkeypatch):
+    Session = _session(monkeypatch)
+    ids = pm.persist_engagement_brain(
+        5,
+        {
+            "phase": "exploitation",
+            "target": "https://shop.acme.com",
+            "identities": ["anon"],
+            "credentials": [
+                {"username": "admin", "secret": "SuperSecretPass!", "secret_type": "password"}
+            ],
+            "hypotheses": [
+                {
+                    "id": "h1",
+                    "title": "IDOR on /api/orders",
+                    "status": "open",
+                    "specialist": "authz",
+                    "target": "https://shop.acme.com",
+                    "priority": "high",
+                }
+            ],
+            "approaches": [
+                {"technique": "idor", "target": "/api/orders", "result": "failed"}
+            ],
+            "next_steps": ["retry with other user id"],
+            "confirmed_findings": [],
+        },
+        session_id="sess-brain",
+    )
+    assert ids
+    db = Session()
+    try:
+        row = db.query(AgentPalaceDrawer).filter_by(id=ids[0]).one()
+        assert row.room == "methodology"
+        assert row.source == "engagement_brain"
+        assert "SuperSecretPass" not in row.content
+        assert "admin" not in row.content
+        assert "IDOR on /api/orders" in row.content
+        assert '"credential_count": 1' in row.content
+    finally:
+        db.close()
+    wake = pm.wake_up(5, target="shop.acme.com")
+    assert "IDOR on /api/orders" in wake
+    assert "SuperSecretPass" not in wake
+
+
+def test_persist_engagement_brain_skips_empty(monkeypatch):
+    Session = _session(monkeypatch)
+    assert pm.persist_engagement_brain(5, {"phase": "informational"}) == []
+    db = Session()
+    try:
+        assert db.query(AgentPalaceDrawer).count() == 0
+    finally:
+        db.close()

@@ -1724,6 +1724,7 @@ class AgentOrchestrator:
                 final_phase=response.current_phase,
                 iteration_count=response.iteration_count,
             )
+            self._persist_palace_brain(organization_id, session_id, final_state)
 
             return response
         
@@ -1762,6 +1763,7 @@ class AgentOrchestrator:
             }
             
             final_state = await self.graph.ainvoke(update_data, config)
+            self._persist_palace_brain(organization_id, session_id, final_state)
             return self._build_response(final_state)
         
         except Exception as e:
@@ -1796,6 +1798,7 @@ class AgentOrchestrator:
             }
             
             final_state = await self.graph.ainvoke(update_data, config)
+            self._persist_palace_brain(organization_id, session_id, final_state)
             return self._build_response(final_state)
         
         except Exception as e:
@@ -1805,6 +1808,25 @@ class AgentOrchestrator:
             if status_callback:
                 self.clear_status_callback()
     
+    def _persist_palace_brain(
+        self,
+        organization_id: int,
+        session_id: str,
+        final_state: Any,
+    ) -> None:
+        """Write a redacted engagement-brain snapshot so later sessions can recall it."""
+        try:
+            from app.services.agent.palace_memory import persist_engagement_brain
+
+            brain = final_state.get("engagement_brain") if isinstance(final_state, dict) else None
+            persist_engagement_brain(
+                organization_id,
+                brain,
+                session_id=session_id,
+            )
+        except Exception:
+            logger.debug("palace engagement brain persist skipped", exc_info=True)
+
     def _build_response(self, state: dict) -> InvokeResponse:
         """Build response from final state."""
         final_answer = ""

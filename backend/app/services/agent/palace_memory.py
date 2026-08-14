@@ -11,9 +11,10 @@ The MemPalace MCP server (44 tools) is intentionally not wired in.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import or_
 
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 WAKE_UP_MAX_CHARS = 3600
 DRAWER_MAX_CHARS = 4000
 TOOL_MAX_CHUNKS = 3
+CONVO_MAX_CHUNKS = 2
 SEARCH_SHORTLIST = 40
 
 HALL_FACTS = "facts"
@@ -246,6 +248,8 @@ def store_drawer(
     chunks = chunk_text(text, max_chars=DRAWER_MAX_CHARS, overlap=120)
     if source == "tool":
         chunks = chunks[:TOOL_MAX_CHUNKS]
+    elif source == "conversation":
+        chunks = chunks[:CONVO_MAX_CHUNKS]
 
     ids: list[int] = []
     db = SessionLocal()
@@ -310,6 +314,7 @@ def search_memory(
         return []
 
     ensure_knowledge_mined(organization_id)
+    ensure_conversations_mined(organization_id)
 
     keywords = _keywords(query)
     db = SessionLocal()
@@ -422,6 +427,7 @@ def wake_up(
         return _L0_IDENTITY
 
     ensure_knowledge_mined(organization_id)
+    ensure_conversations_mined(organization_id)
 
     parts = [_L0_IDENTITY]
     used = len(_L0_IDENTITY)
@@ -561,6 +567,64 @@ def ensure_knowledge_mined(organization_id: int) -> None:
         )
 
 
+def ensure_conversations_mined(organization_id: int) -> None:
+    """Idempotent backfill of recent AgentConversation turns into drawers."""
+    if not organization_id:
+        return
+    payloads: list[tuple] = []
+    db = SessionLocal()
+    try:
+        already = (
+            db.query(AgentPalaceDrawer.id)
+            .filter(
+                AgentPalaceDrawer.organization_id == organization_id,
+                AgentPalaceDrawer.source == "conversation",
+            )
+            .first()
+        )
+        if already:
+            return
+        from app.models.agent_conversation import AgentConversation
+
+        convs = (
+            db.query(AgentConversation)
+            .filter(AgentConversation.organization_id == organization_id)
+            .order_by(AgentConversation.id.desc())
+            .limit(20)
+            .all()
+        )
+        for conv in convs:
+            for i, msg in enumerate((conv.messages or [])[-30:]):
+                if not isinstance(msg, dict):
+                    continue
+                payloads.append(
+                    (
+                        organization_id,
+                        msg.get("role") or "",
+                        msg.get("content") or "",
+                        conv.session_id,
+                        f"{conv.session_id}:{i}",
+                    )
+                )
+    except Exception:
+        logger.debug("ensure_conversations_mined query failed", exc_info=True)
+        return
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+    for org, role, content, session_id, source_id in payloads:
+        mine_conversation_turn(
+            org,
+            role,
+            content,
+            session_id=session_id,
+            source_id=source_id,
+        )
+
+
 def mine_knowledge_doc(
     organization_id: Optional[int],
     title: str,
@@ -668,6 +732,129 @@ def store_specialist_diary(
         source="specialist_diary",
         session_id=session_id,
         target=target,
+    )
+
+
+def mine_conversation_turn(
+    organization_id: Optional[int],
+    role: str,
+    content: str,
+    *,
+    session_id: Optional[str] = None,
+    source_id: Optional[str] = None,
+) -> list[int]:
+    """Persist a redacted chat turn. Conversation drawers are search-only, not wake-up."""
+    if not organization_id:
+        return []
+    label = (role or "").strip().lower()
+    if label == "assistant":
+        label = "agent"
+    if label == "human":
+        label = "user"
+    if label not in ("user", "agent"):
+        return []
+    text = (content or "").strip()
+    if len(text) < 40:
+        return []
+    return store_drawer(
+        organization_id,
+        text,
+        wing=wing_for_org(organization_id),
+        room="conversation",
+        hall=HALL_EVENTS,
+        title=f"{label} turn",
+        source="conversation",
+        source_id=source_id,
+        session_id=session_id,
+    )
+
+
+def persist_engagement_brain(
+    organization_id: Optional[int],
+    brain: Optional[dict[str, Any]],
+    *,
+    session_id: Optional[str] = None,
+    target: Optional[str] = None,
+) -> list[int]:
+    """Store a compact, credential-free brain snapshot in the methodology room."""
+    if not organization_id or not isinstance(brain, dict):
+        return []
+
+    hyps: list[dict[str, Any]] = []
+    for h in (brain.get("hypotheses") or [])[:20]:
+        if not isinstance(h, dict):
+            continue
+        hyps.append(
+            {
+                "id": h.get("id"),
+                "title": h.get("title"),
+                "status": h.get("status"),
+                "specialist": h.get("specialist"),
+                "target": h.get("target"),
+                "priority": h.get("priority"),
+            }
+        )
+
+    approaches: list[dict[str, Any]] = []
+    for a in (brain.get("approaches") or [])[:15]:
+        if not isinstance(a, dict):
+            continue
+        approaches.append(
+            {
+                "technique": a.get("technique"),
+                "target": a.get("target"),
+                "result": a.get("result"),
+            }
+        )
+
+    next_steps = brain.get("next_steps") or []
+    if isinstance(next_steps, list):
+        next_steps = [str(s)[:400] for s in next_steps[:12]]
+    else:
+        next_steps = []
+
+    findings_raw = brain.get("confirmed_findings") or []
+    findings: list[str] = []
+    if isinstance(findings_raw, list):
+        for item in findings_raw[:12]:
+            if isinstance(item, str):
+                findings.append(item[:400])
+            elif isinstance(item, dict):
+                findings.append(str(item.get("title") or item.get("id") or item)[:400])
+
+    notes_raw = brain.get("notes") or []
+    notes: list[str] = []
+    if isinstance(notes_raw, list):
+        notes = [str(n)[:300] for n in notes_raw[:8]]
+
+    if not hyps and not approaches and not next_steps and not findings:
+        return []
+
+    creds = brain.get("credentials") or []
+    snapshot = {
+        "phase": brain.get("phase"),
+        "target": brain.get("target") or target,
+        "identities": brain.get("identities") or [],
+        "credential_count": len(creds) if isinstance(creds, list) else 0,
+        "hypotheses": hyps,
+        "approaches": approaches,
+        "next_steps": next_steps,
+        "confirmed_findings": findings,
+        "notes": notes,
+    }
+    tgt = snapshot.get("target")
+    tgt_str = tgt[:512] if isinstance(tgt, str) and tgt.strip() else None
+    return store_drawer(
+        organization_id,
+        json.dumps(snapshot, indent=2, default=str),
+        wing=wing_for_org(organization_id),
+        room="methodology",
+        hall=HALL_FACTS,
+        title="engagement brain snapshot",
+        source="engagement_brain",
+        source_id=session_id,
+        session_id=session_id,
+        target=tgt_str,
     )
 
 

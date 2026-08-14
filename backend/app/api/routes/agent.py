@@ -199,6 +199,19 @@ def _save_conversation(
 
     conv.messages = msgs
     db.commit()
+    try:
+        from app.services.agent.palace_memory import mine_conversation_turn
+
+        mine_conversation_turn(org_id, role, content, session_id=session_id)
+        if result and role != "agent":
+            mine_conversation_turn(
+                org_id,
+                "agent",
+                result.answer or "",
+                session_id=session_id,
+            )
+    except Exception:
+        logger.debug("palace conversation mine skipped", exc_info=True)
 
 
 def _agent_runtime_available() -> bool:
