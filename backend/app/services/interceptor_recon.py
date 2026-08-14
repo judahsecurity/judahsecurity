@@ -4,9 +4,14 @@ Interceptor Recon Driver
 
 Interaction-first recon via Hacker-Valley-Media/Interceptor.
 
+Site Spider skill model: **katana running inside a real Chrome tab** — drive
+Chrome like a user (scroll, menus, tabs/buttons) so JS lazy-loads through
+WAF-trusted fetches; mine those chunks for endpoints. Interaction is primary;
+BFS link-following is secondary; ``--robots`` / ``--sitemap`` are opt-in only.
+
 Preference:
   1. Native ``interceptor spider`` when supported (Windows skill / newer builds —
-     "katana inside a real Chrome tab", with --max-pages/--depth/--robots/…).
+     max-pages/depth/robots/sitemap/max-clicks).
   2. Verb-loop fallback (``open`` / ``act`` / ``net log``) on older installs.
   3. Server Playwright deep_crawl is handled by interceptor_service, not here.
 

@@ -256,12 +256,17 @@ class MCPServer:
         # Katana web crawler
         self.registry.register(MCPTool(
             name="execute_katana",
-            description="Run Katana web crawler for endpoint discovery.",
+            description=(
+                "Run ProjectDiscovery Katana (CLI HTTP crawler) for bulk URL/JS discovery. "
+                "Use to enrich after execute_interceptor / execute_deep_crawl — not as a "
+                "replacement for Site Spider on CDN/WAF/SPA apps (those often block CLI crawlers). "
+                "Chrome-tab spider = 'katana inside real Chrome'; this tool is the standalone CLI."
+            ),
             tool_type=ToolType.SCAN,
             parameters={
                 "args": {
                     "type": "string",
-                    "description": "Katana CLI arguments (e.g., '-u http://target.com -d 3 -json')"
+                    "description": "Katana CLI arguments (e.g., '-u https://target.com -d 5 -jc -jsonl -silent')"
                 }
             },
             required_params=["args"],
@@ -1283,26 +1288,17 @@ class MCPServer:
         self.registry.register(MCPTool(
             name="execute_deep_crawl",
             description=(
-                "Interceptor-style interaction-first deep crawl. Drives a real headless "
-                "Chromium tab like a human (scroll, expand menus, click safe tabs/buttons, "
-                "follow in-scope links) so the site's own JavaScript loads its lazy chunks "
-                "and SPA route bundles, then PASSIVELY captures the full client-side traffic "
-                "(fetch/XHR/SSE/WebSocket/sendBeacon/BroadcastChannel) using standard Web APIs "
-                "(no CDP). Functionality-first: prioritizes auth, forms, products/demos, APIs "
-                "and nav over static assets; respects hop depth (default 3). Collects every JS "
-                "bundle, mines it for API endpoints/routes/params and source maps, and reports "
-                "first-party APIs, WebSockets, forms, and third-party calls. Surfaces attack "
-                "surface that katana/gau/waybackurls and static scanners miss on JS-heavy apps. "
-                "Runs on the headless Linux/cloud server (Chromium is baked into the image, with "
-                "a system-Chromium fallback). Masks headless/automation fingerprints to browse "
-                "like a normal user. Can crawl AUTHENTICATED: either inject a session "
-                "(cookies/storage_state/headers) or use self-service login (pass a login page + "
-                "username/password and it logs itself in). Credentials can be references instead "
-                "of literals so secrets stay out of the trace: env:NAME, secret:NAME "
-                "(/run/secrets), or file:/path (login also takes username_env/password_env). "
-                "Read-only: never submits forms or clicks destructive controls "
-                "(logout/delete/pay/submit filtered); the only form it submits is the login form "
-                "you explicitly provide."
+                "Interceptor-style Site Spider fallback — 'katana inside a real Chrome tab'. "
+                "Drives headless Chromium like a user (scroll, expand menus, click safe "
+                "tabs/buttons); interaction is primary discovery, BFS link-following secondary. "
+                "Lets the site's JS load lazy chunks/SPA routes through normal fetches, then "
+                "PASSIVELY captures client-side traffic (fetch/XHR/SSE/WebSocket/sendBeacon/"
+                "BroadcastChannel) without CDP. Functionality-first queue (auth/forms/products/"
+                "APIs over static assets); hop depth default 3. Mines JS for endpoints/source "
+                "maps. Prefer execute_interceptor when Mac/Ubuntu workers are online — this is "
+                "the server Playwright fallback. Can crawl AUTHENTICATED via cookies/"
+                "storage_state/headers or self-service login. Credentials may be env:/secret:/"
+                "file: refs. Read-only except the login form you explicitly provide."
             ),
             tool_type=ToolType.SCAN,
             parameters={
@@ -1326,21 +1322,25 @@ class MCPServer:
         self.registry.register(MCPTool(
             name="execute_interceptor",
             description=(
-                "Preferred interaction-first web recon. Preference: online Mac Interceptor "
-                "worker → Ubuntu Interceptor worker → local interceptor CLI → Playwright "
-                "deep_crawl fallback. Workers prefer native `interceptor spider` when the "
-                "binary supports it (max-pages/depth/robots/sitemap/max-clicks), else the "
-                "open/act/net verb-loop. Builds Application Capability Map. "
-                "Pass a bare URL or JSON (url, max_pages, depth, prefer, robots, sitemap, …)."
+                "Preferred Site Spider — think 'katana running inside a real Chrome tab' "
+                "(Hacker-Valley Interceptor skill). Drives real Chrome/Brave so CDN/WAFs "
+                "(Cloudflare/Akamai) that block CLI crawlers still see trusted browser "
+                "fetches; interaction (scroll/click/menus) is primary discovery, BFS "
+                "link-following is secondary; robots/sitemap are opt-in only. Preference: "
+                "Mac Interceptor worker → Ubuntu worker → local interceptor CLI → Playwright "
+                "deep_crawl. Native `interceptor spider` when supported "
+                "(max-pages/depth/robots/sitemap/max-clicks), else open/act/net verb-loop. "
+                "Builds Application Capability Map. Pass bare URL or JSON "
+                "(url, max_pages, depth, interact, prefer, robots, sitemap, login, …)."
             ),
             tool_type=ToolType.SCAN,
             parameters={
                 "args": {
                     "type": "string",
                     "description": (
-                        "Bare URL (e.g. \"https://target.com\") or a JSON object "
-                        "(e.g. '{\"url\": \"https://app.target.com\", \"max_pages\": 20, "
-                        "\"prefer\": [\"mac\", \"ubuntu\"]}')."
+                        "Bare URL or JSON, e.g. "
+                        "'{\"url\": \"https://app.target.com\", \"max_pages\": 20, \"depth\": 3, "
+                        "\"interact\": true, \"prefer\": [\"mac\", \"ubuntu\"]}'."
                     )
                 }
             },

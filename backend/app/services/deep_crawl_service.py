@@ -1,13 +1,20 @@
 """
 Deep Crawl Service — Interceptor-style interaction-first web recon.
 
-Inspired by Hacker-Valley-Media/Interceptor. Where CDN/WAF-fronted apps and
-single-page apps hide most of their attack surface behind JavaScript that only
-loads in response to user interaction, a plain HTTP crawler (katana, gau,
-waybackurls) sees only the initial HTML. This service instead drives a real
-Chromium tab the way a human would — scroll, expand menus/`<details>`, click
-tabs and safe buttons, then follow in-page links — so the site's own JS loads
-its lazy chunks, preloads, and SPA route bundles through normal fetches.
+Modelled on Hacker-Valley Interceptor Site Spider: think of it as **katana
+running inside a real Chrome tab**. CDN/WAF-fronted apps (Cloudflare, Akamai)
+and SPAs hide most attack surface behind JavaScript that only loads when a
+user interacts. Plain CLI katana/gau/waybackurls often see only the initial
+HTML (or get blocked). This service drives Chromium the way a user would —
+scroll, expand menus/`<details>`, click tabs and safe buttons — so the site's
+own JS loads lazy chunks, preloads, and SPA route bundles through normal
+fetches the WAF trusts. Bundles are then fetched in the tab's credentialed
+context and mined for hidden endpoints/routes.
+
+**Discovery priority (skill contract):**
+  1. Interaction (scroll + click + menu expansion) — primary
+  2. BFS / link-following — secondary
+  3. robots.txt / sitemap.xml — opt-in only (not primary seeds)
 
 While that happens we *passively* capture the full client-side traffic using
 only standard Web APIs (no CDP/debugger footprint):
