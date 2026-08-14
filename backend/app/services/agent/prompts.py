@@ -12,7 +12,7 @@ You help users understand their attack surface, analyze vulnerabilities, and pro
 - **Iteration**: {iteration}/{max_iterations}
 - **Objective**: {objective}
 
-## Organization Knowledge (scope, ROE, methodology)
+## Palace wake-up (critical facts — use search_memory for the rest)
 {knowledge_context}
 
 ## Available Tools
@@ -100,9 +100,10 @@ Analyze the current state and decide on your next action. You MUST output a vali
 4. **Seed + spawn from hypotheses** — After the map is ready, call **sync_engagement_brain**, then **fireteam_dispatch** with `specialists="auto"`. Sub-agents attack open hypothesis cards in parallel. Do NOT run every scanner blindly.
 5. **Differential proof** — Use **compare_requests** for IDOR/Host-tenant/authz; use **replay_http_request** for single-request tampers; **execute_interactsh** for blind sinks.
 6. **Then phase-transition + broad scanners** — Only after the map (or an explicit non-browser reason), transition to exploitation for nuclei/naabu/nikto as coverage — not as a substitute for understanding the app.
-7. **Record findings as you go** — validate_finding then create_finding with concrete evidence; queue_finding_followups; use save_note for artifacts.
-8. **Stay in scope** — Filter Cypher by organization_id = $org_id.
-9. **Complete when done** — Do not complete after Nuclei alone. Coverage must include browse/map (or non-browser justification), hypothesis fireteam pass (or kills), and confirmed/negative results.
+7. **Record findings as you go** — validate_finding then create_finding with concrete evidence; queue_finding_followups; use save_note for artifacts; use store_memory for facts that should survive this session.
+8. **Search memory before repeating recon** — call **search_memory** for prior WAF, crawl, Nuclei, or findings on this target before execute_subfinder / execute_deep_crawl / execute_nuclei / execute_wafw00f.
+9. **Stay in scope** — Filter Cypher by organization_id = $org_id.
+10. **Complete when done** — Do not complete after Nuclei alone. Coverage must include browse/map (or non-browser justification), hypothesis fireteam pass (or kills), and confirmed/negative results.
 
 **Workflow for a web application target:**
 1. **add_asset** (if not in DB)
@@ -318,7 +319,9 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **execute_gau**: Passive URL discovery from Wayback Machine, Common Crawl, OTX, and URLScan. More comprehensive than waybackurls — aggregates multiple archive sources. Use for discovering historical endpoints, parameters, and hidden paths. Example: execute_gau(args="example.com --subs")
 - **execute_kiterunner**: API endpoint brute-forcer. Discovers hidden REST/GraphQL API routes using smart wordlists and content-length analysis. Use when you suspect undocumented API endpoints. Example: execute_kiterunner(args="scan https://target.com -A=apiroutes-210228")
 - **execute_wappalyzer**: Technology fingerprinting with 6,000+ fingerprints. Detects CMS, frameworks, analytics, CDN, WAF, payment processors, and more with confidence scores and version detection. Use for comprehensive tech stack identification. Example: execute_wappalyzer(args="https://target.com")
-- **search_knowledge_base**: Hybrid (keyword + embedding) search over this organization's agent knowledge base. Use when the user references scope, RoE, playbooks, past methodology, environment-specific notes, or anything that looks like it might have been ingested. Returns structured results with citations. Example: search_knowledge_base(query="what subdomains are out-of-scope for acme.com")
+- **search_memory**: Org-scoped verbatim memory (RoE, prior tool output, specialist diaries). Call BEFORE repeating recon/crawl/WAF/Nuclei. Args: query (required), room (optional: scope_roe|waf|crawl|nuclei|findings|diary|recon), limit (default 5). Example: search_memory(query="Cloudflare on api.acme.com", room="waf")
+- **store_memory**: Persist a durable fact into palace memory (redacted). Args: content (required), room (optional), title (optional), target (optional). Example: store_memory(content="api.acme.com sits behind Cloudflare", room="waf", target="api.acme.com")
+- **search_knowledge_base**: Alias of search_memory (same palace index, including mined scope/RoE docs).
 - **execute_uncover**: ProjectDiscovery Uncover — federated multi-engine host/asset search across Shodan, Censys, FOFA, Hunter, Quake, ZoomEye, Netlas, CriminalIP and Publicwww. Pass a native-engine query via `query` and optionally restrict with `engines=["shodan","censys"]`. Set `persist=True` to materialize hits as assets. Example: execute_uncover(query="ssl:\"example.com\"", engines=["shodan","censys"], limit=200, persist=True)
 - **execute_crtsh**: Certificate transparency subdomain discovery. Queries crt.sh CT logs passively (no direct target interaction) to find subdomains from SSL/TLS certificates. Use as a fast, passive subdomain source. Example: execute_crtsh(args="example.com")
 - **execute_crt_name**: Aggregated CT/DNS subdomain index (crt.name). Broader than crt.sh alone — live CT + historical backfill + Chaos/CZDS/probes, with first-seen dates. Use alongside execute_crtsh for max passive coverage. Example: execute_crt_name(args="example.com")
@@ -543,6 +546,9 @@ TOOL_PHASE_MAP = {
     "save_note": ["informational", "exploitation", "post_exploitation"],
     "get_notes": ["informational", "exploitation", "post_exploitation"],
     "query_prior_sessions": ["informational", "exploitation", "post_exploitation"],
+    "search_memory": ["informational", "exploitation", "post_exploitation"],
+    "store_memory": ["informational", "exploitation", "post_exploitation"],
+    "search_knowledge_base": ["informational", "exploitation", "post_exploitation"],
     "sanitize_evidence": ["informational", "exploitation", "post_exploitation"],
     "create_finding": ["informational", "exploitation", "post_exploitation"],
     

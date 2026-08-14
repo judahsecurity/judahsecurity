@@ -53,6 +53,9 @@ READONLY_TOOLS = {
     "analyze_attack_surface",
     "get_notes",
     "web_search",
+    "search_memory",
+    "search_knowledge_base",
+    "query_prior_sessions",
 }
 
 # Passive / light recon: always auto-allow unless explicitly denied.

@@ -136,6 +136,18 @@ def ingest_recon(
     db.add(doc)
     db.commit()
     db.refresh(doc)
+    try:
+        from app.services.agent.palace_memory import mine_knowledge_doc
+
+        mine_knowledge_doc(
+            organization_id=doc.organization_id,
+            title=doc.title,
+            content=doc.content,
+            tags=doc.tags or [],
+            doc_id=doc.id,
+        )
+    except Exception:
+        pass
 
     return ReconIngestResponse(
         knowledge_id=doc.id,

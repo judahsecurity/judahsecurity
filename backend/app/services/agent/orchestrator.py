@@ -63,7 +63,6 @@ from app.services.agent.prompts import (
 )
 from app.services.agent.tools import ASMToolsManager, set_tenant_context
 from app.services.agent.model_router import LLMTask
-from app.services.agent.knowledge import retrieve_knowledge
 from app.services.agent import evograph
 from app.services.agent.tool_selector import get_tool_recommendations
 
@@ -560,26 +559,28 @@ class AgentOrchestrator:
             if self.tool_manager else "No session notes."
         )
         
-        # RAG: org knowledge (scope, ROE, methodology)
+        # Palace wake-up: L0 identity + L1 critical facts (~900 tokens).
+        # Full org knowledge / prior tool output is on-demand via search_memory.
         knowledge_context = ""
         if org_id:
-            knowledge_context = retrieve_knowledge(
+            from app.services.agent.palace_memory import wake_up as palace_wake_up
+            knowledge_context = palace_wake_up(
                 org_id,
-                current_objective[:200] if current_objective else "",
-                limit=5,
-                max_chars=1500,
+                target=str((state.get("target_info") or {}).get("primary_target") or "")
+                or None,
             )
         if not knowledge_context:
-            knowledge_context = "None."
+            knowledge_context = "None. Use search_memory after you store results."
 
-        # Cross-session learning: load prior chain context from EvoGraph
+        # Cross-session graph summaries only when the palace is still empty.
         prior_chain_context = ""
-        if org_id and session_id:
+        palace_has_drawers = "Palace has" in knowledge_context
+        if org_id and session_id and not palace_has_drawers:
             prior_chain_context = evograph.get_prior_chain_context(
                 organization_id=org_id,
                 current_session_id=session_id,
             )
-        
+
         # Build prompt
         execution_trace_formatted = format_execution_trace(state.get("execution_trace", []))
         todo_list_formatted = format_todo_list(state.get("todo_list", []))

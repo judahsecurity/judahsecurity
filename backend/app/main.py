@@ -50,6 +50,7 @@ from app.api.routes import detection_feedback as detection_feedback_router
 from app.api.routes import detection_suppression as detection_suppression_router
 from app.api.routes import recon as recon_router
 from app.api.routes import workflows as workflows_router
+from app.models.agent_palace import AgentPalaceDrawer  # noqa: F401 — palace memory table
 from app.models.workflow import (  # noqa: F401 — ensure workflow tables are created
     Workflow,
     WorkflowVersion,

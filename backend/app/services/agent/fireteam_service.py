@@ -582,6 +582,9 @@ TARGETS: {targets}
 AVAILABLE TOOLS (allowlist -- you MAY NOT call anything else):
 {tool_list}
 
+PALACE MEMORY (prior work on this org/target — search before repeating scans):
+{memory}
+
 INSTRUCTIONS:
 1. Obey the operation directive (goal, PASS/KILL, hypothesis ids).
 2. Think briefly about which tool(s) will most quickly prove or kill the hypothesis.
@@ -619,6 +622,7 @@ async def _run_specialist(
     directive: Any = None,
 ) -> SpecialistReport:
     start = datetime.utcnow()
+    target_list = list(targets) if targets else []
     report = SpecialistReport(
         specialist=profile.name,
         role=f"{profile.epithet}: {profile.role}",
@@ -651,13 +655,37 @@ async def _run_specialist(
         mission_for_prompt = mission
         max_iter = profile.max_iterations
 
+    allowed_tools = list(profile.allowed_tools)
+    if "search_memory" not in allowed_tools:
+        allowed_tools.append("search_memory")
+
+    memory_block = "None."
+    org_id = None
+    session_id = None
+    try:
+        from app.services.agent.tools import current_session_id, get_tenant_context
+        from app.services.agent.palace_memory import wake_up as palace_wake_up
+
+        _uid, org_id = get_tenant_context()
+        session_id = current_session_id.get() or None
+        if org_id:
+            seed = target_list[0] if target_list else ""
+            memory_block = palace_wake_up(
+                org_id,
+                target=str(seed) or None,
+                specialist=profile.name,
+            )
+    except Exception:
+        logger.debug("specialist palace wake-up skipped", exc_info=True)
+
     sys_prompt = _SPECIALIST_SYSTEM_PROMPT.format(
         epithet=profile.epithet or profile.name,
         role=profile.role,
         directive=directive_block,
         mission=mission_for_prompt,
-        targets=", ".join(targets) or "<see analyze_attack_surface output>",
-        tool_list="\n".join(f"  - {t}" for t in profile.allowed_tools),
+        targets=", ".join(target_list) or "<see analyze_attack_surface output>",
+        tool_list="\n".join(f"  - {t}" for t in allowed_tools),
+        memory=memory_block,
         max_iter=max_iter,
         suffix=suffix,
     )
@@ -696,7 +724,7 @@ async def _run_specialist(
             break
 
         # Enforce allowlist + max parallelism per turn.
-        tool_calls = [tc for tc in tool_calls if tc.get("tool") in profile.allowed_tools][: profile.max_tools_per_iteration]
+        tool_calls = [tc for tc in tool_calls if tc.get("tool") in allowed_tools][: profile.max_tools_per_iteration]
 
         if not tool_calls:
             messages.append(HumanMessage(
@@ -733,6 +761,21 @@ async def _run_specialist(
             f"concluding. Last tool calls: "
             f"{[t.tool for t in report.tool_calls[-3:]]}"
         )
+    if org_id and (report.summary or report.key_findings):
+        try:
+            from app.services.agent.palace_memory import store_specialist_diary
+
+            seed = target_list[0] if target_list else ""
+            store_specialist_diary(
+                organization_id=org_id,
+                specialist=profile.name,
+                summary=report.summary or "",
+                key_findings=report.key_findings,
+                session_id=session_id,
+                target=str(seed) or None,
+            )
+        except Exception:
+            logger.debug("specialist diary store skipped", exc_info=True)
     return report
 
 

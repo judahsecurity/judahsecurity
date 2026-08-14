@@ -420,8 +420,10 @@ class ASMToolsManager:
             "query_prior_sessions": self.query_prior_sessions,
             # ProjectDiscovery Uncover: multi-engine search
             "execute_uncover": self.execute_uncover,
-            # Knowledge base (RAG) search
+            # Knowledge base (RAG) search — palace-backed
             "search_knowledge_base": self.search_knowledge_base,
+            "search_memory": self.search_memory,
+            "store_memory": self.store_memory,
             # Offensive workflow tools
             "validate_finding": self.validate_finding,
             "detect_bug_chains": self.detect_bug_chains,
@@ -460,6 +462,16 @@ class ASMToolsManager:
         return self.tools
     
     async def execute(self, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute a tool with the given arguments."""
+        result = await self._execute_impl(tool_name, tool_args)
+        try:
+            from app.services.agent.palace_memory import remember_tool_result
+            remember_tool_result(tool_name, tool_args, result)
+        except Exception as exc:
+            logger.debug("palace remember skipped: %s", exc)
+        return result
+
+    async def _execute_impl(self, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool with the given arguments."""
         tool_args = dict(tool_args or {}) if isinstance(tool_args, dict) else {}
 
@@ -2572,27 +2584,74 @@ class ASMToolsManager:
         }
         return json.dumps(payload, indent=2)[:_tool_output_max_chars()]
 
+    async def search_memory(
+        self,
+        query: str,
+        room: Optional[str] = None,
+        limit: int = 5,
+    ) -> str:
+        """Semantic search over org-scoped verbatim palace memory.
+
+        Covers RoE/scope docs, prior tool output, specialist diaries, and
+        mined knowledge. Use before repeating recon, crawl, WAF, or Nuclei.
+        """
+        from app.services.agent.palace_memory import search_memory as palace_search
+
+        _, org_id = get_tenant_context()
+        if not org_id:
+            return json.dumps({"error": "no tenant context"}, indent=2)
+        if not query or not str(query).strip():
+            return json.dumps({"error": "query is required"}, indent=2)
+        rows = palace_search(
+            org_id,
+            query,
+            room=(room or None),
+            limit=max(1, min(int(limit or 5), 10)),
+        )
+        return json.dumps(
+            {"query": query, "count": len(rows), "results": rows},
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def store_memory(
+        self,
+        content: str,
+        room: str = "general",
+        title: str = "",
+        target: Optional[str] = None,
+    ) -> str:
+        """Store a verbatim (redacted) drawer in this org's palace.
+
+        Use for durable notes that should survive this session: WAF vendor,
+        in-scope hosts, killed techniques, confirmed findings.
+        """
+        from app.services.agent.palace_memory import HALL_FACTS, store_drawer, wing_for_org
+
+        _, org_id = get_tenant_context()
+        if not org_id:
+            return json.dumps({"error": "no tenant context"}, indent=2)
+        if not content or not str(content).strip():
+            return json.dumps({"error": "content is required"}, indent=2)
+        ids = store_drawer(
+            org_id,
+            content,
+            wing=wing_for_org(org_id),
+            room=(room or "general")[:128],
+            hall=HALL_FACTS,
+            title=title or "",
+            source="manual",
+            session_id=current_session_id.get() or None,
+            target=target,
+        )
+        return json.dumps({"stored": len(ids), "ids": ids, "room": room or "general"})
+
     async def search_knowledge_base(
         self,
         query: str,
         limit: int = 5,
     ) -> str:
-        """Hybrid (keyword + embedding) search over the org's knowledge base.
-
-        Returns structured JSON with the best scoped docs so the agent can cite
-        or expand them. Respects the active tenant context.
-        """
-        from app.services.agent.knowledge import search_knowledge
-        _, org_id = get_tenant_context()
-        if not org_id:
-            return json.dumps({"error": "no tenant context"}, indent=2)
-        if not query or not query.strip():
-            return json.dumps({"error": "query is required"}, indent=2)
-        rows = search_knowledge(org_id, query, limit=max(1, min(limit, 10)))
-        return json.dumps(
-            {"query": query, "count": len(rows), "results": rows},
-            indent=2,
-        )[:_tool_output_max_chars()]
+        """Alias of search_memory — palace search including mined knowledge docs."""
+        return await self.search_memory(query=query, limit=limit)
 
     async def query_prior_sessions(
         self,

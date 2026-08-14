@@ -61,6 +61,22 @@ def _check_org_access(current_user: User, org_id: Optional[int], db: Session) ->
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Organization not found")
 
 
+def _mine_into_palace(doc: AgentKnowledge) -> None:
+    """Best-effort: copy a knowledge doc into verbatim palace drawers."""
+    try:
+        from app.services.agent.palace_memory import mine_knowledge_doc
+
+        mine_knowledge_doc(
+            organization_id=doc.organization_id,
+            title=doc.title,
+            content=doc.content,
+            tags=doc.tags or [],
+            doc_id=doc.id,
+        )
+    except Exception:
+        pass
+
+
 @router.get("/organizations/{organization_id}/agent-knowledge", response_model=List[AgentKnowledgeResponse])
 def list_agent_knowledge(
     organization_id: int,
@@ -107,6 +123,7 @@ def create_agent_knowledge(
     db.add(doc)
     db.commit()
     db.refresh(doc)
+    _mine_into_palace(doc)
     return AgentKnowledgeResponse(
         id=doc.id,
         organization_id=doc.organization_id,
@@ -162,6 +179,7 @@ def create_global_agent_knowledge(
     db.add(doc)
     db.commit()
     db.refresh(doc)
+    _mine_into_palace(doc)
     return AgentKnowledgeResponse(
         id=doc.id,
         organization_id=doc.organization_id,
@@ -196,6 +214,7 @@ def update_global_agent_knowledge(
         doc.tags = body.tags
     db.commit()
     db.refresh(doc)
+    _mine_into_palace(doc)
     return AgentKnowledgeResponse(
         id=doc.id,
         organization_id=doc.organization_id,
@@ -250,6 +269,7 @@ def update_agent_knowledge(
         doc.tags = body.tags
     db.commit()
     db.refresh(doc)
+    _mine_into_palace(doc)
     return AgentKnowledgeResponse(
         id=doc.id,
         organization_id=doc.organization_id,
