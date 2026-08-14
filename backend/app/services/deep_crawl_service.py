@@ -55,6 +55,7 @@ import os
 import random
 import re
 import shutil
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 from urllib.parse import urljoin, urlparse
@@ -148,15 +149,17 @@ async def _launch_chromium(pw):
             headless=True, args=_LAUNCH_ARGS, executable_path=sys_chrome,
         )
 
-# Bounds — keep a single crawl cheap and predictable.
-DEFAULT_MAX_PAGES = 16
-HARD_MAX_PAGES = 40
-DEFAULT_MAX_CLICKS = 20
-PAGE_TIMEOUT_MS = 25000
-SETTLE_MS = 1200
-MAX_JS_FETCH = 40
+# Bounds — keep a single crawl cheap and predictable for agent sessions.
+DEFAULT_MAX_PAGES = 10
+HARD_MAX_PAGES = 20
+DEFAULT_MAX_CLICKS = 12
+PAGE_TIMEOUT_MS = 20000
+SETTLE_MS = 800
+MAX_JS_FETCH = 25
 MAX_JS_BYTES = 2_000_000
 MAX_CAPTURED_CALLS = 4000
+# Hard wall-clock for one deep_crawl (agent must not block for an hour).
+CRAWL_BUDGET_SEC = int(os.environ.get("DEEP_CRAWL_BUDGET_SEC", "600") or "600")
 
 # Text on a control that means "do not click" — avoids state changes / logout.
 _DESTRUCTIVE_TEXT = re.compile(
@@ -513,11 +516,12 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
 
     Args (bare URL string, or JSON object):
         url        (str, required) — seed URL/host to crawl
-        max_pages  (int)  — in-scope pages to visit (default 12, cap 40)
+        max_pages  (int)  — in-scope pages to visit (default 10, cap 20)
         interact   (bool) — click safe tabs/menus/buttons (default True)
         scope      (str)  — apex to constrain crawl (default: derived from url)
         capture_js (bool) — fetch + mine JS bundles for endpoints (default True)
-        timeout_ms (int)  — per-page navigation timeout (default 25000)
+        timeout_ms (int)  — per-page navigation timeout (default 20000)
+        budget_sec (int)  — hard wall-clock for the whole crawl (default 600)
 
     Authenticated / normal-user session (all optional):
         cookies       (list[dict]) — Playwright cookie objects
@@ -580,6 +584,12 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
     interact = bool(opts.get("interact", True))
     capture_js = bool(opts.get("capture_js", True))
     timeout_ms = int(opts.get("timeout_ms", PAGE_TIMEOUT_MS) or PAGE_TIMEOUT_MS)
+    try:
+        budget_sec = int(opts.get("budget_sec", CRAWL_BUDGET_SEC) or CRAWL_BUDGET_SEC)
+    except (TypeError, ValueError):
+        budget_sec = CRAWL_BUDGET_SEC
+    budget_sec = max(60, min(budget_sec, 1800))  # 1–30 minutes
+    crawl_deadline = time.monotonic() + budget_sec
 
     seed_host = urlparse(seed).netloc
     scope_apex = str(opts.get("scope") or "").strip().lower() or _apex(seed_host)
@@ -697,6 +707,16 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                 seen: Set[str] = set()
 
                 while queue and len(result.pages_visited) < max_pages:
+                    if time.monotonic() >= crawl_deadline:
+                        result.errors.append(
+                            f"crawl_budget_exhausted after {budget_sec}s "
+                            f"({len(result.pages_visited)}/{max_pages} pages) — returning partial map"
+                        )
+                        await _emit_crawl_progress(
+                            f"deep_crawl: budget exhausted at {len(result.pages_visited)} pages — finishing"
+                        )
+                        break
+
                     url = queue.pop(0)
                     norm = url.split("#")[0]
                     if norm in seen:
@@ -704,7 +724,10 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                     seen.add(norm)
 
                     try:
-                        await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+                        # Cap per-page nav by remaining budget
+                        remaining_ms = int(max(3000, (crawl_deadline - time.monotonic()) * 1000))
+                        nav_timeout = min(timeout_ms, remaining_ms)
+                        await page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout)
                     except Exception as e:
                         result.errors.append(f"nav {url[:120]}: {str(e)[:160]}")
                         continue
@@ -747,8 +770,10 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                         result.errors.append(f"harvest {url[:80]}: {str(e)[:120]}")
 
                 # Mine collected JS bundles for endpoints/source maps.
-                if capture_js and result.js_files:
-                    await _mine_js(context, result)
+                if capture_js and result.js_files and time.monotonic() < crawl_deadline:
+                    await _mine_js(context, result, deadline=crawl_deadline)
+                elif capture_js and result.js_files:
+                    result.errors.append("skipped JS mining — crawl budget exhausted")
 
                 # Export session so the agent can hand off auth to execute_browser /
                 # privileged re-crawls (tester methodology: login once, reuse session).
@@ -1095,12 +1120,15 @@ async def _harvest(page):
     return data.get("links", []), data.get("forms", [])
 
 
-async def _mine_js(context, result: CrawlResult) -> None:
+async def _mine_js(context, result: CrawlResult, deadline: Optional[float] = None) -> None:
     """Fetch discovered JS bundles with the browser context and extract endpoints."""
     js_urls = sorted(result.js_files)[:MAX_JS_FETCH]
     for url in js_urls:
+        if deadline is not None and time.monotonic() >= deadline:
+            result.errors.append("js_mine_budget_exhausted")
+            break
         try:
-            resp = await context.request.get(url, timeout=15000)
+            resp = await context.request.get(url, timeout=10000)
             if not resp.ok:
                 continue
             body = await resp.text()

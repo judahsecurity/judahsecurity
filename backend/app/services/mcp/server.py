@@ -2058,8 +2058,16 @@ class MCPServer:
     async def _execute_deep_crawl(self, args: str) -> Dict[str, Any]:
         """Interaction-first deep crawl with passive client-side traffic capture."""
         try:
-            from app.services.deep_crawl_service import run_deep_crawl
-            return await run_deep_crawl(args)
+            from app.services.deep_crawl_service import run_deep_crawl, CRAWL_BUDGET_SEC
+            # Outer safety net: crawl has its own budget; never block the agent > budget+2m.
+            return await asyncio.wait_for(run_deep_crawl(args), timeout=float(CRAWL_BUDGET_SEC) + 120)
+        except asyncio.TimeoutError:
+            return {
+                "success": False,
+                "output": "Deep crawl hit the hard time limit and was cancelled.",
+                "error": "deep_crawl_timeout",
+                "exit_code": -1,
+            }
         except ImportError as e:
             return {"success": False, "output": "", "error": f"Deep crawl service not available: {e}", "exit_code": -1}
         except Exception as e:
