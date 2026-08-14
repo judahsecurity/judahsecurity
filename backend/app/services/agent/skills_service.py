@@ -277,9 +277,13 @@ SKILLS: list[Skill] = [
             "You are running the API-AUTHZ-VALIDATION skill. Start from discovered "
             "OpenAPI/Swagger, GraphQL, or REST endpoints. Prove exposure with minimal "
             "GET/HEAD requests first, then compare unauthenticated and authorized "
-            "responses when credentials are available. Look for sensitive data, PII, "
-            "bulk records, secrets, and missing 401/403 controls. Do not modify data "
-            "or exercise unsafe methods unless explicitly authorized."
+            "responses when credentials are available. On /api/schema/: hunt security: {} "
+            "on /api/auth/account/?email= (is_staff/role). compare_requests unauth "
+            "/api/auth/profile/ (401) vs the lookup with aegis-enum-canary@example.invalid "
+            "(200 or 500). A down database is still SUBMIT. One canary; do not spray. "
+            "Look for sensitive data, PII, bulk records, secrets, and missing 401/403 "
+            "controls. Do not modify data or exercise unsafe methods unless explicitly "
+            "authorized."
         ),
     ),
     Skill(

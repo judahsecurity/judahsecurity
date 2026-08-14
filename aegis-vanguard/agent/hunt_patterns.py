@@ -44,6 +44,8 @@ NEVER_SUBMIT_AND_CHAINS = """
 - Self-XSS without CSRF delivery to victim
 - Open redirect alone (need OAuth token theft or SSRF chain)
 - CORS `*` without ACAC:true + credentialed data exfil
+- OpenAPI/Swagger found without quoting `security: {}` / privilege fields or a 401-vs-500
+  differential on the account lookup (foothold, not a finding)
 - SSRF DNS/OOB ping only (need internal HTTP data or metadata)
 - Host header injection alone (need password-reset poisoning PoC)
 - Clickjacking on non-sensitive pages
@@ -125,11 +127,20 @@ AUTHZ_PATTERNS = """
 - Method confusion: GET denied but POST/PUT/PATCH/DELETE or HEAD/OPTIONS leaks
 - Mass assignment on role/plan/verified/isAdmin/credits during signup or profile update
 - Shadow APIs: /api/v1 vs /api/v2 vs /internal vs /legacy — older versions often weaker authz
+- OpenAPI `security: {}` on email/account lookup (GET /api/auth/account/?email=): missing
+  auth + UserAccount fields is_staff/role/valid_through is **missing authentication**, not IDOR
+- Differential: unauth GET /api/auth/profile/ → 401, unauth GET /api/auth/account/?email=
+  → 200 **or 500**. A 500 (DB down / OperationalError) still proves JWT middleware was skipped
+- One canary email only (`aegis-enum-canary@example.invalid`). Do not spray employee inboxes.
+  Do not dump ICS/OT users. ACAO `*` without credentials is extra, not this finding.
 
 ## Kill signals
 - Response body only contains YOUR user id/email → not IDOR
 - Same data visible to both identities by design (public profile) → not IDOR
 - Admin-only endpoint requiring admin session → not BFLA for low-priv
+- Account lookup returns 401/403 like siblings, or schema requires JWT and body is a
+  non-enumerating boolean → KILL. Do **not** kill because the database is down or the
+  canary email is unregistered.
 """
 
 AUTH_PATTERNS = """

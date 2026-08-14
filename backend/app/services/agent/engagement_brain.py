@@ -327,6 +327,27 @@ _HUNT_CARDS: Dict[str, Dict[str, str]] = {
         "specialist": "credential_assault",
         "priority": "critical",
     },
+    "unauth_account_lookup": {
+        "title": "Unauth OpenAPI account lookup (security: {} / email → role)",
+        "assumption": (
+            "GET /api/auth/account/?email= is documented unauthenticated and returns "
+            "is_staff/role, or it reaches app code while siblings 401"
+        ),
+        "test": (
+            "Quote security: {} / 'without authentication'. compare_requests unauth "
+            "GET /api/auth/profile/ vs /api/auth/account/?email=aegis-enum-canary@example.invalid. "
+            "PASS on 200 with privilege fields OR 500 vs sibling 401. One canary; do not spray."
+        ),
+        "pass_criteria": (
+            "Schema unauth + is_staff/role, OR lookup is not 401 while a protected sibling is"
+        ),
+        "kill_criteria": (
+            "Lookup 401/403 like siblings; schema requires JWT; generic boolean only. "
+            "Do not kill because the database is unavailable"
+        ),
+        "specialist": "api_authz",
+        "priority": "critical",
+    },
     "client_role_param": {
         "title": "Client-supplied userType/admin role",
         "assumption": "API trusts body userType/userId without a server session",

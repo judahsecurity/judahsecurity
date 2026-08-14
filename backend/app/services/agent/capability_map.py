@@ -243,7 +243,7 @@ def finalize_capability_map(cmap: CapabilityMap) -> CapabilityMap:
         if h.get("hunt") not in seen_hunts:
             merged_queue.append(h)
             seen_hunts.add(h.get("hunt"))
-    cmap.ranked_hunt_queue = merged_queue[:14]
+    cmap.ranked_hunt_queue = merged_queue[:18]
     cmap.quality_score = _score_map(cmap)
     # Ready when we actually browsed something useful — not just a blank fail.
     cmap.ready_for_attack = (
@@ -293,6 +293,21 @@ def _build_hunt_queue(cmap: CapabilityMap) -> List[Dict[str, str]]:
     if cmap.has_api:
         add("high", "api_authz", "First-party APIs captured — IDOR/authz and verb tampering",
             cmap.api_endpoints[0].get("path", "") if cmap.api_endpoints else "")
+        blob = " ".join(str(p) for p in cmap.pages_visited) + " " + " ".join(
+            f"{e.get('path', '')}" for e in cmap.api_endpoints if isinstance(e, dict)
+        )
+        if re.search(r"/api/auth/account|/api/schema|swagger|openapi|spectacular", blob, re.I):
+            add(
+                "critical",
+                "unauth_account_lookup",
+                "OpenAPI/schema or /api/auth/account — unauth email lookup (security: {}) "
+                "and 401 siblings vs 200/500 lookup. One canary email; do not spray.",
+                next(
+                    (p for p in cmap.pages_visited
+                     if re.search(r"/api/auth/account|/api/schema|swagger|openapi", str(p), re.I)),
+                    "/api/auth/account/",
+                ),
+            )
     # Multi-host / subdomain pages → host-header tenant isolation card
     hosts = set()
     for p in cmap.pages_visited:
@@ -383,7 +398,7 @@ def _build_hunt_queue(cmap: CapabilityMap) -> List[Dict[str, str]]:
             "After logic hunts — Nuclei/misconfig/CVE coverage (authenticated if creds exist)",
             cmap.target or (cmap.pages_visited[0] if cmap.pages_visited else ""),
         )
-    return queue[:14]
+    return queue[:18]
 
 
 def _score_map(cmap: CapabilityMap) -> float:
@@ -400,6 +415,11 @@ def _score_map(cmap: CapabilityMap) -> float:
         score += 0.05
     if cmap.has_ai_agent:
         score += 0.12  # chatbot/agent surface is high-value even with few pages
+    blob = " ".join(str(p) for p in (cmap.pages_visited or [])) + " " + " ".join(
+        str(e.get("path") or "") for e in (cmap.api_endpoints or [])
+    )
+    if re.search(r"/api/schema|swagger|openapi|/api/auth/account", blob, re.I):
+        score += 0.15  # schema or public account lookup is enough to hunt
     if cmap.authenticated is True:
         score += 0.05
     return round(min(1.0, score), 3)
@@ -447,6 +467,19 @@ def select_specialists_for_map(
             thin = ["app_mapper", "agent_tools", "vuln_triage"]
         else:
             thin = ["app_mapper", "js_secrets", "vuln_triage"]
+        # Critical hunts still deserve their specialist even when quality is low.
+        thin_hunt_map = {
+            "unauth_account_lookup": "api_authz",
+            "api_authz": "api_authz",
+            "azure_function": "coverage",
+            "elasticsearch_unauth": "coverage",
+            "agent_tools": "agent_tools",
+        }
+        if cmap:
+            for item in cmap.ranked_hunt_queue or []:
+                name = thin_hunt_map.get(item.get("hunt") or "")
+                if name and name not in thin:
+                    thin.insert(1, name)
         return (thin if not include_recon
                 else ["web_recon"] + thin[1:])[:max_specialists]
 
@@ -458,6 +491,8 @@ def select_specialists_for_map(
         "graphql": "graphql_api",
         "file_upload": "file_upload",
         "api_authz": "api_authz",
+        "unauth_account_lookup": "api_authz",
+        "mass_assignment": "api_authz",
         "host_tenant": "host_tenant",
         "business_logic": "business_logic",
         "injection": "injection",

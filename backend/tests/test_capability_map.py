@@ -147,3 +147,24 @@ def test_merge_and_format():
     text = format_capability_map_for_prompt(merged)
     assert "Suggested fireteam" in text
     assert "Capabilities:" in text
+
+
+def test_openapi_schema_surfaces_unauth_account_lookup_hunt():
+    cmap = build_capability_map_from_crawl(
+        _fake_crawl(
+            target="https://ics.example.com",
+            pages_visited=[
+                "https://ics.example.com/",
+                "https://ics.example.com/api/schema/",
+            ],
+            forms=[],
+            api_calls={"ics.example.com": {"GET /api/auth/account/", "GET /api/schema/"}},
+        )
+    )
+    hunts = [h["hunt"] for h in cmap.ranked_hunt_queue]
+    assert "unauth_account_lookup" in hunts
+    why = " ".join(h.get("why", "") for h in cmap.ranked_hunt_queue if h["hunt"] == "unauth_account_lookup")
+    assert "account" in why.lower() or "security" in why.lower() or "401" in why
+    names = select_specialists_for_map(cmap, max_specialists=8)
+    assert "api_authz" in names
+    assert cmap.ready_for_attack is True or "api_authz" in names
