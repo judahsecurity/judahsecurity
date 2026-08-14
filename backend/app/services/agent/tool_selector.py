@@ -413,10 +413,39 @@ class ToolSelector:
         # API/Swagger/GraphQL detected
         if "api" in self._target_types:
             recs.append(ToolRecommendation(
+                tool_name="execute_curl",
+                args_template="-sS -D- https://{target}/api/schema/",
+                priority=4,
+                rationale=(
+                    "OpenAPI/Swagger likely — GET /api/schema/ (or swagger.json). Hunt "
+                    "security: {} on /api/auth/account/?email= and writable request fields. "
+                    "Do not spray schemathesis before quoting the public operations."
+                ),
+                category="api",
+            ))
+            recs.append(ToolRecommendation(
+                tool_name="compare_requests",
+                args_template=(
+                    '{"baseline":{"method":"GET","url":"https://{target}/api/auth/profile/"},'
+                    '"mutant":{"method":"GET","url":"https://{target}/api/auth/account/'
+                    '?email=aegis-enum-canary@example.invalid"}}'
+                ),
+                priority=5,
+                rationale=(
+                    "Unauth account lookup: sibling 401 vs lookup 200/500 proves JWT was "
+                    "skipped. One canary email only — do not spray. A down database is SUBMIT."
+                ),
+                category="api",
+            ))
+            recs.append(ToolRecommendation(
                 tool_name="execute_schemathesis",
                 args_template="run https://{target}/openapi.json --checks all",
-                priority=6,
-                rationale="API/OpenAPI detected — fuzz API endpoints for validation issues and 500 errors.",
+                priority=8,
+                rationale=(
+                    "After schema review: optional documented-endpoint checks. "
+                    "500s from a down DB are not the account-lookup proof — use the "
+                    "401-vs-500 differential on /api/auth/account/ instead."
+                ),
                 phase_required="exploitation",
                 category="api",
             ))
@@ -734,11 +763,11 @@ class ToolSelector:
             spa_boost = "spa" in self._target_types
             recs.append(ToolRecommendation(
                 tool_name="execute_deep_crawl",
-                args_template="https://{target}",
+                args_template='{"url":"https://{target}","depth":3,"interact":true}',
                 priority=3 if spa_boost else 4,
                 rationale=(
-                    "Browse the app like a tester (click links/menus) to build a capability map "
-                    "before spraying scanners."
+                    "Enter the app and prioritize functionality (auth, forms, products, APIs) "
+                    "to build a capability map before spraying scanners."
                     + (" SPA fingerprint — prioritize interaction crawl." if spa_boost else "")
                 ),
                 category="reconnaissance",

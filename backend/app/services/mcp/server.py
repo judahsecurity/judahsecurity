@@ -1288,17 +1288,18 @@ class MCPServer:
                 "follow in-scope links) so the site's own JavaScript loads its lazy chunks "
                 "and SPA route bundles, then PASSIVELY captures the full client-side traffic "
                 "(fetch/XHR/SSE/WebSocket/sendBeacon/BroadcastChannel) using standard Web APIs "
-                "(no CDP). Collects every JS bundle, mines it for API endpoints/routes/params "
-                "and source maps, and reports first-party APIs, WebSockets, forms, and "
-                "third-party calls. Surfaces attack surface that katana/gau/waybackurls and "
-                "static scanners miss on JS-heavy apps. Runs on the headless Linux/cloud "
-                "server (Chromium is baked into the image, with a system-Chromium fallback). "
-                "Masks headless/automation fingerprints to browse like a normal user. Can crawl "
-                "AUTHENTICATED: either inject a session (cookies/storage_state/headers) or use "
-                "self-service login (pass a login page + username/password and it logs itself in). "
-                "Credentials can be references instead of literals so secrets stay out of the "
-                "trace: env:NAME, secret:NAME (/run/secrets), or file:/path (login also takes "
-                "username_env/password_env). "
+                "(no CDP). Functionality-first: prioritizes auth, forms, products/demos, APIs "
+                "and nav over static assets; respects hop depth (default 3). Collects every JS "
+                "bundle, mines it for API endpoints/routes/params and source maps, and reports "
+                "first-party APIs, WebSockets, forms, and third-party calls. Surfaces attack "
+                "surface that katana/gau/waybackurls and static scanners miss on JS-heavy apps. "
+                "Runs on the headless Linux/cloud server (Chromium is baked into the image, with "
+                "a system-Chromium fallback). Masks headless/automation fingerprints to browse "
+                "like a normal user. Can crawl AUTHENTICATED: either inject a session "
+                "(cookies/storage_state/headers) or use self-service login (pass a login page + "
+                "username/password and it logs itself in). Credentials can be references instead "
+                "of literals so secrets stay out of the trace: env:NAME, secret:NAME "
+                "(/run/secrets), or file:/path (login also takes username_env/password_env). "
                 "Read-only: never submits forms or clicks destructive controls "
                 "(logout/delete/pay/submit filtered); the only form it submits is the login form "
                 "you explicitly provide."
@@ -1309,8 +1310,8 @@ class MCPServer:
                     "type": "string",
                     "description": (
                         "Bare URL (e.g. \"https://target.com\") OR a JSON object: "
-                        '{"url": "https://target.com", "max_pages": 12, "interact": true, '
-                        '"scope": "target.com", "capture_js": true, '
+                        '{"url": "https://target.com", "max_pages": 12, "depth": 3, '
+                        '"interact": true, "scope": "target.com", "capture_js": true, '
                         '"headers": {"Authorization": "Bearer <jwt>"}, '
                         '"login": {"url": "https://target.com/login", "username": "u", "password": "p"}}'
                     )

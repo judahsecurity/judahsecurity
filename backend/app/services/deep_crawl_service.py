@@ -150,9 +150,11 @@ async def _launch_chromium(pw):
         )
 
 # Bounds — keep a single crawl cheap and predictable for agent sessions.
-DEFAULT_MAX_PAGES = 10
-HARD_MAX_PAGES = 20
-DEFAULT_MAX_CLICKS = 12
+DEFAULT_MAX_PAGES = 12
+HARD_MAX_PAGES = 24
+DEFAULT_MAX_CLICKS = 14
+DEFAULT_DEPTH = 3  # Interceptor spider skill: SPA/deep app uses --depth 3
+HARD_MAX_DEPTH = 6
 PAGE_TIMEOUT_MS = 20000
 SETTLE_MS = 800
 MAX_JS_FETCH = 25
@@ -166,6 +168,25 @@ _DESTRUCTIVE_TEXT = re.compile(
     r"(log\s?out|sign\s?out|delete|remove|destroy|deactivate|"
     r"pay|purchase|checkout|buy|order|confirm|submit|save|"
     r"unsubscribe|cancel\s?subscription|reset|wipe)",
+    re.IGNORECASE,
+)
+
+# Prefer pages that reveal *functionality* over static/marketing spam.
+_FUNC_HIGH = re.compile(
+    r"(login|signin|sign-in|signup|register|auth|sso|oauth|account|dashboard|"
+    r"admin|portal|console|app|product|demo|trial|contact|quote|pricing|"
+    r"checkout|cart|api|graphql|docs|swagger|wp-admin|wp-login|search|"
+    r"upload|settings|profile|workspace|project)",
+    re.IGNORECASE,
+)
+_FUNC_MED = re.compile(
+    r"(feature|solution|service|resource|support|help|faq|blog|"
+    r"download|library|gallery|shop|store|about|team)",
+    re.IGNORECASE,
+)
+_STATIC_SKIP = re.compile(
+    r"\.(?:css|js|mjs|map|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot|pdf|"
+    r"zip|gz|mp4|webm|mp3)(?:\?|$)|/(?:cdn-cgi|static|assets/img)/",
     re.IGNORECASE,
 )
 
@@ -396,6 +417,55 @@ def _in_scope(host: str, scope_apex: str) -> bool:
     return host == scope_apex or host.endswith("." + scope_apex)
 
 
+def _functionality_score(url: str) -> int:
+    """Higher = more likely to expose app functionality (auth, forms, products, APIs)."""
+    if not url or _STATIC_SKIP.search(url):
+        return -100
+    path = urlparse(url).path or "/"
+    blob = f"{path}?{urlparse(url).query}"
+    score = 0
+    if _FUNC_HIGH.search(blob):
+        score += 50
+    if _FUNC_MED.search(blob):
+        score += 20
+    # Prefer short app routes over deep marketing trees
+    depth_hint = path.count("/")
+    if depth_hint <= 2:
+        score += 5
+    if depth_hint >= 5:
+        score -= 5
+    # Query params often mean real features
+    if "?" in url and "=" in url:
+        score += 10
+    return score
+
+
+def _enqueue_func(
+    queue: List[tuple],
+    seen: Set[str],
+    url: str,
+    depth: int,
+    max_depth: int,
+    max_queue: int,
+) -> None:
+    """Add URL to priority queue as (-score, depth, url) if within hop budget."""
+    if depth > max_depth:
+        return
+    norm = url.split("#")[0]
+    if not norm.startswith("http") or norm in seen:
+        return
+    if any(norm == item[2] for item in queue):
+        return
+    if len(queue) >= max_queue:
+        return
+    score = _functionality_score(norm)
+    if score < -50:
+        return
+    # Sort key: higher functionality first, then shallower depth.
+    queue.append((-score, depth, norm))
+    queue.sort(key=lambda t: (t[0], t[1]))
+
+
 def _resolve_secret(value: Any) -> Optional[str]:
     """
     Resolve a credential that may be a literal, an env reference, or a secret.
@@ -516,12 +586,16 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
 
     Args (bare URL string, or JSON object):
         url        (str, required) — seed URL/host to crawl
-        max_pages  (int)  — in-scope pages to visit (default 10, cap 20)
+        max_pages  (int)  — in-scope pages to visit (default 12, cap 24)
+        depth      (int)  — max link hops from seed (default 3, cap 6)
         interact   (bool) — click safe tabs/menus/buttons (default True)
         scope      (str)  — apex to constrain crawl (default: derived from url)
         capture_js (bool) — fetch + mine JS bundles for endpoints (default True)
         timeout_ms (int)  — per-page navigation timeout (default 20000)
         budget_sec (int)  — hard wall-clock for the whole crawl (default 600)
+
+    Crawl policy is functionality-first: enter pages and prioritize auth, forms,
+    products/demos, APIs, and nav over static assets / deep marketing trees.
 
     Authenticated / normal-user session (all optional):
         cookies       (list[dict]) — Playwright cookie objects
@@ -581,6 +655,11 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
         seed = f"https://{seed}"
 
     max_pages = min(int(opts.get("max_pages", DEFAULT_MAX_PAGES) or DEFAULT_MAX_PAGES), HARD_MAX_PAGES)
+    try:
+        max_depth = int(opts.get("depth", DEFAULT_DEPTH) or DEFAULT_DEPTH)
+    except (TypeError, ValueError):
+        max_depth = DEFAULT_DEPTH
+    max_depth = max(1, min(max_depth, HARD_MAX_DEPTH))
     interact = bool(opts.get("interact", True))
     capture_js = bool(opts.get("capture_js", True))
     timeout_ms = int(opts.get("timeout_ms", PAGE_TIMEOUT_MS) or PAGE_TIMEOUT_MS)
@@ -702,8 +781,9 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                     authed = await _perform_login(page, login, timeout_ms, result)
                     result.authenticated = authed
 
-                # BFS over in-scope links, seeded from the target.
-                queue: List[str] = [seed]
+                # Functionality-first crawl: hop depth + priority queue (auth/forms/
+                # products/APIs before static marketing spam). Seed = depth 0.
+                queue: List[tuple] = [(-_functionality_score(seed), 0, seed)]
                 seen: Set[str] = set()
 
                 while queue and len(result.pages_visited) < max_pages:
@@ -717,7 +797,7 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                         )
                         break
 
-                    url = queue.pop(0)
+                    _score, depth, url = queue.pop(0)
                     norm = url.split("#")[0]
                     if norm in seen:
                         continue
@@ -733,16 +813,20 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                         continue
 
                     result.pages_visited.append(page.url)
+                    page_score = _functionality_score(page.url)
 
                     try:
                         await _emit_crawl_progress(
-                            f"deep_crawl: page {len(result.pages_visited)}/{max_pages} — {page.url[:160]}"
+                            f"deep_crawl: page {len(result.pages_visited)}/{max_pages} "
+                            f"depth={depth}/{max_depth} score={page_score} — {page.url[:140]}"
                         )
                     except Exception:
                         pass
 
+                    # High-value pages get more safe clicks (understand functionality).
+                    click_budget = DEFAULT_MAX_CLICKS + (8 if page_score >= 40 else 0)
                     try:
-                        await _drive_page(page, interact)
+                        await _drive_page(page, interact, max_clicks=click_budget)
                     except Exception as e:
                         result.errors.append(f"interact {url[:80]}: {str(e)[:120]}")
 
@@ -760,12 +844,14 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                                 f = dict(f)
                                 f.setdefault("page", page.url)
                                 result.forms.append(f)
+                        child_depth = depth + 1
                         for link in links:
                             absu = urljoin(page.url, link).split("#")[0]
                             h = urlparse(absu).netloc
-                            if absu.startswith("http") and _in_scope(h, scope_apex) and absu not in seen:
-                                if absu not in queue and len(queue) < HARD_MAX_PAGES * 4:
-                                    queue.append(absu)
+                            if absu.startswith("http") and _in_scope(h, scope_apex):
+                                _enqueue_func(
+                                    queue, seen, absu, child_depth, max_depth, HARD_MAX_PAGES * 4
+                                )
                     except Exception as e:
                         result.errors.append(f"harvest {url[:80]}: {str(e)[:120]}")
 
@@ -994,7 +1080,7 @@ async def _perform_login(page, login: Dict[str, Any], timeout_ms: int, result: "
     return ok
 
 
-async def _drive_page(page, interact: bool) -> None:
+async def _drive_page(page, interact: bool, max_clicks: Optional[int] = None) -> None:
     """Scroll to trigger lazy loads, expand disclosures, click safe controls."""
     # Move the mouse to a couple of plausible spots first — some anti-bot scripts
     # only "arm" content after they observe pointer movement.
@@ -1033,17 +1119,18 @@ async def _drive_page(page, interact: bool) -> None:
     # non-destructive buttons) to surface SPA views without mutating state.
     try:
         handles = await page.query_selector_all(
-            "[role=tab], [role=menuitem], button, [role=button], nav a"
+            "[role=tab], [role=menuitem], button, [role=button], nav a, "
+            "a[href*='login'], a[href*='demo'], a[href*='product'], a[href*='contact']"
         )
     except Exception:
         handles = []
 
     # Tester methodology: click as many safe interactive controls as we can
     # afford so SPA routes/lazy bundles surface before attack planning.
-    max_clicks = DEFAULT_MAX_CLICKS
+    click_limit = max_clicks if max_clicks is not None else DEFAULT_MAX_CLICKS
     clicked = 0
-    for h in handles[:80]:
-        if clicked >= max_clicks:
+    for h in handles[:100]:
+        if clicked >= click_limit:
             break
         try:
             if not await h.is_visible():
