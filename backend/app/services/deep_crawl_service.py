@@ -61,6 +61,26 @@ from urllib.parse import urljoin, urlparse
 
 logger = logging.getLogger(__name__)
 
+
+async def _emit_crawl_progress(thought: str) -> None:
+    """Push a thinking heartbeat so the agent UI does not idle-timeout mid-crawl."""
+    try:
+        from app.services.agent.orchestrator import _status_callback_var
+
+        cb = _status_callback_var.get(None)
+        if not cb:
+            return
+        msg = {
+            "type": "thinking",
+            "phase": "informational",
+            "thought": thought[:500],
+        }
+        maybe = cb(msg)
+        if asyncio.iscoroutine(maybe):
+            await maybe
+    except Exception:
+        pass
+
 # Common launch flags — safe under both root (scanner, user 0:0) and non-root
 # (backend appuser) containers.
 _LAUNCH_ARGS = [
@@ -690,6 +710,13 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                         continue
 
                     result.pages_visited.append(page.url)
+
+                    try:
+                        await _emit_crawl_progress(
+                            f"deep_crawl: page {len(result.pages_visited)}/{max_pages} — {page.url[:160]}"
+                        )
+                    except Exception:
+                        pass
 
                     try:
                         await _drive_page(page, interact)

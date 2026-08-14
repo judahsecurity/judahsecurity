@@ -708,6 +708,7 @@ export default function AgentPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const lastAgentActivityRef = useRef<number>(Date.now());
   const toolInFlightRef = useRef(false);
+  const liveStepsRef = useRef<StatusUpdate[]>([]);
 
   // ── Oracle state ─────────────────────────────────────────────────
   const [findings, setFindings] = useState<OracleFinding[]>([]);
@@ -738,6 +739,18 @@ export default function AgentPage() {
 
   const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   useEffect(() => { scrollToBottom(); }, [messages, liveSteps]);
+  useEffect(() => { liveStepsRef.current = liveSteps; }, [liveSteps]);
+
+  const hasInFlightTool = () => {
+    if (toolInFlightRef.current) return true;
+    const steps = liveStepsRef.current;
+    for (let i = steps.length - 1; i >= 0; i--) {
+      const t = steps[i]?.type;
+      if (t === 'tool_complete') return false;
+      if (t === 'tool_start') return true;
+    }
+    return false;
+  };
 
   // ── Agent status + playbooks + conversations ───────────────────
   useEffect(() => {
@@ -878,11 +891,11 @@ export default function AgentPage() {
   }, []);
 
   const loadingTimeoutRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // Idle with no WS progress. While a tool is in-flight (e.g. deep_crawl),
-  // do not fire — only complain after silence once the tool finishes streaming
-  // or after a hard ceiling.
-  const AGENT_IDLE_TIMEOUT_MS = 15 * 60_000;
-  const AGENT_HARD_TIMEOUT_MS = 45 * 60_000;
+  // While a tool is in-flight (deep_crawl / nuclei / interceptor), only apply a
+  // hard wall-clock ceiling — never idle-timeout mid-tool. Idle applies only
+  // when there is no running tool_start in the live step stream.
+  const AGENT_IDLE_TIMEOUT_MS = 20 * 60_000;
+  const AGENT_HARD_TIMEOUT_MS = 90 * 60_000;
 
   useEffect(() => {
     // Don't timeout while waiting on operator tool confirmation / phase approval.
@@ -891,20 +904,34 @@ export default function AgentPage() {
       const startedAt = Date.now();
       loadingTimeoutRef.current = setInterval(() => {
         const now = Date.now();
-        if (toolInFlightRef.current && now - startedAt < AGENT_HARD_TIMEOUT_MS) {
-          // Long-running tool still active — keep waiting.
+        const inFlight = hasInFlightTool();
+        if (inFlight) {
+          toolInFlightRef.current = true;
+          // Long-running tool still active — keep waiting until hard ceiling.
+          if (now - startedAt < AGENT_HARD_TIMEOUT_MS) return;
+          setLoading(false); setLiveSteps([]);
+          toolInFlightRef.current = false;
+          toast({
+            variant: 'destructive',
+            title: 'Timeout',
+            description: 'Agent tool still running after 90 minutes — check backend logs.',
+          });
+          appendAgentMessage({
+            answer: 'Error: Agent tool exceeded 90-minute hard limit. The backend may still be working — check logs before retrying.',
+          });
           return;
         }
         if (now - lastAgentActivityRef.current < AGENT_IDLE_TIMEOUT_MS) return;
+        if (now - startedAt < AGENT_IDLE_TIMEOUT_MS) return;
         setLoading(false); setLiveSteps([]);
         toolInFlightRef.current = false;
         toast({
           variant: 'destructive',
           title: 'Timeout',
-          description: 'No agent activity for 15 minutes. The run may still be going — check logs or retry.',
+          description: 'No agent activity for 20 minutes with no running tool.',
         });
         appendAgentMessage({
-          answer: 'Error: No agent activity for 15 minutes. Long tools (deep crawl, nuclei) can take a while — if the status still shows a running tool, wait or check backend logs.',
+          answer: 'Error: No agent activity for 20 minutes. If a tool was supposed to be running, check backend logs — the UI may have lost the tool_start event.',
         });
       }, 15_000);
     } else if (loadingTimeoutRef.current) {
