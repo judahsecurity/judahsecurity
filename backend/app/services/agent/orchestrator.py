@@ -1025,6 +1025,10 @@ class AgentOrchestrator:
         ):
             tool_args = self._inject_auth_session(tool_name, tool_args, auth_sess)
 
+        # Remote Interceptor workers need session_id / org on the crawl job.
+        if tool_name == "execute_interceptor":
+            tool_args = self._inject_interceptor_job_context(tool_args, state)
+
         if tool_name == "replay_http_request" and state.get("capability_map"):
             # Convenience: if only an index is provided, pull from api_samples
             samples = (state.get("capability_map") or {}).get("api_samples") or []
@@ -1052,7 +1056,7 @@ class AgentOrchestrator:
         if tool_name in spray_tools and not map_ready and not force:
             step_data["tool_output"] = (
                 f"Blocked: '{tool_name}' before application capability map. "
-                "Walk the app like a tester first with execute_deep_crawl on the primary URL, "
+                "Walk the app like a tester first with execute_interceptor (or execute_deep_crawl) on the primary URL, "
                 "then sync_engagement_brain + fireteam_dispatch(specialists='auto'), then resume scanning. "
                 "Pass force=true only for intentionally non-browser targets."
             )
@@ -1378,6 +1382,38 @@ class AgentOrchestrator:
             args["storage_state"] = storage
         elif cookies and "cookies" not in args and "login" not in args:
             args["cookies"] = cookies
+        return args
+
+    @staticmethod
+    def _inject_interceptor_job_context(
+        tool_args: Dict[str, Any],
+        state: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Attach session_id / organization_id so remote workers can push live map updates."""
+        args = dict(tool_args or {})
+        session_id = state.get("session_id")
+        org_id = state.get("organization_id")
+        patch: Dict[str, Any] = {}
+        if session_id:
+            patch["session_id"] = session_id
+        if org_id is not None:
+            patch["organization_id"] = org_id
+        if not patch:
+            return args
+
+        if "args" in args and isinstance(args.get("args"), str):
+            raw = args["args"].strip()
+            try:
+                parsed = json.loads(raw) if raw.startswith("{") else {"url": raw}
+            except Exception:
+                parsed = {"url": raw}
+            for k, v in patch.items():
+                parsed.setdefault(k, v)
+            args["args"] = json.dumps(parsed)
+            return args
+
+        for k, v in patch.items():
+            args.setdefault(k, v)
         return args
     
     async def _await_approval_node(self, state: AgentState, config=None) -> dict:

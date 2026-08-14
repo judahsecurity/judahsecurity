@@ -74,6 +74,8 @@ SAFE_RECON_TOOLS = {
     "execute_crt_name",
     "execute_subfinder",
     "execute_subfaster",
+    "execute_deep_crawl",
+    "execute_interceptor",
     "httpx_help",
     "dnsx_help",
 }

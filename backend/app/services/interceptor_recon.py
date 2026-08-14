@@ -24,10 +24,14 @@ Two ways to use it:
    (optionally) POSTs the result back to the ASM harness (the "bridge") so the
    in-app agent's knowledge benefits from your authenticated crawl.
 
-2. From inside the harness via ``interceptor_service.run_interceptor`` — used only
-   when the ``interceptor`` binary is reachable on the host. On a headless Linux
-   server it usually is not, and the service falls back to the Playwright
-   ``deep_crawl`` engine instead.
+2. From inside the harness via ``interceptor_service.run_interceptor`` — prefers
+   online Mac/Ubuntu workers (job queue), then local ``interceptor`` binary, then
+   Playwright deep_crawl.
+
+3. Always-on worker poller on Mac or Ubuntu::
+
+       python -m app.services.interceptor_worker --kind mac
+       # or: ./scripts/run_interceptor_worker.sh ubuntu ubuntu-ec2-1
 
 IMPORTANT — output-format tolerance
 -----------------------------------

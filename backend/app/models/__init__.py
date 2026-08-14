@@ -24,6 +24,7 @@ from app.models.agent_note import AgentNote
 from app.models.agent_knowledge import AgentKnowledge
 from app.models.agent_palace import AgentPalaceDrawer
 from app.models.agent_conversation import AgentConversation
+from app.models.recon_job import ReconJob, ReconWorkerHeartbeat
 from app.models.project_settings import (
     ProjectSettings,
     ALL_MODULES,
@@ -105,6 +106,8 @@ __all__ = [
     "AgentKnowledge",
     "AgentPalaceDrawer",
     "AgentConversation",
+    "ReconJob",
+    "ReconWorkerHeartbeat",
     "ProjectSettings",
     "ALL_MODULES",
     "get_default_config",

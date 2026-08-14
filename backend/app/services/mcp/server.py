@@ -1321,22 +1321,15 @@ class MCPServer:
             handler=self._execute_deep_crawl,
         ))
 
-        # Interceptor - wrapper around the real Hacker-Valley-Media/Interceptor CLI
+        # Interceptor - Mac/Ubuntu workers first, then local CLI, then deep_crawl
         self.registry.register(MCPTool(
             name="execute_interceptor",
             description=(
-                "Interaction-first web recon. Prefers the REAL Hacker-Valley-Media/Interceptor "
-                "browser session when its CLI is reachable on this host (an operator desktop with "
-                "the extension loaded): it drives your ACTUAL logged-in Chrome/Brave with real "
-                "cookies and non-CDP synthetic input to reach authenticated / anti-automation-"
-                "protected surface headless crawlers can't. NOTE: the real Interceptor has no "
-                "crawler command — the crawl loop is built on top of its verbs by our driver "
-                "(interceptor_recon). Interceptor needs a real browser + extension and does NOT "
-                "run in a headless container, so on a Linux server the binary is absent and this "
-                "tool transparently FALLS BACK to the deep_crawl engine (expected, not an error). "
-                "For authenticated recon from the server, use execute_deep_crawl with a session. "
-                "Pass a bare URL or a JSON object (url, max_pages, scope, and — for the deep_crawl "
-                "fallback — cookies/storage_state/headers/basic_auth)."
+                "Preferred interaction-first web recon. Preference: online Mac Interceptor "
+                "worker → Ubuntu Interceptor worker → local interceptor CLI → Playwright "
+                "deep_crawl fallback. Real Interceptor drives Chrome/Brave with the "
+                "Hacker-Valley extension (non-CDP). Builds Application Capability Map. "
+                "Pass a bare URL or JSON (url, max_pages, scope, prefer, login, cookies…)."
             ),
             tool_type=ToolType.SCAN,
             parameters={
@@ -1345,7 +1338,7 @@ class MCPServer:
                     "description": (
                         "Bare URL (e.g. \"https://target.com\") or a JSON object "
                         "(e.g. '{\"url\": \"https://app.target.com\", \"max_pages\": 20, "
-                        "\"scope\": \"target.com\"}')."
+                        "\"prefer\": [\"mac\", \"ubuntu\"]}')."
                     )
                 }
             },
@@ -1787,7 +1780,7 @@ class MCPServer:
         return await self._run_command(cmd, timeout=60)
     
     async def _httpx_help(self) -> Dict[str, Any]:
-        return await self._run_command(["httpx", "-h"], timeout=MCP_HELP_TIMEOUT)
+        return await self._run_command([self._projectdiscovery_httpx_bin(), "-h"], timeout=MCP_HELP_TIMEOUT)
     
     async def _subfinder_help(self) -> Dict[str, Any]:
         return await self._run_command(["subfinder", "-h"], timeout=MCP_HELP_TIMEOUT)

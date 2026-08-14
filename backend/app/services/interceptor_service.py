@@ -1,34 +1,25 @@
 """
 Interceptor Service — harness entrypoint for the `execute_interceptor` tool.
 
-The real Hacker-Valley-Media/Interceptor CLI is an *agent-driven browser
-controller* (verbs: open/read/act/net log/...). It has **no built-in crawler**,
-and it only runs where a real Chrome/Brave + the loaded Interceptor extension
-exist — i.e. an operator's desktop, **not** a headless Linux/Ubuntu server.
-
-So this service does the environment-correct thing:
-
-    * If the `interceptor` binary is reachable on this host (operator desktop, or
-      a workstation running the agent), it drives the REAL Interceptor through the
-      interaction-first crawl in ``interceptor_recon`` — real cookies, real
-      logged-in session, non-CDP synthetic input that beats anti-automation.
-
-    * Otherwise (the common case for the containerised harness on Linux), it
-      transparently falls back to the Playwright ``deep_crawl`` engine, which is
-      hardened to crawl "like a normal user" and runs anywhere the images do.
-
-Either way the agent gets an interaction-first recon result in one envelope.
+Preference order:
+  1. Online Mac Interceptor worker (job queue)
+  2. Online Ubuntu Interceptor worker (job queue)
+  3. Local ``interceptor`` CLI on this host (desktop / GUI worker colocated)
+  4. Playwright ``deep_crawl`` fallback
 
 Config (env):
-    INTERCEPTOR_BIN          — path to the interceptor binary (default: PATH lookup)
-    INTERCEPTOR_CMD_TIMEOUT  — per-verb timeout seconds (default: 45)
+    INTERCEPTOR_BIN                      — path to local interceptor binary
+    INTERCEPTOR_CMD_TIMEOUT              — per-verb timeout seconds (default: 45)
+    INTERCEPTOR_PREFER_REMOTE_WORKERS    — default true
+    RECON_JOB_TIMEOUT_SEC                — wait for remote workers (default 900)
 """
 
 from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict
+import os
+from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -45,15 +36,21 @@ def _parse_args(args: Any) -> Dict[str, Any]:
             return json.loads(s)
         except (json.JSONDecodeError, TypeError):
             return {"url": s}
-    # Bare URL / host, possibly with trailing flags we ignore for the driver.
     return {"url": s.split()[0]}
+
+
+def _session_id_from_opts(opts: Dict[str, Any]) -> Optional[str]:
+    return (
+        str(opts.get("session_id") or opts.get("agent_session_id") or "").strip()
+        or None
+    )
 
 
 async def run_interceptor(args: Any) -> Dict[str, Any]:
     """
-    Run interaction-first recon: real Interceptor when reachable, else deep_crawl.
+    Run interaction-first recon via remote workers, local Interceptor, or deep_crawl.
 
-    Returns the ASM tool envelope: {success, output, error, exit_code}.
+    Returns the ASM tool envelope: {success, output, error, exit_code, capability_map?}.
     """
     opts = _parse_args(args)
     url = str(opts.get("url") or opts.get("target") or "").strip()
@@ -65,7 +62,120 @@ async def run_interceptor(args: Any) -> Dict[str, Any]:
             "exit_code": 1,
         }
 
-    # Try the real Interceptor first (only succeeds where a browser + extension live).
+    prefer_remote = os.environ.get("INTERCEPTOR_PREFER_REMOTE_WORKERS", "true").lower() not in (
+        "0", "false", "no",
+    )
+    # Allow per-call override: {"prefer_remote": false} or {"prefer": ["ubuntu"]}
+    if "prefer_remote" in opts:
+        prefer_remote = bool(opts.get("prefer_remote"))
+
+    reasons: list[str] = []
+
+    if prefer_remote:
+        remote = await _try_remote_workers(url, opts)
+        if remote is not None:
+            return remote
+        reasons.append("No Mac/Ubuntu Interceptor workers completed the job (offline or timeout).")
+
+    local = await _try_local_interceptor(url, opts)
+    if local is not None:
+        return local
+    reasons.append(
+        "Local Interceptor CLI not reachable (needs Chrome/Brave + extension on this host)."
+    )
+
+    reason = " ".join(reasons) + " Falling back to deep_crawl."
+    return await _fallback(opts, reason)
+
+
+async def _try_remote_workers(url: str, opts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    try:
+        from app.services import recon_jobs_service as jobs
+    except Exception as e:
+        logger.warning("recon_jobs_service unavailable: %s", e)
+        return None
+
+    online = jobs.online_kinds()
+    prefer = opts.get("prefer") or jobs.DEFAULT_PREFER
+    if isinstance(prefer, str):
+        prefer = [p.strip() for p in prefer.split(",") if p.strip()]
+    prefer = [p for p in prefer if p in jobs.WORKER_KINDS]
+    if not prefer:
+        prefer = list(jobs.DEFAULT_PREFER)
+
+    # Only enqueue if at least one preferred kind is online (avoid waiting on empty queue).
+    if not any(p in online for p in prefer):
+        logger.info("No Interceptor workers online for prefer=%s", prefer)
+        return None
+
+    session_id = _session_id_from_opts(opts)
+    org_id = opts.get("organization_id") or opts.get("org_id")
+    try:
+        org_id = int(org_id) if org_id is not None else None
+    except (TypeError, ValueError):
+        org_id = None
+
+    crawl_opts = {
+        k: v for k, v in opts.items()
+        if k not in (
+            "url", "target", "prefer", "prefer_remote", "session_id",
+            "agent_session_id", "organization_id", "org_id",
+        )
+    }
+    view = jobs.create_job(
+        url=url,
+        organization_id=org_id,
+        session_id=session_id,
+        scope=opts.get("scope"),
+        max_pages=int(opts.get("max_pages") or 20),
+        interact=bool(opts.get("interact", True)),
+        prefer=prefer,
+        opts=crawl_opts,
+    )
+    await jobs.notify_session_ws(session_id, {
+        "type": "thinking",
+        "content": (
+            f"Queued Interceptor crawl job {view.id[:8]}… "
+            f"(prefer={prefer}, online={online})"
+        ),
+    })
+
+    timeout = float(os.environ.get("RECON_JOB_TIMEOUT_SEC", "900"))
+
+    async def _progress(v):
+        await jobs.notify_session_ws(session_id, {
+            "type": "thinking",
+            "content": f"Interceptor job {v.id[:8]} status={v.status} worker={v.worker_kind or '-'}",
+        })
+
+    try:
+        done = await jobs.wait_for_job(view.id, timeout_sec=timeout, on_progress=_progress)
+    except TimeoutError:
+        return None
+    except Exception as e:
+        logger.warning("wait_for_job failed: %s", e)
+        return None
+
+    if done.status != "completed" or not isinstance(done.result, dict):
+        return None
+    result = dict(done.result)
+    if not result.get("capability_map") and result.get("normalized"):
+        result = jobs.envelope_from_normalized(
+            result["normalized"],
+            auth_session=result.get("auth_session"),
+            note=f"Completed by {done.worker_kind} worker {done.worker_id}",
+        )
+    result.setdefault("success", True)
+    note = (
+        f"[NOTE] Completed via {done.worker_kind} Interceptor worker "
+        f"({done.worker_id}).\n\n"
+    )
+    result["output"] = note + (result.get("output") or "")
+    await jobs.push_map_updates(session_id, result)
+    return result
+
+
+async def _try_local_interceptor(url: str, opts: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     try:
         from app.services.interceptor_recon import (
             resolve_bin,
@@ -73,35 +183,27 @@ async def run_interceptor(args: Any) -> Dict[str, Any]:
             format_output,
             to_normalized_dict,
         )
-
-        if resolve_bin():
-            result = await run_recon(url, opts)
-            if result.pages_visited:
-                return {
-                    "success": True,
-                    "output": format_output(result),
-                    "error": "; ".join(result.errors[:3]) or None,
-                    "exit_code": 0,
-                    "normalized": to_normalized_dict(result),
-                }
-            reason = (
-                "Interceptor binary is present but produced no pages "
-                f"({'; '.join(result.errors[:2]) or 'daemon/extension not reachable'}). "
-                "Falling back to deep_crawl."
-            )
-        else:
-            reason = (
-                "The real Interceptor CLI is not installed/reachable on this host "
-                "(it needs a real Chrome/Brave + loaded extension and does not run in a "
-                "headless container). Falling back to the deep_crawl engine — this is "
-                "expected on a Linux server. To use the real tool, run the standalone "
-                "driver on your desktop: python -m app.services.interceptor_recon <url>."
-            )
-    except Exception as e:  # pragma: no cover - defensive
+        from app.services.recon_envelope import envelope_from_normalized
+    except Exception as e:
         logger.warning("interceptor_recon unavailable: %s", e)
-        reason = f"Interceptor driver error ({e}); falling back to deep_crawl."
+        return None
 
-    return await _fallback(opts, reason)
+    if not resolve_bin():
+        return None
+
+    result = await run_recon(url, opts)
+    if not result.pages_visited:
+        return None
+
+    normalized = to_normalized_dict(result)
+    envelope = envelope_from_normalized(normalized)
+    envelope["output"] = format_output(result) + "\n\n" + (envelope.get("output") or "")
+    try:
+        from app.services import recon_jobs_service as jobs
+        await jobs.push_map_updates(_session_id_from_opts(opts), envelope)
+    except Exception:
+        pass
+    return envelope
 
 
 async def _fallback(opts: Dict[str, Any], reason: str) -> Dict[str, Any]:
@@ -116,8 +218,6 @@ async def _fallback(opts: Dict[str, Any], reason: str) -> Dict[str, Any]:
             "exit_code": -1,
         }
 
-    # Pass the URL plus any authenticated-session options straight through so the
-    # fallback can also crawl "like a normal user" / logged in.
     result = await run_deep_crawl(opts)
     note = f"[NOTE] {reason}\n\n"
     result["output"] = note + (result.get("output") or "")

@@ -96,6 +96,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_gau",
             "execute_waybackurls",
             "execute_deep_crawl",
+            "execute_interceptor",
             "execute_ffuf",
             "execute_feroxbuster",
             "execute_kiterunner",
@@ -417,6 +418,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         allowed_tools=[
             "execute_browser",
             "execute_deep_crawl",
+            "execute_interceptor",
             "scan_js_urls_for_secrets",
             "execute_retirejs",
             "execute_curl",

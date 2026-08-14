@@ -247,6 +247,15 @@ class Settings(BaseSettings):
     # Comma-separated IPv4/IPv6 addresses or CIDRs, e.g. "203.0.113.10,198.51.100.0/24".
     ASM_SCANNER_EGRESS_IPS: str = ""
     ASM_SCANNER_USER_AGENT: str = "JudahSecurity-ASM-Scanner/1.0"
+
+    # Dual Interceptor workers (Mac desktop + Ubuntu browser host)
+    INTERCEPTOR_BIN: Optional[str] = None
+    INTERCEPTOR_WORKER_TOKEN: Optional[str] = None
+    INTERCEPTOR_WORKER_HEARTBEAT_TTL_SEC: int = 90
+    RECON_JOB_TIMEOUT_SEC: int = 900
+    # When True, execute_interceptor creates a remote job if any worker is online
+    # before trying local CLI / deep_crawl.
+    INTERCEPTOR_PREFER_REMOTE_WORKERS: bool = True
     
     class Config:
         env_file = ".env"
