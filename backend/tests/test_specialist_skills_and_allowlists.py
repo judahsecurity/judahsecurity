@@ -116,3 +116,89 @@ def test_fireteam_injects_skill_pack_helper():
     assert "OperationDirective" in src or "directive" in src
     assert "finding_judge" in src
     assert "credential_assault" in src
+
+
+def test_coverage_skill_pack_mentions_existing_prometheus_proxy():
+    ss = _load_specialist_skills()
+    coverage = ss.skill_pack_for("coverage")
+    assert "admin/settings" in coverage
+    assert "prometheus" in coverage.lower()
+    assault = ss.skill_pack_for("credential_assault")
+    assert "prom-operator" in assault
+    assert "couchdb" in assault.lower()
+    judge = ss.skill_pack_for("finding_judge")
+    assert "foothold" in judge.lower() or "privileged" in judge.lower()
+    assert "elasticsearch" in judge.lower() or "9200" in judge
+    assert "authsession" in coverage.lower() or "_config" in coverage
+    assert "aegis_test_index" in coverage
+    assert "elasticsearch" in coverage.lower()
+    assert "painless" in coverage.lower()
+    assert "9264" in coverage
+    assert "duckdb" in coverage.lower()
+    fireteam_src = (_AGENT_DIR / "fireteam_service.py").read_text()
+    assert "CVE-2024-9264" in fireteam_src
+    assert "no such file or directory" in fireteam_src
+    assert "do not install DuckDB" in fireteam_src
+    judge = ss.skill_pack_for("finding_judge")
+    assert "9264" in judge
+    assert "duckdb" in judge.lower()
+    assert "azurewebsites" in coverage.lower() or "tester" in coverage.lower()
+    assert "azure_function_env_dump" in coverage
+    judge = ss.skill_pack_for("finding_judge")
+    assert "cosmos" in judge.lower() or "env dump" in judge.lower()
+    cloud = ss.skill_pack_for("cloud_audit")
+    assert "key vault" in cloud.lower() or "function" in cloud.lower()
+    js = ss.skill_pack_for("js_secrets")
+    assert "client_secret" in js
+    assert "hostname-keyed" in js or "_next/static" in js
+    assert "emailjs" in js.lower()
+    assert "binary" in js.lower() or "firmware" in js.lower()
+    auth = ss.skill_pack_for("auth_logic")
+    assert "wiki" in auth.lower()
+    assert "elogbook" in auth.lower() or "client-side" in auth.lower()
+    assault = ss.skill_pack_for("credential_assault")
+    assert "arangodb" in assault.lower()
+    assert "emqx" in assault.lower()
+    coverage = ss.skill_pack_for("coverage")
+    assert "arangodb" in coverage.lower()
+    assert "auth0" in coverage.lower()
+    judge = ss.skill_pack_for("finding_judge")
+    assert "wiki" in judge.lower()
+    assert "binary" in judge.lower() or "strings" in judge.lower()
+    api = ss.skill_pack_for("api_authz")
+    assert "readOnly" in api or "readonly" in api.lower()
+    assert "mass_assignment" in api or "mass assignment" in api.lower()
+    assert "database" in api.lower() or "db is down" in api.lower()
+    judge = ss.skill_pack_for("finding_judge")
+    assert "mass assignment" in judge.lower() or "readonly" in judge.lower()
+    api = ss.skill_pack_for("api_authz")
+    assert "weborigins" in api.lower() or "keycloak" in api.lower()
+    assert "canary" in api.lower() or "never-seen" in api.lower()
+    sso = ss.skill_pack_for("saml_sso")
+    assert "weborigins" in sso.lower() or "keycloak" in sso.lower()
+    judge = ss.skill_pack_for("finding_judge")
+    assert "cors" in judge.lower()
+    assert "keycloak" in judge.lower() or "acao" in judge.lower()
+    assault = ss.skill_pack_for("credential_assault")
+    assert "admin-cli" in assault.lower()
+    assert "invalid_grant" in assault.lower() or "password grant" in assault.lower()
+    judge = ss.skill_pack_for("finding_judge")
+    assert "admin-cli" in judge.lower() or "password grant" in judge.lower()
+    api = ss.skill_pack_for("api_authz")
+    assert "/api/auth/account" in api or "unauth_account_lookup" in api
+    assert "401" in api and "500" in api
+    assert "aegis-enum-canary@example.invalid" in api or "do not spray" in api.lower()
+    judge = ss.skill_pack_for("finding_judge")
+    assert "account lookup" in judge.lower() or "/api/auth/account" in judge
+    assert "401" in judge and "500" in judge
+
+
+def test_js_secrets_allowlist_can_prove_live_api():
+    allowlists = _specialist_allowlists_from_ast()
+    tools = allowlists["js_secrets"]
+    assert "execute_curl" in tools
+    assert "execute_browser" in tools
+    assert "execute_interactsh" in tools
+    assert "queue_finding_followups" in tools
+    assert "validate_finding" in tools
+    assert "add_engagement_credential" in tools

@@ -7,6 +7,7 @@ Tools for the AI agent to interact with the ASM platform.
 import json
 import logging
 import re as _re
+from collections import deque
 from typing import List, Optional, Dict, Any
 from contextvars import ContextVar
 from sqlalchemy.orm import Session
@@ -280,6 +281,8 @@ class ASMToolsManager:
         self._mcp_server = None
         # Solomon judge receipts: validate_finding SUBMIT → create_finding gate
         self._finding_receipts: Dict[str, Dict[str, Any]] = {}
+        # Live tool traces for Praetorian-style demonstrated chains
+        self._recent_invocations: deque = deque(maxlen=48)
     
     def _get_mcp_server(self):
         """Lazy load MCP server."""
@@ -461,9 +464,37 @@ class ASMToolsManager:
         """Get all registered tools."""
         return self.tools
     
+    def record_invocation(
+        self,
+        tool_name: str,
+        tool_args: Optional[Dict[str, Any]],
+        result: Optional[Dict[str, Any]],
+    ) -> None:
+        """Keep a ring buffer of live tool calls for demonstrated-chain attach."""
+        try:
+            from app.services.agent.demonstrated_chain import should_record_tool
+
+            if not should_record_tool(tool_name):
+                return
+            result = result or {}
+            output = result.get("output")
+            if output is not None and not isinstance(output, str):
+                output = str(output)
+            self._recent_invocations.append({
+                "tool": tool_name,
+                "args": (tool_args or {}).get("args", tool_args),
+                "output": output or "",
+                "error": result.get("error") or "",
+                "exit_code": result.get("exit_code"),
+                "success": bool(result.get("success")),
+            })
+        except Exception:
+            logger.debug("record_invocation skipped", exc_info=True)
+
     async def execute(self, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool with the given arguments."""
         result = await self._execute_impl(tool_name, tool_args)
+        self.record_invocation(tool_name, tool_args, result)
         try:
             from app.services.agent.palace_memory import remember_tool_result
             remember_tool_result(tool_name, tool_args, result)
@@ -567,6 +598,8 @@ class ASMToolsManager:
                         "output": output or "Command completed.",
                         "error": None,
                     }
+                    if result.get("exit_code") is not None:
+                        payload["exit_code"] = result.get("exit_code")
                     if augur_block:
                         payload["augur"] = augur_block
                     if capability_map:
@@ -590,11 +623,14 @@ class ASMToolsManager:
                     combined = f"Error: {err}{hint}"
                     if out and out.strip():
                         combined += f"\nStdout:\n{out[:err_max]}" + ("\n... (truncated)" if len(out) > err_max else "")
-                    return {
+                    fail_payload = {
                         "success": False,
                         "output": combined,
-                        "error": err
+                        "error": err,
                     }
+                    if result.get("exit_code") is not None:
+                        fail_payload["exit_code"] = result.get("exit_code")
+                    return fail_payload
             except Exception as e:
                 logger.error(f"MCP tool execution failed: {tool_name} - {e}")
                 err_txt = str(e)
@@ -1902,9 +1938,26 @@ class ASMToolsManager:
         proof_of_concept: Optional[str] = None,
         affected_component: Optional[str] = None,
         impact: Optional[str] = None,
+        demonstrated_chain: Optional[str] = None,
+        not_demonstrated: Optional[str] = None,
+        context: Optional[str] = None,
+        references: Optional[str] = None,
         **kwargs: Any,
     ) -> str:
-        """Create a vulnerability/finding in the findings table for the current organization. Use this so discoveries appear in the UI findings list. target = hostname, domain, or URL that must match an existing asset's value (use query_assets to find). severity = critical|high|medium|low|info. Medium+ requires prior validate_finding SUBMIT (Solomon judge gate). Include steps_to_reproduce and evidence so later revalidation can replay the detection."""
+        """Create a vulnerability/finding in the platform findings table.
+
+        Medium+ requires prior validate_finding SUBMIT (Solomon judge gate).
+        Write demonstrated-compromise reports, not scanner hits. Map onto these fields:
+        - description: how access was obtained (product/version, credential or pattern, how it was found, rate-limit/lockout notes)
+        - impact: what was retrieved (database counts, PII, hashes, topology, config) — not merely 'login succeeded'
+        - target: full URL of the affected asset (scheme + host + port)
+        - remediation: immediate credential rotation, access controls, password policy, follow-up resets
+        - references: vendor hardening docs and OWASP/CWE URLs
+        - demonstrated_chain: JSON array of proof steps [{summary, outcome, tool, args, result}]
+        - not_demonstrated: what was NOT attempted (hash cracking, data modification, lateral movement)
+        Default/weak login alone is not a finding until privileged impact is proven.
+        If demonstrated_chain is omitted, the last live execute_* calls against this target are attached.
+        """
         from app.services.agent.finding_gate import consume_or_check_receipt
 
         _, org_id = get_tenant_context()
@@ -1945,6 +1998,25 @@ class ASMToolsManager:
             poc = proof_of_concept or kwargs.get("proof_of_concept") or kwargs.get("poc")
             component = affected_component or kwargs.get("affected_component")
             impact_text = impact or kwargs.get("impact")
+            chain_raw = demonstrated_chain or kwargs.get("demonstrated_chain")
+            not_demo = not_demonstrated or kwargs.get("not_demonstrated")
+            context_text = context or kwargs.get("context")
+            refs_raw = references or kwargs.get("references")
+            from app.services.agent.demonstrated_chain import (
+                build_agent_detection,
+                parse_references,
+            )
+            agent_detection = build_agent_detection(
+                chain=chain_raw,
+                invocations=list(getattr(self, "_recent_invocations", [])),
+                target=target_clean or target,
+                context=context_text,
+                not_demonstrated=not_demo,
+                references=refs_raw,
+                assets=target,
+                session_id=current_session_id.get(),
+            )
+            parsed_refs = parse_references(refs_raw)
             vuln = Vulnerability(
                 title=(title or "Agent finding")[:500],
                 description=(description or "")[:10000] if description else None,
@@ -1958,13 +2030,17 @@ class ASMToolsManager:
                 proof_of_concept=(str(poc)[:10000] if poc else None),
                 affected_component=(str(component)[:1000] if component else None),
                 impact=(str(impact_text)[:5000] if impact_text else None),
+                references=parsed_refs or None,
+                metadata_={"agent_detection": agent_detection},
             )
             db.add(vuln)
             db.commit()
             db.refresh(vuln)
+            chain_n = (agent_detection or {}).get("step_count") or 0
             msg = (
                 f"Finding created: id={vuln.id}, title={vuln.title[:60]}..., "
                 f"severity={vuln.severity.value}, asset={asset.value}"
+                f"{f', demonstrated_chain={chain_n} steps' if chain_n else ''}"
             )
             # CVE→CWE loop-back into engagement brain methodologies
             if vuln.cve_id:
@@ -2742,6 +2818,16 @@ class ASMToolsManager:
             {"vuln": "Privilege Escalation (role = admin)", "severity": "critical", "why": "Mass-assigning the role field promotes any user to admin."},
             {"vuln": "Account Balance / Credits Manipulation", "severity": "critical", "why": "Assigning balance/credits field bypasses payment logic."},
             {"vuln": "Email Takeover via email field assignment", "severity": "high", "why": "Overwriting email field hijacks the account without a reset flow."},
+            {"vuln": "DRF/OpenAPI writable id/created across CRUD serializers", "severity": "high", "why": "Request schemas without readOnly on id/created enable resource overwrite via ID collision. Schema proof is enough if the DB is down."},
+            {"vuln": "Writable user/owner on group/asset create", "severity": "critical", "why": "Any authenticated user can assign ownership to an arbitrary user (cross-user mass assignment)."},
+            {"vuln": "List endpoints with no tenant isolation", "severity": "critical", "why": "Operation text like 'shared across all users' means every registrant sees the same object hierarchy."},
+            {"vuln": "Writable schedule/periodic_task on monitoring assets", "severity": "high", "why": "Unauthorized task scheduling on ICS/OT monitoring assets. Prove via schema; do not enable production schedules."},
+            {"vuln": "Unauth GET /api/auth/account/?email= (security: {} + role leak)", "severity": "critical", "why": "Same schema often marks account lookup public. 500 vs sibling 401 proves JWT was skipped. One canary email; do not spray."},
+        ],
+        "unauth_account_lookup": [
+            {"vuln": "Schema-documented public account lookup (security: {} + is_staff/role)", "severity": "critical", "why": "OpenAPI marks GET /api/auth/account/ unauthenticated and the UserAccount model returns email, is_active, valid_through, is_staff, role."},
+            {"vuln": "JWT bypass proven by 401 siblings vs 500/200 lookup", "severity": "critical", "why": "Protected /api/auth/profile/ and /users/me/ return 401 without a token. The lookup reaches app code (200 or 500). A down database is not a kill."},
+            {"vuln": "Privilege-targeted credential attacks", "severity": "high", "why": "Enumerating is_staff/role lets an attacker aim password attacks at admin/maintainer accounts. One canary email only — do not spray employee inboxes or dump ICS users."},
         ],
         "business_logic": [
             {"vuln": "Race Condition on Transaction / Balance", "severity": "high", "why": "Concurrent requests exploit TOCTOU in balance/inventory checks."},
@@ -2771,10 +2857,70 @@ class ASMToolsManager:
             {"vuln": "Routing SSRF", "severity": "high", "why": "Host selects upstream → internal service or metadata access."},
         ],
         "default_login": [
-            {"vuln": "Authenticated CVE Exploitation", "severity": "critical", "why": "Default creds unlock post-auth nuclei templates (e.g. Grafana CVE-2024-9264)."},
-            {"vuln": "Grafana Datasource-Proxy SSRF → Internal AKS/K8s", "severity": "critical", "why": "Server Admin can proxy to kubernetes.default.svc / metadata when whitelist is empty."},
+            {"vuln": "Grafana Admin Settings / Service-Account Enum", "severity": "critical", "why": "Server Admin GET /api/admin/settings and /api/serviceaccounts/search disclose pod identity, DB config, and API token inventory."},
+            {"vuln": "Grafana Existing Prometheus Datasource Proxy → Cluster Topology", "severity": "critical", "why": "Relay PromQL via the existing kube-prometheus-stack datasource (/api/datasources/proxy) to enumerate in-cluster exporters and kubelets — no new datasource required."},
+            {"vuln": "CouchDB _config Secret + Admin Salt Exposure", "severity": "critical", "why": "GET /_node/_local/_config returns couch_httpd_auth.secret, timeout, and [admins] salts — the HMAC inputs for AuthSession. Survives password rotation."},
+            {"vuln": "CouchDB AuthSession Cookie Forgery", "severity": "critical", "why": "HMAC-SHA1(secret+admin_salt) forges a valid AuthSession for any server admin without their password; prove via /_session _admin + /_all_dbs."},
+            {"vuln": "Grafana CVE-2024-9264 SQL expressions (Viewer+)", "severity": "critical", "why": "POST /api/ds/query type=sql forks DuckDB. Missing binary still confirms the vulnerable path; sqlExpressions=0 in /metrics does not disable the backend. Patch is 11.2.2+."},
+            {"vuln": "Grafana Datasource-Proxy SSRF → Internal AKS/K8s", "severity": "critical", "why": "If no existing Prometheus DS: Server Admin can create one pointing at kubernetes.default.svc / metadata when whitelist is empty."},
             {"vuln": "Admin API / Config Abuse", "severity": "critical", "why": "Admin session can change auth, datasources, or exfil secrets."},
             {"vuln": "Privilege Persistence", "severity": "high", "why": "Create backdoor users/tokens before password change."},
+        ],
+        "elasticsearch_unauth": [
+            {"vuln": "Cluster/node metadata disclosure", "severity": "critical", "why": "Unauth GET /_cluster/health and /_nodes/os,jvm disclose hostname, OS, kernel, JVM."},
+            {"vuln": "Index enumeration + sample read", "severity": "critical", "why": "Unauth GET /_cat/indices plus size=1 sample of user indices (prompts, chat, ransomware notes). Do not dump all docs."},
+            {"vuln": "Arbitrary write via test index", "severity": "critical", "why": "PUT then DELETE aegis_test_index proves create/delete without credentials. Do not write into customer indices."},
+            {"vuln": "Prior compromise / ransomware note", "severity": "high", "why": "User indices named read_me often contain extortion notes — evidence the cluster was already hit."},
+        ],
+        "arangodb_default": [
+            {"vuln": "ArangoDB collection sample / PII", "severity": "critical", "why": "root JWT lists databases; one collection sample proves read of registration/Cookie_Data without dumping PII."},
+        ],
+        "mongodb_unauth": [
+            {"vuln": "MongoDB listDatabases + ransomware-note integrity", "severity": "critical", "why": "Anonymous listDatabases; READ_ME_TO_RECOVER_YOUR_DATA means prior compromise."},
+        ],
+        "emqx_default": [
+            {"vuln": "EMQX authn/plugin admin", "severity": "critical", "why": "admin:public unlocks listeners, users, and plugin upload — do not upload plugins."},
+        ],
+        "cors_credentials": [
+            {"vuln": "CORS ACAO reflection + credentials=true", "severity": "critical", "why": "Arbitrary Origin echoed with Access-Control-Allow-Credentials: true lets attacker JS read cookie-authenticated responses. Header proof is enough; no victim tab required."},
+            {"vuln": "Keycloak webOrigins=* on token/userinfo/admin", "severity": "critical", "why": "IdP CORS on /auth/realms/*/protocol/openid-connect/* and /auth/admin/realms/* exposes userinfo claims and admin user/client APIs to any website. Fix: webOrigins explicit or '+', never '*'."},
+            {"vuln": "Preflight allows Authorization + POST/PUT/DELETE from any origin", "severity": "high", "why": "OPTIONS from a canary origin is approved with Authorization in Allow-Headers."},
+            {"vuln": "Socket.IO unauth get_stream IDOR", "severity": "high", "why": "After ACAO+credentials, get_stream accepts empty userType and arbitrary siteId."},
+        ],
+        "keycloak_password_grant": [
+            {"vuln": "admin-cli public client + password grant", "severity": "critical", "why": "grant_type=password with client_id=admin-cli and no client_secret returns invalid_grant, not invalid_client. Master tokens are full realm-admin."},
+            {"vuln": "No brute-force detection on the token endpoint", "severity": "critical", "why": "Bounded failed password-grant attempts are all processed with no 429 or lockout. Do not hydra; 8 attempts is enough proof."},
+            {"vuln": "CORS compounds browser credential stuffing", "severity": "high", "why": "Filed separately: ACAO+credentials on the token endpoint lets a malicious page submit password grants."},
+        ],
+        "client_role_param": [
+            {"vuln": "Cross-tenant inventory via userType=Admin", "severity": "critical", "why": "publicPortal trusts client userType; Admin returns the full site list."},
+        ],
+        "vendorjson_unauth": [
+            {"vuln": "Internal IP / SuperRegulator map", "severity": "high", "why": "vendorJson discloses userId, roles, and RFC1918 addresses for every tenant."},
+        ],
+        "auth0_mgmt_token": [
+            {"vuln": "Auth0 user/client directory read", "severity": "critical", "why": "Unauth token is accepted by /api/v2 with read:users/read:clients — prove with per_page=1."},
+        ],
+        "gitlab_unauth": [
+            {"vuln": "Hardcoded secrets in public GitLab files", "severity": "critical", "why": "Unauth /api/v4/projects then one-file sample for passwords/keys."},
+        ],
+        "docker_registry": [
+            {"vuln": "Registry image pull / possible push", "severity": "high", "why": "/v2/_catalog with no auth; do not push."},
+        ],
+        "django_debug": [
+            {"vuln": "Leaked Redis key from DEBUG traceback", "severity": "critical", "why": "admin:admin + DEBUG=True 500 dumps Azure Redis and env; ping only, no FLUSHALL."},
+        ],
+        "openai_proxy_unauth": [
+            {"vuln": "Unauth model spend / tool execution", "severity": "high", "why": "POST /api/chat proxies to Azure OpenAI with no session — one canary then stop."},
+        ],
+        "wiki_open_reg": [
+            {"vuln": "Self-registered wiki write / internal PII", "severity": "high", "why": "Open CreateAccount grants sandbox write or internal page read — do not deface production."},
+        ],
+        "binary_hardcoded_creds": [
+            {"vuln": "Production password in public installer/firmware", "severity": "critical", "why": "strings extracts live creds; prove one in-scope login. Do not reverse for exploits."},
+        ],
+        "client_side_auth": [
+            {"vuln": "Admin/eLogbook API without server session", "severity": "critical", "why": "JS-only isAdmin/userType gate; backing API returns privileged records anonymously."},
         ],
         "saml": [
             {"vuln": "Account Takeover via Assertion Tampering", "severity": "critical", "why": "Unsigned or wrapped assertions change NameID to victim."},
@@ -2785,6 +2931,21 @@ class ASMToolsManager:
             {"vuln": "BOLA via node(id) / global IDs", "severity": "high", "why": "GraphQL object IDs lack field-level authz."},
             {"vuln": "Auth Bypass Mutation", "severity": "critical", "why": "Unauth mutations change email/password/role."},
             {"vuln": "Batching / Alias Rate-Limit Bypass", "severity": "medium", "why": "Aliased queries evade per-request throttles."},
+        ],
+        "js_secrets": [
+            {"vuln": "Hostname-keyed client_id/client_secret in Next.js chunks", "severity": "critical", "why": "Admin/sandbox /_next/static/chunks often embed prod/dev/qa OAuth client secrets keyed by hostname."},
+            {"vuln": "Live IAM/API gateway access with leaked headers", "severity": "critical", "why": "client_id/client_secret HTTP headers authenticate to locations/account APIs and return non-public records."},
+            {"vuln": "Cross-environment secret reuse (sandbox ships prod)", "severity": "critical", "why": "A sandbox UI bundle that contains production client_secret requires rotating ALL env pairs, not just sandbox."},
+            {"vuln": "Bulk enumeration via search/queryText", "severity": "high", "why": "Authenticated search parameters enable targeted or bulk record retrieval — prove with a bounded sample, then recommend rate limits."},
+            {"vuln": "EmailJS unauthorized send (phishing via authorized ESP)", "severity": "critical", "why": "Hardcoded EmailJS user_id/service_id/template_id in JS lets any site send mail as the app from a visitor's browser; template_params set the recipient."},
+        ],
+        "azure_function_env_dump": [
+            {"vuln": "Classify runtime secret classes", "severity": "critical", "why": "Anonymous Tester/debug HTTP trigger returns process env: Cosmos master keys, Storage account keys, MACHINEKEY, EasyAuth WEBSITE_AUTH_*, AAD client secrets, App Insights, Key Vault URIs."},
+            {"vuln": "Cosmos master key → internet-accessible DB", "severity": "critical", "why": "Master key grants read/write/delete on employee identity and project records. Prove with one read-only list of databases/containers; no item dumps or writes."},
+            {"vuln": "Storage account key inventory", "severity": "critical", "why": "AzureWebJobsStorage account key lists the Function App content share. List containers only — do not upload packages or write wwwroot."},
+            {"vuln": "Peer Function App via -dev- naming", "severity": "high", "why": "Tenants pair ra-*-fa (prod) with ra-*-dev-fa. The same anonymous trigger is often on both."},
+            {"vuln": "Managed identity / Key Vault blast radius (prerequisites only)", "severity": "critical", "why": "Storage key + MACHINEKEY can lead to code as the system-assigned MI with Key Vault secret get/set. Document prerequisites via ARM/Graph; do not inject code or wait for a restart."},
+            {"vuln": "AAD client secret rotation order", "severity": "high", "why": "Env may hold an expired secret while Key Vault holds the live one. Rotate AAD secrets last, after Tester is removed, so new values cannot re-leak."},
         ],
     }
 
@@ -2804,7 +2965,13 @@ class ASMToolsManager:
                        ssrf, xss, sqli, idor, open_redirect, xxe, lfi, csrf,
                        broken_auth, rce, mass_assignment, business_logic,
                        subdomain_takeover, cache_poisoning, request_smuggling,
-                       host_header, saml, graphql.
+                       host_header, saml, graphql, default_login, js_secrets,
+                       elasticsearch_unauth, azure_function_env_dump, arangodb_default,
+                       mongodb_unauth, emqx_default, cors_credentials, unauth_account_lookup,
+                       client_role_param,
+                       vendorjson_unauth, auth0_mgmt_token, gitlab_unauth, docker_registry,
+                       django_debug, openai_proxy_unauth, wiki_open_reg, binary_hardcoded_creds,
+                       client_side_auth.
             target: Optional hostname/URL for context in the output.
             notes: Optional notes about the confirmed finding.
         """
@@ -2828,6 +2995,50 @@ class ASMToolsManager:
             "password_reset_poisoning": "host_header",
             "default_credentials": "default_login", "default-login": "default_login",
             "default_creds": "default_login", "weak_password": "default_login",
+            "grafana": "default_login", "grafana_default_login": "default_login",
+            "cwe_1393": "default_login", "cwe-1393": "default_login",
+            "couchdb": "default_login", "authsession": "default_login",
+            "cookie_forgery": "default_login", "session_forgery": "default_login",
+            "js_secrets": "js_secrets", "hardcoded_credentials": "js_secrets",
+            "client_secret": "js_secrets", "cwe_312": "js_secrets", "cwe-312": "js_secrets",
+            "cwe_540": "js_secrets", "cwe-540": "js_secrets",
+            "emailjs": "js_secrets", "email_js": "js_secrets",
+            "elasticsearch": "elasticsearch_unauth",
+            "elasticsearch_unauth": "elasticsearch_unauth",
+            "exposed_elasticsearch": "elasticsearch_unauth",
+            "xpack_security": "elasticsearch_unauth",
+            "azure_function_env_dump": "azure_function_env_dump",
+            "azure_function": "azure_function_env_dump",
+            "function_app": "azure_function_env_dump",
+            "authlevel_anonymous": "azure_function_env_dump",
+            "tester_function": "azure_function_env_dump",
+            "cwe_526": "azure_function_env_dump",
+            "cwe-526": "azure_function_env_dump",
+            "arangodb": "arangodb_default", "arangodb_default": "arangodb_default",
+            "mongodb": "mongodb_unauth", "mongodb_unauth": "mongodb_unauth",
+            "emqx": "emqx_default", "emqx_default": "emqx_default",
+            "cors": "cors_credentials", "cors_credentials": "cors_credentials",
+            "keycloak_password_grant": "keycloak_password_grant",
+            "admin-cli": "keycloak_password_grant",
+            "password_grant": "keycloak_password_grant",
+            "cwe-307": "keycloak_password_grant",
+            "unauth_account_lookup": "unauth_account_lookup",
+            "user_enum": "unauth_account_lookup",
+            "user_enumeration": "unauth_account_lookup",
+            "account_enumeration": "unauth_account_lookup",
+            "cwe-204": "unauth_account_lookup",
+            "cwe_204": "unauth_account_lookup",
+            "usertype": "client_role_param", "client_role_param": "client_role_param",
+            "vendorjson": "vendorjson_unauth", "vendorjson_unauth": "vendorjson_unauth",
+            "auth0": "auth0_mgmt_token", "auth0_mgmt_token": "auth0_mgmt_token",
+            "gitlab": "gitlab_unauth", "gitlab_unauth": "gitlab_unauth",
+            "docker_registry": "docker_registry",
+            "django": "django_debug", "django_debug": "django_debug",
+            "openai_proxy": "openai_proxy_unauth", "openai_proxy_unauth": "openai_proxy_unauth",
+            "wiki": "wiki_open_reg", "wiki_open_reg": "wiki_open_reg",
+            "binary_hardcoded_creds": "binary_hardcoded_creds",
+            "downloadable_binary": "binary_hardcoded_creds",
+            "client_side_auth": "client_side_auth",
             "sso": "saml", "saml_sso": "saml",
             "gql": "graphql",
         }
@@ -2865,10 +3076,11 @@ class ASMToolsManager:
         cve_id: Optional[str] = None,
         remediation: Optional[str] = None,
     ) -> str:
-        """7-Question Validation Gate — score a proposed finding before reporting.
+        """Validation gate — score a proposed finding before reporting.
 
-        Evaluates the finding against 7 criteria and returns a verdict:
-        SUBMIT (6-7/7), IMPROVE (3-5/7), or DROP (0-2/7).
+        Evaluates the finding against demonstrated-compromise criteria and returns
+        SUBMIT, IMPROVE, or DROP. Default/weak login IMPROVE until privileged
+        API impact is documented.
 
         Args:
             title: Short finding title.
@@ -2976,6 +3188,9 @@ class ASMToolsManager:
             "user a", "user b", "anonymous", "unauthenticated", "without auth",
             "session a", "session b", "low-priv", "cross-identity", "two accounts",
             "victim user", "attacker account",
+            "any authenticated", "shared across", "all users", "readonly",
+            "request serializer", "writable id",
+            "acao", "allow-credentials", "credentialed", "preflight", "canary origin",
         ])
         q8 = (not authz_signal) or identity_signal
         questions.append({
@@ -2985,9 +3200,273 @@ class ASMToolsManager:
                         "FAIL — document anonymous vs user-A vs user-B repro before submitting IDOR/BOLA.",
         })
 
+        # Q9: Demonstrated-compromise writeup for default/weak credential findings
+        cred_finding = any(w in text for w in [
+            "default login", "default-login", "default credential", "weak password",
+            "prom-operator", "cwe-1393", "cwe 1393", "kube-prometheus",
+            "client_secret", "hardcoded credential", "hardcoded api",
+            "javascript bundle", "js bundle", "_next/static", "cwe-312", "cwe-540",
+            "couchdb-default", "authsession", "couch_httpd_auth", "kevin:kevin",
+            "emailjs", "api.emailjs.com",
+        ])
+        privileged_followup = any(w in text for w in [
+            "admin/settings", "/api/admin", "datasources", "serviceaccount",
+            "service account", "prometheus", "internal", "cluster", "proxy",
+            "retrieved", "enumerated", "disclosed", "pod identity", "grafana.ini",
+            "records", "locations", "accountid", "accountname", "postalcode",
+            "_node/_local/_config", "couch_httpd_auth", "_all_dbs", "userctx",
+            "_admin", "authsession", "forged cookie", "session cookie",
+            "template_params", "sent email", "canary inbox", "email/send",
+            "duckdb", "fork/exec", "/api/ds/query", "sql expression",
+        ])
+        q9 = (not cred_finding) or privileged_followup
+        questions.append({
+            "question": (
+                "For default/weak creds or JS-leaked secrets: is privileged impact proven "
+                "(admin APIs, live API records) — not merely login success or a key in a bundle?"
+            ),
+            "pass": q9,
+            "feedback": (
+                "PASS — privileged impact present or not a credential/secret finding." if q9 else
+                "FAIL — foothold only. Prove privileged APIs or a live in-scope API response "
+                "(count + redacted sample) before SUBMIT."
+            ),
+        })
+
+        # Q10: Elasticsearch unauth — banner is a foothold
+        es_finding = any(w in text for w in [
+            "elasticsearch", ":9200", "xpack.security", "you know, for search",
+        ])
+        es_read = any(w in text for w in [
+            "_cat/indices", "indices", "cluster_name", "_nodes", "_cluster/health",
+            "sample", "read_me",
+        ])
+        es_write = any(w in text for w in [
+            "aegis_test_index", "test_index", "acknowledged", "write access",
+        ])
+        q10 = (not es_finding) or (es_read and es_write)
+        questions.append({
+            "question": (
+                "For unauthenticated Elasticsearch: are indices enumerated AND write "
+                "proven (create+delete test index) — not merely an open :9200 banner?"
+            ),
+            "pass": q10,
+            "feedback": (
+                "PASS — ES read+write proven or not an Elasticsearch finding." if q10 else
+                "FAIL — banner is a foothold. Prove GET /_cat/indices + sample read and "
+                "PUT+DELETE aegis_test_index. Do not dump all docs or run Painless RCE."
+            ),
+        })
+
+        # Q11: Azure Function env dump — classify secret classes, not 'env leaked'
+        azfn_finding = any(w in text for w in [
+            "azure function", "function app", "authlevel", "azurewebjobsstorage",
+            "machinekey", "website_auth", "tester function", "azurewebsites.net",
+            "cwe-526", "cwe 526",
+        ])
+        azfn_classified = any(w in text for w in [
+            "cosmos", "storage account", "azurewebjobsstorage", "machinekey",
+            "easyauth", "website_auth", "client secret", "application insights",
+            "key vault", "instrumentation key",
+        ])
+        q11 = (not azfn_finding) or azfn_classified
+        questions.append({
+            "question": (
+                "For anonymous Azure Function env dump: are leaked secret classes named "
+                "(Cosmos, Storage, MACHINEKEY, EasyAuth, AAD) — not merely 'env vars leaked'?"
+            ),
+            "pass": q11,
+            "feedback": (
+                "PASS — secret classes classified or not an Azure Function env-dump finding."
+                if q11 else
+                "FAIL — env dump is a foothold. Name which classes were retrieved "
+                "(Cosmos / Storage / MACHINEKEY / EasyAuth / AAD). Do not inject code; "
+                "list managed-identity ACE under not_demonstrated."
+            ),
+        })
+
+        # Q12: OpenAPI/DRF mass assignment — schema-confirmed writable fields.
+        # Do not match bare OpenAPI/schema mentions (account-lookup writeups cite
+        # the schema without being mass assignment).
+        ma_finding = any(w in text for w in [
+            "mass assignment", "mass-assignment", "writable id", "extra_kwargs",
+            "property-level", "property level authorization", "cwe-915",
+            "request serializer",
+        ])
+        ma_proof = any(w in text for w in [
+            "readonly", "read_only", "writable id", "writable user",
+            "shared across", "all users", "periodic_task", "extra_kwargs",
+            "not readonly", "without readonly",
+        ])
+        q12 = (not ma_finding) or ma_proof
+        questions.append({
+            "question": (
+                "For OpenAPI/DRF mass assignment: are writable privileged fields named "
+                "(id/created/user without readOnly) or is missing tenant isolation quoted "
+                "— not merely 'swagger found'? A down database is not a fail."
+            ),
+            "pass": q12,
+            "feedback": (
+                "PASS — schema names writable privileged fields / shared-list, or not a "
+                "mass-assignment finding." if q12 else
+                "FAIL — OpenAPI without field analysis is a foothold. Count request "
+                "serializers missing readOnly on id/created/user, or quote 'all users' "
+                "list text. Do not kill because the DB is down."
+            ),
+        })
+
+        # Q13: CORS ACAO + credentials — header proof is enough.
+        # ACAO * without credentials is not this bug (and is extra on account-lookup writeups).
+        cors_finding = any(w in text for w in [
+            "weborigins",
+            "allow-credentials", "allow_credentials",
+            "cors reflection", "credentialed cors",
+            "acao+credentials",
+        ]) or (
+            ("acao" in text or "access-control-allow-origin" in text or "cors origin" in text)
+            and any(w in text for w in [
+                "allow-credentials", "credentials: true", "credentials=true",
+                "weborigins", "credentialed cors",
+            ])
+        )
+        cors_proof = any(w in text for w in [
+            "credentials: true", "credentials=true", "allow-credentials: true",
+            "allow-credentials=true", "reflected", "canary origin", "echoes",
+            "echoed", "aegis-cors-canary",
+        ])
+        q13 = (not cors_finding) or cors_proof
+        questions.append({
+            "question": (
+                "For CORS: is ACAO reflection of a canary Origin proven WITH "
+                "Access-Control-Allow-Credentials: true — not merely 'CORS enabled'? "
+                "A missing victim browser tab is not a fail."
+            ),
+            "pass": q13,
+            "feedback": (
+                "PASS — ACAO+credentials proven or not a CORS finding." if q13 else
+                "FAIL — 'CORS enabled' is a foothold. Prove a never-seen Origin is "
+                "reflected in ACAO with credentials=true. Do not ship an HTML exploit; "
+                "do not dump Keycloak /users. Kill only ACAO=* without credentials."
+            ),
+        })
+
+        # Q14: Keycloak admin-cli password grant / no lockout
+        kc_grant_finding = any(w in text for w in [
+            "admin-cli", "admin_cli", "password grant", "direct access grant",
+            "resource owner password", "invalid_grant", "cwe-307",
+        ])
+        kc_grant_proof = any(w in text for w in [
+            "invalid_grant", "no client_secret", "without a client secret",
+            "public client", "no 429", "no lockout", "not invalid_client",
+            "unsupported_grant_type",
+        ])
+        q14 = (not kc_grant_finding) or kc_grant_proof
+        questions.append({
+            "question": (
+                "For Keycloak admin-cli: is the public password grant proven "
+                "(invalid_grant without client_secret) and/or no lockout on a bounded "
+                "probe — not merely 'token endpoint exists'? Guessing a valid password "
+                "is not required."
+            ),
+            "pass": q14,
+            "feedback": (
+                "PASS — public password grant / no-lockout proven, or not an admin-cli finding."
+                if q14 else
+                "FAIL — prove POST grant_type=password client_id=admin-cli with no secret "
+                "returns invalid_grant (not invalid_client). Cap lockout tests at 8. "
+                "Do not hydra/rockyou. Do not kill because no password was guessed."
+            ),
+        })
+
+        # Q15: Unauth OpenAPI account lookup — schema unauth + privilege fields
+        # and/or 401 siblings vs 200/500 lookup. DB down is not a fail.
+        acct_finding = any(w in text for w in [
+            "/api/auth/account", "account lookup", "user enumeration",
+            "user account statistics", "account statistics without",
+            "cwe-204", "cwe 204",
+        ])
+        acct_proof = any(w in text for w in [
+            "security: {}", "security:{}", "without authentication",
+            "is_staff", "valid_through",
+            "401 vs 500", "401 vs 200", "vs 401", "versus 401",
+            "bypasses the jwt", "bypasses jwt", "jwt authentication middleware",
+        ]) or ("401" in text and ("500" in text or "is_staff" in text or "role" in text))
+        q15 = (not acct_finding) or acct_proof
+        questions.append({
+            "question": (
+                "For unauth account lookup: is security: {} / 'without authentication' "
+                "quoted with privilege fields (is_staff/role), OR is JWT skip proven by "
+                "sibling 401 vs lookup 200/500 — not merely 'swagger found'? A down "
+                "database is not a fail. One canary email; do not spray."
+            ),
+            "pass": q15,
+            "feedback": (
+                "PASS — schema-unauth + privilege fields or 401-vs-500/200 proven, "
+                "or not an account-lookup finding." if q15 else
+                "FAIL — OpenAPI without security: {} / privilege fields / 401-vs-500 "
+                "is a foothold. Quote the public operation and UserAccount fields, or "
+                "compare_requests a 401 sibling vs the lookup. Do not kill because the "
+                "DB is down or the canary email is unregistered. Do not spray inboxes."
+            ),
+        })
+
         score = sum(1 for q in questions if q["pass"])
         total = len(questions)
-        if score >= total - 1:
+        if cred_finding and not privileged_followup:
+            verdict = "IMPROVE"
+            verdict_detail = (
+                "Default/weak login or a JS-leaked secret is a foothold, not a finding. "
+                "Prove privileged impact (admin APIs, or live API records from leaked "
+                "client_id/client_secret) and write description + impact + assets + remediation."
+            )
+        elif es_finding and not (es_read and es_write):
+            verdict = "IMPROVE"
+            verdict_detail = (
+                "Unauthenticated Elasticsearch banner is a foothold, not a finding. "
+                "Prove index enumeration + sample read and PUT+DELETE aegis_test_index. "
+                "Do not dump all documents or run Painless RCE."
+            )
+        elif azfn_finding and not azfn_classified:
+            verdict = "IMPROVE"
+            verdict_detail = (
+                "Anonymous Azure Function env dump is a foothold until leaked secret "
+                "classes are named (Cosmos, Storage, MACHINEKEY, EasyAuth, AAD). "
+                "Do not inject code as the managed identity; list ACE under not_demonstrated. "
+                "Write description + impact + assets + remediation (remove Tester or "
+                "authLevel=function; rotate keys; AAD secrets last)."
+            )
+        elif ma_finding and not ma_proof:
+            verdict = "IMPROVE"
+            verdict_detail = (
+                "OpenAPI without named writable privileged fields is a foothold. "
+                "Count request serializers missing readOnly on id/created/user/owner, "
+                "or quote a list description that shares objects across all users. "
+                "A down database is not a kill."
+            )
+        elif cors_finding and not cors_proof:
+            verdict = "IMPROVE"
+            verdict_detail = (
+                "'CORS enabled' is a foothold. Prove a never-seen Origin is reflected "
+                "in ACAO with Access-Control-Allow-Credentials: true. Header proof is "
+                "enough — no victim tab. Do not dump Keycloak /users or ship an HTML exploit."
+            )
+        elif kc_grant_finding and not kc_grant_proof:
+            verdict = "IMPROVE"
+            verdict_detail = (
+                "Keycloak token endpoint existence is a foothold. Prove admin-cli accepts "
+                "grant_type=password with no client_secret (invalid_grant) and/or that "
+                "<=8 failures have no 429/lockout. Do not hydra. Do not kill because a "
+                "valid password was not guessed."
+            )
+        elif acct_finding and not acct_proof:
+            verdict = "IMPROVE"
+            verdict_detail = (
+                "OpenAPI/Swagger without a public account operation is a foothold. "
+                "Quote security: {} / 'without authentication' and is_staff/role, or "
+                "prove JWT skip (sibling 401 vs lookup 200/500). A down database is "
+                "not a kill. One canary email; do not spray employee inboxes."
+            )
+        elif score >= total - 1:
             verdict = "SUBMIT"
             verdict_detail = "Strong finding. Submit with the evidence and steps provided."
         elif score >= 3:
@@ -4332,8 +4811,19 @@ class ASMToolsManager:
             {
                 "stored": rec.redacted(),
                 "hint": (
+                    "Replay as client_id/client_secret HTTP headers against the in-scope API "
+                    "(one read-only call). queue_finding_followups(vuln_type='js_secrets'). "
+                    "sanitize_evidence before create_finding."
+                    if secret_type == "oauth_client"
+                    else (
+                    "Prove EmailJS with ONE browser-context POST to "
+                    "https://api.emailjs.com/api/v1.0/email/send using an engagement-controlled "
+                    "canary inbox (never employees). queue_finding_followups(vuln_type='emailjs')."
+                    if secret_type == "emailjs"
+                    else
                     "Use these creds for authenticated nuclei (-var username=… -var password=…) "
                     "and queue_finding_followups(vuln_type='default_login')."
+                    )
                 ),
                 "engagement_brain": self._engagement_brain,
             },

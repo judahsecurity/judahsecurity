@@ -433,23 +433,26 @@ PLAYBOOKS: List[Dict[str, Any]] = [
     },
     {
         "id": "finding_validation",
-        "name": "Finding validation (7-Question Gate)",
-        "description": "Score a proposed finding through 7 criteria before reporting to eliminate weak, theoretical, and duplicate submissions.",
+        "name": "Finding validation (demonstrated-compromise gate)",
+        "description": "Score a proposed finding through Solomon's criteria before reporting to eliminate weak, theoretical, login-only, and duplicate submissions.",
         "objective": (
-            "Validate one or more proposed findings using the 7-Question Gate.\n\n"
+            "Validate one or more proposed findings using the demonstrated-compromise gate.\n\n"
             "**Phase 1 — Score the finding**\n"
             "1) Call validate_finding(title, description, severity, target, evidence) for each finding.\n"
-            "2) Report the score and verdict: SUBMIT (6-7/7), IMPROVE (3-5/7), DROP (0-2/7).\n\n"
+            "2) Report the score and verdict: SUBMIT, IMPROVE, or DROP.\n"
+            "3) Default/weak login IMPROVE until privileged API impact is proven "
+            "(Grafana: /api/admin/settings, datasources, service accounts, Prometheus proxy).\n\n"
             "**Phase 2 — Address gaps (IMPROVE verdict)**\n"
-            "3) For each failing question, explain to the user what evidence or language is missing.\n"
-            "4) If evidence is missing: use execute_curl, execute_browser, or the appropriate injection "
+            "4) For each failing question, explain to the user what evidence or language is missing.\n"
+            "5) If evidence is missing: use execute_curl, execute_browser, or the appropriate injection "
             "tool to generate a concrete PoC request/response.\n"
-            "5) Re-run validate_finding once the gaps are addressed.\n\n"
+            "6) Re-run validate_finding once the gaps are addressed.\n\n"
             "**Phase 3 — Surface follow-on opportunities**\n"
-            "6) For any SUBMIT finding, call detect_bug_chains(vuln_type=<confirmed_type>) to "
+            "7) For any SUBMIT finding, call detect_bug_chains(vuln_type=<confirmed_type>) to "
             "identify what else to test that commonly chains with this vulnerability.\n"
-            "7) Save chain recommendations with save_note(category='artifact').\n\n"
-            "IMPORTANT: Never create_finding for a DROP verdict. Only create_finding after SUBMIT."
+            "8) Save chain recommendations with save_note(category='artifact').\n\n"
+            "IMPORTANT: Never create_finding for a DROP verdict. Only create_finding after SUBMIT. "
+            "Write description + impact + assets + remediation."
         ),
         "initial_todos": [
             {"description": "Run validate_finding on the proposed finding(s)", "status": "pending", "priority": "high"},

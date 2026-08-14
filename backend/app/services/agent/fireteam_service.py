@@ -110,7 +110,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         name="js_secrets",
         role=(
             "JavaScript recon specialist. Extract endpoints from bundles, "
-            "find secrets, source maps, dep-confusion, and DOM sinks."
+            "find secrets (especially hostname-keyed client_id/client_secret maps "
+            "in Next.js admin chunks), then prove live API impact with a bounded read."
         ),
         allowed_tools=[
             "query_assets",
@@ -118,8 +119,40 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_retirejs",
             "execute_gitleaks",
             "execute_hermes",
+            "execute_curl",
+            "execute_httpx",
+            "execute_browser",
+            "execute_interactsh",
+            "get_engagement_brain",
+            "add_engagement_credential",
+            "queue_finding_followups",
+            "update_hypothesis",
+            "sanitize_evidence",
+            "validate_finding",
+            "create_finding",
+            "save_note",
             "create_scan",
         ],
+        max_iterations=8,
+        system_prompt_suffix=(
+            "Hunt first-party /_next/static/chunks/*.js and admin bundles for "
+            "hostname-keyed config objects (prod/dev/qa → client_id + client_secret). "
+            "Credentials are often sent as client_id/client_secret HTTP headers, not Bearer. "
+            "Sandbox/admin UIs commonly ship PRODUCTION pairs — stash all envs, redact in evidence. "
+            "Prove impact with ONE read-only API call (count + 1-2 redacted sample fields). "
+            "Do not paginate or bulk-export. Call prod APIs only if in scope. "
+            "On hit: add_engagement_credential(secret_type=oauth_client) + "
+            "queue_finding_followups(vuln_type='js_secrets'). "
+            "Also hunt EmailJS: emailjs_userid / emailjs_serviceid / emailjs_templateid "
+            "(or service_id: service_*). Prove with ONE browser-context POST to "
+            "https://api.emailjs.com/api/v1.0/email/send using an engagement-controlled "
+            "canary inbox (interactsh/operator) — never customer employees or arbitrary "
+            "recipients. curl 403 from missing Origin is NOT a kill; retry execute_browser. "
+            "Max one canary per template (cap two). "
+            "Write description + impact + assets + remediation (rotate ALL env pairs and "
+            "EmailJS user_id; never ship secrets to the browser — server-side proxy; "
+            "EmailJS origin allowlist + rate limit). CWE-798 / CWE-312 / CWE-540."
+        ),
     ),
     SpecialistProfile(
         name="vuln_triage",
@@ -270,9 +303,18 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ],
         max_iterations=8,
         system_prompt_suffix=(
-            "Tiny lists only (defaults / known product creds). Always hydra -f / exit on success. "
+            "Tiny lists only (defaults / known product creds). Grafana: admin:prom-operator "
+            "(kube-prometheus-stack), then admin:admin / admin:grafana. CouchDB: admin:admin, "
+            "admin:password, couchdb:couchdb (nuclei couchdb-default-login). Always hydra -f / "
+            "exit on success. "
             "On hit: add_engagement_credential + queue_finding_followups(vuln_type='default_login') "
-            "+ validate_finding before create_finding. Never invent credentials; no rockyou."
+            "+ validate_finding before create_finding. Login is a foothold — coverage proves "
+            "privileged APIs. Never invent credentials; no rockyou. "
+            "Keycloak: POST /auth/realms/master/protocol/openid-connect/token "
+            "grant_type=password client_id=admin-cli with NO client_secret. invalid_grant "
+            "proves the public password grant. At most 8 fake-password attempts for lockout/"
+            "429 — then stop. Tiny defaults only (admin:admin, admin:password, admin:keycloak). "
+            "queue_finding_followups(vuln_type='keycloak_password_grant'). Master is highest impact."
         ),
     ),
     SpecialistProfile(
@@ -299,7 +341,25 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         max_iterations=8,
         system_prompt_suffix=(
             "Prove with compare_requests across identities/object IDs. "
-            "Status 200 alone is not a finding — show other-user fields."
+            "Status 200 alone is not a finding — show other-user fields. "
+            "OpenAPI/DRF (GET /api/schema/ or swagger.json): count request serializers "
+            "where id, created, updated, user, owner, schedule, periodic_task are writable "
+            "(not readOnly). SUBMIT on that schema even if writes 500 / DB down. "
+            "List descriptions that say 'all users' / 'shared across' are missing isolation. "
+            "One bounded canary write if the DB is up — do not enable ICS schedules or dump "
+            "OT/ICS asset trees. queue_finding_followups(vuln_type='mass_assignment'). "
+            "Kill only if fields are readOnly / extra_kwargs or object-level 403. "
+            "Unauth account lookup: schema security: {} on /api/auth/account/?email= "
+            "plus is_staff/role, or compare_requests sibling 401 vs lookup 200/500. "
+            "One canary email (aegis-enum-canary@example.invalid) — do not spray. "
+            "DB down is SUBMIT. queue_finding_followups(vuln_type='unauth_account_lookup'). "
+            "CORS: canary Origin (not evil.com) vs none. SUBMIT if ACAO echoes AND "
+            "credentials=true. OPTIONS preflight Authorization+POST. Keycloak: repeat on "
+            "token, userinfo, /auth/admin/realms/<realm>/users — header proof is enough; "
+            "do not dump users; webOrigins explicit or '+', never '*'. "
+            "queue_finding_followups(vuln_type='cors_credentials'). "
+            "Keycloak admin-cli: if CORS is proven, queue_finding_followups("
+            "vuln_type='keycloak_password_grant') — do not spray passwords."
         ),
     ),
     SpecialistProfile(
@@ -482,13 +542,45 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         max_iterations=8,
         system_prompt_suffix=(
             "Check get_engagement_brain for credentials before nuclei. "
-            "Example: execute_nuclei args='-u https://host -id grafana-default-login,CVE-2024-9264 "
+            "Grafana default-login: execute_nuclei args='-u https://host -id grafana-default-login "
             "-var username=admin -var password=prom-operator -jsonl'. "
             "On default-login hits: add_engagement_credential + queue_finding_followups. "
-            "For Grafana admin sessions, ALSO prove datasource-proxy SSRF: create a temporary "
-            "datasource aimed at https://kubernetes.default.svc or metadata, then "
-            "GET /api/datasources/proxy/... — report only with internal response body evidence. "
-            "Prefer read-only canaries; do not mutate cluster state."
+            "For Grafana admin sessions, prove demonstrated compromise read-only first: "
+            "(1) GET /api/admin/settings — pod identity, grafana.ini, DB config; "
+            "(2) GET /api/datasources — existing Prometheus/Loki URLs; "
+            "(3) GET /api/serviceaccounts/search — SA names, roles, token counts (do not create tokens); "
+            "(4) Proxy EXISTING prometheus datasource: GET /api/datasources/proxy/<id>/api/v1/targets "
+            "or /api/v1/query?query=up — enumerate in-cluster exporters. "
+            "(5) Only if no usable existing DS: create a temporary prometheus datasource to "
+            "kubernetes.default.svc / metadata, then GET /api/datasources/proxy/... "
+            "CouchDB _admin: (1) GET /_session — roles _admin; (2) GET /_all_dbs — db count; "
+            "(3) GET /_node/_local/_config/couch_httpd_auth/secret and /admins — secret + salts; "
+            "(4) Forge AuthSession with HMAC-SHA1(secret+admin_salt, user:hex_ts) — NOT _users "
+            "derived_key — then GET /_session and /_all_dbs with Cookie only. Password rotation "
+            "does not kill this; rotating the secret does. Redact secret/salts/AuthSession. "
+            "Elasticsearch :9200 (xpack.security off): unauth GET / is a foothold. Prove: "
+            "(1) GET / — cluster name, version, node, tagline; "
+            "(2) GET /_cluster/health and GET /_nodes/os,jvm — hostname/OS/kernel; "
+            "(3) GET /_cat/indices?v then GET /<user-index>/_search?size=1 on 1–3 user "
+            "indices (do not scroll/dump); "
+            "(4) PUT /aegis_test_index then immediately DELETE /aegis_test_index. "
+            "Do not run Painless/scripting RCE. Do not pivot. "
+            "queue_finding_followups(vuln_type='elasticsearch_unauth'). CWE-306. "
+            "Write the finding as Vulnerability Description, Impact (what was retrieved), "
+            "Assets Affected, Recommendation (rotate admin + SA tokens, metrics_require_auth, "
+            "upgrade, network ACL). CWE-1393. Prefer read-only canaries; do not mutate cluster state. "
+            "Azure Function Apps (*.azurewebsites.net): unauthenticated GET /api/Tester then "
+            "/api/test,/api/debug,/api/env,/api/HttpTrigger1. If the body is process env JSON "
+            "(AzureWebJobsStorage, Cosmos keys, MACHINEKEY, WEBSITE_AUTH_*), classify secret "
+            "classes, redact keys, queue_finding_followups(vuln_type='azure_function_env_dump'). "
+            "Do not upload function packages or inject code. Probe the -dev- / production peer hostname. "
+            "CVE-2024-9264 (Grafana): ANY authenticated session (Viewer / SA token is enough). "
+            "POST /api/ds/query with type=sql. SUBMIT if the server forks /usr/local/bin/duckdb "
+            "— including 'no such file or directory'. Missing DuckDB is NOT a kill. "
+            "sqlExpressions=0 in /metrics is NOT a kill (UI toggle ≠ backend in 11.0.x). "
+            "Kill only if patched >=11.2.2 or the engine rejects SQL expressions without "
+            "forking DuckDB. Use direct curl plus nuclei CVE-2024-9264; do not install DuckDB; "
+            "do not run shell extensions."
         ),
     ),
     SpecialistProfile(
@@ -513,7 +605,19 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         system_prompt_suffix=(
             "Re-score each proposed finding with validate_finding. Only create_finding "
             "after SUBMIT. Kill theoretical / status-only / identity-less IDOR claims. "
-            "Prefer sanitize_evidence before publish."
+            "Prefer sanitize_evidence before publish. "
+            "Grafana CVE-2024-9264: SUBMIT if /api/ds/query type=sql forks duckdb — "
+            "including 'no such file or directory'. Missing binary and sqlExpressions=0 "
+            "in /metrics are NOT kills. "
+            "OpenAPI/DRF mass assignment: SUBMIT on writable id/created/user without "
+            "readOnly, or a list that documents 'all users' — even if the DB is down. "
+            "Unauth account lookup: SUBMIT on security: {} + is_staff/role, or 500/200 "
+            "vs sibling 401. Do not kill because the DB is down. One canary email; "
+            "do not spray. "
+            "CORS/Keycloak: SUBMIT if a canary Origin is reflected with credentials=true "
+            "on token/userinfo/admin. Header proof is enough; do not dump /users. "
+            "Keycloak admin-cli: SUBMIT if password grant works without client_secret and "
+            "<=8 failures have no 429/lockout — do not require a guessed password; no hydra."
         ),
     ),
 ]
@@ -609,6 +713,8 @@ INSTRUCTIONS:
    }}
 
 5. Medium+ findings: call validate_finding first; create_finding only on SUBMIT.
+   Write demonstrated-compromise reports (description + impact + assets + remediation),
+   not 'login worked' or template-match-only.
 6. Do not exceed {max_iter} iterations. If unsure, finish with done=true.
 
 {suffix}

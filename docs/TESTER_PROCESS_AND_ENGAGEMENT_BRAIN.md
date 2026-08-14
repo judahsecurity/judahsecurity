@@ -114,19 +114,38 @@ Call `queue_finding_followups(vuln_type=..., title=..., target=..., evidence=...
 
 | Trigger class | Example follow-ups |
 |---------------|-------------------|
-| `default_login` | Authenticated Nuclei with `-var`; Grafana CVE-2024-9264; **Grafana admin → datasource-proxy SSRF → AKS/K8s**; generic admin URL-fetch SSRF |
+| `default_login` | Grafana Server Admin APIs (`/api/admin/settings`, `/api/datasources`, `/api/serviceaccounts/search`); **existing Prometheus datasource proxy → cluster enum**; **CouchDB `_config` secret + admin salts**; **CouchDB AuthSession cookie forgery** (HMAC secret+admin salt, not `_users` derived_key); authenticated Nuclei with `-var`; Grafana CVE-2024-9264; Grafana admin → new-datasource SSRF → AKS/K8s; generic admin URL-fetch SSRF |
+| `js_secrets` | Hostname-keyed `client_id`/`client_secret` maps in `/_next/static/chunks`; **live API impact with leaked headers** (bounded sample); cross-env leak (sandbox UI ships prod); **EmailJS `user_id`/`service_id`/`template_id` → one browser-context canary send** (engagement inbox only) |
+| `elasticsearch_unauth` | Unauth GET `/` + `/_cluster/health` + `/_cat/indices` + sample read; PUT+DELETE `aegis_test_index`; no Painless RCE |
+| `azure_function_env_dump` | Anonymous HTTP trigger (`Tester`) returns process env JSON; classify Cosmos/Storage/MACHINEKEY/EasyAuth/AAD; Cosmos list-only; storage list-only; peer `-dev-` hostname; MI/Key Vault **prerequisites only** (no code injection); rotate AAD secrets last |
 | `host_header` | Tenant isolation bypass; password-reset poisoning |
-| `idor` | Write/export variants on the same object family |
+| `idor` | Write/export variants on the same object family; **OpenAPI/DRF mass assignment of `id`/`user`/`owner`** (schema first) |
+| `mass_assignment` | Count request serializers missing `readOnly` on `id`/`created`/`user`/`schedule`; writable ownership; list ops that document **shared across all users**. **DB down is still SUBMIT**. Also enqueue unauth `/api/auth/account/` lookup on the same schema |
+| `unauth_account_lookup` | OpenAPI `security: {}` on `/api/auth/account/?email=` returning `is_staff`/`role`/`valid_through`; **sibling 401 vs lookup 200/500 is SUBMIT**. One canary email; do not spray. **DB down is still SUBMIT** |
+| `cors_credentials` | Canary Origin reflected in ACAO **and** `Access-Control-Allow-Credentials: true`; OPTIONS allows `Authorization` + POST; **Keycloak `webOrigins=*`** on token/userinfo/admin. Header proof is SUBMIT (no victim tab). Socket.IO `url_key` only |
+| `keycloak_password_grant` | **admin-cli public + password grant** (`invalid_grant` without `client_secret`); **no 429/lockout on ≤8 fake attempts**. Do not hydra. Guessing a valid password is not required. Tiny defaults only |
 | `ssrf` | Metadata / internal pivot canaries |
 
-Grafana-specific cards (`grafana-*` suffixes) only enqueue when the title/target looks like Grafana.
+Grafana-specific cards (`grafana-*` suffixes), CouchDB-specific cards (`couchdb-*`), Elasticsearch (`es-*`), Azure Function cards (`azfn-*`), Keycloak (`keycloak-*`), and Socket.IO (`socketio-*`) only enqueue when the title/target/evidence looks like that product.
 
 ### Romulus-style examples this encodes
 
-1. **Grafana default creds** (`admin:prom-operator`) → stash creds → authenticated probes  
-2. **CVE-2024-9264** SQL expressions (post-auth)  
-3. **Server Admin → datasource proxy SSRF → internal AKS** (`kubernetes.default.svc` / metadata)  
-4. **Host-header tenant isolation bypass**
+1. **Grafana default creds** (`admin:prom-operator`, kube-prometheus-stack Helm default / CWE-1393) → stash creds  
+2. **Server Admin APIs** — `GET /api/admin/settings` (pod identity, DB config), `GET /api/datasources`, `GET /api/serviceaccounts/search` (token inventory)  
+3. **Existing Prometheus datasource proxy** — relay PromQL via `/api/datasources/proxy/<id>/api/v1/targets` to enumerate in-cluster exporters (Redis, Mongo, Kafka, Postgres, kubelets, …) without creating a new datasource  
+4. **CVE-2024-9264** — Viewer+ `POST /api/ds/query` `type=sql` forks DuckDB. **Missing binary is still SUBMIT** (`fork/exec ... duckdb: no such file`). `sqlExpressions=0` in `/metrics` is UI-only in 11.0.x — not a kill. Patch: Grafana **11.2.2+**; do not install DuckDB; disable SQL expressions in backend config; least-privilege SA tokens.  
+5. **New datasource SSRF → internal AKS** (`kubernetes.default.svc` / metadata) — only if no existing Prometheus DS  
+6. **Host-header tenant isolation bypass**
+7. **JS-leaked OAuth client secrets** — hostname-keyed `client_id`/`client_secret` in Next.js admin chunks → one in-scope API read (count + redacted sample); rotate **all** env pairs; never ship secrets to the browser
+8. **EmailJS keys in production JS** — `service_id` / `user_id` / `template_id` → one browser-origin POST to `api.emailjs.com` with an engagement-controlled canary (not employees). Origin allowlists that block curl but allow any website embedding the keys are still a finding. Rotate `user_id`; move send server-side; EmailJS domain allowlist + rate limit.
+9. **CouchDB default/weak admin** → GET `/_node/_local/_config` (secret, timeout, `[admins]` salts) → forge AuthSession with HMAC-SHA1(secret+admin_salt) → GET `/_session` `_admin` + `/_all_dbs` without the password. Independent of password rotation until the secret is rotated. Failed `_users` derived_key HMACs go in **not_demonstrated**.
+10. **Anonymous Azure Function `Tester`** (`authLevel:anonymous`, `*.azurewebsites.net`) → process env JSON (Cosmos master keys, Storage keys, MACHINEKEY, EasyAuth, AAD, App Insights). Classify secret classes; Cosmos/storage **list-only**; probe the `-dev-` peer; MI/Key Vault ACE is **not_demonstrated** (do not inject code). Remove Tester or set `authLevel=function`; rotate leaked keys; rotate AAD secrets last.
+11. **OpenAPI/DRF mass assignment** (CWE-915 / API3) — `GET /api/schema/` (or swagger.json). Count `*Request` serializers where `id`, `created`, `updated`, `user`/`owner`, `schedule`, or `periodic_task` are writable (not `readOnly`). Quote list operations that say **shared across all users**. **Missing database is still SUBMIT** (schema proves the contract). One bounded canary write if the DB is up; do not enable ICS/OT schedules; do not dump the hierarchy. Fix: `read_only=True` / `extra_kwargs`; object-level permissions; tenant-scope lists.
+12. **Keycloak / CORS `webOrigins=*`** (CWE-942) — canary `Origin` reflected in `Access-Control-Allow-Origin` **with** `Access-Control-Allow-Credentials: true` on token, userinfo, JWKS, and `/auth/admin/realms/<realm>/*`. OPTIONS allows `Authorization` + POST/PUT/DELETE. **Header proof is SUBMIT** (no victim browser tab). Do not dump `/users`; do not ship an HTML exploit. Fix: client `webOrigins` explicit allowlist or `+` (valid redirect URIs), never `*`; audit reverse-proxy CORS overrides.
+13. **Keycloak `admin-cli` password grant / no lockout** (CWE-307) — public client (no `client_secret`) with Direct Access Grants on `master` and app realms. `invalid_grant` without a secret proves the grant. **≤8 failed attempts with no 429/lockout is SUBMIT** — do not hydra/rockyou; do not kill because a valid password was not guessed. Disable Direct Access Grants; enable Brute Force Detection; if the grant must stay, confidential client + network ACL.
+14. **Unauth OpenAPI account lookup** (CWE-204 / CWE-200 / CWE-862) — `GET /api/auth/account/?email=` documented with `security: {}` (“public API … without authentication”) returning `email`, `is_active`, `valid_through`, `is_staff`, `role`. Quote the schema **or** prove JWT skip: protected siblings (`/api/auth/profile/`, `/api/auth/users/me/`) return **401** while the lookup is **200** or **500** (app/DB error still reached application code). **Missing database is still SUBMIT**. One canary email (`aegis-enum-canary@example.invalid`); do not spray employee inboxes; do not dump ICS/OT users. `Access-Control-Allow-Origin: *` is extra, not the CORS-credentials finding. Fix: require JWT; if a pre-login check is needed, boolean `is_active` only + rate limit; do not confirm account existence.
+
+Findings must be demonstrated-compromise writeups: **Vulnerability Description**, **Impact** (what was retrieved), **Assets Affected**, **Recommendation** — not “login succeeded”.
 
 ---
 

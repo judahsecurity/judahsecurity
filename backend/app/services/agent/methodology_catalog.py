@@ -43,11 +43,21 @@ _RESET_RE = re.compile(
 _INVITE_RE = re.compile(r"(invite|invitation|/signup|/register|/join|create.?account)", re.I)
 _CHECKOUT_RE = re.compile(r"(checkout|cart|payment|order|billing|price|quantity)", re.I)
 _OPENAPI_RE = re.compile(
-    r"(swagger|openapi|/api-docs|/v3/api-docs|/docs\.json|redoc|/schema\.json)",
+    r"(swagger|openapi|/api-docs|/v3/api-docs|/docs\.json|redoc|"
+    r"/schema\.json|/api/schema|spectacular|swagger-ui)",
     re.I,
 )
 _APIKEY_HINT_RE = re.compile(
-    r"(api[_-]?key|access[_-]?token|secret[_-]?key|authorization|bearer)",
+    r"(api[_-]?key|access[_-]?token|secret[_-]?key|authorization|bearer|"
+    r"client[_-]?id|client[_-]?secret)",
+    re.I,
+)
+_NEXT_ADMIN_JS_RE = re.compile(
+    r"(_next/static|/adminui|admin-ui|/admin/_next)",
+    re.I,
+)
+_EMAILJS_RE = re.compile(
+    r"(emailjs|emailjs[_-]?(?:user|service|template)id|api\.emailjs\.com)",
     re.I,
 )
 _ID_PARAM_RE = re.compile(
@@ -60,6 +70,10 @@ _REFLECT_PARAM_RE = re.compile(
 )
 _SSRF_HINT_RE = re.compile(
     r"(webhook|callback|fetch|proxy|import|url=|uri=|link=|avatar|og:image|preview)",
+    re.I,
+)
+_AZURE_FUNCTION_RE = re.compile(
+    r"(azurewebsites\.net|azurefunctions\.net|/api/Tester\b|functions\.azure\.com)",
     re.I,
 )
 _AI_AGENT_RE = re.compile(
@@ -111,8 +125,12 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
     forms_blob = " ".join(
         f"{f.get('action', '')} {' '.join(f.get('inputs') or [])}" for f in forms if isinstance(f, dict)
     )
-    api_blob = " ".join(f"{e.get('method', '')} {e.get('path', '')}" for e in apis if isinstance(e, dict))
-    combined = f"{pages_blob} {forms_blob} {api_blob} {' '.join(param_paths)}"
+    api_blob = " ".join(
+        f"{e.get('method', '')} {e.get('path', '')} {e.get('host', '')}"
+        for e in apis if isinstance(e, dict)
+    )
+    target = str(g("target") or "")
+    combined = f"{pages_blob} {forms_blob} {api_blob} {' '.join(param_paths)} {target}"
     has_ai = bool(g("has_ai_agent")) or bool(
         _AI_AGENT_RE.search(f"{combined} {' '.join(str(j) for j in js_endpoints)}")
     )
@@ -146,7 +164,7 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             ),
             pass_criteria="Working authenticated session with verified credentials",
             kill_criteria="Defaults rejected; lockout without success",
-            cwe_ids=["CWE-798", "CWE-521", "CWE-287"],
+            cwe_ids=["CWE-798", "CWE-521", "CWE-287", "CWE-1393"],
             capec_ids=["CAPEC-70", "CAPEC-49"],
             owasp="A07:2021 Identification and Authentication Failures",
             evidence=login_ev,
@@ -170,6 +188,521 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             owasp="A07:2021 Identification and Authentication Failures",
             evidence=login_ev,
             why="Auth surface present",
+        ))
+
+    target = str(g("target") or "")
+    grafana_blob = f"{target} {pages_blob} {combined}"
+    if re.search(r"grafana", grafana_blob, re.I):
+        add(Methodology(
+            id="grafana_kube_prometheus_defaults",
+            title="Grafana kube-prometheus-stack default admin (CWE-1393)",
+            hunt="credential_assault",
+            specialist="credential_assault",
+            priority="critical",
+            assumption=(
+                "Internet-facing Grafana still uses the Helm-chart default "
+                "admin:prom-operator (or admin:admin / admin:grafana) without rotation"
+            ),
+            test=(
+                "Tiny product-default list only: admin:prom-operator, admin:admin, admin:grafana. "
+                "Prefer nuclei grafana-default-login or POST /login. On success stash creds and "
+                "queue default_login follow-ups (admin APIs + existing Prometheus datasource proxy)."
+            ),
+            pass_criteria="Working Grafana session (grafana_session cookie or dashboard redirect)",
+            kill_criteria="Defaults rejected; MFA/SSO required; lockout",
+            cwe_ids=["CWE-1393", "CWE-798", "CWE-521"],
+            capec_ids=["CAPEC-70", "CAPEC-49"],
+            owasp="A07:2021 Identification and Authentication Failures",
+            evidence=target or next((p for p in pages if re.search(r"grafana", p, re.I)), ""),
+            why="Grafana hostname/UI observed — kube-prometheus-stack default is a common unrotated credential",
+        ))
+        add(Methodology(
+            id="grafana_cve_9264_sql_expressions",
+            title="Grafana SQL expressions CVE-2024-9264 (Viewer+ /api/ds/query)",
+            hunt="coverage",
+            specialist="coverage",
+            priority="critical",
+            assumption=(
+                "Grafana 11.0.x still forks DuckDB for type=sql expressions; Viewer and "
+                "service accounts can reach /api/ds/query; sqlExpressions=0 in /metrics "
+                "does not disable the backend; missing DuckDB is not a patch"
+            ),
+            test=(
+                "Authenticated POST /api/ds/query type=sql (Viewer is enough). Confirm "
+                "fork/exec of duckdb — file-read canary if present, or 'no such file' error. "
+                "GET /metrics for the toggle (do not treat 0 as patched). Upgrade to 11.2.2+."
+            ),
+            pass_criteria=(
+                "SQL expression accepted and DuckDB invoked (file contents OR fork/exec error)"
+            ),
+            kill_criteria=(
+                "Engine rejects SQL expressions without forking DuckDB; version >= 11.2.2 patched"
+            ),
+            cwe_ids=["CWE-89", "CWE-94", "CWE-863"],
+            capec_ids=["CAPEC-66", "CAPEC-242"],
+            owasp="A03:2021 Injection",
+            evidence=target or next((p for p in pages if re.search(r"grafana", p, re.I)), ""),
+            why="Grafana observed — CVE-2024-9264 is reachable by Viewer if unpatched",
+        ))
+
+    es_blob = f"{target} {pages_blob} {combined}"
+    if re.search(
+        r":9200\b|:9300\b|elasticsearch|you know, for search|xpack\.security",
+        es_blob,
+        re.I,
+    ):
+        add(Methodology(
+            id="elasticsearch_unauth_exposure",
+            title="Unauthenticated Elasticsearch (xpack.security disabled, CWE-306)",
+            hunt="elasticsearch_unauth",
+            specialist="coverage",
+            priority="critical",
+            assumption=(
+                "Internet-facing Elasticsearch on :9200 has xpack.security.enabled unset, "
+                "so any client can read and write the cluster without credentials"
+            ),
+            test=(
+                "Unauthenticated GET / (cluster name, version, node, tagline). "
+                "Banner-only is a foothold — queue elasticsearch_unauth follow-ups: "
+                "/_cluster/health + /_nodes/os,jvm, /_cat/indices, limited sample read of "
+                "user indices, then PUT+DELETE a uniquely named empty test index "
+                "(aegis_test_index). Do not dump all documents, do not run Painless RCE, "
+                "do not pivot."
+            ),
+            pass_criteria=(
+                "HTTP 200 cluster JSON without credentials (name/version/tagline). "
+                "Writeup still IMPROVE until indices enumerated and write proven."
+            ),
+            kill_criteria="401/403 with security enabled; not Elasticsearch; port filtered",
+            cwe_ids=["CWE-306", "CWE-284", "CWE-200"],
+            capec_ids=["CAPEC-115", "CAPEC-1"],
+            owasp="A01:2021 Broken Access Control",
+            evidence=target or next(
+                (p for p in pages if re.search(r":9200|elasticsearch", p, re.I)),
+                "",
+            ),
+            why="Elasticsearch HTTP API / :9200 observed — unauthenticated clusters are a common internet exposure",
+        ))
+
+    if re.search(r"couchdb|_all_dbs|_utils|_node/_local/_config|:5984\b", grafana_blob, re.I):
+        add(Methodology(
+            id="couchdb_default_admin",
+            title="CouchDB default/weak admin (CWE-1393) → _config + AuthSession",
+            hunt="credential_assault",
+            specialist="credential_assault",
+            priority="critical",
+            assumption=(
+                "Internet-facing CouchDB still accepts product defaults (admin:admin / "
+                "admin:password / couchdb:couchdb) or a leftover app default, unlocking _admin"
+            ),
+            test=(
+                "Tiny product-default list only: admin:admin, admin:password, couchdb:couchdb. "
+                "Prefer nuclei couchdb-default-login or GET / with Basic. On success stash creds "
+                "and queue default_login follow-ups (_config secret/salts, then AuthSession forgery)."
+            ),
+            pass_criteria="Working CouchDB _admin session (Welcome JSON or /_session roles _admin)",
+            kill_criteria="Defaults rejected; auth required without success; lockout",
+            cwe_ids=["CWE-1393", "CWE-798", "CWE-200", "CWE-613"],
+            capec_ids=["CAPEC-70", "CAPEC-49", "CAPEC-115"],
+            owasp="A07:2021 Identification and Authentication Failures",
+            evidence=target or next(
+                (p for p in pages if re.search(r"couchdb|_utils|_all_dbs", p, re.I)),
+                "",
+            ),
+            why="CouchDB hostname/API observed — default admin plus readable _config enables cookie forgery independent of password rotation",
+        ))
+
+    if re.search(r":8529\b|arangodb|aardvark|_open/auth", es_blob, re.I):
+        add(Methodology(
+            id="arangodb_root_empty",
+            title="ArangoDB root empty password (CWE-1393 / CWE-306)",
+            hunt="credential_assault",
+            specialist="credential_assault",
+            priority="critical",
+            assumption="Internet-facing ArangoDB accepts root with an empty password at /_open/auth",
+            test=(
+                "POST /_open/auth {\"username\":\"root\",\"password\":\"\"} only — no other guesses. "
+                "On JWT, queue arangodb_default follow-ups (list databases, one collection sample). "
+                "Do not dump PII collections."
+            ),
+            pass_criteria="JWT for root with empty password",
+            kill_criteria="401/403; password required",
+            cwe_ids=["CWE-1393", "CWE-306", "CWE-798"],
+            capec_ids=["CAPEC-70", "CAPEC-49"],
+            owasp="A07:2021 Identification and Authentication Failures",
+            evidence=target or next((p for p in pages if re.search(r":8529|arangodb", p, re.I)), ""),
+            why="ArangoDB HTTP API / :8529 observed",
+        ))
+
+    if re.search(r":27017\b|mongodb", es_blob, re.I):
+        add(Methodology(
+            id="mongodb_anonymous",
+            title="MongoDB anonymous login (CWE-306)",
+            hunt="mongodb_unauth",
+            specialist="coverage",
+            priority="critical",
+            assumption="Internet-facing MongoDB on :27017 has no authentication (often AKS LoadBalancer)",
+            test=(
+                "nuclei mongodb-unauth or listDatabases. Record db names only. "
+                "Note READ_ME_TO_RECOVER_YOUR_DATA if present. Do not dump or drop."
+            ),
+            pass_criteria="Unauthenticated listDatabases succeeds",
+            kill_criteria="auth required; port filtered",
+            cwe_ids=["CWE-306", "CWE-284"],
+            capec_ids=["CAPEC-115"],
+            owasp="A01:2021 Broken Access Control",
+            evidence=target,
+            why="MongoDB / :27017 observed",
+        ))
+
+    if re.search(r"emqx|:18083\b|:18084\b", es_blob, re.I):
+        add(Methodology(
+            id="emqx_dashboard_defaults",
+            title="EMQX dashboard default admin (CWE-1393)",
+            hunt="credential_assault",
+            specialist="credential_assault",
+            priority="critical",
+            assumption="EMQX dashboard still uses admin:public",
+            test="Tiny list: admin:public then admin:admin. On success queue emqx_default (read-only APIs). No plugin upload.",
+            pass_criteria="Dashboard/API session as admin",
+            kill_criteria="Defaults rejected",
+            cwe_ids=["CWE-1393", "CWE-798"],
+            capec_ids=["CAPEC-70"],
+            owasp="A07:2021 Identification and Authentication Failures",
+            evidence=target,
+            why="EMQX dashboard observed",
+        ))
+
+    if re.search(
+        r"socket\.io|access-control-allow-origin|:6147\b|keycloak|"
+        r"/auth/realms|openid-connect|/auth/admin/realms",
+        es_blob,
+        re.I,
+    ):
+        add(Methodology(
+            id="cors_acao_credentials",
+            title="CORS origin reflection with credentials (CWE-942)",
+            hunt="cors_credentials",
+            specialist="api_authz",
+            priority="high",
+            assumption=(
+                "ACAO reflects an arbitrary Origin while Access-Control-Allow-Credentials "
+                "is true, so a victim's browser will attach cookies and let attacker JS "
+                "read the body. ACAO=* without credentials is NOT this bug"
+            ),
+            test=(
+                "compare_requests: Origin=https://aegis-cors-canary-<rand>.example vs no Origin. "
+                "Use a never-seen origin (allowlists often deny evil.com). PASS if ACAO echoes "
+                "that origin AND credentials=true. Also OPTIONS preflight with "
+                "Access-Control-Request-Headers: Authorization and Request-Method: POST. "
+                "Socket.IO: unauth get_stream url_key only — no video dump, "
+                "no null-input crash loops."
+            ),
+            pass_criteria=(
+                "ACAO equals the canary origin AND Access-Control-Allow-Credentials is true"
+            ),
+            kill_criteria=(
+                "Allowlist rejects the canary origin; ACAO is * without credentials. "
+                "Do NOT kill solely because no victim browser session was available"
+            ),
+            cwe_ids=["CWE-942", "CWE-346"],
+            capec_ids=["CAPEC-113"],
+            owasp="A05:2021 Security Misconfiguration",
+            evidence=target,
+            why="CORS / Socket.IO / IdP surface observed",
+        ))
+
+    if re.search(
+        r"keycloak|/auth/realms|openid-connect|/protocol/openid|/auth/admin/realms",
+        es_blob,
+        re.I,
+    ):
+        add(Methodology(
+            id="keycloak_cors_web_origins",
+            title="Keycloak webOrigins=* — credentialed CORS on token/userinfo/admin",
+            hunt="cors_credentials",
+            specialist="api_authz",
+            priority="critical",
+            assumption=(
+                "Keycloak client webOrigins is * (or a reverse proxy injects ACAO reflection "
+                "+ credentials). That applies to /auth/realms/*/protocol/openid-connect/token, "
+                "userinfo, certs/JWKS, and /auth/admin/realms/*"
+            ),
+            test=(
+                "Authenticated-cookie CORS is proven with headers, not a phishing page. "
+                "GET/OPTIONS each of: token, userinfo, JWKS, /auth/admin/realms/<realm>/users "
+                "with Origin=https://aegis-cors-canary-<rand>.example. Record ACAO, ACAC, "
+                "Allow-Methods, Allow-Headers (Authorization). Do not dump the user directory; "
+                "header proof is SUBMIT. If an engagement admin session exists, ONE bounded "
+                "GET users?max=1 then stop. Remediation: webOrigins explicit allowlist or '+' "
+                "(valid redirect URIs), never '*'; audit proxies that override CORS."
+            ),
+            pass_criteria=(
+                "Canary Origin is reflected with credentials=true on token and/or userinfo "
+                "and/or admin API (preflight allowing POST+Authorization strengthens impact)"
+            ),
+            kill_criteria=(
+                "webOrigins allowlist / '+' only; canary Origin not echoed; ACAO=* without "
+                "credentials. Do NOT kill because JWKS is public or no victim tab was open"
+            ),
+            cwe_ids=["CWE-942", "CWE-346", "CWE-284"],
+            capec_ids=["CAPEC-113", "CAPEC-62"],
+            owasp="A05:2021 Security Misconfiguration",
+            evidence=target or next(
+                (p for p in pages if re.search(r"keycloak|openid-connect|/auth/realms", p, re.I)),
+                "",
+            ),
+            why="Keycloak / OIDC surface observed — webOrigins=* is a common IdP CORS footgun",
+        ))
+        add(Methodology(
+            id="keycloak_admin_cli_password_grant",
+            title="Keycloak admin-cli public + password grant with no brute-force defense",
+            hunt="credential_assault",
+            specialist="credential_assault",
+            priority="critical",
+            assumption=(
+                "admin-cli is a public client (no client_secret) with Direct Access Grants "
+                "(OAuth2 password / ROPC) enabled on master and application realms. The token "
+                "endpoint accepts username/password with no rate limit, lockout, or CAPTCHA. "
+                "Guessing a valid password is NOT required — unbounded invalid_grant is the finding"
+            ),
+            test=(
+                "POST /auth/realms/{master|other}/protocol/openid-connect/token with "
+                "grant_type=password, client_id=admin-cli, and NO client_secret. A fake user "
+                "returning invalid_grant (not invalid_client / unauthorized_client / "
+                "unsupported_grant_type) proves the public password grant. Then at most 8 "
+                "failed attempts with unique fake passwords — record 429 / lockout / slowing. "
+                "Do NOT hydra or rockyou. Optional tiny defaults only: admin:admin, "
+                "admin:password, admin:keycloak (stop on hit). Master realm is highest impact. "
+                "CORS stuffing is a separate card. If a token is issued: stash and ONE "
+                "GET /auth/admin/realms?briefRepresentation=true (or users?max=1); do not dump."
+            ),
+            pass_criteria=(
+                "Password grant accepted without a client secret (invalid_grant on a bad "
+                "password) AND the bounded 8-attempt probe shows no 429 and no lockout"
+            ),
+            kill_criteria=(
+                "invalid_client / unauthorized_client (confidential); unsupported_grant_type; "
+                "429 or brute-force lockout within the 8-attempt cap. "
+                "Do NOT kill solely because no valid password was guessed"
+            ),
+            cwe_ids=["CWE-307", "CWE-799", "CWE-287"],
+            capec_ids=["CAPEC-49", "CAPEC-70"],
+            owasp="A07:2021 Identification and Authentication Failures",
+            evidence=target or next(
+                (p for p in pages if re.search(r"keycloak|openid-connect|/auth/realms", p, re.I)),
+                "",
+            ),
+            why="Keycloak observed — public admin-cli + password grant is a common internet-facing misconfig",
+        ))
+
+    if re.search(r"usertype|publicportal|userType", es_blob, re.I):
+        add(Methodology(
+            id="client_supplied_usertype",
+            title="Client-supplied userType/admin role (CWE-639 / CWE-807)",
+            hunt="client_role_param",
+            specialist="api_authz",
+            priority="critical",
+            assumption="API trusts body userType/userId without a server session",
+            test=(
+                "compare_requests userType empty vs Admin (decode base64 bodies if the client does). "
+                "Bounded sample; do not export the full site inventory."
+            ),
+            pass_criteria="Admin mutant returns cross-tenant or privileged fields",
+            kill_criteria="401/403; userType ignored",
+            cwe_ids=["CWE-639", "CWE-807", "CWE-285"],
+            capec_ids=["CAPEC-1", "CAPEC-122"],
+            owasp="A01:2021 Broken Access Control",
+            evidence=target,
+            why="userType / publicPortal observed",
+        ))
+
+    if re.search(r"vendorjson|vendorJson|userManagement/api", es_blob, re.I):
+        add(Methodology(
+            id="vendorjson_unauth_manifest",
+            title="Unauth vendorJson multi-tenant manifest (CWE-200)",
+            hunt="vendorjson_unauth",
+            specialist="api_authz",
+            priority="high",
+            assumption="/glens/userManagement/api/v3.0/vendorJson returns all tenants without auth",
+            test="Unauth GET vendorJson; record tenant count + 1–2 hosts; do not dump the full blob.",
+            pass_criteria="Multiple tenants or internal userId/role/IP fields without auth",
+            kill_criteria="401/403; current-tenant display only",
+            cwe_ids=["CWE-200", "CWE-306"],
+            capec_ids=["CAPEC-116"],
+            owasp="A01:2021 Broken Access Control",
+            evidence=target,
+            why="GLens vendorJson / userManagement API observed",
+        ))
+
+    if re.search(r"identitymigrate|/api/token|auth0", es_blob, re.I):
+        add(Methodology(
+            id="auth0_mgmt_token_unauth",
+            title="Unauth Auth0 Management API token (CWE-306)",
+            hunt="auth0_mgmt_token",
+            specialist="coverage",
+            priority="critical",
+            assumption="Public /api/token returns an Auth0 Management JWT",
+            test=(
+                "Unauth GET token URL. Prove with ONE /api/v2/clients?per_page=1 or users?per_page=1. "
+                "Redact JWT. Do not enumerate the directory."
+            ),
+            pass_criteria="Token issued unauthenticated AND Management API accepts a read",
+            kill_criteria="401; token rejected",
+            cwe_ids=["CWE-306", "CWE-200", "CWE-798"],
+            capec_ids=["CAPEC-115"],
+            owasp="A01:2021 Broken Access Control",
+            evidence=target,
+            why="Auth0 / identitymigrate /api/token observed",
+        ))
+
+    if re.search(r"gitlab|/api/v4/projects", es_blob, re.I):
+        add(Methodology(
+            id="gitlab_unauth_projects",
+            title="Unauth GitLab project API (CWE-306)",
+            hunt="gitlab_unauth",
+            specialist="js_secrets",
+            priority="critical",
+            assumption="GitLab /api/v4/projects lists public repos; files may hold secrets",
+            test="GET /api/v4/projects?per_page=5. Sample ONE file for secrets. Do not clone all.",
+            pass_criteria="Unauth project list and/or a sampled hardcoded secret",
+            kill_criteria="401/403; no public projects",
+            cwe_ids=["CWE-306", "CWE-798", "CWE-540"],
+            capec_ids=["CAPEC-116"],
+            owasp="A01:2021 Broken Access Control",
+            evidence=target,
+            why="GitLab API observed",
+        ))
+
+    if re.search(r"docker.?registry|/v2/_catalog", es_blob, re.I):
+        add(Methodology(
+            id="docker_registry_unauth",
+            title="Unauth Docker Registry catalog (CWE-306)",
+            hunt="docker_registry",
+            specialist="coverage",
+            priority="high",
+            assumption="/v2/_catalog requires no credentials",
+            test="GET /v2/ then GET /v2/_catalog. Count names. Do not push images.",
+            pass_criteria="200 catalog with repository names",
+            kill_criteria="401 WWW-Authenticate",
+            cwe_ids=["CWE-306"],
+            capec_ids=["CAPEC-115"],
+            owasp="A01:2021 Broken Access Control",
+            evidence=target,
+            why="Docker Registry observed",
+        ))
+
+    if re.search(r"django|/admin/login|/api/token-pair", es_blob, re.I):
+        add(Methodology(
+            id="django_admin_debug",
+            title="Django admin:admin + DEBUG traceback (CWE-1393 / CWE-215)",
+            hunt="credential_assault",
+            specialist="credential_assault",
+            priority="critical",
+            assumption="Django accepts admin:admin and DEBUG=True dumps env on 500",
+            test=(
+                "Tiny list admin:admin on /admin/login/ and /api/token-pair/. On success queue "
+                "django_debug (safe 500 → Redis/env classes). Redact keys. Do not flush Redis."
+            ),
+            pass_criteria="admin:admin session or JWT",
+            kill_criteria="Defaults rejected",
+            cwe_ids=["CWE-1393", "CWE-215", "CWE-209"],
+            capec_ids=["CAPEC-70"],
+            owasp="A07:2021 Identification and Authentication Failures",
+            evidence=target,
+            why="Django admin / token-pair observed",
+        ))
+
+    if re.search(r"/api/chat|azure.?openai|openai", es_blob, re.I) and re.search(
+        r"chat|openai|gpt", es_blob, re.I
+    ):
+        add(Methodology(
+            id="openai_chat_proxy_unauth",
+            title="Unauth Azure OpenAI /api/chat proxy (CWE-306)",
+            hunt="openai_proxy_unauth",
+            specialist="agent_tools",
+            priority="high",
+            assumption="POST /api/chat proxies to Azure OpenAI with no session",
+            test="One cheap canary completion. Do not burn tokens. Do not jailbreak for harm.",
+            pass_criteria="Unauth model completion",
+            kill_criteria="401/403",
+            cwe_ids=["CWE-306", "CWE-770"],
+            capec_ids=["CAPEC-115"],
+            owasp="A01:2021 Broken Access Control",
+            evidence=target,
+            why="Chat/OpenAI proxy observed",
+        ))
+
+    if re.search(
+        r"wiki|mediawiki|confluence|dokuwiki|special:createaccount",
+        es_blob,
+        re.I,
+    ) and _INVITE_RE.search(combined):
+        add(Methodology(
+            id="wiki_open_self_registration",
+            title="Open wiki self-registration (CWE-284)",
+            hunt="wiki_open_reg",
+            specialist="auth_logic",
+            priority="high",
+            assumption="Wiki/Confluence allows CreateAccount/signup without approval and grants write or internal pages",
+            test=(
+                "Create ONE throwaway account. Prove sandbox/user-page write OR one internal "
+                "page with employee PII. Do not deface production articles. Do not scrape."
+            ),
+            pass_criteria="Self-registered session can write a sandbox page or read non-public wiki content",
+            kill_criteria="Registration closed; captcha/approval; no write/internal read",
+            cwe_ids=["CWE-284", "CWE-269", "CWE-200"],
+            capec_ids=["CAPEC-122", "CAPEC-1"],
+            owasp="A01:2021 Broken Access Control",
+            evidence=target,
+            why="Wiki + signup/register surface observed",
+        ))
+
+    if re.search(
+        r"\.(exe|msi|apk|dmg|ipa)\b|firmware|installer|publicly-downloadable",
+        es_blob,
+        re.I,
+    ):
+        add(Methodology(
+            id="binary_hardcoded_credentials",
+            title="Hardcoded credentials in a public downloadable binary (CWE-798)",
+            hunt="binary_hardcoded_creds",
+            specialist="js_secrets",
+            priority="critical",
+            assumption="Public installer/firmware/APK embeds production passwords or connection strings",
+            test=(
+                "Download the public binary. strings/grep for password/secret/connection (bounded). "
+                "Prove ONE extracted credential on an in-scope login if safe. Redact secrets. "
+                "Do not reverse for exploits; do not attach the binary."
+            ),
+            pass_criteria="Extracted production secret from a public download (optional live login)",
+            kill_criteria="No secrets; placeholders only",
+            cwe_ids=["CWE-798", "CWE-321", "CWE-540"],
+            capec_ids=["CAPEC-70", "CAPEC-191"],
+            owasp="A07:2021 Identification and Authentication Failures",
+            evidence=target,
+            why="Downloadable binary / installer / firmware observed",
+        ))
+
+    if has_spa and re.search(r"elogbook|/admin|dashboard", es_blob, re.I):
+        add(Methodology(
+            id="client_side_only_auth",
+            title="Client-side-only authentication on admin UI (CWE-603 / CWE-807)",
+            hunt="client_side_auth",
+            specialist="auth_logic",
+            priority="critical",
+            assumption="Admin/eLogbook gates pages in JS without a server session",
+            test=(
+                "Forced-browse admin routes anonymous; compare_requests backing APIs without "
+                "the client flag vs with a forged role. Do not mutate production rows."
+            ),
+            pass_criteria="Privileged page or API data without a server-side session",
+            kill_criteria="401/403; empty bodies; server session required",
+            cwe_ids=["CWE-603", "CWE-807", "CWE-287"],
+            capec_ids=["CAPEC-115", "CAPEC-1"],
+            owasp="A07:2021 Identification and Authentication Failures",
+            evidence=target,
+            why="SPA admin / eLogbook surface — client-side gates are a common miss",
         ))
 
     if _RESET_RE.search(combined):
@@ -269,6 +802,85 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             owasp="A01:2021 Broken Access Control",
             evidence=str(ev),
             why="OpenAPI/Swagger documentation surface observed",
+        ))
+        add(Methodology(
+            id="openapi_mass_assignment",
+            title="OpenAPI/DRF request serializers — mass assignment of server-managed fields",
+            hunt="api_authz",
+            specialist="api_authz",
+            priority="critical",
+            assumption=(
+                "DRF/Spectacular (and similar) request serializers expose writable id, "
+                "created, updated, user/owner, schedule, or periodic_task without readOnly; "
+                "list endpoints may document shared access across all users. A down database "
+                "does not patch the contract"
+            ),
+            test=(
+                "GET /api/schema/ (or swagger.json / openapi.json). For each *Request / "
+                "requestBody component, record whether id, created, updated, user, owner, "
+                "schedule, periodic_task are present AND not readOnly. Count affected "
+                "serializers. Read operation descriptions for 'all users' / 'shared across'. "
+                "If the DB is up: ONE bounded canary write on a test object (do not enable "
+                "ICS/OT schedules, do not dump the hierarchy, do not overwrite other users' "
+                "production rows). If the DB is down (500 / OperationalError): still SUBMIT "
+                "on the schema evidence — do not kill."
+            ),
+            pass_criteria=(
+                "One or more request serializers expose writable privileged fields without "
+                "readOnly, AND/OR a list endpoint documents cross-user sharing. Live write "
+                "is stronger but not required when the schema already proves the contract"
+            ),
+            kill_criteria=(
+                "Privileged fields are readOnly / extra_kwargs read_only; object-level 403 "
+                "on foreign id/user; list endpoints return only the caller's objects. "
+                "Do NOT kill solely because the database is unavailable"
+            ),
+            cwe_ids=["CWE-915", "CWE-639", "CWE-284"],
+            capec_ids=["CAPEC-126", "CAPEC-1"],
+            owasp="API3:2023 Broken Object Property Level Authorization",
+            evidence=str(ev),
+            why="OpenAPI/Swagger observed — request schemas often leak mass-assignment surface",
+        ))
+
+    if _OPENAPI_RE.search(combined) or re.search(r"/api/auth/account", combined, re.I):
+        add(Methodology(
+            id="openapi_unauth_account_lookup",
+            title="Unauth OpenAPI account lookup (security: {} / email → role)",
+            hunt="api_authz",
+            specialist="api_authz",
+            priority="critical",
+            assumption=(
+                "OpenAPI marks /api/auth/account/ (or similar email lookup) with security: {} "
+                "and a response schema of email, is_active, valid_through, is_staff, role. "
+                "A 500 from a down database is not an auth rejection — siblings return 401"
+            ),
+            test=(
+                "Quote the schema: security: {} / 'without authentication' / public account "
+                "statistics, plus UserAccount fields (is_staff, role, valid_through). "
+                "compare_requests: unauth GET a protected sibling (/api/auth/profile/, "
+                "/api/auth/users/me/) vs GET /api/auth/account/?email=aegis-enum-canary@example.invalid. "
+                "PASS if the lookup is 200 with those fields OR 500/app error while siblings are 401. "
+                "One canary email only — do not spray employee inboxes. Do not dump ICS users. "
+                "ACAO * is extra, not a substitute for the 401-vs-500 differential."
+            ),
+            pass_criteria=(
+                "Schema documents unauth account lookup returning privilege fields, AND/OR "
+                "unauth request reaches app code (200 or 500) while protected siblings 401"
+            ),
+            kill_criteria=(
+                "Lookup returns 401/403 like siblings; schema requires JWT; response is a "
+                "generic non-enumerating boolean. Do NOT kill solely because the database "
+                "is unavailable or no registered email was found"
+            ),
+            cwe_ids=["CWE-204", "CWE-200", "CWE-862"],
+            capec_ids=["CAPEC-575", "CAPEC-169"],
+            owasp="A01:2021 Broken Access Control",
+            evidence=(
+                next((p for p in pages if _OPENAPI_RE.search(str(p))), None)
+                or next((p for p in pages if re.search(r"/api/auth/account", str(p), re.I)), "")
+                or "/api/auth/account/"
+            ),
+            why="Public account/email lookup in schema or crawl — unauth user enum + role leak",
         ))
 
     # --- Authorization / IDOR ---
@@ -524,13 +1136,13 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             test="scan_js_urls_for_secrets + execute_retirejs on first-party bundles from the map",
             pass_criteria="Live/production credential or confirmed vulnerable library with CVE",
             kill_criteria="Only public config / test stubs; no actionable CVEs",
-            cwe_ids=["CWE-798", "CWE-200", "CWE-1104"],
+            cwe_ids=["CWE-798", "CWE-200", "CWE-1104", "CWE-312"],
             capec_ids=["CAPEC-70"],
             owasp="A02:2021 Cryptographic Failures",
             evidence=js_files[0],
             why="JS bundles present",
         ))
-        js_surface = " ".join(js_endpoints + js_files + pages)
+        js_surface = " ".join(js_endpoints + js_files + pages + [str(g("target") or "")])
         if _APIKEY_HINT_RE.search(js_surface):
             add(Methodology(
                 id="js_apikey_exposure",
@@ -551,6 +1163,65 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
                 evidence=next((e for e in js_endpoints if _APIKEY_HINT_RE.search(e)), js_files[0]),
                 why="API key / token naming hints in JS surface",
             ))
+        if _NEXT_ADMIN_JS_RE.search(js_surface) or bool(g("has_admin")):
+            add(Methodology(
+                id="js_hostname_keyed_api_creds",
+                title="Hostname-keyed API credentials in client JS (CWE-798 / CWE-312)",
+                hunt="js_secrets",
+                specialist="js_secrets",
+                priority="critical",
+                assumption=(
+                    "Admin/Next.js bundles ship client_id/client_secret maps keyed by "
+                    "environment hostname; sandbox UIs often include production pairs"
+                ),
+                test=(
+                    "scan_js_urls_for_secrets on /_next/static/chunks/*.js. Extract hostname-keyed "
+                    "client_id + client_secret (prod/dev/qa). Note header scheme from the bundle. "
+                    "Stash creds; prove with ONE in-scope read-only API call (count + redacted sample). "
+                    "Do not bulk-export. Prod API only if in scope."
+                ),
+                pass_criteria=(
+                    "Non-publishable client_secret in a public bundle AND/OR live API returns "
+                    "non-public records with those headers"
+                ),
+                kill_criteria="Publishable keys only; API rejects; no hostname-keyed map",
+                cwe_ids=["CWE-798", "CWE-312", "CWE-540"],
+                capec_ids=["CAPEC-70", "CAPEC-37"],
+                owasp="A02:2021 Cryptographic Failures",
+                evidence=next(
+                    (f for f in js_files if _NEXT_ADMIN_JS_RE.search(f)),
+                    js_files[0],
+                ),
+                why="Next.js/admin JS surface — hostname-keyed OAuth client secrets are a common leak",
+            ))
+        if _EMAILJS_RE.search(js_surface):
+            add(Methodology(
+                id="js_emailjs_client_send",
+                title="EmailJS keys in client JS — unauthorized mail send (CWE-798)",
+                hunt="js_secrets",
+                specialist="js_secrets",
+                priority="critical",
+                assumption=(
+                    "Bundles embed EmailJS user_id/service_id/template_id; any page can "
+                    "POST api.emailjs.com from a visitor's browser and set the recipient"
+                ),
+                test=(
+                    "Extract emailjs_userid, emailjs_serviceid, emailjs_templateid. Prove with "
+                    "ONE browser-context POST /api/v1.0/email/send to an engagement-controlled "
+                    "canary (interactsh/operator). Never send to employees or arbitrary inboxes. "
+                    "curl Origin-block is not a kill. Cap two templates."
+                ),
+                pass_criteria="200/OK from browser send and/or canary mailbox received the mail",
+                kill_criteria="Keys rejected from browser; domain allowlist + auth required",
+                cwe_ids=["CWE-798", "CWE-312", "CWE-540"],
+                capec_ids=["CAPEC-70", "CAPEC-163"],
+                owasp="A02:2021 Cryptographic Failures",
+                evidence=next(
+                    (f for f in js_files if _EMAILJS_RE.search(f)),
+                    js_files[0],
+                ),
+                why="EmailJS identifiers observed in JS surface",
+            ))
 
     if has_spa or source_maps or len(js_files) >= 3:
         add(Methodology(
@@ -560,7 +1231,7 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             specialist="spa_client",
             priority="medium",
             assumption="Client routing or DOM sinks allow XSS or hidden API abuse",
-            test="Browser DOM checks + hidden API routes from JS against authz",
+            test="Browser DOM checks + hidden API routes from JS against authz. Also forced-browse admin UI without the client-side isAdmin/localStorage flag.",
             pass_criteria="DOM XSS execution or hidden API missing auth with data impact",
             kill_criteria="No sinks and APIs enforce authz",
             cwe_ids=["CWE-79", "CWE-862"],
@@ -635,6 +1306,40 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             owasp="LLM08 Excessive Agency / LLM01 Prompt Injection",
             evidence=str(chat_ev),
             why="Chatbot/AI/agent/MCP surface observed — enumerate tools before payload spray",
+        ))
+
+    # Azure Function Apps — anonymous HTTP triggers that dump process env
+    if _AZURE_FUNCTION_RE.search(combined):
+        az_ev = next(
+            (str(p) for p in pages if _AZURE_FUNCTION_RE.search(str(p))),
+            target or (pages[0] if pages else "azurewebsites.net"),
+        )
+        add(Methodology(
+            id="azure_function_anonymous_env",
+            title="Anonymous Azure Function HTTP trigger env dump",
+            hunt="azure_function",
+            specialist="coverage",
+            priority="critical",
+            assumption=(
+                "A Function App ships an HTTP trigger (often Tester) with authLevel:anonymous "
+                "and no network restrictions, returning the process environment as JSON"
+            ),
+            test=(
+                "Unauthenticated GET /api/Tester, then /api/test, /api/debug, /api/env, "
+                "/api/HttpTrigger1. PASS if the body is runtime env (AzureWebJobsStorage, "
+                "Cosmos keys, MACHINEKEY, WEBSITE_AUTH_*). Classify secret classes; "
+                "queue_finding_followups(vuln_type='azure_function_env_dump'). "
+                "Do not upload packages or inject code."
+            ),
+            pass_criteria=(
+                "Unauth HTTP 200 JSON includes Function App process settings / secret names"
+            ),
+            kill_criteria="401/403 function key required; 404; body is not process environment",
+            cwe_ids=["CWE-526", "CWE-200", "CWE-798", "CWE-284"],
+            capec_ids=["CAPEC-37", "CAPEC-116"],
+            owasp="A01:2021 Broken Access Control",
+            evidence=str(az_ev),
+            why="Azure Function App hostname / HTTP trigger surface observed",
         ))
 
     # Coverage leftovers when we have something to scan

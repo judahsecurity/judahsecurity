@@ -36,6 +36,7 @@ PANTHEON: Dict[str, tuple[str, str]] = {
     "spa_client": ("Miriam", "Song in the client — DOM XSS and hidden routes"),
     "coverage": ("Nehemiah", "Builder who finds gaps — authenticated coverage scans"),
     "finding_judge": ("Solomon", "Wisdom gate — evidence judgment before publish"),
+    "agent_tools": ("Isaiah", "Voice of the model — chatbot tools and unauth LLM proxies"),
     # Existing branded tools (already first-class)
     "atlas": ("Atlas", "Cartographer of the heavens — org attack-surface map"),
     "argus": ("Argus", "All-seeing — local secrets scanner"),

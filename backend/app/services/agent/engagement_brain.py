@@ -250,6 +250,184 @@ _HUNT_CARDS: Dict[str, Dict[str, str]] = {
         "specialist": "spa_client",
         "priority": "medium",
     },
+    "elasticsearch_unauth": {
+        "title": "Unauthenticated Elasticsearch (xpack.security disabled)",
+        "assumption": (
+            "Internet-facing Elasticsearch on :9200 has xpack.security.enabled unset"
+        ),
+        "test": (
+            "Unauth GET / then /_cluster/health, /_nodes/os,jvm, /_cat/indices, "
+            "limited sample read, PUT+DELETE aegis_test_index. No Painless RCE, no bulk dump."
+        ),
+        "pass_criteria": "Cluster JSON without credentials; indices listed; write proven via test index",
+        "kill_criteria": "401/403; security enabled; not Elasticsearch",
+        "specialist": "coverage",
+        "priority": "critical",
+    },
+    "arangodb_default": {
+        "title": "ArangoDB root empty password",
+        "assumption": "Internet-facing ArangoDB /_open/auth accepts root with an empty password",
+        "test": "POST /_open/auth root+empty password; list DBs; one collection sample. No PII dump.",
+        "pass_criteria": "JWT for root AND at least one database/collection listed",
+        "kill_criteria": "401/403; password required",
+        "specialist": "coverage",
+        "priority": "critical",
+    },
+    "mongodb_unauth": {
+        "title": "MongoDB anonymous login",
+        "assumption": "Port 27017 accepts unauthenticated connections",
+        "test": "listDatabases only; note ransomware-note DBs. Do not dump or drop.",
+        "pass_criteria": "Unauthenticated listDatabases succeeds",
+        "kill_criteria": "auth required; port filtered",
+        "specialist": "coverage",
+        "priority": "critical",
+    },
+    "emqx_default": {
+        "title": "EMQX dashboard default login",
+        "assumption": "EMQX dashboard still uses admin:public",
+        "test": "Tiny list admin:public then admin:admin; read-only listeners/users. No plugin upload.",
+        "pass_criteria": "Admin dashboard/API session",
+        "kill_criteria": "Defaults rejected",
+        "specialist": "credential_assault",
+        "priority": "critical",
+    },
+    "cors_credentials": {
+        "title": "CORS origin reflection with credentials",
+        "assumption": (
+            "ACAO reflects an arbitrary Origin while Access-Control-Allow-Credentials is true. "
+            "On Keycloak this is usually client webOrigins=*"
+        ),
+        "test": (
+            "compare_requests Origin=https://aegis-cors-canary-<rand>.example vs none. "
+            "PASS if ACAO echoes AND credentials=true. OPTIONS preflight Authorization+POST. "
+            "Keycloak: also hit token, userinfo, admin users. Socket.IO: url_key only."
+        ),
+        "pass_criteria": "ACAO echoes attacker origin AND credentials true",
+        "kill_criteria": (
+            "Allowlist rejects canary; ACAO * without credentials. "
+            "Do not kill solely because no victim browser session was available"
+        ),
+        "specialist": "api_authz",
+        "priority": "high",
+    },
+    "keycloak_password_grant": {
+        "title": "Keycloak admin-cli public password grant / no lockout",
+        "assumption": (
+            "admin-cli is public with Direct Access Grants; token endpoint has no brute-force defense"
+        ),
+        "test": (
+            "POST grant_type=password client_id=admin-cli with no secret. invalid_grant proves "
+            "the grant. At most 8 failed attempts — no 429. Tiny defaults only; no hydra/rockyou."
+        ),
+        "pass_criteria": "Password grant without client_secret AND no lockout on the bounded probe",
+        "kill_criteria": (
+            "Confidential client; password grant disabled; 429/lockout within 8 attempts. "
+            "Do not kill because no valid password was guessed"
+        ),
+        "specialist": "credential_assault",
+        "priority": "critical",
+    },
+    "client_role_param": {
+        "title": "Client-supplied userType/admin role",
+        "assumption": "API trusts body userType/userId without a server session",
+        "test": "compare_requests userType empty vs Admin; bounded sample, not full inventory.",
+        "pass_criteria": "Admin mutant returns cross-tenant or privileged fields",
+        "kill_criteria": "401/403; userType ignored",
+        "specialist": "api_authz",
+        "priority": "critical",
+    },
+    "vendorjson_unauth": {
+        "title": "Unauth vendorJson multi-tenant manifest",
+        "assumption": "vendorJson returns all tenants without auth",
+        "test": "Unauth GET; record tenant count + 1–2 hosts. Do not dump the full blob.",
+        "pass_criteria": "Multiple tenants or internal userId/role/IP fields without auth",
+        "kill_criteria": "401/403; current-tenant display only",
+        "specialist": "api_authz",
+        "priority": "high",
+    },
+    "auth0_mgmt_token": {
+        "title": "Unauth Auth0 Management API token",
+        "assumption": "Public /api/token returns an Auth0 Management JWT",
+        "test": "Unauth GET token; ONE /api/v2/clients?per_page=1. Redact JWT. Do not enumerate the directory.",
+        "pass_criteria": "Token issued unauthenticated AND Management API accepts a read",
+        "kill_criteria": "401; token rejected",
+        "specialist": "coverage",
+        "priority": "critical",
+    },
+    "gitlab_unauth": {
+        "title": "Unauth GitLab project API",
+        "assumption": "GitLab /api/v4/projects lists public repos; files may hold secrets",
+        "test": "GET /api/v4/projects?per_page=5. Sample ONE file. Do not clone all.",
+        "pass_criteria": "Unauth project list and/or a sampled hardcoded secret",
+        "kill_criteria": "401/403; no public projects",
+        "specialist": "js_secrets",
+        "priority": "critical",
+    },
+    "docker_registry": {
+        "title": "Unauth Docker Registry catalog",
+        "assumption": "/v2/_catalog requires no credentials",
+        "test": "GET /v2/ then GET /v2/_catalog. Count names. Do not push images.",
+        "pass_criteria": "200 catalog with repository names",
+        "kill_criteria": "401 WWW-Authenticate",
+        "specialist": "coverage",
+        "priority": "high",
+    },
+    "django_debug": {
+        "title": "Django DEBUG traceback after default admin",
+        "assumption": "DEBUG=True plus admin:admin dumps env on 500",
+        "test": "After admin:admin, safe 500 → secret classes; optional Redis ping. No FLUSHALL.",
+        "pass_criteria": "Traceback discloses env secret classes, or Redis accepts the leaked key",
+        "kill_criteria": "DEBUG off; defaults rejected",
+        "specialist": "coverage",
+        "priority": "critical",
+    },
+    "openai_proxy_unauth": {
+        "title": "Unauth Azure OpenAI /api/chat proxy",
+        "assumption": "POST /api/chat proxies to Azure OpenAI with no session",
+        "test": "One cheap canary completion. Do not burn tokens. Do not jailbreak for harm.",
+        "pass_criteria": "Unauth model completion",
+        "kill_criteria": "401/403",
+        "specialist": "agent_tools",
+        "priority": "high",
+    },
+    "wiki_open_reg": {
+        "title": "Open wiki self-registration → write / internal pages",
+        "assumption": "Wiki/Confluence/MediaWiki allows anonymous CreateAccount and grants write or internal PII",
+        "test": (
+            "Create ONE throwaway account (Special:CreateAccount / signup). Prove write on a "
+            "sandbox/user page OR read one internal page with employee PII. Do not deface "
+            "production pages or scrape the wiki."
+        ),
+        "pass_criteria": "Self-registered session can edit a page or read non-public wiki content",
+        "kill_criteria": "Registration closed; captcha/approval; no write/internal read",
+        "specialist": "auth_logic",
+        "priority": "high",
+    },
+    "binary_hardcoded_creds": {
+        "title": "Hardcoded credentials in a public downloadable binary",
+        "assumption": "Public installer/firmware/APK embeds production passwords or connection strings",
+        "test": (
+            "Download the public binary. strings/grep for password/secret/connection patterns. "
+            "Prove ONE extracted credential against an in-scope login if safe. Redact secrets. "
+            "Do not reverse for exploits; do not ship the binary into findings."
+        ),
+        "pass_criteria": "Extracted production credential (and optional live login) from a public download",
+        "kill_criteria": "No secrets; only public config; binary not in scope",
+        "specialist": "js_secrets",
+        "priority": "critical",
+    },
+    "client_side_auth": {
+        "title": "Client-side-only authentication on admin UI",
+        "assumption": "Admin dashboard/eLogbook gates pages in JS (localStorage/userType) without a server session",
+        "test": (
+            "Forced-browse admin routes anonymous; compare_requests to the backing API without "
+            "the client flag vs with a forged role. PASS if privileged data returns without a session."
+        ),
+        "pass_criteria": "Admin page or API returns privileged data without a server-side session",
+        "kill_criteria": "401/403 on APIs; UI hide-only with empty bodies",
+        "specialist": "auth_logic",
+        "priority": "critical",
+    },
     "coverage": {
         "title": "Coverage scan for known vulns/misconfig",
         "assumption": "Known CVE/misconfig templates may hit remaining inventory after logic hunts",
@@ -286,11 +464,162 @@ _HUNT_CARDS: Dict[str, Dict[str, str]] = {
         "specialist": "injection",
         "priority": "medium",
     },
+    "azure_function": {
+        "title": "Anonymous Azure Function HTTP trigger env dump",
+        "assumption": (
+            "A Function App (*.azurewebsites.net) ships an HTTP trigger such as Tester "
+            "with authLevel:anonymous and no IP restrictions, returning process env as JSON"
+        ),
+        "test": (
+            "Unauthenticated GET /api/Tester (then /api/test, /api/debug, /api/env, "
+            "/api/HttpTrigger1) on the Function App hostname. PASS if the body is the "
+            "runtime environment (AzureWebJobsStorage, Cosmos keys, WEBSITE_AUTH_*). "
+            "Do not upload packages or inject code."
+        ),
+        "pass_criteria": (
+            "Unauth HTTP 200 JSON includes Function App process settings / secret names"
+        ),
+        "kill_criteria": (
+            "401/403 function key required; 404; body is not process environment"
+        ),
+        "specialist": "coverage",
+        "priority": "critical",
+    },
 }
 
 
 _CHAIN_CARDS: Dict[str, List[Dict[str, str]]] = {
     "default_login": [
+        {
+            "title": "Grafana Server Admin APIs: settings, datasources, service accounts",
+            "assumption": (
+                "Grafana Server Admin (often kube-prometheus-stack admin:prom-operator) unlocks "
+                "GET /api/admin/settings, /api/datasources, and /api/serviceaccounts/search"
+            ),
+            "test": (
+                "With Grafana admin session (cookie or Basic), read-only GETs only: "
+                "1) GET /api/admin/settings — instance identity, grafana.ini, DB config, pod name; "
+                "2) GET /api/datasources — existing Prometheus/Loki/etc URLs (in-cluster DNS); "
+                "3) GET /api/serviceaccounts/search — names, roles, token counts. "
+                "Do not create/rotate tokens or mutate settings."
+            ),
+            "pass_criteria": (
+                "Settings JSON discloses instance/DB/config, OR datasources list internal "
+                "cluster URLs, OR service accounts with roles/token counts are enumerated"
+            ),
+            "kill_criteria": (
+                "Admin APIs 401/403; Viewer session cannot reach Server Admin endpoints"
+            ),
+            "specialist": "coverage",
+            "priority": "critical",
+            "id_suffix": "grafana-admin-apis",
+        },
+        {
+            "title": "Grafana existing Prometheus datasource proxy → cluster service enum",
+            "assumption": (
+                "kube-prometheus-stack Grafana already has a Prometheus datasource at an "
+                "in-cluster URL (e.g. http://kube-prometheus-stack-prometheus.monitoring:9090/). "
+                "Server Admin can relay PromQL via /api/datasources/proxy without creating a new datasource"
+            ),
+            "test": (
+                "1) GET /api/datasources — find type=prometheus with an internal URL; "
+                "2) GET /api/datasources/proxy/<id>/api/v1/targets "
+                "(or /api/v1/label/job/values, /api/v1/query?query=up) through the EXISTING datasource; "
+                "3) Record cluster DNS names, exporter ports, kubelet/API-server scrape targets. "
+                "Read-only Prometheus queries only. Creating a new datasource is a separate SSRF card."
+            ),
+            "pass_criteria": (
+                "Proxy response lists internal scrape targets / jobs (exporters, kubelets, "
+                "in-cluster service DNS) proving cluster topology via the existing datasource"
+            ),
+            "kill_criteria": (
+                "No prometheus datasource; proxy 403/whitelist; empty targets"
+            ),
+            "specialist": "coverage",
+            "priority": "critical",
+            "id_suffix": "grafana-prom-proxy-enum",
+        },
+        {
+            "title": "CouchDB _config exposure: auth secret, admin salts, session timeout",
+            "assumption": (
+                "CouchDB _admin (often a product default like admin:admin or an app default) "
+                "can GET /_node/_local/_config. That endpoint returns couch_httpd_auth.secret, "
+                "couch_httpd_auth.timeout, and PBKDF2 salts for every [admins] user — the two "
+                "inputs that sign AuthSession cookies. Password rotation does not hide them."
+            ),
+            "test": (
+                "With the CouchDB _admin session (Basic or cookie), read-only GETs only: "
+                "1) GET /_node/_local/_config/couch_httpd_auth/secret; "
+                "2) GET /_node/_local/_config/couch_httpd_auth/timeout; "
+                "3) GET /_node/_local/_config/admins (usernames + hashed salts). "
+                "sanitize_evidence before notes. Do not PUT the secret or mutate config."
+            ),
+            "pass_criteria": (
+                "Secret value returned AND at least one admin salt visible AND/OR timeout "
+                "is far above a normal session (e.g. 31536000 = one year)"
+            ),
+            "kill_criteria": (
+                "_config 401/403; secret/admins sections empty; config restricted to localhost"
+            ),
+            "specialist": "coverage",
+            "priority": "critical",
+            "id_suffix": "couchdb-config-secret",
+        },
+        {
+            "title": "CouchDB AuthSession cookie forgery (secret + admin salt)",
+            "assumption": (
+                "CouchDB 2.x signs AuthSession as HMAC-SHA1(secret + admin_salt, "
+                "username:hex_timestamp). Server-admin salts come from "
+                "/_node/_local/_config/admins/<user> — NOT org.couchdb.user derived_key "
+                "(that HMAC fails 401/400). Forgery impersonates any [admins] account "
+                "without their password and survives password rotation until the secret is rotated."
+            ),
+            "test": (
+                "After the _config card: pick TWO [admins] usernames. Build the documented "
+                "AuthSession cookie (base64 username:hex_timestamp:hmac) using secret+that "
+                "admin's salt. Prove with Cookie: AuthSession=… and NO Basic auth: "
+                "1) GET /_session → userCtx.name=<admin> roles includes _admin; "
+                "2) GET /_all_dbs → database list (record count, not full dump). "
+                "Read-only. Do not PUT/DELETE docs, do not rotate the secret, do not crack "
+                "PBKDF2. Failed _users derived_key attempts belong in not_demonstrated. "
+                "Redact secret, salts, and AuthSession via sanitize_evidence."
+            ),
+            "pass_criteria": (
+                "/_session returns ok with _admin for a user whose password was not used, "
+                "AND /_all_dbs returns the database list under that forged cookie"
+            ),
+            "kill_criteria": (
+                "Forged cookie 401; secret not readable; cookie auth disabled; "
+                "only the original Basic session works"
+            ),
+            "specialist": "coverage",
+            "priority": "critical",
+            "id_suffix": "couchdb-authsession-forgery",
+        },
+        {
+            "title": "CouchDB sibling trivial admins (username=username, e.g. karen:karen)",
+            "assumption": (
+                "Besides the first hit (kevin:kevin / admin:admin), [_config/admins] often "
+                "contains leftover test admins with username-as-password and 10 PBKDF2 iterations. "
+                "Rotating one account does not kill the others."
+            ),
+            "test": (
+                "From GET /_node/_local/_config/admins, take at most 8 short names "
+                "(admin, kevin, karen, test, plus any name whose hash ends with ,10). "
+                "Try username:username via GET /_session only — no invented passwords, no 169-account spray. "
+                "On hit: stash add_engagement_credential and prove GET /_session _admin (do not re-dump all dbs). "
+                "Each distinct trivial admin is its own finding; rotation of one is not remediation of others."
+            ),
+            "pass_criteria": (
+                "A second [admins] account authenticates with username=username and returns _admin"
+            ),
+            "kill_criteria": (
+                "Tiny sibling list rejected; no 10-iteration hashes; lockout"
+            ),
+            "specialist": "credential_assault",
+            "priority": "critical",
+            "id_suffix": "couchdb-sibling-trivial-admins",
+        },
         {
             "title": "Authenticated CVE / post-auth misconfig with recovered creds",
             "assumption": "Default/weak login unlocks authenticated nuclei templates and admin APIs",
@@ -302,11 +631,32 @@ _CHAIN_CARDS: Dict[str, List[Dict[str, str]]] = {
             "id_suffix": "auth-cve",
         },
         {
-            "title": "Grafana SQL Expressions RCE/LFI (CVE-2024-9264) with session",
-            "assumption": "Grafana + valid viewer+ session + duckdb path may allow SQL expression file read/RCE",
-            "test": "With working Grafana session, POST /api/ds/query SQL expression read_blob('/etc/passwd') (or nuclei CVE-2024-9264 with creds)",
-            "pass_criteria": "File contents or command impact in query response",
-            "kill_criteria": "Patched version, duckdb absent, or query rejected",
+            "title": "Grafana SQL Expressions RCE/LFI (CVE-2024-9264) — Viewer+ /api/ds/query",
+            "assumption": (
+                "Grafana 11.0.x expression engine accepts queries with type=sql from any "
+                "authenticated user (including Viewer / service accounts) and forks "
+                "/usr/local/bin/duckdb. The sqlExpressions feature toggle in /metrics may "
+                "be 0 (UI hidden) while the backend still processes SQL expressions. "
+                "A missing DuckDB binary is NOT a patch — it only blocks the last step"
+            ),
+            "test": (
+                "With any Grafana session (Viewer is enough; cookie, Basic, or SA token): "
+                "POST /api/ds/query with an expression query type=sql (nuclei CVE-2024-9264 "
+                "with -var creds AND a direct curl — nuclei may miss the missing-binary case). "
+                "Also GET /metrics and record grafana_feature_toggles_sqlExpressions (or similar) "
+                "— value 0 does not kill. Do not install DuckDB. If the binary is present, "
+                "a file-read canary is enough; do not run shell/system-command extensions."
+            ),
+            "pass_criteria": (
+                "SQL expression is accepted and the server attempts DuckDB: either file "
+                "contents in the query response, OR an error proving fork/exec of "
+                "/usr/local/bin/duckdb (e.g. no such file or directory). Both are SUBMIT"
+            ),
+            "kill_criteria": (
+                "Patched (>=11.2.2) or authz rejects SQL expressions without forking DuckDB "
+                "(401/403/feature-disabled at the engine). Unauthenticated-only. "
+                "Do NOT kill solely because DuckDB is absent or the UI toggle is off"
+            ),
             "specialist": "coverage",
             "priority": "critical",
             "id_suffix": "grafana-9264",
@@ -319,12 +669,12 @@ _CHAIN_CARDS: Dict[str, List[Dict[str, str]]] = {
                 "/api/datasources/proxy when data_source_proxy_whitelist is empty"
             ),
             "test": (
-                "With Grafana admin session: "
+                "Only if no existing Prometheus datasource yielded cluster topology: "
                 "1) POST /api/datasources with type=prometheus|testdata URL="
                 "https://kubernetes.default.svc or http://169.254.169.254/ (or in-cluster DNS); "
                 "2) GET /api/datasources/proxy/uid/<uid>/version or /api/v1/namespaces; "
                 "3) Also try CallResource /api/datasources/uid/<uid>/resources/* if proxy whitelist blocks; "
-                "4) Prefer read-only canaries (API discovery, /version, secrets list IF authorized) — no destructive writes"
+                "4) Prefer read-only canaries (API discovery, /version) — no destructive writes"
             ),
             "pass_criteria": (
                 "Proxy/resource response body shows internal K8s API, cloud metadata, "
@@ -386,6 +736,31 @@ _CHAIN_CARDS: Dict[str, List[Dict[str, str]]] = {
             "priority": "high",
             "id_suffix": "idor-write",
         },
+        {
+            "title": "Mass-assign id/user/owner on the same object family (schema first)",
+            "assumption": (
+                "Read IDOR or a shared list often pairs with DRF request serializers that "
+                "leave id, created, and user writable (no readOnly)"
+            ),
+            "test": (
+                "If OpenAPI exists (GET /api/schema/ or swagger.json): count *Request "
+                "components where id/created/updated/user/owner/schedule/periodic_task "
+                "are writable (not readOnly). Note list ops that say 'all users' / "
+                "'shared across'. One bounded canary write only if the DB is up — do not "
+                "enable ICS schedules or dump OT/ICS hierarchy."
+            ),
+            "pass_criteria": (
+                "Schema shows writable privileged fields without readOnly, OR a list "
+                "endpoint documents cross-user sharing. Live write optional"
+            ),
+            "kill_criteria": (
+                "readOnly/extra_kwargs on those fields; object-level 403; caller-only lists. "
+                "Do NOT kill because the database is unavailable"
+            ),
+            "specialist": "api_authz",
+            "priority": "critical",
+            "id_suffix": "idor-mass-assign",
+        },
     ],
     "ssrf": [
         {
@@ -399,6 +774,867 @@ _CHAIN_CARDS: Dict[str, List[Dict[str, str]]] = {
             "id_suffix": "ssrf-meta",
         },
     ],
+    "elasticsearch_unauth": [
+        {
+            "title": "Elasticsearch cluster/node metadata (OS, hostname, kernel)",
+            "assumption": (
+                "Unauthenticated GET / already returned cluster JSON; /_cluster/health and "
+                "/_nodes/os,jvm disclose hostname, OS, kernel, and JVM without credentials"
+            ),
+            "test": (
+                "Unauthenticated GET /_cluster/health and GET /_nodes/os,jvm?pretty "
+                "(or /_nodes/_all/os,jvm). Record cluster_name, node name, OS name/pretty, "
+                "kernel, JVM. Read-only. Do not change cluster settings."
+            ),
+            "pass_criteria": (
+                "Node JSON discloses hostname and/or OS/kernel (or equivalent cluster health "
+                "with unauthenticated 200)"
+            ),
+            "kill_criteria": "401/403 on /_nodes and /_cluster/health; security now enabled",
+            "specialist": "coverage",
+            "priority": "critical",
+            "id_suffix": "es-nodes-os",
+        },
+        {
+            "title": "Elasticsearch index enum + limited sample read",
+            "assumption": (
+                "xpack.security disabled allows listing all indices and reading documents"
+            ),
+            "test": (
+                "GET /_cat/indices?v (names, docs, store size). Sample-read only: "
+                "GET /<user-index>/_search?size=1 (or _doc/_search) on 1–3 non-system "
+                "indices. Prefer notable names (read_me, ransomware notes, prompt/chat "
+                "indices). Do NOT dump all documents or scroll the cluster."
+            ),
+            "pass_criteria": (
+                "Index list returned unauthenticated AND at least one user-created index "
+                "sample (or empty user indices with system indices listed)"
+            ),
+            "kill_criteria": "401/403 on _cat/indices; no indices; not Elasticsearch",
+            "specialist": "coverage",
+            "priority": "critical",
+            "id_suffix": "es-indices-read",
+        },
+        {
+            "title": "Elasticsearch write proof: create then delete test index",
+            "assumption": (
+                "Unauthenticated clients can create and delete indices when security is off"
+            ),
+            "test": (
+                "PUT /aegis_test_index (empty index, no documents). Confirm "
+                '{"acknowledged":true}. Immediately DELETE /aegis_test_index to clean up. '
+                "Do not write into existing customer indices. Do not run Painless/scripting."
+            ),
+            "pass_criteria": (
+                "Create acknowledged, then delete acknowledged (or 200) for aegis_test_index"
+            ),
+            "kill_criteria": (
+                "Create 401/403/405; cluster is read-only; security enabled"
+            ),
+            "specialist": "coverage",
+            "priority": "critical",
+            "id_suffix": "es-write-test-index",
+        },
+    ],
+    "js_secrets": [
+        {
+            "title": "Hostname-keyed client_id/client_secret map in client JS",
+            "assumption": (
+                "Next.js/admin UI chunks (_next/static/chunks) embed a hostname-keyed "
+                "config object mapping prod/dev/qa hosts to OAuth client_id + client_secret"
+            ),
+            "test": (
+                "scan_js_urls_for_secrets on first-party /_next/static/chunks/*.js (and other "
+                "admin bundles). Extract every env pair and the API host each authenticates to. "
+                "Note the header scheme from the bundle (often client_id/client_secret HTTP "
+                "headers, not Authorization: Bearer). Stash via add_engagement_credential "
+                "(secret_type=oauth_client). Redact values in notes."
+            ),
+            "pass_criteria": (
+                "At least one non-publishable client_id/client_secret pair tied to an API host "
+                "is recovered from a public JS bundle"
+            ),
+            "kill_criteria": (
+                "Only public/publishable keys; no client_secret; map is empty stubs"
+            ),
+            "specialist": "js_secrets",
+            "priority": "critical",
+            "id_suffix": "js-hostname-cred-map",
+        },
+        {
+            "title": "Live API impact with JS-leaked client credentials",
+            "assumption": (
+                "Extracted client_id/client_secret authenticate to the IAM/API gateway and "
+                "return non-public records (locations, accounts, partners)"
+            ),
+            "test": (
+                "Replay the header scheme from the bundle against the in-scope API host "
+                "(prefer sandbox/dev first). ONE read-only request. If a search/queryText "
+                "parameter exists, one targeted query is enough. Record status, result count, "
+                "and 1-2 redacted sample field names (not full dumps). Do not paginate or "
+                "bulk-export. Call prod only if that API host is in engagement scope."
+            ),
+            "pass_criteria": (
+                "Authenticated response returns non-public records (count + redacted sample "
+                "fields proving PII/business data)"
+            ),
+            "kill_criteria": (
+                "401/403; publishable-key sandbox only; no record payload"
+            ),
+            "specialist": "js_secrets",
+            "priority": "critical",
+            "id_suffix": "js-cred-live-api",
+        },
+        {
+            "title": "Cross-environment credential leak from sandbox/admin UI",
+            "assumption": (
+                "A sandbox or admin UI bundle ships production AND lower-env credential "
+                "triples — rotating only the sandbox pair is insufficient"
+            ),
+            "test": (
+                "From the hostname-keyed map, list every env (prod/dev/qa) and its API host. "
+                "Remediation must rotate ALL pairs. Optional: one live check of an in-scope "
+                "non-prod host. Do not call out-of-scope production APIs."
+            ),
+            "pass_criteria": (
+                "Map contains more than one environment's secrets, or a sandbox UI contains "
+                "a production client_secret"
+            ),
+            "kill_criteria": "Single-env publishable key only",
+            "specialist": "js_secrets",
+            "priority": "high",
+            "id_suffix": "js-cred-cross-env",
+        },
+        {
+            "title": "EmailJS public keys in client JS (service_id / user_id / template_id)",
+            "assumption": (
+                "Production bundles embed EmailJS emailjs_userid, emailjs_serviceid, and "
+                "emailjs_templateid. Those keys let any page send mail through the app's "
+                "authorized EmailJS integration"
+            ),
+            "test": (
+                "scan_js_urls_for_secrets on first-party bundles (main.*.js, /_next/static/chunks). "
+                "Extract service_id (service_*), user_id, and every template_id. Stash via "
+                "add_engagement_credential(secret_type=emailjs). Note recipient template_params "
+                "names from the bundle (to_mail, managerEmail, to_email, user_email, email). "
+                "Redact keys in notes."
+            ),
+            "pass_criteria": (
+                "Public bundle contains EmailJS user_id + service_id + at least one template_id"
+            ),
+            "kill_criteria": "No EmailJS keys; placeholders only; keys revoked",
+            "specialist": "js_secrets",
+            "priority": "critical",
+            "id_suffix": "emailjs-keys",
+        },
+        {
+            "title": "EmailJS send API — browser canary to engagement-controlled inbox",
+            "assumption": (
+                "EmailJS often blocks non-browser origins but still accepts POST "
+                "https://api.emailjs.com/api/v1.0/email/send from a visitor's browser. "
+                "template_params control the recipient, so any site embedding the keys can send"
+            ),
+            "test": (
+                "ONE canary per template, max two templates. Recipient MUST be an "
+                "engagement-controlled inbox (execute_interactsh mailbox or operator canary) — "
+                "never customer employees, never arbitrary third parties, never phishing lures. "
+                "Prefer execute_browser fetch() from the target origin (curl/server POST is often "
+                "blocked by EmailJS origin checks; a 403 from curl is NOT a kill). "
+                "Body: service_id, template_id, user_id, template_params with the recipient field "
+                "from the bundle. PASS on HTTP 200 body OK or canary received. Then stop."
+            ),
+            "pass_criteria": (
+                "Browser-context send returns 200/OK and/or the canary inbox received mail "
+                "from the application's EmailJS integration"
+            ),
+            "kill_criteria": (
+                "Keys rejected from browser and server; domain allowlist blocks foreign origins "
+                "AND the first-party origin requires an authenticated session the agent does not have"
+            ),
+            "specialist": "js_secrets",
+            "priority": "critical",
+            "id_suffix": "emailjs-send-canary",
+        },
+    ],
+    "azure_function_env_dump": [
+        {
+            "title": "Classify Function App runtime secret classes",
+            "assumption": (
+                "An anonymous HTTP trigger (often named Tester) returned the process "
+                "environment loaded at startup: Cosmos master keys, Storage account keys, "
+                "MACHINEKEY_DecryptionKey, EasyAuth WEBSITE_AUTH_* keys, AAD client secrets, "
+                "App Insights instrumentation key, Key Vault URIs, managed-identity endpoints"
+            ),
+            "test": (
+                "From the unauth JSON, inventory secret *classes* and resource names only. "
+                "add_engagement_credential with secret_type labels and [REDACTED] values "
+                "(never persist raw keys). sanitize_evidence before create_finding. "
+                "Write Vulnerability Description + Impact (which classes, which data stores) "
+                "+ Assets Affected + Recommendation: remove Tester or set authLevel=function; "
+                "ipSecurityRestrictions or Private Endpoints; rotate every disclosed credential; "
+                "decommission unused Function Apps / web apps / Cosmos / storage / Key Vaults / "
+                "AAD apps. Rotate AAD client secrets last, after Tester is unreachable."
+            ),
+            "pass_criteria": (
+                "Env JSON classified into concrete secret types (Cosmos / Storage / "
+                "MACHINEKEY / EasyAuth / AAD / App Insights / Key Vault) with redacted evidence"
+            ),
+            "kill_criteria": "Body is not process env; only public config; function key required",
+            "specialist": "coverage",
+            "priority": "critical",
+            "id_suffix": "azfn-classify-secrets",
+        },
+        {
+            "title": "Cosmos master key → internet-accessible database (read-only)",
+            "assumption": (
+                "The leaked Cosmos master key grants read/write/delete on an internet-reachable "
+                "account that may back employee identity and project records"
+            ),
+            "test": (
+                "If ACCOUNT_ENDPOINT (or equivalent) is in the env JSON and in scope: ONE "
+                "read-only list of databases/containers. Record account + container names only. "
+                "No item dumps, no writes, no deletes. Redact the key in evidence."
+            ),
+            "pass_criteria": (
+                "Read-only list proves the master key works against a reachable Cosmos account"
+            ),
+            "kill_criteria": (
+                "Key rejected; account not internet-reachable; endpoint out of scope"
+            ),
+            "specialist": "coverage",
+            "priority": "critical",
+            "id_suffix": "azfn-cosmos-readonly",
+        },
+        {
+            "title": "Storage account key inventory (list only)",
+            "assumption": (
+                "AzureWebJobsStorage holds an account key that can list (and, unused here, "
+                "overwrite) the Function App content share"
+            ),
+            "test": (
+                "List containers / share names only with the storage key. Do not upload blobs, "
+                "do not replace function packages, do not write host.json or wwwroot. "
+                "Presence of AccountKey + MACHINEKEY_DecryptionKey is the ACE prerequisite — "
+                "record it; do not exercise it."
+            ),
+            "pass_criteria": (
+                "List operation succeeds, proving the storage key is live (container names only)"
+            ),
+            "kill_criteria": "Key rejected; storage not reachable; no AccountKey in env",
+            "specialist": "coverage",
+            "priority": "critical",
+            "id_suffix": "azfn-storage-list",
+        },
+        {
+            "title": "Peer Function App via -dev- / production naming",
+            "assumption": (
+                "Tenants often pair ra-*-fa (production) with ra-*-dev-fa (development). "
+                "The same anonymous Tester trigger is commonly deployed to both"
+            ),
+            "test": (
+                "From the hostname, derive the peer (insert or strip a -dev- token) and "
+                "unauthenticated GET the same HTTP trigger. Same authLevel probe only."
+            ),
+            "pass_criteria": "Peer Function App returns the same class of runtime env JSON",
+            "kill_criteria": "Peer NXDOMAIN / 401/403 / no anonymous trigger",
+            "specialist": "coverage",
+            "priority": "high",
+            "id_suffix": "azfn-peer-naming",
+        },
+        {
+            "title": "Managed identity / Key Vault blast radius (prerequisites only)",
+            "assumption": (
+                "Storage account key + DataProtection/MACHINEKEY can lead to code execution "
+                "as the Function App system-assigned managed identity, which may have secret "
+                "get/set on the app Key Vault holding the live AAD client secret — and that "
+                "principal may hold Graph directory enum plus ARM Owner on a resource group. "
+                "Production ACE requires injecting code and waiting for a restart."
+            ),
+            "test": (
+                "Record MSI / identity endpoint, Key Vault URI, and (if cloud ROE allows) "
+                "read-only ARM/Graph checks of MI role assignments and Key Vault access policy. "
+                "Do NOT upload function packages, do NOT write wwwroot, do NOT inject code, "
+                "do NOT wait for a restart. Mark arbitrary code execution as not_demonstrated."
+            ),
+            "pass_criteria": (
+                "Prerequisites documented (storage key + MACHINEKEY + Key Vault + MI roles) "
+                "without executing code on the Function App"
+            ),
+            "kill_criteria": "No MI, no Key Vault URI, or cloud ROE forbids control-plane reads",
+            "specialist": "cloud_audit",
+            "priority": "high",
+            "id_suffix": "azfn-mi-keyvault-prereq",
+        },
+        {
+            "title": "AAD client secret handling and rotation order",
+            "assumption": (
+                "Env may include an expired AAD client secret while Key Vault holds the live "
+                "one. Redeeming a live secret can yield Graph directory tokens and ARM as the "
+                "Owner-bound service principal"
+            ),
+            "test": (
+                "Note client_id / secret presence and expiry if shown. Do not redeem the "
+                "secret for Graph or ARM tokens unless cloud control-plane testing is in ROE. "
+                "Remediation must rotate AAD secrets LAST — after Tester is removed — so new "
+                "values cannot re-leak on the next process restart."
+            ),
+            "pass_criteria": (
+                "AAD app/secret presence (and expiry) recorded; rotation-order called out"
+            ),
+            "kill_criteria": "No AAD client secret / app id in the env JSON",
+            "specialist": "coverage",
+            "priority": "high",
+            "id_suffix": "azfn-aad-rotation-order",
+        },
+    ],
+    "arangodb_default": [
+        {
+            "title": "ArangoDB root empty-password → database/collection sample",
+            "assumption": "Internet-facing ArangoDB /_open/auth accepts root with empty password and returns a JWT",
+            "test": (
+                "POST /_open/auth {\"username\":\"root\",\"password\":\"\"}. On JWT: "
+                "GET /_api/database (names only), then GET /_api/collection on _system plus "
+                "ONE user DB with limit=1 document sample. Do not dump PII collections. "
+                "Do not mutate. Redact JWTs."
+            ),
+            "pass_criteria": "JWT issued for root AND at least one non-system database or collection listed",
+            "kill_criteria": "401/403; password required; /_open/auth disabled",
+            "specialist": "coverage",
+            "priority": "critical",
+            "id_suffix": "arangodb-root-enum",
+        },
+    ],
+    "mongodb_unauth": [
+        {
+            "title": "MongoDB anonymous listDatabases + ransomware/integrity check",
+            "assumption": "Port 27017 accepts unauthenticated connections (often AKS LoadBalancer)",
+            "test": (
+                "execute_nuclei -id mongodb-unauth or equivalent listDatabases. Record db names only. "
+                "If READ_ME_TO_RECOVER_YOUR_DATA (or similar) is present, note prior compromise. "
+                "Do not dump collections. Do not drop databases."
+            ),
+            "pass_criteria": "Unauthenticated listDatabases succeeds (or ransomware-note db visible)",
+            "kill_criteria": "auth required; port filtered",
+            "specialist": "coverage",
+            "priority": "critical",
+            "id_suffix": "mongo-listdbs",
+        },
+    ],
+    "emqx_default": [
+        {
+            "title": "EMQX dashboard default login → broker admin APIs",
+            "assumption": "EMQX dashboard still uses admin:public (or admin:admin)",
+            "test": (
+                "Tiny list only: admin:public then admin:admin on /api/v5/login or dashboard. "
+                "On success: GET listeners/users/authn (read-only). Do not upload plugins, "
+                "do not change authn, do not publish MQTT."
+            ),
+            "pass_criteria": "Dashboard/API session with admin role; listeners or users enumerated",
+            "kill_criteria": "Defaults rejected; MFA/SSO; not EMQX",
+            "specialist": "credential_assault",
+            "priority": "critical",
+            "id_suffix": "emqx-admin-apis",
+        },
+    ],
+    "cors_credentials": [
+        {
+            "title": "CORS ACAO reflection + Access-Control-Allow-Credentials: true",
+            "assumption": (
+                "The server echoes an arbitrary Origin in ACAO while returning "
+                "Access-Control-Allow-Credentials: true, so browsers will attach cookies "
+                "and expose the response body to attacker JavaScript"
+            ),
+            "test": (
+                "compare_requests / curl: Origin=https://aegis-cors-canary-<rand>.example "
+                "(a never-seen origin — not evil.com, not null unless testing null) vs no Origin. "
+                "PASS only if ACAO equals that origin AND credentials=true. Do not ship an "
+                "HTML exploit page. Header proof is SUBMIT even without a victim tab."
+            ),
+            "pass_criteria": (
+                "ACAO reflects the canary origin AND Access-Control-Allow-Credentials is true"
+            ),
+            "kill_criteria": (
+                "Allowlist does not echo the canary; ACAO is * without credentials. "
+                "Do NOT kill solely because no authenticated victim browser was available"
+            ),
+            "specialist": "api_authz",
+            "priority": "critical",
+            "id_suffix": "cors-acao-creds",
+        },
+        {
+            "title": "CORS preflight allows Authorization + mutating methods from any origin",
+            "assumption": (
+                "OPTIONS from the canary origin is approved with Access-Control-Allow-Methods "
+                "including POST/PUT/DELETE and Access-Control-Allow-Headers including Authorization"
+            ),
+            "test": (
+                "OPTIONS on the same paths with Access-Control-Request-Method: POST and "
+                "Access-Control-Request-Headers: Authorization. Record Allow-Methods and "
+                "Allow-Headers. Do not send a real token from an attacker page."
+            ),
+            "pass_criteria": (
+                "Preflight ACAO echoes the canary AND allows Authorization and/or POST/PUT/DELETE"
+            ),
+            "kill_criteria": (
+                "Preflight 403/missing ACAO; Authorization not allowed. "
+                "Do NOT kill because GET-only was allowed if credentialed GET still reflects"
+            ),
+            "specialist": "api_authz",
+            "priority": "high",
+            "id_suffix": "cors-preflight-authz",
+        },
+        {
+            "title": "Keycloak IdP CORS — token, userinfo, JWKS, admin REST",
+            "assumption": (
+                "Keycloak client webOrigins=* (or a proxy override) applies to "
+                "/auth/realms/<realm>/protocol/openid-connect/token, /userinfo, /certs, "
+                "and /auth/admin/realms/<realm>/* — including users and clients"
+            ),
+            "test": (
+                "Repeat the canary Origin GET/OPTIONS on token, userinfo, JWKS, and "
+                "GET /auth/admin/realms/<realm>/users. Header proof on those paths is SUBMIT. "
+                "Do not dump the user directory or client secrets. If an engagement admin "
+                "session exists, ONE GET users?max=1 (count + 1 redacted username) then stop. "
+                "Remediation: webOrigins explicit or '+' (redirect URIs), never '*'; audit "
+                "reverse-proxy CORS that overrides Keycloak."
+            ),
+            "pass_criteria": (
+                "Canary Origin + credentials=true on token and/or userinfo and/or admin API"
+            ),
+            "kill_criteria": (
+                "webOrigins allowlist/'+' ; canary not echoed on IdP paths; ACAO=* without "
+                "credentials. Do NOT kill because JWKS is public or no victim tab was open"
+            ),
+            "specialist": "api_authz",
+            "priority": "critical",
+            "id_suffix": "keycloak-cors-idp",
+        },
+        {
+            "title": "Keycloak admin-cli public client + password grant (no client_secret)",
+            "assumption": (
+                "admin-cli is public with Direct Access Grants. POST grant_type=password "
+                "without a client_secret yields invalid_grant, not invalid_client"
+            ),
+            "test": (
+                "POST /auth/realms/master/protocol/openid-connect/token and one other realm "
+                "with grant_type=password, client_id=admin-cli, username=aegis_lockout_probe, "
+                "a fake password, NO client_secret. Repeat on discovered realms. "
+                "Do not hydra. queue_finding_followups(vuln_type='keycloak_password_grant')."
+            ),
+            "pass_criteria": (
+                "invalid_grant (or access_token) without presenting a client_secret — "
+                "not invalid_client / unsupported_grant_type"
+            ),
+            "kill_criteria": (
+                "invalid_client / unauthorized_client; unsupported_grant_type. "
+                "Do NOT kill because the password was wrong"
+            ),
+            "specialist": "credential_assault",
+            "priority": "critical",
+            "id_suffix": "keycloak-admin-cli-public",
+        },
+        {
+            "title": "Socket.IO unauth get_stream after CORS (url_key only)",
+            "assumption": "After ACAO+credentials, get_stream accepts empty userType / arbitrary siteId",
+            "test": (
+                "Unauth get_stream; record url_key presence. Do not pull video frames; "
+                "no null-crash loops."
+            ),
+            "pass_criteria": "Unauth stream url_key or equivalent handshake secret",
+            "kill_criteria": "get_stream requires auth; no url_key",
+            "specialist": "api_authz",
+            "priority": "high",
+            "id_suffix": "socketio-get-stream",
+        },
+    ],
+    "keycloak_password_grant": [
+        {
+            "title": "admin-cli public + Resource Owner Password Credentials (no client_secret)",
+            "assumption": (
+                "Keycloak admin-cli in master and application realms is a public client with "
+                "Direct Access Grants. Any network client can POST username/password to "
+                "/auth/realms/{realm}/protocol/openid-connect/token without a client_secret. "
+                "Master tokens are full realm-admin"
+            ),
+            "test": (
+                "POST token on master and every discovered realm: grant_type=password, "
+                "client_id=admin-cli, username=aegis_lockout_probe, password=not-a-real-secret, "
+                "NO client_secret. invalid_grant proves the grant is enabled and public. "
+                "Do not send a client_secret. Do not hydra."
+            ),
+            "pass_criteria": (
+                "invalid_grant or access_token without a client_secret on master and/or "
+                "another realm"
+            ),
+            "kill_criteria": (
+                "invalid_client / unauthorized_client (confidential); unsupported_grant_type. "
+                "Do NOT kill solely because no valid password was guessed"
+            ),
+            "specialist": "credential_assault",
+            "priority": "critical",
+            "id_suffix": "keycloak-admin-cli-public",
+        },
+        {
+            "title": "Token endpoint has no lockout / 429 / CAPTCHA (bounded probe)",
+            "assumption": (
+                "Brute Force Detection is off. Sequential password-grant failures are all "
+                "processed at full speed with invalid_grant and no 429"
+            ),
+            "test": (
+                "At most 8 POSTs with unique fake passwords for the same probe user on master "
+                "(then one other realm if the first is open). Record status, error, and whether "
+                "latency grows. Stop at 8. No hydra, no rockyou, no employee username list. "
+                "CORS-enabled stuffing is a separate finding."
+            ),
+            "pass_criteria": (
+                "All <=8 attempts return invalid_grant (or equivalent) with no 429, no lockout "
+                "message, and no meaningful slowdown"
+            ),
+            "kill_criteria": (
+                "429; account locked; wait increment / max failures; CAPTCHA. "
+                "Do NOT kill because a real admin password was not found"
+            ),
+            "specialist": "credential_assault",
+            "priority": "critical",
+            "id_suffix": "keycloak-token-no-lockout",
+        },
+        {
+            "title": "Tiny admin-cli defaults on master (stop on hit)",
+            "assumption": (
+                "If password grant is public, product defaults (admin:admin / admin:keycloak) "
+                "may still work on master"
+            ),
+            "test": (
+                "Tiny list only on master then one other realm: admin:admin, admin:password, "
+                "admin:keycloak. hydra -f / stop on first token. On hit: stash and ONE "
+                "GET /auth/admin/realms (count) or users?max=1 — do not dump users or clients. "
+                "No rockyou."
+            ),
+            "pass_criteria": "access_token issued for a tiny-list pair",
+            "kill_criteria": "Tiny list rejected; do not continue spraying",
+            "specialist": "credential_assault",
+            "priority": "high",
+            "id_suffix": "keycloak-admin-cli-defaults",
+        },
+    ],
+    "client_role_param": [
+        {
+            "title": "Client-supplied userType/admin role bypasses tenant scoping",
+            "assumption": "publicPortal (or similar) trusts body/query userType, userId, userName without a session",
+            "test": (
+                "compare_requests: baseline userType empty/User vs mutant userType=Admin "
+                "(and SuperRegulator if seen in JS). Decode base64 bodies if the client does. "
+                "PASS if Admin returns a larger/cross-tenant dataset. Sample counts + 1–2 redacted "
+                "fields; do not export the full inventory."
+            ),
+            "pass_criteria": "Admin/userType mutant returns other-tenant or privileged fields vs baseline",
+            "kill_criteria": "401/403; same body; server ignores userType",
+            "specialist": "api_authz",
+            "priority": "critical",
+            "id_suffix": "usertype-admin",
+        },
+    ],
+    "vendorjson_unauth": [
+        {
+            "title": "Unauth vendorJson multi-tenant configuration disclosure",
+            "assumption": "/glens/userManagement/api/v3.0/vendorJson (or sibling) returns the full tenant manifest",
+            "test": (
+                "Unauth GET vendorJson. If base64, decode. Record tenant count, 1–2 hostnames, "
+                "and whether userId/role/internal IPs appear. Do not dump the full 88-tenant blob "
+                "into the finding."
+            ),
+            "pass_criteria": "Unauth response lists multiple tenants or internal userId/role/IP fields",
+            "kill_criteria": "401/403; current-tenant display config only",
+            "specialist": "api_authz",
+            "priority": "high",
+            "id_suffix": "vendorjson-manifest",
+        },
+    ],
+    "auth0_mgmt_token": [
+        {
+            "title": "Unauth Auth0 Management API token → one bounded directory read",
+            "assumption": "A public /api/token (identitymigrate) returns a client-credentials JWT for Auth0 /api/v2/",
+            "test": (
+                "Unauth GET the token URL. Decode aud/scopes (read:clients, read:users). "
+                "Prove with ONE Management API call: GET /api/v2/clients?per_page=1 or "
+                "users?per_page=1. Record count if present. Redact the JWT. Do not enumerate "
+                "the full user directory or rotate secrets."
+            ),
+            "pass_criteria": "Token issued unauthenticated AND Management API accepts it for a read",
+            "kill_criteria": "401 on token URL; token rejected by /api/v2",
+            "specialist": "coverage",
+            "priority": "critical",
+            "id_suffix": "auth0-mgmt-read",
+        },
+    ],
+    "gitlab_unauth": [
+        {
+            "title": "Unauth GitLab /api/v4/projects + bounded secret sample",
+            "assumption": "GitLab API lists public projects without auth and repos contain hardcoded secrets",
+            "test": (
+                "GET /api/v4/projects?per_page=5&simple=true (count via X-Total if present). "
+                "Sample-search ONE repo file for password/secret patterns. Do not clone all "
+                "projects. Rotate-recommendation only for verified live secrets."
+            ),
+            "pass_criteria": "Unauth project list (count) AND/OR a hardcoded secret in a sampled file",
+            "kill_criteria": "401/403; no public projects",
+            "specialist": "js_secrets",
+            "priority": "critical",
+            "id_suffix": "gitlab-projects-sample",
+        },
+    ],
+    "docker_registry": [
+        {
+            "title": "Unauth Docker Registry /v2/_catalog",
+            "assumption": "Registry /v2 and /v2/_catalog require no credentials",
+            "test": (
+                "GET /v2/ then GET /v2/_catalog. Record image name count (not all tags). "
+                "Do not push images. Do not pull secrets from layers unless a single manifest "
+                "clearly embeds a credential."
+            ),
+            "pass_criteria": "200 on /v2/_catalog with repository names",
+            "kill_criteria": "401 WWW-Authenticate; registry closed",
+            "specialist": "coverage",
+            "priority": "high",
+            "id_suffix": "docker-catalog",
+        },
+    ],
+    "django_debug": [
+        {
+            "title": "Django DEBUG traceback leaks Redis/env after default admin",
+            "assumption": "DEBUG=True plus admin:admin; a 500 on an API dumps env including Redis keys",
+            "test": (
+                "After admin:admin (session or /api/token-pair/), trigger a safe 500 "
+                "(e.g. POST /api/v1/optimize/ with empty body). Extract secret *classes* "
+                "(Redis, DB, Azure) from the traceback. Then optional read-only Redis ping "
+                "if a key+host leaked. Redact keys. Do not flush Redis."
+            ),
+            "pass_criteria": "Traceback discloses env secret classes, or Redis accepts the leaked key",
+            "kill_criteria": "DEBUG off; no traceback; defaults rejected",
+            "specialist": "coverage",
+            "priority": "critical",
+            "id_suffix": "django-debug-env",
+        },
+    ],
+    "openai_proxy_unauth": [
+        {
+            "title": "Unauth Azure OpenAI /api/chat proxy (token theft / spend)",
+            "assumption": "POST /api/chat proxies to Azure OpenAI with no auth and client-only system prompt",
+            "test": (
+                "One cheap canary POST (short max_tokens) proving a model completion without a session. "
+                "Note if tools/functions are accepted. Do not run a token-burn loop. Do not jailbreak "
+                "for harmful content. queue llm_red_team tool_enumeration if tools work."
+            ),
+            "pass_criteria": "Unauth completion from the backend model (or tools executed)",
+            "kill_criteria": "401/403; WAF; not a model proxy",
+            "specialist": "agent_tools",
+            "priority": "high",
+            "id_suffix": "openai-chat-proxy",
+        },
+    ],
+    "wiki_open_reg": [
+        {
+            "title": "Open wiki self-registration → sandbox write / internal read",
+            "assumption": (
+                "MediaWiki/Confluence/DokuWiki (or similar) allows Special:CreateAccount / "
+                "signup without approval and grants write or visibility into internal pages"
+            ),
+            "test": (
+                "Create ONE throwaway account. Prove (a) edit a user/sandbox page, or "
+                "(b) read one internal page that shows employee PII/process docs. "
+                "Do not deface production articles. Do not scrape the wiki."
+            ),
+            "pass_criteria": "Self-registered session can write a sandbox page or read non-public content",
+            "kill_criteria": "Registration disabled; captcha+approval; anonymous cannot write or see internals",
+            "specialist": "auth_logic",
+            "priority": "high",
+            "id_suffix": "wiki-self-reg",
+        },
+    ],
+    "binary_hardcoded_creds": [
+        {
+            "title": "Strings-extract production creds from public binary + one live proof",
+            "assumption": (
+                "A publicly downloadable installer, APK, firmware, or desktop client embeds "
+                "production passwords, DB URIs, or API keys"
+            ),
+            "test": (
+                "Download from the public URL. strings | grep -iE 'password|secret|conn|api[_-]?key' "
+                "(bounded). If a credential looks live, prove ONE in-scope login. Redact secrets. "
+                "Do not reverse-engineer for exploits; do not attach the binary to the finding."
+            ),
+            "pass_criteria": "Hardcoded production secret extracted (and optional live auth)",
+            "kill_criteria": "No secrets; placeholders only; download not in scope",
+            "specialist": "js_secrets",
+            "priority": "critical",
+            "id_suffix": "binary-strings-creds",
+        },
+    ],
+    "client_side_auth": [
+        {
+            "title": "Client-side-only admin gate — forced browse + API without session",
+            "assumption": (
+                "Admin/eLogbook UI hides routes in JS (localStorage, userType, isAdmin) "
+                "while backing APIs skip server auth"
+            ),
+            "test": (
+                "Forced-browse /admin (or eLogbook) without cookies. compare_requests the "
+                "backing API anonymous vs with a forged client role flag. PASS if privileged "
+                "records return. Do not mutate production eLogbook rows."
+            ),
+            "pass_criteria": "Privileged page or API data without a server session",
+            "kill_criteria": "401/403; empty bodies; server session required",
+            "specialist": "auth_logic",
+            "priority": "critical",
+            "id_suffix": "clientauth-forced-browse",
+        },
+    ],
+    "mass_assignment": [
+        {
+            "title": "OpenAPI/DRF request serializers — writable id/created/user without readOnly",
+            "assumption": (
+                "Auto-generated OpenAPI (DRF Spectacular /api/schema/) request components "
+                "expose server-managed fields as writable. The sql/UI-toggle analogue: "
+                "a down database does not disable the serializer contract"
+            ),
+            "test": (
+                "GET /api/schema/ (or swagger.json). For each *Request / requestBody, "
+                "check id, created, updated, user, owner, schedule, periodic_task — "
+                "present and not readOnly. Count serializers (systemic vs one-off). "
+                "Do not install anything; do not dump ICS/OT asset trees."
+            ),
+            "pass_criteria": (
+                "Count >= 1 request serializer with writable privileged fields (id/created/"
+                "user/schedule/…). Schema evidence is SUBMIT even if writes 500"
+            ),
+            "kill_criteria": (
+                "Those fields are readOnly or omitted from request schemas. "
+                "Do NOT kill solely because the database is unavailable"
+            ),
+            "specialist": "api_authz",
+            "priority": "critical",
+            "id_suffix": "oa-readonly-fields",
+        },
+        {
+            "title": "Writable user/owner on create/update — cross-user ownership",
+            "assumption": (
+                "Group/asset request serializers expose a writable user (or owner) field, "
+                "so any authenticated caller can assign ownership to an arbitrary user"
+            ),
+            "test": (
+                "From the schema, name the serializer and path (e.g. POST/PUT group_detail). "
+                "If the DB is up: ONE canary with user=<other in-scope id> on a test object, "
+                "then revert. If the DB is down: SUBMIT on the writable user field in the "
+                "request schema. Do not reassign production ICS assets."
+            ),
+            "pass_criteria": (
+                "Request schema has writable user/owner without readOnly, OR a canary "
+                "changes ownership"
+            ),
+            "kill_criteria": (
+                "user/owner is readOnly or stripped server-side (ignored in stored row). "
+                "Do NOT kill because the database is unavailable"
+            ),
+            "specialist": "api_authz",
+            "priority": "critical",
+            "id_suffix": "oa-writable-user",
+        },
+        {
+            "title": "List endpoints document no tenant isolation ('all users' / shared)",
+            "assumption": (
+                "OpenAPI operation descriptions that say 'queries all … shared across all "
+                "users' are an explicit missing-isolation contract, not just a UI hint"
+            ),
+            "test": (
+                "Quote the operation description. If two accounts exist, compare_requests "
+                "on the list path (user A vs B) — other-user objects in the body. "
+                "A documented 'all users' list is SUBMIT even when a second account or "
+                "the DB is unavailable. Bounded sample only; do not export the hierarchy."
+            ),
+            "pass_criteria": (
+                "Description documents shared/all-users access, OR list body contains "
+                "another user's objects"
+            ),
+            "kill_criteria": (
+                "List is owner-scoped (or explicit share ACL) in both schema and live body. "
+                "Do NOT kill because the database is unavailable"
+            ),
+            "specialist": "api_authz",
+            "priority": "critical",
+            "id_suffix": "oa-shared-list",
+        },
+        {
+            "title": "OpenAPI security: {} account/email lookup (unauth enum + role)",
+            "assumption": (
+                "The same schema often documents GET /api/auth/account/?email= with "
+                "security: {} and UserAccount fields is_staff/role. 500 vs sibling 401 "
+                "proves JWT was skipped"
+            ),
+            "test": (
+                "Quote security: {} / 'without authentication'. compare_requests unauth "
+                "GET /api/auth/profile/ (expect 401) vs /api/auth/account/?email="
+                "aegis-enum-canary@example.invalid (200 with role/is_staff OR 500). "
+                "One canary only. queue_finding_followups(vuln_type='unauth_account_lookup')."
+            ),
+            "pass_criteria": (
+                "Schema unauth + privilege fields, OR lookup is not 401 while siblings are"
+            ),
+            "kill_criteria": (
+                "Lookup 401/403; JWT required in schema. Do NOT kill because the DB is down"
+            ),
+            "specialist": "api_authz",
+            "priority": "critical",
+            "id_suffix": "oa-unauth-account",
+        },
+    ],
+    "unauth_account_lookup": [
+        {
+            "title": "Schema documents public account lookup (security: {} + is_staff/role)",
+            "assumption": (
+                "OpenAPI marks the account/email endpoint as unauthenticated and the "
+                "response model includes email, is_active, valid_through, is_staff, role"
+            ),
+            "test": (
+                "GET /api/schema/. Quote security: {} (or empty security) and the "
+                "description 'without authentication' / 'check if a user is active'. "
+                "Name the privilege fields. Do not spray emails."
+            ),
+            "pass_criteria": (
+                "Operation is documented unauth AND response includes is_staff and/or role "
+                "(or equivalent privilege)"
+            ),
+            "kill_criteria": (
+                "Schema requires bearer/JWT; response is a non-enumerating boolean only"
+            ),
+            "specialist": "api_authz",
+            "priority": "critical",
+            "id_suffix": "account-schema-public",
+        },
+        {
+            "title": "Unauth lookup reaches app code (500/200) while siblings 401",
+            "assumption": (
+                "Protected /api/auth/profile/ and /users/me/ return 401 without a token. "
+                "/api/auth/account/ does not — 500 from a down DB still proves JWT was skipped"
+            ),
+            "test": (
+                "compare_requests: unauth GET sibling vs GET /api/auth/account/?email="
+                "aegis-enum-canary@example.invalid. PASS on 200 with UserAccount fields OR "
+                "500/OperationalError vs 401 on siblings. One canary email. Do not enumerate "
+                "employee inboxes. Do not dump ICS/OT users."
+            ),
+            "pass_criteria": (
+                "Lookup is not 401/403 while a protected sibling is 401, or 200 discloses "
+                "is_staff/role/valid_through"
+            ),
+            "kill_criteria": (
+                "Lookup 401/403 matching siblings. Do NOT kill solely because the database "
+                "is unavailable or the canary email is unregistered"
+            ),
+            "specialist": "api_authz",
+            "priority": "critical",
+            "id_suffix": "account-401-vs-500",
+        },
+    ],
 }
 
 
@@ -408,7 +1644,16 @@ _FINDING_CLASS_ALIASES = {
     "default_credentials": "default_login",
     "default-credentials": "default_login",
     "grafana-default-login": "default_login",
+    "grafana_default_login": "default_login",
+    "cwe-1393": "default_login",
+    "cwe_1393": "default_login",
     "weak_password": "default_login",
+    "weak_credential": "default_login",
+    "couchdb": "default_login",
+    "couchdb_config": "default_login",
+    "session_forgery": "default_login",
+    "cookie_forgery": "default_login",
+    "authsession": "default_login",
     "host_header": "host_header",
     "host-header": "host_header",
     "host_header_injection": "host_header",
@@ -419,6 +1664,96 @@ _FINDING_CLASS_ALIASES = {
     "authz": "idor",
     "broken_authz": "idor",
     "ssrf": "ssrf",
+    "elasticsearch_unauth": "elasticsearch_unauth",
+    "elasticsearch-unauth": "elasticsearch_unauth",
+    "elasticsearch": "elasticsearch_unauth",
+    "exposed_elasticsearch": "elasticsearch_unauth",
+    "unauth_elasticsearch": "elasticsearch_unauth",
+    "unauthenticated_elasticsearch": "elasticsearch_unauth",
+    "xpack_security": "elasticsearch_unauth",
+    "js_secrets": "js_secrets",
+    "js-secrets": "js_secrets",
+    "hardcoded_credentials": "js_secrets",
+    "hardcoded-credentials": "js_secrets",
+    "client_secret": "js_secrets",
+    "client_id": "js_secrets",
+    "cwe-312": "js_secrets",
+    "cwe_312": "js_secrets",
+    "cwe-540": "js_secrets",
+    "cwe_540": "js_secrets",
+    "emailjs": "js_secrets",
+    "email_js": "js_secrets",
+    "email-js": "js_secrets",
+    "azure_function_env_dump": "azure_function_env_dump",
+    "azure_function": "azure_function_env_dump",
+    "azure-function": "azure_function_env_dump",
+    "function_app": "azure_function_env_dump",
+    "function-app": "azure_function_env_dump",
+    "authlevel_anonymous": "azure_function_env_dump",
+    "authlevel-anonymous": "azure_function_env_dump",
+    "tester_function": "azure_function_env_dump",
+    "cwe-526": "azure_function_env_dump",
+    "cwe_526": "azure_function_env_dump",
+    "arangodb_default": "arangodb_default",
+    "arangodb": "arangodb_default",
+    "mongodb_unauth": "mongodb_unauth",
+    "mongodb": "mongodb_unauth",
+    "mongo_anon": "mongodb_unauth",
+    "emqx_default": "emqx_default",
+    "emqx": "emqx_default",
+    "cors_credentials": "cors_credentials",
+    "cors": "cors_credentials",
+    "weborigins": "cors_credentials",
+    "web_origins": "cors_credentials",
+    "keycloak_cors": "cors_credentials",
+    "keycloak_password_grant": "keycloak_password_grant",
+    "keycloak-password-grant": "keycloak_password_grant",
+    "admin-cli": "keycloak_password_grant",
+    "admin_cli": "keycloak_password_grant",
+    "password_grant": "keycloak_password_grant",
+    "direct_access_grants": "keycloak_password_grant",
+    "cwe-307": "keycloak_password_grant",
+    "cwe_307": "keycloak_password_grant",
+    "client_role_param": "client_role_param",
+    "usertype": "client_role_param",
+    "user_type": "client_role_param",
+    "vendorjson_unauth": "vendorjson_unauth",
+    "vendorjson": "vendorjson_unauth",
+    "vendor_json": "vendorjson_unauth",
+    "auth0_mgmt_token": "auth0_mgmt_token",
+    "auth0": "auth0_mgmt_token",
+    "gitlab_unauth": "gitlab_unauth",
+    "gitlab": "gitlab_unauth",
+    "docker_registry": "docker_registry",
+    "docker-registry": "docker_registry",
+    "django_debug": "django_debug",
+    "django": "django_debug",
+    "openai_proxy_unauth": "openai_proxy_unauth",
+    "openai_proxy": "openai_proxy_unauth",
+    "azure_openai": "openai_proxy_unauth",
+    "wiki_open_reg": "wiki_open_reg",
+    "wiki": "wiki_open_reg",
+    "self_registration": "wiki_open_reg",
+    "binary_hardcoded_creds": "binary_hardcoded_creds",
+    "downloadable_binary": "binary_hardcoded_creds",
+    "client_side_auth": "client_side_auth",
+    "client-side-auth": "client_side_auth",
+    "mass_assignment": "mass_assignment",
+    "mass-assignment": "mass_assignment",
+    "cwe-915": "mass_assignment",
+    "cwe_915": "mass_assignment",
+    "bopla": "mass_assignment",
+    "property_level": "mass_assignment",
+    "drf_mass_assignment": "mass_assignment",
+    "unauth_account_lookup": "unauth_account_lookup",
+    "unauth-account-lookup": "unauth_account_lookup",
+    "user_enum": "unauth_account_lookup",
+    "user_enumeration": "unauth_account_lookup",
+    "account_enumeration": "unauth_account_lookup",
+    "cwe-204": "unauth_account_lookup",
+    "cwe_204": "unauth_account_lookup",
+    "/api/auth/account": "unauth_account_lookup",
+    "api/auth/account": "unauth_account_lookup",
 }
 
 
@@ -559,14 +1894,120 @@ def queue_followups_for_finding(
     # Fuzzy title matching for nuclei template names
     blob = f"{vuln_type} {title}".lower()
     if not key:
-        if "default" in blob and ("login" in blob or "credential" in blob or "password" in blob):
+        if "emqx" in blob:
+            key = "emqx_default"
+        elif "arangodb" in blob or ":8529" in blob:
+            key = "arangodb_default"
+        elif "default" in blob and ("login" in blob or "credential" in blob or "password" in blob):
             key = "default_login"
         elif "host" in blob and "header" in blob:
             key = "host_header"
+        elif any(
+            t in blob
+            for t in (
+                "/api/auth/account",
+                "account lookup",
+                "user enumeration",
+                "user account statistics",
+            )
+        ) or ("is_staff" in blob and "email" in blob):
+            key = "unauth_account_lookup"
+        elif any(
+            t in blob
+            for t in (
+                "mass assignment",
+                "mass-assignment",
+                "writable id",
+                "extra_kwargs",
+                "property-level",
+                "request serializer",
+                "/api/schema",
+            )
+        ):
+            key = "mass_assignment"
         elif "idor" in blob or "bola" in blob:
             key = "idor"
         elif "ssrf" in blob:
             key = "ssrf"
+        elif "elasticsearch" in blob or ":9200" in blob or "xpack.security" in blob:
+            key = "elasticsearch_unauth"
+        elif "arangodb" in blob or ":8529" in blob:
+            key = "arangodb_default"
+        elif "mongodb" in blob or ":27017" in blob:
+            key = "mongodb_unauth"
+        elif "emqx" in blob:
+            key = "emqx_default"
+        elif "auth0" in blob or "identitymigrate" in blob:
+            key = "auth0_mgmt_token"
+        elif "gitlab" in blob:
+            key = "gitlab_unauth"
+        elif "docker registry" in blob or "/v2/_catalog" in blob:
+            key = "docker_registry"
+        elif "vendorjson" in blob:
+            key = "vendorjson_unauth"
+        elif "usertype" in blob or "publicportal" in blob or "public portal" in blob or "user-supplied" in blob:
+            key = "client_role_param"
+        elif any(
+            t in blob
+            for t in (
+                "admin-cli",
+                "admin_cli",
+                "password grant",
+                "direct access grant",
+                "resource owner password",
+                "invalid_grant",
+            )
+        ) or (
+            "keycloak" in blob
+            and any(t in blob for t in ("lockout", "brute", "rate limit", "429"))
+        ):
+            key = "keycloak_password_grant"
+        elif (
+            "cors" in blob
+            or "weborigins" in blob
+            or ("keycloak" in blob and "origin" in blob)
+        ):
+            key = "cors_credentials"
+        elif "/api/chat" in blob or "openai" in blob:
+            key = "openai_proxy_unauth"
+        elif "django" in blob and "debug" in blob:
+            key = "django_debug"
+        elif "wiki" in blob and (
+            "self-reg" in blob or "self-registered" in blob or "open registration" in blob
+            or "open self-registration" in blob
+        ):
+            key = "wiki_open_reg"
+        elif "downloadable binary" in blob or "publicly-downloadable" in blob:
+            key = "binary_hardcoded_creds"
+        elif "client-side-only" in blob or "client-side only" in blob:
+            key = "client_side_auth"
+        elif any(
+            t in blob
+            for t in (
+                "azure function",
+                "function app",
+                "authlevel",
+                "azurewebjobsstorage",
+                "machinekey",
+                "website_auth",
+                "tester function",
+                "azurewebsites.net",
+            )
+        ):
+            key = "azure_function_env_dump"
+        elif any(
+            t in blob
+            for t in (
+                "client_secret",
+                "hardcoded credential",
+                "hardcoded api",
+                "javascript bundle",
+                "js bundle",
+                "_next/static",
+                "emailjs",
+            )
+        ):
+            key = "js_secrets"
     if not key:
         return []
 
@@ -576,14 +2017,66 @@ def queue_followups_for_finding(
     # Default login → record credential hint if present in evidence/title
     if key == "default_login":
         _maybe_extract_credential(brain, title=title, evidence=evidence, target=target)
+    elif key == "js_secrets":
+        _maybe_extract_oauth_client(brain, title=title, evidence=evidence, target=target)
+        _maybe_extract_emailjs(brain, title=title, evidence=evidence, target=target)
 
     existing = {h.id for h in brain.hypotheses}
     created: List[Hypothesis] = []
     for card in _CHAIN_CARDS.get(key, []):
-        # Skip Grafana-specific cards unless target/title smells like Grafana
-        if str(card.get("id_suffix") or "").startswith("grafana-"):
-            if "grafana" not in blob and "grafana" not in (target or "").lower():
-                continue
+        suffix = str(card.get("id_suffix") or "")
+        hay = f"{blob} {target} {evidence}".lower()
+        # Skip product-specific cards unless title/target/evidence smells like that product
+        if suffix.startswith("grafana-") and "grafana" not in hay:
+            continue
+        if suffix.startswith("couchdb-") and not _looks_like_couchdb(hay):
+            continue
+        if suffix.startswith("es-") and not (
+            "elasticsearch" in hay or ":9200" in hay or "xpack" in hay
+        ):
+            continue
+        if suffix.startswith("arangodb-") and "arangodb" not in hay and ":8529" not in hay:
+            continue
+        if suffix.startswith("mongo-") and "mongo" not in hay and "27017" not in hay:
+            continue
+        if suffix.startswith("emqx-") and "emqx" not in hay:
+            continue
+        if suffix.startswith("cors-") and "cors" not in hay and "socket.io" not in hay:
+            continue
+        if suffix.startswith("keycloak-") and not any(
+            t in hay for t in ("keycloak", "openid", "realms", "openid-connect")
+        ):
+            continue
+        if suffix.startswith("socketio-") and "socket.io" not in hay:
+            continue
+        if suffix.startswith("usertype-") and not any(
+            t in hay for t in ("usertype", "user type", "publicportal", "public portal", "user-supplied")
+        ):
+            continue
+        if suffix.startswith("wiki-") and "wiki" not in hay:
+            continue
+        if suffix.startswith("binary-") and "binary" not in hay and ".exe" not in hay:
+            continue
+        if suffix.startswith("clientauth-") and "client-side" not in hay and "elogbook" not in hay:
+            continue
+        if suffix.startswith("vendorjson-") and "vendorjson" not in hay and "vendor json" not in hay:
+            continue
+        if suffix.startswith("auth0-") and "auth0" not in hay and "identitymigrate" not in hay:
+            continue
+        if suffix.startswith("gitlab-") and "gitlab" not in hay:
+            continue
+        if suffix.startswith("docker-") and "docker" not in hay and "registry" not in hay:
+            continue
+        if suffix.startswith("django-") and "django" not in hay:
+            continue
+        if suffix.startswith("openai-") and "openai" not in hay and "/api/chat" not in hay:
+            continue
+        if suffix.startswith("azfn-") and key != "azure_function_env_dump" and not any(
+            t in hay for t in ("azure", "function app", "azurewebsites", "tester", "authlevel")
+        ):
+            continue
+        if suffix.startswith("emailjs-") and "emailjs" not in hay:
+            continue
         hid = _hyp_id(target or brain.target, key, card.get("id_suffix") or card["title"])
         if hid in existing:
             continue
@@ -797,6 +2290,29 @@ def format_engagement_brain_for_prompt(
         "Process: observe → methodology cards → spawn specialists → compare_requests proof → "
         "update_hypothesis → queue_finding_followups → coverage leftovers → report."
     )
+    lines.append(
+        "Findings: demonstrated-compromise writeups (description + impact + assets + "
+        "remediation). Default/weak login is a foothold until privileged APIs are proven "
+        "(Grafana: /api/admin/settings, /api/datasources, /api/serviceaccounts/search, "
+        "existing Prometheus datasource proxy). JS-leaked client_id/client_secret is a "
+        "foothold until a live in-scope API returns non-public records (bounded sample). "
+        "EmailJS keys in JS are a foothold until a browser-context canary send to an "
+        "engagement-controlled inbox (never employees). "
+        "Anonymous Azure Function env dump: classify leaked secret classes (Cosmos, Storage, "
+        "MACHINEKEY, EasyAuth, AAD, App Insights); do not inject code as the managed identity. "
+        "OpenAPI/DRF mass assignment: writable id/created/user without readOnly is SUBMIT "
+        "even if the database is down; a 'shared across all users' list description is "
+        "missing tenant isolation — do not dump ICS/OT hierarchies. "
+        "Unauth OpenAPI account lookup (/api/auth/account/?email=): security: {} plus "
+        "is_staff/role, OR 500/app error vs sibling 401, is SUBMIT — a down database is "
+        "not a kill. One canary email only; do not spray employee inboxes. "
+        "CORS: ACAO reflecting a canary Origin AND credentials=true is SUBMIT (header proof; "
+        "no victim tab required). Keycloak webOrigins=* on token/userinfo/admin is the IdP "
+        "variant — do not dump /users; do not ship an HTML exploit page. "
+        "Keycloak admin-cli password grant: invalid_grant without a client_secret plus no "
+        "429/lockout on <=8 fake attempts is SUBMIT — do not hydra/rockyou; do not kill "
+        "because a valid password was not guessed."
+    )
     return "\n".join(lines)
 
 
@@ -824,14 +2340,150 @@ def mission_from_hypotheses(brain: EngagementBrain) -> str:
 def classify_finding_type(title: str = "", description: str = "", tags: Optional[Iterable[str]] = None) -> str:
     """Best-effort vuln class for chain enqueue."""
     blob = f"{title} {description} {' '.join(tags or [])}".lower()
-    if any(t in blob for t in ("default-login", "default login", "default credential", "prom-operator")):
+    if "emqx" in blob:
+        return "emqx_default"
+    if "arangodb" in blob or ":8529" in blob or "/_open/auth" in blob:
+        return "arangodb_default"
+    if any(
+        t in blob
+        for t in (
+            "default-login",
+            "default login",
+            "default credential",
+            "prom-operator",
+            "cwe-1393",
+            "weak credential",
+            "trivial admin",
+            "trivial credential",
+            "username-as-password",
+            "karen:karen",
+            "kevin:kevin",
+            "couchdb-default",
+            "authsession",
+            "cookie forgery",
+            "couch_httpd_auth",
+        )
+    ):
         return "default_login"
     if "host header" in blob or "host-header" in blob or "x-forwarded-host" in blob:
         return "host_header"
+    if (
+        "/api/auth/account" in blob
+        or "account lookup" in blob
+        or "user enumeration" in blob
+        or "user account statistics" in blob
+        or ("is_staff" in blob and "email" in blob)
+    ):
+        return "unauth_account_lookup"
+    if any(
+        t in blob
+        for t in (
+            "mass assignment",
+            "mass-assignment",
+            "writable id",
+            "extra_kwargs",
+            "property-level authorization",
+            "property level authorization",
+            "cwe-915",
+            "request serializer",
+            "/api/schema",
+        )
+    ):
+        return "mass_assignment"
     if "idor" in blob or "bola" in blob or "broken object" in blob:
         return "idor"
     if "ssrf" in blob:
         return "ssrf"
+    if "elasticsearch" in blob or ":9200" in blob or "xpack.security" in blob:
+        return "elasticsearch_unauth"
+    if "arangodb" in blob or ":8529" in blob or "/_open/auth" in blob:
+        return "arangodb_default"
+    if "mongodb" in blob or ":27017" in blob:
+        return "mongodb_unauth"
+    if "emqx" in blob:
+        return "emqx_default"
+    if "auth0" in blob or "identitymigrate" in blob:
+        return "auth0_mgmt_token"
+    if "gitlab" in blob:
+        return "gitlab_unauth"
+    if "docker registry" in blob or "/v2/_catalog" in blob:
+        return "docker_registry"
+    if "django debug" in blob or ("django" in blob and "debug" in blob):
+        return "django_debug"
+    if "vendorjson" in blob or "vendor json" in blob:
+        return "vendorjson_unauth"
+    if "usertype" in blob or "user-supplied admin" in blob or "publicportal" in blob or "public portal" in blob:
+        return "client_role_param"
+    if any(
+        t in blob
+        for t in (
+            "admin-cli",
+            "admin_cli",
+            "password grant",
+            "direct access grant",
+            "resource owner password",
+            "invalid_grant",
+        )
+    ) or (
+        "keycloak" in blob
+        and any(t in blob for t in ("lockout", "brute-force", "brute force", "rate limit"))
+    ):
+        return "keycloak_password_grant"
+    if (
+        "cors" in blob
+        or "access-control-allow-origin" in blob
+        or "weborigins" in blob
+        or ("keycloak" in blob and "origin" in blob)
+    ):
+        return "cors_credentials"
+    if "/api/chat" in blob or "azure openai" in blob or "openai api proxy" in blob:
+        return "openai_proxy_unauth"
+    if "wiki" in blob and (
+        "self-reg" in blob
+        or "self-registered" in blob
+        or "open registration" in blob
+        or "open self-registration" in blob
+        or "wiki write" in blob
+    ):
+        return "wiki_open_reg"
+    if (
+        "downloadable binary" in blob
+        or "publicly-downloadable" in blob
+        or ("hardcoded" in blob and "binary" in blob)
+    ):
+        return "binary_hardcoded_creds"
+    if "client-side-only" in blob or "client-side only" in blob:
+        return "client_side_auth"
+    if any(
+        t in blob
+        for t in (
+            "azure function",
+            "function app",
+            "authlevel",
+            "azurewebjobsstorage",
+            "machinekey",
+            "website_auth",
+            "tester function",
+            "cwe-526",
+            "azurewebsites.net",
+        )
+    ):
+        return "azure_function_env_dump"
+    if any(
+        t in blob
+        for t in (
+            "client_secret",
+            "hardcoded api",
+            "hardcoded credential",
+            "javascript bundle",
+            "js bundle",
+            "_next/static",
+            "cwe-312",
+            "cwe-540",
+            "emailjs",
+        )
+    ):
+        return "js_secrets"
     return "unknown"
 
 
@@ -1073,6 +2725,22 @@ def _derive_next_steps(brain: EngagementBrain) -> List[str]:
     return steps[:8]
 
 
+def _looks_like_couchdb(hay: str) -> bool:
+    h = (hay or "").lower()
+    return any(
+        s in h
+        for s in (
+            "couchdb",
+            "_node/_local/_config",
+            "authsession",
+            "couch_httpd_auth",
+            "/_all_dbs",
+            "/_utils",
+            ":5984",
+        )
+    )
+
+
 def _maybe_extract_credential(
     brain: EngagementBrain,
     *,
@@ -1086,7 +2754,9 @@ def _maybe_extract_credential(
         r"(?i)\b([a-z0-9._-]{1,64})\s*[:/]\s*([^\s,\"']{1,128})\b",
         blob,
     )
-    if m and m.group(1).lower() in {"admin", "root", "user", "administrator", "grafana"}:
+    if m and m.group(1).lower() in {
+        "admin", "root", "user", "administrator", "grafana", "kevin", "couchdb", "guest", "tomcat",
+    }:
         add_credential(
             brain,
             username=m.group(1),
@@ -1105,3 +2775,74 @@ def _maybe_extract_credential(
             valid_on=[target] if target else [],
             notes=title[:200] or "Grafana kube-prometheus-stack default",
         )
+
+
+def _maybe_extract_oauth_client(
+    brain: EngagementBrain,
+    *,
+    title: str,
+    evidence: str,
+    target: str,
+) -> None:
+    """Stash client_id/client_secret pairs leaked from JS (redact in prompts)."""
+    blob = f"{title}\n{evidence}"
+    m = re.search(
+        r"(?i)client[_-]?id[:\s=]+['\"]?([A-Za-z0-9_-]{16,64})['\"]?"
+        r".{0,120}?"
+        r"client[_-]?secret[:\s=]+['\"]?([A-Za-z0-9_-]{16,64})",
+        blob,
+        re.DOTALL,
+    )
+    if not m:
+        m = re.search(
+            r"(?i)client[_-]?secret[:\s=]+['\"]?([A-Za-z0-9_-]{16,64})['\"]?"
+            r".{0,120}?"
+            r"client[_-]?id[:\s=]+['\"]?([A-Za-z0-9_-]{16,64})",
+            blob,
+            re.DOTALL,
+        )
+        if m:
+            secret, cid = m.group(1), m.group(2)
+        else:
+            return
+    else:
+        cid, secret = m.group(1), m.group(2)
+    add_credential(
+        brain,
+        username=cid,
+        secret=secret,
+        secret_type="oauth_client",
+        source="js_bundle",
+        valid_on=[target] if target else [],
+        notes=(title[:200] or "JS-leaked client_id/client_secret") + " (redact in findings)",
+    )
+
+
+def _maybe_extract_emailjs(
+    brain: EngagementBrain,
+    *,
+    title: str,
+    evidence: str,
+    target: str,
+) -> None:
+    """Stash EmailJS user_id/service_id leaked from JS (redact in prompts)."""
+    blob = f"{title}\n{evidence}"
+    uid = re.search(
+        r"(?i)(?:emailjs[_-]?user(?:_?id)?|user_id)\s*[:\s=]+\s*['\"]?([A-Za-z0-9_-]{8,64})",
+        blob,
+    )
+    sid = re.search(
+        r"(?i)(?:emailjs[_-]?service(?:_?id)?|service_id)\s*[:\s=]+\s*['\"]?(service_[A-Za-z0-9_-]+)",
+        blob,
+    )
+    if not uid or not sid:
+        return
+    add_credential(
+        brain,
+        username=sid.group(1),
+        secret=uid.group(1),
+        secret_type="emailjs",
+        source="js_bundle",
+        valid_on=[target] if target else [],
+        notes=(title[:200] or "JS-leaked EmailJS keys") + " (redact in findings)",
+    )

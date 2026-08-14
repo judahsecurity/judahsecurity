@@ -323,8 +323,23 @@ def _build_hunt_queue(cmap: CapabilityMap) -> List[Dict[str, str]]:
         add("medium", "admin_surface", "Admin/dashboard paths — privilege and exposure checks",
             next((p for p in cmap.pages_visited if _ADMIN_RE.search(p)), ""))
     if cmap.js_files:
-        add("medium", "js_secrets", "JS bundles present — secrets, source maps, retire.js CVEs",
-            cmap.js_files[0] if cmap.js_files else "")
+        js_blob = " ".join(cmap.js_files + cmap.pages_visited + [cmap.target or ""])
+        next_admin = bool(
+            cmap.has_admin
+            or "_next/" in js_blob
+            or "/admin" in js_blob.lower()
+        )
+        add(
+            "high" if next_admin else "medium",
+            "js_secrets",
+            (
+                "Admin/Next.js bundles — hunt hostname-keyed client_id/client_secret maps "
+                "and prove live API impact"
+                if next_admin
+                else "JS bundles present — secrets, source maps, retire.js CVEs"
+            ),
+            cmap.js_files[0] if cmap.js_files else "",
+        )
     if cmap.has_websocket or cmap.has_sse:
         add("medium", "realtime", "WebSocket/SSE channels — auth on upgrade and message injection",
             (cmap.websockets or cmap.sse or [""])[0])
@@ -341,6 +356,21 @@ def _build_hunt_queue(cmap: CapabilityMap) -> List[Dict[str, str]]:
                 (p for p in (cmap.pages_visited + [e.get("path", "") for e in cmap.api_endpoints])
                   if _AI_AGENT_RE.search(str(p))),
                 "chat",
+            ),
+        )
+    az_blob = " ".join(
+        [cmap.target or ""]
+        + list(cmap.pages_visited or [])
+        + [str(e.get("host") or e.get("path") or "") for e in (cmap.api_endpoints or [])]
+    )
+    if re.search(r"azurewebsites\.net|azurefunctions\.net|/api/Tester\b", az_blob, re.I):
+        add(
+            "critical",
+            "azure_function",
+            "Azure Function App — probe anonymous HTTP triggers (Tester/test/debug/env) for process env dump",
+            next(
+                (p for p in (cmap.pages_visited or []) if re.search(r"azurewebsites|Tester", p, re.I)),
+                cmap.target or "",
             ),
         )
     if not queue and cmap.pages_visited:

@@ -54,3 +54,30 @@ def test_info_skips_gate():
     )
     assert ok
     assert msg == "gate_skipped"
+
+
+def test_writeup_guidance_requires_privileged_impact():
+    g = _load()
+    text = g.FINDING_WRITEUP_GUIDANCE.lower()
+    assert "demonstrated-compromise" in text
+    assert "login" in text
+    assert "impact" in text
+    assert "remediation" in text
+    assert "elasticsearch" in text
+    assert "aegis_test_index" in text
+    assert "painless" in text
+    assert "9264" in text
+    assert "duckdb" in text
+    assert "no such file" in text
+    assert "mass assignment" in text or "readonly" in text
+    assert "cwe-915" in text or "api/schema" in text
+    assert "cors" in text
+    assert "weborigins" in text or "keycloak" in text
+    assert "credentials" in text
+    assert "admin-cli" in text or "cwe-307" in text
+    assert "password grant" in text or "invalid_grant" in text
+    assert "cwe-204" in text or "/api/auth/account" in text
+    assert "is_staff" in text or "user account" in text
+    assert "arangodb" in text
+    assert "wiki" in text
+    assert "binary" in text

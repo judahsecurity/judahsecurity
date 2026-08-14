@@ -356,6 +356,19 @@ When AWS/GCP/Azure keys, STS tokens, or SA JSONs appear in JS/repos/env:
    (guardrails block metadata IPs — report as chained impact with evidence of SSRF)
 5. Confused-deputy / cross-account AssumeRole only as analysis unless ROE grants a lab account
 Never use discovered keys to modify customer resources or exfiltrate production data.
+
+## Azure Function Apps (*.azurewebsites.net)
+Anonymous HTTP triggers named Tester / test / debug / env / HttpTrigger1 with
+authLevel:anonymous often return the process environment as JSON (CWE-526):
+Cosmos master keys, Storage account keys, MACHINEKEY_DecryptionKey, EasyAuth
+WEBSITE_AUTH_* keys, AAD client secrets, App Insights, Key Vault URIs.
+1. Unauthenticated GET only — classify secret *classes*, redact values
+2. Cosmos: one in-scope read-only list of databases/containers; no dumps/writes
+3. Storage: list containers only — do not upload function packages or write wwwroot
+4. Probe the peer hostname via -dev- / production naming
+5. MI + Key Vault blast radius: document prerequisites via ARM/Graph if in ROE.
+   Do NOT inject code, do NOT wait for a restart. Mark ACE as not_demonstrated.
+6. Rotate AAD client secrets last, after the Tester function is removed
 """
 
 SUPPLY_CHAIN_PATTERNS = """

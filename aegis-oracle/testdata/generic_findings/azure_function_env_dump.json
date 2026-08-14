@@ -1,16 +1,25 @@
 {
   "vulnerability": {
     "vulnerability_id": "fixture-azure-function-env",
-    "title": "Anonymous Azure Function exposes runtime secrets",
+    "title": "Anonymous Azure Function Tester dumps runtime secrets",
     "severity": "critical",
-    "description": "A public test endpoint returned application environment variables and parsed settings.",
-    "evidence": "Response included AzureWebJobsStorage, Cosmos DB key, WEBSITE_AUTH signing material, and Key Vault name.",
+    "description": "HTTP-triggered function Tester on a production Azure Function App (and its -dev- peer) was configured with authLevel:anonymous and no network restrictions. Unauthenticated GET returned the process environment as JSON, including Cosmos master key names, Storage account key material, MACHINEKEY_DecryptionKey, EasyAuth WEBSITE_AUTH_* keys, an AAD client secret, and an App Insights instrumentation key.",
+    "impact": "Leaked Cosmos master key grants read/write/delete on an internet-accessible account backing identity and project records. Storage account key plus DataProtection key are prerequisites for code execution as the system-assigned managed identity (Key Vault secret get/set, Graph directory enum, ARM Owner on the app resource group). ACE was not demonstrated — production restart/code injection was out of ROE; prerequisites verified via ARM/Graph only.",
+    "evidence": "Unauth GET /api/Tester returned JSON containing AzureWebJobsStorage, Cosmos ACCOUNT_ENDPOINT/key names, MACHINEKEY_DecryptionKey, WEBSITE_AUTH_ENCRYPTION_KEY, WEBSITE_AUTH_SIGNING_KEY, and App Insights key names. Values redacted.",
+    "remediation": "Remove Tester or set authLevel=function and redeploy. Apply ipSecurityRestrictions or Private Endpoints. Determine if the app is still required; if not, decommission Function Apps, web apps, Cosmos, storage, Key Vaults, and AAD apps. Rotate Cosmos keys, storage keys, MACHINEKEY, WEBSITE_AUTH_*, App Insights, then AAD client secrets last after Tester is unreachable.",
     "detected_by": "agent",
-    "tags": ["secret-leak", "azure", "function-app"],
+    "tags": ["secret-leak", "azure", "function-app", "cwe-526", "authlevel-anonymous"],
+    "cwe_ids": ["CWE-526", "CWE-200", "CWE-798", "CWE-284"],
+    "cvss": "CVSS:4.0/AV:N/AC:L/AT:N/PR:N/UI:N/VC:H/VI:N/VA:N/SC:H/SI:H/SA:N",
+    "not_demonstrated": "Arbitrary code execution as the Function App managed identity (would require writing a package and waiting for restart). Redeeming the live AAD client secret for Graph/ARM tokens. Item-level Cosmos dumps or destructive writes.",
+    "references": [
+      "https://learn.microsoft.com/en-us/azure/azure-functions/functions-bindings-http-webhook-trigger#http-auth"
+    ],
     "metadata": {
       "kind": "azure_function_env_dump",
       "verified": true,
-      "secret_verified": true
+      "secret_verified": true,
+      "assets": ["ra-teamplanner-fa", "ra-teamplanner-dev-fa"]
     }
   }
 }

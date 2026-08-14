@@ -38,7 +38,7 @@ _TECH_CLASSIFIERS: Dict[str, List[str]] = {
     "source": ["github", "gitlab", "bitbucket", ".git", "source map", "sourcemap"],
     "nginx": ["nginx"],
     "apache": ["apache"],
-    "cloudflare": ["cloudflare"],
+    "elasticsearch": ["elasticsearch", "you know, for search"],
     "cdn": ["cloudflare", "akamai", "fastly", "cloudfront", "incapsula"],
     "waf": ["cloudflare", "akamai", "imperva", "incapsula", "f5", "modsecurity", "sucuri", "barracuda"],
     "chatbot": [
@@ -71,7 +71,9 @@ _PORT_SERVICE_MAP: Dict[int, str] = {
     6379: "redis",
     8080: "http-alt",
     8443: "https-alt",
+    8529: "arangodb",
     9200: "elasticsearch",
+    18083: "emqx",
     27017: "mongodb",
 }
 
@@ -180,7 +182,7 @@ class ToolSelector:
             http_ports = {80, 443, 8080, 8443, 8000, 3000, 5000}
             if self._ports & http_ports:
                 types.add("web")
-            db_ports = {3306, 5432, 1433, 1521, 27017, 6379}
+            db_ports = {3306, 5432, 1433, 1521, 27017, 6379, 9200, 9300, 5984, 8529}
             if self._ports & db_ports:
                 types.add("database")
 
@@ -346,6 +348,45 @@ class ToolSelector:
     def _technology_recommendations(self) -> List[ToolRecommendation]:
         """Technology-specific tool recommendations."""
         recs = []
+
+        es_hit = (
+            "elasticsearch" in self._target_types
+            or "elasticsearch" in self._services
+            or bool(self._ports & {9200, 9300})
+            or ":9200" in (self.target or "").lower()
+        )
+        if es_hit:
+            recs.append(ToolRecommendation(
+                tool_name="execute_curl",
+                args_template="-sS -D- http://{target}:9200/",
+                priority=2,
+                rationale=(
+                    "Elasticsearch :9200 observed — unauth GET / for cluster name/version/node. "
+                    "Banner is a foothold: then /_cluster/health, /_nodes/os,jvm, /_cat/indices, "
+                    "size=1 sample read, PUT+DELETE aegis_test_index. No Painless RCE, no bulk dump."
+                ),
+                phase_required="exploitation",
+                category="data_store",
+            ))
+
+        arango_hit = (
+            "arangodb" in self._target_types
+            or "arangodb" in self._services
+            or bool(self._ports & {8529})
+            or ":8529" in (self.target or "").lower()
+        )
+        if arango_hit:
+            recs.append(ToolRecommendation(
+                tool_name="execute_curl",
+                args_template='-sS -D- -H Content-Type: application/json -d {"username":"root","password":""} http://{target}:8529/_open/auth',
+                priority=2,
+                rationale=(
+                    "ArangoDB :8529 observed — POST /_open/auth root with empty password only. "
+                    "On JWT: list databases + one collection sample. No PII dump."
+                ),
+                phase_required="exploitation",
+                category="data_store",
+            ))
 
         # WordPress detected
         if "wordpress" in self._target_types:
