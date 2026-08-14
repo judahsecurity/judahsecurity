@@ -17,6 +17,7 @@ from app.models.asset import Asset, AssetType
 from app.models.vulnerability import Vulnerability, Severity, VulnerabilityStatus
 from app.models.scan import Scan
 from app.services.nuclei_service import NucleiResult, NucleiScanResult
+from app.services.nuclei_detection import build_nuclei_detection
 
 logger = logging.getLogger(__name__)
 
@@ -619,6 +620,17 @@ class NucleiFindingsService:
             matcher_name=nuclei_result.matcher_name or "",
         )
 
+        metadata = {
+            "nuclei_host": nuclei_result.host,
+            "nuclei_ip": nuclei_result.ip,
+            "nuclei_matched_at": nuclei_result.matched_at,
+            "nuclei_timestamp": nuclei_result.timestamp.isoformat() if nuclei_result.timestamp else None,
+            "nuclei_extracted_results": nuclei_result.extracted_results[:10] if nuclei_result.extracted_results else [],
+        }
+        detection = build_nuclei_detection(nuclei_result)
+        if detection:
+            metadata["detection"] = detection
+
         vulnerability = Vulnerability(
             title=title,
             description=description,
@@ -637,13 +649,7 @@ class NucleiFindingsService:
             status=VulnerabilityStatus.OPEN,
             evidence=evidence,
             tags=tags,
-            metadata_={
-                "nuclei_host": nuclei_result.host,
-                "nuclei_ip": nuclei_result.ip,
-                "nuclei_matched_at": nuclei_result.matched_at,
-                "nuclei_timestamp": nuclei_result.timestamp.isoformat() if nuclei_result.timestamp else None,
-                "nuclei_extracted_results": nuclei_result.extracted_results[:10] if nuclei_result.extracted_results else [],
-            }
+            metadata_=metadata,
         )
         
         return vulnerability
@@ -697,6 +703,11 @@ class NucleiFindingsService:
             meta["nuclei_extracted_results"] = nuclei_result.extracted_results[:10]
         if nuclei_result.timestamp:
             meta["nuclei_timestamp"] = nuclei_result.timestamp.isoformat()
+        detection = build_nuclei_detection(nuclei_result)
+        if detection:
+            existing = meta.get("detection") if isinstance(meta.get("detection"), dict) else {}
+            existing.update(detection)
+            meta["detection"] = existing
         vulnerability.metadata_ = meta
 
         # Potentially update severity if it changed (unusual but possible)

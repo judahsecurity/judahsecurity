@@ -163,6 +163,10 @@ class NucleiResult:
     cwe_id: Optional[str] = None
     tags: list[str] = field(default_factory=list)
     curl_command: Optional[str] = None
+    request: Optional[str] = None
+    response: Optional[str] = None
+    template_path: Optional[str] = None
+    template_yaml: Optional[str] = None
     
     @classmethod
     def from_json(cls, data: dict) -> "NucleiResult":
@@ -254,7 +258,11 @@ class NucleiResult:
             cve_id=cve_id or extracted_cve_id,
             cwe_id=extracted_cwe_id,
             tags=tags,
-            curl_command=data.get("curl-command", ""),
+            curl_command=data.get("curl-command", data.get("curl_command", "")),
+            request=data.get("request") or data.get("request-raw") or "",
+            response=data.get("response") or data.get("response-raw") or "",
+            template_path=data.get("template-path") or data.get("template_path") or data.get("template") or "",
+            template_yaml="",
         )
 
 
@@ -400,6 +408,9 @@ class NucleiService:
                 "-concurrency", str(concurrency),
                 "-timeout", str(timeout),
                 "-no-color",
+                # Include raw request/response in JSONL so findings can show
+                # Praetorian-style Detection (request, cURL, response).
+                "-irr",
             ]
             
             # Add severity filter

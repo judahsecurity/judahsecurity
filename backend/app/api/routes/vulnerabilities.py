@@ -115,12 +115,16 @@ def check_org_access(db: Session, user: User, asset_id: int) -> bool:
     return user.organization_id == asset.organization_id
 
 
-def build_vuln_response(vuln: Vulnerability, db: Optional[Session] = None) -> dict:
+def build_vuln_response(
+    vuln: Vulnerability,
+    db: Optional[Session] = None,
+    *,
+    include_detection_dumps: bool = True,
+) -> dict:
     """Build vulnerability response with computed fields. Ensures required fields are never None."""
     d = {k: v for k, v in vuln.__dict__.items() if k != "_sa_instance_state" and k != "metadata_"}
     d["name"] = vuln.title
     d["host"] = vuln.asset.value if vuln.asset else None
-    d["matched_at"] = (vuln.evidence[:200] if vuln.evidence else None)
     d["organization_id"] = vuln.asset.organization_id if vuln.asset else None
 
     # Latest asset screenshot for analyst visual context on the findings page
@@ -147,6 +151,7 @@ def build_vuln_response(vuln: Vulnerability, db: Optional[Session] = None) -> di
 
     # Surface Delphi (CISA KEV + EPSS) and Aegis Oracle enrichment so the UI
     # can show KEV / EPSS / OPES badges and sort by combined priority.
+    # Agent demonstrated-compromise chains live alongside those payloads.
     # Everything else in metadata_ stays internal.
     if vuln.metadata_ and isinstance(vuln.metadata_, dict):
         delphi = vuln.metadata_.get("delphi")
@@ -155,6 +160,24 @@ def build_vuln_response(vuln: Vulnerability, db: Optional[Session] = None) -> di
         oracle = vuln.metadata_.get("oracle")
         if oracle:
             d["oracle"] = oracle
+        agent_detection = vuln.metadata_.get("agent_detection")
+        if agent_detection:
+            d["agent_detection"] = agent_detection
+        nuclei_matched = vuln.metadata_.get("nuclei_matched_at")
+        if nuclei_matched:
+            d["matched_at"] = nuclei_matched
+
+    if not d.get("matched_at"):
+        d["matched_at"] = (vuln.evidence[:200] if vuln.evidence else None)
+
+    from app.services.nuclei_detection import scanner_detection_for_vulnerability
+    detection = scanner_detection_for_vulnerability(
+        vuln, include_dumps=include_detection_dumps
+    )
+    if detection:
+        d["detection"] = detection
+        if detection.get("match"):
+            d["matched_at"] = detection["match"]
     # Ensure list fields are never None (JSON columns can be NULL in DB)
     if d.get("references") is None:
         d["references"] = []
@@ -245,6 +268,10 @@ def list_vulnerabilities(
     ),
     skip: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
+    detected_by: Optional[str] = Query(
+        None,
+        description="Filter by detector (e.g. agent, nuclei, port_scanner)",
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -277,6 +304,8 @@ def list_vulnerabilities(
         query = query.filter(Vulnerability.asset_id == asset_id)
     if cve_id:
         query = query.filter(Vulnerability.cve_id == cve_id)
+    if detected_by:
+        query = query.filter(Vulnerability.detected_by == detected_by.strip())
 
     vulns = (
         query.order_by(
@@ -314,7 +343,7 @@ def list_vulnerabilities(
 
     responses = []
     for v in vulns:
-        d = build_vuln_response(v)
+        d = build_vuln_response(v, include_detection_dumps=False)
         sid = d.get("screenshot_id")
         shot = shots_by_id.get(sid) if sid else None
         if shot:

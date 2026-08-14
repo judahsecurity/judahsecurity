@@ -656,6 +656,7 @@ class ApiClient {
     severity?: string;
     /** OPES priority category — preferred over scanner severity for triage filters */
     opes_category?: string;
+    detected_by?: string;
     skip?: number; 
     limit?: number;
   }) {

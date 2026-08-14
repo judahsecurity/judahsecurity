@@ -45,7 +45,6 @@ import {
   Activity,
   User,
   Calendar,
-  Link as LinkIcon,
   Info,
   CheckCircle,
   XCircle,
@@ -61,12 +60,16 @@ import {
   Bug,
   Copy,
   Camera,
+  Bot,
 } from 'lucide-react';
 import Link from 'next/link';
 import { api, getApiErrorMessage } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { formatDate, downloadCSV, cn } from '@/lib/utils';
 import { RemediationPanel } from '@/components/remediation/RemediationPanel';
+import { DemonstratedChain, type AgentDetection } from '@/components/findings/DemonstratedChain';
+import { DetectionPanel, hasScannerDetection, type ScannerDetection } from '@/components/findings/DetectionPanel';
+import { FindingWriteup } from '@/components/findings/FindingWriteup';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
   Select,
@@ -155,6 +158,11 @@ interface Finding {
   evidence?: string;
   proof_of_concept?: string;
   remediation?: string;
+  impact?: string;
+  steps_to_reproduce?: string;
+  affected_component?: string;
+  agent_detection?: AgentDetection;
+  detection?: ScannerDetection;
   remediation_deadline?: string;
   detected_by?: string;
   matcher_name?: string;
@@ -653,6 +661,7 @@ export default function FindingsPage() {
   const [assignee, setAssignee] = useState('');
   const [sortMode, setSortMode] = useState<SortMode>('opes');
   const [onlyKev, setOnlyKev] = useState(false);
+  const [onlyAgent, setOnlyAgent] = useState(false);
   const [oracleBatchBusy, setOracleBatchBusy] = useState(false);
   const [capturingScreenshot, setCapturingScreenshot] = useState(false);
   const [screenshotLightboxOpen, setScreenshotLightboxOpen] = useState(false);
@@ -1100,6 +1109,15 @@ export default function FindingsPage() {
     setSelectedFinding(finding);
     setScreenshotLightboxOpen(false);
     fetchRemediation(finding.id);
+    api.getVulnerability(finding.id)
+      .then((full) => {
+        setSelectedFinding((prev) =>
+          prev?.id === finding.id ? { ...prev, ...full } : prev,
+        );
+      })
+      .catch(() => {
+        /* list payload is enough to render the sheet */
+      });
   };
 
   // Handle status change
@@ -1470,6 +1488,7 @@ export default function FindingsPage() {
         api.getFindings({
           // Top chips filter by OPES priority score (scanner severity as unscored fallback)
           opes_category: selectedSeverity || undefined,
+          detected_by: onlyAgent ? 'agent' : undefined,
           limit: 100,
         }),
         api.getFindingsSummary(),
@@ -1500,7 +1519,7 @@ export default function FindingsPage() {
     api.getOrganizations().then((orgs: any[]) => {
       if (orgs?.length) setFirstOrgId(orgs[0].id);
     }).catch(() => {});
-  }, [selectedSeverity]);
+  }, [selectedSeverity, onlyAgent]);
 
   const handleSearch = (query: string) => {
     setSearchQuery(query);
@@ -1597,6 +1616,7 @@ export default function FindingsPage() {
         (f.cve_id || '').toLowerCase().includes(searchLower);
       if (!matchesSearch) return false;
       if (onlyKev && !f.delphi?.kev) return false;
+      if (onlyAgent && (f.detected_by || '').toLowerCase() !== 'agent') return false;
       return true;
     })
     .sort((a, b) => {
@@ -1643,6 +1663,7 @@ export default function FindingsPage() {
 
   const kevCount = findings.filter((f) => f.delphi?.kev).length;
   const ransomwareCount = findings.filter((f) => isRansomwareKev(f.delphi?.kev)).length;
+  const agentCount = findings.filter((f) => (f.detected_by || '').toLowerCase() === 'agent').length;
 
   // Priority chip counts — OPES category (falls back to scanner severity when unscored)
   const opesCounts = stats?.by_opes_category || {};
@@ -1761,6 +1782,15 @@ export default function FindingsPage() {
             >
               <Flame className="h-4 w-4 mr-2" />
               KEV only {kevCount > 0 && <span className="ml-1 text-xs opacity-70">({kevCount})</span>}
+            </Button>
+            <Button
+              variant={onlyAgent ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => setOnlyAgent((v) => !v)}
+              title="Show only findings demonstrated by the agent with a live proof chain"
+            >
+              <Bot className="h-4 w-4 mr-2" />
+              Agent detections {agentCount > 0 && <span className="ml-1 text-xs opacity-70">({agentCount})</span>}
             </Button>
             <Button variant="outline" size="sm">
               <Filter className="h-4 w-4 mr-2" />
@@ -2008,6 +2038,17 @@ export default function FindingsPage() {
                           )}
                           <OracleBadge oracle={finding.oracle} compact />
                           <DelphiBadges delphi={finding.delphi} compact />
+                          {(finding.detected_by || '').toLowerCase() === 'agent' && (
+                            <Badge
+                              variant="outline"
+                              className="text-[10px] text-orange-400 border-orange-500/30 bg-orange-500/10"
+                            >
+                              Agent
+                              {finding.agent_detection?.step_count
+                                ? ` · ${finding.agent_detection.step_count} steps`
+                                : ''}
+                            </Badge>
+                          )}
                         </div>
                       </div>
                     </TableCell>
@@ -2556,8 +2597,10 @@ export default function FindingsPage() {
                 </div>
               )}
 
-              {/* Matched At / Evidence */}
-              {selectedFinding?.matched_at && (
+              {/* Matched At — scanner detections only, and only when Detection has no Match URL */}
+              {selectedFinding?.matched_at &&
+                (selectedFinding.detected_by || '').toLowerCase() !== 'agent' &&
+                !selectedFinding?.detection?.match && (
                 <div className="space-y-2">
                   <p className="text-sm font-medium flex items-center gap-2">
                     <Target className="h-4 w-4" />
@@ -2569,18 +2612,36 @@ export default function FindingsPage() {
                 </div>
               )}
 
-              {/* Description */}
-              {selectedFinding?.description && (
-                <div className="space-y-2">
-                  <p className="text-sm font-medium">Description</p>
-                  <p className="text-sm text-muted-foreground whitespace-pre-wrap">
-                    {selectedFinding.description}
-                  </p>
-                </div>
+              <FindingWriteup
+                description={selectedFinding?.description}
+                impact={selectedFinding?.impact}
+                assets={selectedFinding?.agent_detection?.assets}
+                host={selectedFinding?.host}
+                affectedComponent={selectedFinding?.affected_component}
+                recommendation={selectedFinding?.remediation}
+                references={
+                  selectedFinding?.agent_detection?.references?.length
+                    ? selectedFinding.agent_detection.references
+                    : selectedFinding?.references || selectedFinding?.reference
+                }
+                notDemonstrated={selectedFinding?.agent_detection?.not_demonstrated}
+              />
+
+              {hasScannerDetection(selectedFinding?.detection) && (
+                <DetectionPanel detection={selectedFinding.detection} />
               )}
 
-              {/* Evidence */}
-              {selectedFinding?.evidence && selectedFinding.evidence !== selectedFinding.matched_at && (
+              {(selectedFinding?.detected_by === 'agent' || selectedFinding?.agent_detection) && (
+                <DemonstratedChain detection={selectedFinding.agent_detection} />
+              )}
+
+              {/* Evidence — skip Nuclei auto-evidence when Detection already shows request/cURL/match */}
+              {selectedFinding?.evidence &&
+                selectedFinding.evidence !== selectedFinding.matched_at &&
+                !(
+                  hasScannerDetection(selectedFinding.detection) &&
+                  /^(Nuclei template |Matched at:)/.test(selectedFinding.evidence.trim())
+                ) && (
                 <div className="space-y-2">
                   <p className="text-sm font-medium">Evidence</p>
                   <div className="p-3 bg-secondary/50 rounded-lg overflow-x-auto">
@@ -2603,7 +2664,11 @@ export default function FindingsPage() {
                 </div>
               )}
 
-              {/* Remediation Panel */}
+              {/* Structured playbook — narrative recommendation is in FindingWriteup */}
+              {(loadingRemediation ||
+                remediationData?.has_playbook ||
+                remediationData?.cwe ||
+                selectedFinding?.remediation_deadline) && (
               <div className="space-y-2">
                 <p className="text-sm font-medium text-green-400 flex items-center gap-2">
                   <Shield className="h-4 w-4" />
@@ -2621,12 +2686,17 @@ export default function FindingsPage() {
                 ) : (
                   <RemediationPanel 
                     playbook={remediationData?.has_playbook ? remediationData.playbook : undefined}
-                    fallbackRemediation={selectedFinding?.remediation || remediationData?.remediation}
+                    fallbackRemediation={
+                      selectedFinding?.remediation
+                        ? undefined
+                        : remediationData?.remediation
+                    }
                     cwe={remediationData?.cwe}
                     cweId={remediationData?.cwe_id || selectedFinding?.cwe_id}
                   />
                 )}
               </div>
+              )}
 
               {/* Status Actions */}
               <div className="space-y-2 pt-4 border-t border-border">
@@ -2934,31 +3004,6 @@ export default function FindingsPage() {
                       <Badge key={i} variant="secondary" className="text-xs">
                         {tag}
                       </Badge>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* References */}
-              {((selectedFinding?.references && selectedFinding.references.length > 0) ||
-                (selectedFinding?.reference && selectedFinding.reference.length > 0)) && (
-                <div className="space-y-2">
-                  <p className="text-sm font-medium flex items-center gap-2">
-                    <LinkIcon className="h-4 w-4" />
-                    References
-                  </p>
-                  <div className="space-y-1">
-                    {(selectedFinding.references || selectedFinding.reference || []).map((ref, i) => (
-                      <a
-                        key={i}
-                        href={ref}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-sm text-primary hover:underline flex items-center gap-1 break-all"
-                      >
-                        <ExternalLink className="h-3 w-3 shrink-0" />
-                        {ref}
-                      </a>
                     ))}
                   </div>
                 </div>
