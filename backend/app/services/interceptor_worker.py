@@ -137,16 +137,23 @@ def complete_job(
 
 async def run_one_job(job: Dict[str, Any]) -> None:
     from app.services.interceptor_recon import run_recon, to_normalized_dict
+    from app.services.interceptor_service import apply_pentester_defaults
     from app.services.recon_envelope import envelope_from_normalized
 
     url = job.get("url") or ""
-    opts = dict(job.get("opts") or {})
+    opts = apply_pentester_defaults(dict(job.get("opts") or {}))
     if job.get("scope"):
         opts.setdefault("scope", job["scope"])
-    opts.setdefault("max_pages", job.get("max_pages") or 20)
+    opts.setdefault("max_pages", job.get("max_pages") or opts.get("max_pages") or 25)
     opts.setdefault("interact", bool(job.get("interact", True)))
 
-    logger.info("Running Interceptor recon for %s (job %s)", url, job.get("id"))
+    logger.info(
+        "Running Interceptor pentester recon for %s (job %s depth=%s pages=%s)",
+        url,
+        job.get("id"),
+        opts.get("depth"),
+        opts.get("max_pages"),
+    )
     result = await run_recon(url, opts)
     normalized = to_normalized_dict(result)
     envelope = envelope_from_normalized(

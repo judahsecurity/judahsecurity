@@ -738,12 +738,13 @@ class ToolSelector:
 
         # JS secret / sink analysis after crawl tools have run
         crawled = self._tools_already_run & {
-            "execute_katana", "execute_gau", "execute_waybackurls", "execute_deep_crawl",
+            "execute_katana", "execute_gau", "execute_waybackurls",
+            "execute_deep_crawl", "execute_interceptor",
         }
         if crawled and "scan_js_urls_for_secrets" not in self._tools_already_run:
             recs.append(ToolRecommendation(
                 tool_name="scan_js_urls_for_secrets",
-                args_template="urls=<JS URLs from katana/deep_crawl/gau>",
+                args_template="urls=<JS URLs from katana/deep_crawl/gau/interceptor>",
                 priority=6,
                 rationale="JS bundles discovered — hunt hardcoded API keys/tokens before deeper testing.",
                 category="reconnaissance",
@@ -770,21 +771,51 @@ class ToolSelector:
                 category="reconnaissance",
             ))
 
-        # Tester methodology: browser walkthrough early for any HTTP web target
-        if "execute_deep_crawl" not in self._tools_already_run:
+        # Tester methodology: Interceptor walkthrough first (real Chrome), deep_crawl fallback
+        browser_done = (
+            "execute_interceptor" in self._tools_already_run
+            or "execute_deep_crawl" in self._tools_already_run
+        )
+        if "execute_interceptor" not in self._tools_already_run:
             spa_boost = "spa" in self._target_types
             recs.append(ToolRecommendation(
-                tool_name="execute_deep_crawl",
-                args_template='{"url":"https://{target}","depth":3,"interact":true}',
-                priority=3 if spa_boost else 4,
+                tool_name="execute_interceptor",
+                args_template=(
+                    '{"url":"https://{target}","depth":3,"max_pages":25,'
+                    '"interact":true,"max_clicks":14}'
+                ),
+                priority=2 if spa_boost else 3,
                 rationale=(
-                    "Enter the app and prioritize functionality (auth, forms, products, APIs) "
-                    "to build a capability map before spraying scanners."
-                    + (" SPA fingerprint — prioritize interaction crawl." if spa_boost else "")
+                    "Walk the app like a pentester with Interceptor Site Spider "
+                    "(katana in a real Chrome tab) — interaction first, map functionality "
+                    "(auth/forms/products/APIs) before spraying scanners."
+                    + (" SPA fingerprint — prioritize Chrome-tab crawl." if spa_boost else "")
                 ),
                 category="reconnaissance",
             ))
-        elif "fireteam_dispatch" not in self._tools_already_run:
+        if "execute_deep_crawl" not in self._tools_already_run:
+            # Fallback / enrichment if Interceptor workers offline or map stayed thin
+            recs.append(ToolRecommendation(
+                tool_name="execute_deep_crawl",
+                args_template='{"url":"https://{target}","depth":3,"interact":true}',
+                priority=5 if "execute_interceptor" in self._tools_already_run else 6,
+                rationale=(
+                    "Playwright deep_crawl — use when Interceptor workers are offline or "
+                    "the capability map is still thin on forms/APIs after the Chrome crawl."
+                ),
+                category="reconnaissance",
+            ))
+        if browser_done and "fireteam_dispatch" not in self._tools_already_run:
+            if "sync_engagement_brain" not in self._tools_already_run:
+                recs.append(ToolRecommendation(
+                    tool_name="sync_engagement_brain",
+                    args_template="",
+                    priority=2,
+                    rationale=(
+                        "Browser map ready — seed observation→methodology cards before fireteam."
+                    ),
+                    category="exploitation",
+                ))
             recs.append(ToolRecommendation(
                 tool_name="fireteam_dispatch",
                 args_template='mission="Attack mapped surfaces" specialists="auto" targets=["https://{target}"]',

@@ -118,7 +118,11 @@ def _default_args_for_tool(tool_name: str, target: str) -> str:
             return f"{target} -a 1"
         return target
     if name in ("deep_crawl", "interceptor"):
-        return target
+        # Pentester defaults as JSON so workers get depth/interact/max_pages
+        return (
+            '{"url":"%s","depth":3,"max_pages":25,"interact":true,"max_clicks":14}'
+            % target
+        )
     # Generic: prefer -u for HTTP-ish tools
     if any(x in name for x in ("http", "web", "crawl", "scan")):
         return f"-u {target}"
@@ -1596,6 +1600,7 @@ class ASMToolsManager:
         import re as _re
         import subprocess
         import shutil
+        import asyncio
 
         if not query.strip():
             return "query is required"
@@ -1621,7 +1626,8 @@ class ASMToolsManager:
                 env = {**dict(__import__("os").environ)}
                 if api_key:
                     env["PDCP_API_KEY"] = api_key
-                result = subprocess.run(
+                result = await asyncio.to_thread(
+                    subprocess.run,
                     cmd, capture_output=True, text=True, timeout=30, env=env
                 )
                 if result.returncode == 0 and result.stdout.strip():

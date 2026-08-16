@@ -62,10 +62,11 @@ _PAGE_LINE_RE = re.compile(
     re.IGNORECASE,
 )
 
-DEFAULT_MAX_PAGES = 15
+DEFAULT_MAX_PAGES = 25  # assessment-grade; skill allows up to ~80 for deep SPA
 HARD_MAX_PAGES = 80  # Interceptor Windows skill deep-SPA guidance
-DEFAULT_CLICKS_PER_PAGE = 10
+DEFAULT_CLICKS_PER_PAGE = 14
 DEFAULT_SPIDER_DEPTH = 3
+HARD_MAX_DEPTH = 6
 CMD_TIMEOUT = int(os.environ.get("INTERCEPTOR_CMD_TIMEOUT", "45") or "45")
 SPIDER_TIMEOUT = int(os.environ.get("INTERCEPTOR_SPIDER_TIMEOUT_SEC", "1800") or "1800")
 
@@ -100,6 +101,55 @@ def _in_scope(host: str, scope_apex: str) -> bool:
     return host == scope_apex or host.endswith("." + scope_apex)
 
 
+async def _emit_progress(thought: str) -> None:
+    """Push thinking heartbeats so the agent UI stays alive mid-crawl."""
+    try:
+        from app.services.agent.orchestrator import _status_callback_var
+
+        cb = _status_callback_var.get(None)
+        if not cb:
+            return
+        msg = {"type": "thinking", "phase": "informational", "thought": thought[:500]}
+        maybe = cb(msg)
+        if asyncio.iscoroutine(maybe):
+            await maybe
+    except Exception:
+        pass
+
+
+def _func_score(url: str) -> int:
+    try:
+        from app.services.deep_crawl_service import _functionality_score
+
+        return int(_functionality_score(url))
+    except Exception:
+        return 0
+
+
+def _enqueue_priority(
+    queue: List[tuple],
+    seen: Set[str],
+    url: str,
+    depth: int,
+    max_depth: int,
+    max_queue: int,
+) -> None:
+    if depth > max_depth:
+        return
+    norm = url.split("#")[0]
+    if not norm.startswith("http") or norm in seen:
+        return
+    if any(norm == item[2] for item in queue):
+        return
+    if len(queue) >= max_queue:
+        return
+    score = _func_score(norm)
+    if score < -50:
+        return
+    queue.append((-score, depth, norm))
+    queue.sort(key=lambda t: (t[0], t[1]))
+
+
 @dataclass
 class ReconResult:
     """Normalised recon surface — the shared contract with deep_crawl."""
@@ -108,6 +158,7 @@ class ReconResult:
     engine: str = "interceptor"  # interceptor_spider | interceptor_verbs | interceptor
     coverage: Optional[str] = None  # EXHAUSTIVE | PARTIAL (native spider)
     pages_visited: List[str] = field(default_factory=list)
+    forms: List[Dict[str, Any]] = field(default_factory=list)
     js_files: Set[str] = field(default_factory=set)
     source_maps: Set[str] = field(default_factory=set)
     api_calls: Dict[str, Set[str]] = field(default_factory=dict)  # host -> {"METHOD path"}
@@ -371,8 +422,17 @@ async def run_recon(url: str, opts: Optional[Dict[str, Any]] = None) -> ReconRes
         url = f"https://{url}"
     scope = str(opts.get("scope") or "").strip().lower() or _apex(urlparse(url).netloc)
     max_pages = min(int(opts.get("max_pages", DEFAULT_MAX_PAGES) or DEFAULT_MAX_PAGES), HARD_MAX_PAGES)
+    try:
+        max_depth = int(opts.get("depth", DEFAULT_SPIDER_DEPTH) or DEFAULT_SPIDER_DEPTH)
+    except (TypeError, ValueError):
+        max_depth = DEFAULT_SPIDER_DEPTH
+    max_depth = max(1, min(max_depth, HARD_MAX_DEPTH))
     interact = bool(opts.get("interact", True))
-    clicks = int(opts.get("clicks_per_page", DEFAULT_CLICKS_PER_PAGE) or DEFAULT_CLICKS_PER_PAGE)
+    clicks = int(
+        opts.get("max_clicks")
+        or opts.get("clicks_per_page", DEFAULT_CLICKS_PER_PAGE)
+        or DEFAULT_CLICKS_PER_PAGE
+    )
     prefer_spider = opts.get("prefer_spider", True)
     if isinstance(prefer_spider, str):
         prefer_spider = prefer_spider.lower() not in ("0", "false", "no")
@@ -393,15 +453,23 @@ async def run_recon(url: str, opts: Optional[Dict[str, Any]] = None) -> ReconRes
         return result
 
     await cli.run("net", "monitor", "on", "--reload")
+    await _emit_progress(
+        f"interceptor: starting pentester crawl depth={max_depth} "
+        f"max_pages={max_pages} interact={interact}"
+    )
 
     if prefer_spider and await supports_spider(cli):
         ok = await _run_native_spider(cli, url, opts, result, max_pages)
         if ok:
+            await _emit_progress(
+                f"interceptor spider done — {len(result.pages_visited)} pages, "
+                f"{sum(len(v) for v in result.api_calls.values())} API calls"
+            )
             return result
         result.errors.append("native spider produced no pages; falling back to verb-loop crawl")
-        # Reset surface for verb-loop (keep errors)
         result.engine = "interceptor"
         result.pages_visited = []
+        result.forms = []
         result.js_files = set()
         result.source_maps = set()
         result.api_calls = {}
@@ -411,13 +479,14 @@ async def run_recon(url: str, opts: Optional[Dict[str, Any]] = None) -> ReconRes
         result.endpoints_from_js = set()
         result.coverage = None
 
-    # Verb-loop fallback (older Interceptor without spider)
+    # Verb-loop fallback — functionality-first priority queue (interaction primary).
     result.engine = "interceptor_verbs"
-    queue: List[str] = [url]
+    queue: List[tuple] = [(-_func_score(url), 0, url)]
     seen: Set[str] = set()
 
     while queue and len(result.pages_visited) < max_pages:
-        page_url = queue.pop(0).split("#")[0]
+        _score, depth, page_url = queue.pop(0)
+        page_url = page_url.split("#")[0]
         if page_url in seen:
             continue
         seen.add(page_url)
@@ -427,21 +496,34 @@ async def run_recon(url: str, opts: Optional[Dict[str, Any]] = None) -> ReconRes
             result.errors.append(f"open {page_url[:100]}: {open_out[:120]}")
             continue
         result.pages_visited.append(page_url)
+        page_score = _func_score(page_url)
+        await _emit_progress(
+            f"interceptor: page {len(result.pages_visited)}/{max_pages} "
+            f"depth={depth}/{max_depth} score={page_score} — {page_url[:140]}"
+        )
         await cli.run("wait-stable", timeout=20)
 
+        click_budget = clicks + (6 if page_score >= 40 else 0)
         if interact:
-            await _drive(cli, result, clicks)
+            await _drive(cli, result, click_budget)
 
         await _drain(cli, result)
 
         tree = await cli.run("tree", "--filter", "all")
+        _harvest_forms(tree, page_url, result)
+        child_depth = depth + 1
         for link in _extract_links(tree):
             absu = urljoin(page_url, link).split("#")[0]
             if absu.startswith("http") and _in_scope(urlparse(absu).netloc, scope):
-                if absu not in seen and absu not in queue and len(queue) < HARD_MAX_PAGES * 4:
-                    queue.append(absu)
+                _enqueue_priority(
+                    queue, seen, absu, child_depth, max_depth, HARD_MAX_PAGES * 4
+                )
 
     await _mine_headers(cli, result)
+    await _emit_progress(
+        f"interceptor verb-loop done — {len(result.pages_visited)} pages, "
+        f"{len(result.forms)} forms"
+    )
     return result
 
 
@@ -454,6 +536,16 @@ async def _drive(cli: InterceptorCLI, result: ReconResult, clicks: int) -> None:
 
     tree = await cli.run("tree")
     refs = _extract_clickable_refs(tree)
+    # Prefer functionality-shaped labels (login, demo, product, nav) first.
+    def _label_rank(item: tuple) -> int:
+        label = (item[1] or "").lower()
+        if re.search(r"log\s?in|sign\s?in|demo|product|pricing|contact|account|dashboard|api|docs", label):
+            return 0
+        if re.search(r"menu|nav|tab|more|learn|feature", label):
+            return 1
+        return 2
+
+    refs.sort(key=_label_rank)
     done = 0
     for ref, label in refs:
         if done >= clicks:
@@ -463,9 +555,41 @@ async def _drive(cli: InterceptorCLI, result: ReconResult, clicks: int) -> None:
         await cli.run("act", ref, "--no-read", timeout=20)
         done += 1
         await asyncio.sleep(0.2)
-        # Traffic from each interaction is captured passively; drain periodically.
         if done % 4 == 0:
             await _drain(cli, result)
+
+
+def _harvest_forms(tree_text: str, page_url: str, result: ReconResult) -> None:
+    """Best-effort form signals from the accessibility/DOM tree dump."""
+    if not tree_text or len(result.forms) >= 60:
+        return
+    low = tree_text.lower()
+    has_form = bool(re.search(r"\bform\b|role[=:]?\s*form", low))
+    has_password = "password" in low
+    has_email = bool(re.search(r"\b(email|e-mail|username|user)\b", low))
+    has_search = bool(re.search(r"\b(search|query)\b", low))
+    if not (has_form or has_password or (has_email and "input" in low) or has_search):
+        return
+    inputs: List[str] = []
+    if has_password:
+        inputs.extend(["password", "username" if has_email else "email"])
+    elif has_email:
+        inputs.append("email")
+    if has_search:
+        inputs.append("q")
+    for m in re.finditer(r'name\s*[:=]\s*["\']?([A-Za-z0-9_\-]{1,40})', tree_text):
+        n = m.group(1)
+        if n not in inputs and len(inputs) < 12:
+            inputs.append(n)
+    kind = "login" if has_password else ("search" if has_search else "form")
+    result.forms.append(
+        {
+            "page": page_url,
+            "method": "POST" if has_password else "GET",
+            "kind": kind,
+            "inputs": inputs[:12],
+        }
+    )
 
 
 async def _drain(cli: InterceptorCLI, result: ReconResult) -> None:
@@ -562,6 +686,7 @@ def to_normalized_dict(result: ReconResult) -> Dict[str, Any]:
         "engine": result.engine,
         "coverage": result.coverage,
         "pages_visited": result.pages_visited,
+        "forms": list(result.forms)[:60],
         "js_files": sorted(result.js_files),
         "source_maps": sorted(result.source_maps),
         "api_calls": {h: sorted(v) for h, v in result.api_calls.items()},
@@ -583,6 +708,7 @@ def format_output(result: ReconResult) -> str:
         f"Target: {d['target']}  (scope: {d['scope']})",
         f"Pages visited: {len(d['pages_visited'])}"
         + (f"  coverage={d['coverage']}" if d.get("coverage") else ""),
+        f"Forms observed: {len(d.get('forms') or [])}",
     ]
     for p in d["pages_visited"][:25]:
         lines.append(f"  - {p}")

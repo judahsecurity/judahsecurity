@@ -1360,16 +1360,15 @@ class MCPServer:
         self.registry.register(MCPTool(
             name="execute_interceptor",
             description=(
-                "Preferred Site Spider — think 'katana running inside a real Chrome tab' "
-                "(Hacker-Valley Interceptor skill). Drives real Chrome/Brave so CDN/WAFs "
-                "(Cloudflare/Akamai) that block CLI crawlers still see trusted browser "
-                "fetches; interaction (scroll/click/menus) is primary discovery, BFS "
-                "link-following is secondary; robots/sitemap are opt-in only. Preference: "
-                "Mac Interceptor worker → Ubuntu worker → local interceptor CLI → Playwright "
-                "deep_crawl. Native `interceptor spider` when supported "
-                "(max-pages/depth/robots/sitemap/max-clicks), else open/act/net verb-loop. "
-                "Builds Application Capability Map. Pass bare URL or JSON "
-                "(url, max_pages, depth, interact, prefer, robots, sitemap, login, …)."
+                "Preferred pentester crawl — 'katana running inside a real Chrome tab' "
+                "(Hacker-Valley Interceptor Site Spider). Walks the app like a tester: "
+                "scroll, menus, safe clicks; prioritizes auth/forms/products/APIs. "
+                "Preference: Mac worker → Ubuntu worker → local interceptor CLI → "
+                "Playwright deep_crawl. Native spider when supported; else functionality-first "
+                "verb-loop. Auto-applies assessment defaults (depth=3, max_pages=25, "
+                "interact=true, max_clicks=14). Builds Application Capability Map + optional "
+                "auth_session. After crawl: sync_engagement_brain → fireteam. "
+                "Pass bare URL or JSON (url, max_pages, depth, interact, prefer, login, …)."
             ),
             tool_type=ToolType.SCAN,
             parameters={
@@ -2522,6 +2521,47 @@ class MCPServer:
             return []
         return modified[len(original):]
 
+    def tool_binary_available(self, name: str) -> bool:
+        """True if the external binary a tool needs is installed on this worker.
+
+        Tools that don't shell out to an external binary (DB queries, pure-Python
+        HTTP probes) are always available. Results are cached because installed
+        binaries don't appear/disappear at runtime.
+        """
+        cache = getattr(self, "_tool_availability_cache", None)
+        if cache is None:
+            cache = {}
+            self._tool_availability_cache = cache
+        if name in cache:
+            return cache[name]
+
+        import shutil
+        import os
+
+        if name == "execute_httpx":
+            bin_ = self._projectdiscovery_httpx_bin()
+            ok = bool(shutil.which(bin_)) or (
+                os.path.isfile(bin_) and os.access(bin_, os.X_OK)
+            )
+        elif name in self._HANDLER_BINARY:
+            ok = bool(shutil.which(self._HANDLER_BINARY[name]))
+        else:
+            # Not a CLI-binary tool (browser tools have their own fallbacks;
+            # everything else is in-process) — treat as available.
+            ok = True
+
+        cache[name] = ok
+        return ok
+
+    def unavailable_tools(self) -> List[str]:
+        """execute_* CLI tools whose binary is missing on this worker.
+
+        Used to steer the agent away from tools that can only return
+        "Command not found", and to fail those calls fast at the chokepoint.
+        """
+        names = set(self._HANDLER_BINARY.keys()) | {"execute_httpx"}
+        return sorted(n for n in names if not self.tool_binary_available(n))
+
     async def call_tool(self, name: str, arguments: Dict[str, Any]) -> Dict[str, Any]:
         """
         Aegis chokepoint for every tool invocation.
@@ -2544,6 +2584,21 @@ class MCPServer:
             return {"success": False, "error": f"Tool '{name}' not found"}
         if not tool.handler:
             return {"success": False, "error": f"Tool '{name}' has no handler"}
+
+        # Fail fast on CLI tools whose binary isn't installed on this worker, so
+        # the agent gets one clear, non-retryable signal instead of paying the
+        # subprocess-spawn cost only to read a generic "Command not found".
+        if (name in self._HANDLER_BINARY or name == "execute_httpx") and not self.tool_binary_available(name):
+            return {
+                "success": False,
+                "output": "",
+                "error": (
+                    f"{name} is not installed on this worker. Do not retry it — "
+                    "pick a different available tool to keep making progress."
+                ),
+                "exit_code": -1,
+                "tool_unavailable": True,
+            }
 
         # 1. Required-parameter check
         for param in tool.required_params:

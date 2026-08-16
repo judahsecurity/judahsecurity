@@ -1,15 +1,42 @@
 # Dual Interceptor workers (Mac + Ubuntu)
 
-ASM prefers real [Hacker-Valley-Media/Interceptor](https://github.com/Hacker-Valley-Media/Interceptor) browsers for interaction-first crawls, with Playwright `deep_crawl` as last-resort fallback.
+ASM prefers real [Hacker-Valley-Media/Interceptor](https://github.com/Hacker-Valley-Media/Interceptor) browsers for **pentester-style** interaction-first crawls, with Playwright `deep_crawl` as last-resort fallback.
+
+## Goal
+
+Walk the customer app the way a tester would: scroll, open menus, click safe tabs/buttons, follow functional routes (login, demos, products, forms, APIs). Build an **Application Capability Map**, then assess — not page-count spray.
+
+Site Spider skill model: **katana running inside a real Chrome tab**. Interaction is primary; BFS is secondary; `--robots` / `--sitemap` are opt-in.
 
 ## Preference order
 
 1. **Mac** Interceptor worker (online heartbeat)
 2. **Ubuntu** Interceptor worker (Xvfb / GUI host)
 3. Local `interceptor` CLI on the agent host (rare)
-4. Playwright **deep_crawl**
+4. Playwright **deep_crawl** (same pentester depth/interact defaults)
 
-On each Interceptor host, the worker prefers **native `interceptor spider`** (Windows skill / newer builds) with flags like `--max-pages`, `--depth`, `--robots`, `--sitemap`, `--max-clicks`. If the binary has no `spider` verb, it falls back to the open/act/net verb-loop.
+On each Interceptor host, the worker prefers **native `interceptor spider`** with `--max-pages`, `--depth`, `--max-clicks`. If the binary has no `spider` verb, it falls back to a **functionality-first** open/act/net verb-loop (auth/forms/products prioritized over static marketing URLs).
+
+## Pentester defaults (auto-applied)
+
+When the agent passes a bare URL, ASM fills:
+
+| Knob | Default |
+|------|---------|
+| `depth` | 3 |
+| `max_pages` | 25 |
+| `interact` | true |
+| `max_clicks` | 14 |
+| `prefer_spider` | true |
+
+Example agent call:
+
+```json
+{"url":"https://customer.example.com/","depth":3,"max_pages":25,"interact":true,"max_clicks":14}
+```
+
+After a successful crawl the tool output includes:
+`NEXT: sync_engagement_brain → fireteam_dispatch(auto) → compare_requests`.
 
 ## Architecture
 
@@ -20,7 +47,7 @@ Agent execute_interceptor
  POST /api/v1/recon/jobs   ──►  Mac worker poller
         │                       Ubuntu worker poller
         ▼
- wait + WS thinking heartbeats
+ wait + WS thinking heartbeats (page/depth progress)
         │
         ▼
  POST /api/v1/recon/jobs/{id}/complete
@@ -70,7 +97,7 @@ Optional launchd / `tmux` keep-alive.
 
 ```bash
 python -m app.services.interceptor_recon https://www.emulate3d.com/ \
-  --max-pages 25 \
+  --max-pages 25 --depth 3 \
   --post https://<asm>/api/v1/recon/ingest \
   --token "$ASM_TOKEN" --org 1
 ```
@@ -103,12 +130,13 @@ curl -s -H "Authorization: Bearer $TOKEN" \
   https://<asm>/api/v1/recon/workers
 # Expect online_kinds: ["mac"] and/or ["ubuntu"]
 
-# Agent path: ask for a crawl of a URL — UI should show thinking
-# "Queued Interceptor crawl job …" then capability map updates.
+# Agent path: paste a customer URL — UI should show thinking
+# "Queued Interceptor pentester crawl …" then page/depth progress, then capability map.
 ```
 
 ## Ops notes
 
-- If both workers are down, behaviour matches today’s deep_crawl fallback.
+- If both workers are down, behaviour falls back to deep_crawl with the same depth/interact defaults.
 - Mac is preferred when both are online (job claim skips Ubuntu while Mac is healthy).
 - Job tables: `recon_jobs`, `recon_worker_heartbeats` (created via SQLAlchemy `create_all` / migration SQL).
+- For customer assessments: keep at least one worker online so WAF/SPA apps get a real Chrome walkthrough.

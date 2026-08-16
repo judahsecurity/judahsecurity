@@ -9,6 +9,8 @@ Supports WebSocket streaming callbacks and cross-session learning via EvoGraph.
 import json
 import logging
 import re
+import time
+import asyncio
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Callable, Awaitable
 
@@ -75,6 +77,11 @@ StatusCallback = Optional[Callable[[Dict[str, Any]], Awaitable[None]]]
 # This avoids the race condition of storing it as instance state on the singleton.
 _max_iterations_var: ContextVar[Optional[int]] = ContextVar('_max_iterations_var', default=None)
 _status_callback_var: ContextVar[StatusCallback] = ContextVar('_status_callback_var', default=None)
+# Monotonic wall-clock deadline (time.monotonic() seconds) for the current turn.
+# Set at the start of every invoke/resume so the ReAct loop stops picking new
+# tools once the budget is spent, and so a single tool call can be bounded by the
+# remaining budget. None means "no deadline" (falls back to iteration cap only).
+_turn_deadline_var: ContextVar[Optional[float]] = ContextVar('_turn_deadline_var', default=None)
 
 # Global checkpointer for session persistence.
 # NOTE: MemorySaver stores all checkpoints in-memory. For production deployments
@@ -447,6 +454,65 @@ class AgentOrchestrator:
                 logger.debug("Status callback failed", exc_info=True)
 
     # =========================================================================
+    # TURN WALL-CLOCK BUDGET
+    # =========================================================================
+
+    def _start_turn_deadline(self) -> None:
+        """Arm the per-turn wall-clock budget for the current invoke/resume.
+
+        The deadline lives in a ContextVar so the sync routing functions and the
+        tool-execution node can read it without threading it through LangGraph
+        state (which isn't populated on resume paths).
+        """
+        budget = getattr(settings, "AGENT_TURN_BUDGET_SECONDS", 0) or 0
+        if budget > 0:
+            _turn_deadline_var.set(time.monotonic() + float(budget))
+        else:
+            _turn_deadline_var.set(None)
+
+    def _turn_time_remaining(self) -> Optional[float]:
+        """Seconds left in the turn budget, or None when no budget is armed."""
+        deadline = _turn_deadline_var.get(None)
+        if deadline is None:
+            return None
+        return deadline - time.monotonic()
+
+    def _turn_budget_exceeded(self) -> bool:
+        """True once the turn wall-clock budget has been spent."""
+        remaining = self._turn_time_remaining()
+        return remaining is not None and remaining <= 0
+
+    def _unavailable_tools_note(self) -> str:
+        """Prompt block listing execute_* tools whose binary isn't installed here.
+
+        Steers the LLM away from tools that can only return "Command not found",
+        so a worker with a partial toolset still makes progress with what it has
+        (many web checks are pure-Python and need no external binary). Cached per
+        process since installed binaries don't change at runtime.
+        """
+        cached = getattr(self, "_unavailable_tools_note_cache", None)
+        if cached is not None:
+            return cached
+        note = ""
+        try:
+            mcp = self.tool_manager._get_mcp_server() if self.tool_manager else None
+            missing = mcp.unavailable_tools() if mcp else []
+        except Exception:
+            missing = []
+        if missing:
+            note = (
+                "\n\n## Tools UNAVAILABLE on this worker — do NOT call these "
+                "(the binary is not installed; they will fail):\n"
+                + ", ".join(missing)
+                + "\nMany web checks need no external binary and remain available: "
+                "bypass_403, replay_http_request, compare_requests, discover_parameters, "
+                "scan_js_urls_for_secrets, the test_* probes, and the query_* DB tools. "
+                "Prefer those over an unavailable scanner."
+            )
+        self._unavailable_tools_note_cache = note
+        return note
+
+    # =========================================================================
     # LANGGRAPH NODES
     # =========================================================================
     
@@ -588,6 +654,7 @@ class AgentOrchestrator:
         qa_history_formatted = format_qa_history(state.get("qa_history", []))
         objective_history_formatted = format_objective_history(state.get("objective_history", []))
         available_tools = get_phase_tools(phase)
+        available_tools += self._unavailable_tools_note()
 
         # Append prior session intelligence to knowledge context
         combined_knowledge = knowledge_context
@@ -1121,8 +1188,44 @@ class AgentOrchestrator:
                         user_id, tool_name, forced,
                     )
 
-        result = await self.tool_manager.execute(tool_name, tool_args)
-        
+        # Bound a single tool call so a hung/blocking tool can never stall the
+        # turn. Cap = min(configured per-tool ceiling, remaining turn budget) so
+        # we always exit before the outer request timeout. `result` is assigned
+        # in every path (success, failure, timeout, raise), so the tool_complete
+        # emit below always fires and the UI never dangles on the tool_start.
+        tool_cap = getattr(settings, "AGENT_TOOL_HARD_TIMEOUT_SECONDS", 600) or 600
+        remaining = self._turn_time_remaining()
+        tool_timeout = (
+            max(1.0, min(float(tool_cap), remaining))
+            if remaining is not None
+            else float(tool_cap)
+        )
+        try:
+            result = await asyncio.wait_for(
+                self.tool_manager.execute(tool_name, tool_args),
+                timeout=tool_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[%s] Tool %s exceeded node cap of %.0fs — aborted",
+                user_id, tool_name, tool_timeout,
+            )
+            result = {
+                "success": False,
+                "output": "",
+                "error": (
+                    f"Tool '{tool_name}' exceeded its {int(tool_timeout)}s time "
+                    "budget and was aborted. The backend stopped waiting."
+                ),
+            }
+        except Exception as e:
+            logger.error("[%s] Tool %s raised: %s", user_id, tool_name, e)
+            result = {
+                "success": False,
+                "output": "",
+                "error": f"Tool '{tool_name}' raised: {e}",
+            }
+
         step_data["tool_output"] = result.get("output") or result.get("error") or ""
         step_data["success"] = result.get("success", False)
         step_data["error_message"] = result.get("error")
@@ -1389,7 +1492,9 @@ class AgentOrchestrator:
         tool_args: Dict[str, Any],
         state: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Attach session_id / organization_id so remote workers can push live map updates."""
+        """Attach session_id / org and pentester crawl defaults for remote workers."""
+        from app.services.interceptor_service import apply_pentester_defaults
+
         args = dict(tool_args or {})
         session_id = state.get("session_id")
         org_id = state.get("organization_id")
@@ -1398,8 +1503,6 @@ class AgentOrchestrator:
             patch["session_id"] = session_id
         if org_id is not None:
             patch["organization_id"] = org_id
-        if not patch:
-            return args
 
         if "args" in args and isinstance(args.get("args"), str):
             raw = args["args"].strip()
@@ -1407,14 +1510,15 @@ class AgentOrchestrator:
                 parsed = json.loads(raw) if raw.startswith("{") else {"url": raw}
             except Exception:
                 parsed = {"url": raw}
+            parsed = apply_pentester_defaults(parsed)
             for k, v in patch.items():
                 parsed.setdefault(k, v)
             args["args"] = json.dumps(parsed)
             return args
 
-        for k, v in patch.items():
-            args.setdefault(k, v)
-        return args
+        # Flattened dict form
+        merged = apply_pentester_defaults({**args, **{k: v for k, v in patch.items()}})
+        return merged
     
     async def _await_approval_node(self, state: AgentState, config=None) -> dict:
         """Request user approval for phase transition."""
@@ -1522,11 +1626,19 @@ class AgentOrchestrator:
     
     async def _generate_response_node(self, state: AgentState, config=None) -> dict:
         """Generate final response."""
+        completion_reason = state.get("completion_reason")
+        if not completion_reason and self._turn_budget_exceeded():
+            completion_reason = (
+                "Reached the time budget for this turn — summarizing the findings "
+                "gathered so far. Ask a follow-up to continue where this left off."
+            )
+        completion_reason = completion_reason or "Session ended"
+
         report_prompt = FINAL_REPORT_PROMPT.format(
             objective=state.get("original_objective", ""),
             iteration_count=state.get("current_iteration", 0),
             final_phase=state.get("current_phase", "informational"),
-            completion_reason=state.get("completion_reason", "Session ended"),
+            completion_reason=completion_reason,
             execution_trace=format_execution_trace(state.get("execution_trace", [])),
             target_info=json_dumps_safe(state.get("target_info", {}), indent=2),
             todo_list=format_todo_list(state.get("todo_list", [])),
@@ -1538,7 +1650,7 @@ class AgentOrchestrator:
         return {
             "messages": [AIMessage(content=response.content)],
             "task_complete": True,
-            "completion_reason": state.get("completion_reason") or "Task completed",
+            "completion_reason": completion_reason,
         }
     
     # =========================================================================
@@ -1553,6 +1665,8 @@ class AgentOrchestrator:
         return "think"
     
     def _route_after_think(self, state: AgentState) -> str:
+        if self._turn_budget_exceeded():
+            return "generate_response"
         if state.get("current_iteration", 0) >= state.get("max_iterations", 15):
             return "generate_response"
         if state.get("task_complete"):
@@ -1578,6 +1692,8 @@ class AgentOrchestrator:
     
     def _route_after_analyze(self, state: AgentState) -> str:
         if state.get("task_complete"):
+            return "generate_response"
+        if self._turn_budget_exceeded():
             return "generate_response"
         if state.get("current_iteration", 0) >= state.get("max_iterations", 15):
             return "generate_response"
@@ -1621,7 +1737,25 @@ class AgentOrchestrator:
                 return LLMDecision.model_validate(data)
         except Exception as e:
             logger.warning(f"Failed to parse LLM decision: {e}")
-        
+
+        # No usable JSON. Distinguish a provider content-filter refusal (the model
+        # declined in prose) from a plain formatting miss, so the operator can tell
+        # which layer stopped an authorized run instead of seeing a vague error.
+        if self._looks_like_refusal(text):
+            logger.warning("LLM returned a content-filter refusal (no decision JSON)")
+            return LLMDecision(
+                thought=text,
+                reasoning="LLM provider declined the request",
+                action="complete",
+                completion_reason=(
+                    "The LLM provider's content filter declined this step "
+                    "(the model refused rather than returning a decision). This is "
+                    "authorized in-scope testing — retry, rephrase the objective, or "
+                    "switch the agent to a provider/model that permits security testing."
+                ),
+                updated_todo_list=[],
+            )
+
         return LLMDecision(
             thought=text,
             reasoning="Failed to parse response",
@@ -1629,6 +1763,22 @@ class AgentOrchestrator:
             completion_reason="Parse error",
             updated_todo_list=[],
         )
+
+    @staticmethod
+    def _looks_like_refusal(text: str) -> bool:
+        """Heuristic: does an un-parseable LLM reply read like a safety refusal?"""
+        if not text:
+            return False
+        low = text.lower()
+        markers = (
+            "i can't help", "i cannot help", "i can't assist", "i cannot assist",
+            "i'm unable to", "i am unable to", "i'm not able to", "i am not able to",
+            "i won't", "i will not", "cannot comply", "can't comply",
+            "against my guidelines", "i must decline", "i have to decline",
+            "not able to provide", "unable to provide assistance",
+            "i can't provide", "i cannot provide",
+        )
+        return any(m in low for m in markers)
     
     def _parse_analysis_response(self, text: str) -> OutputAnalysis:
         """Parse analysis response."""
@@ -1687,6 +1837,7 @@ class AgentOrchestrator:
             return InvokeResponse(error="Agent not initialized - check OPENAI_API_KEY")
         
         _max_iterations_var.set(max_iterations)
+        self._start_turn_deadline()
         logger.info(f"[{user_id}/{session_id}] Invoking with: {question[:100]}... (mode={mode}, max_iter={max_iterations or 'default'})")
 
         if status_callback:
@@ -1749,6 +1900,7 @@ class AgentOrchestrator:
         if not self._initialized:
             return InvokeResponse(error="Agent not initialized")
 
+        self._start_turn_deadline()
         if status_callback:
             self.set_status_callback(status_callback)
         
@@ -1785,6 +1937,7 @@ class AgentOrchestrator:
         if not self._initialized:
             return InvokeResponse(error="Agent not initialized")
 
+        self._start_turn_deadline()
         if status_callback:
             self.set_status_callback(status_callback)
         
