@@ -287,6 +287,10 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
     ),
     "content_api": (
         "SKILL PACK — content/API enum:\n"
+        "- After Interceptor: run bounded feroxbuster/ffuf with "
+        "/opt/wordlists/app-dirs-common.txt (-d 1, rate-limited) for login/reset/admin/"
+        ".git/swagger/backups — not full DirBuster.\n"
+        "- Fetch robots.txt + sitemap.xml; merge with katana/gau via ingest_urls_into_map.\n"
         "- Crawl + parameter discovery; feed map for authz/injection specialists."
     ),
 }

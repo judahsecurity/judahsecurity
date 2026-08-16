@@ -713,14 +713,66 @@ class ToolSelector:
             ))
 
         # Content discovery + API brute after baseline recon
-        if "execute_ffuf" not in self._tools_already_run and (
-            "execute_httpx" in self._tools_already_run or "execute_katana" in self._tools_already_run
+        browser_done = (
+            "execute_interceptor" in self._tools_already_run
+            or "execute_deep_crawl" in self._tools_already_run
+        )
+        if browser_done and "execute_feroxbuster" not in self._tools_already_run:
+            recs.append(ToolRecommendation(
+                tool_name="execute_feroxbuster",
+                args_template=(
+                    "-u https://{target} -w /opt/wordlists/app-dirs-common.txt "
+                    "-d 1 -t 20 --rate-limit 50 -q --status-codes 200,204,301,302,401,403"
+                ),
+                priority=4,
+                rationale=(
+                    "After the browser walkthrough: bounded directory/path enum "
+                    "(login, reset, admin, .git, swagger, backups) for misconfig context — "
+                    "not a full DirBuster spray. Then ingest_urls_into_map."
+                ),
+                category="reconnaissance",
+            ))
+        if browser_done and "execute_katana" not in self._tools_already_run:
+            recs.append(ToolRecommendation(
+                tool_name="execute_katana",
+                args_template=(
+                    "-u https://{target} -d 3 -jc -fx "
+                    "-ef woff,css,png,svg,jpg,woff2,jpeg,gif -jsonl -silent"
+                ),
+                priority=5,
+                rationale=(
+                    "Enrich path inventory with katana JS/asset crawl; merge via ingest_urls_into_map."
+                ),
+                category="reconnaissance",
+            ))
+        if (
+            browser_done
+            and "ingest_urls_into_map" not in self._tools_already_run
+            and (
+                "execute_feroxbuster" in self._tools_already_run
+                or "execute_katana" in self._tools_already_run
+                or "execute_gau" in self._tools_already_run
+            )
         ):
             recs.append(ToolRecommendation(
+                tool_name="ingest_urls_into_map",
+                args_template='urls=<newline paths from ferox/katana/gau>',
+                priority=3,
+                rationale="Fold discovered directories/paths into the capability map and refresh methodologies.",
+                category="reconnaissance",
+            ))
+        if "execute_ffuf" not in self._tools_already_run and browser_done:
+            recs.append(ToolRecommendation(
                 tool_name="execute_ffuf",
-                args_template="-u https://{target}/FUZZ -w /usr/share/seclists/Discovery/Web-Content/common.txt -mc 200,204,301,302,403 -t 40",
-                priority=8,
-                rationale="Directory/content discovery on live host — find admin panels, backups, API roots.",
+                args_template=(
+                    "-u https://{target}/FUZZ -w /opt/wordlists/app-dirs-common.txt "
+                    "-mc 200,204,301,302,401,403 -t 20 -rate 50"
+                ),
+                priority=7,
+                rationale=(
+                    "Optional second-pass path fuzz if ferox was thin — still use the "
+                    "common dirs list, not a massive SecLists DirBuster wordlist."
+                ),
                 phase_required="exploitation",
                 category="reconnaissance",
             ))

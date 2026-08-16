@@ -1181,10 +1181,12 @@ class MCPServer:
         self.registry.register(MCPTool(
             name="execute_feroxbuster",
             description=(
-                "Run Feroxbuster for recursive content / directory discovery. "
-                "Complement to ffuf when deeper recursion is needed. "
-                "Example: '-u https://target.com -w /usr/share/seclists/Discovery/Web-Content/common.txt "
-                "-t 20 --silent -q'."
+                "Run Feroxbuster for bounded directory / path discovery after the browser "
+                "crawl. Prefer /opt/wordlists/app-dirs-common.txt with -d 1 and rate limits "
+                "to find login/reset/admin/.git/swagger/backups for misconfig context — "
+                "not a full DirBuster SecLists spray. Example: "
+                "'-u https://target.com -w /opt/wordlists/app-dirs-common.txt -d 1 -t 20 "
+                "--rate-limit 50 -q'."
             ),
             tool_type=ToolType.SCAN,
             parameters={

@@ -174,6 +174,9 @@ RUN mkdir -p /opt/projectdiscovery && \
     rm -rf /tmp/downloaded-tools && \
     chmod +x /usr/local/bin/* 2>/dev/null || true
 
+# Curated high-value directory list for post-crawl path context (not full SecLists).
+COPY wordlists/ /opt/wordlists/
+
 # Install EyeWitness
 RUN git clone --depth 1 https://github.com/RedSiege/EyeWitness.git /opt/EyeWitness \
     && cd /opt/EyeWitness \

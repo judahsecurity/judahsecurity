@@ -1014,6 +1014,41 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             why="Admin/dashboard paths observed",
         ))
 
+    # Directory/path context — misconfigs and routes the crawl may not have linked.
+    if pages or has_api or g("target"):
+        ev = str(g("target") or (pages[0] if pages else ""))
+        add(Methodology(
+            id="path_directory_context",
+            title="Directory / path enumeration for app context",
+            hunt="path_enum",
+            specialist="content_api",
+            priority="high",
+            assumption=(
+                "Interesting directories and paths (login, reset, admin, .git, swagger, backups) "
+                "exist beyond what the browser crawl linked — useful for misconfig and attack surface"
+            ),
+            test=(
+                "After Interceptor/deep_crawl: (1) fetch robots.txt + sitemap.xml; "
+                "(2) execute_feroxbuster with /opt/wordlists/app-dirs-common.txt "
+                "(-d 1 -t 20 --rate-limit 50) OR execute_ffuf with the same list; "
+                "(3) execute_katana/gau for passive URLs; (4) ingest_urls_into_map. "
+                "Do NOT run huge SecLists DirBuster-style sprays before the capability map exists. "
+                "Flag 200/301/302/403 on sensitive paths for follow-up."
+            ),
+            pass_criteria=(
+                "New high-value paths discovered (auth, admin, API docs, VCS, backups) "
+                "ingested into the map with status evidence"
+            ),
+            kill_criteria=(
+                "Bounded common-dirs pass finds nothing beyond the crawl; robots/sitemap empty"
+            ),
+            cwe_ids=["CWE-538", "CWE-200", "CWE-552"],
+            capec_ids=["CAPEC-87", "CAPEC-150"],
+            owasp="A05:2021 Security Misconfiguration",
+            evidence=ev,
+            why="Web app assessments need directory/path context for misconfigurations",
+        ))
+
     # --- Injection / XSS ---
     reflect_paths = [p for p in param_paths if _REFLECT_PARAM_RE.search(p)]
     if has_search or reflect_paths:

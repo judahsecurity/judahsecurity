@@ -493,6 +493,7 @@ def select_specialists_for_map(
         "api_authz": "api_authz",
         "unauth_account_lookup": "api_authz",
         "mass_assignment": "api_authz",
+        "path_enum": "content_api",
         "host_tenant": "host_tenant",
         "business_logic": "business_logic",
         "injection": "injection",

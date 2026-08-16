@@ -102,6 +102,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_kiterunner",
             "execute_arjun",
             "discover_parameters",
+            "ingest_urls_into_map",
             "create_scan",
         ],
         max_iterations=8,
