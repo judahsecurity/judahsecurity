@@ -76,6 +76,10 @@ SAFE_RECON_TOOLS = {
     "execute_subfaster",
     "execute_deep_crawl",
     "execute_interceptor",
+    "execute_feroxbuster",  # bounded wordlist streams (app-dirs-common)
+    "spawn_recon_workers",
+    "wait_recon_workers",
+    "list_recon_workers",
     "httpx_help",
     "dnsx_help",
 }

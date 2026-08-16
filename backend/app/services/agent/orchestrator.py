@@ -570,14 +570,22 @@ class AgentOrchestrator:
 
         # Fast parallel probes + early Interceptor queue so crawl starts while
         # the LLM plans. execute_interceptor later attaches to the same job_id.
+        # Also spawn Copilot-style recon streams (httpx/waf/whatweb) in background.
         execution_trace: list = []
         interceptor_job_id: Optional[str] = None
+        recon_worker_briefs: List[str] = []
         if seed:
             session_id = state.get("session_id")
             org_id = state.get("organization_id")
+            uid_raw = state.get("user_id")
+            try:
+                uid_int = int(uid_raw) if uid_raw is not None and str(uid_raw).isdigit() else None
+            except Exception:
+                uid_int = None
             try:
                 from app.services.agent.assessment_kickoff import run_assessment_kickoff
                 from app.services.interceptor_service import queue_early_pentester_crawl
+                from app.services.agent import recon_workers
 
                 kickoff_coro = run_assessment_kickoff(seed)
                 queue_coro = queue_early_pentester_crawl(
@@ -585,9 +593,19 @@ class AgentOrchestrator:
                     session_id=session_id,
                     organization_id=org_id,
                 )
-                kickoff, queued = await asyncio.wait_for(
-                    asyncio.gather(kickoff_coro, queue_coro, return_exceptions=True),
-                    timeout=25.0,
+                streams_coro = recon_workers.spawn_workers(
+                    url=seed,
+                    session_id=str(session_id or ""),
+                    pack="early",
+                    tools_manager=self.tool_manager,
+                    user_id=uid_int,
+                    organization_id=org_id if isinstance(org_id, int) else None,
+                )
+                kickoff, queued, streams = await asyncio.wait_for(
+                    asyncio.gather(
+                        kickoff_coro, queue_coro, streams_coro, return_exceptions=True
+                    ),
+                    timeout=28.0,
                 )
                 if isinstance(kickoff, Exception):
                     logger.warning("assessment kickoff failed: %s", kickoff)
@@ -595,6 +613,9 @@ class AgentOrchestrator:
                 if isinstance(queued, Exception):
                     logger.warning("early interceptor queue failed: %s", queued)
                     queued = {}
+                if isinstance(streams, Exception):
+                    logger.warning("early recon streams failed: %s", streams)
+                    streams = []
 
                 kickoff_brief = (kickoff or {}).get("brief") or ""
                 if isinstance(queued, dict) and queued.get("job_id"):
@@ -612,22 +633,34 @@ class AgentOrchestrator:
                     )
                     kickoff_brief = (kickoff_brief + qnote) if kickoff_brief else qnote.strip()
 
+                if isinstance(streams, list) and streams:
+                    kinds = ", ".join(
+                        f"{s.get('kind')}({s.get('note')})" for s in streams if isinstance(s, dict)
+                    )
+                    snote = (
+                        f"\n  Parallel recon streams (running): {kinds}. "
+                        "Results inject automatically; use wait_recon_workers or "
+                        "spawn_recon_workers(pack='enrich') for ferox/katana."
+                    )
+                    kickoff_brief = (kickoff_brief + snote) if kickoff_brief else snote.strip()
+
                 if kickoff_brief:
                     next_steps = [
                         "execute_interceptor (attaches to early job if queued)",
-                        "Bounded path enrich (feroxbuster + app-dirs-common.txt)",
+                        "spawn_recon_workers(pack='enrich') for ferox+katana streams",
                         "ingest_urls_into_map → sync_engagement_brain",
                     ]
                     execution_trace.append(
                         ExecutionStep(
                             iteration=0,
                             phase="informational",
-                            thought="Automatic kickoff recon + early Interceptor queue",
-                            reasoning="Surface signal + crawl start before first LLM think",
+                            thought="Automatic kickoff + Interceptor queue + recon streams",
+                            reasoning="Surface signal + parallel streams while LLM plans",
                             tool_name="assessment_kickoff",
                             tool_args={
                                 "url": seed,
                                 "interceptor_job_id": interceptor_job_id,
+                                "streams": streams if isinstance(streams, list) else [],
                             },
                             tool_output=kickoff_brief,
                             success=bool((kickoff or {}).get("success")) or bool(interceptor_job_id),
@@ -661,6 +694,7 @@ class AgentOrchestrator:
             "engagement_brain": None,
             "kickoff_brief": kickoff_brief or None,
             "interceptor_job_id": interceptor_job_id,
+            "recon_worker_briefs": recon_worker_briefs,
             "awaiting_user_approval": False,
             "phase_transition_pending": None,
             "qa_history": [],
@@ -692,6 +726,45 @@ class AgentOrchestrator:
                 org_id,
                 session_id=session_id,
             )
+
+        # Drain completed parallel recon streams into state before the LLM thinks
+        # (non-blocking collect; soft 1.5s join so fast httpx/waf results land early).
+        drained_briefs: List[str] = list(state.get("recon_worker_briefs") or [])
+        drain_trace_extra: list = []
+        try:
+            from app.services.agent import recon_workers
+
+            soft_wait = 1.5 if iteration <= 2 else 0.0
+            newly = await recon_workers.drain_completed(
+                str(session_id or ""),
+                wait_sec=soft_wait,
+            )
+            for item in newly:
+                brief = (item.get("brief") or "").strip()
+                if not brief:
+                    continue
+                drained_briefs.append(brief)
+                drain_trace_extra.append(
+                    ExecutionStep(
+                        iteration=iteration,
+                        phase=phase,
+                        thought=f"Recon stream completed: {item.get('kind')}",
+                        reasoning="Parallel worker result injected into context",
+                        tool_name=f"recon_worker:{item.get('kind')}",
+                        tool_args={"worker_id": item.get("worker_id")},
+                        tool_output=brief[:8000],
+                        success=item.get("status") == "completed",
+                        error_message=item.get("error"),
+                    ).model_dump()
+                )
+                await self._emit_status({
+                    "type": "thinking",
+                    "iteration": iteration,
+                    "phase": phase,
+                    "thought": f"Recon stream [{item.get('kind')}] results ready",
+                })
+        except Exception as drain_err:
+            logger.debug("recon worker drain skipped: %s", drain_err)
         
         # Get current objective
         objectives = state.get("conversation_objectives", [])
@@ -727,7 +800,8 @@ class AgentOrchestrator:
             )
 
         # Build prompt
-        execution_trace_formatted = format_execution_trace(state.get("execution_trace", []))
+        merged_trace = list(state.get("execution_trace", []) or []) + drain_trace_extra
+        execution_trace_formatted = format_execution_trace(merged_trace)
         todo_list_formatted = format_todo_list(state.get("todo_list", []))
         target_info_formatted = json_dumps_safe(state.get("target_info", {}), indent=2)
         qa_history_formatted = format_qa_history(state.get("qa_history", []))
@@ -743,6 +817,16 @@ class AgentOrchestrator:
         if kickoff_brief and iteration <= 2:
             combined_knowledge = (
                 f"{combined_knowledge}\n\n## Kickoff recon (already ran — use this)\n{kickoff_brief}"
+            )
+        if drained_briefs:
+            from app.services.agent.recon_workers import format_briefs_for_prompt
+            # Only show the most recent briefs in the prompt (full text is in execution_trace)
+            recent_for_prompt = [
+                {"kind": "stream", "status": "completed", "worker_id": "cached", "brief": b}
+                for b in drained_briefs[-6:]
+            ]
+            combined_knowledge = (
+                f"{combined_knowledge}\n\n{format_briefs_for_prompt(recent_for_prompt)}"
             )
 
         # Auto tool recommendations based on discovered state
@@ -889,7 +973,11 @@ class AgentOrchestrator:
             "todo_list": todo_list,
             "_current_step": step.model_dump(),
             "_decision": decision.model_dump(),
+            "recon_worker_briefs": drained_briefs[-12:],
         }
+        if drain_trace_extra:
+            updates["execution_trace"] = merged_trace
+
         
         # Handle actions
         if decision.action == "complete":

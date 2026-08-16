@@ -273,6 +273,8 @@ class AgentState(TypedDict, total=False):
     kickoff_brief: Optional[str]
     # Early-queued Interceptor job id (agent attaches instead of double-crawl)
     interceptor_job_id: Optional[str]
+    # Parallel recon stream briefs drained into the prompt (Copilot-style)
+    recon_worker_briefs: Optional[List[str]]
     
     # Internal state
     _current_step: Optional[Dict[str, Any]]

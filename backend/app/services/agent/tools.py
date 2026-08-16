@@ -424,6 +424,10 @@ class ASMToolsManager:
             "cmseek_help": self.execute_mcp_tool,
             # Fireteam: scatter-gather specialists in parallel
             "fireteam_dispatch": self.fireteam_dispatch,
+            # Copilot-style parallel recon streams (non-blocking)
+            "spawn_recon_workers": self.spawn_recon_workers,
+            "wait_recon_workers": self.wait_recon_workers,
+            "list_recon_workers": self.list_recon_workers,
             # Replay captured XHR/API requests (from capability map samples)
             "replay_http_request": self.replay_http_request,
             # EvoGraph: cross-session memory lookup
@@ -4950,6 +4954,97 @@ class ASMToolsManager:
             },
             indent=2,
         )[:_tool_output_max_chars()]
+
+    async def spawn_recon_workers(
+        self,
+        target: str = "",
+        pack: str = "",
+        kinds: Optional[List[str]] = None,
+    ) -> str:
+        """Spawn parallel recon streams that run while the agent continues.
+
+        Results inject automatically into the next think step. Use wait_recon_workers
+        to block briefly for them.
+
+        Args:
+            target: URL/host (defaults to session seed).
+            pack: ``early`` | ``enrich`` | ``full`` (optional if kinds set).
+            kinds: Explicit list: httpx_tech, waf_probe, whatweb, ferox_dirs, katana_urls.
+        """
+        import json as _json
+        from app.services.agent import recon_workers
+
+        url = (target or "").strip() or (current_seed_target.get() or "")
+        url = url or (getattr(self, "_fallback_target", None) or "")
+        if not url:
+            return _json.dumps({
+                "success": False,
+                "error": "no_target",
+                "hint": "Pass target=https://… or paste a URL in the objective first.",
+            })
+
+        _, org_id = get_tenant_context()
+        session_id = current_session_id.get() or ""
+        user_id = current_user_id.get()
+
+        spawned = await recon_workers.spawn_workers(
+            url=url,
+            session_id=session_id,
+            pack=(pack or None),
+            kinds=kinds,
+            tools_manager=self,
+            user_id=user_id,
+            organization_id=org_id,
+        )
+        return _json.dumps(
+            {
+                "success": True,
+                "spawned": spawned,
+                "note": (
+                    "Streams are running in the background. Continue with execute_interceptor "
+                    "or other tools; completed results inject on the next think. "
+                    "Call wait_recon_workers(timeout_sec=45) to join, or "
+                    "spawn_recon_workers(pack='enrich') for ferox+katana."
+                ),
+            },
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def wait_recon_workers(
+        self,
+        timeout_sec: float = 45.0,
+        worker_ids: Optional[List[str]] = None,
+    ) -> str:
+        """Wait for parallel recon streams to finish and return their briefs."""
+        import json as _json
+        from app.services.agent import recon_workers
+
+        session_id = current_session_id.get() or ""
+        briefs = await recon_workers.wait_workers(
+            session_id,
+            timeout_sec=float(timeout_sec or 45.0),
+            worker_ids=worker_ids,
+        )
+        return _json.dumps(
+            {
+                "success": True,
+                "count": len(briefs),
+                "results": briefs,
+                "prompt_block": recon_workers.format_briefs_for_prompt(briefs),
+            },
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def list_recon_workers(self) -> str:
+        """List status of parallel recon streams for this session."""
+        import json as _json
+        from app.services.agent import recon_workers
+
+        session_id = current_session_id.get() or ""
+        rows = await recon_workers.list_workers(session_id)
+        return _json.dumps({"success": True, "workers": rows}, indent=2)[
+            :_tool_output_max_chars()
+        ]
 
     async def fireteam_dispatch(
         self,
