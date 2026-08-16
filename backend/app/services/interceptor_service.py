@@ -80,6 +80,112 @@ def _session_id_from_opts(opts: Dict[str, Any]) -> Optional[str]:
     )
 
 
+async def queue_early_pentester_crawl(
+    url: str,
+    *,
+    session_id: Optional[str] = None,
+    organization_id: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Queue a pentester Interceptor job immediately (no wait).
+
+    Returns {queued, job_id, online, note}. Safe to call when no workers are
+    online — then queued=False and execute_interceptor will fall back later.
+    """
+    u = (url or "").strip()
+    if not u:
+        return {"queued": False, "job_id": None, "online": [], "note": "no_url"}
+    if not u.startswith("http"):
+        u = f"https://{u}"
+
+    try:
+        from app.services import recon_jobs_service as jobs
+    except Exception as e:
+        return {"queued": False, "job_id": None, "online": [], "note": f"jobs_unavailable:{e}"}
+
+    # Reuse an in-flight job for this session+URL if kickoff ran twice.
+    existing = jobs.find_active_job(session_id=session_id, url=u)
+    if existing:
+        await jobs.notify_session_ws(
+            session_id,
+            {
+                "type": "thinking",
+                "content": (
+                    f"Interceptor crawl already in flight ({existing.id[:8]}… "
+                    f"status={existing.status}) — agent will attach when ready."
+                ),
+            },
+        )
+        return {
+            "queued": True,
+            "job_id": existing.id,
+            "online": jobs.online_kinds(),
+            "note": f"reused_active:{existing.status}",
+            "status": existing.status,
+        }
+
+    online = jobs.online_kinds()
+    if not online:
+        return {
+            "queued": False,
+            "job_id": None,
+            "online": [],
+            "note": "no_workers_online",
+        }
+
+    prefer = [p for p in jobs.DEFAULT_PREFER if p in online] or list(jobs.DEFAULT_PREFER)
+    opts = apply_pentester_defaults({"url": u, "prefer": prefer})
+    max_pages = int(opts.get("max_pages") or PENTESTER_DEFAULTS["max_pages"])
+    crawl_opts = {
+        k: v
+        for k, v in opts.items()
+        if k
+        not in (
+            "url",
+            "target",
+            "prefer",
+            "prefer_remote",
+            "session_id",
+            "agent_session_id",
+            "organization_id",
+            "org_id",
+            "job_id",
+        )
+    }
+    try:
+        org_id = int(organization_id) if organization_id is not None else None
+    except (TypeError, ValueError):
+        org_id = None
+
+    view = jobs.create_job(
+        url=u,
+        organization_id=org_id,
+        session_id=session_id,
+        max_pages=max_pages,
+        interact=bool(opts.get("interact", True)),
+        prefer=prefer,
+        opts=crawl_opts,
+    )
+    await jobs.notify_session_ws(
+        session_id,
+        {
+            "type": "thinking",
+            "content": (
+                f"Early-queued Interceptor pentester crawl {view.id[:8]}… "
+                f"depth={opts.get('depth')} max_pages={max_pages} "
+                f"(prefer={prefer}, online={online}) — running while agent plans."
+            ),
+        },
+    )
+    return {
+        "queued": True,
+        "job_id": view.id,
+        "online": online,
+        "note": "queued",
+        "status": view.status,
+    }
+
+
 async def run_interceptor(args: Any) -> Dict[str, Any]:
     """
     Run interaction-first recon via remote workers, local Interceptor, or deep_crawl.
@@ -166,10 +272,6 @@ async def _try_remote_workers(url: str, opts: Dict[str, Any]) -> Optional[Dict[s
     if not prefer:
         prefer = list(jobs.DEFAULT_PREFER)
 
-    if not any(p in online for p in prefer):
-        logger.info("No Interceptor workers online for prefer=%s", prefer)
-        return None
-
     session_id = _session_id_from_opts(opts)
     org_id = opts.get("organization_id") or opts.get("org_id")
     try:
@@ -177,43 +279,78 @@ async def _try_remote_workers(url: str, opts: Dict[str, Any]) -> Optional[Dict[s
     except (TypeError, ValueError):
         org_id = None
 
-    crawl_opts = {
-        k: v
-        for k, v in opts.items()
-        if k
-        not in (
-            "url",
-            "target",
-            "prefer",
-            "prefer_remote",
-            "session_id",
-            "agent_session_id",
-            "organization_id",
-            "org_id",
+    # Attach to early-queued or in-flight crawl when possible.
+    force_new = bool(opts.get("force_new") or opts.get("force_new_job"))
+    reuse_id = str(opts.get("job_id") or "").strip() or None
+    view = None
+    if reuse_id and not force_new:
+        view = jobs.get_job(reuse_id)
+        if view and view.status in ("failed", "cancelled"):
+            view = None
+    if view is None and not force_new:
+        view = jobs.find_active_job(session_id=session_id, url=url)
+        # Completed early job: agent called execute_interceptor after crawl finished.
+        if view is None and reuse_id:
+            done_early = jobs.get_job(reuse_id)
+            if done_early and done_early.status == "completed":
+                view = done_early
+
+    if view is None:
+        if not any(p in online for p in prefer):
+            logger.info("No Interceptor workers online for prefer=%s", prefer)
+            return None
+
+        crawl_opts = {
+            k: v
+            for k, v in opts.items()
+            if k
+            not in (
+                "url",
+                "target",
+                "prefer",
+                "prefer_remote",
+                "session_id",
+                "agent_session_id",
+                "organization_id",
+                "org_id",
+                "job_id",
+                "force_new",
+                "force_new_job",
+            )
+        }
+        max_pages = int(opts.get("max_pages") or PENTESTER_DEFAULTS["max_pages"])
+        view = jobs.create_job(
+            url=url,
+            organization_id=org_id,
+            session_id=session_id,
+            scope=opts.get("scope"),
+            max_pages=max_pages,
+            interact=bool(opts.get("interact", True)),
+            prefer=prefer,
+            opts=crawl_opts,
         )
-    }
-    max_pages = int(opts.get("max_pages") or PENTESTER_DEFAULTS["max_pages"])
-    view = jobs.create_job(
-        url=url,
-        organization_id=org_id,
-        session_id=session_id,
-        scope=opts.get("scope"),
-        max_pages=max_pages,
-        interact=bool(opts.get("interact", True)),
-        prefer=prefer,
-        opts=crawl_opts,
-    )
-    await jobs.notify_session_ws(
-        session_id,
-        {
-            "type": "thinking",
-            "content": (
-                f"Queued Interceptor pentester crawl {view.id[:8]}… "
-                f"depth={opts.get('depth')} max_pages={max_pages} "
-                f"interact={opts.get('interact')} (prefer={prefer}, online={online})"
-            ),
-        },
-    )
+        await jobs.notify_session_ws(
+            session_id,
+            {
+                "type": "thinking",
+                "content": (
+                    f"Queued Interceptor pentester crawl {view.id[:8]}… "
+                    f"depth={opts.get('depth')} max_pages={max_pages} "
+                    f"interact={opts.get('interact')} (prefer={prefer}, online={online})"
+                ),
+            },
+        )
+    else:
+        await jobs.notify_session_ws(
+            session_id,
+            {
+                "type": "thinking",
+                "content": (
+                    f"Attaching to Interceptor job {view.id[:8]}… "
+                    f"status={view.status} (early queue / in-flight reuse)"
+                ),
+            },
+        )
 
     timeout = float(os.environ.get("RECON_JOB_TIMEOUT_SEC", "900"))
 
@@ -229,13 +366,17 @@ async def _try_remote_workers(url: str, opts: Dict[str, Any]) -> Optional[Dict[s
             },
         )
 
-    try:
-        done = await jobs.wait_for_job(view.id, timeout_sec=timeout, on_progress=_progress)
-    except TimeoutError:
-        return None
-    except Exception as e:
-        logger.warning("wait_for_job failed: %s", e)
-        return None
+    # Already finished (early queue completed during planning).
+    if view.status == "completed" and isinstance(view.result, dict):
+        done = view
+    else:
+        try:
+            done = await jobs.wait_for_job(view.id, timeout_sec=timeout, on_progress=_progress)
+        except TimeoutError:
+            return None
+        except Exception as e:
+            logger.warning("wait_for_job failed: %s", e)
+            return None
 
     if done.status != "completed" or not isinstance(done.result, dict):
         return None

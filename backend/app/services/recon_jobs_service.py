@@ -166,6 +166,56 @@ def get_job(job_id: str) -> Optional[JobView]:
         db.close()
 
 
+def _normalize_job_url(url: str) -> str:
+    """Loose URL equality for reuse (scheme+host+path, strip trailing slash)."""
+    from urllib.parse import urlparse
+
+    u = (url or "").strip()
+    if not u:
+        return ""
+    if not u.startswith("http"):
+        u = f"https://{u}"
+    parsed = urlparse(u)
+    path = (parsed.path or "/").rstrip("/") or "/"
+    host = (parsed.netloc or "").lower()
+    return f"{parsed.scheme}://{host}{path}"
+
+
+def find_active_job(
+    *,
+    session_id: Optional[str],
+    url: str,
+) -> Optional[JobView]:
+    """
+    Find a queued/claimed/running job for this agent session + URL.
+
+    Used so early kickoff queue and later execute_interceptor share one crawl.
+    Does not reuse completed/failed jobs (re-crawl / login must create a new one).
+    """
+    sid = (session_id or "").strip()
+    want = _normalize_job_url(url)
+    if not sid or not want:
+        return None
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(ReconJob)
+            .filter(
+                ReconJob.session_id == sid,
+                ReconJob.status.in_(("queued", "claimed", "running")),
+            )
+            .order_by(ReconJob.created_at.desc())
+            .limit(20)
+            .all()
+        )
+        for row in rows:
+            if _normalize_job_url(row.url or "") == want:
+                return _row_to_view(row)
+        return None
+    finally:
+        db.close()
+
+
 def record_heartbeat(
     *,
     worker_id: str,

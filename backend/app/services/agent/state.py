@@ -268,6 +268,11 @@ class AgentState(TypedDict, total=False):
     auth_session: Optional[Dict[str, Any]]
     # Tester-process control plane (hypotheses, creds, approaches, chains)
     engagement_brain: Optional[Dict[str, Any]]
+
+    # Fast URL kickoff (robots / key paths) — injected before first LLM think
+    kickoff_brief: Optional[str]
+    # Early-queued Interceptor job id (agent attaches instead of double-crawl)
+    interceptor_job_id: Optional[str]
     
     # Internal state
     _current_step: Optional[Dict[str, Any]]

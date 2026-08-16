@@ -553,6 +553,8 @@ class AgentOrchestrator:
         # Seed primary_target from the user's message so execute_* can recover
         # when the LLM omits tool_args.args (common empty-{} failure loop).
         target_info = TargetInfo().model_dump()
+        kickoff_brief = ""
+        seed = None
         try:
             from app.services.agent.tools import extract_seed_target, set_seed_target
             seed = extract_seed_target(latest_message)
@@ -565,6 +567,81 @@ class AgentOrchestrator:
                     pass
         except Exception:
             pass
+
+        # Fast parallel probes + early Interceptor queue so crawl starts while
+        # the LLM plans. execute_interceptor later attaches to the same job_id.
+        execution_trace: list = []
+        interceptor_job_id: Optional[str] = None
+        if seed:
+            session_id = state.get("session_id")
+            org_id = state.get("organization_id")
+            try:
+                from app.services.agent.assessment_kickoff import run_assessment_kickoff
+                from app.services.interceptor_service import queue_early_pentester_crawl
+
+                kickoff_coro = run_assessment_kickoff(seed)
+                queue_coro = queue_early_pentester_crawl(
+                    seed,
+                    session_id=session_id,
+                    organization_id=org_id,
+                )
+                kickoff, queued = await asyncio.wait_for(
+                    asyncio.gather(kickoff_coro, queue_coro, return_exceptions=True),
+                    timeout=25.0,
+                )
+                if isinstance(kickoff, Exception):
+                    logger.warning("assessment kickoff failed: %s", kickoff)
+                    kickoff = {}
+                if isinstance(queued, Exception):
+                    logger.warning("early interceptor queue failed: %s", queued)
+                    queued = {}
+
+                kickoff_brief = (kickoff or {}).get("brief") or ""
+                if isinstance(queued, dict) and queued.get("job_id"):
+                    interceptor_job_id = str(queued["job_id"])
+                    qnote = (
+                        f"\n  Interceptor: early-queued job {interceptor_job_id[:8]}… "
+                        f"({queued.get('note')}; online={queued.get('online')}). "
+                        "Call execute_interceptor next — it will attach, not start a second crawl."
+                    )
+                    kickoff_brief = (kickoff_brief + qnote) if kickoff_brief else qnote.strip()
+                elif isinstance(queued, dict) and queued.get("note") == "no_workers_online":
+                    qnote = (
+                        "\n  Interceptor: no Mac/Ubuntu workers online yet — "
+                        "execute_interceptor will use local CLI or deep_crawl fallback."
+                    )
+                    kickoff_brief = (kickoff_brief + qnote) if kickoff_brief else qnote.strip()
+
+                if kickoff_brief:
+                    next_steps = [
+                        "execute_interceptor (attaches to early job if queued)",
+                        "Bounded path enrich (feroxbuster + app-dirs-common.txt)",
+                        "ingest_urls_into_map → sync_engagement_brain",
+                    ]
+                    execution_trace.append(
+                        ExecutionStep(
+                            iteration=0,
+                            phase="informational",
+                            thought="Automatic kickoff recon + early Interceptor queue",
+                            reasoning="Surface signal + crawl start before first LLM think",
+                            tool_name="assessment_kickoff",
+                            tool_args={
+                                "url": seed,
+                                "interceptor_job_id": interceptor_job_id,
+                            },
+                            tool_output=kickoff_brief,
+                            success=bool((kickoff or {}).get("success")) or bool(interceptor_job_id),
+                            actionable_findings=[
+                                "Attach via execute_interceptor"
+                                if interceptor_job_id
+                                else "Start execute_interceptor next"
+                            ],
+                            recommended_next_steps=next_steps,
+                        ).model_dump()
+                    )
+            except Exception as e:
+                logger.warning("assessment kickoff skipped: %s", e)
+                kickoff_brief = ""
         
         return {
             "current_iteration": 0,
@@ -572,7 +649,7 @@ class AgentOrchestrator:
             "task_complete": False,
             "current_phase": "informational",
             "phase_history": [PhaseHistoryEntry(phase="informational").model_dump()],
-            "execution_trace": [],
+            "execution_trace": execution_trace,
             "todo_list": todo_list,
             "conversation_objectives": objectives,
             "current_objective_index": 0,
@@ -582,6 +659,8 @@ class AgentOrchestrator:
             "capability_map": None,
             "auth_session": None,
             "engagement_brain": None,
+            "kickoff_brief": kickoff_brief or None,
+            "interceptor_job_id": interceptor_job_id,
             "awaiting_user_approval": False,
             "phase_transition_pending": None,
             "qa_history": [],
@@ -660,6 +739,11 @@ class AgentOrchestrator:
         combined_knowledge = knowledge_context
         if prior_chain_context:
             combined_knowledge = f"{knowledge_context}\n\n{prior_chain_context}"
+        kickoff_brief = (state.get("kickoff_brief") or "").strip()
+        if kickoff_brief and iteration <= 2:
+            combined_knowledge = (
+                f"{combined_knowledge}\n\n## Kickoff recon (already ran — use this)\n{kickoff_brief}"
+            )
 
         # Auto tool recommendations based on discovered state
         target_info_raw = state.get("target_info", {})
@@ -1492,17 +1576,20 @@ class AgentOrchestrator:
         tool_args: Dict[str, Any],
         state: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Attach session_id / org and pentester crawl defaults for remote workers."""
+        """Attach session_id / org / early job_id and pentester crawl defaults."""
         from app.services.interceptor_service import apply_pentester_defaults
 
         args = dict(tool_args or {})
         session_id = state.get("session_id")
         org_id = state.get("organization_id")
+        early_job = state.get("interceptor_job_id")
         patch: Dict[str, Any] = {}
         if session_id:
             patch["session_id"] = session_id
         if org_id is not None:
             patch["organization_id"] = org_id
+        if early_job:
+            patch["job_id"] = early_job
 
         if "args" in args and isinstance(args.get("args"), str):
             raw = args["args"].strip()

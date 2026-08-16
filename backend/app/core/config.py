@@ -110,9 +110,9 @@ class Settings(BaseSettings):
     # Docker Desktop: http://host.docker.internal:11434/v1
     OLLAMA_BASE_URL: str = "http://127.0.0.1:11434/v1"
     OLLAMA_MODEL: str = "qwen2.5:14b"
-    # When the preferred cloud provider has no API key, OR a cloud call fails
-    # with credit/quota/billing errors, try local Ollama if reachable.
-    OLLAMA_FALLBACK_ENABLED: bool = True
+    # Local Ollama fallback is opt-in (needs a GPU/RAM box). Default off so
+    # small app hosts use cloud APIs only.
+    OLLAMA_FALLBACK_ENABLED: bool = False
 
     @field_validator(
         "ANTHROPIC_API_KEY",
@@ -161,7 +161,16 @@ class Settings(BaseSettings):
     AGENT_MAX_OUTPUT_TOKENS: int = 4096  # Max tokens for LLM response (Claude/OpenAI); increase for long answers (e.g. 8192, 16384, 64000)
     AGENT_TOOL_OUTPUT_MAX_CHARS: int = 20000  # RedAmon-style default; truncation for LLM context
     AGENT_REST_MAX_ITERATIONS: int = 15  # Cap per REST request to avoid proxy timeouts
-    AGENT_REQUEST_TIMEOUT_SECONDS: int = 660  # Hard timeout for a single agent REST call (11 min, covers Nuclei 10-min max + LLM overhead)
+    AGENT_WS_MAX_ITERATIONS: int = 40  # Cap per WebSocket agent turn (previously fell through to AGENT_MAX_ITERATIONS=100)
+    AGENT_REQUEST_TIMEOUT_SECONDS: int = 660  # Hard timeout for a single agent REST/WS turn (11 min); outer backstop
+    # Internal wall-clock budget for one agent turn's ReAct loop. Once exceeded the
+    # loop stops picking new tools and wraps up with a partial report. Keep below
+    # AGENT_REQUEST_TIMEOUT_SECONDS so the graceful path wins over the hard cutoff.
+    AGENT_TURN_BUDGET_SECONDS: int = 600
+    # Node-level ceiling for a single tool call. Bounds any one tool so a hung
+    # tool can never block the turn, and guarantees a tool_complete event is
+    # emitted (so the UI never dangles on a tool_start).
+    AGENT_TOOL_HARD_TIMEOUT_SECONDS: int = 600
 
     # ---- Aegis Lictor / Censor / Augur (deterministic guard layer) ----
     # Lictor pre/post tool-execution hooks. Disabling skips ALL guards (not recommended).
@@ -260,6 +269,13 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
+        # Ignore unknown environment variables. The project's .env is shared with
+        # docker-compose and carries orchestration-only keys (POSTGRES_USER,
+        # DB_PORT, DEFAULT_ADMIN_PASSWORD, …) that are not Settings fields. In
+        # Docker the container only receives a curated env list so this never
+        # bites, but running the app directly against the full .env must not crash
+        # on those extras.
+        extra = "ignore"
 
 
 @lru_cache()

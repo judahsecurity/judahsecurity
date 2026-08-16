@@ -759,6 +759,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                             initial_todos=initial_todos,
                             mode=mode,
                             status_callback=status_callback,
+                            max_iterations=settings.AGENT_WS_MAX_ITERATIONS,
                         ),
                         timeout=settings.AGENT_REQUEST_TIMEOUT_SECONDS,
                     )
