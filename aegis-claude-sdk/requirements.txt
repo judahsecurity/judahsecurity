@@ -1,0 +1,10 @@
+# Claude Agent SDK harness for Aegis Vanguard (Pro/Max subscription billing).
+#
+# The offensive tooling itself comes from ../aegis-vanguard — install that too:
+#     pip install -r ../aegis-vanguard/requirements.txt
+#
+# The Agent SDK wraps the Claude Code CLI, so the CLI must be installed and a
+# subscription OAuth token generated once:
+#     npm install -g @anthropic-ai/claude-code
+#     claude setup-token
+claude-agent-sdk>=0.1.0

@@ -1,6 +1,8 @@
 # Judah Security ASM - Makefile
 .PHONY: help build up down restart logs shell db-shell init-db clean dev dev-graph deploy \
-	harness-install harness-test harness-batch harness-benchmark
+	harness-install harness-test harness-batch harness-benchmark \
+	agent-run agent-playbooks agent-status agent-benchmark agent-benchmark-baseline \
+	agent-subscription
 
 # Default target
 help:
@@ -26,6 +28,20 @@ help:
 	@echo "  harness-test       Run the harness test suite"
 	@echo "  harness-batch      Batch-scan targets in harness REPO_LIST.txt"
 	@echo "  harness-benchmark  Benchmark scanner accuracy against the corpus"
+	@echo ""
+	@echo "Aegis Agent (headless console engagements):"
+	@echo "  agent-status       Check whether an LLM runtime is configured"
+	@echo "  agent-playbooks    List available playbooks"
+	@echo "  agent-run          Start an engagement:"
+	@echo "                       make agent-run TARGET=https://app.example.com"
+	@echo "                       make agent-run TARGET=<url> PLAYBOOK=tester_process"
+	@echo "                       make agent-run TARGET=<url> QUESTION=\"find IDORs\" MODE=agent ORG=1"
+	@echo "  agent-benchmark    Benchmark the in-product agent (Glasswing contract) on the corpus"
+	@echo "  agent-benchmark-baseline  Same, but with the verify/coverage gate disabled (baseline)"
+	@echo "  agent-subscription Run Vanguard via Claude Agent SDK on a Pro/Max subscription:"
+	@echo "                       make agent-subscription TARGET=https://example.com"
+	@echo "                       Needs Docker running + an LLM key + backend deps importable."
+	@echo "                       make agent-benchmark ARGS=\"--repos juice-shop --setup\""
 	@echo ""
 
 # Build Docker images
@@ -112,6 +128,60 @@ harness-batch:
 
 harness-benchmark:
 	cd harness && python -m local_harness.benchmark.run
+
+# --- Aegis Agent (headless console) ----------------------------------------
+# Kick off an engagement without the HTTP layer, reusing the same
+# AgentOrchestrator.invoke() path as the API. See backend/app/cli.py.
+agent-status:
+	docker-compose exec backend python -m app.cli status
+
+agent-playbooks:
+	docker-compose exec backend python -m app.cli playbooks
+
+# make agent-run TARGET=<url> [PLAYBOOK=<id>] [QUESTION="..."] [MODE=agent|assist] [ORG=<n>]
+agent-run:
+	@[ -n "$(TARGET)$(QUESTION)$(PLAYBOOK)" ] || (echo 'Usage: make agent-run TARGET=<url> [PLAYBOOK=<id>] [QUESTION="..."] [MODE=agent|assist] [ORG=<n>]' && exit 1)
+	docker-compose exec backend python -m app.cli run \
+	  $(if $(TARGET),--target "$(TARGET)") \
+	  $(if $(PLAYBOOK),--playbook "$(PLAYBOOK)") \
+	  $(if $(QUESTION),--question "$(QUESTION)") \
+	  $(if $(MODE),--mode "$(MODE)") \
+	  $(if $(ORG),--org "$(ORG)")
+
+# Benchmark the IN-PRODUCT agent (engagement brain + independent verifier +
+# coverage) against the known-vulnerable corpus, by pointing the harness scanner
+# command at the CLI. The agent mirrors findings to AEGIS_FINDINGS_SINK (set by
+# the harness) so the judge can score them. Prereqs: Docker running (for --setup
+# targets), an LLM key in the environment, and backend deps importable.
+#   make agent-benchmark ARGS="--repos juice-shop --setup"
+AGENT_PY ?= backend/.venv311/bin/python
+agent-benchmark:
+	cd harness && \
+	  AEGIS_HARNESS_SCANNER_CMD="$(abspath $(AGENT_PY)) -m app.cli run" \
+	  AEGIS_HARNESS_SCANNER_CWD="$(abspath backend)" \
+	  PYTHONPATH=. "$(abspath $(AGENT_PY))" -m local_harness.benchmark.run $(ARGS)
+
+# Same run with the Glasswing verify/coverage gate DISABLED — the baseline half
+# of the with/without-contract comparison.
+agent-benchmark-baseline:
+	cd harness && \
+	  AEGIS_DISABLE_VERIFY_GATE=1 \
+	  AEGIS_HARNESS_SCANNER_CMD="$(abspath $(AGENT_PY)) -m app.cli run" \
+	  AEGIS_HARNESS_SCANNER_CWD="$(abspath backend)" \
+	  PYTHONPATH=. "$(abspath $(AGENT_PY))" -m local_harness.benchmark.run $(ARGS)
+
+# Run Vanguard through the Claude Agent SDK, billed to a Claude Pro/Max
+# subscription (CLAUDE_CODE_OAUTH_TOKEN). Personal/research use only — see
+# aegis-claude-sdk/README.md for the Terms-of-Service caveat. Runs on the host
+# (needs the `claude` CLI + Python deps), not in Docker.
+#   make agent-subscription TARGET=https://example.com [SCOPE=example.com] [ARGS="--max-risk medium"]
+SUBSCRIPTION_PY ?= python3
+agent-subscription:
+	@[ -n "$(TARGET)" ] || (echo 'Usage: make agent-subscription TARGET=<url> [SCOPE=<domain>] [ARGS="..."]' && exit 1)
+	cd aegis-claude-sdk && "$(SUBSCRIPTION_PY)" pentest_subscription.py \
+	  --target "$(TARGET)" \
+	  $(if $(SCOPE),--scope "$(SCOPE)") \
+	  $(ARGS)
 
 # Deploy to EC2: make deploy EC2=1.2.3.4 KEY=~/.ssh/mykey.pem
 # Only rebuilds backend + oracle; leaves db/redis/scanner untouched.
