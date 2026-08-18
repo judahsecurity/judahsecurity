@@ -46,7 +46,7 @@ class OperationDirective:
         cwes = ", ".join(self.cwe_ids[:8]) if self.cwe_ids else "—"
         capecs = ", ".join(self.capec_ids[:6]) if self.capec_ids else "—"
         owasp = "; ".join(self.owasp[:4]) if self.owasp else "—"
-        return (
+        block = (
             f"OPERATION DIRECTIVE — {pantheon_line(self.specialist)}\n"
             f"- Target: {self.target}\n"
             f"- Goal: {self.goal}\n"
@@ -66,6 +66,16 @@ class OperationDirective:
             "status 200 alone is never a finding; prove with differentials when authz/tenant; "
             "execute the listed methodologies against observed evidence before spraying scanners."
         )
+        # Inject short Burp-style procedure packs for open methodology cards
+        try:
+            from app.services.agent.methodology_procedures import format_procedures_for_prompt
+
+            procs = format_procedures_for_prompt(self.methodology_ids, limit=3)
+            if procs:
+                block = f"{block}\n\n{procs}"
+        except Exception:
+            pass
+        return block
 
 
 def directives_from_hypotheses(

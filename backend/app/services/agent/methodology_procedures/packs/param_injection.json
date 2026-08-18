@@ -1,0 +1,16 @@
+{
+  "id": "param_injection",
+  "title": "Injection on mapped parameters",
+  "summary": "Detect SQLi/SSTI/command injection via disciplined canaries then targeted escalation.",
+  "steps": [
+    "Rank params from map (id, q, sort, template, host, cmd-like names).",
+    "Send benign baseline then one canary family at a time (SQLi boolean/time, SSTI {{7*7}}, cmd separators).",
+    "compare_requests baseline vs mutant for body/timing differentials.",
+    "Escalate with sqlmap/xsstrike only on anomalous params — never blind spray all params.",
+    "On PASS: concrete param + differential or data extraction evidence."
+  ],
+  "tools": ["compare_requests", "execute_curl", "execute_sqlmap", "execute_commix"],
+  "pass_signals": ["Boolean/time/error-based differential", "Template/command evaluation evidenced"],
+  "kill_signals": ["No anomalous differentials after ranked probes"],
+  "references": ["CWE-89", "CWE-94", "CWE-78", "PortSwigger: Detect SQL Injection"]
+}

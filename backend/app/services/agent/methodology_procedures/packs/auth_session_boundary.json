@@ -1,0 +1,16 @@
+{
+  "id": "auth_session_boundary",
+  "title": "Auth / session boundary abuse",
+  "summary": "Prove protected routes or elevated actions are reachable without proper auth.",
+  "steps": [
+    "List auth/admin paths from the capability map.",
+    "compare_requests: anonymous vs authenticated to each high-value path.",
+    "Forced browse admin/API with cookies stripped; try method overrides (GET→POST) if observed.",
+    "Check cookie flags and session after privilege-sensitive actions.",
+    "On PASS: unauth access to protected resource or elevated session without credentials."
+  ],
+  "tools": ["compare_requests", "execute_curl", "bypass_403", "execute_browser"],
+  "pass_signals": ["Protected resource without auth", "Role elevation via path/header"],
+  "kill_signals": ["Auth enforced consistently", "No forced-browse success"],
+  "references": ["CWE-287", "CWE-306", "PortSwigger: Attack Authentication / Access Controls"]
+}

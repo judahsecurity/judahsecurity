@@ -1,0 +1,16 @@
+{
+  "id": "api_idor_bola",
+  "title": "API IDOR / BOLA",
+  "summary": "Prove object-level authorization gaps by swapping resource IDs across identities.",
+  "steps": [
+    "Pick object APIs with IDs from api_samples (users, orders, files, orgs).",
+    "Establish anonymous vs user-A vs user-B sessions when possible.",
+    "compare_requests: A’s object with B’s session (and anon); mutate one ID at a time.",
+    "Require identity-differentiated bodies (PII/records), not status-code-only.",
+    "On PASS: submit_finding_candidate with A/B evidence; queue_finding_followups(vuln_type='idor')."
+  ],
+  "tools": ["compare_requests", "replay_http_request", "execute_curl"],
+  "pass_signals": ["User B reads/modifies User A object", "Anonymous access to tenant object"],
+  "kill_signals": ["Consistent 401/403 across foreign IDs", "Bodies identical only for public resources"],
+  "references": ["CWE-639", "CWE-284", "OWASP API1:2023 BOLA", "PortSwigger: IDOR / Access Controls"]
+}

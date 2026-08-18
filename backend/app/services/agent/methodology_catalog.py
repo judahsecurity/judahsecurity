@@ -189,6 +189,76 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             evidence=login_ev,
             why="Auth surface present",
         ))
+        add(Methodology(
+            id="session_token_quality",
+            title="Session token generation & handling",
+            hunt="auth_logic",
+            specialist="auth_logic",
+            priority="medium",
+            assumption="Session identifiers are predictable, fixable, or poorly scoped/flagged",
+            test=(
+                "Inspect Set-Cookie flags; compare pre/post-login tokens; test fixation and "
+                "post-logout replay"
+            ),
+            pass_criteria="Fixation, non-rotation, or weak cookie flags with a concrete abuse path",
+            kill_criteria="Strong flags, rotate on login, invalidate on logout",
+            cwe_ids=["CWE-384", "CWE-613", "CWE-1004"],
+            capec_ids=["CAPEC-61", "CAPEC-31"],
+            owasp="A07:2021 Identification and Authentication Failures",
+            evidence=login_ev,
+            why="Login/auth issues session cookies",
+        ))
+        add(Methodology(
+            id="csrf_state_changing",
+            title="CSRF on state-changing authenticated actions",
+            hunt="auth_logic",
+            specialist="auth_logic",
+            priority="high",
+            assumption="Cookie-authenticated state changes lack effective anti-CSRF controls",
+            test=(
+                "Replay password/email/admin/state-changing requests without CSRF token; "
+                "confirm real state change via compare_requests"
+            ),
+            pass_criteria="Authenticated state changed without a valid anti-CSRF token",
+            kill_criteria="Token required and bound; SameSite adequately blocks with no alternate vector",
+            cwe_ids=["CWE-352"],
+            capec_ids=["CAPEC-62"],
+            owasp="A01:2021 Broken Access Control",
+            evidence=login_ev,
+            why="Authenticated cookie session enables CSRF testing on state-changing actions",
+        ))
+
+    # Open redirect — login/OAuth/logout style params
+    _REDIRECT_RE = re.compile(
+        r"(?:[?&](?:redirect|redir|next|return|returnUrl|return_url|url|continue|goto|dest|destination)=)",
+        re.I,
+    )
+    redirect_hits = [p for p in param_paths if _REDIRECT_RE.search(p)] + [
+        p for p in pages if _REDIRECT_RE.search(p) or re.search(
+            r"redirect|returnUrl|oauth.*callback", p, re.I
+        )
+    ]
+    if redirect_hits or (has_login and re.search(r"redirect|next=|return=", combined, re.I)):
+        ev = redirect_hits[0] if redirect_hits else "redirect-param"
+        add(Methodology(
+            id="open_redirect",
+            title="Open redirection",
+            hunt="auth_logic",
+            specialist="auth_logic",
+            priority="medium",
+            assumption="Redirect/next/return parameters accept off-site destinations",
+            test=(
+                "Set redirect params to an engagement canary host; confirm Location or "
+                "client-side navigation off-domain"
+            ),
+            pass_criteria="Browser/HTTP redirect to external canary",
+            kill_criteria="Allowlist rejects external hosts after disciplined probes",
+            cwe_ids=["CWE-601"],
+            capec_ids=["CAPEC-194"],
+            owasp="A01:2021 Broken Access Control",
+            evidence=ev,
+            why="Redirect-style parameters or auth redirect flows observed",
+        ))
 
     target = str(g("target") or "")
     grafana_blob = f"{target} {pages_blob} {combined}"

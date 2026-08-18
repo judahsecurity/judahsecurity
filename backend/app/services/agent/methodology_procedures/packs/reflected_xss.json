@@ -1,0 +1,17 @@
+{
+  "id": "reflected_xss",
+  "title": "Reflected / stored XSS",
+  "summary": "Prove untrusted input executes in HTML/JS contexts in a victim browser.",
+  "steps": [
+    "Inject a unique canary into search/reflect params from the map.",
+    "Confirm reflection context (HTML body, attribute, script) via response or browser.",
+    "Escalate to a minimal execution proof (alert/console) in-scope only.",
+    "If filtered, try one context-appropriate encoding — do not spray huge payload lists.",
+    "Stored: submit canary, reload as second identity if available.",
+    "On PASS: demonstrated script execution or unambiguous injectable context with repro URL."
+  ],
+  "tools": ["execute_browser", "execute_curl", "execute_dalfox", "execute_xsstrike"],
+  "pass_signals": ["Script executes in browser", "Unambiguous HTML/JS injection with canary"],
+  "kill_signals": ["Output encoded and CSP blocks with no viable bypass after context tests"],
+  "references": ["CWE-79", "PortSwigger: Find XSS / Reflected XSS / Stored XSS"]
+}

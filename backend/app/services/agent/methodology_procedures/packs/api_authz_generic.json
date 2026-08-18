@@ -1,0 +1,15 @@
+{
+  "id": "api_authz_generic",
+  "title": "API authorization / verb tampering",
+  "summary": "Test method/role/function-level authorization on mapped APIs.",
+  "steps": [
+    "From api_samples, try verb swaps (GET↔PUT/DELETE) on sensitive resources.",
+    "compare_requests across anon/A/B roles for the same endpoint.",
+    "Mass-assignment: add role/is_admin/owner fields when serializers are exposed.",
+    "On PASS: unauthorized verb/role succeeds with state or data proof."
+  ],
+  "tools": ["compare_requests", "replay_http_request", "execute_curl"],
+  "pass_signals": ["Unauthorized method/role succeeds", "Privilege field accepted"],
+  "kill_signals": ["Methods/roles rejected consistently"],
+  "references": ["CWE-285", "OWASP API5:2023", "PortSwigger: Missing Function Level Access Control"]
+}

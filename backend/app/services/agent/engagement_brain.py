@@ -3,6 +3,7 @@ Engagement Brain — tester-process control plane for the ASM agent.
 
 Keeps structured engagement memory that survives chat noise:
 
+* **threat model** (ranked actor→outcome rows + focus-area partition)
 * capability-map-seeded **hypotheses** (open / proven / killed)
 * discovered **credentials** (for authenticated follow-ups)
 * **approaches tried** + **next steps**
@@ -36,7 +37,7 @@ class Hypothesis:
     priority: str = "high"  # high | medium | low
     target: str = ""
     evidence: str = ""
-    source: str = "map"  # map | chain | manual | finding | methodology
+    source: str = "map"  # map | chain | manual | finding | methodology | threat_model
     parent_finding: str = ""
     methodology_id: str = ""
     cwe_ids: List[str] = field(default_factory=list)
@@ -98,6 +99,11 @@ class EngagementBrain:
     next_steps: List[str] = field(default_factory=list)
     confirmed_findings: List[str] = field(default_factory=list)
     notes: List[str] = field(default_factory=list)
+    threat_model: Dict[str, Any] = field(default_factory=dict)
+    surfaces: List[Dict[str, Any]] = field(default_factory=list)
+    focus_areas: List[Dict[str, Any]] = field(default_factory=list)
+    candidates: List[Dict[str, Any]] = field(default_factory=list)
+    coverage: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -110,6 +116,11 @@ class EngagementBrain:
             "next_steps": list(self.next_steps),
             "confirmed_findings": list(self.confirmed_findings),
             "notes": list(self.notes),
+            "threat_model": dict(self.threat_model or {}),
+            "surfaces": list(self.surfaces or []),
+            "focus_areas": list(self.focus_areas or []),
+            "candidates": list(self.candidates or []),
+            "coverage": list(self.coverage or []),
         }
 
 
@@ -1895,7 +1906,82 @@ def seed_hypotheses_from_capability_map(
         )
         existing.add(hid)
 
+    brain = ensure_threat_model(brain, cmap)
     brain.next_steps = _derive_next_steps(brain)
+    return brain
+
+
+def ensure_threat_model(
+    brain: EngagementBrain,
+    cmap: Optional[Dict[str, Any]] = None,
+    *,
+    repo_path: str = "",
+    url: str = "",
+    source: str = "auto",
+    owner_notes: str = "",
+    languages: Optional[List[str]] = None,
+    frameworks: Optional[List[str]] = None,
+    rebuild: bool = False,
+) -> EngagementBrain:
+    """Attach / refresh a threat model and seed threat-sourced hypothesis cards."""
+    from app.services.agent.threat_model import (
+        build_auto,
+        threats_as_hypothesis_dicts,
+        threat_model_from_dict,
+    )
+
+    existing = None if rebuild else (brain.threat_model or None)
+    model = build_auto(
+        cmap=cmap,
+        url=url or brain.target,
+        repo_path=repo_path,
+        languages=languages,
+        frameworks=frameworks,
+        owner_notes=owner_notes,
+        existing=existing,
+        source=source,
+    )
+    brain.threat_model = model.to_dict()
+    brain.surfaces = [s.to_dict() for s in model.surfaces]
+    brain.focus_areas = [f.to_dict() for f in model.focus_areas]
+    if not brain.target:
+        brain.target = model.target or brain.target
+    seed_coverage_from_surfaces(brain)
+    return seed_hypotheses_from_threat_model(brain, model.to_dict())
+
+
+def seed_hypotheses_from_threat_model(
+    brain: EngagementBrain,
+    model_dict: Optional[Dict[str, Any]],
+) -> EngagementBrain:
+    """Seed open hypotheses from ranked threats (skip if a methodology card already covers the specialist+title)."""
+    if not model_dict:
+        return brain
+    from app.services.agent.threat_model import threats_as_hypothesis_dicts, threat_model_from_dict
+
+    model = threat_model_from_dict(model_dict)
+    existing_ids = {h.id for h in brain.hypotheses}
+    for card in threats_as_hypothesis_dicts(model, target=brain.target):
+        hid = _hyp_id(brain.target, "threat", card["id"])
+        if hid in existing_ids:
+            continue
+        brain.hypotheses.append(
+            Hypothesis(
+                id=hid,
+                title=str(card.get("title") or card["id"]),
+                assumption=str(card.get("assumption") or ""),
+                test=str(card.get("test") or ""),
+                pass_criteria=str(card.get("pass_criteria") or ""),
+                kill_criteria=str(card.get("kill_criteria") or ""),
+                specialist=str(card.get("specialist") or "injection"),
+                priority=str(card.get("priority") or "high"),
+                target=brain.target or str(card.get("target") or ""),
+                evidence=str(card.get("evidence") or "")[:500],
+                source="threat_model",
+                methodology_id=str(card.get("id") or ""),
+            )
+        )
+        existing_ids.add(hid)
     return brain
 
 
@@ -2139,6 +2225,15 @@ def update_hypothesis(
             if evidence is not None:
                 h.evidence = evidence[:2000]
             h.updated_at = datetime.now(timezone.utc).isoformat()
+            if status in ("proven", "killed"):
+                cov_status = "finding" if status == "proven" else "tested_clean"
+                record_surface_coverage(
+                    brain,
+                    path=h.target or brain.target,
+                    status=cov_status,
+                    reason=f"hypothesis {h.id} {status}",
+                    hypothesis_id=h.id,
+                )
             brain.next_steps = _derive_next_steps(brain)
             return h
     return None
@@ -2208,18 +2303,16 @@ def specialists_from_open_hypotheses(
     open_hyps.sort(key=lambda h: (pri.get(h.priority, 9), h.created_at))
     selected: List[str] = ["app_mapper"]
     for h in open_hyps:
-        if h.specialist and h.specialist not in selected:
+        if h.specialist and h.specialist not in selected and h.specialist not in (
+            "finding_judge",
+            "independent_verifier",
+        ):
             selected.append(h.specialist)
-        if len(selected) >= max_specialists - 1:
-            break
-    # Always close with Solomon (finding judge) for demonstrated-compromise bar
-    if "finding_judge" not in selected:
         if len(selected) >= max_specialists:
-            selected = selected[: max_specialists - 1]
-        selected.append("finding_judge")
-    elif "vuln_triage" not in selected and len(selected) < max_specialists:
-        selected.append("vuln_triage")
-    return selected[:max_specialists]
+            break
+    # Independent verifier is a SECOND WAVE after hunters file candidates — do not
+    # sit Solomon or Deborah in the hunter conversation (finder grading its own homework).
+    return [n for n in selected if n not in ("finding_judge", "independent_verifier")][:max_specialists]
 
 
 def format_engagement_brain_for_prompt(
@@ -2233,18 +2326,26 @@ def format_engagement_brain_for_prompt(
         and not brain.credentials
         and not brain.approaches
         and not brain.next_steps
+        and not brain.threat_model
     ):
         return (
-            "No engagement brain yet. After execute_deep_crawl, call "
-            "sync_engagement_brain (or fireteam_dispatch) to seed hypotheses from the "
-            "capability map. Use compare_requests for differential proof. On confirmed "
-            "findings call queue_finding_followups so authenticated/chain cards are enqueued."
+            "No engagement brain yet. After execute_deep_crawl (URL) or a local checkout "
+            "(code), call build_threat_model then sync_engagement_brain (or fireteam_dispatch) "
+            "so threats and methodology cards aim hunters. Use compare_requests for "
+            "differential proof. On confirmed findings call queue_finding_followups."
         )
 
     lines = [
         f"Phase: {brain.phase}  target={brain.target or '?'}",
         f"Identities: {', '.join(brain.identities) or 'anonymous'}",
     ]
+
+    if brain.threat_model:
+        try:
+            from app.services.agent.threat_model import format_threat_model_for_prompt
+            lines.append(format_threat_model_for_prompt(brain.threat_model))
+        except Exception:
+            lines.append(f"Threat model: {len((brain.threat_model or {}).get('threats') or [])} threats")
 
     if brain.credentials:
         lines.append("Credentials (reuse for authenticated follow-ups):")
@@ -2281,10 +2382,51 @@ def format_engagement_brain_for_prompt(
             if h.capec_ids:
                 lines.append(f"      capec: {', '.join(h.capec_ids[:4])}")
 
+        # Short procedure packs for top open methodologies (how to test)
+        try:
+            from app.services.agent.methodology_procedures import format_procedures_for_prompt
+
+            open_mids = [
+                h.methodology_id for h in sorted(open_hyps, key=lambda x: pri.get(x.priority, 9))
+                if h.methodology_id
+            ]
+            procs = format_procedures_for_prompt(open_mids, limit=2)
+            if procs:
+                lines.append("")
+                lines.append(procs)
+                lines.append(
+                    "(More packs: lookup_methodology_procedure(methodology_id=…) "
+                    "or search_memory(room='methodologies').)"
+                )
+        except Exception:
+            pass
+
     if proven:
         lines.append("Proven:")
         for h in proven[:6]:
             lines.append(f"  - {h.title} ({h.evidence[:120]})")
+
+    pending_cands = [
+        c for c in (brain.candidates or [])
+        if (c.get("status") if isinstance(c, dict) else getattr(c, "status", "")) == "pending"
+    ]
+    if pending_cands or brain.candidates:
+        lines.append(
+            f"Finding candidates: {len(pending_cands)} pending independent_verify "
+            f"(total {len(brain.candidates or [])})"
+        )
+        for c in pending_cands[:6]:
+            if isinstance(c, dict):
+                lines.append(f"  - [{c.get('severity')}] {c.get('title')} id={c.get('id')}")
+
+    if brain.coverage:
+        try:
+            cov = coverage_progress(brain)
+            lines.append(cov.get("summary") or "Coverage:")
+            for u in (cov.get("untested") or [])[:6]:
+                lines.append(f"  untested: {u.get('method')} {u.get('path')}")
+        except Exception:
+            pass
 
     if brain.approaches:
         lines.append("Approaches tried (do not blindly repeat failures):")
@@ -2308,8 +2450,9 @@ def format_engagement_brain_for_prompt(
     except Exception:
         pass
     lines.append(
-        "Process: observe → methodology cards → spawn specialists → compare_requests proof → "
-        "update_hypothesis → queue_finding_followups → coverage leftovers → report."
+        "Process: observe → threat model (aim) → methodology cards → spawn hunters "
+        "(partitioned by focus area) → submit_finding_candidate → independent_verify "
+        "(fresh agent) → create_finding → record_surface_coverage → report."
     )
     lines.append(
         "Findings: demonstrated-compromise writeups (description + impact + assets + "
@@ -2351,10 +2494,16 @@ def mission_from_hypotheses(brain: EngagementBrain) -> str:
             f" Known credentials available ({len(brain.credentials)}); use for authenticated "
             "follow-ups (do not re-spray)."
         )
+    threat_note = ""
+    if brain.focus_areas:
+        slices = "; ".join(
+            f"{fa.get('specialist')}={fa.get('id')}" for fa in brain.focus_areas[:5]
+        )
+        threat_note = f" Stay inside your focus area ({slices})."
     return (
         f"Prove or kill these open hypotheses on {brain.target or 'target'}: {bullets}. "
         f"Use compare_requests for authz/tenant/Host diffs. "
-        f"Stay in your specialist lane.{cred_note}"
+        f"Stay in your specialist lane.{cred_note}{threat_note}"
     )
 
 
@@ -2585,7 +2734,17 @@ def methodology_progress(
         len(blocking) == 0 or any(h.status == "in_progress" for h in cards) or len(proven) + len(killed) > 0
     )
 
-    ready_to_complete = seeded and len(blocking) == 0
+    ready_to_complete_methods = seeded and len(blocking) == 0
+    cov = coverage_progress(brain)
+    pending_candidates = [
+        c for c in (brain.candidates or [])
+        if (c.get("status") if isinstance(c, dict) else getattr(c, "status", "")) == "pending"
+    ]
+    ready_to_complete = (
+        ready_to_complete_methods
+        and cov.get("ready_to_complete_coverage", True)
+        and not pending_candidates
+    )
     blockers = [
         {
             "id": h.id,
@@ -2597,6 +2756,25 @@ def methodology_progress(
         }
         for h in blocking[:12]
     ]
+    for row in (cov.get("untested") or [])[:8]:
+        blockers.append({
+            "id": row.get("key") or row.get("path"),
+            "methodology_id": "coverage",
+            "title": f"untested {row.get('method', '')} {row.get('path', '')}".strip(),
+            "specialist": "coverage",
+            "priority": "high",
+            "status": "untested",
+        })
+    for c in pending_candidates[:6]:
+        if isinstance(c, dict):
+            blockers.append({
+                "id": c.get("id"),
+                "methodology_id": "verify",
+                "title": f"pending verify: {c.get('title')}",
+                "specialist": "independent_verifier",
+                "priority": "high",
+                "status": "pending",
+            })
 
     return {
         "seeded": seeded,
@@ -2610,11 +2788,16 @@ def methodology_progress(
         "ready_for_coverage": ready_for_coverage,
         "ready_for_coverage_spray": ready_for_coverage_spray or (map_ready and seeded and len(blocking) == 0),
         "ready_to_complete": ready_to_complete,
+        "ready_to_complete_methods": ready_to_complete_methods,
+        "coverage": cov,
+        "pending_candidates": len(pending_candidates),
         "blockers": blockers,
         "checklist": checklist,
         "summary": (
             f"Methodologies: {len(proven)} proven, {len(killed)} killed, "
-            f"{len(open_cards)} open ({len(blocking)} high-priority blocking complete)"
+            f"{len(open_cards)} open ({len(blocking)} high-priority blocking complete). "
+            f"Coverage: {cov.get('summary', '')}. "
+            f"Candidates pending verify: {len(pending_candidates)}."
         ),
     }
 
@@ -2630,6 +2813,16 @@ def format_methodology_progress_for_prompt(progress: Dict[str, Any]) -> str:
         f"ready_for_coverage_spray={progress.get('ready_for_coverage_spray')}  "
         f"ready_to_complete={progress.get('ready_to_complete')}",
     ]
+    cov = progress.get("coverage") or {}
+    if cov:
+        lines.append(cov.get("summary") or "")
+        for u in (cov.get("untested") or [])[:6]:
+            lines.append(f"  untested: {u.get('method')} {u.get('path')}")
+    if progress.get("pending_candidates"):
+        lines.append(
+            f"Pending independent_verify: {progress.get('pending_candidates')} candidate(s). "
+            "Do not create_finding until confirmed."
+        )
     blockers = progress.get("blockers") or []
     if blockers:
         lines.append("Blocking (prove or kill before complete):")
@@ -2705,6 +2898,217 @@ def boost_methodologies_for_cwes(
 
 
 # ---------------------------------------------------------------------------
+# Coverage accounting (surfaces.json denominator)
+# ---------------------------------------------------------------------------
+
+
+_COVERAGE_STATUSES = ("untested", "in_focus", "finding", "tested_clean", "skipped")
+
+
+def surface_key(method: str = "GET", path: str = "", host: str = "") -> str:
+    method = (method or "GET").upper().strip()
+    path = (path or "/").strip() or "/"
+    host = (host or "").strip().lower()
+    if path.startswith("http://") or path.startswith("https://"):
+        from urllib.parse import urlparse
+        parsed = urlparse(path)
+        host = host or (parsed.netloc or "").lower()
+        path = parsed.path or "/"
+    if not path.startswith("/"):
+        path = "/" + path
+    return f"{method} {host}{path}" if host else f"{method} {path}"
+
+
+def _focus_surface_set(brain: EngagementBrain) -> set[str]:
+    keys: set[str] = set()
+    for fa in brain.focus_areas or []:
+        for s in fa.get("surfaces") or []:
+            text = str(s).strip()
+            if not text:
+                continue
+            if " " in text and text.split(" ", 1)[0].isupper():
+                keys.add(text)
+            else:
+                keys.add(f"GET {text}")
+    return keys
+
+
+def denominator_surfaces(brain: EngagementBrain) -> List[Dict[str, Any]]:
+    """Inventory rows that must be accounted before complete.
+
+    Focus-area surfaces plus takes_input rows (capped) — not every static asset.
+    """
+    focus = _focus_surface_set(brain)
+    out: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for s in brain.surfaces or []:
+        method = str(s.get("method") or "GET")
+        path = str(s.get("path") or "/")
+        host = str(s.get("host") or "")
+        key = surface_key(method, path, host)
+        takes = bool(s.get("takes_input"))
+        in_focus = key in focus or any(path in f or f.endswith(path) for f in focus)
+        if not takes and not in_focus:
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "key": key,
+            "method": method,
+            "path": path,
+            "host": host,
+            "takes_input": takes,
+            "in_focus": in_focus,
+        })
+        if len(out) >= 60:
+            break
+    return out
+
+
+def seed_coverage_from_surfaces(brain: EngagementBrain) -> EngagementBrain:
+    rows = []
+    existing: set[str] = set()
+    for row in brain.coverage or []:
+        if not isinstance(row, dict):
+            continue
+        row = dict(row)
+        row["key"] = surface_key(
+            row.get("method") or "GET",
+            row.get("path") or "/",
+            row.get("host") or "",
+        )
+        if row["key"] in existing:
+            continue
+        rows.append(row)
+        existing.add(row["key"])
+    for s in denominator_surfaces(brain):
+        if s["key"] in existing:
+            continue
+        rows.append({
+            "key": s["key"],
+            "method": s["method"],
+            "path": s["path"],
+            "host": s.get("host") or "",
+            "status": "in_focus" if s.get("in_focus") else "untested",
+            "reason": "",
+            "hypothesis_id": "",
+            "finding_title": "",
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        })
+        existing.add(s["key"])
+    brain.coverage = rows
+    return brain
+
+
+def record_surface_coverage(
+    brain: EngagementBrain,
+    *,
+    method: str = "GET",
+    path: str = "",
+    status: str = "tested_clean",
+    reason: str = "",
+    hypothesis_id: str = "",
+    finding_title: str = "",
+    host: str = "",
+) -> Dict[str, Any]:
+    status = (status or "tested_clean").strip().lower()
+    if status not in _COVERAGE_STATUSES:
+        status = "tested_clean"
+    if status == "skipped" and not (reason or "").strip():
+        raise ValueError("skipped coverage requires a reason")
+    path = (path or brain.target or "/").strip() or "/"
+    host = (host or "").strip()
+    key = surface_key(method, path, host)
+    if path.startswith("http://") or path.startswith("https://"):
+        from urllib.parse import urlparse
+        parsed = urlparse(path)
+        host = host or parsed.netloc
+        path = parsed.path or "/"
+    elif not path.startswith("/"):
+        path = "/" + path
+    now = datetime.now(timezone.utc).isoformat()
+    rows = list(brain.coverage or [])
+    rec_host = (host or "").strip().lower()
+    for row in rows:
+        row_host = (row.get("host") or "").strip().lower()
+        if row.get("key") == key or (
+            (row.get("path") or "") == path
+            and (row.get("method") or "GET").upper() == method.upper()
+            and row_host == rec_host
+        ):
+            row["status"] = status
+            row["reason"] = reason[:500]
+            row["hypothesis_id"] = hypothesis_id or row.get("hypothesis_id") or ""
+            row["finding_title"] = finding_title or row.get("finding_title") or ""
+            row["updated_at"] = now
+            brain.coverage = rows
+            return row
+    rec = {
+        "key": key,
+        "method": method.upper(),
+        "path": path,
+        "host": host,
+        "status": status,
+        "reason": reason[:500],
+        "hypothesis_id": hypothesis_id,
+        "finding_title": finding_title,
+        "updated_at": now,
+    }
+    rows.append(rec)
+    brain.coverage = rows
+    return rec
+
+
+def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[str, Any]:
+    if isinstance(brain, dict) or brain is None:
+        brain = engagement_brain_from_dict(brain)
+    seed_coverage_from_surfaces(brain)
+    denom = denominator_surfaces(brain)
+    by_key = {
+        r.get("key"): r
+        for r in (brain.coverage or [])
+        if isinstance(r, dict) and r.get("key")
+    }
+    buckets = {s: [] for s in _COVERAGE_STATUSES}
+    untested: List[Dict[str, Any]] = []
+    for s in denom:
+        row = by_key.get(s["key"]) or {}
+        st = (row.get("status") or "untested").strip().lower()
+        merged = {**s, **row}
+        if st in ("finding", "tested_clean", "skipped"):
+            buckets[st].append(merged)
+        else:
+            merged["status"] = "untested"
+            untested.append(merged)
+            buckets["untested"].append(merged)
+    accounted = (
+        len(buckets["finding"])
+        + len(buckets["tested_clean"])
+        + len(buckets["skipped"])
+    )
+    denom_n = len(denom)
+    ready = len(untested) == 0
+    return {
+        "denominator": denom_n,
+        "finding": len(buckets["finding"]),
+        "tested_clean": len(buckets["tested_clean"]),
+        "skipped": len(buckets["skipped"]),
+        "untested_count": len(untested),
+        "untested": untested[:20],
+        "tested_clean_rows": buckets["tested_clean"][:20],
+        "skipped_rows": buckets["skipped"][:20],
+        "finding_rows": buckets["finding"][:20],
+        "ready_to_complete_coverage": ready,
+        "summary": (
+            f"coverage {accounted}/{denom_n or 0} accounted "
+            f"(finding={len(buckets['finding'])} clean={len(buckets['tested_clean'])} "
+            f"skipped={len(buckets['skipped'])} untested={len(untested)})"
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # internals
 # ---------------------------------------------------------------------------
 
@@ -2739,10 +3143,26 @@ def _derive_next_steps(brain: EngagementBrain) -> List[str]:
     proven_chains = [h for h in brain.hypotheses if h.status == "proven" and h.source in ("map", "methodology")]
     if proven_chains and not any(h.source == "chain" and h.status == "open" for h in brain.hypotheses):
         steps.append("Call queue_finding_followups on proven findings to enqueue chain cards")
+    pending = [
+        c for c in (brain.candidates or [])
+        if (c.get("status") if isinstance(c, dict) else getattr(c, "status", "")) == "pending"
+    ]
+    if pending:
+        steps.insert(
+            0,
+            f"independent_verify pending candidates ({len(pending)}) — fresh agent, then create_finding",
+        )
+    cov = progress.get("coverage") or {}
+    if cov.get("untested"):
+        steps.append(
+            "record_surface_coverage for untested inventory (finding | tested_clean | skipped+reason)"
+        )
     if progress.get("ready_to_complete"):
-        steps.append("High-priority methodologies resolved — finish coverage leftovers then complete")
+        steps.append("High-priority methodologies and coverage denominator resolved — complete")
     if not steps:
-        steps.append("execute_deep_crawl → sync_engagement_brain to seed methodology cards")
+        steps.append("execute_deep_crawl or inventory the checkout → build_threat_model → sync_engagement_brain")
+    elif not brain.threat_model:
+        steps.insert(0, "build_threat_model so hunters aim at ranked threats, not a scanner spray")
     return steps[:8]
 
 

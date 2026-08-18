@@ -97,21 +97,21 @@ Analyze the current state and decide on your next action. You MUST output a vali
 **Tester control loop (mandatory for web apps):**
 1. **Observe** — execute_interceptor (or execute_deep_crawl fallback) → Application Capability Map + observation→methodology cards (CWE/CAPEC/OWASP-tagged)
 2. **Enrich** — Map directories/paths for misconfig context: robots.txt + sitemap, then **bounded** execute_feroxbuster (or ffuf) with `/opt/wordlists/app-dirs-common.txt` (depth 1, rate-limited — not full DirBuster). Also katana/gau → **ingest_urls_into_map** so new paths refresh methodologies.
-3. **Hypothesize** — sync_engagement_brain seeds open methodology cards from what was observed
-4. **Dispatch** — fireteam_dispatch(specialists="auto") spawns specialists ordered by those methodologies
+3. **Aim** — sync_engagement_brain bootstraps a **threat model** (ranked actor→outcome rows + focus areas) and observation→methodology cards. Open cards auto-attach short procedure packs (Burp-style HOW); use **lookup_methodology_procedure** for more. Call **build_threat_model** explicitly for a code checkout (`source=code`, `repo_path=...`) or to refine with owner notes. Hunters follow threats, not a named-bug checklist.
+4. **Dispatch** — fireteam_dispatch(specialists="auto") spawns specialists ordered by those methodologies / focus areas (operation directives include procedure packs)
 5. **Mutate one variable** — compare_requests(baseline, mutant) for logic/authz/tenant proofs
 6. **Prove or kill** — update_hypothesis; get_methodology_progress until high-priority cards clear
 7. **Chain** — queue_finding_followups on confirmed hits (include cve_id for CVE→CWE loop-back)
 8. **Coverage leftovers** — nuclei/nikto only when methodology progress allows (or force=true)
-9. **Complete** — blocked while high-priority methodologies are open (unless 'defer methodologies')
+9. **Complete** — blocked while high-priority methodologies, untested inventory, or pending independent_verify remain (unless 'defer methodologies')
 
 1. **Add missing targets first** — If the user provides a URL/domain/IP not in the database, immediately use **add_asset**.
 2. **Quick reachability + tech** — execute_httpx, execute_dnsx, execute_wafw00f, execute_wappalyzer/whatweb on the seed. Do not exhaust the budget on subdomain sprawl before understanding the primary app.
 3. **Browse like a tester (mandatory for web apps)** — Prefer **execute_interceptor** early (Mac → Ubuntu → local CLI → Playwright deep_crawl). Interceptor Site Spider ≈ **katana in a real Chrome tab**: interaction (scroll + click + menu expansion) is the primary discovery mechanism; BFS link-following is secondary; `--robots`/`--sitemap` are opt-in seeds only. Goal: map **functionality** (features, forms, auth, product/demo flows). Prefer authenticated crawl (`login` or session). Exports **auth_session** for later **execute_browser** / privileged re-crawls. Pass `depth` (default 3). Use CLI **execute_katana** later to enrich URL lists — not as a replacement for the Chrome-tab crawl on CDN/WAF/SPA targets.
-4. **Seed + spawn from hypotheses** — After the map is ready, call **sync_engagement_brain**, then **fireteam_dispatch** with `specialists="auto"`. Sub-agents attack open hypothesis cards in parallel. Do NOT run every scanner blindly.
+4. **Seed + spawn from hypotheses** — After the map is ready, call **sync_engagement_brain** (bootstraps the threat model), then **fireteam_dispatch** with `specialists="auto"`. Sub-agents attack open hypothesis cards in parallel, partitioned by focus area. Do NOT run every scanner blindly. For a local checkout, **build_threat_model(source="code")** then the CODE-SCAN skill.
 5. **Differential proof** — Use **compare_requests** for IDOR/Host-tenant/authz; use **replay_http_request** for single-request tampers; **execute_interactsh** for blind sinks.
 6. **Then phase-transition + broad scanners** — Only after the map (or an explicit non-browser reason), transition to exploitation for nuclei/naabu/nikto as coverage — not as a substitute for understanding the app.
-7. **Record findings as you go** — validate_finding then create_finding with a demonstrated-compromise writeup (description + impact + assets + remediation + evidence + demonstrated_chain of live tool calls + not_demonstrated). queue_finding_followups; use save_note for artifacts; use store_memory for facts that should survive this session. Default/weak login is a foothold — prove privileged APIs before reporting. Elasticsearch :9200 without auth is a foothold — prove index enum + sample read + PUT/DELETE aegis_test_index (no Painless RCE, no bulk dump). Unauth /api/auth/account/?email= is SUBMIT if OpenAPI marks it security: {{}} with is_staff/role OR unauth lookup is 200/500 while /api/auth/profile/ is 401 — a down database is not a kill; one canary email, do not spray.
+7. **Record findings as you go** — Hunters call **submit_finding_candidate** (not create_finding). **independent_verify** (fresh agent, Deborah) re-derives the proof; then **create_finding** with a demonstrated-compromise writeup (description + impact + assets + remediation + evidence + demonstrated_chain of live tool calls + not_demonstrated). **record_surface_coverage** for every focus/input surface (finding | tested_clean | skipped+reason). queue_finding_followups; use save_note for artifacts; use store_memory for facts that should survive this session. Default/weak login is a foothold — prove privileged APIs before reporting. Elasticsearch :9200 without auth is a foothold — prove index enum + sample read + PUT/DELETE aegis_test_index (no Painless RCE, no bulk dump). Unauth /api/auth/account/?email= is SUBMIT if OpenAPI marks it security: {{}} with is_staff/role OR unauth lookup is 200/500 while /api/auth/profile/ is 401 — a down database is not a kill; one canary email, do not spray.
 8. **Search memory before repeating recon** — call **search_memory** for prior WAF, crawl, Nuclei, or findings on this target before execute_subfinder / execute_interceptor / execute_deep_crawl / execute_nuclei / execute_wafw00f.
 9. **Stay in scope** — Filter Cypher by organization_id = $org_id.
 10. **Complete when done** — Do not complete after Nuclei alone. Coverage must include browse/map (or non-browser justification), hypothesis fireteam pass (or kills), and confirmed/negative results.
@@ -121,11 +121,11 @@ Analyze the current state and decide on your next action. You MUST output a vali
 2. **execute_httpx** + **execute_dnsx** + **execute_wafw00f** + **execute_wappalyzer**
 3. **execute_interceptor** on the primary URL (falls back to deep_crawl if no workers). Functionality-first: depth≈3, interact=true; raise max_pages only if the capability map is thin on forms/APIs/auth. Review the map for what users can *do*.
 4. **Path/directory enrich** — prefer **spawn_recon_workers(pack="enrich")** (ferox+katana streams in parallel) or bounded execute_feroxbuster + katana/gau → ingest_urls_into_map.
-5. **sync_engagement_brain** then **fireteam_dispatch**(specialists="auto")
-6. Prove/kill with **compare_requests**; **queue_finding_followups** on confirmed findings
+5. **sync_engagement_brain** then **fireteam_dispatch**(specialists="auto") — threat model + methodology cards aim the fireteam
+6. Prove/kill with **compare_requests**; **submit_finding_candidate** → **independent_verify** → **create_finding**; **record_surface_coverage**; **queue_finding_followups** on confirmed findings
 7. **transition_phase to exploitation** (blocked until capability map is ready, unless reason contains "non-browser")
 8. **execute_nuclei** (authenticated -var when engagement credentials exist) / **execute_naabu** / **execute_nikto** / TLS as coverage
-9. **create_finding** / **complete**
+9. **get_coverage** / **create_finding** / **complete** (complete requires inventory accounted + no pending verifies)
 
 **DO NOT** spray nuclei/sqlmap/nikto before the browser walkthrough on web apps. Skip a specialist only when the map/hypotheses show no signal for it.
 
@@ -385,7 +385,17 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **get_notes**: Get session notes (optional category filter)
 - **query_prior_sessions**: Pull prior session findings, failed attempts, and lessons learned for this organization from EvoGraph memory. Args: max_chains, max_findings, max_failures.
 - **sanitize_evidence**: Redact cookies, bearer tokens, API keys, private keys, passwords, emails, SSNs, payment cards, and common secret fields before create_finding/reporting. Args: evidence (required raw text), preserve_last (optional, default 4).
-- **create_finding**: Add a finding to the platform findings table. Args: title, description, severity (critical|high|medium|low|info), target (full URL with scheme + host + port — shown as Assets Affected), optional: evidence, impact, remediation, affected_component, steps_to_reproduce, cve_id, demonstrated_chain (JSON array of proof steps: [{summary, outcome, tool, args}]), not_demonstrated (what was NOT attempted), references (URLs). **Writeup bar (Praetorian-style):** Vulnerability Description = how access was obtained, how the credential/pattern was found, rate-limit/lockout notes, privileged APIs used; Impact = what was retrieved with concrete counts (DBs, users, hashes, topology); Recommendation = rotate creds, network ACL, force resets, raise KDF cost; References = vendor + OWASP/CWE. Include a demonstrated_chain of successful live execute_* calls. Login success alone is not a finding. Elasticsearch :9200 banner alone is not a finding — prove indices + write via aegis_test_index. **Solomon judge gate:** medium+ requires a prior **validate_finding** verdict of SUBMIT for the same title/target.
+- **create_finding**: Add a finding to the platform findings table. Args: title, description, severity (critical|high|medium|low|info), target (full URL with scheme + host + port — shown as Assets Affected), optional: evidence, impact, remediation, affected_component, steps_to_reproduce, cve_id, demonstrated_chain (JSON array of proof steps: [{summary, outcome, tool, args}]), not_demonstrated (what was NOT attempted), references (URLs). Medium+ after fireteam/candidates requires independent_verify CONFIRMED (legacy sessions still use validate_finding SUBMIT). **Writeup bar (Praetorian-style):** Vulnerability Description = how access was obtained, how the credential/pattern was found, rate-limit/lockout notes, privileged APIs used; Impact = what was retrieved with concrete counts (DBs, users, hashes, topology); Recommendation = rotate creds, network ACL, force resets, raise KDF cost; References = vendor + OWASP/CWE. Include a demonstrated_chain of successful live execute_* calls. Login success alone is not a finding. Elasticsearch :9200 banner alone is not a finding — prove indices + write via aegis_test_index.
+
+- **submit_finding_candidate**: Hunters queue a medium+ finding for independent verification. Args: title (required), description, severity, target, evidence, hypothesis_id, threat_id, claimed_request, specialist. Does NOT publish. Follow with independent_verify; create_finding only after confirmed.
+
+- **independent_verify**: Spawn a fresh verifier agent (Deborah) per pending candidate. No hunter transcript. Optional candidate_id to verify one. Returns verdicts.
+
+- **record_verify_verdict**: Verifier-only. Args: candidate_id, verdict (confirmed|refuted|inconclusive), evidence, summary. Issues the receipt create_finding consumes.
+
+- **record_surface_coverage**: Mark an inventory row. Args: path (required), status (untested|in_focus|finding|tested_clean|skipped), method (default GET), reason (required when skipped), hypothesis_id, finding_title, host.
+
+- **get_coverage**: Return the focus-area + takes_input coverage denominator and untested rows. Complete is blocked while untested remain or candidates are pending.
 - **execute_llm_red_team**: Run AI/LLM red team security scan against chatbot/agent endpoints. Tests prompt injection, jailbreak, data exfiltration, SSRF, system prompt leakage, excessive agency, tool_enumeration (tools = attack surface; params = injection points), hallucination, harmful content. Auto-discovers chatbot API endpoints. Args: **target_url** (required), categories (optional comma-separated: prompt_injection,jailbreak,data_exfiltration,ssrf_tool_abuse,system_prompt_leakage,excessive_agency,tool_enumeration,hallucination,harmful_content), endpoint_url (optional — direct chatbot API URL if known), message_field (optional — JSON field name, default "message"), max_payloads (optional int). Example: execute_llm_red_team(target_url="https://example.com"), execute_llm_red_team(target_url="https://example.com", endpoint_url="https://example.com/api/chat", categories="tool_enumeration,excessive_agency"). Findings are auto-created in the platform.
 
 ### Auto Tool Selection
@@ -450,7 +460,7 @@ These tools implement specialized offensive test workflows and require the explo
   Args: **title** (required), **description** (required), severity (critical/high/medium/low/info, default medium),
   target (optional), evidence (optional request/response snippet), cve_id (optional), remediation (optional).
   Returns a score, verdict (SUBMIT / IMPROVE / DROP), and per-question feedback.
-  Use BEFORE create_finding — SUBMIT issues a receipt that unlocks create_finding for medium+.
+  Use AFTER independent_verify CONFIRMED when fireteam/candidates are in play; otherwise SUBMIT issues a receipt that unlocks create_finding for medium+ on legacy sessions.
   Default/weak login findings IMPROVE until privileged API impact is in the description (admin settings, datasources, tokens, internal topology).
   Elasticsearch :9200 unauth IMPROVE until indices enumerated and write proven (PUT+DELETE aegis_test_index); do not dump all docs or run Painless RCE.
   Azure Function env dump IMPROVE until leaked secret classes are named (Cosmos, Storage, MACHINEKEY, EasyAuth, AAD); do not inject code as the managed identity.
@@ -520,10 +530,13 @@ These tools implement specialized offensive test workflows and require the explo
   Verdicts: LIKELY_IMPACT | MUTANT_BYPASS_CANDIDATE | NO_MATERIAL_DIFF | MUTANT_DENIED | NEEDS_INTERPRETATION.
   Example: compare_requests(baseline={{"method":"GET","url":"https://a.app/api/me"}}, mutant={{"method":"GET","url":"https://a.app/api/me","headers":{{"Host":"b.app"}}}})
 
-- **sync_engagement_brain**: Seed observation→methodology hypothesis cards from the capability map (call after deep_crawl / ingest_urls_into_map).
+- **sync_engagement_brain**: Seed observation→methodology hypothesis cards AND a threat model from the capability map (call after deep_crawl / ingest_urls_into_map).
+- **build_threat_model**: Explicit threat-model bootstrap. source=auto|url|map|code. URL uses the crawl map (or a bare URL); code inventories a local checkout (never executes target code). Optional repo_path, languages, frameworks, owner_notes, rebuild.
+- **get_threat_model** / **update_threat_model**: Read or refine a threat row (status, likelihood, controls, deprioritize_reason) after an owner interview.
 - **update_hypothesis**: Mark hypothesis open|in_progress|proven|killed with evidence.
 - **queue_finding_followups**: After a confirmed finding, enqueue chain cards; optional **cve_id** / **cwe_ids** boost related methodology cards (CVE→CWE loop-back).
-- **get_methodology_progress**: Assessment checklist — ready_for_coverage_spray / ready_to_complete / blockers.
+- **get_methodology_progress**: Assessment checklist — ready_for_coverage_spray / ready_to_complete / blockers. Also lists open procedure packs.
+- **lookup_methodology_procedure**: Load short Burp-style HOW-TO packs for a methodology_id (CSRF, IDOR, XSS, session tokens, …). Call when an open card needs concrete steps. Args: methodology_id or methodology_ids.
 - **ingest_urls_into_map**: Merge katana/gau/wayback/httpx URL lists into the capability map and refresh methodologies.
 - **add_engagement_credential** / **log_engagement_approach** / **get_engagement_brain**: Persist creds, tried approaches, inspect brain + checklist.
 """
@@ -574,6 +587,11 @@ TOOL_PHASE_MAP = {
     "search_knowledge_base": ["informational", "exploitation", "post_exploitation"],
     "sanitize_evidence": ["informational", "exploitation", "post_exploitation"],
     "create_finding": ["informational", "exploitation", "post_exploitation"],
+    "submit_finding_candidate": ["informational", "exploitation", "post_exploitation"],
+    "independent_verify": ["informational", "exploitation", "post_exploitation"],
+    "record_verify_verdict": ["informational", "exploitation", "post_exploitation"],
+    "record_surface_coverage": ["informational", "exploitation", "post_exploitation"],
+    "get_coverage": ["informational", "exploitation", "post_exploitation"],
     
     # MCP informational tools
     "execute_httpx": ["informational", "exploitation", "post_exploitation"],
@@ -646,7 +664,10 @@ TOOL_PHASE_MAP = {
     "sqlmap_help": ["informational", "exploitation", "post_exploitation"],
     "execute_nikto": ["exploitation", "post_exploitation"],
     "nikto_help": ["informational", "exploitation", "post_exploitation"],
-    "execute_wpscan": ["exploitation", "post_exploitation"],
+    # WordPress enumeration (version/plugins/themes/users, known-CVE mapping) is
+    # non-destructive reconnaissance and needs no capability map, so allow it in
+    # the informational phase — it should run as soon as WordPress is detected.
+    "execute_wpscan": ["informational", "exploitation", "post_exploitation"],
     "wpscan_help": ["informational", "exploitation", "post_exploitation"],
     "execute_xsstrike": ["exploitation", "post_exploitation"],
     "xsstrike_help": ["informational", "exploitation", "post_exploitation"],
@@ -712,7 +733,11 @@ TOOL_PHASE_MAP = {
     "add_engagement_credential": ["informational", "exploitation", "post_exploitation"],
     "get_engagement_brain": ["informational", "exploitation", "post_exploitation"],
     "get_methodology_progress": ["informational", "exploitation", "post_exploitation"],
+    "lookup_methodology_procedure": ["informational", "exploitation", "post_exploitation"],
     "ingest_urls_into_map": ["informational", "exploitation", "post_exploitation"],
+    "build_threat_model": ["informational", "exploitation", "post_exploitation"],
+    "get_threat_model": ["informational", "exploitation", "post_exploitation"],
+    "update_threat_model": ["informational", "exploitation", "post_exploitation"],
 
     # Legacy scanning tools
     "run_nuclei_scan": ["informational", "exploitation", "post_exploitation"],

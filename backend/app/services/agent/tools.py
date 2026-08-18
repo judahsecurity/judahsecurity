@@ -6,6 +6,7 @@ Tools for the AI agent to interact with the ASM platform.
 
 import json
 import logging
+import os
 import re as _re
 from collections import deque
 from typing import List, Optional, Dict, Any
@@ -27,6 +28,52 @@ def _tool_output_max_chars() -> int:
     return getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000)
 
 logger = logging.getLogger(__name__)
+
+
+def _emit_finding_to_sink(
+    *,
+    title: str,
+    description: str,
+    severity: str,
+    target: str,
+    host: str,
+    evidence: Optional[str] = None,
+    poc: Optional[str] = None,
+    cve_id: Optional[str] = None,
+    confirmed: bool = False,
+) -> None:
+    """Append a finding to ``AEGIS_FINDINGS_SINK`` as JSONL, if configured.
+
+    Lets the local benchmark harness score the platform agent's output using
+    the same sink contract the standalone Vanguard scanner uses. No-op unless
+    the env var is set; never raises into the create_finding path.
+    """
+    sink = os.environ.get("AEGIS_FINDINGS_SINK")
+    if not sink:
+        return
+    try:
+        url = target if str(target).startswith(("http://", "https://")) else None
+        tags = ["confirmed"] if confirmed else []
+        record = {
+            "type": "vulnerability",
+            "source": "aegis-agent",
+            "target": host or target,
+            "host": host or target,
+            "url": url,
+            "title": title,
+            "description": description,
+            "severity": (severity or "info"),
+            "confidence": "confirmed" if confirmed else "high",
+            "cve_id": (cve_id or "").strip() or None,
+            "tags": tags,
+            "raw_data": {"poc": {"endpoint": url or target, "response_snippet": (poc or evidence or "")[:4000]}},
+        }
+        os.makedirs(os.path.dirname(os.path.abspath(sink)), exist_ok=True)
+        with open(sink, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, default=str) + "\n")
+    except Exception:
+        logger.debug("finding sink append failed", exc_info=True)
+
 
 # Context variables for tenant isolation and session
 current_user_id: ContextVar[Optional[int]] = ContextVar('current_user_id', default=None)
@@ -285,6 +332,9 @@ class ASMToolsManager:
         self._mcp_server = None
         # Solomon judge receipts: validate_finding SUBMIT → create_finding gate
         self._finding_receipts: Dict[str, Dict[str, Any]] = {}
+        # Independent verifier receipts: confirmed → create_finding when fireteam is in play
+        self._verify_receipts: Dict[str, Dict[str, Any]] = {}
+        self._require_independent_verify = False
         # Live tool traces for Praetorian-style demonstrated chains
         self._recent_invocations: deque = deque(maxlen=48)
     
@@ -456,7 +506,16 @@ class ASMToolsManager:
             "add_engagement_credential": self.add_engagement_credential,
             "get_engagement_brain": self.get_engagement_brain,
             "get_methodology_progress": self.get_methodology_progress,
+            "lookup_methodology_procedure": self.lookup_methodology_procedure,
             "ingest_urls_into_map": self.ingest_urls_into_map,
+            "build_threat_model": self.build_threat_model,
+            "get_threat_model": self.get_threat_model,
+            "update_threat_model": self.update_threat_model,
+            "submit_finding_candidate": self.submit_finding_candidate,
+            "independent_verify": self.independent_verify,
+            "record_verify_verdict": self.record_verify_verdict,
+            "record_surface_coverage": self.record_surface_coverage,
+            "get_coverage": self.get_coverage,
         }
         # Optional: web search (RedAmon-style) when Tavily API key is set
         if getattr(settings, "TAVILY_API_KEY", None):
@@ -1959,7 +2018,8 @@ class ASMToolsManager:
     ) -> str:
         """Create a vulnerability/finding in the platform findings table.
 
-        Medium+ requires prior validate_finding SUBMIT (Solomon judge gate).
+        Medium+ requires independent_verify CONFIRMED once fireteam/candidates are in play;
+        otherwise a prior validate_finding SUBMIT (Solomon judge gate).
         Write demonstrated-compromise reports, not scanner hits. Map onto these fields:
         - description: how access was obtained (product/version, credential or pattern, how it was found, rate-limit/lockout notes)
         - impact: what was retrieved (database counts, PII, hashes, topology, config) — not merely 'login succeeded'
@@ -1971,19 +2031,19 @@ class ASMToolsManager:
         Default/weak login alone is not a finding until privileged impact is proven.
         If demonstrated_chain is omitted, the last live execute_* calls against this target are attached.
         """
-        from app.services.agent.finding_gate import consume_or_check_receipt
+        from app.services.agent.independent_verify import finding_publish_allowed
 
         _, org_id = get_tenant_context()
         if not org_id:
             return "Error: No organization context. create_finding requires an active session."
 
-        # Solomon / Praetorian-style demonstrated-compromise gate
-        ok, gate_msg = consume_or_check_receipt(
-            getattr(self, "_finding_receipts", {}),
+        # Independent verify (fireteam/candidates) or legacy Solomon SUBMIT gate
+        ok, gate_msg = finding_publish_allowed(
+            self,
             title=title or "",
-            target=target,
+            target=target or "",
             severity=severity or "info",
-            require=not bool(kwargs.get("skip_judge_gate")),
+            skip=bool(kwargs.get("skip_judge_gate")),
         )
         if not ok:
             return gate_msg
@@ -2049,6 +2109,19 @@ class ASMToolsManager:
             db.add(vuln)
             db.commit()
             db.refresh(vuln)
+            # Optional benchmark sink: mirror the finding to a JSONL file so the
+            # local harness can score the agent's output (see harness/README.md).
+            _emit_finding_to_sink(
+                title=title or "",
+                description=description or "",
+                severity=(severity or "info").strip().lower(),
+                target=target or target_clean,
+                host=target_clean,
+                evidence=evidence,
+                poc=poc,
+                cve_id=cve_id,
+                confirmed=str(gate_msg or "").startswith("verify_ok"),
+            )
             chain_n = (agent_detection or {}).get("step_count") or 0
             msg = (
                 f"Finding created: id={vuln.id}, title={vuln.title[:60]}..., "
@@ -2094,6 +2167,22 @@ class ASMToolsManager:
                             msg += f" | CWEs: {', '.join(names)}"
                 except Exception:
                     logger.debug("create_finding CVE→CWE loop-back failed", exc_info=True)
+            try:
+                from app.services.agent.engagement_brain import (
+                    engagement_brain_from_dict,
+                    record_surface_coverage,
+                )
+                brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+                record_surface_coverage(
+                    brain,
+                    path=target or target_clean,
+                    status="finding",
+                    finding_title=title or "",
+                    reason="create_finding",
+                )
+                self._engagement_brain = brain.to_dict()
+            except Exception:
+                logger.debug("create_finding coverage update failed", exc_info=True)
             return msg
         except Exception as e:
             db.rollback()
@@ -4661,6 +4750,8 @@ class ASMToolsManager:
                 "credentials_redacted": [c.redacted() for c in brain.credentials],
                 "next_steps": brain.next_steps,
                 "suggested_specialists": specialists_from_open_hypotheses(brain),
+                "threat_model": brain.threat_model or None,
+                "focus_areas": brain.focus_areas[:8],
                 "prompt_view": format_engagement_brain_for_prompt(self._engagement_brain),
                 "engagement_brain": self._engagement_brain,
             },
@@ -4874,14 +4965,458 @@ class ASMToolsManager:
             methodology_progress,
             format_methodology_progress_for_prompt,
         )
+        from app.services.agent.methodology_procedures import (
+            list_procedure_ids,
+            procedures_summary_for_brain,
+        )
 
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         cmap = getattr(self, "_capability_map", None) or {}
         progress = methodology_progress(brain, cmap=cmap if isinstance(cmap, dict) else {})
+        open_mids = [
+            h.methodology_id
+            for h in brain.hypotheses
+            if h.status in ("open", "in_progress") and h.methodology_id
+        ]
         return json.dumps(
             {
                 "progress": progress,
                 "prompt_view": format_methodology_progress_for_prompt(progress),
+                "open_procedure_packs": procedures_summary_for_brain(open_mids, limit=6),
+                "available_procedure_ids": list(list_procedure_ids()),
+            },
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def lookup_methodology_procedure(
+        self,
+        methodology_id: str = "",
+        methodology_ids: Optional[List[str]] = None,
+    ) -> str:
+        """Load short Burp-style procedure pack(s) for methodology card id(s).
+
+        Use when an open hypothesis has a methodology_id and you need concrete steps.
+        """
+        from app.services.agent.methodology_procedures import (
+            format_procedure_block,
+            format_procedures_for_prompt,
+            list_procedure_ids,
+            load_procedure,
+            procedures_for_ids,
+        )
+
+        ids: List[str] = []
+        if methodology_id:
+            ids.append(methodology_id.strip())
+        if methodology_ids:
+            ids.extend(str(x).strip() for x in methodology_ids if x)
+        ids = [i for i in ids if i]
+        if not ids:
+            return json.dumps(
+                {
+                    "success": False,
+                    "error": "pass methodology_id or methodology_ids",
+                    "available_procedure_ids": list(list_procedure_ids()),
+                },
+                indent=2,
+            )
+
+        packs = procedures_for_ids(ids, limit=5)
+        missing = [i for i in ids if not load_procedure(i)]
+        return json.dumps(
+            {
+                "success": bool(packs),
+                "packs": packs,
+                "prompt_view": format_procedures_for_prompt(ids, limit=5),
+                "missing": missing,
+                "available_procedure_ids": list(list_procedure_ids()),
+            },
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def build_threat_model(
+        self,
+        source: str = "auto",
+        target: str = "",
+        repo_path: str = "",
+        languages: Optional[List[str]] = None,
+        frameworks: Optional[List[str]] = None,
+        owner_notes: str = "",
+        rebuild: bool = False,
+        persist_note: bool = True,
+        capability_map: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Build or refresh the engagement threat model (the map hunters aim at).
+
+        source: auto | url | map | code
+        URL/map: uses the session capability map (crawl first) or a bare URL.
+        code: inventories a local checkout — never executes target code.
+        """
+        from app.services.agent.engagement_brain import (
+            engagement_brain_from_dict,
+            ensure_threat_model,
+            format_engagement_brain_for_prompt,
+            specialists_from_open_hypotheses,
+        )
+        from app.services.agent.threat_model import format_threat_model_for_prompt, to_markdown, threat_model_from_dict
+
+        cmap = capability_map or getattr(self, "_capability_map", None) or {}
+        if isinstance(cmap, dict) and target and not cmap.get("target"):
+            cmap = dict(cmap)
+            cmap["target"] = target
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        if target and not brain.target:
+            brain.target = target
+        brain = ensure_threat_model(
+            brain,
+            cmap if isinstance(cmap, dict) else {},
+            repo_path=repo_path,
+            url=target or (cmap.get("target") if isinstance(cmap, dict) else "") or "",
+            source=source,
+            owner_notes=owner_notes,
+            languages=list(languages or []),
+            frameworks=list(frameworks or []),
+            rebuild=rebuild,
+        )
+        self._engagement_brain = brain.to_dict()
+        model = threat_model_from_dict(brain.threat_model)
+        markdown = to_markdown(model)
+        note_status = None
+        if persist_note:
+            try:
+                note_status = await self.save_note(
+                    category="artifact",
+                    content=markdown[:10000],
+                    target=brain.target or target or None,
+                )
+            except Exception as exc:
+                note_status = f"note skipped: {exc}"
+        ranked = [
+            {
+                "id": t.id,
+                "threat": t.threat,
+                "actor": t.actor,
+                "impact": t.impact,
+                "likelihood": t.likelihood,
+                "specialist": t.specialist,
+                "shape": t.shape,
+            }
+            for t in model.ranked_threats()[:10]
+        ]
+        return json.dumps(
+            {
+                "mode": model.mode,
+                "target": model.target or brain.target,
+                "ranked_threats": ranked,
+                "focus_areas": brain.focus_areas[:8],
+                "open_questions": model.open_questions[:8],
+                "suggested_specialists": specialists_from_open_hypotheses(brain),
+                "prompt_view": format_threat_model_for_prompt(brain.threat_model),
+                "brain_view": format_engagement_brain_for_prompt(self._engagement_brain),
+                "markdown": markdown[:8000],
+                "note": note_status,
+                "engagement_brain": self._engagement_brain,
+            },
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def get_threat_model(self) -> str:
+        """Return the current threat model, surfaces, and focus-area partition."""
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.threat_model import format_threat_model_for_prompt, to_markdown, threat_model_from_dict
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        if not brain.threat_model:
+            return json.dumps(
+                {
+                    "error": "no threat model yet",
+                    "hint": "Call build_threat_model after a crawl (URL) or with repo_path (code).",
+                },
+                indent=2,
+            )
+        model = threat_model_from_dict(brain.threat_model)
+        return json.dumps(
+            {
+                "prompt_view": format_threat_model_for_prompt(brain.threat_model),
+                "focus_areas": brain.focus_areas,
+                "surface_count": len(brain.surfaces),
+                "markdown": to_markdown(model)[:8000],
+                "threat_model": brain.threat_model,
+            },
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def update_threat_model(
+        self,
+        threat_id: str,
+        status: str = "",
+        likelihood: str = "",
+        controls: str = "",
+        evidence: str = "",
+        deprioritize_reason: str = "",
+    ) -> str:
+        """Refine a threat row after owner interview (status/likelihood/controls/deprioritize)."""
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.threat_model import (
+            apply_threat_patch,
+            format_threat_model_for_prompt,
+            threat_model_from_dict,
+        )
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        model = threat_model_from_dict(brain.threat_model)
+        if not model.threats:
+            return json.dumps({"error": "no threat model to update; call build_threat_model first"}, indent=2)
+        patched = apply_threat_patch(
+            model,
+            threat_id,
+            status=status or None,
+            likelihood=likelihood or None,
+            controls=controls or None,
+            evidence=evidence or None,
+            deprioritize_reason=deprioritize_reason or None,
+        )
+        if not patched:
+            return json.dumps(
+                {
+                    "error": f"threat not found: {threat_id}",
+                    "known": [t.id for t in model.threats],
+                },
+                indent=2,
+            )
+        brain.threat_model = model.to_dict()
+        brain.focus_areas = [f.to_dict() for f in model.focus_areas]
+        self._engagement_brain = brain.to_dict()
+        return json.dumps(
+            {
+                "updated": patched.to_dict(),
+                "prompt_view": format_threat_model_for_prompt(brain.threat_model),
+                "engagement_brain": self._engagement_brain,
+            },
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    def _cheap_llm(self):
+        """Resolve a specialist/verifier LLM the same provider-aware way the main
+        loop does: honor AI_PROVIDER / per-org config and wrap with the credit
+        fallback so a dead primary (e.g. Anthropic out of credits) cascades to a
+        working provider instead of failing every call. Only if router resolution
+        is impossible do we build a client directly."""
+        try:
+            from app.services.agent.model_router import get_llm_for_task, LLMTask
+            _, org_id = get_tenant_context()
+            db = SessionLocal()
+            try:
+                return get_llm_for_task(
+                    db, org_id, LLMTask.OFFENSIVE,
+                    temperature=0, timeout=120, max_retries=2,
+                )
+            finally:
+                db.close()
+        except Exception:
+            logger.warning(
+                "Specialist LLM resolution via model_router failed; building a "
+                "direct client as last resort", exc_info=True,
+            )
+        # Last resort only (router unreachable). Prefer a provider that both
+        # constructs and is likely to have credits in this deployment — try
+        # OpenAI before Anthropic so we don't dead-end on a keyed-but-empty
+        # account the way the old hardcoded Anthropic default did.
+        try:
+            from langchain_openai import ChatOpenAI
+            return ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        except Exception:
+            from langchain_anthropic import ChatAnthropic
+            return ChatAnthropic(model="claude-sonnet-4-6", temperature=0)
+
+    async def submit_finding_candidate(
+        self,
+        title: str,
+        description: str = "",
+        severity: str = "medium",
+        target: str = "",
+        evidence: str = "",
+        hypothesis_id: str = "",
+        threat_id: str = "",
+        claimed_request: str = "",
+        specialist: str = "",
+    ) -> str:
+        """Queue a medium+ finding for independent verification. Hunters must not create_finding."""
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.independent_verify import submit_candidate
+
+        self._require_independent_verify = True
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cand = submit_candidate(
+            brain,
+            title=title or "",
+            description=description or "",
+            severity=severity or "medium",
+            target=target or "",
+            evidence=evidence or "",
+            hypothesis_id=hypothesis_id or "",
+            threat_id=threat_id or "",
+            claimed_request=claimed_request or "",
+            specialist=specialist or "",
+        )
+        self._engagement_brain = brain.to_dict()
+        return json.dumps(
+            {
+                "candidate": cand.to_dict(),
+                "hint": (
+                    "Call independent_verify (or wait for the fireteam second wave). "
+                    "create_finding only after verdict=confirmed."
+                ),
+                "engagement_brain": self._engagement_brain,
+            },
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def record_verify_verdict(
+        self,
+        candidate_id: str,
+        verdict: str,
+        evidence: str = "",
+        summary: str = "",
+        nonce_observed: bool = False,
+    ) -> str:
+        """Independent verifier issues confirmed|refuted|inconclusive for a candidate."""
+        from app.services.agent.independent_verify import apply_verdict
+
+        cand = apply_verdict(
+            self,
+            candidate_id=candidate_id or "",
+            verdict=verdict or "",
+            evidence=evidence or "",
+            summary=summary or "",
+            nonce_observed=bool(nonce_observed),
+        )
+        if not cand:
+            return json.dumps(
+                {
+                    "error": (
+                        "unknown candidate or invalid verdict "
+                        "(need confirmed|refuted|inconclusive)"
+                    ),
+                    "candidate_id": candidate_id,
+                },
+                indent=2,
+            )
+        return json.dumps(
+            {
+                "candidate": cand.to_dict(),
+                "engagement_brain": getattr(self, "_engagement_brain", None),
+            },
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def independent_verify(
+        self,
+        candidate_id: str = "",
+        max_parallel: int = 3,
+    ) -> str:
+        """Spawn a fresh verifier agent per pending candidate (no hunter transcript)."""
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.independent_verify import (
+            candidate_from_dict,
+            run_independent_verifiers,
+        )
+
+        self._require_independent_verify = True
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cands = [
+            c
+            for c in (candidate_from_dict(raw) for raw in (brain.candidates or []))
+            if c
+        ]
+        if candidate_id:
+            wanted = candidate_id.strip()
+            cands = [c for c in cands if c.id == wanted or c.title == wanted]
+        threat_slice = ""
+        if brain.threat_model:
+            try:
+                from app.services.agent.threat_model import format_threat_model_for_prompt
+                threat_slice = format_threat_model_for_prompt(brain.threat_model)[:2500]
+            except Exception:
+                threat_slice = ""
+        reports = await run_independent_verifiers(
+            cands,
+            llm=self._cheap_llm(),
+            tools_manager=self,
+            targets=[brain.target] if brain.target else [],
+            threat_slice=threat_slice,
+            max_parallel=int(max_parallel or 3),
+        )
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        return json.dumps(
+            {
+                "verify_wave": reports,
+                "candidates": brain.candidates,
+                "engagement_brain": brain.to_dict(),
+            },
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def record_surface_coverage(
+        self,
+        path: str,
+        status: str = "tested_clean",
+        method: str = "GET",
+        reason: str = "",
+        hypothesis_id: str = "",
+        finding_title: str = "",
+        host: str = "",
+    ) -> str:
+        """Mark an inventory surface finding | tested_clean | skipped (skip needs a reason)."""
+        from app.services.agent.engagement_brain import (
+            coverage_progress,
+            engagement_brain_from_dict,
+            record_surface_coverage,
+        )
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        try:
+            row = record_surface_coverage(
+                brain,
+                method=method or "GET",
+                path=path or "",
+                status=status or "tested_clean",
+                reason=reason or "",
+                hypothesis_id=hypothesis_id or "",
+                finding_title=finding_title or "",
+                host=host or "",
+            )
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)}, indent=2)
+        self._engagement_brain = brain.to_dict()
+        return json.dumps(
+            {
+                "row": row,
+                "coverage": coverage_progress(brain),
+                "engagement_brain": self._engagement_brain,
+            },
+            indent=2,
+        )[:_tool_output_max_chars()]
+
+    async def get_coverage(self) -> str:
+        """Return inventory coverage (focus-area + takes_input denominator)."""
+        from app.services.agent.engagement_brain import (
+            coverage_progress,
+            engagement_brain_from_dict,
+            methodology_progress,
+        )
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cmap = getattr(self, "_capability_map", None) or {}
+        cov = coverage_progress(brain)
+        self._engagement_brain = brain.to_dict()
+        return json.dumps(
+            {
+                "coverage": cov,
+                "methodology": methodology_progress(
+                    brain, cmap=cmap if isinstance(cmap, dict) else {}
+                ),
+                "engagement_brain": self._engagement_brain,
             },
             indent=2,
         )[:_tool_output_max_chars()]
@@ -5128,6 +5663,12 @@ class ASMToolsManager:
             )
             selection_source = selection_source if auto else "default"
 
+        if auto:
+            chosen = [
+                n for n in (chosen or [])
+                if n not in ("finding_judge", "independent_verifier")
+            ]
+
         if not mission or not str(mission).strip():
             if brain.hypotheses:
                 mission = mission_from_hypotheses(brain)
@@ -5149,31 +5690,35 @@ class ASMToolsManager:
                 f"- forms: {cmap.forms[:8]}\n"
                 f"- hunt_queue: {cmap.ranked_hunt_queue[:8]}\n"
             )
-        if brain.hypotheses:
+        if brain.hypotheses or brain.threat_model:
             mission = (
                 f"{mission}\n\nENGAGEMENT BRAIN:\n"
                 f"{format_engagement_brain_for_prompt(brain.to_dict())}\n"
             )
+        if brain.threat_model:
+            try:
+                from app.services.agent.threat_model import specialist_focus_block, threat_model_from_dict
+                tm = threat_model_from_dict(brain.threat_model)
+                slices = [
+                    specialist_focus_block(tm, name)
+                    for name in (chosen or [])
+                    if specialist_focus_block(tm, name)
+                ]
+                if slices:
+                    mission = f"{mission}\n\n" + "\n".join(slices[:6])
+            except Exception:
+                pass
 
         target_list = list(targets or [])
         if not target_list and cmap and cmap.target:
             target_list = [cmap.target]
             target_list.extend(cmap.pages_visited[:5])
 
-        # Lazy-build a cheap LLM instance. Reuse the orchestrator factory if available.
-        try:
-            from app.services.agent.orchestrator import AgentOrchestrator
-            llm = AgentOrchestrator()._build_llm() if hasattr(AgentOrchestrator, "_build_llm") else None
-        except Exception:
-            llm = None
-
-        if llm is None:
-            try:
-                from langchain_anthropic import ChatAnthropic
-                llm = ChatAnthropic(model="claude-sonnet-4-6", temperature=0)
-            except Exception:
-                from langchain_openai import ChatOpenAI
-                llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+        # Resolve the specialists' LLM the same provider-aware way the main loop
+        # does (honors AI_PROVIDER / per-org config, wraps with credit fallback),
+        # so a dead primary cascades to a working provider instead of failing
+        # every specialist.
+        llm = self._cheap_llm()
 
         from app.services.agent.aegis_pantheon import epithet_for, pantheon_line
         from app.services.agent.fireteam_service import get_specialist
@@ -5197,6 +5742,39 @@ class ASMToolsManager:
             max_parallel=max_parallel,
             directives=directives,
         )
+        self._require_independent_verify = True
+        from app.services.agent.independent_verify import (
+            candidate_from_dict,
+            ingest_report_findings,
+            run_independent_verifiers,
+        )
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        lifted = ingest_report_findings(brain, result.reports)
+        self._engagement_brain = brain.to_dict()
+        pending = [
+            c
+            for c in (candidate_from_dict(raw) for raw in (brain.candidates or []))
+            if c and c.status == "pending"
+        ]
+        verify_reports: list = []
+        if pending:
+            threat_slice = ""
+            if brain.threat_model:
+                try:
+                    from app.services.agent.threat_model import format_threat_model_for_prompt
+                    threat_slice = format_threat_model_for_prompt(brain.threat_model)[:2500]
+                except Exception:
+                    threat_slice = ""
+            verify_reports = await run_independent_verifiers(
+                pending,
+                llm=llm,
+                tools_manager=self,
+                targets=target_list,
+                threat_slice=threat_slice,
+                max_parallel=max_parallel,
+            )
+            brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         out = {
             "commander": pantheon_line("orchestrator"),
             "mission": result.mission[:2000],
@@ -5220,6 +5798,12 @@ class ASMToolsManager:
             "total_tool_calls": result.total_tool_calls,
             "duration_seconds": result.duration_seconds,
             "merged_summary": result.merged_summary,
+            "candidates_lifted": [c.to_dict() for c in lifted],
+            "verify_wave": verify_reports,
+            "pending_candidates": [
+                c for c in (brain.candidates or [])
+                if (c.get("status") if isinstance(c, dict) else "") == "pending"
+            ],
             "reports": [
                 {
                     "specialist": r.specialist,

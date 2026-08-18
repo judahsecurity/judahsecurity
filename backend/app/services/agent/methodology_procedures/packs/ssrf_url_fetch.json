@@ -1,0 +1,16 @@
+{
+  "id": "ssrf_url_fetch",
+  "title": "SSRF via URL fetch features",
+  "summary": "Prove the server fetches attacker-controlled URLs and hits an internal/canary target.",
+  "steps": [
+    "Locate webhook/import/proxy/preview/url params from the map.",
+    "Point to engagement Collaborator/Interactsh or internal metadata IP only if in RoE.",
+    "Observe out-of-band hit or response body reflecting internal content.",
+    "Do not pivot freely into unrelated internal networks beyond RoE.",
+    "On PASS: OOB correlation or internal content in response with request evidence."
+  ],
+  "tools": ["execute_curl", "execute_interactsh", "compare_requests", "replay_http_request"],
+  "pass_signals": ["OOB callback correlated", "Internal service response body returned"],
+  "kill_signals": ["Allowlist blocks; no OOB; no internal bleed"],
+  "references": ["CWE-918", "CAPEC-260"]
+}

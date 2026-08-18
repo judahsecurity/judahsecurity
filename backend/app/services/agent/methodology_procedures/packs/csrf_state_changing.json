@@ -1,0 +1,17 @@
+{
+  "id": "csrf_state_changing",
+  "title": "CSRF on state-changing actions",
+  "summary": "Prove cross-site forged requests can change auth'd state without a valid anti-CSRF token.",
+  "steps": [
+    "From the map, pick a state-changing form/API (password change, email update, transfer, admin action) that uses cookies.",
+    "Capture a legitimate request via capability map api_samples or replay_http_request.",
+    "Strip/blank CSRF token / custom header; replay cross-origin style (no token, different Origin/Referer).",
+    "compare_requests: legitimate vs forged; confirm state change (email updated, password set) not just HTTP 200.",
+    "If SameSite=Lax/Strict blocks classic CSRF, note it and try method override / JSON content-type edge cases only when observed.",
+    "On PASS: submit_finding_candidate with before/after evidence; queue_finding_followups(vuln_type='csrf')."
+  ],
+  "tools": ["replay_http_request", "compare_requests", "execute_curl", "execute_browser"],
+  "pass_signals": ["Authenticated state changed without valid CSRF token", "Action succeeds with missing/invalid token"],
+  "kill_signals": ["Token required and bound to session", "SameSite + no alternative vector after disciplined probes"],
+  "references": ["CWE-352", "CAPEC-62", "PortSwigger: Using Burp to Test for CSRF"]
+}

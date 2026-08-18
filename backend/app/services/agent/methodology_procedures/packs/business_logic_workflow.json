@@ -1,0 +1,15 @@
+{
+  "id": "business_logic_workflow",
+  "title": "Business logic / workflow abuse",
+  "summary": "Skip steps, replay, or reorder multi-step flows (checkout, invite, approve).",
+  "steps": [
+    "Map the intended step order from forms/APIs (cart→pay→confirm).",
+    "Skip a step, replay a completed step, or negative/zero quantities/prices.",
+    "compare_requests across mutated workflow sequences.",
+    "On PASS: financial/state integrity break with concrete sequence evidence."
+  ],
+  "tools": ["compare_requests", "replay_http_request", "execute_browser"],
+  "pass_signals": ["Step skip accepted", "Price/qty integrity break"],
+  "kill_signals": ["Server enforces order and invariants"],
+  "references": ["CWE-840", "PortSwigger-style workflow testing"]
+}

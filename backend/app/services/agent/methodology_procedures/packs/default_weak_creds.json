@@ -1,0 +1,15 @@
+{
+  "id": "default_weak_creds",
+  "title": "Default / weak credentials",
+  "summary": "Tiny known-default sprays on mapped logins; prove privileged impact after login.",
+  "steps": [
+    "Use only mapped login + product-default shortlists (never rockyou).",
+    "test_credential_spray or bounded hydra -f; stop on first hit.",
+    "On success: add_engagement_credential; prove privileged API/admin impact.",
+    "submit_finding_candidate only with privileged impact — not 'login worked'."
+  ],
+  "tools": ["test_credential_spray", "execute_hydra", "compare_requests", "execute_curl"],
+  "pass_signals": ["Working defaults + privileged data/actions"],
+  "kill_signals": ["Defaults rejected; lockout without success"],
+  "references": ["CWE-798", "CWE-521", "PortSwigger: Brute Force a Login Page"]
+}

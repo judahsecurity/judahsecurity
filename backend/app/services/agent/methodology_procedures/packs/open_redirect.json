@@ -1,0 +1,16 @@
+{
+  "id": "open_redirect",
+  "title": "Open redirection",
+  "summary": "Prove unvalidated redirect/next/return/url parameters send users off-site.",
+  "steps": [
+    "Find redirect params from map (redirect, next, return, url, continue, goto) on login/OAuth/logout.",
+    "Set value to an engagement-controlled external host (https://aegis-canary.example).",
+    "compare_requests or browser: confirm Location / meta refresh / JS redirect to canary.",
+    "Try protocol-relative //evil and encoded variants only if simple case fails.",
+    "On PASS: submit_finding_candidate with request + Location evidence."
+  ],
+  "tools": ["execute_curl", "compare_requests", "execute_httpx", "execute_browser"],
+  "pass_signals": ["HTTP Location or client redirect to external canary", "OAuth redirect_uri accepts off-domain"],
+  "kill_signals": ["Allowlist rejects external hosts", "Relative-only redirects with no bypass"],
+  "references": ["CWE-601", "CAPEC-194", "PortSwigger: Open Redirections"]
+}

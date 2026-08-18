@@ -1,0 +1,16 @@
+{
+  "id": "host_tenant_isolation",
+  "title": "Host-header tenant isolation",
+  "summary": "Prove Host/X-Forwarded-Host swaps cross tenant data boundaries.",
+  "steps": [
+    "Identify multi-tenant host pattern from map (tenant-a vs tenant-b).",
+    "compare_requests same path with Host swapped to sibling tenant.",
+    "Include auth cookies from tenant A against Host tenant B.",
+    "Require data differential (records/branding/config), not only status.",
+    "On PASS: cross-tenant data or admin leakage with evidence."
+  ],
+  "tools": ["compare_requests", "execute_curl", "replay_http_request"],
+  "pass_signals": ["Tenant B data with Tenant A session/Host", "Cache poison via Host"],
+  "kill_signals": ["Host ignored or hard-bound to tenant"],
+  "references": ["CWE-346", "CWE-918", "PortSwigger-style host/access control tests"]
+}

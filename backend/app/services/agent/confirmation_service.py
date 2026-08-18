@@ -28,6 +28,7 @@ import logging
 import threading
 import time
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from fnmatch import fnmatch
 from typing import Any, Optional
@@ -40,6 +41,28 @@ from app.models.project_settings import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# Set by the orchestrator for autonomous ("agent") runs. When enabled, tools
+# whose policy decision is "confirm" are auto-approved instead of pausing for an
+# operator (which would just stall an unattended turn until the 5-minute
+# confirmation timeout). Explicit "deny" always still wins. Autonomous mode is
+# unattended by design — it also auto-approves phase transitions — so this keeps
+# the confirmation gate meaningful for interactive ("assist") sessions while
+# letting the agent actually run active testing on its own.
+_autonomous_mode: ContextVar[bool] = ContextVar("agent_autonomous_mode", default=False)
+
+
+def set_autonomous_mode(enabled: bool) -> Any:
+    """Enable/disable auto-approval of confirm-gated tools for this context.
+
+    Returns the ContextVar token so callers can reset it if desired.
+    """
+    return _autonomous_mode.set(bool(enabled))
+
+
+def autonomous_mode_enabled() -> bool:
+    return bool(_autonomous_mode.get())
 
 
 READONLY_TOOLS = {
@@ -56,6 +79,10 @@ READONLY_TOOLS = {
     "search_memory",
     "search_knowledge_base",
     "query_prior_sessions",
+    "get_threat_model",
+    "get_coverage",
+    "get_engagement_brain",
+    "get_methodology_progress",
 }
 
 # Passive / light recon: always auto-allow unless explicitly denied.
@@ -80,6 +107,15 @@ SAFE_RECON_TOOLS = {
     "spawn_recon_workers",
     "wait_recon_workers",
     "list_recon_workers",
+    "sync_engagement_brain",
+    "build_threat_model",
+    "get_threat_model",
+    "update_threat_model",
+    "submit_finding_candidate",
+    "independent_verify",
+    "record_verify_verdict",
+    "record_surface_coverage",
+    "get_coverage",
     "httpx_help",
     "dnsx_help",
 }
@@ -294,6 +330,7 @@ async def gate(
 
     # RoE escalates "auto" -> "confirm" for non-readonly tools when enabled,
     # but keep SAFE_RECON_TOOLS auto so httpx/dns fingerprinting can start.
+    roe_escalated = False
     if (
         decision == "auto"
         and _roe_requires_confirmation(organization_id)
@@ -301,12 +338,31 @@ async def gate(
         and tool_name not in SAFE_RECON_TOOLS
     ):
         decision = "confirm"
+        roe_escalated = True
 
     if decision == "deny":
         return {
             "decision": "deny",
             "reason": f"Tool '{tool_name}' is denied by the organization's agent policy.",
         }
+
+    # Autonomous ("agent") runs auto-approve policy "confirm" decisions so an
+    # unattended engagement doesn't stall waiting for an operator who will never
+    # answer. Guardrails preserved: explicit "deny" (above) still wins, an
+    # RoE-mandated confirmation is a compliance control and is NOT bypassed, and
+    # operators can turn this off via the agent config flag.
+    if (
+        decision == "confirm"
+        and _autonomous_mode.get()
+        and not roe_escalated
+        and policy_cfg.get("agent_autonomous_auto_approve", True)
+    ):
+        logger.info(
+            "Autonomous agent mode: auto-approving confirm-gated tool %s", tool_name
+        )
+        if existing_token:
+            tool_args.pop("_confirm_token", None)
+        return {"decision": "auto"}
 
     if decision == "auto":
         if existing_token:

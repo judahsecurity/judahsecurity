@@ -1,0 +1,17 @@
+{
+  "id": "session_token_quality",
+  "title": "Session token generation & handling",
+  "summary": "Assess session identifier entropy, fixation, and cookie security attributes.",
+  "steps": [
+    "Capture session cookie(s) before/after login from auth_session or Set-Cookie.",
+    "Check flags: Secure, HttpOnly, SameSite; Domain/Path scope vs app needs.",
+    "Login twice; compare tokens — predictable/sequential patterns are leads.",
+    "Session fixation: set anonymous session cookie, login, see if server keeps attacker-supplied id.",
+    "Logout / password change: confirm old session invalidated (replay old cookie → 401).",
+    "On PASS: evidenced weak flags, fixation, or non-rotation with impact path."
+  ],
+  "tools": ["execute_curl", "compare_requests", "execute_browser", "execute_interceptor"],
+  "pass_signals": ["Fixation succeeds", "Session reusable after logout", "Missing Secure/HttpOnly on auth cookie with theft path"],
+  "kill_signals": ["Strong flags + rotation on login + invalidate on logout"],
+  "references": ["CWE-384", "CWE-613", "PortSwigger: Session Token Generation/Handling"]
+}
