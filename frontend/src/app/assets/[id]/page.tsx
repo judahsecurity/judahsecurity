@@ -76,6 +76,7 @@ import { formatDate } from '@/lib/utils';
 import { ApplicationMap } from '@/components/assets/ApplicationMap';
 import { DiscoveryPath } from '@/components/assets/DiscoveryPath';
 import { AddFindingDialog } from '@/components/findings/AddFindingDialog';
+import { LaunchAssessmentDialog } from '@/components/agent/LaunchAssessmentDialog';
 
 interface Technology {
   name: string;
@@ -670,19 +671,15 @@ export default function AssetDetailPage() {
                 <Database className="h-3 w-3" />
                 Data Sources
               </Badge>
-              <Button
-                variant="default"
-                onClick={() => {
-                  const targetEnc = encodeURIComponent(asset.value);
-                  const questionEnc = encodeURIComponent(
-                    `Perform a security assessment on ${asset.value}. Use create_finding for any vulnerabilities you find so they appear in Findings.`
-                  );
-                  router.push(`/agent?target=${targetEnc}&playbook=vuln_scan&question=${questionEnc}`);
-                }}
-              >
-                <MessageSquare className="h-4 w-4 mr-2" />
-                Run agent assessment
-              </Button>
+              <LaunchAssessmentDialog
+                defaultTarget={asset.value}
+                trigger={
+                  <Button variant="default">
+                    <MessageSquare className="h-4 w-4 mr-2" />
+                    Run agent assessment
+                  </Button>
+                }
+              />
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
                   <Button variant="outline">

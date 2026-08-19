@@ -220,10 +220,12 @@ class ToolSelector:
         # Phase 5: Specialty scans based on findings
         recs.extend(self._specialty_recommendations())
 
-        # Filter out already-run tools, dedupe by tool name, sort by priority
+        # Filter out already-run tools, dedupe by tool name, sort by priority.
+        # CMS hunts (WordPress) jump the recon-first queue — once WP is
+        # fingerprinted, wpscan / REST user enum should be the next action.
         seen: Set[str] = set()
         filtered: List[ToolRecommendation] = []
-        for r in sorted(recs, key=lambda x: x.priority):
+        for r in sorted(recs, key=lambda x: (0 if x.category == "cms" else 1, x.priority)):
             if r.tool_name in self._tools_already_run or r.tool_name in seen:
                 continue
             seen.add(r.tool_name)
@@ -250,9 +252,9 @@ class ToolSelector:
             by_category.setdefault(cat, []).append(r)
 
         priority_order = [
-            "reconnaissance", "technology", "waf_detection",
+            "cms", "reconnaissance", "technology", "waf_detection",
             "parameter_discovery", "injection_testing",
-            "active_scanning", "tls_ssl", "cms", "api", "ai_security",
+            "active_scanning", "tls_ssl", "api", "ai_security",
             "source_sast", "supply_chain", "general",
         ]
 
@@ -388,14 +390,33 @@ class ToolSelector:
                 category="data_store",
             ))
 
-        # WordPress detected
+        # WordPress detected — scan immediately (informational). Do not wait
+        # for methodology cards or phase promotion. Token is env-injected.
         if "wordpress" in self._target_types:
             recs.append(ToolRecommendation(
                 tool_name="execute_wpscan",
-                args_template="--url https://{target} --enumerate vp,vt,u",
-                priority=5,
-                rationale="WordPress detected — scan for plugin/theme vulnerabilities and user enumeration.",
-                phase_required="exploitation",
+                args_template=(
+                    "--url https://{target} --enumerate vp,u "
+                    "--plugins-detection passive --random-user-agent"
+                ),
+                priority=1,
+                rationale=(
+                    "WordPress detected — run WPScan NOW. Then GET "
+                    "/wp-json/wp/v2/users and probe /wp-admin/admin-ajax.php "
+                    "(loadmore / tax_query) for SQLi."
+                ),
+                phase_required="informational",
+                category="cms",
+            ))
+            recs.append(ToolRecommendation(
+                tool_name="execute_curl",
+                args_template="-sS -D- https://{target}/wp-json/wp/v2/users?per_page=100",
+                priority=1,
+                rationale=(
+                    "WordPress REST user enumeration — unauthenticated "
+                    "GET /wp-json/wp/v2/users often leaks admin logins (200 + slug)."
+                ),
+                phase_required="informational",
                 category="cms",
             ))
 

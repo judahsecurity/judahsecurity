@@ -322,11 +322,11 @@ def format_execution_trace(
     lines = []
     for step in recent_trace:
         iteration = step.get("iteration", 0)
-        phase = step.get("phase", "informational")
-        thought = step.get("thought", "")[:200]
+        phase = step.get("phase") or "informational"
+        thought = (step.get("thought") or "")[:200]
         tool_name = step.get("tool_name", "")
         success = step.get("success")
-        analysis = step.get("output_analysis", "")[:300]
+        analysis = (step.get("output_analysis") or "")[:300]
         
         lines.append(f"## Step {iteration} [{phase}]")
         lines.append(f"Thought: {thought}")

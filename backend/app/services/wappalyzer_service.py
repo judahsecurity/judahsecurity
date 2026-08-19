@@ -1771,7 +1771,11 @@ class WappalyzerService:
             if not regex_pattern:  # Empty pattern means just check existence
                 return {"confidence": 100}
             
-            match = re.search(regex_pattern, header_value, re.IGNORECASE)
+            try:
+                match = re.search(regex_pattern, header_value, re.IGNORECASE)
+            except re.error as e:
+                logger.debug(f"Invalid header regex '{regex_pattern}': {e}")
+                continue
             if match:
                 version = extract_version(match, version_template)
                 return {"confidence": confidence, "version": version}
@@ -1811,7 +1815,11 @@ class WappalyzerService:
             if not regex_pattern:
                 return {"confidence": 100}
             
-            match = re.search(regex_pattern, meta_value, re.IGNORECASE)
+            try:
+                match = re.search(regex_pattern, meta_value, re.IGNORECASE)
+            except re.error as e:
+                logger.debug(f"Invalid meta regex '{regex_pattern}': {e}")
+                continue
             if match:
                 version = extract_version(match, version_template)
                 return {"confidence": confidence, "version": version}
@@ -1826,8 +1834,12 @@ class WappalyzerService:
                 if name.lower() == cookie_name.lower():
                     if not pattern:
                         return {"confidence": 100}
-                    if re.search(pattern, cookies[name], re.IGNORECASE):
-                        return {"confidence": 100}
+                    try:
+                        if re.search(pattern, cookies[name], re.IGNORECASE):
+                            return {"confidence": 100}
+                    except re.error as e:
+                        logger.debug(f"Invalid cookie regex '{pattern}': {e}")
+                        continue
         return None
     
     def _extract_meta_tags(self, html: str) -> dict:

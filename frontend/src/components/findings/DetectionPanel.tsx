@@ -1,6 +1,6 @@
-"""Praetorian-style scanner Detection panel for Nuclei findings."""
-
 'use client';
+
+// Praetorian-style scanner Detection panel for Nuclei findings.
 
 import { useState } from 'react';
 import { Check, Copy } from 'lucide-react';

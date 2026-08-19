@@ -2628,11 +2628,11 @@ export default function FindingsPage() {
               />
 
               {hasScannerDetection(selectedFinding?.detection) && (
-                <DetectionPanel detection={selectedFinding.detection} />
+                <DetectionPanel detection={selectedFinding?.detection} />
               )}
 
               {(selectedFinding?.detected_by === 'agent' || selectedFinding?.agent_detection) && (
-                <DemonstratedChain detection={selectedFinding.agent_detection} />
+                <DemonstratedChain detection={selectedFinding?.agent_detection} />
               )}
 
               {/* Evidence — skip Nuclei auto-evidence when Detection already shows request/cURL/match */}

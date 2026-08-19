@@ -81,10 +81,11 @@ def test_specialists_from_open_hypotheses_priority():
     )
     names = specialists_from_open_hypotheses(brain, max_specialists=6)
     assert names[0] == "app_mapper"
-    assert "vuln_triage" in names
+    assert "finding_judge" not in names
+    assert "independent_verifier" not in names
     assert len(names) <= 6
     # Should prefer attack specialists over empty
-    assert any(n in names for n in ("host_tenant", "api_authz", "auth_logic", "injection"))
+    assert any(n in names for n in ("host_tenant", "api_authz", "auth_logic", "injection", "js_secrets"))
 
 
 def test_default_login_queues_grafana_chain_and_credential():

@@ -156,7 +156,7 @@ def _wp_next(f: Dict[str, Any]) -> Optional[NextStep]:
         return None
     return NextStep(
         tool_name="execute_wpscan",
-        args=f"--url https://{host} --enumerate vp,vt,u",
+        args=f"--url https://{host} --enumerate vp,u --plugins-detection passive --random-user-agent",
         rationale=(
             "Augur: nuclei flagged a WordPress signal at "
             f"{_matched_at_host(f) or host}. Enumerate vulnerable plugins, "
@@ -912,10 +912,10 @@ _FILTERS = {
     "nmap": filter_nmap,
     "naabu": filter_naabu,
     "ffuf": filter_ffuf,
-    "subfinder": lambda r, m=20000: filter_subdomain_list(r, m, "subfinder"),
-    "amass": lambda r, m=20000: filter_subdomain_list(r, m, "amass"),
-    "crtsh": lambda r, m=20000: filter_subdomain_list(r, m, "crtsh"),
-    "tldfinder": lambda r, m=20000: filter_subdomain_list(r, m, "tldfinder"),
+    "subfinder": lambda r, max_chars=20000: filter_subdomain_list(r, max_chars, "subfinder"),
+    "amass": lambda r, max_chars=20000: filter_subdomain_list(r, max_chars, "amass"),
+    "crtsh": lambda r, max_chars=20000: filter_subdomain_list(r, max_chars, "crtsh"),
+    "tldfinder": lambda r, max_chars=20000: filter_subdomain_list(r, max_chars, "tldfinder"),
     "themis": filter_prowler,
     "prowler": filter_prowler,
     "autoswagger": filter_autoswagger,

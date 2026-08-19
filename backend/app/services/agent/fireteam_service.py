@@ -130,7 +130,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "update_hypothesis",
             "sanitize_evidence",
             "validate_finding",
-            "create_finding",
+            "submit_finding_candidate",
             "save_note",
             "create_scan",
         ],
@@ -213,7 +213,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "query_assets",
             "update_hypothesis",
             "validate_finding",
-            "create_finding",
+            "submit_finding_candidate",
         ],
     ),
     SpecialistProfile(
@@ -274,7 +274,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "log_engagement_approach",
             "save_note",
             "validate_finding",
-            "create_finding",
+            "submit_finding_candidate",
         ],
         max_iterations=8,
         system_prompt_suffix=(
@@ -300,7 +300,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "update_hypothesis",
             "log_engagement_approach",
             "validate_finding",
-            "create_finding",
+            "submit_finding_candidate",
             "save_note",
         ],
         max_iterations=8,
@@ -310,7 +310,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "admin:password, couchdb:couchdb (nuclei couchdb-default-login). Always hydra -f / "
             "exit on success. "
             "On hit: add_engagement_credential + queue_finding_followups(vuln_type='default_login') "
-            "+ validate_finding before create_finding. Login is a foothold — coverage proves "
+            "+ validate_finding before submit_finding_candidate. Login is a foothold — coverage proves "
             "privileged APIs. Never invent credentials; no rockyou. "
             "Keycloak: POST /auth/realms/master/protocol/openid-connect/token "
             "grant_type=password client_id=admin-cli with NO client_secret. invalid_grant "
@@ -338,7 +338,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "queue_finding_followups",
             "log_engagement_approach",
             "validate_finding",
-            "create_finding",
+            "submit_finding_candidate",
             "save_note",
         ],
         max_iterations=8,
@@ -379,7 +379,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "queue_finding_followups",
             "log_engagement_approach",
             "validate_finding",
-            "create_finding",
+            "submit_finding_candidate",
             "save_note",
         ],
         max_iterations=8,
@@ -404,7 +404,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "update_hypothesis",
             "log_engagement_approach",
             "validate_finding",
-            "create_finding",
+            "submit_finding_candidate",
             "save_note",
         ],
         max_iterations=8,
@@ -433,7 +433,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "update_hypothesis",
             "log_engagement_approach",
             "validate_finding",
-            "create_finding",
+            "submit_finding_candidate",
         ],
         max_iterations=8,
     ),
@@ -449,7 +449,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_httpx",
             "update_hypothesis",
             "validate_finding",
-            "create_finding",
+            "submit_finding_candidate",
             "save_note",
         ],
         max_iterations=6,
@@ -468,7 +468,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "compare_requests",
             "update_hypothesis",
             "validate_finding",
-            "create_finding",
+            "submit_finding_candidate",
         ],
         max_iterations=6,
     ),
@@ -488,7 +488,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "compare_requests",
             "update_hypothesis",
             "validate_finding",
-            "create_finding",
+            "submit_finding_candidate",
         ],
         max_iterations=6,
     ),
@@ -509,7 +509,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "compare_requests",
             "update_hypothesis",
             "validate_finding",
-            "create_finding",
+            "submit_finding_candidate",
             "save_note",
         ],
         max_iterations=8,
@@ -539,7 +539,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "update_hypothesis",
             "add_engagement_credential",
             "validate_finding",
-            "create_finding",
+            "submit_finding_candidate",
             "save_note",
         ],
         max_iterations=8,
@@ -587,6 +587,34 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ),
     ),
     SpecialistProfile(
+        name="code_sast",
+        role=(
+            "White-box / SAST specialist (Huldah). Threat-model the checkout, then "
+            "instantiate ranked threat shapes with Semgrep/Gitleaks/Trivy. Never execute "
+            "target code."
+        ),
+        allowed_tools=[
+            "build_threat_model",
+            "get_threat_model",
+            "get_engagement_brain",
+            "execute_semgrep",
+            "execute_gitleaks",
+            "execute_trivy",
+            "update_hypothesis",
+            "validate_finding",
+            "submit_finding_candidate",
+            "save_note",
+        ],
+        max_iterations=8,
+        epithet="Huldah",
+        system_prompt_suffix=(
+            "get_threat_model first; hunt shapes from ranked threats. "
+            "A Semgrep hit is a lead — require a reachable exploit scenario that "
+            "instantiates a threat row before submit_finding_candidate. "
+            "Mitigated one layer up → kill. Never execute target binaries."
+        ),
+    ),
+    SpecialistProfile(
         name="finding_judge",
         role=(
             "Finding judge (Solomon). Adversarial review of proposed findings — "
@@ -602,12 +630,12 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "log_engagement_approach",
             "get_notes",
             "save_note",
-            "create_finding",
         ],
         max_iterations=6,
         system_prompt_suffix=(
-            "Re-score each proposed finding with validate_finding. Only create_finding "
-            "after SUBMIT. Kill theoretical / status-only / identity-less IDOR claims. "
+            "Re-score each proposed finding with validate_finding. Do NOT create_finding "
+            "or submit_finding_candidate — hunters submit candidates; Deborah verifies; "
+            "Joshua publishes. Kill theoretical / status-only / identity-less IDOR claims. "
             "Prefer sanitize_evidence before publish. "
             "Grafana CVE-2024-9264: SUBMIT if /api/ds/query type=sql forks duckdb — "
             "including 'no such file or directory'. Missing binary and sqlExpressions=0 "
@@ -621,6 +649,29 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "on token/userinfo/admin. Header proof is enough; do not dump /users. "
             "Keycloak admin-cli: SUBMIT if password grant works without client_secret and "
             "<=8 failures have no 429/lockout — do not require a guessed password; no hydra."
+        ),
+    ),
+    SpecialistProfile(
+        name="independent_verifier",
+        role=(
+            "Independent verifier (Deborah). Fresh session — re-derive the claimed "
+            "proof without the hunter transcript. Issues verify receipts only."
+        ),
+        allowed_tools=[
+            "compare_requests",
+            "execute_curl",
+            "execute_httpx",
+            "replay_http_request",
+            "record_verify_verdict",
+            "sanitize_evidence",
+            "save_note",
+            "get_notes",
+        ],
+        max_iterations=6,
+        system_prompt_suffix=(
+            "You did not see the hunter's chain. Re-derive with your own requests. "
+            "Call record_verify_verdict only. Never create_finding or "
+            "submit_finding_candidate. Never call get_engagement_brain."
         ),
     ),
 ]
@@ -715,7 +766,7 @@ INSTRUCTIONS:
      "key_findings": ["bullet", "bullet", "bullet"]
    }}
 
-5. Medium+ findings: call validate_finding first; create_finding only on SUBMIT.
+5. Medium+ findings: call validate_finding first; submit_finding_candidate only on SUBMIT.
    Write demonstrated-compromise reports (description + impact + assets + remediation),
    not 'login worked' or template-match-only.
 6. Do not exceed {max_iter} iterations. If unsure, finish with done=true.

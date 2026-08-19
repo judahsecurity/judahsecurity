@@ -48,7 +48,7 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "- Django: admin:admin on /admin/login/ and /api/token-pair/; then DEBUG traceback card.\n"
         "- test_credential_spray or execute_hydra with tiny lists + -f.\n"
         "- On success: add_engagement_credential + queue_finding_followups("
-        "vuln_type='default_login') + validate_finding → create_finding.\n"
+        "vuln_type='default_login') + submit_finding_candidate (not create_finding).\n"
         "- Login success is a foothold, not the finding: coverage must prove privileged "
         "APIs (Grafana: /api/admin/settings, /api/datasources, /api/serviceaccounts/search; "
         "CouchDB: /_session _admin, /_all_dbs, /_node/_local/_config).\n"
@@ -108,7 +108,19 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "- Require demonstrated-compromise writeup: description + impact + assets + remediation "
         "+ demonstrated_chain (live tool calls with observed responses) + not_demonstrated.\n"
         "- DROP theoretical / status-only / missing-evidence cards.\n"
-        "- create_finding only after SUBMIT; sanitize_evidence first when secrets present."
+        "- You do not create_finding. Independent verifier (Deborah) re-derives proofs; "
+        "Joshua publishes after confirmed."
+    ),
+    "independent_verifier": (
+        "SKILL PACK — independent verify (Deborah):\n"
+        "- Fresh session. You did not see the hunter transcript. Assume the claim may be wrong.\n"
+        "- Re-derive with compare_requests or execute_curl. Do not trust finder markers.\n"
+        "- Send header X-Aegis-Verify: <nonce from mission> on live probes.\n"
+        "- record_verify_verdict(candidate_id, verdict, evidence) only. "
+        "verdict=confirmed|refuted|inconclusive. Do not create_finding.\n"
+        "- confirmed = you reproduced impact with your own request/response.\n"
+        "- refuted = control holds or the finder hallucinated.\n"
+        "- inconclusive = could not re-derive — never rubber-stamp."
     ),
     "api_authz": (
         "SKILL PACK — IDOR / BOLA proof:\n"
@@ -292,6 +304,14 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         ".git/swagger/backups — not full DirBuster.\n"
         "- Fetch robots.txt + sitemap.xml; merge with katana/gau via ingest_urls_into_map.\n"
         "- Crawl + parameter discovery; feed map for authz/injection specialists."
+    ),
+    "code_sast": (
+        "SKILL PACK — white-box (Huldah):\n"
+        "- get_threat_model first; hunt only ranked threat shapes.\n"
+        "- Semgrep/Gitleaks/Trivy on the checkout. Never execute target code.\n"
+        "- A Semgrep hit is a lead: require a reachable exploit scenario that "
+        "instantiates a threat row before submit_finding_candidate.\n"
+        "- Mitigated one layer up (caller sanitizes) → kill, don't report."
     ),
 }
 

@@ -4,6 +4,66 @@ from typing import List, Dict, Any, Optional
 
 PLAYBOOKS: List[Dict[str, Any]] = [
     {
+        "id": "threat_model",
+        "name": "Threat Model (aim the engagement)",
+        "description": (
+            "Build a durable threat model from a URL crawl and/or a local checkout. "
+            "Aims later hunting; calibrates severity. Not a vulnerability scan."
+        ),
+        "objective": (
+            "Produce a threat model that answers: what could go wrong, who would do it, "
+            "and where hunters should look. A threat survives a one-line patch; a "
+            "vulnerability does not.\n\n"
+            "Give the model room: map the system, then rank actor→outcome rows. Describe "
+            "vulnerability *shapes* (structural properties), not a CWE checklist.\n\n"
+            "URL target: observe with execute_interceptor or execute_deep_crawl, then "
+            "build_threat_model(source='map') (sync_engagement_brain also bootstraps one). "
+            "If an owner is present, ask what assets/actors matter and update_threat_model.\n\n"
+            "Code target: build_threat_model(source='code', repo_path=...). Do not execute "
+            "target code. Then hand the ranked threats to /code-scan or fireteam_dispatch.\n\n"
+            "Deliverable: ranked threats, focus-area partition, open questions. "
+            "Do not spray Nuclei. Do not complete with findings unless a threat was instantiated."
+        ),
+        "initial_todos": [
+            {"description": "Observe URL (crawl) or inventory checkout — do not execute target code", "status": "pending", "priority": "high"},
+            {"description": "build_threat_model (map or code) → ranked threats + focus areas", "status": "pending", "priority": "high"},
+            {"description": "If owner present: refine via update_threat_model; else list open questions", "status": "pending", "priority": "medium"},
+            {"description": "sync_engagement_brain so hunters consume the model; save_note the markdown", "status": "pending", "priority": "high"},
+        ],
+    },
+    {
+        "id": "code_assessment",
+        "name": "Code Assessment (threat-model → SAST)",
+        "description": (
+            "White-box assessment: threat-model the checkout, scan for instantiations of "
+            "those threats, adversarially verify. Complements a live URL assessment."
+        ),
+        "objective": (
+            "Assess the local checkout like a reviewer who already knows what must not "
+            "go wrong. Assume vulnerabilities exist; keep going until ranked threats are "
+            "instantiated or killed.\n\n"
+            "1) build_threat_model(source='code', repo_path=...) — static inventory only.\n"
+            "2) Hunt *shapes* from the model (attacker input changes query/template syntax; "
+            "identifier trusted as authz; secret in a public bundle) — do not enumerate "
+            "SQLi/XSS/CSRF as a checklist.\n"
+            "3) execute_semgrep / execute_gitleaks / execute_trivy aimed at those surfaces. "
+            "fireteam_dispatch(specialists='auto') will include code_sast.\n"
+            "4) Finding_judge / independent_verify must refute: unreachable, mitigated one "
+            "layer up, or not instantiating a threat row → DROP.\n"
+            "5) submit_finding_candidate then independent_verify; create_finding only for "
+            "reachable, threat-aligned, confirmed issues. "
+            "If a live URL is also in scope, prove with compare_requests after SAST.\n"
+            "Do not execute target binaries. Do not complete after Semgrep alone without "
+            "tying hits back to the threat model."
+        ),
+        "initial_todos": [
+            {"description": "build_threat_model(source=code) on the checkout", "status": "pending", "priority": "high"},
+            {"description": "SAST (semgrep/gitleaks/trivy) aimed at ranked threat surfaces", "status": "pending", "priority": "high"},
+            {"description": "fireteam_dispatch auto (code_sast; verifier is second wave)", "status": "pending", "priority": "high"},
+            {"description": "submit_finding_candidate → independent_verify → create_finding", "status": "pending", "priority": "high"},
+        ],
+    },
+    {
         "id": "tester_process",
         "name": "Tester Process (Hypotheses + Differentials)",
         "description": (
@@ -16,9 +76,9 @@ PLAYBOOKS: List[Dict[str, Any]] = [
             "1) Observe — execute_deep_crawl on the primary web target.\n"
             "2) Enrich — execute_katana/gau then ingest_urls_into_map so passive URLs "
             "update methodologies.\n"
-            "3) Hypothesize — sync_engagement_brain seeds observation→methodology cards "
-            "(CWE/CAPEC/OWASP-tagged: login→creds, search→XSS, APIs→IDOR, …).\n"
-            "4) Dispatch — fireteam_dispatch(specialists='auto') from open methodology cards.\n"
+            "3) Aim — sync_engagement_brain bootstraps a threat model + methodology cards "
+            "(or call build_threat_model). Hunters follow ranked threats, not a scanner list.\n"
+            "4) Dispatch — fireteam_dispatch(specialists='auto') from open cards / focus areas.\n"
             "5) Mutate one variable — compare_requests(baseline, mutant) for logic proofs.\n"
             "6) Prove or kill — update_hypothesis(status=proven|killed); check "
             "get_methodology_progress until high-priority cards are resolved.\n"
@@ -29,19 +89,22 @@ PLAYBOOKS: List[Dict[str, Any]] = [
             "RULES:\n"
             "- Status 200 alone is never a finding — show field/body differentials.\n"
             "- Prefer 3–6 specialists, not every hunter.\n"
-            "- validate_finding before create_finding for medium+.\n"
-            "- Do NOT complete while high-priority methodology cards are open "
-            "(unless completion_reason includes 'defer methodologies').\n"
+            "- Hunters submit_finding_candidate; independent_verify (fresh agent) then create_finding.\n"
+            "- record_surface_coverage for every focus/input surface (finding | tested_clean | skipped+reason).\n"
+            "- Do NOT complete while high-priority methodology cards are open, inventory is untested, "
+            "or candidates are pending verify (unless completion_reason includes 'defer methodologies').\n"
             "- Complete with proven/killed methodologies + coverage summary, not Nuclei-only.\n"
         ),
         "initial_todos": [
             {"description": "Deep crawl primary app → capability map + methodologies", "status": "pending", "priority": "high"},
-            {"description": "ingest_urls_into_map from katana/gau; sync_engagement_brain", "status": "pending", "priority": "high"},
-            {"description": "fireteam_dispatch(specialists=auto) from methodology cards", "status": "pending", "priority": "high"},
+            {"description": "ingest_urls_into_map from katana/gau; sync_engagement_brain (threat model + cards)", "status": "pending", "priority": "high"},
+            {"description": "fireteam_dispatch(specialists=auto) from threat/methodology cards", "status": "pending", "priority": "high"},
             {"description": "compare_requests proofs; update_hypothesis proven/killed", "status": "pending", "priority": "high"},
+            {"description": "submit_finding_candidate → independent_verify → create_finding", "status": "pending", "priority": "high"},
+            {"description": "record_surface_coverage / get_coverage — no untested denom rows", "status": "pending", "priority": "high"},
             {"description": "get_methodology_progress — clear high-priority blockers", "status": "pending", "priority": "high"},
             {"description": "queue_finding_followups + authenticated coverage", "status": "pending", "priority": "high"},
-            {"description": "validate_finding → create_finding → report", "status": "pending", "priority": "medium"},
+            {"description": "get_coverage then create_finding for confirmed candidates", "status": "pending", "priority": "medium"},
         ],
     },
     {

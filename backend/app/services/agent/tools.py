@@ -153,7 +153,16 @@ def _default_args_for_tool(tool_name: str, target: str) -> str:
     if name in ("nikto",):
         return f"-h {target} -Format json"
     if name in ("wpscan",):
-        return f"--url {target} --enumerate vp,vt,u"
+        # Passive plugin detection finds HTML-referenced plugins (e.g. Yoast via
+        # the generator comment) in seconds instead of brute-forcing thousands of
+        # known locations (which took ~5 min and ate the whole turn budget). Drop
+        # the theme brute (vt) for speed; keep vulnerable-plugin + user enum. The
+        # WPSCAN_API_TOKEN is picked up from the environment automatically and is
+        # what enables the vp (known-CVE) mapping.
+        return (
+            f"--url {target} --enumerate vp,u --plugins-detection passive "
+            "--random-user-agent --disable-tls-checks"
+        )
     if name in ("subfinder", "subfaster", "dnsx", "tldfinder"):
         return f"-d {host}"
     if name in ("naabu", "nmap", "masscan"):
@@ -656,6 +665,8 @@ class ASMToolsManager:
             try:
                 mcp = self._get_mcp_server()
                 result = await mcp.call_tool(tool_name, tool_args)
+                from app.services.mcp.cli_results import normalize_cli_result
+                result = normalize_cli_result(tool_name, result)
 
                 max_chars = _tool_output_max_chars()
                 augur_block = result.get("augur")  # Augur reading: kept/dropped/next_steps/signals
@@ -4452,15 +4463,18 @@ class ASMToolsManager:
         timeout: int = 25,
         follow_redirects: bool = True,
     ) -> Dict[str, Any]:
+        import time as _time
         import httpx
 
         method = (method or "GET").upper().strip()
         hdrs = {str(k): str(v) for k, v in (headers or {}).items()}
         hdrs = self._resolve_request_cookies(hdrs, cookies, use_auth_session)
+        start = _time.monotonic()
         async with httpx.AsyncClient(
             follow_redirects=follow_redirects, verify=False, timeout=timeout
         ) as client:
             resp = await client.request(method, url, headers=hdrs, content=body)
+        elapsed_s = round(_time.monotonic() - start, 3)
         body_text = resp.text or ""
         return {
             "request": {
@@ -4477,6 +4491,7 @@ class ASMToolsManager:
                 "headers": dict(list(resp.headers.items())[:40]),
                 "body_preview": body_text[:4000],
                 "length": len(resp.content or b""),
+                "elapsed_s": elapsed_s,
             },
             "_body_text": body_text,
         }
@@ -4528,7 +4543,7 @@ class ASMToolsManager:
         mutant: Dict[str, Any],
         interest_fields: Optional[List[str]] = None,
         use_auth_session: bool = True,
-        timeout: int = 25,
+        timeout: int = 30,
         hypothesis_id: Optional[str] = None,
     ) -> str:
         """Differential HTTP proof — baseline vs one mutation (tester core loop).
@@ -4630,6 +4645,9 @@ class ASMToolsManager:
         status_delta = mut_ex["response"]["status"] - base_ex["response"]["status"]
         length_delta = mut_ex["response"]["length"] - base_ex["response"]["length"]
         body_changed = b_body != m_body
+        b_elapsed = float(base_ex.get("response", {}).get("elapsed_s") or 0)
+        m_elapsed = float(mut_ex.get("response", {}).get("elapsed_s") or 0)
+        elapsed_delta = round(m_elapsed - b_elapsed, 3)
         field_deltas = {
             k: {"baseline": b_fields.get(k), "mutant": m_fields.get(k)}
             for k in set(b_fields) | set(m_fields)
@@ -4646,12 +4664,16 @@ class ASMToolsManager:
             signals.append("body_changed")
         if field_deltas:
             signals.append(f"interest_field_deltas={list(field_deltas)}")
+        if elapsed_delta >= 1.5:
+            signals.append(f"elapsed_delta_s={elapsed_delta}")
 
         interesting = bool(signals) and mut_ex["response"]["status"] < 400
         verdict = "NEEDS_INTERPRETATION"
-        if interesting and field_deltas:
+        if elapsed_delta >= 1.5 and mut_ex["response"]["status"] < 500:
+            verdict = "TIME_BASED_INJECTION_CANDIDATE"
+        elif interesting and field_deltas:
             verdict = "LIKELY_IMPACT"
-        elif not body_changed and status_delta == 0 and abs(length_delta) < 16:
+        elif not body_changed and status_delta == 0 and abs(length_delta) < 16 and elapsed_delta < 1.5:
             verdict = "NO_MATERIAL_DIFF"
         elif mut_ex["response"]["status"] in (401, 403, 404) and base_ex["response"]["status"] < 400:
             verdict = "MUTANT_DENIED"
@@ -4671,10 +4693,18 @@ class ASMToolsManager:
                 "mutant": mut_ex["response"]["length"],
                 "delta": length_delta,
             },
+            "elapsed_s": {
+                "baseline": b_elapsed,
+                "mutant": m_elapsed,
+                "delta": elapsed_delta,
+            },
             "interest_fields": {"baseline": b_fields, "mutant": m_fields, "deltas": field_deltas},
             "baseline": base_ex,
             "mutant": mut_ex,
             "guidance": (
+                "TIME_BASED_INJECTION_CANDIDATE → mutant took ≥1.5s longer (SLEEP/WAIT). "
+                "Confirm with a second delay (SLEEP(0) vs SLEEP(2) vs SLEEP(4)); "
+                "then execute_sqlmap --technique=BT and create_finding with the timing table. "
                 "LIKELY_IMPACT / MUTANT_BYPASS_CANDIDATE → update_hypothesis(status='proven') "
                 "with evidence, validate_finding, create_finding, then queue_finding_followups. "
                 "NO_MATERIAL_DIFF / MUTANT_DENIED → update_hypothesis(status='killed') unless "
@@ -4692,7 +4722,11 @@ class ASMToolsManager:
                 brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
                 status = (
                     "proven"
-                    if verdict in ("LIKELY_IMPACT", "MUTANT_BYPASS_CANDIDATE")
+                    if verdict in (
+                        "LIKELY_IMPACT",
+                        "MUTANT_BYPASS_CANDIDATE",
+                        "TIME_BASED_INJECTION_CANDIDATE",
+                    )
                     else (
                         "killed"
                         if verdict in ("NO_MATERIAL_DIFF", "MUTANT_DENIED")

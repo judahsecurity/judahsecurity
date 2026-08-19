@@ -39,6 +39,7 @@ import { api } from '@/lib/api';
 import { formatNumber } from '@/lib/utils';
 import Link from 'next/link';
 import { useToast } from '@/hooks/use-toast';
+import { LaunchAssessmentDialog } from '@/components/agent/LaunchAssessmentDialog';
 
 const WorldMap = dynamic(
   () => import('@/components/map/WorldMap').then((m) => m.WorldMap),
@@ -388,6 +389,17 @@ export default function DashboardPage() {
       <Header title="Dashboard" subtitle="Overview of your attack surface" />
 
       <div className="p-6 space-y-6">
+        {/* Launch an engagement */}
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <h2 className="text-lg font-semibold">Start an engagement</h2>
+            <p className="text-sm text-muted-foreground">
+              Point Aegis at a target — pick a playbook or set a custom objective.
+            </p>
+          </div>
+          <LaunchAssessmentDialog />
+        </div>
+
         {/* Stats Grid */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
           {statCards.map((stat) => (

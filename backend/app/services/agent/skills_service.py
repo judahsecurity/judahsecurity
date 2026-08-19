@@ -3,6 +3,8 @@ Agent Skills + ``/skill`` chat prefix routing.
 
 A "skill" is a named, bounded workflow the agent knows how to run:
 
+    * ``threat-model`` - Durable threat model from a URL crawl or local checkout
+    * ``code-scan``    - White-box: threat-model the checkout then SAST
     * ``external-assessment`` - Full tester-methodology external engagement
     * ``tester-process`` - Hypothesis queue + compare_requests + specialist fireteam
     * ``web-recon``    - subdomain + HTTP + tech fingerprint
@@ -56,6 +58,45 @@ class Skill:
 
 SKILLS: list[Skill] = [
     Skill(
+        id="threat-model",
+        aliases=["threatmodel", "threat_model", "tm", "aim"],
+        title="Threat model",
+        description=(
+            "Build a durable threat model from a URL (after crawl) or a local checkout. "
+            "Aims hunters and calibrates severity; does not itself prove bugs."
+        ),
+        playbook_id="threat_model",
+        system_context=(
+            "You are running the THREAT-MODEL skill. Produce the map, not findings. "
+            "URL: observe (interceptor/deep_crawl) then build_threat_model(source='map' or 'url'). "
+            "Code: build_threat_model(source='code', repo_path=...) — do not execute target code. "
+            "Describe shapes, not CWE checklists. If an owner is in the session, ask what "
+            "assets/actors matter and update_threat_model. sync_engagement_brain so later "
+            "fireteams consume ranked threats + focus areas. save_note the markdown artifact. "
+            "Do not spray Nuclei."
+        ),
+    ),
+    Skill(
+        id="code-scan",
+        aliases=["code-assessment", "sast", "whitebox", "source-scan", "ccsec"],
+        title="Code assessment (threat-model → SAST)",
+        description=(
+            "White-box scan: threat-model the checkout, hunt instantiations of those "
+            "threats with Semgrep/Gitleaks/Trivy, verify adversarially."
+        ),
+        playbook_id="code_assessment",
+        required_inputs=["repo_path"],
+        system_context=(
+            "You are running the CODE-SCAN skill. "
+            "1) build_threat_model(source='code', repo_path=...). "
+            "2) Hunt shapes from the model with execute_semgrep / execute_gitleaks / "
+            "execute_trivy — not a named-bug checklist. "
+            "3) fireteam_dispatch(specialists='auto') so code_sast hunts (independent_verify is the second wave). "
+            "4) submit_finding_candidate then independent_verify; create_finding only when a threat row is instantiated "
+            "and reachable. Do not execute target binaries."
+        ),
+    ),
+    Skill(
         id="external-assessment",
         aliases=["external", "pentest-recon", "full-assessment", "tester", "engagement"],
         title="External assessment (tester methodology)",
@@ -94,8 +135,8 @@ SKILLS: list[Skill] = [
         system_context=(
             "You are running the TESTER-PROCESS skill. "
             "1) execute_deep_crawl on the primary web target. "
-            "2) sync_engagement_brain to seed observation→methodology hypothesis cards "
-            "(CWE/CAPEC/OWASP-tagged tests from forms/APIs/auth/params seen). "
+            "2) sync_engagement_brain to seed a threat model + observation→methodology cards "
+            "(CWE/CAPEC-tagged tests from forms/APIs/auth/params seen). "
             "3) fireteam_dispatch(specialists='auto') — specialists receive methodology "
             "directives and must prove/kill each card. "
             "4) Prove logic/authz with compare_requests (baseline vs one mutation). "

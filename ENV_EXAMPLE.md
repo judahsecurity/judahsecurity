@@ -93,6 +93,11 @@ SQS_QUEUE_URL=
 # Get API key at: https://cloud.projectdiscovery.io
 PDCP_API_KEY=
 
+# WPScan API token (optional but required for vulnerable plugin/theme CVE mapping).
+# Free tier (25 req/day): https://wpscan.com/register
+# Without this, `wpscan --enumerate vp` aborts instead of scanning.
+WPSCAN_API_TOKEN=
+
 # =============================================================================
 # AI Agent Configuration (optional)
 # =============================================================================

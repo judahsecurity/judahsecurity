@@ -62,9 +62,11 @@ from app.services.agent.prompts import (
     FINAL_REPORT_PROMPT,
     get_phase_tools,
     is_tool_allowed_in_phase,
+    TOOL_PHASE_MAP,
 )
 from app.services.agent.tools import ASMToolsManager, set_tenant_context
 from app.services.agent.model_router import LLMTask
+from app.services.agent.confirmation_service import set_autonomous_mode
 from app.services.agent import evograph
 from app.services.agent.tool_selector import get_tool_recommendations
 
@@ -701,6 +703,134 @@ class AgentOrchestrator:
             "mode": mode,
         }
     
+    def _wordpress_hunt_note(self, state: AgentState) -> str:
+        """When WordPress is fingerprinted, force the high-value WP surfaces
+        that a human tester (and Claude) hits immediately: WPScan, REST user
+        enum, login oracle, admin-ajax injection. Returns empty when WP is
+        not in play."""
+        tech = " ".join(
+            str(t).lower()
+            for t in (state.get("target_info", {}) or {}).get("technologies", [])
+        )
+        blob = tech
+        for s in state.get("execution_trace", []) or []:
+            blob += " " + str(s.get("tool_output") or "").lower()[:400]
+            blob += " " + str(s.get("thought") or "").lower()[:200]
+        if "wordpress" not in blob and "wp-content" not in blob and "wp-json" not in blob:
+            return ""
+
+        ran = {s.get("tool_name") for s in (state.get("execution_trace") or []) if s.get("tool_name")}
+        origin = ((state.get("target_info") or {}).get("primary_target") or "").rstrip("/")
+        url = origin or "https://TARGET"
+
+        lines = [
+            "\n\n## WordPress detected — hunt these surfaces NOW",
+            "WPScan is OPTIONAL (known CVEs / plugin list). Do not wait on it, "
+            "and do not retry it. Claude-style findings on WordPress come from "
+            "REST user enum + admin-ajax time-based SQLi, not from WPScan.",
+        ]
+        lines.append(
+            f"1. Unauth REST user enum FIRST: execute_curl(args=\"-sS -D- {url}/wp-json/wp/v2/users?per_page=100\"). "
+            "A 200 with slug/name is a finding (user enumeration). Then create_finding "
+            "with title/description/severity/target filled in."
+        )
+        lines.append(
+            f"2. Time-based SQLi PoC (do this even if WPScan failed). "
+            f"compare_requests on POST {url}/wp-admin/admin-ajax.php with "
+            "Content-Type: application/x-www-form-urlencoded. "
+            "baseline body: action=loadmore&page=1&query={{\"tax_query\":{{\"0\":{{\"terms\":[\"1\"]}}}}}} "
+            "mutant body: same but terms=[\"1) AND (SELECT 1 FROM (SELECT SLEEP(2))x)-- -\"]. "
+            "timeout=20. If elapsed_s delta ≥ 1.5s (TIME_BASED_INJECTION_CANDIDATE), "
+            "repeat with SLEEP(4) then execute_sqlmap --technique=BT and create_finding "
+            "with the timing table as evidence."
+        )
+        lines.append(
+            f"3. Login oracle (ONE attempt per username, no brute force): POST {url}/wp-login.php "
+            "and compare 'not registered' vs 'password you entered for the username X is incorrect'."
+        )
+        if "execute_wpscan" not in ran:
+            lines.append(
+                "4. OPTIONAL later: execute_wpscan for plugin CVE mapping. Skip if it aborted "
+                "(token/quota). Do not block the ajax/REST hunts on WPScan."
+            )
+        else:
+            lines.append(
+                "4. WPScan already ran or aborted — do NOT call it again. Continue ajax/REST."
+            )
+        return "\n".join(lines)
+
+    def _repetition_guard_note(self, state: AgentState, phase: str) -> str:
+        """Detect an unproductive loop — the model re-running the same tool over
+        and over without surfacing anything new — and steer it toward a
+        different, higher-value action. Returns a prompt block (empty string
+        when no loop is detected).
+
+        This is a soft steer (prompt-level), matching how the rest of the loop
+        is guided; it does not hard-override the model's choice, because the
+        same tool against *different* inputs (e.g. compare_requests on distinct
+        endpoints) is legitimate.
+        """
+        trace = state.get("execution_trace", []) or []
+        recent = [s for s in trace[-8:] if s.get("tool_name")]
+        if len(recent) < 3:
+            return ""
+
+        from collections import Counter
+
+        counts = Counter(s.get("tool_name") for s in recent)
+        tool, n = counts.most_common(1)[0]
+        if n < 3:
+            return ""
+
+        # Did those repeats produce anything actionable? If so, it's productive
+        # work, not a stuck loop — leave it alone.
+        produced = any(
+            s.get("tool_name") == tool
+            and (s.get("actionable_findings") or s.get("output_analysis"))
+            for s in recent
+        )
+        if produced and n < 5:
+            return ""
+
+        ran = {s.get("tool_name") for s in trace if s.get("tool_name")}
+        tech = " ".join(
+            str(t).lower()
+            for t in (state.get("target_info", {}) or {}).get("technologies", [])
+        )
+        cmap = state.get("capability_map") or {}
+
+        suggestions: List[str] = []
+        if "wordpress" in tech and "execute_wpscan" not in ran:
+            suggestions.append(
+                "run execute_wpscan (WordPress detected — enumerate plugins, "
+                "themes, users, and known CVEs)"
+            )
+        if "fireteam_dispatch" not in ran and cmap.get("ready_for_attack"):
+            suggestions.append(
+                "dispatch fireteam_dispatch(specialists='auto') to hunt the "
+                "capability-map surfaces with specialists"
+            )
+        if "execute_nuclei" not in ran:
+            suggestions.append(
+                "run execute_nuclei for template-based vulnerability detection"
+            )
+        if "execute_cmseek" not in ran and "wordpress" not in tech:
+            suggestions.append("run execute_cmseek to fingerprint the CMS")
+        if not suggestions:
+            suggestions.append(
+                "synthesize your findings and finish (action=complete) instead "
+                "of repeating tools"
+            )
+        alt = "; ".join(f"({i + 1}) {s}" for i, s in enumerate(suggestions))
+
+        return (
+            "\n\n## Loop detected — change your approach\n"
+            f"You have run `{tool}` {n} times in the last {len(recent)} steps"
+            f"{'' if produced else ' without surfacing new findings'}. "
+            f"Do NOT call `{tool}` again unless you have genuinely new inputs "
+            f"for it. Choose a different, higher-value action now: {alt}."
+        )
+
     async def _think_node(self, state: AgentState, config=None) -> dict:
         """Core ReAct reasoning node."""
         user_id = state.get("user_id", "unknown")
@@ -862,6 +992,12 @@ class AgentOrchestrator:
                 parameters=discovered_params,
                 waf_detected=waf_detected,
             )
+        # WordPress-specific hunt: once WP is fingerprinted, do not wait for
+        # methodology cards — run wpscan + REST user enum + ajax SQLi probes.
+        tool_recommendations += self._wordpress_hunt_note(state)
+        # Break unproductive loops: if the model has been hammering one tool
+        # without new findings, steer it to a different, higher-value action.
+        tool_recommendations += self._repetition_guard_note(state, phase)
 
         from app.services.agent.capability_map import format_capability_map_for_prompt
         from app.services.agent.engagement_brain import format_engagement_brain_for_prompt
@@ -1006,7 +1142,7 @@ class AgentOrchestrator:
                         ) or "methodology cards not seeded"
                         step.thought = (
                             (step.thought or "")
-                            + " | Complete blocked — unresolved high-priority methodologies."
+                            + " | Complete blocked — unresolved methodologies, coverage, or pending verify."
                         )
                         step.tool_name = None
                         updates["_current_step"] = step.model_dump()
@@ -1014,7 +1150,10 @@ class AgentOrchestrator:
                             "Cannot complete yet — application assessment methodology incomplete.\n"
                             f"{progress.get('summary')}\n"
                             f"Blocking: {blocker_txt}\n\n"
-                            "Prove or kill those cards (update_hypothesis), then complete. "
+                            "Prove or kill those cards (update_hypothesis), "
+                            "independent_verify pending candidates, and "
+                            "record_surface_coverage for untested inventory "
+                            "(finding | tested_clean | skipped+reason), then complete. "
                             "Or set completion_reason to include 'defer methodologies' / "
                             "'force complete' if intentionally skipping."
                         ))]
@@ -1204,11 +1343,84 @@ class AgentOrchestrator:
                 session_id=session_id,
             )
         
-        # Check phase restriction
+        # Check phase restriction. In autonomous ("agent") mode a phase transition
+        # is auto-approved anyway (see _analyze_node), so when the agent reaches
+        # for an active-testing tool while still in the informational phase, treat
+        # it as an implicit transition and promote in place instead of returning a
+        # dead-end error the model just retries (which stalls the turn). Keep the
+        # "walk the app first" rule: only promote once the capability map is ready
+        # (execute_deep_crawl has produced a usable map).
+        auto_promoted_phase: Optional[str] = None
         if not is_tool_allowed_in_phase(tool_name, phase):
-            step_data["tool_output"] = f"Error: Tool '{tool_name}' not allowed in '{phase}' phase"
-            step_data["success"] = False
-            return {"_current_step": step_data}
+            allowed_phases = TOOL_PHASE_MAP.get(tool_name, [])
+            target_phase = (
+                "exploitation" if "exploitation" in allowed_phases
+                else (allowed_phases[0] if allowed_phases else None)
+            )
+            cmap_ready = bool((state.get("capability_map") or {}).get("ready_for_attack"))
+            # Fallback readiness: even without a full deep_crawl capability map, the
+            # target may be well-enough characterized to begin active testing — the
+            # tech stack is fingerprinted AND concrete attack surface is known
+            # (parameters discovered or capabilities mapped). This keeps the "walk
+            # the app first" intent (we don't promote on an empty recon) while
+            # preventing the informational-phase stall where the model wants an
+            # exploitation tool but a deep_crawl map never materialized.
+            _cmap = state.get("capability_map") or {}
+            _tech = (state.get("target_info") or {}).get("technologies") or []
+            _params_found = any(
+                s.get("tool_name") in ("discover_parameters", "execute_arjun")
+                and s.get("success")
+                for s in state.get("execution_trace", []) or []
+            )
+            _wp = "wordpress" in " ".join(str(t).lower() for t in _tech)
+            if not _wp:
+                _wp = any(
+                    "wordpress" in str(s.get("tool_output") or "").lower()
+                    or "wp-content" in str(s.get("tool_output") or "").lower()
+                    for s in (state.get("execution_trace") or [])
+                )
+            recon_ready = bool(_tech) and (
+                _params_found or bool(_cmap.get("capabilities"))
+            ) or _wp
+            if (
+                state.get("mode") == "agent"
+                and phase == "informational"
+                and target_phase
+                and (cmap_ready or recon_ready)
+            ):
+                logger.info(
+                    "[%s] Agent mode: auto-promoting informational->%s so %s can run "
+                    "(cmap_ready=%s recon_ready=%s)",
+                    user_id, target_phase, tool_name, cmap_ready, recon_ready,
+                )
+                phase = target_phase
+                auto_promoted_phase = target_phase
+                await self._emit_status({
+                    "type": "phase_transition",
+                    "from_phase": "informational",
+                    "to_phase": target_phase,
+                    "reason": f"autonomous active testing ({tool_name})",
+                })
+            else:
+                if target_phase == "exploitation" and not cmap_ready:
+                    step_data["tool_output"] = (
+                        f"Error: '{tool_name}' needs the exploitation phase. Run "
+                        "execute_deep_crawl on the target first to build the "
+                        "capability map, then retry this tool."
+                    )
+                else:
+                    step_data["tool_output"] = (
+                        f"Error: Tool '{tool_name}' not allowed in '{phase}' phase"
+                    )
+                step_data["success"] = False
+                await self._emit_status({
+                    "type": "tool_complete",
+                    "tool_name": tool_name,
+                    "success": False,
+                    "output_summary": (step_data.get("tool_output") or "")[:300],
+                    "iteration": iteration,
+                })
+                return {"_current_step": step_data}
         
         # Inject agent state context for auto_select_tools
         if tool_name == "auto_select_tools":
@@ -1241,9 +1453,18 @@ class AgentOrchestrator:
             "add_engagement_credential",
             "log_engagement_approach",
             "get_engagement_brain",
+            "build_threat_model",
+            "get_threat_model",
+            "update_threat_model",
+            "submit_finding_candidate",
+            "independent_verify",
+            "record_verify_verdict",
+            "record_surface_coverage",
+            "get_coverage",
+            "ingest_urls_into_map",
         ):
             if state.get("capability_map") and not tool_args.get("capability_map"):
-                if tool_name in ("fireteam_dispatch", "sync_engagement_brain"):
+                if tool_name in ("fireteam_dispatch", "sync_engagement_brain", "build_threat_model"):
                     tool_args["capability_map"] = state.get("capability_map")
             try:
                 self.tool_manager._capability_map = state.get("capability_map")
@@ -1285,11 +1506,15 @@ class AgentOrchestrator:
 
         # Soft gate: block broad active scanners until capability map + methodology cards exist
         # (unless the operator forces, or this is clearly a non-HTTP engagement).
+        # NOTE: execute_wpscan is intentionally NOT here — WordPress enumeration
+        # (version/plugins/themes/users, known-CVE mapping) is *targeted* recon against
+        # an already-detected CMS, not a blind broad spray, so it should run as soon as
+        # WordPress is fingerprinted rather than waiting on the full methodology flow.
         cmap = state.get("capability_map") or {}
         map_ready = bool(cmap.get("ready_for_attack"))
         spray_tools = {
-            "execute_nuclei", "execute_sqlmap", "execute_xsstrike", "execute_nikto",
-            "execute_ffuf", "execute_wpscan",
+            "execute_nuclei", "execute_xsstrike", "execute_nikto",
+            "execute_ffuf",
         }
         force = bool(tool_args.get("force"))
         if tool_name in spray_tools and not map_ready and not force:
@@ -1301,6 +1526,13 @@ class AgentOrchestrator:
             )
             step_data["success"] = False
             step_data["error_message"] = "capability_map_required"
+            await self._emit_status({
+                "type": "tool_complete",
+                "tool_name": tool_name,
+                "success": False,
+                "output_summary": (step_data.get("tool_output") or "")[:300],
+                "iteration": iteration,
+            })
             return {"_current_step": step_data}
 
         if tool_name in spray_tools and map_ready and not force:
@@ -1317,6 +1549,13 @@ class AgentOrchestrator:
                     )
                     step_data["success"] = False
                     step_data["error_message"] = "methodology_required"
+                    await self._emit_status({
+                        "type": "tool_complete",
+                        "tool_name": tool_name,
+                        "success": False,
+                        "output_summary": (step_data.get("tool_output") or "")[:300],
+                        "iteration": iteration,
+                    })
                     return {"_current_step": step_data}
                 if not progress.get("ready_for_coverage_spray"):
                     blockers = progress.get("blockers") or []
@@ -1330,11 +1569,60 @@ class AgentOrchestrator:
                     )
                     step_data["success"] = False
                     step_data["error_message"] = "methodology_incomplete"
+                    await self._emit_status({
+                        "type": "tool_complete",
+                        "tool_name": tool_name,
+                        "success": False,
+                        "output_summary": (step_data.get("tool_output") or "")[:300],
+                        "iteration": iteration,
+                    })
                     return {"_current_step": step_data}
             except Exception:
                 logger.exception("methodology spray-gate failed")
 
         # Execute tool
+        # Skip a second WPScan when the first already produced a complete scan
+        # (including exit-code-5 "vulnerabilities found"). Re-running burns the
+        # remaining turn budget and is what kept us from hunting REST users /
+        # admin-ajax.php.
+        if tool_name == "execute_wpscan":
+            from app.services.mcp.cli_results import wpscan_output_looks_complete
+            prior_scans = [
+                s for s in (state.get("execution_trace") or [])
+                if s.get("tool_name") == "execute_wpscan"
+            ]
+            complete = next(
+                (
+                    s for s in reversed(prior_scans)
+                    if wpscan_output_looks_complete(str(s.get("tool_output") or ""))
+                ),
+                None,
+            )
+            if complete or len(prior_scans) >= 2:
+                origin = (
+                    (state.get("target_info") or {}).get("primary_target") or ""
+                ).rstrip("/")
+                prior_out = str((complete or prior_scans[-1]).get("tool_output") or "")
+                step_data["success"] = True
+                step_data["error_message"] = None
+                step_data["tool_output"] = (
+                    "WPScan already completed this session — do not re-run it. "
+                    "Treat the prior output as SUCCESS (exit 5 means findings, "
+                    "not failure). create_finding for each CVE/user, then hunt "
+                    f"{origin or 'the origin'}/wp-json/wp/v2/users and "
+                    f"{origin or 'the origin'}/wp-admin/admin-ajax.php "
+                    "(loadmore / tax_query time-based SQLi).\n\n"
+                    + prior_out[:8000]
+                )
+                await self._emit_status({
+                    "type": "tool_complete",
+                    "tool_name": tool_name,
+                    "success": True,
+                    "output_summary": "skipped duplicate WPScan; using prior results",
+                    "iteration": iteration,
+                })
+                return {"_current_step": step_data}
+
         # Break identical execute_* failure loops (empty args / same error)
         if tool_name and tool_name.startswith("execute_"):
             recent = state.get("execution_trace") or []
@@ -1401,6 +1689,25 @@ class AgentOrchestrator:
         step_data["tool_output"] = result.get("output") or result.get("error") or ""
         step_data["success"] = result.get("success", False)
         step_data["error_message"] = result.get("error")
+        # WPScan exit 5 / findings-in-stdout must never land as a failed step.
+        if tool_name == "execute_wpscan":
+            from app.services.mcp.cli_results import (
+                normalize_cli_result,
+                wpscan_output_looks_complete,
+            )
+            normalized = normalize_cli_result("execute_wpscan", {
+                "success": step_data["success"],
+                "output": step_data["tool_output"],
+                "error": step_data.get("error_message"),
+                "exit_code": result.get("exit_code"),
+            })
+            if normalized.get("success") or wpscan_output_looks_complete(
+                step_data["tool_output"]
+            ):
+                step_data["success"] = True
+                step_data["error_message"] = None
+                if normalized.get("output"):
+                    step_data["tool_output"] = normalized["output"]
         if result.get("capability_map"):
             step_data["capability_map"] = result.get("capability_map")
         if result.get("auth_session"):
@@ -1456,7 +1763,13 @@ class AgentOrchestrator:
                 "chain": chain_data,
             })
 
-        return {"_current_step": step_data}
+        node_updates: Dict[str, Any] = {"_current_step": step_data}
+        if auto_promoted_phase:
+            node_updates["current_phase"] = auto_promoted_phase
+            node_updates["phase_history"] = state.get("phase_history", []) + [
+                PhaseHistoryEntry(phase=auto_promoted_phase).model_dump()
+            ]
+        return node_updates
     
     async def _analyze_output_node(self, state: AgentState, config=None) -> dict:
         """Analyze tool output and extract intelligence."""
@@ -1578,6 +1891,14 @@ class AgentOrchestrator:
             "get_engagement_brain",
             "get_methodology_progress",
             "ingest_urls_into_map",
+            "build_threat_model",
+            "get_threat_model",
+            "update_threat_model",
+            "submit_finding_candidate",
+            "independent_verify",
+            "record_verify_verdict",
+            "record_surface_coverage",
+            "get_coverage",
         ) and "engagement_brain" in raw_out:
             try:
                 parsed = json.loads(raw_out)
@@ -1908,7 +2229,18 @@ class AgentOrchestrator:
                     data["user_question"] = None
                 if "phase_transition" in data and not data["phase_transition"]:
                     data["phase_transition"] = None
-                
+
+                # Coerce a common LLM slip: putting the tool name directly in
+                # `action` (e.g. action="fireteam_dispatch") instead of
+                # action="use_tool" with tool_name set. Without this the decision
+                # fails literal validation and the whole turn is wasted on a parse
+                # error, which manifests as the agent stalling.
+                _valid_actions = {"use_tool", "complete", "transition_phase", "ask_user"}
+                _act = data.get("action")
+                if isinstance(_act, str) and _act not in _valid_actions and _act.strip():
+                    data["tool_name"] = data.get("tool_name") or data.get("tool") or _act
+                    data["action"] = "use_tool"
+
                 return LLMDecision.model_validate(data)
         except Exception as e:
             logger.warning(f"Failed to parse LLM decision: {e}")
@@ -2013,6 +2345,7 @@ class AgentOrchestrator:
         
         _max_iterations_var.set(max_iterations)
         self._start_turn_deadline()
+        set_autonomous_mode(mode == "agent")
         logger.info(f"[{user_id}/{session_id}] Invoking with: {question[:100]}... (mode={mode}, max_iter={max_iterations or 'default'})")
 
         if status_callback:
@@ -2055,13 +2388,27 @@ class AgentOrchestrator:
             return response
         
         except Exception as e:
-            logger.error(f"[{user_id}/{session_id}] Error: {e}")
+            logger.exception(f"[{user_id}/{session_id}] Error: {e}")
             evograph.record_chain_end(session_id=session_id, status="error", outcome=str(e)[:300])
             return InvokeResponse(error=str(e))
         finally:
             if status_callback:
                 self.clear_status_callback()
     
+    async def _arm_autonomous_from_state(self, config: dict) -> None:
+        """Restore autonomous auto-approval on resume from the checkpointed run
+        mode. An agent-mode run that paused (e.g. asked the user a question)
+        should keep auto-approving confirm-gated tools on resume rather than
+        stalling; assist-mode resumes stay interactive. Best-effort: defaults to
+        interactive (False) if the checkpoint can't be read."""
+        mode = None
+        try:
+            snap = await self.graph.aget_state(config)
+            mode = (getattr(snap, "values", None) or {}).get("mode")
+        except Exception:
+            logger.debug("Could not read checkpoint mode for autonomous arm", exc_info=True)
+        set_autonomous_mode(mode == "agent")
+
     async def resume_after_approval(
         self,
         session_id: str,
@@ -2081,6 +2428,7 @@ class AgentOrchestrator:
         
         try:
             config = {"configurable": {"thread_id": session_id}}
+            await self._arm_autonomous_from_state(config)
             
             update_data = {
                 "user_approval_response": decision,
@@ -2118,6 +2466,7 @@ class AgentOrchestrator:
         
         try:
             config = {"configurable": {"thread_id": session_id}}
+            await self._arm_autonomous_from_state(config)
             
             update_data = {
                 "user_question_answer": answer,

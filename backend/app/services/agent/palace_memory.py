@@ -102,6 +102,7 @@ _SKIP_REMEMBER = {
     "get_notes",
     "get_engagement_brain",
     "get_methodology_progress",
+    "get_threat_model",
     "sanitize_evidence",
     "auto_select_tools",
     "query_assets",
@@ -145,6 +146,9 @@ _TOOL_ROOMS = {
     "test_credential_spray": "authz",
     "fireteam_dispatch": "fireteam",
     "sync_engagement_brain": "methodology",
+    "build_threat_model": "methodology",
+    "update_threat_model": "methodology",
+    "get_threat_model": "methodology",
 }
 
 _WAKE_ROOMS = ("scope_roe", "methodology", "findings", "waf", "diary", "crawl")

@@ -97,6 +97,9 @@ services:
       - AGENT_REST_MAX_ITERATIONS=${AGENT_REST_MAX_ITERATIONS:-15}
       # GitHub Secret Scanning (optional)
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      # WPScan API token — required for --enumerate vp/vt (CVE mapping).
+      # Without it, those enum modes abort. Free token: https://wpscan.com/register
+      - WPSCAN_API_TOKEN=${WPSCAN_API_TOKEN:-}
       # Aegis Oracle service URL (internal docker network)
       - ORACLE_URL=${ORACLE_URL:-http://aegis-oracle:8742}
       - ORACLE_TIMEOUT=${ORACLE_TIMEOUT:-180}

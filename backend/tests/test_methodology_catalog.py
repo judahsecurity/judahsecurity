@@ -154,7 +154,26 @@ def test_methodology_progress_blocks_complete_until_high_pri_resolved():
         if h.priority in ("critical", "high") and h.specialist != "coverage":
             update_hypothesis(brain, h.id, status="killed", evidence="tested clean")
     progress2 = methodology_progress(brain, cmap=cmap.to_dict())
-    assert progress2["ready_to_complete"] is True
+    assert progress2["ready_to_complete_methods"] is True
+    from app.services.agent.engagement_brain import record_surface_coverage
+    leftover = list((progress2.get("coverage") or {}).get("untested") or [])
+    for _ in range(3):
+        if not leftover:
+            break
+        for row in leftover:
+            record_surface_coverage(
+                brain,
+                method=row.get("method") or "GET",
+                path=row.get("path") or "/",
+                host=row.get("host") or "",
+                status="tested_clean",
+                reason="killed high-priority cards",
+            )
+        progress2 = methodology_progress(brain, cmap=cmap.to_dict())
+        leftover = list((progress2.get("coverage") or {}).get("untested") or [])
+    assert progress2["ready_to_complete"] is True, (
+        f"{progress2.get('summary')} leftover={leftover}"
+    )
     assert progress2["ready_for_coverage_spray"] is True
 
 

@@ -7,6 +7,7 @@ Provides a server for exposing security tools via the Model Context Protocol.
 import asyncio
 import json
 import logging
+import os
 import shlex
 import subprocess
 import time
@@ -1664,8 +1665,14 @@ class MCPServer:
         command: List[str],
         timeout: int = 300,
         max_output_chars: int = 2_000_000,
+        success_exit_codes: Optional[set] = None,
     ) -> Dict[str, Any]:
-        """Run a shell command and return the result. Kills process on timeout; caps output size."""
+        """Run a shell command and return the result. Kills process on timeout; caps output size.
+
+        ``success_exit_codes`` defaults to ``{0}``. Pass extra codes for scanners
+        that use a non-zero status to mean "findings found" (WPScan=5, Semgrep=1).
+        """
+        ok_codes = success_exit_codes or {0}
         process = None
         try:
             process = await asyncio.create_subprocess_exec(
@@ -1696,13 +1703,15 @@ class MCPServer:
                 out_str = out_str[:max_output_chars] + f"\n\n... (truncated, {len(stdout)} bytes total)"
             if len(err_str) > max_output_chars:
                 err_str = err_str[:max_output_chars] + "\n\n... (stderr truncated)"
-            if process.returncode != 0 and err_str:
-                logger.debug(f"MCP command finished in {elapsed:.1f}s exit={process.returncode}: {command[0]}")
+            rc = process.returncode
+            ok = rc in ok_codes
+            if rc not in ok_codes and err_str:
+                logger.debug(f"MCP command finished in {elapsed:.1f}s exit={rc}: {command[0]}")
             return {
-                "success": process.returncode == 0,
+                "success": ok,
                 "output": out_str,
-                "error": err_str if process.returncode != 0 else None,
-                "exit_code": process.returncode,
+                "error": None if ok else (err_str or f"exit {rc}"),
+                "exit_code": rc,
             }
         except FileNotFoundError as e:
             return {
@@ -2228,10 +2237,58 @@ class MCPServer:
         return await self._run_command(["arjun", "-h"], timeout=MCP_HELP_TIMEOUT)
     
     async def _execute_wpscan(self, args: str) -> Dict[str, Any]:
-        cmd = ["wpscan"] + self._parse_args(args)
-        if "--no-banner" not in args:
-            cmd.append("--no-banner")
-        return await self._run_command(cmd, timeout=600)
+        parsed = self._parse_args(args)
+        if "--no-banner" not in parsed:
+            parsed.append("--no-banner")
+
+        # WPScan reads WPSCAN_API_TOKEN from the environment. If that env var
+        # is missing, --enumerate vp/vt aborts the *entire* scan. Rewrite those
+        # modes to token-free plugin/theme enum so WordPress recon still runs.
+        token = (os.environ.get("WPSCAN_API_TOKEN") or "").strip()
+        has_api_flag = any(
+            a == "--api-token" or a.startswith("--api-token=") for a in parsed
+        )
+        enum_idx = None
+        enum_joined = False
+        for i, a in enumerate(parsed):
+            if a in ("--enumerate", "-e") and i + 1 < len(parsed):
+                enum_idx = i + 1
+                break
+            if a.startswith("--enumerate="):
+                enum_idx = i
+                enum_joined = True
+                break
+        enum_val = ""
+        if enum_idx is not None:
+            enum_val = (
+                parsed[enum_idx].split("=", 1)[-1] if enum_joined else parsed[enum_idx]
+            )
+        needs_api = any(part.strip() in ("vp", "vt") for part in enum_val.split(","))
+        rewritten = False
+        if needs_api and not token and not has_api_flag:
+            new_enum = ",".join(
+                "p" if p.strip() == "vp" else "t" if p.strip() == "vt" else p.strip()
+                for p in enum_val.split(",")
+                if p.strip()
+            ) or "p,u"
+            if enum_joined:
+                parsed[enum_idx] = f"--enumerate={new_enum}"
+            else:
+                parsed[enum_idx] = new_enum
+            rewritten = True
+
+        cmd = ["wpscan"] + parsed
+        # 0 = clean scan, 5 = interesting findings (vulns). Both are success.
+        result = await self._run_command(
+            cmd, timeout=600, success_exit_codes={0, 5},
+        )
+        if rewritten and isinstance(result.get("output"), str):
+            result["output"] = (
+                "[note] WPSCAN_API_TOKEN is not set; rewrote vp/vt → p/t so the "
+                "scan could run without CVE mapping.\n"
+            ) + result["output"]
+        from app.services.mcp.cli_results import normalize_cli_result
+        return normalize_cli_result("execute_wpscan", result)
     
     async def _wpscan_help(self) -> Dict[str, Any]:
         return await self._run_command(["wpscan", "-h"], timeout=MCP_HELP_TIMEOUT)
@@ -2440,12 +2497,11 @@ class MCPServer:
         if "--quiet" not in parts and "-q" not in parts:
             parts = ["--quiet"] + parts
         cmd = ["semgrep"] + parts
-        result = await self._run_command(cmd, timeout=900)
-        # Semgrep: 0 = clean, 1 = findings, 2 = error. Surface findings as success.
-        if result.get("exit_code") == 1 and result.get("output"):
-            result["success"] = True
-            result["error"] = None
-        return result
+        result = await self._run_command(
+            cmd, timeout=900, success_exit_codes={0, 1},
+        )
+        from app.services.mcp.cli_results import normalize_cli_result
+        return normalize_cli_result("execute_semgrep", result)
 
     async def _semgrep_help(self) -> Dict[str, Any]:
         return await self._run_command(["semgrep", "--help"], timeout=MCP_HELP_TIMEOUT)
@@ -2473,12 +2529,11 @@ class MCPServer:
         if "--quiet" not in parts and "-q" not in parts:
             parts = ["--quiet"] + parts
         cmd = ["trivy"] + parts
-        result = await self._run_command(cmd, timeout=900)
-        # Trivy: 0 = clean, 1 = vulns found (when exit-code is default). Keep findings.
-        if result.get("exit_code") == 1 and result.get("output"):
-            result["success"] = True
-            result["error"] = None
-        return result
+        result = await self._run_command(
+            cmd, timeout=900, success_exit_codes={0, 1},
+        )
+        from app.services.mcp.cli_results import normalize_cli_result
+        return normalize_cli_result("execute_trivy", result)
 
     async def _trivy_help(self) -> Dict[str, Any]:
         return await self._run_command(["trivy", "--help"], timeout=MCP_HELP_TIMEOUT)
@@ -2710,6 +2765,11 @@ class MCPServer:
                     result["raw_output"] = result["output"]
                 result["output"] = reading.to_text()
                 result["augur"] = augur_block
+
+        # Last-chance: scanners that use non-zero exit to mean "found issues"
+        # (WPScan=5, Semgrep/Trivy=1) must never look like failures to the agent.
+        from app.services.mcp.cli_results import normalize_cli_result
+        result = normalize_cli_result(name, result)
 
         return result
     

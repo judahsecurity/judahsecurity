@@ -684,6 +684,8 @@ export default function AgentPage() {
   const [target, setTarget] = useState('');
   const [mode, setMode] = useState<'assist' | 'agent'>('assist');
   const [urlPrefilled, setUrlPrefilled] = useState(false);
+  const [pendingAutostart, setPendingAutostart] = useState(false);
+  const autostartFiredRef = useRef(false);
   const [connectionMode, setConnectionMode] = useState<ConnectionMode>('connecting');
   const [liveSteps, setLiveSteps] = useState<StatusUpdate[]>([]);
   const [modifyInput, setModifyInput] = useState('');
@@ -727,10 +729,14 @@ export default function AgentPage() {
     const t = searchParams.get('target');
     const p = searchParams.get('playbook');
     const q = searchParams.get('question');
+    const m = searchParams.get('mode');
+    const auto = searchParams.get('autostart');
     const tab = searchParams.get('tab');
     if (t != null && t !== '') setTarget(decodeURIComponent(t));
     if (p != null && p !== '') setSelectedPlaybookId(decodeURIComponent(p));
     if (q != null && q !== '') { setQuestion(decodeURIComponent(q)); setUrlPrefilled(true); }
+    if (m === 'assist' || m === 'agent') setMode(m);
+    if (auto === '1' || auto === 'true') setPendingAutostart(true);
     // Handle tab param
     if (tab === 'cve' || tab === 'findings') setActiveTab(tab);
     // Open findings tab if ?view=oracle (legacy redirect)
@@ -1020,6 +1026,27 @@ export default function AgentPage() {
       appendAgentMessage({ answer: `Error: ${msg}` });
     }
   };
+
+  // ── Auto-start (deep link with ?autostart=1) ───────────────────
+  useEffect(() => {
+    if (!pendingAutostart || autostartFiredRef.current) return;
+    if (!agentAvailable || loading) return;
+    const ready = selectedPlaybookId !== 'custom' || question.trim().length > 0;
+    if (!ready) return;
+
+    const fire = () => {
+      if (autostartFiredRef.current) return;
+      autostartFiredRef.current = true;
+      setPendingAutostart(false);
+      handleSend();
+    };
+    // Prefer the WebSocket (streams progress, no timeout). If it hasn't
+    // authenticated shortly, fall back to whatever connection is up.
+    if (connectionMode === 'websocket') { fire(); return; }
+    const t = setTimeout(fire, 3000);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingAutostart, agentAvailable, loading, connectionMode, selectedPlaybookId, question]);
 
   const handleApprove = async (decision: 'approve' | 'modify' | 'abort', modification?: string) => {
     if (!sessionId || loading) return;
