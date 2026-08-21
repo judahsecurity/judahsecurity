@@ -444,6 +444,7 @@ ATTACK_SPECIALIST_NAMES = [
     "file_upload",
     "saml_sso",
     "spa_client",
+    "content_api",
     "agent_tools",
     "coverage",
     "finding_judge",
@@ -454,7 +455,7 @@ ATTACK_SPECIALIST_NAMES = [
 def select_specialists_for_map(
     cmap: Optional[CapabilityMap | Dict[str, Any]],
     *,
-    max_specialists: int = 6,
+    max_specialists: int = 8,
     include_recon: bool = False,
 ) -> List[str]:
     """Pick fireteam specialists from a capability map (tester branching)."""
@@ -464,16 +465,19 @@ def select_specialists_for_map(
         # Thin map: still map + secrets + triage, avoid spray.
         # If an AI/chat surface is already visible, prioritize tool enumeration.
         if cmap and getattr(cmap, "has_ai_agent", False):
-            thin = ["app_mapper", "agent_tools", "vuln_triage"]
+            thin = ["content_api", "app_mapper", "agent_tools", "js_secrets"]
         else:
-            thin = ["app_mapper", "js_secrets", "vuln_triage"]
+            # Empty/404/thin maps still have unlinked dirs, params, and JS APIs.
+            thin = ["content_api", "app_mapper", "js_secrets", "api_authz"]
         # Critical hunts still deserve their specialist even when quality is low.
         thin_hunt_map = {
+            "path_enum": "content_api",
             "unauth_account_lookup": "api_authz",
             "api_authz": "api_authz",
             "azure_function": "coverage",
             "elasticsearch_unauth": "coverage",
             "agent_tools": "agent_tools",
+            "injection": "injection",
         }
         if cmap:
             for item in cmap.ranked_hunt_queue or []:
@@ -511,6 +515,21 @@ def select_specialists_for_map(
             selected.append(name)
         if len(selected) >= max_specialists - 1:
             break
+
+    # Strong observed surfaces always get a slot (don't let hunt-queue order drop them).
+    forced: List[str] = []
+    if getattr(cmap, "has_graphql", False):
+        forced.append("graphql_api")
+    if any((item.get("hunt") or "") == "path_enum" for item in (cmap.ranked_hunt_queue or [])):
+        forced.append("content_api")
+    for name in forced:
+        if name in selected:
+            continue
+        if len(selected) >= max_specialists - 1:
+            selected.insert(1, name)
+            selected = selected[: max_specialists - 1]
+        else:
+            selected.append(name)
 
     # Close with Solomon (finding judge) — demonstrated-compromise bar
     if "finding_judge" not in selected:

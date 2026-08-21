@@ -81,12 +81,20 @@ def test_secrets_and_cloud_use_real_tools():
 
 def test_injection_and_auth_have_new_arsenal_tools():
     allowlists = _specialist_allowlists_from_ast()
-    for name in ("execute_dalfox", "execute_commix", "execute_xsstrike", "execute_sqlmap"):
+    for name in ("execute_dalfox", "execute_commix", "execute_xsstrike", "execute_sqlmap", "execute_interactsh"):
         assert name in allowlists["injection"]
     assert "execute_hydra" in allowlists["auth_logic"]
     assert "test_credential_spray" in allowlists["auth_logic"]
     assert "execute_feroxbuster" in allowlists["web_recon"]
     assert "execute_feroxbuster" in allowlists["content_api"]
+    assert "mutate_list" in allowlists["content_api"]
+    assert "fingerprint_api" in allowlists["content_api"]
+    assert "fingerprint_api" in allowlists["app_mapper"]
+    assert "fetch_lazy_chunks" in allowlists["spa_client"]
+    assert "run_custom_probe" in allowlists["injection"]
+    assert "mutate_captured_request" in allowlists["injection"]
+    assert "mutate_captured_request" in allowlists["api_authz"]
+
 
 
 def test_credential_assault_and_finding_judge_exist():
@@ -151,6 +159,9 @@ def test_coverage_skill_pack_mentions_existing_prometheus_proxy():
     js = ss.skill_pack_for("js_secrets")
     assert "client_secret" in js
     assert "hostname-keyed" in js or "_next/static" in js
+    assert "fetch_lazy_chunks" in js
+    assert "extract_js_endpoints" in js
+    assert "webpack" in js.lower() or "hash" in js.lower()
     assert "emailjs" in js.lower()
     assert "binary" in js.lower() or "firmware" in js.lower()
     auth = ss.skill_pack_for("auth_logic")
@@ -199,6 +210,9 @@ def test_js_secrets_allowlist_can_prove_live_api():
     assert "execute_curl" in tools
     assert "execute_browser" in tools
     assert "execute_interactsh" in tools
+    assert "fetch_lazy_chunks" in tools
+    assert "extract_js_endpoints" in tools
+    assert "ingest_urls_into_map" in tools
     assert "queue_finding_followups" in tools
     assert "validate_finding" in tools
     assert "add_engagement_credential" in tools

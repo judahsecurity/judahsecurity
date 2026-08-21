@@ -144,9 +144,9 @@ class ToolSelector:
         # Derived state
         self._tools_already_run: Set[str] = self._extract_tools_run()
         self._technologies: Set[str] = self._extract_technologies()
-        self._ports: Set[int] = set(self.target_info.get("ports", []))
-        self._services: Set[str] = set(s.lower() for s in self.target_info.get("services", []))
-        self._vulns: List[str] = self.target_info.get("vulnerabilities", [])
+        self._ports: Set[int] = set(self.target_info.get("ports") or [])
+        self._services: Set[str] = set(s.lower() for s in (self.target_info.get("services") or []))
+        self._vulns: List[str] = list(self.target_info.get("vulnerabilities") or [])
         self._target_types: Set[str] = self._classify_target()
 
     # ------------------------------------------------------------------
@@ -154,17 +154,23 @@ class ToolSelector:
     # ------------------------------------------------------------------
 
     def _extract_tools_run(self) -> Set[str]:
-        """Get set of tools already executed in this session."""
-        tools = set()
-        for step in self.execution_trace:
-            tool = step.get("tool_name")
-            if tool:
-                tools.add(tool)
-        return tools
+        """Get set of tools already executed in this session (incl. recon-worker aliases)."""
+        try:
+            from app.services.agent.tester_loop import normalized_tools_run
+            return normalized_tools_run(self.execution_trace)
+        except Exception:
+            tools = set()
+            for step in self.execution_trace:
+                if not isinstance(step, dict):
+                    continue
+                tool = step.get("tool_name")
+                if tool:
+                    tools.add(tool)
+            return tools
 
     def _extract_technologies(self) -> Set[str]:
         """Get lowercase set of discovered technologies."""
-        return set(t.lower() for t in self.target_info.get("technologies", []))
+        return set(t.lower() for t in (self.target_info.get("technologies") or []))
 
     def _classify_target(self) -> Set[str]:
         """Classify the target based on discovered technologies."""
@@ -236,7 +242,22 @@ class ToolSelector:
     def get_recommendations_text(self) -> str:
         """Format recommendations as text for prompt injection."""
         recs = self.get_recommendations()
+        try:
+            from app.services.agent.tester_loop import tester_loop_progress
+            loop = tester_loop_progress({
+                "execution_trace": self.execution_trace,
+                "target_info": self.target_info,
+                "objective": self.target,
+            })
+        except Exception:
+            loop = {}
         if not recs:
+            if loop.get("is_web") and not loop.get("ready_to_complete"):
+                nxt = loop.get("next_action") or "spawn_recon_workers(pack='enrich') then fireteam_dispatch"
+                return (
+                    "Tester loop still open — do not complete. Next: "
+                    + str(nxt)
+                )
             return "All recommended tools have been executed. Consider completing or deepening specific findings."
 
         lines = ["### Smart Tool Recommendations (based on discovered state)"]
@@ -581,8 +602,11 @@ class ToolSelector:
             recs.append(ToolRecommendation(
                 tool_name="discover_parameters",
                 args_template="https://{target}",
-                priority=5,
-                rationale="Discover injectable parameters — forms, query strings, hidden inputs, JS variables.",
+                priority=3,
+                rationale=(
+                    "Mine injectable parameters from forms, query strings, hidden inputs, "
+                    "and JavaScript — unknown inputs, not a known-CVE pass."
+                ),
                 category="parameter_discovery",
             ))
 
@@ -590,7 +614,7 @@ class ToolSelector:
             recs.append(ToolRecommendation(
                 tool_name="execute_arjun",
                 args_template="-u https://{target}",
-                priority=6,
+                priority=4,
                 rationale="Find hidden HTTP parameters with smart wordlists and response analysis.",
                 category="parameter_discovery",
             ))
@@ -738,18 +762,44 @@ class ToolSelector:
             "execute_interceptor" in self._tools_already_run
             or "execute_deep_crawl" in self._tools_already_run
         )
-        if browser_done and "execute_feroxbuster" not in self._tools_already_run:
+        empty_root = False
+        try:
+            from app.services.agent.tester_loop import surface_looks_empty
+            empty_root = surface_looks_empty({
+                "execution_trace": self.execution_trace,
+                "target_info": self.target_info,
+            })
+        except Exception:
+            empty_root = False
+        ferox_done = (
+            "execute_feroxbuster" in self._tools_already_run
+            or "recon_worker:ferox_dirs" in self._tools_already_run
+        )
+        if (browser_done or empty_root) and not ferox_done:
+            recs.append(ToolRecommendation(
+                tool_name="spawn_recon_workers",
+                args_template='pack="enrich" target="https://{target}"',
+                priority=1 if empty_root else 4,
+                rationale=(
+                    "Root looks 404/empty — bounded directory brute-force is mandatory "
+                    "(ferox+katana enrich). A 404 is not a clean host."
+                    if empty_root else
+                    "After the browser walkthrough: bounded directory/path enum "
+                    "(login, reset, admin, .git, swagger, backups) for misconfig context — "
+                    "not a full DirBuster spray. Then ingest_urls_into_map."
+                ),
+                category="reconnaissance",
+            ))
             recs.append(ToolRecommendation(
                 tool_name="execute_feroxbuster",
                 args_template=(
                     "-u https://{target} -w /opt/wordlists/app-dirs-common.txt "
                     "-d 1 -t 20 --rate-limit 50 -q --status-codes 200,204,301,302,401,403"
                 ),
-                priority=4,
+                priority=2 if empty_root else 4,
                 rationale=(
-                    "After the browser walkthrough: bounded directory/path enum "
-                    "(login, reset, admin, .git, swagger, backups) for misconfig context — "
-                    "not a full DirBuster spray. Then ingest_urls_into_map."
+                    "Bounded ferox directory brute-force on the origin. "
+                    "Treat 200/301/302/401/403 as live surface, then param-mine those paths."
                 ),
                 category="reconnaissance",
             ))
@@ -816,10 +866,31 @@ class ToolSelector:
         }
         if crawled and "scan_js_urls_for_secrets" not in self._tools_already_run:
             recs.append(ToolRecommendation(
+                tool_name="fetch_lazy_chunks",
+                args_template="bundle_url=<runtime JS from map> dry_run=true then download",
+                priority=5,
+                rationale="Reconstruct webpack/Vite/Next lazy chunks the crawl never loaded.",
+                category="reconnaissance",
+            ))
+            recs.append(ToolRecommendation(
+                tool_name="extract_js_endpoints",
+                args_template="urls=<fetched chunks + map js_files>",
+                priority=5,
+                rationale="Mine hidden /api, IDOR, and SSRF/redirect URLs from JS before guessing.",
+                category="reconnaissance",
+            ))
+            recs.append(ToolRecommendation(
                 tool_name="scan_js_urls_for_secrets",
                 args_template="urls=<JS URLs from katana/deep_crawl/gau/interceptor>",
                 priority=6,
                 rationale="JS bundles discovered — hunt hardcoded API keys/tokens before deeper testing.",
+                category="reconnaissance",
+            ))
+            recs.append(ToolRecommendation(
+                tool_name="fingerprint_api",
+                args_template="",
+                priority=6,
+                rationale="Profile API hosts/tech from captured XHR before spraying scanners.",
                 category="reconnaissance",
             ))
         if crawled:

@@ -33,6 +33,8 @@ class OperationDirective:
     owasp: List[str] = field(default_factory=list)
     max_iterations: int = 6
     priority: str = "medium"
+    rewrite_note: str = ""
+    brain_slice: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -64,8 +66,13 @@ class OperationDirective:
             f"- Allowed tools: {tools}\n"
             "Rules: stay in lane; do not call fireteam_dispatch; "
             "status 200 alone is never a finding; prove with differentials when authz/tenant; "
-            "execute the listed methodologies against observed evidence before spraying scanners."
+            "execute the listed methodologies against observed evidence before spraying scanners; "
+            "return the executor summary contract (verdict/evidence/spawn) — no raw scan dumps."
         )
+        if self.rewrite_note:
+            block = f"{block}\n\n{self.rewrite_note}"
+        if self.brain_slice:
+            block = f"{block}\n\n{self.brain_slice}"
         # Inject short Burp-style procedure packs for open methodology cards
         try:
             from app.services.agent.methodology_procedures import format_procedures_for_prompt
@@ -164,6 +171,12 @@ def directives_from_hypotheses(
             max_iterations=int(getattr(profile, "max_iterations", 6) or 6),
             priority=priority,
         )
+        try:
+            from app.services.agent.penetration_task_graph import format_executor_slice
+
+            out[name].brain_slice = format_executor_slice(brain, name)
+        except Exception:
+            pass
     return out
 
 

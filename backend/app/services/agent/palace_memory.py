@@ -368,7 +368,7 @@ def search_memory(
             score = 0.0
             if q_vec and drawer.embedding:
                 score = cosine(q_vec, drawer.embedding)
-            blob = f"{drawer.title} {drawer.target or ''} {drawer.content[:2000]}".lower()
+            blob = f"{drawer.title} {drawer.target or ''} {(drawer.content or '')[:2000]}".lower()
             score += 0.06 * sum(1 for kw in keywords if kw in blob)
             if room and drawer.room == room:
                 score += 0.05
@@ -378,8 +378,8 @@ def search_memory(
         out: list[dict] = []
         total = 0
         for score, drawer in ranked[:limit]:
-            snippet = drawer.content[:900]
-            if len(drawer.content) > 900:
+            snippet = (drawer.content or "")[:900]
+            if len(drawer.content or "") > 900:
                 snippet += "..."
             row = {
                 "id": drawer.id,
@@ -470,7 +470,7 @@ def wake_up(
                 and drawer.organization_id != organization_id
             ):
                 continue
-            snippet = drawer.content[:420].strip()
+            snippet = (drawer.content or "")[:420].strip()
             if not snippet:
                 continue
             line = f"- [{drawer.room}] {drawer.title}: {snippet}"

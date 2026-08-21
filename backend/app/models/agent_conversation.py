@@ -1,7 +1,7 @@
 """Agent conversation model for persistent chat history."""
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, JSON, Boolean
+from sqlalchemy import Column, Integer, String, DateTime, Text, ForeignKey, JSON, Boolean, Float
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -24,6 +24,9 @@ class AgentConversation(Base):
     messages = Column(JSON, default=list)
     execution_summary = Column(Text, nullable=True)
     todo_list = Column(JSON, default=list)
+    engagement_replay = Column(JSON, default=list)
+    token_usage = Column(JSON, nullable=True)
+    cost_usd = Column(Float, nullable=True)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

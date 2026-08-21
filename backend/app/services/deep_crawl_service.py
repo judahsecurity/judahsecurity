@@ -776,7 +776,40 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                     except Exception:
                         pass
 
+                def _on_response(resp):
+                    try:
+                        req = resp.request
+                        if req.resource_type not in ("xhr", "fetch"):
+                            return
+                        url = (req.url or "")[:500]
+                        method = req.method
+                        for sample in reversed(result.api_samples):
+                            if sample.get("url") == url and sample.get("method") == method:
+                                sample["status"] = resp.status
+                                try:
+                                    rh = resp.headers or {}
+                                    resp_headers = {}
+                                    for hk in (
+                                        "server", "x-powered-by", "via", "cf-ray",
+                                        "cf-cache-status", "content-type",
+                                        "x-amzn-requestid", "x-amz-apigw-id",
+                                        "x-envoy-upstream-service-time",
+                                    ):
+                                        if hk in rh:
+                                            resp_headers[hk] = str(rh[hk])[:200]
+                                    if resp_headers:
+                                        sample["response_headers"] = resp_headers
+                                    sc = rh.get("set-cookie")
+                                    if sc:
+                                        sample["set_cookie"] = str(sc).split("=", 1)[0][:80]
+                                except Exception:
+                                    pass
+                                break
+                    except Exception:
+                        pass
+
                 page.on("request", _on_request)
+                page.on("response", _on_response)
                 page.on("websocket", lambda ws: result.websockets.add(ws.url)
                         if len(result.websockets) < 100 else None)
 

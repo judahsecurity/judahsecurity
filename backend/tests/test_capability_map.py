@@ -81,9 +81,9 @@ def test_select_specialists_auto_from_map():
     assert "app_mapper" in names
     assert "auth_logic" in names or "saml_sso" in names
     assert "graphql_api" in names
-    assert "finding_judge" not in names
+    assert "content_api" in names
     assert "independent_verifier" not in names
-    assert len(names) <= 6
+    assert len(names) <= 8
 
 
 def test_ai_agent_surface_hunts_agent_tools():
@@ -124,6 +124,7 @@ def test_thin_map_not_ready():
     )
     assert cmap.ready_for_attack is False
     names = select_specialists_for_map(cmap)
+    assert "content_api" in names
     assert "app_mapper" in names
     assert "js_secrets" in names
 

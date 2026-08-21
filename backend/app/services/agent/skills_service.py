@@ -21,6 +21,7 @@ A "skill" is a named, bounded workflow the agent knows how to run:
     * ``host-tenant-bypass`` - Host-header tenant isolation differentials
     * ``nextjs-stack`` / ``springboot-stack`` / ``laravel-stack`` - Tech-conditional hunts
     * ``spa-api-discovery`` - Hidden APIs from JS bundles
+    * ``api-test``     - Interceptor → lazy chunks ∥ fingerprint → JS endpoints
     * ``evidence-hygiene`` - Redact sensitive evidence before reporting
 
 In chat, the user can invoke any skill with::
@@ -204,9 +205,13 @@ SKILLS: list[Skill] = [
         description="JS secrets, endpoint extraction, source-map / dep-confusion / DOM-sink analysis.",
         scan_type="js_recon",
         system_context=(
-            "You are running the JS-RECON skill. Inspect first-party JS bundles for "
-            "leaked credentials, source maps, dependency-confusion candidates, and "
-            "DOM-XSS sinks. Persist everything via create_finding when warranted."
+            "You are running the JS-RECON skill. "
+            "1) execute_interceptor / crawl so js_files exist. "
+            "2) fetch_lazy_chunks(dry_run then download) — webpack/Vite/Next code-split "
+            "chunks the crawl never loaded. "
+            "3) extract_js_endpoints (IDOR/SSRF/redirect triage) then ingest_urls_into_map. "
+            "4) scan_js_urls_for_secrets / gitleaks on the same bundles. "
+            "api_samples are XHR only; script tags live in js_files."
         ),
     ),
     Skill(
@@ -420,11 +425,37 @@ SKILLS: list[Skill] = [
         playbook_id="spa_api_discovery",
         system_context=(
             "You are running the SPA-API-DISCOVERY skill. "
-            "1) Collect first-party JS (execute_katana / js-recon). "
-            "2) Extract API base paths, GraphQL URLs, and object routes from bundles. "
-            "3) Probe discovered APIs unauthenticated then with low-priv auth. "
-            "4) Feed promising object routes into dual-identity-authz or idor-validation. "
-            "Introspection or route listing alone is not a finding — need authz impact."
+            "1) execute_interceptor (interact=true). XHR → api_samples; <script> → js_files. "
+            "2) fetch_lazy_chunks then extract_js_endpoints — code-split routes the crawl missed. "
+            "3) ingest_urls_into_map; probe unauthenticated then low-priv. "
+            "4) Feed object routes into dual-identity-authz or idor-validation. "
+            "Route listing alone is not a finding — need authz impact."
+        ),
+    ),
+    Skill(
+        id="api-test",
+        aliases=["api_test", "apitest", "api-recon", "api_recon"],
+        title="API test (interceptor → chunks ∥ fingerprint → endpoints)",
+        description=(
+            "Recon an API surface: visit with interceptor, download lazy JS chunks and "
+            "fingerprint captured traffic in parallel, then extract endpoints from JS."
+        ),
+        playbook_id="api_test",
+        required_inputs=["target"],
+        system_context=(
+            "You are running the /api-test skill (Judah, not Codex/Caido).\n"
+            "If target is missing, ask for the URL and stop.\n"
+            "Step 1: execute_interceptor (interact=true) on the target. Fallback "
+            "execute_deep_crawl. Capture origin, js_files, api_samples. Report before Step 2. "
+            "Not the operator's desktop Chrome.\n"
+            "Step 2: SAME tool round — fetch_lazy_chunks(dry_run then download) using "
+            "Step 1 base URL/publicPath, AND fingerprint_api on the original target string. "
+            "Fingerprint is independent of chunk files. If fingerprint is blocked/no-data, "
+            "relay it and continue. Do not require Caido.\n"
+            "Step 3: extract_js_endpoints on js_files + fetched chunks, ingest_urls_into_map. "
+            "Triage /api, IDOR, SSRF/redirect. Do not write all_endpoints.txt.\n"
+            "Final report: origin, chunk ok/FAIL, fingerprint hosts+tech+coverage, "
+            "endpoint count, highest-value leads. Map surface; do not claim vulns yet."
         ),
     ),
     Skill(
@@ -683,6 +714,13 @@ def parse_skill_prefix(message: str) -> tuple[Optional[Skill], dict, str]:
             free_text_parts.append(tok)
 
     free_text = " ".join(free_text_parts).strip()
+    if skill and free_text and "target" not in args:
+        first, _, extra = free_text.partition(" ")
+        from app.services.agent.api_test_pipeline import looks_like_target
+
+        if looks_like_target(first):
+            args["target"] = first
+            free_text = extra.strip()
     return skill, args, free_text
 
 
@@ -796,6 +834,14 @@ def build_skill_context(skill: Skill, args: dict, free_text: str = "") -> str:
         f"## Active skill: {skill.title}",
         skill.system_context or "",
     ]
+    if skill.id == "api-test":
+        from app.services.agent.api_test_pipeline import pipeline_prompt
+        from app.services.agent.skill_md import skill_body
+
+        parts.append(pipeline_prompt(str((args or {}).get("target") or free_text or "")))
+        md = (skill_body("api_test") or "").strip()
+        if md:
+            parts.append(md)
     if args:
         parts.append("Arguments:")
         for k, v in args.items():

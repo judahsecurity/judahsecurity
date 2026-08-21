@@ -16,6 +16,8 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "SKILL PACK — map first:\n"
         "- Prefer execute_deep_crawl / execute_browser to capture forms, APIs, auth surfaces.\n"
         "- Persist a compact capability summary via save_note(artifact=capability_map).\n"
+        "- list_captured_requests then hand indexes to hunters. mutate_list(kind='paths') on 404s.\n"
+        "- fingerprint_api on captured samples (Judah traffic, not Caido). If blocked/no-data, crawl first.\n"
         "- Do not spray Nuclei; hand off to attack specialists."
     ),
     "auth_logic": (
@@ -126,6 +128,7 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "SKILL PACK — IDOR / BOLA proof:\n"
         "- Pick mapped object APIs with IDs (users, orgs, files, invoices).\n"
         "- compare_requests across anonymous / user A / user B (or adjacent IDs).\n"
+        "- Prefer mutate_captured_request on list_captured_requests indexes (one field).\n"
         "- PASS only if other-user fields appear; status 200 alone is not a finding.\n"
         "- Client-supplied userType/userId/Admin in publicPortal: compare_requests empty vs Admin; "
         "bounded sample; queue_finding_followups(vuln_type='client_role_param').\n"
@@ -174,12 +177,15 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "- Prove the bypass; do not complete fraudulent checkout or irreversible actions."
     ),
     "injection": (
-        "SKILL PACK — injection / XSS:\n"
-        "- Only probe ranked params/forms from the map (or arjun/discover_parameters hits).\n"
+        "SKILL PACK — injection / unknown inputs:\n"
+        "- If params are unknown: mutate_list(kind='params') then discover_parameters + arjun.\n"
         "- SQLi: canary → execute_sqlmap --batch on confirmed candidates.\n"
-        "- XSS: execute_xsstrike and/or execute_dalfox; confirm with execute_browser when needed.\n"
+        "- XSS: mutate_list(kind='xss') then mutate_captured_request / xsstrike / browser.\n"
         "- Command injection: execute_commix only on high-signal params; no blind spray.\n"
-        "- Report with payload + response evidence; no status-only findings."
+        "- SSRF: url/uri/request/datasource/execute fields → execute_interactsh then "
+        "mutate_captured_request(location='body_json'|query, field=url, value=payload_url). "
+        "Prove with run_custom_probe if you need a 10-line PoC. Never metadata/localhost.\n"
+        "- Report with payload + response evidence; no status-only findings. Not a CVE checklist."
     ),
     "file_upload": (
         "SKILL PACK — upload abuse:\n"
@@ -197,6 +203,7 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
     ),
     "spa_client": (
         "SKILL PACK — SPA / DOM:\n"
+        "- fetch_lazy_chunks then extract_js_endpoints before guessing client routes.\n"
         "- Hunt DOM XSS sinks, hidden client routes, and JS-driven APIs missing auth.\n"
         "- Confirm DOM XSS in browser; hidden APIs → hand off to api_authz."
     ),
@@ -238,7 +245,11 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
     ),
     "js_secrets": (
         "SKILL PACK — JS secrets (Uri):\n"
-        "- scan_js_urls_for_secrets / execute_hermes / execute_gitleaks on first-party bundles, "
+        "- Companion workflow (lazy-chunk then mine): fetch_lazy_chunks(dry_run=true) on a "
+        "first-party webpack/Vite/Next runtime, then download. 404s on hash-map ids are expected.\n"
+        "- extract_js_endpoints on those chunks — triage /api, absolute URLs, IDOR (?id=), "
+        "SSRF/redirect (?url=/?redirect=). ingest_urls_into_map in-scope paths. Filter .css/.png.\n"
+        "- Then scan_js_urls_for_secrets / execute_hermes / execute_gitleaks on first-party bundles, "
         "especially /_next/static/chunks/*.js on admin/sandbox UIs.\n"
         "- Look for hostname-keyed objects mapping prod/dev/qa hosts to client_id + client_secret. "
         "Those are often sent as HTTP headers (client_id / client_secret), not Bearer tokens.\n"
@@ -298,12 +309,15 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "- Confirm dangling CNAME + provider fingerprint before HIGH severity."
     ),
     "content_api": (
-        "SKILL PACK — content/API enum:\n"
-        "- After Interceptor: run bounded feroxbuster/ffuf with "
-        "/opt/wordlists/app-dirs-common.txt (-d 1, rate-limited) for login/reset/admin/"
-        ".git/swagger/backups — not full DirBuster.\n"
+        "SKILL PACK — content/API enum (curious tester):\n"
+        "- 404/empty/login-wall: still run bounded feroxbuster/ffuf with "
+        "/opt/wordlists/app-dirs-common.txt (-d 1, rate-limited). Unlinked dirs are the point.\n"
         "- Fetch robots.txt + sitemap.xml; merge with katana/gau via ingest_urls_into_map.\n"
-        "- Crawl + parameter discovery; feed map for authz/injection specialists."
+        "- fingerprint_api from captured XHR (not Caido). If no samples, interceptor/crawl first.\n"
+        "- extract_js_endpoints on first-party bundles for hidden /api routes.\n"
+        "- On every live hit: discover_parameters + execute_arjun (GET and POST). "
+        "mutate_list(kind='paths'|'params') is a single shot — then brute/arjun, don't think about it.\n"
+        "Hand new params to injection/api_authz. This is unknown-bug hunting, not Nuclei."
     ),
     "code_sast": (
         "SKILL PACK — white-box (Huldah):\n"
@@ -317,5 +331,26 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
 
 
 def skill_pack_for(specialist: str) -> str:
-    """Return the skill-pack body for a specialist, or empty string."""
-    return (SPECIALIST_SKILL_PACKS.get(specialist) or "").strip()
+    """Return the skill-pack body for a specialist, or empty string.
+
+    Appends Claude-style SKILL.md packs (lazy chunks, JS analysis, interceptor
+    recipes) where the specialist actually uses those tools.
+    """
+    parts = [(SPECIALIST_SKILL_PACKS.get(specialist) or "").strip()]
+    extra = {
+        "js_secrets": ("lazy_chunk_downloader", "js_analysis"),
+        "spa_client": ("lazy_chunk_downloader", "js_analysis", "interceptor"),
+        "content_api": ("js_analysis", "interceptor", "api_fingerprint"),
+        "app_mapper": ("interceptor", "api_fingerprint"),
+    }.get(specialist) or ()
+    if extra:
+        try:
+            from app.services.agent.skill_md import skill_body
+
+            for name in extra:
+                body = (skill_body(name) or "").strip()
+                if body:
+                    parts.append(body)
+        except Exception:
+            pass
+    return "\n\n".join(p for p in parts if p)

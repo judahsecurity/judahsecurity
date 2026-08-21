@@ -11,7 +11,7 @@ import logging
 import uuid
 from typing import Optional, Literal, List
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, Field
 
 from sqlalchemy.orm import Session
 
@@ -42,6 +42,8 @@ class AgentQueryRequest(BaseModel):
     playbook_id: Optional[str] = None
     target: Optional[str] = None
     mode: Optional[Literal["assist", "agent"]] = "assist"
+    load_session_id: Optional[str] = None
+    price_limit_usd: Optional[float] = None
 
     @field_validator("question")
     @classmethod
@@ -51,6 +53,25 @@ class AgentQueryRequest(BaseModel):
         if not v.strip():
             raise ValueError("question must not be empty")
         return v
+
+
+class AgentSteerRequest(BaseModel):
+    session_id: str
+    message: str
+
+    @field_validator("message")
+    @classmethod
+    def validate_steer(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("message must not be empty")
+        if len(v) > 4000:
+            raise ValueError("message must be at most 4,000 characters")
+        return v.strip()
+
+
+class AgentLoadRequest(BaseModel):
+    session_id: str
+    source_session_id: str
 
 
 class AgentApprovalRequest(BaseModel):
@@ -82,6 +103,10 @@ class AgentResponse(BaseModel):
     error: Optional[str] = None
     # Soft notice when preferred LLM was unavailable but a fallback kept serving
     warning: Optional[str] = None
+    engagement_replay: list = Field(default_factory=list)
+    token_usage: Optional[dict] = None
+    cost_usd: Optional[float] = None
+    price_limit_usd: Optional[float] = None
 
 
 class ConversationSummary(BaseModel):
@@ -196,6 +221,25 @@ def _save_conversation(
         conv.is_active = not result.task_complete
         conv.todo_list = result.todo_list or []
         conv.execution_summary = result.execution_trace_summary or ""
+        if getattr(result, "engagement_replay", None) is not None:
+            conv.engagement_replay = result.engagement_replay
+        if getattr(result, "token_usage", None) is not None:
+            conv.token_usage = result.token_usage
+        if getattr(result, "cost_usd", None) is not None:
+            conv.cost_usd = result.cost_usd
+        try:
+            from app.services.agent.observability import export_otlp_replay
+
+            export_otlp_replay(
+                {
+                    "steps": result.engagement_replay or [],
+                    "token_usage": result.token_usage or {},
+                },
+                service_name="judah-agent",
+                session_id=session_id,
+            )
+        except Exception:
+            logger.debug("OTLP replay export skipped", exc_info=True)
 
     conv.messages = msgs
     db.commit()
@@ -241,6 +285,10 @@ def _build_agent_response(result, session_id: str) -> AgentResponse:
         awaiting_question=result.awaiting_question,
         question_request=result.question_request,
         warning=getattr(result, "warning", None),
+        engagement_replay=getattr(result, "engagement_replay", None) or [],
+        token_usage=getattr(result, "token_usage", None),
+        cost_usd=getattr(result, "cost_usd", None),
+        price_limit_usd=getattr(result, "price_limit_usd", None),
     )
 
 
@@ -281,7 +329,7 @@ async def query_agent(
     _save_conversation(db, session_id, current_user.id, org_id, "user", question, mode=request.mode or "assist")
 
     try:
-        result = await asyncio.wait_for(
+        invoke_task = asyncio.create_task(
             orchestrator.invoke(
                 question=question,
                 user_id=str(current_user.id),
@@ -290,7 +338,12 @@ async def query_agent(
                 initial_todos=initial_todos,
                 mode=request.mode or "assist",
                 max_iterations=settings.AGENT_REST_MAX_ITERATIONS,
-            ),
+                load_session_id=request.load_session_id,
+                price_limit_usd=request.price_limit_usd,
+            )
+        )
+        result = await asyncio.wait_for(
+            invoke_task,
             timeout=settings.AGENT_REQUEST_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
@@ -334,14 +387,17 @@ async def approve_phase_transition(
         raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
     
     try:
-        result = await asyncio.wait_for(
+        invoke_task = asyncio.create_task(
             orchestrator.resume_after_approval(
                 session_id=request.session_id,
                 user_id=str(current_user.id),
                 organization_id=org_id,
                 decision=request.decision,
                 modification=request.modification,
-            ),
+            )
+        )
+        result = await asyncio.wait_for(
+            invoke_task,
             timeout=settings.AGENT_REQUEST_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
@@ -381,13 +437,16 @@ async def answer_agent_question(
     _save_conversation(db, request.session_id, current_user.id, org_id, "user", request.answer)
 
     try:
-        result = await asyncio.wait_for(
+        invoke_task = asyncio.create_task(
             orchestrator.resume_after_answer(
                 session_id=request.session_id,
                 user_id=str(current_user.id),
                 organization_id=org_id,
                 answer=request.answer,
-            ),
+            )
+        )
+        result = await asyncio.wait_for(
+            invoke_task,
             timeout=settings.AGENT_REQUEST_TIMEOUT_SECONDS,
         )
     except asyncio.TimeoutError:
@@ -401,6 +460,91 @@ async def answer_agent_question(
 
     _save_conversation(db, request.session_id, current_user.id, org_id, "agent", result.answer or "", result)
     return _build_agent_response(result, request.session_id)
+
+
+@router.post("/sessions/{session_id}/stop")
+async def stop_agent_run(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Cancel an in-flight agent run so it stops spending LLM tokens."""
+    if not session_id or not session_id.strip():
+        raise HTTPException(status_code=400, detail="session_id is required")
+    org_id = _resolve_agent_organization_id(current_user, db)
+    if not org_id:
+        raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
+    cancelled = _stop_agent_session(session_id)
+    logger.info(
+        "Agent stop requested by user %s for session %s (task_cancelled=%s)",
+        current_user.id,
+        session_id,
+        cancelled,
+    )
+    return {"ok": True, "cancelled": cancelled, "session_id": session_id}
+
+
+@router.post("/sessions/{session_id}/steer")
+async def steer_agent_run(
+    session_id: str,
+    request: AgentSteerRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Inject an operator instruction into a live hunt without cancelling it."""
+    if request.session_id != session_id:
+        raise HTTPException(status_code=400, detail="session_id mismatch")
+    org_id = _resolve_agent_organization_id(current_user, db)
+    if not org_id:
+        raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
+    from app.services.agent.run_control import has_running_task, queue_steer
+
+    in_flight = queue_steer(session_id, request.message)
+    return {
+        "ok": True,
+        "session_id": session_id,
+        "queued": True,
+        "run_in_progress": in_flight or has_running_task(session_id),
+    }
+
+
+@router.post("/sessions/{session_id}/compact")
+async def compact_agent_run(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Queue a CAI-style context compact for the next think turn."""
+    org_id = _resolve_agent_organization_id(current_user, db)
+    if not org_id:
+        raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
+    from app.services.agent.run_control import request_compact
+
+    request_compact(session_id)
+    return {"ok": True, "session_id": session_id, "compact_queued": True}
+
+
+@router.post("/sessions/{session_id}/load")
+async def load_prior_hunt(
+    session_id: str,
+    request: AgentLoadRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Queue a prior conversation brief into this session (CAI /load)."""
+    if request.session_id != session_id:
+        raise HTTPException(status_code=400, detail="session_id mismatch")
+    org_id = _resolve_agent_organization_id(current_user, db)
+    if not org_id:
+        raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
+    from app.services.agent.run_control import queue_load_brief
+    from app.services.agent.session_ops import load_prior_conversation_brief
+
+    brief = load_prior_conversation_brief(db, org_id, request.source_session_id)
+    if not brief:
+        raise HTTPException(status_code=404, detail="Prior session not found")
+    queue_load_brief(session_id, brief)
+    return {"ok": True, "session_id": session_id, "source_session_id": request.source_session_id}
 
 
 @router.get("/playbooks")
@@ -468,7 +612,13 @@ async def get_agent_status():
             "websocket_streaming": True,
             "cross_session_learning": True,
             "conversation_history": True,
+            "mid_run_steer": True,
+            "session_compact": True,
+            "spend_cap": True,
+            "mcp_client": True,
+            "custom_probe": True,
         } if available else {},
+        "price_limit_usd": settings.AGENT_PRICE_LIMIT_USD if available else None,
     }
 
 
@@ -540,6 +690,9 @@ async def get_conversation(
         "messages": conv.messages or [],
         "todo_list": conv.todo_list or [],
         "execution_summary": conv.execution_summary,
+        "engagement_replay": conv.engagement_replay or [],
+        "token_usage": conv.token_usage,
+        "cost_usd": conv.cost_usd,
         "created_at": conv.created_at.isoformat() if conv.created_at else "",
         "updated_at": conv.updated_at.isoformat() if conv.updated_at else "",
     }
@@ -627,7 +780,38 @@ class WebSocketManager:
                 self.disconnect(session_id)
 
 
-ws_manager = WebSocketManager()
+def _stop_agent_session(session_id: str) -> bool:
+    """Cancel an in-flight agent run and its recon streams."""
+    from app.services.agent.run_control import request_stop
+    from app.services.agent import recon_workers
+
+    cancelled = request_stop(session_id)
+    try:
+        recon_workers.clear_session(session_id)
+    except Exception:
+        logger.debug("recon worker clear on stop failed", exc_info=True)
+    return cancelled
+
+
+def _ws_response_payload(result) -> dict:
+    return {
+        "type": "response",
+        "answer": result.answer,
+        "current_phase": result.current_phase,
+        "iteration_count": result.iteration_count,
+        "task_complete": result.task_complete,
+        "todo_list": result.todo_list,
+        "execution_trace_summary": result.execution_trace_summary,
+        "awaiting_approval": result.awaiting_approval,
+        "approval_request": result.approval_request,
+        "awaiting_question": result.awaiting_question,
+        "question_request": result.question_request,
+        "warning": getattr(result, "warning", None),
+        "engagement_replay": getattr(result, "engagement_replay", None) or [],
+        "token_usage": getattr(result, "token_usage", None),
+        "cost_usd": getattr(result, "cost_usd", None),
+        "price_limit_usd": getattr(result, "price_limit_usd", None),
+    }
 
 
 def _authenticate_ws_token(token: str):
@@ -658,9 +842,14 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
     
     Message format (client -> server):
     - {"type": "init", "token": "jwt_token"}
-    - {"type": "query", "question": "...", "playbook_id": "...", "target": "...", "mode": "..."}
+    - {"type": "query", "question": "...", "playbook_id": "...", "target": "...", "mode": "...",
+       "load_session_id": "...", "price_limit_usd": 5.0}
+    - {"type": "steer", "message": "..."}  # mid-run; does not cancel the hunt
+    - {"type": "compact"}
+    - {"type": "load", "source_session_id": "..."}
     - {"type": "approval", "decision": "approve|modify|abort", "modification": "..."}
     - {"type": "answer", "answer": "..."}
+    - {"type": "stop"}
     - {"type": "ping"}
     
     Message format (server -> client):
@@ -672,7 +861,12 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
     - {"type": "auth_session_update", "authenticated": bool, "cookie_count": N}
     - {"type": "pending_confirmation", "token": "...", "tool_name": "..."}
     - {"type": "tool_complete", "tool_name": "...", "success": true, "output_summary": "..."}
+    - {"type": "cost", "cost_usd": N, "limit_usd": N, "capped": bool}
+    - {"type": "steered", "message": "..."}
+    - {"type": "compacted", "brief": "..."}
+    - {"type": "steer_queued" | "compact_queued" | "load_queued"}
     - {"type": "response", ...full AgentResponse fields...}
+    - {"type": "cancelled", "message": "..."}
     - {"type": "error", "message": "..."}
     - {"type": "pong"}
     """
@@ -685,10 +879,60 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
         user_id = None
         org_id = None
         authenticated = False
+        run_holder: dict = {"task": None, "cancelled_sent": False}
 
         async def status_callback(msg: dict):
             """Forward orchestrator status updates to WebSocket."""
             await ws_manager.send_message(session_id, msg)
+
+        async def emit_cancelled():
+            if run_holder["cancelled_sent"]:
+                return
+            run_holder["cancelled_sent"] = True
+            await ws_manager.send_message(session_id, {
+                "type": "cancelled",
+                "message": "Stopped by operator. No further LLM or tool calls will run.",
+            })
+
+        async def finish_result(result, *, save_user_question=None, mode=None):
+            from app.services.agent.run_control import is_stop_requested
+            if run_holder["cancelled_sent"] or is_stop_requested(session_id):
+                if not run_holder["cancelled_sent"]:
+                    await emit_cancelled()
+                return
+            db = SessionLocal()
+            try:
+                if save_user_question:
+                    _save_conversation(
+                        db, session_id, user_id, org_id, "user", save_user_question, mode=mode,
+                    )
+                if not result.error:
+                    _save_conversation(db, session_id, user_id, org_id, "agent", result.answer or "", result)
+            finally:
+                db.close()
+            if result.error:
+                await websocket.send_json({"type": "error", "message": result.error})
+            else:
+                await websocket.send_json(_ws_response_payload(result))
+
+        def spawn_run(coro):
+            from app.services.agent.run_control import register_run
+
+            async def _guarded():
+                try:
+                    await coro
+                except asyncio.CancelledError:
+                    await emit_cancelled()
+
+            task = asyncio.create_task(_guarded())
+            run_holder["task"] = task
+            run_holder["cancelled_sent"] = False
+            register_run(session_id, task)
+            return task
+
+        def run_in_progress() -> bool:
+            task = run_holder.get("task")
+            return bool(task is not None and not task.done())
 
         # Require authentication within 30 seconds
         try:
@@ -730,6 +974,12 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                 if not user_id:
                     await websocket.send_json({"type": "error", "message": "Not authenticated. Send {type: 'init', token: '...'} first."})
                     continue
+                if run_in_progress():
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "A run is already in progress. Stop it first.",
+                    })
+                    continue
                 
                 question = data.get("question", "")
                 if not question or not question.strip():
@@ -741,120 +991,109 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                 playbook_id = data.get("playbook_id")
                 target = data.get("target")
                 mode = data.get("mode", "assist")
+                load_session_id = data.get("load_session_id") or None
+                price_limit_usd = None
+                if data.get("price_limit_usd") is not None:
+                    try:
+                        price_limit_usd = float(data.get("price_limit_usd"))
+                    except (TypeError, ValueError):
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": "price_limit_usd must be a number",
+                        })
+                        continue
 
                 initial_todos = None
                 if playbook_id:
                     objective, initial_todos = build_initial_objective(playbook_id, target)
                     if objective:
                         question = objective
-                
-                try:
-                    orchestrator = await get_agent_orchestrator()
-                    result = await asyncio.wait_for(
-                        orchestrator.invoke(
-                            question=question,
-                            user_id=str(user_id),
-                            organization_id=org_id,
-                            session_id=session_id,
-                            initial_todos=initial_todos,
-                            mode=mode,
-                            status_callback=status_callback,
-                            max_iterations=settings.AGENT_WS_MAX_ITERATIONS,
-                        ),
-                        timeout=settings.AGENT_REQUEST_TIMEOUT_SECONDS,
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(f"WS agent query timed out after {settings.AGENT_REQUEST_TIMEOUT_SECONDS}s for session {session_id}")
-                    await websocket.send_json({
-                        "type": "error",
-                        "message": f"The agent took longer than {settings.AGENT_REQUEST_TIMEOUT_SECONDS // 60} minutes and timed out. Try a more specific question.",
-                    })
-                    continue
-                except Exception as e:
-                    logger.error(f"WS agent query error for session {session_id}: {e}")
-                    await websocket.send_json({"type": "error", "message": f"Agent error: {e}"})
-                    continue
-                
-                # Save to conversation history
-                db = SessionLocal()
-                try:
-                    _save_conversation(db, session_id, user_id, org_id, "user", question, mode=mode)
-                    if not result.error:
-                        _save_conversation(db, session_id, user_id, org_id, "agent", result.answer or "", result)
-                finally:
-                    db.close()
 
-                if result.error:
-                    await websocket.send_json({"type": "error", "message": result.error})
-                else:
-                    await websocket.send_json({
-                        "type": "response",
-                        "answer": result.answer,
-                        "current_phase": result.current_phase,
-                        "iteration_count": result.iteration_count,
-                        "task_complete": result.task_complete,
-                        "todo_list": result.todo_list,
-                        "execution_trace_summary": result.execution_trace_summary,
-                        "awaiting_approval": result.awaiting_approval,
-                        "approval_request": result.approval_request,
-                        "awaiting_question": result.awaiting_question,
-                        "question_request": result.question_request,
-                        "warning": getattr(result, "warning", None),
-                    })
+                async def _run_query(
+                    q=question,
+                    todos=initial_todos,
+                    run_mode=mode,
+                    load_id=load_session_id,
+                    limit=price_limit_usd,
+                ):
+                    try:
+                        orchestrator = await get_agent_orchestrator()
+                        result = await asyncio.wait_for(
+                            orchestrator.invoke(
+                                question=q,
+                                user_id=str(user_id),
+                                organization_id=org_id,
+                                session_id=session_id,
+                                initial_todos=todos,
+                                mode=run_mode,
+                                status_callback=status_callback,
+                                max_iterations=settings.AGENT_WS_MAX_ITERATIONS,
+                                load_session_id=load_id,
+                                price_limit_usd=limit,
+                            ),
+                            timeout=settings.AGENT_REQUEST_TIMEOUT_SECONDS,
+                        )
+                        await finish_result(result, save_user_question=q, mode=run_mode)
+                    except asyncio.CancelledError:
+                        await emit_cancelled()
+                    except asyncio.TimeoutError:
+                        logger.warning(f"WS agent query timed out after {settings.AGENT_REQUEST_TIMEOUT_SECONDS}s for session {session_id}")
+                        await websocket.send_json({
+                            "type": "error",
+                            "message": f"The agent took longer than {settings.AGENT_REQUEST_TIMEOUT_SECONDS // 60} minutes and timed out. Try a more specific question.",
+                        })
+                    except Exception as e:
+                        logger.error(f"WS agent query error for session {session_id}: {e}")
+                        await websocket.send_json({"type": "error", "message": f"Agent error: {e}"})
+
+                spawn_run(_run_query())
             
             elif msg_type == "approval":
                 if not user_id:
                     await websocket.send_json({"type": "error", "message": "Not authenticated"})
                     continue
-                
-                try:
-                    orchestrator = await get_agent_orchestrator()
-                    result = await asyncio.wait_for(
-                        orchestrator.resume_after_approval(
-                            session_id=session_id,
-                            user_id=str(user_id),
-                            organization_id=org_id,
-                            decision=data.get("decision", "abort"),
-                            modification=data.get("modification"),
-                            status_callback=status_callback,
-                        ),
-                        timeout=settings.AGENT_REQUEST_TIMEOUT_SECONDS,
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(f"WS agent approval timed out for session {session_id}")
-                    await websocket.send_json({"type": "error", "message": "Agent approval processing timed out."})
-                    continue
-                except Exception as e:
-                    logger.error(f"WS agent approval error for session {session_id}: {e}")
-                    await websocket.send_json({"type": "error", "message": f"Agent error: {e}"})
+                if run_in_progress():
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "A run is already in progress. Stop it first.",
+                    })
                     continue
 
-                db = SessionLocal()
-                try:
-                    if not result.error:
-                        _save_conversation(db, session_id, user_id, org_id, "agent", result.answer or "", result)
-                finally:
-                    db.close()
-                
-                if result.error:
-                    await websocket.send_json({"type": "error", "message": result.error})
-                else:
-                    await websocket.send_json({
-                        "type": "response",
-                        "answer": result.answer,
-                        "current_phase": result.current_phase,
-                        "iteration_count": result.iteration_count,
-                        "task_complete": result.task_complete,
-                        "todo_list": result.todo_list,
-                        "execution_trace_summary": result.execution_trace_summary,
-                        "awaiting_approval": result.awaiting_approval,
-                        "approval_request": result.approval_request,
-                        "warning": getattr(result, "warning", None),
-                    })
+                async def _run_approval(decision=data.get("decision", "abort"), modification=data.get("modification")):
+                    try:
+                        orchestrator = await get_agent_orchestrator()
+                        result = await asyncio.wait_for(
+                            orchestrator.resume_after_approval(
+                                session_id=session_id,
+                                user_id=str(user_id),
+                                organization_id=org_id,
+                                decision=decision,
+                                modification=modification,
+                                status_callback=status_callback,
+                            ),
+                            timeout=settings.AGENT_REQUEST_TIMEOUT_SECONDS,
+                        )
+                        await finish_result(result)
+                    except asyncio.CancelledError:
+                        await emit_cancelled()
+                    except asyncio.TimeoutError:
+                        logger.warning(f"WS agent approval timed out for session {session_id}")
+                        await websocket.send_json({"type": "error", "message": "Agent approval processing timed out."})
+                    except Exception as e:
+                        logger.error(f"WS agent approval error for session {session_id}: {e}")
+                        await websocket.send_json({"type": "error", "message": f"Agent error: {e}"})
+
+                spawn_run(_run_approval())
             
             elif msg_type == "answer":
                 if not user_id:
                     await websocket.send_json({"type": "error", "message": "Not authenticated"})
+                    continue
+                if run_in_progress():
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "A run is already in progress. Stop it first.",
+                    })
                     continue
                 
                 answer_text = data.get("answer", "")
@@ -865,56 +1104,103 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                 finally:
                     db.close()
 
-                try:
-                    orchestrator = await get_agent_orchestrator()
-                    result = await asyncio.wait_for(
-                        orchestrator.resume_after_answer(
-                            session_id=session_id,
-                            user_id=str(user_id),
-                            organization_id=org_id,
-                            answer=answer_text,
-                            status_callback=status_callback,
-                        ),
-                        timeout=settings.AGENT_REQUEST_TIMEOUT_SECONDS,
-                    )
-                except asyncio.TimeoutError:
-                    logger.warning(f"WS agent answer timed out for session {session_id}")
-                    await websocket.send_json({"type": "error", "message": "Agent answer processing timed out."})
+                async def _run_answer(answer=answer_text):
+                    try:
+                        orchestrator = await get_agent_orchestrator()
+                        result = await asyncio.wait_for(
+                            orchestrator.resume_after_answer(
+                                session_id=session_id,
+                                user_id=str(user_id),
+                                organization_id=org_id,
+                                answer=answer,
+                                status_callback=status_callback,
+                            ),
+                            timeout=settings.AGENT_REQUEST_TIMEOUT_SECONDS,
+                        )
+                        await finish_result(result)
+                    except asyncio.CancelledError:
+                        await emit_cancelled()
+                    except asyncio.TimeoutError:
+                        logger.warning(f"WS agent answer timed out for session {session_id}")
+                        await websocket.send_json({"type": "error", "message": "Agent answer processing timed out."})
+                    except Exception as e:
+                        logger.error(f"WS agent answer error for session {session_id}: {e}")
+                        await websocket.send_json({"type": "error", "message": f"Agent error: {e}"})
+
+                spawn_run(_run_answer())
+
+            elif msg_type == "steer":
+                if not user_id:
+                    await websocket.send_json({"type": "error", "message": "Not authenticated"})
                     continue
-                except Exception as e:
-                    logger.error(f"WS agent answer error for session {session_id}: {e}")
-                    await websocket.send_json({"type": "error", "message": f"Agent error: {e}"})
+                message = (data.get("message") or "").strip()
+                if not message:
+                    await websocket.send_json({"type": "error", "message": "message must not be empty"})
                     continue
+                if len(message) > 4000:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "message must be at most 4,000 characters",
+                    })
+                    continue
+                from app.services.agent.run_control import has_running_task, queue_steer
+
+                in_flight = queue_steer(session_id, message)
+                await websocket.send_json({
+                    "type": "steer_queued",
+                    "queued": True,
+                    "run_in_progress": in_flight or has_running_task(session_id),
+                })
+
+            elif msg_type == "compact":
+                if not user_id:
+                    await websocket.send_json({"type": "error", "message": "Not authenticated"})
+                    continue
+                from app.services.agent.run_control import request_compact
+
+                request_compact(session_id)
+                await websocket.send_json({"type": "compact_queued", "session_id": session_id})
+
+            elif msg_type == "load":
+                if not user_id:
+                    await websocket.send_json({"type": "error", "message": "Not authenticated"})
+                    continue
+                source = (data.get("source_session_id") or "").strip()
+                if not source:
+                    await websocket.send_json({
+                        "type": "error",
+                        "message": "source_session_id is required",
+                    })
+                    continue
+                from app.services.agent.run_control import queue_load_brief
+                from app.services.agent.session_ops import load_prior_conversation_brief
 
                 db = SessionLocal()
                 try:
-                    if not result.error:
-                        _save_conversation(db, session_id, user_id, org_id, "agent", result.answer or "", result)
+                    brief = load_prior_conversation_brief(db, org_id, source)
                 finally:
                     db.close()
-                
-                if result.error:
-                    await websocket.send_json({"type": "error", "message": result.error})
-                else:
-                    await websocket.send_json({
-                        "type": "response",
-                        "answer": result.answer,
-                        "current_phase": result.current_phase,
-                        "iteration_count": result.iteration_count,
-                        "task_complete": result.task_complete,
-                        "todo_list": result.todo_list,
-                        "execution_trace_summary": result.execution_trace_summary,
-                        "awaiting_question": result.awaiting_question,
-                        "question_request": result.question_request,
-                        "warning": getattr(result, "warning", None),
-                    })
+                if not brief:
+                    await websocket.send_json({"type": "error", "message": "Prior session not found"})
+                    continue
+                queue_load_brief(session_id, brief)
+                await websocket.send_json({
+                    "type": "load_queued",
+                    "source_session_id": source,
+                })
+
+            elif msg_type == "stop":
+                _stop_agent_session(session_id)
+                await emit_cancelled()
             
             elif msg_type == "ping":
                 await websocket.send_json({"type": "pong"})
     
     except WebSocketDisconnect:
+        _stop_agent_session(session_id)
         ws_manager.disconnect(session_id)
         logger.info(f"WebSocket disconnected: {session_id}")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
+        _stop_agent_session(session_id)
         ws_manager.disconnect(session_id)

@@ -525,6 +525,20 @@ class ASMToolsManager:
             "record_verify_verdict": self.record_verify_verdict,
             "record_surface_coverage": self.record_surface_coverage,
             "get_coverage": self.get_coverage,
+            "mcp_connect": self.mcp_connect,
+            "mcp_list": self.mcp_list,
+            "mcp_call": self.mcp_call,
+            "mcp_disconnect": self.mcp_disconnect,
+            "run_custom_probe": self.run_custom_probe,
+            "run_poc_python": self.run_custom_probe,
+            "list_captured_requests": self.list_captured_requests,
+            "mutate_captured_request": self.mutate_captured_request,
+            "mutate_list": self.mutate_list,
+            "fetch_lazy_chunks": self.fetch_lazy_chunks,
+            "extract_js_endpoints": self.extract_js_endpoints,
+            "fingerprint_api": self.fingerprint_api,
+            "compact_context": self.compact_context,
+            "load_prior_hunt": self.load_prior_hunt,
         }
         # Optional: web search (RedAmon-style) when Tavily API key is set
         if getattr(settings, "TAVILY_API_KEY", None):
@@ -2478,7 +2492,7 @@ class ASMToolsManager:
             lines = []
             for n in notes:
                 target_str = f" target={n.target}" if n.target else ""
-                lines.append(f"- [{n.category}]{target_str}: {n.content[:500]}{'...' if len(n.content) > 500 else ''}")
+                lines.append(f"- [{n.category}]{target_str}: {(n.content or '')[:500]}{'...' if len(n.content or '') > 500 else ''}")
             return "\n".join(lines)
         finally:
             db.close()
@@ -2864,6 +2878,390 @@ class ASMToolsManager:
             max_findings=max_findings,
             max_failures=max_failures,
         ) or ""
+
+    async def mcp_connect(self, url: str, name: str = "burp") -> str:
+        """Attach an external MCP server (Burp, Caido, custom) as agent tools.
+
+        CAI analog: `/mcp load http://localhost:9876/sse burp`. Supports
+        streamable HTTP and SSE. Tools become callable via mcp_call.
+        """
+        import asyncio
+        from app.services.agent import mcp_client
+
+        _, org_id = get_tenant_context()
+        if not org_id:
+            return "Error: organization context required"
+        try:
+            result = await asyncio.to_thread(mcp_client.connect, org_id, url, name)
+        except Exception as exc:
+            return f"MCP connect failed: {exc}"
+        tools = result.get("tools") or []
+        names = ", ".join(t.get("name") or "?" for t in tools[:40]) or "(none listed)"
+        return (
+            f"Connected MCP server '{result.get('name')}' via {result.get('transport')} "
+            f"({len(tools)} tools): {names}. Call mcp_call(server='{result.get('name')}', "
+            f"tool='...', arguments={{...}})."
+        )
+
+    async def mcp_list(self) -> str:
+        """List attached external MCP servers and their tools."""
+        from app.services.agent import mcp_client
+
+        _, org_id = get_tenant_context()
+        if not org_id:
+            return "Error: organization context required"
+        sessions = mcp_client.list_sessions(org_id)
+        if not sessions:
+            return "No external MCP servers attached. Use mcp_connect(url, name)."
+        lines = []
+        for s in sessions:
+            tools = ", ".join(s.get("tools") or []) or "(no tools)"
+            lines.append(f"- {s.get('name')} [{s.get('transport')}] {s.get('url')}: {tools}")
+        return "\n".join(lines)
+
+    async def mcp_call(
+        self,
+        server: str,
+        tool: str,
+        arguments: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Call a tool on an attached MCP server (Burp Repeater, Caido, …)."""
+        import asyncio
+        from app.services.agent import mcp_client
+
+        _, org_id = get_tenant_context()
+        if not org_id:
+            return "Error: organization context required"
+        try:
+            result = await asyncio.to_thread(
+                mcp_client.call_tool, org_id, server, tool, arguments or {},
+            )
+        except Exception as exc:
+            return f"mcp_call failed: {exc}"
+        text = json.dumps(result, default=str) if not isinstance(result, str) else result
+        return text[: int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)]
+
+    async def mcp_disconnect(self, name: str) -> str:
+        """Detach an external MCP server."""
+        from app.services.agent import mcp_client
+
+        _, org_id = get_tenant_context()
+        if not org_id:
+            return "Error: organization context required"
+        ok = mcp_client.disconnect(org_id, name)
+        return f"Disconnected '{name}'." if ok else f"No MCP session named '{name}'."
+
+    async def run_custom_probe(
+        self,
+        source: str,
+        allowed_hosts: Optional[str] = None,
+        timeout_sec: float = 20,
+        **kwargs: Any,
+    ) -> str:
+        """Run a one-off Python HTTP probe in a sandbox (bounded CodeAgent).
+
+        Allowed imports: json, re, httpx, hashlib, hmac, base64, time, math,
+        datetime, collections, urllib.parse. Hosts must be in engagement scope.
+        Print results to stdout. Not a shell — no os/subprocess/sockets.
+        """
+        from app.services.agent.custom_probe import run_custom_probe
+
+        hosts: List[str] = []
+        if allowed_hosts:
+            hosts.extend(
+                p.strip() for p in str(allowed_hosts).replace(",", "\n").splitlines() if p.strip()
+            )
+        fallback = (getattr(self, "_fallback_target", "") or "").strip()
+        if fallback:
+            hosts.append(fallback)
+        cmap = getattr(self, "_capability_map", None) or {}
+        if isinstance(cmap, dict) and cmap.get("target"):
+            hosts.append(str(cmap.get("target")))
+
+        result = run_custom_probe(source, allowed_hosts=hosts, timeout_sec=timeout_sec)
+        result["oob_allowed"] = True
+        result["hint"] = (
+            "In-scope hosts plus Interactsh/OAST. Never fetch 169.254.169.254 or "
+            "localhost — Lictor blocks those. Print JSON proof to stdout."
+        )
+        return json.dumps(result, default=str)[: int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)]
+
+    async def list_captured_requests(self, limit: int = 40, **kwargs: Any) -> str:
+        """Index captured XHR/API samples from the capability map for mutate_captured_request."""
+        from app.services.agent.request_mutate import samples_from_map, summarize_samples
+
+        cmap = getattr(self, "_capability_map", None) or {}
+        origin = ""
+        if isinstance(cmap, dict):
+            origin = str(cmap.get("target") or "")
+        origin = origin or (getattr(self, "_fallback_target", None) or "") or (current_seed_target.get() or "")
+        samples = samples_from_map(cmap if isinstance(cmap, dict) else {})
+        rows = summarize_samples(samples, fallback_origin=origin, limit=max(1, min(int(limit or 40), 80)))
+        return json.dumps({
+            "ok": True,
+            "count": len(rows),
+            "origin": origin,
+            "samples": rows,
+            "next": (
+                "mutate_captured_request(sample_index=N, location='query|header|body_json|body_form|path|method', "
+                "field='url', value='https://<interactsh>') — one field only."
+            ),
+        }, indent=2)[:_tool_output_max_chars()]
+
+    async def mutate_captured_request(
+        self,
+        sample_index: int = 0,
+        location: str = "query",
+        field: str = "",
+        value: str = "",
+        compare: bool = True,
+        use_auth_session: bool = True,
+        timeout: int = 25,
+        **kwargs: Any,
+    ) -> str:
+        """Change one field on a captured request and send it (Repeater + one mutation)."""
+        from app.services.agent.request_mutate import (
+            apply_one_mutation,
+            normalize_sample,
+            samples_from_map,
+        )
+
+        cmap = getattr(self, "_capability_map", None) or {}
+        origin = ""
+        if isinstance(cmap, dict):
+            origin = str(cmap.get("target") or "")
+        origin = origin or (getattr(self, "_fallback_target", None) or "") or (current_seed_target.get() or "")
+        samples = samples_from_map(cmap if isinstance(cmap, dict) else {})
+        try:
+            idx = int(sample_index)
+            sample = samples[idx]
+        except Exception:
+            return json.dumps({
+                "ok": False,
+                "error": "sample_index out of range — call list_captured_requests first",
+                "count": len(samples),
+            })
+        try:
+            baseline, mutant = apply_one_mutation(
+                sample,
+                location=location,
+                field=field,
+                value=value,
+                fallback_origin=origin,
+            )
+        except ValueError as exc:
+            return json.dumps({"ok": False, "error": str(exc)})
+
+        if compare:
+            return await self.compare_requests(
+                baseline=baseline,
+                mutant=mutant,
+                use_auth_session=use_auth_session,
+                timeout=timeout,
+            )
+        try:
+            exchange = await self._http_exchange(
+                method=mutant["method"],
+                url=mutant["url"],
+                headers=mutant.get("headers"),
+                body=mutant.get("body"),
+                use_auth_session=use_auth_session,
+                timeout=timeout,
+                follow_redirects=False,
+            )
+            exchange.pop("_body_text", None)
+            return json.dumps({
+                "ok": True,
+                "mutation": {"location": location, "field": field, "value": value},
+                "baseline": normalize_sample(baseline, fallback_origin=origin),
+                "sent": mutant,
+                "response": exchange.get("response"),
+                "request": exchange.get("request"),
+            }, indent=2)[:_tool_output_max_chars()]
+        except Exception as exc:
+            return json.dumps({"ok": False, "error": f"mutate send failed: {exc}"})
+
+    async def mutate_list(
+        self,
+        kind: str = "paths",
+        observed: str = "",
+        count: int = 30,
+        **kwargs: Any,
+    ) -> str:
+        """Single-shot mutation list (paths/params/xss/passwords/subdomains). Not a ReAct loop."""
+        from app.services.agent.single_shot_mutate import generate_mutations
+
+        blob = observed or ""
+        if not blob:
+            cmap = getattr(self, "_capability_map", None) or {}
+            if isinstance(cmap, dict):
+                blob = " ".join(
+                    [
+                        str(cmap.get("target") or ""),
+                        " ".join(str(p) for p in (cmap.get("pages_visited") or [])[:8]),
+                    ]
+                )
+            blob = blob or (getattr(self, "_fallback_target", None) or "")
+        result = generate_mutations(kind, blob, count=count)
+        return json.dumps(result, indent=2)[:_tool_output_max_chars()]
+
+    def _js_urls_from_map(self) -> List[str]:
+        cmap = getattr(self, "_capability_map", None) or {}
+        if not isinstance(cmap, dict):
+            return []
+        urls: List[str] = []
+        for u in list(cmap.get("js_files") or []) + list(cmap.get("js_endpoints") or []):
+            s = str(u).strip()
+            if s.startswith("http"):
+                urls.append(s)
+        return urls
+
+    def _origin_host(self) -> str:
+        cmap = getattr(self, "_capability_map", None) or {}
+        origin = ""
+        if isinstance(cmap, dict):
+            origin = str(cmap.get("target") or "")
+        origin = origin or (getattr(self, "_fallback_target", None) or "") or (current_seed_target.get() or "")
+        from urllib.parse import urlparse
+
+        return (urlparse(origin if "://" in origin else f"https://{origin}").hostname or "").lower()
+
+    async def fetch_lazy_chunks(
+        self,
+        bundle_url: str = "",
+        base_url: str = "",
+        dry_run: bool = False,
+        **kwargs: Any,
+    ) -> str:
+        """Reconstruct webpack/Vite/Next lazy-chunk URLs from a first-party bundle, then fetch in-scope."""
+        from app.services.agent.lazy_chunks import fetch_lazy_chunks as run_fetch
+
+        url = (bundle_url or "").strip()
+        if not url:
+            js = self._js_urls_from_map()
+            preferred = [u for u in js if "/_next/" in u or "chunk" in u.lower() or "webpack" in u.lower()]
+            url = (preferred or js or [""])[0]
+        if not url:
+            return json.dumps({
+                "ok": False,
+                "error": "bundle_url required (or crawl a page so js_files is populated)",
+            })
+        origin = (base_url or "").strip()
+        if not origin:
+            cmap = getattr(self, "_capability_map", None) or {}
+            if isinstance(cmap, dict):
+                origin = str(cmap.get("target") or "")
+            origin = origin or (getattr(self, "_fallback_target", None) or "") or url
+        result = await run_fetch(bundle_url=url, base_url=origin, dry_run=bool(dry_run))
+        fetched_urls = [
+            str(row.get("url"))
+            for row in (result.get("fetched") or [])
+            if isinstance(row, dict) and row.get("url")
+        ]
+        if fetched_urls:
+            cmap = getattr(self, "_capability_map", None)
+            if isinstance(cmap, dict):
+                js = list(cmap.get("js_files") or [])
+                for u in fetched_urls:
+                    if u not in js:
+                        js.append(u)
+                cmap = dict(cmap)
+                cmap["js_files"] = js[:160]
+                self._capability_map = cmap
+                result["capability_map"] = cmap
+        return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
+
+    async def extract_js_endpoints(
+        self,
+        urls: str = "",
+        **kwargs: Any,
+    ) -> str:
+        """Extract and triage API paths/URLs from in-scope JavaScript (local analysis after fetch)."""
+        from app.services.agent.js_endpoints import extract_js_endpoints as run_extract
+
+        raw = urls or kwargs.get("url") or ""
+        parsed: List[str] = []
+        if isinstance(raw, list):
+            parsed = [str(u).strip() for u in raw]
+        else:
+            blob = str(raw).strip()
+            if blob.startswith("["):
+                try:
+                    parsed = [str(u).strip() for u in json.loads(blob)]
+                except json.JSONDecodeError:
+                    parsed = []
+            if not parsed:
+                parsed = [p.strip() for p in blob.replace(",", "\n").splitlines() if p.strip()]
+        if not parsed:
+            parsed = self._js_urls_from_map()
+        result = await run_extract(parsed, origin_host=self._origin_host())
+        origin = ""
+        cmap = getattr(self, "_capability_map", None) or {}
+        if isinstance(cmap, dict):
+            origin = str(cmap.get("target") or "")
+        origin = origin or (getattr(self, "_fallback_target", None) or "")
+        to_ingest: List[str] = []
+        for ep in result.get("endpoints") or []:
+            s = str(ep).strip()
+            if s.startswith("http"):
+                to_ingest.append(s)
+            elif s.startswith("/") and origin.startswith("http"):
+                to_ingest.append(origin.rstrip("/") + s)
+        if to_ingest:
+            from app.services.agent.capability_map import ingest_passive_urls
+
+            merged = ingest_passive_urls(
+                cmap if isinstance(cmap, dict) else None,
+                to_ingest,
+                target=origin,
+                source="js_analysis",
+            )
+            self._capability_map = merged
+            result["ingested"] = len(to_ingest)
+            result["capability_map"] = merged
+        return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
+
+    async def fingerprint_api(self, **kwargs: Any) -> str:
+        """Fingerprint API hosts/tech from captured Interceptor/crawl samples (no Caido/Codex)."""
+        from app.services.agent.api_fingerprint import fingerprint_from_map
+
+        cmap = getattr(self, "_capability_map", None) or {}
+        target = ""
+        if isinstance(cmap, dict):
+            target = str(cmap.get("target") or "")
+        target = target or (getattr(self, "_fallback_target", None) or "")
+        result = fingerprint_from_map(cmap if isinstance(cmap, dict) else {}, target=target)
+        return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
+
+    async def compact_context(self) -> str:
+        """Request CAI-style /compact: collapse older execution-trace steps next think."""
+        from app.services.agent.run_control import request_compact
+
+        session_id = current_session_id.get() or ""
+        if not session_id:
+            return "No session to compact."
+        request_compact(session_id)
+        return "Compact queued. The next reasoning turn will summarize older steps and keep the recent window."
+
+    async def load_prior_hunt(self, source_session_id: str) -> str:
+        """Load a prior conversation's compact brief into this hunt (CAI /load)."""
+        from app.db.database import SessionLocal
+        from app.services.agent.run_control import queue_load_brief
+        from app.services.agent.session_ops import load_prior_conversation_brief
+
+        _, org_id = get_tenant_context()
+        session_id = current_session_id.get() or ""
+        if not org_id or not session_id:
+            return "Error: organization/session context required"
+        db = SessionLocal()
+        try:
+            brief = load_prior_conversation_brief(db, org_id, source_session_id)
+        finally:
+            db.close()
+        if not brief:
+            return f"No prior hunt found for session {source_session_id}."
+        queue_load_brief(session_id, brief)
+        return brief[:4000]
 
     # ──────────────────────────────────────────────────────────────────────
     # Bug chain lookup table: confirmed_vuln → likely follow-on vulns
@@ -4763,6 +5161,11 @@ class ASMToolsManager:
             seed_hypotheses_from_capability_map,
             specialists_from_open_hypotheses,
         )
+        from app.services.agent.penetration_task_graph import (
+            format_graph_for_scheduler,
+            ready_wave,
+            sync_graph_from_brain,
+        )
 
         cmap = capability_map or getattr(self, "_capability_map", None) or {}
         brain = (
@@ -4771,6 +5174,7 @@ class ASMToolsManager:
             else engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         )
         brain = seed_hypotheses_from_capability_map(brain, cmap if isinstance(cmap, dict) else {})
+        graph = sync_graph_from_brain(brain)
         self._engagement_brain = brain.to_dict()
         return json.dumps(
             {
@@ -4783,7 +5187,9 @@ class ASMToolsManager:
                 ],
                 "credentials_redacted": [c.redacted() for c in brain.credentials],
                 "next_steps": brain.next_steps,
-                "suggested_specialists": specialists_from_open_hypotheses(brain),
+                "suggested_specialists": ready_wave(graph) or specialists_from_open_hypotheses(brain),
+                "task_graph": graph.snapshot(),
+                "task_graph_prompt": format_graph_for_scheduler(graph),
                 "threat_model": brain.threat_model or None,
                 "focus_areas": brain.focus_areas[:8],
                 "prompt_view": format_engagement_brain_for_prompt(self._engagement_brain),
@@ -5003,10 +5409,17 @@ class ASMToolsManager:
             list_procedure_ids,
             procedures_summary_for_brain,
         )
+        from app.services.agent.penetration_task_graph import (
+            format_graph_for_scheduler,
+            ready_wave,
+            sync_graph_from_brain,
+        )
 
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         cmap = getattr(self, "_capability_map", None) or {}
         progress = methodology_progress(brain, cmap=cmap if isinstance(cmap, dict) else {})
+        graph = sync_graph_from_brain(brain)
+        self._engagement_brain = brain.to_dict()
         open_mids = [
             h.methodology_id
             for h in brain.hypotheses
@@ -5016,6 +5429,9 @@ class ASMToolsManager:
             {
                 "progress": progress,
                 "prompt_view": format_methodology_progress_for_prompt(progress),
+                "task_graph": graph.snapshot(),
+                "task_graph_prompt": format_graph_for_scheduler(graph),
+                "ready_specialists": ready_wave(graph),
                 "open_procedure_packs": procedures_summary_for_brain(open_mids, limit=6),
                 "available_procedure_ids": list(list_procedure_ids()),
             },
@@ -5645,12 +6061,22 @@ class ASMToolsManager:
         )
         from app.services.agent.engagement_brain import (
             engagement_brain_from_dict,
-            format_engagement_brain_for_prompt,
+            ensure_spawned_hypotheses,
             mission_from_hypotheses,
             seed_hypotheses_from_capability_map,
             specialists_from_open_hypotheses,
         )
         from app.services.agent.fireteam_service import run_fireteam
+        from app.services.agent.penetration_task_graph import (
+            apply_executor_summary,
+            compact_scheduler_mission,
+            format_graph_for_scheduler,
+            mark_running,
+            parse_executor_summary,
+            persist_graph,
+            ready_wave,
+            sync_graph_from_brain,
+        )
 
         cmap_raw = capability_map or getattr(self, "_capability_map", None)
         cmap = build_capability_map_from_dict(cmap_raw) if cmap_raw else None
@@ -5677,10 +6103,21 @@ class ASMToolsManager:
                 auto = True
                 chosen = None
 
+        graph = sync_graph_from_brain(brain)
+        self._engagement_brain = brain.to_dict()
+
         selection_source = "explicit"
         if auto:
             open_hyps = [h for h in brain.hypotheses if h.status in ("open", "in_progress")]
-            if open_hyps and mode != "recon":
+            wave = ready_wave(
+                graph,
+                max_specialists=6,
+                include_app_mapper=bool(cmap and not cmap.ready_for_attack),
+            )
+            if wave and mode != "recon":
+                chosen = wave
+                selection_source = "task_graph"
+            elif open_hyps and mode != "recon":
                 chosen = specialists_from_open_hypotheses(brain)
                 selection_source = "hypotheses"
             else:
@@ -5711,37 +6148,19 @@ class ASMToolsManager:
             else:
                 return "Error: mission is required (or provide a capability_map)."
 
-        # Ground the mission in concrete map evidence + open hypotheses.
+        # Executors get a compact mission + per-specialist slice on the directive.
+        # Do not dump the full capability map or engagement brain into every hunter.
+        map_digest = ""
         if cmap and cmap.ready_for_attack:
-            api_preview = [
-                f"{e.get('method')} {e.get('path')}" for e in cmap.api_endpoints[:15]
-            ]
-            mission = (
-                f"{mission}\n\nCAPABILITY MAP (use these concrete surfaces):\n"
-                f"- capabilities: {', '.join(cmap.capabilities)}\n"
-                f"- pages: {cmap.pages_visited[:12]}\n"
-                f"- apis: {api_preview}\n"
-                f"- forms: {cmap.forms[:8]}\n"
-                f"- hunt_queue: {cmap.ranked_hunt_queue[:8]}\n"
+            map_digest = (
+                f"Map digest: capabilities={', '.join((cmap.capabilities or [])[:8])}. "
+                f"Use the operation directive evidence, not a scan dump."
             )
-        if brain.hypotheses or brain.threat_model:
-            mission = (
-                f"{mission}\n\nENGAGEMENT BRAIN:\n"
-                f"{format_engagement_brain_for_prompt(brain.to_dict())}\n"
-            )
-        if brain.threat_model:
-            try:
-                from app.services.agent.threat_model import specialist_focus_block, threat_model_from_dict
-                tm = threat_model_from_dict(brain.threat_model)
-                slices = [
-                    specialist_focus_block(tm, name)
-                    for name in (chosen or [])
-                    if specialist_focus_block(tm, name)
-                ]
-                if slices:
-                    mission = f"{mission}\n\n" + "\n".join(slices[:6])
-            except Exception:
-                pass
+        mission = compact_scheduler_mission(
+            f"{mission}\n{map_digest}".strip(),
+            ready_count=len(chosen or []),
+            target=(cmap.target if cmap else brain.target) or "",
+        )
 
         target_list = list(targets or [])
         if not target_list and cmap and cmap.target:
@@ -5767,6 +6186,10 @@ class ASMToolsManager:
             default_target=default_target or "",
         )
 
+        mark_running(graph, chosen)
+        persist_graph(brain, graph)
+        self._engagement_brain = brain.to_dict()
+
         result = await run_fireteam(
             mission=mission,
             targets=target_list,
@@ -5776,6 +6199,79 @@ class ASMToolsManager:
             max_parallel=max_parallel,
             directives=directives,
         )
+
+        from app.services.agent.auto_prompter import (
+            apply_rewrite_to_directive,
+            apply_rewrite_to_profile,
+            record_failure_approach,
+            should_rewrite,
+        )
+        from dataclasses import replace as _dc_replace
+
+        executor_summaries = [parse_executor_summary(r) for r in result.reports]
+        spawned: list = []
+        rewrites: list = []
+        for summary, report in zip(executor_summaries, result.reports):
+            spawned.extend(apply_executor_summary(graph, brain, summary))
+            rewrite = should_rewrite(graph, summary, report)
+            if rewrite:
+                rewrites.append(rewrite)
+                record_failure_approach(brain, summary, rewrite.failure)
+
+        if spawned:
+            ensure_spawned_hypotheses(brain, spawned)
+            graph = sync_graph_from_brain(brain)
+
+        retry_names = []
+        if rewrites:
+            retry_profiles = []
+            retry_directives = {}
+            for rewrite in rewrites:
+                base = get_specialist(rewrite.specialist)
+                if not base:
+                    continue
+                retry_profiles.append(
+                    apply_rewrite_to_profile(_dc_replace(base), rewrite)
+                )
+                d = directives.get(rewrite.specialist)
+                if d is not None:
+                    retry_directives[rewrite.specialist] = apply_rewrite_to_directive(d, rewrite)
+                retry_names.append(rewrite.specialist)
+            if retry_profiles:
+                mark_running(graph, retry_names)
+                persist_graph(brain, graph)
+                self._engagement_brain = brain.to_dict()
+                retry_result = await run_fireteam(
+                    mission=mission,
+                    targets=target_list,
+                    specialists=retry_profiles,
+                    llm=llm,
+                    tools_manager=self,
+                    max_parallel=max_parallel,
+                    directives=retry_directives,
+                )
+                result.reports.extend(list(retry_result.reports))
+                result.specialists_run = list(result.specialists_run) + list(
+                    retry_result.specialists_run
+                )
+                result.total_tool_calls += retry_result.total_tool_calls
+                result.duration_seconds += retry_result.duration_seconds
+                result.merged_summary = (
+                    (result.merged_summary or "")
+                    + "\n\n# Auto-prompter rewrite wave\n"
+                    + (retry_result.merged_summary or "")
+                )
+                retry_summaries = [parse_executor_summary(r) for r in retry_result.reports]
+                executor_summaries.extend(retry_summaries)
+                for summary in retry_summaries:
+                    spawned.extend(apply_executor_summary(graph, brain, summary))
+                if spawned:
+                    ensure_spawned_hypotheses(brain, spawned)
+                    graph = sync_graph_from_brain(brain)
+
+        persist_graph(brain, graph)
+        self._engagement_brain = brain.to_dict()
+
         self._require_independent_verify = True
         from app.services.agent.independent_verify import (
             candidate_from_dict,
@@ -5823,6 +6319,14 @@ class ASMToolsManager:
             "selection_mode": "auto" if auto else "explicit",
             "selection_source": selection_source,
             "capability_map_ready": bool(cmap and cmap.ready_for_attack),
+            "task_graph": graph.snapshot(),
+            "task_graph_prompt": format_graph_for_scheduler(graph),
+            "executor_summaries": [s.to_dict() for s in executor_summaries],
+            "auto_prompter_rewrites": [
+                {"specialist": r.specialist, "failure": r.failure}
+                for r in rewrites
+            ],
+            "spawned": spawned,
             "open_hypotheses": [
                 {"id": h.id, "title": h.title, "specialist": h.specialist, "status": h.status}
                 for h in brain.hypotheses
@@ -5844,6 +6348,10 @@ class ASMToolsManager:
                     "epithet": epithet_for(r.specialist),
                     "role": r.role,
                     "summary": r.summary,
+                    "verdict": r.verdict,
+                    "hypothesis_ids": r.hypothesis_ids,
+                    "evidence": (r.evidence or "")[:800],
+                    "spawn": r.spawn,
                     "key_findings": r.key_findings,
                     "tool_calls": [
                         {"tool": t.tool, "success": t.success, "summary": t.summary[:500]}

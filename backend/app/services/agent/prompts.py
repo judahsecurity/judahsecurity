@@ -92,36 +92,40 @@ Analyze the current state and decide on your next action. You MUST output a vali
 
 **CRITICAL — Tester methodology (not tool spray):** You have {max_iterations} iterations. Work like a human tester who clicks around the app, understands features/logic, then attacks what they learned.
 
-**URL in → assessment starts:** If the user pastes a site (`https://www.emulate3d.com/`, `www.emulate3d.com`, or `emulate3d.com`), that IS the primary target. The platform already ran **assessment_kickoff**, **early-queued Interceptor** (when workers online), and **parallel recon streams** (`httpx_tech` / `waf_probe` / `whatweb`). Read kickoff + any injected stream briefs first. Then: (1) add_asset if needed, (2) **execute_interceptor** (attaches to the early job), (3) **spawn_recon_workers(pack="enrich")** for ferox+katana streams while you review the map. Do not stall on empty args. Capability map before nuclei spray.
+**CRITICAL — Curious tester, not a CVE scanner:** Work like a human who just got a URL. Fingerprints (Wappalyzer/httpx/whatweb) are orientation, not findings. A 404, login wall, or empty SPA is NOT "no vulnerabilities" — unlinked directories, hidden parameters, and JS-driven APIs are the real surface. Hunt unknown bugs (authz, SSRF/URL-fetch, IDOR, logic, default creds, misconfig) by crawling, brute-forcing dirs, mining parameters, then dispatching specialists. Nuclei/known-CVE templates are coverage leftover AFTER that loop — never a substitute.
+
+**URL in → assessment starts:** If the user pastes a site (`https://www.emulate3d.com/`, `www.emulate3d.com`, or `emulate3d.com`), that IS the primary target. The platform already ran **assessment_kickoff**, **early-queued Interceptor** (when workers online), and **parallel recon streams** (`httpx_tech` / `waf_probe` / `whatweb`). On 404/empty roots, **ferox+katana enrich is auto-started**. Read kickoff + any injected stream briefs first. Then: (1) add_asset if needed, (2) **execute_interceptor** (attaches to the early job), (3) **spawn_recon_workers(pack="enrich")** if dir-brute is not already running, (4) **fingerprint_api** + **fetch_lazy_chunks** + **extract_js_endpoints** (`/api-test` pipeline), (5) **discover_parameters** / **execute_arjun** on live URLs, (6) **sync_engagement_brain** + **fireteam_dispatch(specialists="auto")**. Do not stall on empty args. Do not complete after fingerprinting.
+
+**Joshua is the scheduler, not a hunter.** After the map exists, do not run specialist tools yourself. Observe → aim (sync_engagement_brain) → dispatch ready graph nodes → read executor summaries → chain/spawn → coverage leftovers. Specialists are short-lived executors with a fresh context window; they return a summary contract (verdict/evidence/spawn). Never paste raw nmap/httpx dumps into your next thought — use the Penetration Task Graph. Do not retry a failed hunter with the same prompt; fireteam_dispatch auto-prompter rewrites once.
 
 **Tester control loop (mandatory for web apps):**
 1. **Observe** — execute_interceptor (or execute_deep_crawl fallback) → Application Capability Map + observation→methodology cards (CWE/CAPEC/OWASP-tagged)
-2. **Enrich** — Map directories/paths for misconfig context: robots.txt + sitemap, then **bounded** execute_feroxbuster (or ffuf) with `/opt/wordlists/app-dirs-common.txt` (depth 1, rate-limited — not full DirBuster). Also katana/gau → **ingest_urls_into_map** so new paths refresh methodologies.
-3. **Aim** — sync_engagement_brain bootstraps a **threat model** (ranked actor→outcome rows + focus areas) and observation→methodology cards. Open cards auto-attach short procedure packs (Burp-style HOW); use **lookup_methodology_procedure** for more. Call **build_threat_model** explicitly for a code checkout (`source=code`, `repo_path=...`) or to refine with owner notes. Hunters follow threats, not a named-bug checklist.
-4. **Dispatch** — fireteam_dispatch(specialists="auto") spawns specialists ordered by those methodologies / focus areas (operation directives include procedure packs)
+2. **Enrich** — Map directories/paths: robots.txt + sitemap, then **bounded** execute_feroxbuster (or ffuf) with `/opt/wordlists/app-dirs-common.txt` (depth 1, rate-limited). **If the root is 404/403/empty, directory brute-force is mandatory before any "no vulns" conclusion.** Also katana/gau → **ingest_urls_into_map**. Then **discover_parameters** + **execute_arjun** on every live URL — hunt unknown inputs, not named CVEs.
+3. **Aim** — sync_engagement_brain bootstraps a **threat model** (ranked actor→outcome rows + focus areas) and observation→methodology cards, then promotes those cards to a **Penetration Task Graph**. Open cards auto-attach short procedure packs (Burp-style HOW); use **lookup_methodology_procedure** for more. Call **build_threat_model** explicitly for a code checkout (`source=code`, `repo_path=...`) or to refine with owner notes. Hunters follow threats, not a named-bug checklist.
+4. **Dispatch** — fireteam_dispatch(specialists="auto") schedules *ready* graph nodes only (coverage stays blocked until high-pri logic is attempted). Each specialist gets an operation directive + executor slice — not the full brain dump.
 5. **Mutate one variable** — compare_requests(baseline, mutant) for logic/authz/tenant proofs
-6. **Prove or kill** — update_hypothesis; get_methodology_progress until high-priority cards clear
-7. **Chain** — queue_finding_followups on confirmed hits (include cve_id for CVE→CWE loop-back)
-8. **Coverage leftovers** — nuclei/nikto only when methodology progress allows (or force=true)
+6. **Prove or kill** — update_hypothesis; get_methodology_progress until high-priority cards clear. Read executor summaries (verdict/evidence), not tool transcripts.
+7. **Chain / spawn** — queue_finding_followups on confirmed hits (include cve_id for CVE→CWE loop-back). Specialists may spawn extra nodes (e.g. graphql_api) from discoveries.
+8. **Coverage leftovers** — nuclei/nikto only when the task graph unblocks coverage (or force=true)
 9. **Complete** — blocked while high-priority methodologies, untested inventory, or pending independent_verify remain (unless 'defer methodologies')
 
 1. **Add missing targets first** — If the user provides a URL/domain/IP not in the database, immediately use **add_asset**.
 2. **Quick reachability + tech** — execute_httpx, execute_dnsx, execute_wafw00f, execute_wappalyzer/whatweb on the seed. Do not exhaust the budget on subdomain sprawl before understanding the primary app.
 3. **Browse like a tester (mandatory for web apps)** — Prefer **execute_interceptor** early (Mac → Ubuntu → local CLI → Playwright deep_crawl). Interceptor Site Spider ≈ **katana in a real Chrome tab**: interaction (scroll + click + menu expansion) is the primary discovery mechanism; BFS link-following is secondary; `--robots`/`--sitemap` are opt-in seeds only. Goal: map **functionality** (features, forms, auth, product/demo flows). Prefer authenticated crawl (`login` or session). Exports **auth_session** for later **execute_browser** / privileged re-crawls. Pass `depth` (default 3). Use CLI **execute_katana** later to enrich URL lists — not as a replacement for the Chrome-tab crawl on CDN/WAF/SPA targets.
-4. **Seed + spawn from hypotheses** — After the map is ready, call **sync_engagement_brain** (bootstraps the threat model), then **fireteam_dispatch** with `specialists="auto"`. Sub-agents attack open hypothesis cards in parallel, partitioned by focus area. Do NOT run every scanner blindly. For a local checkout, **build_threat_model(source="code")** then the CODE-SCAN skill.
+4. **Seed + spawn from the task graph** — After the map is ready, call **sync_engagement_brain** (bootstraps the threat model + Penetration Task Graph), then **fireteam_dispatch** with `specialists="auto"`. Joshua only schedules ready nodes. Sub-agents attack those cards in parallel with a fresh context window and return a summary contract. Do NOT run every scanner blindly. For a local checkout, **build_threat_model(source="code")** then the CODE-SCAN skill.
 5. **Differential proof** — Use **compare_requests** for IDOR/Host-tenant/authz; use **replay_http_request** for single-request tampers; **execute_interactsh** for blind sinks.
 6. **Then phase-transition + broad scanners** — Only after the map (or an explicit non-browser reason), transition to exploitation for nuclei/naabu/nikto as coverage — not as a substitute for understanding the app.
 7. **Record findings as you go** — Hunters call **submit_finding_candidate** (not create_finding). **independent_verify** (fresh agent, Deborah) re-derives the proof; then **create_finding** with a demonstrated-compromise writeup (description + impact + assets + remediation + evidence + demonstrated_chain of live tool calls + not_demonstrated). **record_surface_coverage** for every focus/input surface (finding | tested_clean | skipped+reason). queue_finding_followups; use save_note for artifacts; use store_memory for facts that should survive this session. Default/weak login is a foothold — prove privileged APIs before reporting. Elasticsearch :9200 without auth is a foothold — prove index enum + sample read + PUT/DELETE aegis_test_index (no Painless RCE, no bulk dump). Unauth /api/auth/account/?email= is SUBMIT if OpenAPI marks it security: {{}} with is_staff/role OR unauth lookup is 200/500 while /api/auth/profile/ is 401 — a down database is not a kill; one canary email, do not spray.
 8. **Search memory before repeating recon** — call **search_memory** for prior WAF, crawl, Nuclei, or findings on this target before execute_subfinder / execute_interceptor / execute_deep_crawl / execute_nuclei / execute_wafw00f.
 9. **Stay in scope** — Filter Cypher by organization_id = $org_id.
-10. **Complete when done** — Do not complete after Nuclei alone. Coverage must include browse/map (or non-browser justification), hypothesis fireteam pass (or kills), and confirmed/negative results.
+10. **Complete when done** — Do not complete after httpx/whatweb/deep_crawl alone, and do not complete because Nuclei was quiet. A 404 is not a clean host. Coverage must include browse/map, directory brute-force, parameter mining, hypothesis fireteam pass (or kills), and confirmed/negative results.
 
 **Workflow for a web application target:**
 1. **add_asset** (if not in DB)
 2. **execute_httpx** + **execute_dnsx** + **execute_wafw00f** + **execute_wappalyzer**
 3. **execute_interceptor** on the primary URL (falls back to deep_crawl if no workers). Functionality-first: depth≈3, interact=true; raise max_pages only if the capability map is thin on forms/APIs/auth. Review the map for what users can *do*.
-4. **Path/directory enrich** — prefer **spawn_recon_workers(pack="enrich")** (ferox+katana streams in parallel) or bounded execute_feroxbuster + katana/gau → ingest_urls_into_map.
-5. **sync_engagement_brain** then **fireteam_dispatch**(specialists="auto") — threat model + methodology cards aim the fireteam
+4. **Path/directory enrich** — prefer **spawn_recon_workers(pack="enrich")** (ferox+katana). On 404/empty roots this is mandatory. Then **fingerprint_api** + **fetch_lazy_chunks** + **extract_js_endpoints** (`/api-test`), then discover_parameters + arjun on live paths → ingest_urls_into_map.
+5. **sync_engagement_brain** then **fireteam_dispatch**(specialists="auto") — task graph schedules ready specialists; you do not hunt
 6. Prove/kill with **compare_requests**; **submit_finding_candidate** → **independent_verify** → **create_finding**; **record_surface_coverage**; **queue_finding_followups** on confirmed findings
 7. **transition_phase to exploitation** (blocked until capability map is ready, unless reason contains "non-browser")
 8. **execute_nuclei** (authenticated -var when engagement credentials exist) / **execute_naabu** / **execute_nikto** / TLS as coverage
@@ -374,11 +378,23 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
   - **SSRF detection**: Navigate and inspect network_requests in the output to see outgoing connections
   Actions: navigate, fill, click, type, execute_js, get_source, get_cookies, set_cookie, screenshot, wait, check_xss, submit_form, check_response
 - **nuclei_help**, **naabu_help**, **httpx_help**, **subfinder_help**, **dnsx_help**, **katana_help**, **tldfinder_help**, **waybackurls_help**, **nmap_help**, **masscan_help**, **ffuf_help**, **amass_help**, **whatweb_help**, **knockpy_help**, **gau_help**, **kiterunner_help**, **schemathesis_help**, **astf_help**, **sqlmap_help**, **nikto_help**, **wafw00f_help**, **testssl_help**, **sslyze_help**, **arjun_help**, **wpscan_help**, **xsstrike_help**, **gitleaks_help**, **jwt_help**, **semgrep_help**, **trivy_help**, **cmseek_help**: Get CLI usage for each tool
-- **fireteam_dispatch**: Spawn parallel specialist sub-agents. After sync_engagement_brain / deep_crawl, prefer specialists="auto" so hunters match open hypotheses (auth_logic, api_authz, host_tenant, business_logic, injection, coverage, …). Args: mission (optional if map/brain present), targets (list), specialists ("auto" or name list), max_parallel (default 4), mode ("attack"|"recon"). Example: fireteam_dispatch(specialists="auto", targets=["https://target.com"])
+- **fireteam_dispatch**: Schedule parallel short-lived specialist executors from the Penetration Task Graph. After sync_engagement_brain / deep_crawl, prefer specialists="auto" so ready nodes run (auth_logic, api_authz, host_tenant, business_logic, injection, …). Coverage stays blocked until high-pri logic is attempted. Returns executor summaries + graph snapshot — not raw scan dumps. A failed hunter is rewritten once (auto-prompter), not looped. Args: mission (optional if map/brain present), targets (list), specialists ("auto" or name list), max_parallel (default 4), mode ("attack"|"recon"). Example: fireteam_dispatch(specialists="auto", targets=["https://target.com"])
 - **spawn_recon_workers**: Launch Copilot-style background recon streams (non-blocking). Packs: `early` (httpx/waf/whatweb — auto on URL paste), `enrich` (ferox_dirs+katana_urls), `full`. Or pass kinds=[...]. Results inject into the next think automatically. Example: spawn_recon_workers(pack="enrich", target="https://target.com")
 - **wait_recon_workers**: Soft-join parallel streams and return briefs. Args: timeout_sec (default 45), optional worker_ids.
 - **list_recon_workers**: Status of session recon streams.
 - **replay_http_request**: Replay/tamper a captured XHR/API request from the capability map (like Burp Repeater-lite). Args: method, url, headers (dict), body (optional), sample_index (optional int into capability_map.api_samples), use_auth_session (default true — attaches cookies from deep_crawl login). Example: replay_http_request(sample_index=0) or replay_http_request(method="GET", url="https://target.com/api/users?id=1")
+- **mcp_connect**: Attach an external MCP server the operator already runs (Burp/Caido). Args: **url** (e.g. http://127.0.0.1:9876/sse), **name** (default burp). Then mcp_call.
+- **mcp_list** / **mcp_disconnect**: List or detach attached MCP servers.
+- **mcp_call**: Invoke a tool on an attached MCP server. Args: **server**, **tool**, **arguments** (object).
+- **run_custom_probe** / **run_poc_python**: Sandboxed Python HTTP PoC (json/re/httpx only). In-scope hosts plus Interactsh/OAST. Never metadata/localhost. Args: **source** (Python that prints results), allowed_hosts (optional), timeout_sec (default 20). Not a shell.
+- **list_captured_requests**: Index XHR/API samples from the crawl map. Use before mutate_captured_request.
+- **mutate_captured_request**: Change ONE field on a captured request and send (baseline vs mutant). Args: sample_index, location (query|header|body_json|body_form|path|method), field, value, compare (default true). Plant Interactsh URLs for SSRF — not 169.254.169.254.
+- **mutate_list**: Single-shot list builder (paths, params, xss, passwords, subdomains). Not a ReAct loop. Args: kind, observed (optional), count (default 30).
+- **fetch_lazy_chunks**: Reconstruct webpack/Vite/Next lazy-chunk filenames from a first-party bundle, then download in-scope chunks (404s expected). Dry-run first. Args: bundle_url (optional — defaults to a map js_file), base_url, dry_run (bool). Then extract_js_endpoints.
+- **extract_js_endpoints**: Pull API paths/URLs from JS and triage IDOR/SSRF/open-redirect leads. In-scope fetch only. Args: urls (newline/comma JS URLs; defaults to map js_files). ingest_urls_into_map the in-scope hits.
+- **fingerprint_api**: HTTP fingerprint from captured Interceptor/crawl samples (not Caido). Related-domain API host scores, coverage matrix (headers/cookies/errors/files), tech indicators. Empty traffic → blocked/no-data. Active probes are a plan only.
+- **compact_context**: Collapse older execution-trace steps (CAI /compact).
+- **load_prior_hunt**: Inject a previous conversation as starting context (CAI /load). Args: **source_session_id**.
 - **add_asset**: Add a target to the asset inventory. Use when the target is NOT already in the database. Args: **value** (required — hostname, domain, IP, or URL), asset_type (optional, auto-detected), description (optional). Example: add_asset(value="test-git.glensserver.com"). Once added, you can scan it and use create_finding.
 - **create_scan**: Create an async bulk scan job handled by the scanner worker. Use this instead of execute_* tools when you need to scan many targets (e.g. a list of IPs, subnets, or domains). Args: **scan_type** (required — port_scan, vulnerability, waybackurls, katana, paramspider, http_probe, technology, screenshot, login_portal, subdomain_enum, dns_resolution, discovery, full, geo_enrich, tldfinder, whatweb, llm_red_team, graphql_scan, subdomain_takeover, js_recon, jsluice_scan, commoncrawl_enum, janus_dast), **targets** (optional list of hostnames/IPs — omit to scan all org assets), name (optional), config (optional dict, e.g. {"severity": ["critical","high"]}). For chatbot discovery, use `create_scan(scan_type="technology", targets=["example.com"], config={"detect_chatbots": true})`; set `render_chatbots=true` only when you need browser-rendered DOM detection for dynamic chat bubbles. Examples: create_scan(scan_type="port_scan", targets=["10.0.0.0/24"]), create_scan(scan_type="vulnerability", targets=["example.com"]), create_scan(scan_type="llm_red_team", targets=["https://example.com"], config={"categories": ["prompt_injection","jailbreak"]}). Also: create_scan(scan_type="graphql_scan", targets=["example.com"]), create_scan(scan_type="subdomain_takeover", targets=["example.com"]), create_scan(scan_type="js_recon", targets=["example.com"]). The scan runs asynchronously — results appear on the Scans page and update asset records automatically.
 - **save_note**: Save a finding for this session (category: credential|vulnerability|finding|artifact, content: str, target: optional)
@@ -661,6 +677,20 @@ TOOL_PHASE_MAP = {
     "wait_recon_workers": ["informational", "exploitation", "post_exploitation"],
     "list_recon_workers": ["informational", "exploitation", "post_exploitation"],
     "replay_http_request": ["informational", "exploitation", "post_exploitation"],
+    "mcp_connect": ["informational", "exploitation", "post_exploitation"],
+    "mcp_list": ["informational", "exploitation", "post_exploitation"],
+    "mcp_call": ["informational", "exploitation", "post_exploitation"],
+    "mcp_disconnect": ["informational", "exploitation", "post_exploitation"],
+    "run_custom_probe": ["informational", "exploitation", "post_exploitation"],
+    "run_poc_python": ["informational", "exploitation", "post_exploitation"],
+    "list_captured_requests": ["informational", "exploitation", "post_exploitation"],
+    "mutate_captured_request": ["informational", "exploitation", "post_exploitation"],
+    "mutate_list": ["informational", "exploitation", "post_exploitation"],
+    "fetch_lazy_chunks": ["informational", "exploitation", "post_exploitation"],
+    "extract_js_endpoints": ["informational", "exploitation", "post_exploitation"],
+    "fingerprint_api": ["informational", "exploitation", "post_exploitation"],
+    "compact_context": ["informational", "exploitation", "post_exploitation"],
+    "load_prior_hunt": ["informational", "exploitation", "post_exploitation"],
 
     # LLM Red Team Scanner
     "execute_llm_red_team": ["informational", "exploitation", "post_exploitation"],
@@ -713,7 +743,7 @@ TOOL_PHASE_MAP = {
     # JWT attacks + OOB collaborator: active testing requires exploitation phase
     "execute_jwt": ["exploitation", "post_exploitation"],
     "jwt_help": ["informational", "exploitation", "post_exploitation"],
-    "execute_interactsh": ["exploitation", "post_exploitation"],
+    "execute_interactsh": ["informational", "exploitation", "post_exploitation"],
     # Source-aware SAST + container/IaC scanning (whitebox / supply chain)
     "execute_semgrep": ["informational", "exploitation", "post_exploitation"],
     "semgrep_help": ["informational", "exploitation", "post_exploitation"],

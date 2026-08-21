@@ -69,7 +69,11 @@ _REFLECT_PARAM_RE = re.compile(
     re.I,
 )
 _SSRF_HINT_RE = re.compile(
-    r"(webhook|callback|fetch|proxy|import|url=|uri=|link=|avatar|og:image|preview)",
+    r"("
+    r"webhook|callback|fetch|proxy|import|url=|uri=|link=|avatar|og:image|preview|"
+    r"/actions|/execute|datasource|requesturl|request_url|httpurl|targeturl|"
+    r"queryurl|endpoint=|callbackurl"
+    r")",
     re.I,
 )
 _AZURE_FUNCTION_RE = re.compile(
@@ -1100,7 +1104,8 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             test=(
                 "After Interceptor/deep_crawl: (1) fetch robots.txt + sitemap.xml; "
                 "(2) execute_feroxbuster with /opt/wordlists/app-dirs-common.txt "
-                "(-d 1 -t 20 --rate-limit 50) OR execute_ffuf with the same list; "
+                "(-d 1 -t 20 --rate-limit 50) OR execute_ffuf with the same list — "
+                "MANDATORY if the root is 404/empty (a 404 is not a clean host); "
                 "(3) execute_katana/gau for passive URLs; (4) ingest_urls_into_map. "
                 "Do NOT run huge SecLists DirBuster-style sprays before the capability map exists. "
                 "Flag 200/301/302/403 on sensitive paths for follow-up."
@@ -1117,6 +1122,33 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             owasp="A05:2021 Security Misconfiguration",
             evidence=ev,
             why="Web app assessments need directory/path context for misconfigurations",
+        ))
+        add(Methodology(
+            id="path_parameter_mining",
+            title="Hidden parameter / unlinked input discovery",
+            hunt="path_enum",
+            specialist="content_api",
+            priority="high",
+            assumption=(
+                "Live paths expose query/body/header parameters the HTML crawl did not "
+                "link — including JSON APIs, hidden fields, and JS-driven execute/query endpoints"
+            ),
+            test=(
+                "On every live URL from crawl/ferox: discover_parameters (forms, query, hidden, JS) "
+                "then execute_arjun GET+POST. Treat url/uri/request/datasource/execute/query fields "
+                "as SSRF candidates. Ingest new params into the map for injection/api_authz. "
+                "This is unknown-bug hunting, not a CVE template pass."
+            ),
+            pass_criteria=(
+                "New parameters discovered and handed to injection/api_authz, or bounded Arjun "
+                "pass documents none on the live set"
+            ),
+            kill_criteria="Bounded param mining on crawled+ferox URLs finds no extra inputs",
+            cwe_ids=["CWE-20", "CWE-918", "CWE-89"],
+            capec_ids=["CAPEC-137", "CAPEC-664"],
+            owasp="A03:2021 Injection",
+            evidence=ev,
+            why="Curious testers mine parameters on whatever the dir brute and crawl uncovered",
         ))
 
     # --- Injection / XSS ---

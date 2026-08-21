@@ -1,6 +1,6 @@
 # Tester Process & Engagement Brain
 
-How the ASM AI agent works like a human tester: **observe → methodology cards (CWE/CAPEC) → dispatch specialists → differential proof → chain follow-ups → coverage leftovers**.
+How the ASM AI agent works like a human tester: **observe → methodology cards (CWE/CAPEC) → Penetration Task Graph → dispatch ready specialists → differential proof → chain follow-ups → coverage leftovers**.
 
 Related code:
 
@@ -8,6 +8,8 @@ Related code:
 |-------|------|
 | Methodology catalog | `backend/app/services/agent/methodology_catalog.py` |
 | Engagement brain | `backend/app/services/agent/engagement_brain.py` |
+| Penetration Task Graph | `backend/app/services/agent/penetration_task_graph.py` |
+| Auto-prompter | `backend/app/services/agent/auto_prompter.py` |
 | Capability map | `backend/app/services/agent/capability_map.py` |
 | Fireteam specialists | `backend/app/services/agent/fireteam_service.py` |
 | Specialist skill packs | `backend/app/services/agent/specialist_skills.py` |
@@ -17,7 +19,7 @@ Related code:
 | Tools (`compare_requests`, brain APIs) | `backend/app/services/agent/tools.py` |
 | Orchestrator injection | `backend/app/services/agent/orchestrator.py` |
 | Skills / playbooks | `skills_service.py`, `playbooks.py` |
-| Tests | `backend/tests/test_methodology_catalog.py`, `test_engagement_brain.py` |
+| Tests | `backend/tests/test_methodology_catalog.py`, `test_engagement_brain.py`, `test_penetration_task_graph.py` |
 
 Standalone pentester (parallel fireteam): [`aegis-vanguard/`](../aegis-vanguard/README.md)  
 Batch / accuracy harness: [`harness/README.md`](../harness/README.md)
@@ -30,11 +32,12 @@ Batch / accuracy harness: [`harness/README.md`](../harness/README.md)
 execute_deep_crawl (+ katana/gau → ingest_urls_into_map)
         │
         ▼
-sync_engagement_brain          ← seeds CWE/CAPEC methodology cards from observations
+sync_engagement_brain          ← seeds CWE/CAPEC cards + Penetration Task Graph
         │
         ▼
-fireteam_dispatch(auto)        ← specialists get methodology directives
-        │
+fireteam_dispatch(auto)        ← Joshua schedules *ready* graph nodes only
+        │                         executors get a fresh context + summary contract
+        │                         auto-prompter rewrites a failed hunter once
         ▼
 compare_requests               ← baseline vs one mutation (logic/authz/tenant)
         │
@@ -42,16 +45,19 @@ compare_requests               ← baseline vs one mutation (logic/authz/tenant)
 update_hypothesis(proven|killed) + get_methodology_progress
         │
         ▼
-queue_finding_followups        ← chain cards + CVE→CWE loop-back
+queue_finding_followups        ← chain cards + CVE→CWE loop-back (new graph nodes)
         │
         ▼
-coverage Nuclei (gated until high-pri methodologies progress) → validate → create_finding
+coverage Nuclei (graph-unblocked leftovers) → validate → create_finding
         │
         ▼
 complete                       ← blocked while high-pri methodology cards remain open
 ```
 
-**Rule:** scanners find candidates; specialists prove impact. Status `200` alone is never a finding.
+**Swarm rules:** engagement brain is shared memory; the task graph is the planner;
+Joshua only schedules; specialists are short-lived executors; imagined tool output
+(soliloquy) is a retry, not a finding. **Rule:** scanners find candidates; specialists
+prove impact. Status `200` alone is never a finding.
 **Gates:** Nuclei/sqlmap/etc. require a capability map + seeded methodologies; `complete` requires high-priority methodology cards proven/killed (or `completion_reason` includes `defer methodologies`).
 
 ---
@@ -157,11 +163,14 @@ Attack profiles in `fireteam_service.py` (allowlisted tools + short ReAct loops)
 
 `fireteam_dispatch(specialists="auto")` preference order:
 
-1. Open / in-progress hypotheses (engagement brain)  
-2. Else capability-map hunt queue  
-3. Else recon triad  
+1. **Penetration Task Graph ready wave** (deps satisfied; coverage blocked until high-pri logic is attempted)
+2. Open / in-progress hypotheses (engagement brain)
+3. Else capability-map hunt queue
+4. Else recon triad
 
 Prefer **3–6** specialists per wave — not every hunter every time.
+Each executor returns a summary contract (`verdict`, `evidence`, `spawn`).
+A soliloquy (summary with no tool calls) is rewritten once by the auto-prompter.
 
 ---
 

@@ -137,6 +137,11 @@ AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
 # AEGIS_LLM_BACKEND=auto
 # AEGIS_GUARDRAILS=true
 # AEGIS_TRACING=true
+# Optional: write traces next to harness artifacts, and/or export redacted OTLP
+# to a self-hosted Phoenix/Langfuse (never Langfuse Cloud — spans hold engagement data).
+# AEGIS_TRACES_DIR=/tmp/aegis-traces
+# OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:6006/v1/traces
+# COMPOSE_PROFILES=observability
 # If Anthropic/OpenAI credits run out, Vanguard retries on local Ollama when
 # reachable (same OLLAMA_* vars as the platform agent; disable with
 # OLLAMA_FALLBACK_ENABLED=false).

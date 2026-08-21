@@ -840,6 +840,33 @@ PLAYBOOKS: List[Dict[str, Any]] = [
         ],
     },
     {
+        "id": "api_test",
+        "name": "/api-test (interceptor → chunks ∥ fingerprint → endpoints)",
+        "description": (
+            "API-recon pipeline: visit the target, download lazy JS chunks and fingerprint "
+            "captured traffic in parallel, then extract endpoints from JS."
+        ),
+        "objective": (
+            "Run /api-test against the given URL (authorized recon only).\n"
+            "If the target is empty, ask for it and stop.\n\n"
+            "1) execute_interceptor (interact=true); fallback execute_deep_crawl. "
+            "Report origin, js_files, api_samples. Not the operator's Chrome.\n"
+            "2) SAME round: fetch_lazy_chunks (dry-run then download) AND fingerprint_api "
+            "on the original host string. Fingerprint does not wait on chunks. "
+            "Blocked/no-data is OK — continue. Caido is not required.\n"
+            "3) extract_js_endpoints on bundles + chunks; ingest_urls_into_map. "
+            "Triage /api, IDOR, SSRF/redirect. Return the list (no all_endpoints.txt).\n\n"
+            "Deliverable: origin, chunk tally, fingerprint (hosts, tech, coverage matrix), "
+            "endpoint count, highest-value leads. Do not complete with 'no vulns' — this "
+            "skill maps surface for hunters."
+        ),
+        "initial_todos": [
+            {"description": "execute_interceptor on the target; record origin + js_files", "status": "pending", "priority": "high"},
+            {"description": "Parallel: fetch_lazy_chunks + fingerprint_api", "status": "pending", "priority": "high"},
+            {"description": "extract_js_endpoints + ingest_urls_into_map; report leads", "status": "pending", "priority": "high"},
+        ],
+    },
+    {
         "id": "garak_scan",
         "name": "Garak LLM Vulnerability Scan (NVIDIA)",
         "description": (

@@ -85,7 +85,7 @@ def record_chain_start(
                     c.status    = 'running'
                 """,
                 sid=session_id, org=organization_id, uid=user_id,
-                obj=objective[:500], mode=mode, ts=_now_iso(),
+                obj=(objective or "")[:500], mode=mode, ts=_now_iso(),
             )
     except Exception as e:
         logger.debug(f"EvoGraph record_chain_start error: {e}")
@@ -132,7 +132,7 @@ def record_step(
                 """,
                 sid=session_id, iter=iteration, phase=phase,
                 tool=tool_name or "", args=args_str, output=output_str,
-                success=success, thought=thought[:300], ts=_now_iso(),
+                success=success, thought=(thought or "")[:300], ts=_now_iso(),
                 prev_iter=iteration - 1,
             )
     except Exception as e:
@@ -166,7 +166,7 @@ def record_finding(
                 """,
                 sid=session_id, iter=iteration,
                 ftype=finding_type, sev=severity,
-                desc=description[:500], ts=_now_iso(),
+                desc=(description or "")[:500], ts=_now_iso(),
             )
     except Exception as e:
         logger.debug(f"EvoGraph record_finding error: {e}")
@@ -198,8 +198,8 @@ def record_failure(
                 MERGE (step)-[:FAILED_WITH]->(f)
                 """,
                 sid=session_id, iter=iteration,
-                tool=tool_name, err=error[:500],
-                lesson=lesson[:500], ts=_now_iso(),
+                tool=tool_name, err=(error or "")[:500],
+                lesson=(lesson or "")[:500], ts=_now_iso(),
             )
     except Exception as e:
         logger.debug(f"EvoGraph record_failure error: {e}")
@@ -228,7 +228,7 @@ def record_chain_end(
                     c.ended_at         = $ts
                 """,
                 sid=session_id, status=status,
-                outcome=outcome[:500], phase=final_phase,
+                outcome=(outcome or "")[:500], phase=final_phase,
                 iters=iteration_count, ts=_now_iso(),
             )
     except Exception as e:
@@ -314,21 +314,21 @@ def get_prior_chain_context(
             for c in chains:
                 status_icon = "completed" if c["status"] == "completed" else "aborted"
                 parts.append(
-                    f"- [{status_icon}] {c.get('objective', '?')[:120]} "
+                    f"- [{status_icon}] {(c.get('objective') or '?')[:120]} "
                     f"(phase: {c.get('phase', '?')}, {c.get('iters', 0)} steps)"
                 )
                 if c.get("outcome"):
-                    parts.append(f"  Outcome: {c['outcome'][:200]}")
+                    parts.append(f"  Outcome: {(c.get('outcome') or '')[:200]}")
 
         if findings:
             parts.append("\n### Key Findings from Prior Sessions")
             for f in findings:
-                parts.append(f"- [{f['severity']}] {f['type']}: {f['description'][:200]}")
+                parts.append(f"- [{f.get('severity')}] {f.get('type')}: {(f.get('description') or '')[:200]}")
 
         if failures:
             parts.append("\n### Lessons Learned (avoid repeating)")
             for f in failures:
-                parts.append(f"- {f['tool']}: {f.get('lesson', f.get('error', ''))[:200]}")
+                parts.append(f"- {f.get('tool')}: {(f.get('lesson') or f.get('error') or '')[:200]}")
 
         return "\n".join(parts)
 

@@ -131,3 +131,6 @@ def test_playbook_and_skill_registered():
     assert parsed and parsed.id == "threat-model"
     assert args.get("target") == "https://app.example.com"
     assert rest == ""
+    api = get_skill("api-test")
+    assert api and api.playbook_id == "api_test"
+    assert get_playbook("api_test")

@@ -15,6 +15,21 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def clip_text(value: Any, limit: int) -> str:
+    """Slice a value that may be None / non-str without raising TypeError.
+
+    ``dict.get("k", "")[:n]`` still crashes when the key exists and is ``None``
+    — that is the Agent page ``'NoneType' object is not subscriptable`` error.
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    if limit < 0:
+        return value
+    return value[:limit]
+
+
 # Type aliases
 Phase = Literal["informational", "exploitation", "post_exploitation"]
 ActionType = Literal["use_tool", "complete", "transition_phase", "ask_user"]
@@ -76,6 +91,8 @@ class ExecutionStep(BaseModel):
     actionable_findings: List[str] = Field(default_factory=list)
     recommended_next_steps: List[str] = Field(default_factory=list)
     timestamp: datetime = Field(default_factory=utc_now)
+    token_usage: Optional[Dict[str, Any]] = None
+    llm_model: Optional[str] = None
 
 
 class PhaseTransitionRequest(BaseModel):
@@ -146,6 +163,15 @@ class LLMDecision(BaseModel):
     completion_reason: Optional[str] = None
     updated_todo_list: List[TodoItem] = Field(default_factory=list)
 
+    @field_validator("thought", "reasoning", mode="before")
+    @classmethod
+    def coerce_thought_reasoning(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        if isinstance(v, str):
+            return v
+        return str(v)
+
     @field_validator("tool_args", mode="before")
     @classmethod
     def coerce_tool_args(cls, v: Any) -> Optional[Dict[str, Any]]:
@@ -174,10 +200,19 @@ class LLMDecision(BaseModel):
 
 class OutputAnalysis(BaseModel):
     """Analysis of tool output by the LLM."""
-    interpretation: str
+    interpretation: str = ""
     extracted_info: ExtractedTargetInfo = Field(default_factory=ExtractedTargetInfo)
     actionable_findings: List[str] = Field(default_factory=list)
     recommended_next_steps: List[str] = Field(default_factory=list)
+
+    @field_validator("interpretation", mode="before")
+    @classmethod
+    def coerce_interpretation(cls, v: Any) -> str:
+        if v is None:
+            return ""
+        if isinstance(v, str):
+            return v
+        return str(v)
 
 
 class ConversationObjective(BaseModel):
@@ -214,6 +249,11 @@ class InvokeResponse(BaseModel):
     error: Optional[str] = None
     # Soft notice when preferred LLM was unavailable but a fallback kept serving
     warning: Optional[str] = None
+    engagement_replay: List[Dict[str, Any]] = Field(default_factory=list)
+    token_usage: Optional[Dict[str, Any]] = None
+    cost_usd: Optional[float] = None
+    price_limit_usd: Optional[float] = None
+    compacted: bool = False
 
 
 class AgentState(TypedDict, total=False):
@@ -275,6 +315,8 @@ class AgentState(TypedDict, total=False):
     interceptor_job_id: Optional[str]
     # Parallel recon stream briefs drained into the prompt (Copilot-style)
     recon_worker_briefs: Optional[List[str]]
+    # Kickoff saw 404/empty root — directory brute-force is mandatory
+    needs_dir_brute: Optional[bool]
     
     # Internal state
     _current_step: Optional[Dict[str, Any]]
@@ -283,6 +325,11 @@ class AgentState(TypedDict, total=False):
     _just_transitioned_to: Optional[Phase]
     _emitted_approval_key: Optional[str]
     _emitted_question_key: Optional[str]
+    token_usage: Optional[Dict[str, Any]]
+    operator_steers: Optional[List[str]]
+    prior_hunt_brief: Optional[str]
+    compacted_brief: Optional[str]
+    price_limit_usd: Optional[float]
 
 
 def format_todo_list(todo_list: List[Dict[str, Any]]) -> str:
@@ -292,17 +339,19 @@ def format_todo_list(todo_list: List[Dict[str, Any]]) -> str:
     
     lines = []
     for todo in todo_list:
+        if not isinstance(todo, dict):
+            continue
         status_icon = {
             "pending": "[ ]",
             "in_progress": "[~]",
             "completed": "[x]",
             "blocked": "[!]"
-        }.get(todo.get("status", "pending"), "[ ]")
-        priority = todo.get("priority", "medium")
+        }.get(todo.get("status") or "pending", "[ ]")
+        priority = todo.get("priority") or "medium"
         priority_marker = {"high": "!!!", "medium": "!!", "low": "!"}.get(priority, "!!")
-        lines.append(f"{status_icon} {priority_marker} {todo.get('description', '')}")
+        lines.append(f"{status_icon} {priority_marker} {todo.get('description') or ''}")
     
-    return "\n".join(lines)
+    return "\n".join(lines) or "No tasks defined yet."
 
 
 def format_execution_trace(
@@ -321,12 +370,14 @@ def format_execution_trace(
     
     lines = []
     for step in recent_trace:
+        if not isinstance(step, dict):
+            continue
         iteration = step.get("iteration", 0)
         phase = step.get("phase") or "informational"
-        thought = (step.get("thought") or "")[:200]
-        tool_name = step.get("tool_name", "")
+        thought = clip_text(step.get("thought"), 200)
+        tool_name = step.get("tool_name") or ""
         success = step.get("success")
-        analysis = (step.get("output_analysis") or "")[:300]
+        analysis = clip_text(step.get("output_analysis"), 300)
         
         lines.append(f"## Step {iteration} [{phase}]")
         lines.append(f"Thought: {thought}")
@@ -337,7 +388,7 @@ def format_execution_trace(
                 lines.append(f"Analysis: {analysis}")
         lines.append("")
     
-    return "\n".join(lines)
+    return "\n".join(lines) or "No steps executed yet."
 
 
 def format_qa_history(qa_history: List[Dict[str, Any]]) -> str:
@@ -347,15 +398,21 @@ def format_qa_history(qa_history: List[Dict[str, Any]]) -> str:
     
     lines = []
     for i, entry in enumerate(qa_history, 1):
-        question = entry.get("question", {})
-        answer = entry.get("answer", {})
-        q_text = question.get("question", "Unknown question")
-        a_text = answer.get("answer", "No answer") if answer else "Awaiting answer"
-        lines.append(f"Q{i}: {q_text[:200]}")
-        lines.append(f"A{i}: {a_text[:200]}")
+        if not isinstance(entry, dict):
+            continue
+        question = entry.get("question") or {}
+        answer = entry.get("answer") or {}
+        if not isinstance(question, dict):
+            question = {}
+        if not isinstance(answer, dict):
+            answer = {}
+        q_text = clip_text(question.get("question") or "Unknown question", 200)
+        a_text = clip_text(answer.get("answer") or "Awaiting answer", 200) if entry.get("answer") else "Awaiting answer"
+        lines.append(f"Q{i}: {q_text}")
+        lines.append(f"A{i}: {a_text}")
         lines.append("")
     
-    return "\n".join(lines)
+    return "\n".join(lines) or "No Q&A history."
 
 
 def format_objective_history(objective_history: List[Dict[str, Any]]) -> str:
@@ -365,13 +422,17 @@ def format_objective_history(objective_history: List[Dict[str, Any]]) -> str:
     
     lines = []
     for i, outcome in enumerate(objective_history, 1):
-        obj = outcome.get("objective", {})
+        if not isinstance(outcome, dict):
+            continue
+        obj = outcome.get("objective") or {}
+        if not isinstance(obj, dict):
+            obj = {}
         success = outcome.get("success", False)
         status = "✓" if success else "✗"
-        content = obj.get("content", "Unknown objective")[:100]
+        content = clip_text(obj.get("content") or "Unknown objective", 100)
         lines.append(f"{i}. [{status}] {content}")
     
-    return "\n".join(lines)
+    return "\n".join(lines) or "No completed objectives."
 
 
 def summarize_trace_for_response(trace: List[Dict[str, Any]]) -> str:
@@ -383,9 +444,11 @@ def summarize_trace_for_response(trace: List[Dict[str, Any]]) -> str:
     findings = []
     
     for step in trace:
+        if not isinstance(step, dict):
+            continue
         if step.get("tool_name"):
             tools_used.append(step["tool_name"])
-        for finding in step.get("actionable_findings", []):
+        for finding in step.get("actionable_findings") or []:
             findings.append(finding)
     
     summary_parts = []

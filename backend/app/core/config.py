@@ -167,6 +167,13 @@ class Settings(BaseSettings):
     # loop stops picking new tools and wraps up with a partial report. Keep below
     # AGENT_REQUEST_TIMEOUT_SECONDS so the graceful path wins over the hard cutoff.
     AGENT_TURN_BUDGET_SECONDS: int = 600
+    # Hard USD spend cap for one agent session (CAI CAI_PRICE_LIMIT analog).
+    # 0 disables the cap. Checked before each LLM think so we stop before overspend.
+    AGENT_PRICE_LIMIT_USD: float = 5.0
+    # Auto-compact the execution trace once it exceeds this many steps.
+    AGENT_COMPACT_TRACE_STEPS: int = 24
+    # Timeout for attaching an external MCP server (Burp/Caido).
+    AGENT_MCP_CONNECT_TIMEOUT_SECONDS: float = 8.0
     # Node-level ceiling for a single tool call. Bounds any one tool so a hung
     # tool can never block the turn, and guarantees a tool_complete event is
     # emitted (so the UI never dangles on a tool_start).
@@ -265,6 +272,12 @@ class Settings(BaseSettings):
     # When True, execute_interceptor creates a remote job if any worker is online
     # before trying local CLI / deep_crawl.
     INTERCEPTOR_PREFER_REMOTE_WORKERS: bool = True
+
+    # Optional OTLP HTTP endpoint for redacted agent traces (Phoenix / self-hosted Langfuse).
+    OTEL_EXPORTER_OTLP_ENDPOINT: Optional[str] = None
+    OTEL_EXPORTER_OTLP_HEADERS: Optional[str] = None
+    LANGFUSE_PUBLIC_KEY: Optional[str] = None
+    LANGFUSE_SECRET_KEY: Optional[str] = None
     
     class Config:
         env_file = ".env"

@@ -104,6 +104,7 @@ class EngagementBrain:
     focus_areas: List[Dict[str, Any]] = field(default_factory=list)
     candidates: List[Dict[str, Any]] = field(default_factory=list)
     coverage: List[Dict[str, Any]] = field(default_factory=list)
+    task_graph: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -121,6 +122,7 @@ class EngagementBrain:
             "focus_areas": list(self.focus_areas or []),
             "candidates": list(self.candidates or []),
             "coverage": list(self.coverage or []),
+            "task_graph": dict(self.task_graph or {}),
         }
 
 
@@ -1908,6 +1910,12 @@ def seed_hypotheses_from_capability_map(
 
     brain = ensure_threat_model(brain, cmap)
     brain.next_steps = _derive_next_steps(brain)
+    try:
+        from app.services.agent.penetration_task_graph import sync_graph_from_brain
+
+        sync_graph_from_brain(brain)
+    except Exception:
+        pass
     return brain
 
 
@@ -2208,6 +2216,12 @@ def queue_followups_for_finding(
     if brain.phase not in ("coverage", "report"):
         brain.phase = "attack"
     brain.next_steps = _derive_next_steps(brain)
+    try:
+        from app.services.agent.penetration_task_graph import sync_graph_from_brain
+
+        sync_graph_from_brain(brain)
+    except Exception:
+        pass
     return created
 
 
@@ -2288,6 +2302,60 @@ def log_approach(
     brain.approaches.append(rec)
     brain.approaches = brain.approaches[-40:]
     return rec
+
+
+def ensure_spawned_hypotheses(
+    brain: EngagementBrain,
+    spawn_names: Iterable[str],
+) -> List[Hypothesis]:
+    """Add hunt cards for specialists discovered mid-swarm (dynamic spawn)."""
+    created: List[Hypothesis] = []
+    existing_open = {
+        h.specialist
+        for h in brain.hypotheses
+        if h.status in ("open", "in_progress")
+    }
+    existing_ids = {h.id for h in brain.hypotheses}
+    for raw in spawn_names or []:
+        name = str(raw or "").strip()
+        if not name or name in existing_open:
+            continue
+        card = _HUNT_CARDS.get(name)
+        if not card:
+            for _key, val in _HUNT_CARDS.items():
+                if val.get("specialist") == name:
+                    card = val
+                    break
+        if not card:
+            continue
+        hid = _hyp_id(brain.target, "spawn", name, card["title"])
+        if hid in existing_ids:
+            continue
+        hyp = Hypothesis(
+            id=hid,
+            title=card["title"],
+            assumption=card["assumption"],
+            test=card["test"],
+            pass_criteria=card["pass_criteria"],
+            kill_criteria=card["kill_criteria"],
+            specialist=card["specialist"],
+            priority=card.get("priority", "high"),
+            target=brain.target,
+            source="spawn",
+        )
+        brain.hypotheses.append(hyp)
+        created.append(hyp)
+        existing_open.add(hyp.specialist)
+        existing_ids.add(hid)
+    if created:
+        try:
+            from app.services.agent.penetration_task_graph import sync_graph_from_brain
+
+            sync_graph_from_brain(brain)
+        except Exception:
+            pass
+        brain.next_steps = _derive_next_steps(brain)
+    return created
 
 
 def specialists_from_open_hypotheses(
@@ -2398,6 +2466,18 @@ def format_engagement_brain_for_prompt(
                     "(More packs: lookup_methodology_procedure(methodology_id=…) "
                     "or search_memory(room='methodologies').)"
                 )
+        except Exception:
+            pass
+
+    if brain.task_graph:
+        try:
+            from app.services.agent.penetration_task_graph import (
+                format_graph_for_scheduler,
+                graph_from_dict,
+            )
+
+            lines.append("")
+            lines.append(format_graph_for_scheduler(graph_from_dict(brain.task_graph)))
         except Exception:
             pass
 

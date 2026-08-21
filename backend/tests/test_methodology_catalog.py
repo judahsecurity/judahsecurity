@@ -102,6 +102,8 @@ def test_methodologies_from_rich_crawl():
     assert "reflected_xss" in ids
     assert "unsafe_file_upload" in ids
     assert "ssrf_url_fetch" in ids
+    assert "path_directory_context" in ids
+    assert "path_parameter_mining" in ids
     assert "realtime_channel_auth" in ids
     assert "admin_surface_exposure" in ids
     assert "coverage_known_vulns" in ids
@@ -124,6 +126,20 @@ def test_methodologies_from_rich_crawl():
     assert cmap.methodologies
     assert any(h.get("methodology_id") for h in cmap.ranked_hunt_queue)
     assert any(h.get("hunt") == "unauth_account_lookup" for h in cmap.ranked_hunt_queue)
+
+
+def test_action_execute_path_seeds_ssrf_card():
+    cmap = build_capability_map_from_crawl(
+        _fake_crawl(
+            pages_visited=["https://appsmith.example.com/"],
+            api_calls={"appsmith.example.com": {"POST /api/v1/actions/execute"}},
+            api_samples=[{"url": "/api/v1/actions/execute", "method": "POST"}],
+            forms=[],
+        )
+    )
+    ids = {m.id for m in methodologies_from_capability_map(cmap)}
+    assert "ssrf_url_fetch" in ids
+    assert "path_parameter_mining" in ids
 
 
 def test_seed_hypotheses_uses_methodology_cards():

@@ -1,21 +1,16 @@
 """
 Fireteam / Scatter-Gather ReAct pattern.
 
-Purpose
--------
-Spawn N *specialist* sub-agents in parallel, each given:
+Joshua (orchestrator) only *schedules*. This module runs N short-lived
+specialist executors in parallel. Each gets:
 
-    * A tightly-scoped role (e.g. "web_recon", "cloud_audit", "secrets").
-    * A restricted tool allowlist.
-    * The same shared mission and targets.
+    * A tightly-scoped role and allowlist
+    * An operation directive + brain slice (not the full engagement dump)
+    * A fresh context window
 
-Each specialist runs a short, focused ReAct loop and returns a compact
-``SpecialistReport``. The orchestrator calling ``run_fireteam`` then
-receives all reports in one shot so it can integrate their findings.
-
-The implementation is deliberately self-contained -- it does not reuse the
-main ``AgentOrchestrator`` because the sub-agents should be simpler, more
-deterministic, and cheaper to run in bulk.
+Each specialist returns an ``ExecutorSummary`` contract (verdict / evidence /
+spawn). The Penetration Task Graph is the planner; auto-prompter rewrites a
+failed hunter instead of looping the same prompt.
 """
 
 from __future__ import annotations
@@ -87,8 +82,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
     SpecialistProfile(
         name="content_api",
         role=(
-            "Content and API discovery specialist. Crawl, fuzz dirs, mine "
-            "historical URLs, find params and undocumented API routes."
+            "Content and API discovery specialist. When the page is 404, login-only, "
+            "or thin: directory brute-force, crawl JS, mine parameters, find undocumented "
+            "APIs. A 404 is not 'nothing else is available'."
         ),
         allowed_tools=[
             "query_assets",
@@ -104,8 +100,14 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "discover_parameters",
             "ingest_urls_into_map",
             "create_scan",
+            "mutate_list",
+            "list_captured_requests",
+            "mutate_captured_request",
+            "fingerprint_api",
+            "extract_js_endpoints",
+            "fetch_lazy_chunks",
         ],
-        max_iterations=8,
+        max_iterations=12,
     ),
     SpecialistProfile(
         name="js_secrets",
@@ -117,6 +119,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         allowed_tools=[
             "query_assets",
             "scan_js_urls_for_secrets",
+            "fetch_lazy_chunks",
+            "extract_js_endpoints",
+            "ingest_urls_into_map",
             "execute_retirejs",
             "execute_gitleaks",
             "execute_hermes",
@@ -124,6 +129,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_httpx",
             "execute_browser",
             "execute_interactsh",
+            "run_custom_probe",
+            "mutate_list",
             "get_engagement_brain",
             "add_engagement_credential",
             "queue_finding_followups",
@@ -134,8 +141,10 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "save_note",
             "create_scan",
         ],
-        max_iterations=8,
+        max_iterations=12,
         system_prompt_suffix=(
+            "First fetch_lazy_chunks (dry_run then download) on webpack/Vite/Next runtime bundles, "
+            "then extract_js_endpoints, ingest_urls_into_map, then secrets. "
             "Hunt first-party /_next/static/chunks/*.js and admin bundles for "
             "hostname-keyed config objects (prod/dev/qa → client_id + client_secret). "
             "Credentials are often sent as client_id/client_secret HTTP headers, not Bearer. "
@@ -244,6 +253,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "rank_attack_surface",
             "save_note",
             "execute_curl",
+            "list_captured_requests",
+            "fingerprint_api",
+            "mutate_list",
         ],
         max_iterations=4,
         system_prompt_suffix=(
@@ -268,6 +280,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_hydra",
             "execute_jwt",
             "compare_requests",
+            "mutate_captured_request",
+            "run_custom_probe",
             "add_engagement_credential",
             "queue_finding_followups",
             "update_hypothesis",
@@ -276,7 +290,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "validate_finding",
             "submit_finding_candidate",
         ],
-        max_iterations=8,
+        max_iterations=12,
         system_prompt_suffix=(
             "Prefer compare_requests (anonymous vs auth). On default/weak login success: "
             "add_engagement_credential + queue_finding_followups(vuln_type='default_login'). "
@@ -334,6 +348,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "discover_parameters",
             "execute_arjun",
             "compare_requests",
+            "mutate_captured_request",
+            "list_captured_requests",
+            "run_custom_probe",
             "update_hypothesis",
             "queue_finding_followups",
             "log_engagement_approach",
@@ -341,7 +358,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "submit_finding_candidate",
             "save_note",
         ],
-        max_iterations=8,
+        max_iterations=12,
         system_prompt_suffix=(
             "Prove with compare_requests across identities/object IDs. "
             "Status 200 alone is not a finding — show other-user fields. "
@@ -375,6 +392,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "compare_requests",
             "execute_curl",
             "replay_http_request",
+            "mutate_captured_request",
             "update_hypothesis",
             "queue_finding_followups",
             "log_engagement_approach",
@@ -399,6 +417,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         allowed_tools=[
             "compare_requests",
             "replay_http_request",
+            "mutate_captured_request",
+            "run_custom_probe",
             "execute_curl",
             "execute_browser",
             "update_hypothesis",
@@ -416,8 +436,10 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
     SpecialistProfile(
         name="injection",
         role=(
-            "Injection specialist (SQLi/XSS/SSTI/command). Use only parameters and "
-            "forms discovered in the capability map or confirmed via arjun/discover_parameters."
+            "Injection and input-abuse specialist. Hunt UNKNOWN bugs on discovered "
+            "and hidden parameters: SQLi/XSS/SSTI/command AND SSRF/URL-fetch "
+            "(webhook, proxy, execute, datasource, url/uri fields). Do not wait for "
+            "a named CVE. If the map is thin, run discover_parameters + arjun first."
         ),
         allowed_tools=[
             "discover_parameters",
@@ -427,15 +449,27 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_dalfox",
             "execute_commix",
             "execute_browser",
+            "execute_interactsh",
             "generate_injection_payloads",
             "execute_curl",
             "compare_requests",
+            "mutate_list",
+            "list_captured_requests",
+            "mutate_captured_request",
+            "run_custom_probe",
             "update_hypothesis",
             "log_engagement_approach",
             "validate_finding",
             "submit_finding_candidate",
         ],
-        max_iterations=8,
+        max_iterations=12,
+        system_prompt_suffix=(
+            "Start with discover_parameters + arjun on live paths if params are unknown. "
+            "SQLi/XSS/SSTI/cmd as usual. Also treat url/uri/request/datasource/execute/"
+            "query fields as SSRF: plant execute_interactsh, compare benign vs internal "
+            "canary (do not use cloud-metadata/loopback if Lictor blocks — use in-scope "
+            "OOB). Status 200 is not a finding. Unknown-bug hunting beats Nuclei templates."
+        ),
     ),
     SpecialistProfile(
         name="file_upload",
@@ -483,14 +517,19 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_deep_crawl",
             "execute_interceptor",
             "scan_js_urls_for_secrets",
+            "fetch_lazy_chunks",
+            "extract_js_endpoints",
             "execute_retirejs",
             "execute_curl",
             "compare_requests",
+            "mutate_list",
+            "mutate_captured_request",
+            "run_custom_probe",
             "update_hypothesis",
             "validate_finding",
             "submit_finding_candidate",
         ],
-        max_iterations=6,
+        max_iterations=12,
     ),
     SpecialistProfile(
         name="agent_tools",
@@ -707,6 +746,11 @@ class SpecialistReport:
     tool_calls: list[ToolInvocation] = field(default_factory=list)
     duration_seconds: float = 0.0
     error: Optional[str] = None
+    verdict: str = ""                     # proven | killed | blocked | retry | inconclusive
+    hypothesis_ids: list[str] = field(default_factory=list)
+    evidence: str = ""
+    spawn: list[str] = field(default_factory=list)
+    rewrite_hint: str = ""
 
 
 @dataclass
@@ -717,6 +761,29 @@ class FireteamResult:
     merged_summary: str = ""
     duration_seconds: float = 0.0
     total_tool_calls: int = 0
+
+
+def _fill_summary_contract(report: SpecialistReport, payload: dict) -> None:
+    """Copy executor summary-contract fields off a done JSON payload."""
+    verdict = str(payload.get("verdict") or "").strip().lower()
+    if verdict:
+        report.verdict = verdict
+    hyps = payload.get("hypothesis_ids") or payload.get("hypothesis_id") or []
+    if isinstance(hyps, str):
+        hyps = [hyps]
+    if isinstance(hyps, list) and hyps:
+        report.hypothesis_ids = [str(x) for x in hyps if x][:12]
+    evidence = payload.get("evidence")
+    if evidence:
+        report.evidence = str(evidence)[:2000]
+    spawn = payload.get("spawn") or payload.get("spawn_specialists") or []
+    if isinstance(spawn, str):
+        spawn = [spawn]
+    if isinstance(spawn, list):
+        report.spawn = [str(x).strip() for x in spawn if str(x).strip()][:8]
+    hint = payload.get("rewrite_hint") or payload.get("next_attempt")
+    if hint:
+        report.rewrite_hint = str(hint)[:500]
 
 
 # ---------------------------------------------------------------------------
@@ -742,13 +809,17 @@ TARGETS: {targets}
 AVAILABLE TOOLS (allowlist -- you MAY NOT call anything else):
 {tool_list}
 
-PALACE MEMORY (prior work on this org/target — search before repeating scans):
+PALACE / HUNT NOTES (compact — URL, param, hypothesis, next mutation):
 {memory}
 
 INSTRUCTIONS:
 1. Obey the operation directive (goal, PASS/KILL, hypothesis ids).
-2. Think briefly about which tool(s) will most quickly prove or kill the hypothesis.
-3. Respond ONLY with a JSON object of this shape:
+2. Code-first: list_captured_requests → mutate_captured_request (one field) or run_custom_probe.
+   JS: fetch_lazy_chunks → extract_js_endpoints → ingest_urls_into_map. API profile: fingerprint_api.
+   For lists (paths/params/xss) call mutate_list once — do not ReAct them.
+3. Blind SSRF/XXE: execute_interactsh register, plant payload_url. Never 169.254.169.254 or localhost.
+4. Think briefly about which tool(s) will most quickly prove or kill the hypothesis.
+5. Respond ONLY with a JSON object of this shape:
 
    {{
      "tool_calls": [
@@ -758,18 +829,25 @@ INSTRUCTIONS:
      "reasoning": "one-line rationale"
    }}
 
-4. When you have enough evidence, respond with:
+6. When you have enough evidence, respond with:
 
    {{
      "done": true,
      "summary": "1-3 paragraph narrative of what you found",
-     "key_findings": ["bullet", "bullet", "bullet"]
+     "key_findings": ["bullet", "bullet", "bullet"],
+     "verdict": "proven|killed|blocked|retry|inconclusive",
+     "hypothesis_ids": ["id from the directive"],
+     "evidence": "tool-backed proof only — quote tool output, never imagined",
+     "spawn": ["optional specialist names to enqueue, e.g. graphql_api"],
+     "rewrite_hint": "if retry: what to try differently"
    }}
 
-5. Medium+ findings: call validate_finding first; submit_finding_candidate only on SUBMIT.
+6. Medium+ findings: call validate_finding first; submit_finding_candidate only on SUBMIT.
    Write demonstrated-compromise reports (description + impact + assets + remediation),
    not 'login worked' or template-match-only.
-6. Do not exceed {max_iter} iterations. If unsure, finish with done=true.
+7. Do not exceed {max_iter} iterations. If unsure, finish with done=true.
+8. Imagining tool output is a failure (soliloquy). If you did not call a tool, verdict=retry.
+9. save_note(category='hunt') with URL/param/hypothesis/next mutation — not raw httpx.
 
 {suffix}
 """
@@ -808,6 +886,8 @@ async def _run_specialist(
         directive_block = directive.to_prompt_block()
         mission_for_prompt = merge_directive_into_mission(mission, None)  # directive shown separately
         max_iter = directive.max_iterations or profile.max_iterations
+        if directive.hypothesis_ids and not report.hypothesis_ids:
+            report.hypothesis_ids = list(directive.hypothesis_ids)
     else:
         directive_block = (
             f"Goal: execute your role ({profile.epithet}) against the shared mission.\n"
@@ -827,18 +907,27 @@ async def _run_specialist(
     try:
         from app.services.agent.tools import current_session_id, get_tenant_context
         from app.services.agent.palace_memory import wake_up as palace_wake_up
+        from app.services.agent.hunter_brief import format_hunter_brief
 
         _uid, org_id = get_tenant_context()
         session_id = current_session_id.get() or None
+        palace_snippet = ""
         if org_id:
             seed = target_list[0] if target_list else ""
-            memory_block = palace_wake_up(
+            palace_snippet = palace_wake_up(
                 org_id,
                 target=str(seed) or None,
                 specialist=profile.name,
             )
+        cmap = getattr(tools_manager, "_capability_map", None) or {}
+        memory_block = format_hunter_brief(
+            specialist=profile.name,
+            directive=directive if isinstance(directive, OperationDirective) else None,
+            cmap=cmap if isinstance(cmap, dict) else {},
+            palace_snippet=palace_snippet,
+        )
     except Exception:
-        logger.debug("specialist palace wake-up skipped", exc_info=True)
+        logger.debug("specialist hunt-brief skipped", exc_info=True)
 
     sys_prompt = _SPECIALIST_SYSTEM_PROMPT.format(
         epithet=profile.epithet or profile.name,
@@ -878,6 +967,7 @@ async def _run_specialist(
             kf = payload.get("key_findings") or []
             if isinstance(kf, list):
                 report.key_findings = [str(x) for x in kf][:20]
+            _fill_summary_contract(report, payload)
             break
 
         tool_calls = payload.get("tool_calls") or []

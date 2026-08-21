@@ -25,11 +25,12 @@ import {
   ShieldAlert, HelpCircle, XCircle, AlertTriangle, Flame,
   RefreshCw, BookOpen, Globe, BarChart2, Code2, ShieldCheck, Mail,
   ArrowRightLeft, Key, Package, MoveRight, Search, ChevronDown, ChevronUp,
-  Terminal, Brain, Zap, ShieldQuestion,
+  Terminal, Brain, Zap, ShieldQuestion, Square, DollarSign, Minimize2, FolderInput,
 } from 'lucide-react';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useRouter } from 'next/navigation';
 import { AttackScenarioPanel, ChainData } from '@/components/agent/AttackScenarioPanel';
+import { EngagementReplay, ReplayStep, TokenUsage } from '@/components/agent/EngagementReplay';
 import {
   CapabilityMapPanel,
   CapabilityMapState,
@@ -693,9 +694,13 @@ export default function AgentPage() {
   const wsRef = useRef<WebSocket | null>(null);
   const wsAuthenticatedRef = useRef(false);
   const wsFailCountRef = useRef(0);
+  const stopRequestedRef = useRef(false);
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [chainData, setChainData] = useState<ChainData | null>(null);
+  const [engagementReplay, setEngagementReplay] = useState<ReplayStep[]>([]);
+  const [replayUsage, setReplayUsage] = useState<TokenUsage | null>(null);
+  const [replayCost, setReplayCost] = useState<number | null>(null);
   const [scenarioCollapsed, setScenarioCollapsed] = useState(false);
   const [showScenario, setShowScenario] = useState(true);
   const [capabilityMap, setCapabilityMap] = useState<CapabilityMapState | null>(null);
@@ -707,6 +712,9 @@ export default function AgentPage() {
   } | null>(null);
   const [pendingConfirmation, setPendingConfirmation] = useState<PendingToolConfirmation | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
+  const [liveCost, setLiveCost] = useState<number | null>(null);
+  const [spendLimit, setSpendLimit] = useState<number | null>(null);
+  const [pendingLoadSessionId, setPendingLoadSessionId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const lastAgentActivityRef = useRef<number>(Date.now());
   const toolInFlightRef = useRef(false);
@@ -761,9 +769,12 @@ export default function AgentPage() {
   // ── Agent status + playbooks + conversations ───────────────────
   useEffect(() => {
     api.getAgentStatus()
-      .then((data: { available?: boolean; hint?: string }) => {
+      .then((data: { available?: boolean; hint?: string; price_limit_usd?: number }) => {
         setAgentAvailable(data?.available ?? false);
         setAgentStatusHint(data?.hint ?? null);
+        if (typeof data?.price_limit_usd === 'number' && data.price_limit_usd > 0) {
+          setSpendLimit(data.price_limit_usd);
+        }
       })
       .catch((err: unknown) => {
         setAgentAvailable(false);
@@ -813,6 +824,7 @@ export default function AgentPage() {
     if (
       [
         'thinking', 'tool_start', 'tool_complete', 'response', 'error',
+        'cancelled', 'cost', 'steered', 'compacted',
         'pending_confirmation', 'capability_map_update', 'auth_session_update',
         'attack_scenario_update', 'authenticated', 'pong',
       ].includes(msgType)
@@ -821,7 +833,7 @@ export default function AgentPage() {
     }
     if (msgType === 'tool_start') {
       toolInFlightRef.current = true;
-    } else if (msgType === 'tool_complete' || msgType === 'response' || msgType === 'error') {
+    } else if (msgType === 'tool_complete' || msgType === 'response' || msgType === 'error' || msgType === 'cancelled') {
       toolInFlightRef.current = false;
     }
     if (msgType === 'authenticated') {
@@ -853,8 +865,29 @@ export default function AgentPage() {
         expires_at: data.expires_at as number | undefined,
         message: data.message as string | undefined,
       });
+    } else if (msgType === 'cost') {
+      if (typeof data.cost_usd === 'number') setLiveCost(data.cost_usd);
+      if (typeof data.limit_usd === 'number') setSpendLimit(data.limit_usd);
+      if (data.capped) {
+        toast({
+          title: 'Spend cap reached',
+          description: `Stopped at $${Number(data.cost_usd || 0).toFixed(4)} of $${Number(data.limit_usd || 0).toFixed(2)}.`,
+        });
+      }
+    } else if (msgType === 'steered') {
+      toast({
+        title: 'Steer queued',
+        description: String(data.message || 'Operator instruction will apply on the next think turn.'),
+      });
+    } else if (msgType === 'compacted') {
+      toast({
+        title: 'Context compacted',
+        description: String(data.brief || 'Older steps were summarized to keep the hunt in-window.'),
+      });
     } else if (msgType === 'response') {
       setLiveSteps([]); setLoading(false);
+      if (typeof data.cost_usd === 'number') setLiveCost(data.cost_usd);
+      if (typeof data.price_limit_usd === 'number') setSpendLimit(data.price_limit_usd);
       appendAgentMessage({
         answer: data.answer as string,
         current_phase: data.current_phase as string,
@@ -864,6 +897,9 @@ export default function AgentPage() {
         approval_request: data.approval_request as Record<string, unknown>,
         awaiting_question: data.awaiting_question as boolean,
         question_request: data.question_request as Record<string, unknown>,
+        engagement_replay: data.engagement_replay as ReplayStep[] | undefined,
+        token_usage: data.token_usage as TokenUsage | undefined,
+        cost_usd: data.cost_usd as number | undefined,
       });
       if (typeof data.warning === 'string' && data.warning.trim()) {
         toast({
@@ -874,6 +910,18 @@ export default function AgentPage() {
       if (data.awaiting_question) setPendingAnswer(true);
       loadConversations();
       if (sid) api.getAgentSessionChain(sid, true).then(setChainData).catch(() => {});
+    } else if (msgType === 'cancelled') {
+      setLiveSteps([]); setLoading(false);
+      const msg = (data.message as string) || 'Stopped by operator.';
+      toast({ title: 'Stopped', description: msg });
+      setMessages((prev) => {
+        if (prev.some((m) => typeof m.content === 'string' && m.content.startsWith('Stopped by operator'))) {
+          return prev;
+        }
+        return [...prev, {
+          id: `agent-${Date.now()}`, role: 'agent' as const, content: msg,
+        }];
+      });
     } else if (msgType === 'error') {
       setLiveSteps([]); setLoading(false);
       const errMsg = (data.message as string) || 'Unknown error';
@@ -953,6 +1001,9 @@ export default function AgentPage() {
     execution_trace_summary?: string; awaiting_approval?: boolean;
     approval_request?: Record<string, unknown>; awaiting_question?: boolean;
     question_request?: Record<string, unknown>;
+    engagement_replay?: ReplayStep[];
+    token_usage?: TokenUsage;
+    cost_usd?: number;
   }) => {
     setMessages((prev) => [...prev, {
       id: `agent-${Date.now()}`, role: 'agent', content: payload.answer || '(No response)',
@@ -961,6 +1012,9 @@ export default function AgentPage() {
       approvalRequest: payload.approval_request, awaitingQuestion: payload.awaiting_question,
       questionRequest: payload.question_request,
     }]);
+    if (payload.engagement_replay) setEngagementReplay(payload.engagement_replay);
+    if (payload.token_usage) setReplayUsage(payload.token_usage);
+    if (payload.cost_usd != null) setReplayCost(payload.cost_usd);
   };
 
   const sendViaWs = (msgObj: Record<string, unknown>): boolean => {
@@ -974,7 +1028,29 @@ export default function AgentPage() {
     const q = question.trim();
     const usePreset = selectedPlaybookId !== 'custom';
     if (!usePreset && !q) return;
-    if (loading) return;
+
+    const sid = sessionId || crypto.randomUUID();
+    if (!sessionId) setSessionId(sid);
+
+    if (loading) {
+      if (!q) return;
+      setMessages((prev) => [...prev, {
+        id: `steer-${Date.now()}`,
+        role: 'user',
+        content: `Steer: ${q}`,
+      }]);
+      setQuestion('');
+      const sent = sendViaWs({ type: 'steer', message: q });
+      if (!sent) {
+        try {
+          await api.steerAgentRun(sid, q);
+          toast({ title: 'Steer queued', description: 'The agent will pick this up on the next think turn.' });
+        } catch (err: unknown) {
+          toast({ variant: 'destructive', title: 'Steer failed', description: getApiErrorMessage(err as Error) });
+        }
+      }
+      return;
+    }
 
     const displayContent = usePreset
       ? `${playbooks.find((p) => p.id === selectedPlaybookId)?.name ?? selectedPlaybookId}${target.trim() ? ` — ${target.trim()}` : ''}`
@@ -983,9 +1059,7 @@ export default function AgentPage() {
     setMessages((prev) => [...prev, { id: `user-${Date.now()}`, role: 'user', content: displayContent }]);
     if (!usePreset) setQuestion('');
     setUrlPrefilled(false); setLoading(true); setLiveSteps([]);
-
-    const sid = sessionId || crypto.randomUUID();
-    if (!sessionId) setSessionId(sid);
+    stopRequestedRef.current = false;
 
     try {
       if (pendingAnswer && sid) {
@@ -1003,11 +1077,18 @@ export default function AgentPage() {
       } else {
         const wsMsg: Record<string, unknown> = { type: 'query', question: usePreset ? displayContent : q, mode };
         if (usePreset) { wsMsg.playbook_id = selectedPlaybookId; wsMsg.target = target.trim() || undefined; }
+        if (pendingLoadSessionId) {
+          wsMsg.load_session_id = pendingLoadSessionId;
+          setPendingLoadSessionId(null);
+        }
         const sent = sendViaWs(wsMsg);
         if (!sent) {
           const data = await api.queryAgent(usePreset ? displayContent : q, sid, {
-            ...(usePreset ? { playbookId: selectedPlaybookId, target: target.trim() || undefined } : {}), mode,
+            ...(usePreset ? { playbookId: selectedPlaybookId, target: target.trim() || undefined } : {}),
+            mode,
+            ...(pendingLoadSessionId ? { loadSessionId: pendingLoadSessionId } : {}),
           });
+          setPendingLoadSessionId(null);
           setLoading(false);
           if (data.session_id) setSessionId(data.session_id);
           appendAgentMessage(data);
@@ -1016,15 +1097,73 @@ export default function AgentPage() {
           }
           if (data.awaiting_question) setPendingAnswer(true);
           if (data.error) toast({ variant: 'destructive', title: 'Agent error', description: data.error });
+          if (typeof data.cost_usd === 'number') setLiveCost(data.cost_usd);
+          if (typeof data.price_limit_usd === 'number') setSpendLimit(data.price_limit_usd);
           loadConversations();
         }
       }
     } catch (err: unknown) {
       setLoading(false);
+      if (stopRequestedRef.current) return;
       const msg = getApiErrorMessage(err as Error, 'Failed to send');
       toast({ variant: 'destructive', title: 'Error', description: msg });
       appendAgentMessage({ answer: `Error: ${msg}` });
     }
+  };
+
+  const handleCompact = async () => {
+    const sid = sessionId;
+    if (!sid) return;
+    const sent = sendViaWs({ type: 'compact' });
+    if (!sent) {
+      try {
+        await api.compactAgentRun(sid);
+        toast({ title: 'Compact queued', description: 'Older steps will be summarized on the next think turn.' });
+      } catch (err: unknown) {
+        toast({ variant: 'destructive', title: 'Compact failed', description: getApiErrorMessage(err as Error) });
+      }
+    }
+  };
+
+  const useHuntAsContext = async (sourceSessionId: string) => {
+    const sid = sessionId;
+    if (!sid || sourceSessionId === sid) {
+      toast({ title: 'Already this session', description: 'Open a new conversation first, then load this hunt as context.' });
+      return;
+    }
+    if (loading) {
+      const sent = sendViaWs({ type: 'load', source_session_id: sourceSessionId });
+      if (!sent) {
+        try {
+          await api.loadPriorHunt(sid, sourceSessionId);
+        } catch (err: unknown) {
+          toast({ variant: 'destructive', title: 'Load failed', description: getApiErrorMessage(err as Error) });
+          return;
+        }
+      }
+      toast({ title: 'Prior hunt queued', description: 'The agent will use that session as context on the next think turn.' });
+      return;
+    }
+    setPendingLoadSessionId(sourceSessionId);
+    toast({ title: 'Will load as context', description: 'The next Send will inject a compact brief from that hunt.' });
+  };
+
+  const handleStop = async () => {
+    if (!loading) return;
+    stopRequestedRef.current = true;
+    const sid = sessionId;
+    const sent = sendViaWs({ type: 'stop' });
+    if (!sent && sid) {
+      try {
+        await api.stopAgentRun(sid);
+      } catch {
+        /* backend may already have finished; UI still unblocks */
+      }
+      toast({ title: 'Stopped', description: 'Cancelling the agent run so it stops spending tokens.' });
+    }
+    setLoading(false);
+    setLiveSteps([]);
+    toolInFlightRef.current = false;
   };
 
   // ── Auto-start (deep link with ?autostart=1) ───────────────────
@@ -1074,6 +1213,9 @@ export default function AgentPage() {
         phase: m.role === 'agent' ? data.current_phase : undefined,
       }));
       setMessages(restored); setShowHistory(false); setPendingAnswer(false);
+      setEngagementReplay((data.engagement_replay as ReplayStep[]) || []);
+      setReplayUsage((data.token_usage as TokenUsage) || null);
+      setReplayCost(typeof data.cost_usd === 'number' ? data.cost_usd : null);
       api.getAgentSessionChain(sid, true).then(setChainData).catch(() => setChainData(null));
     } catch {
       toast({ variant: 'destructive', title: 'Error', description: 'Could not load conversation' });
@@ -1092,7 +1234,9 @@ export default function AgentPage() {
 
   const startNewConversation = () => {
     setMessages([]); setPendingAnswer(false); setLiveSteps([]); setShowHistory(false); setChainData(null);
+    setEngagementReplay([]); setReplayUsage(null); setReplayCost(null);
     setShowModifyInput(false); setModifyInput('');
+    setLiveCost(null); setPendingLoadSessionId(null);
     if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
     wsAuthenticatedRef.current = false; wsFailCountRef.current = 0;
     setSessionId(crypto.randomUUID()); setConnectionMode('connecting');
@@ -1154,8 +1298,15 @@ export default function AgentPage() {
         <div className="flex items-center gap-2 px-3 py-2 border-b border-primary/20 bg-primary/10">
           <Loader2 className="h-3.5 w-3.5 animate-spin text-primary shrink-0" />
           <span className="text-xs font-semibold text-primary">Agent working</span>
+          {(liveCost != null || (spendLimit != null && spendLimit > 0)) && (
+            <span className="flex items-center gap-0.5 text-[10px] font-mono tabular-nums text-muted-foreground">
+              <DollarSign className="h-3 w-3" />
+              ${(liveCost ?? 0).toFixed(3)}
+              {spendLimit != null && spendLimit > 0 ? ` / $${spendLimit.toFixed(2)}` : ''}
+            </span>
+          )}
           {liveSteps.length > 0 && (
-            <div className="ml-auto flex items-center gap-3 text-[10px] text-muted-foreground">
+            <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
               {toolStepCount > 0 && (
                 <span className="flex items-center gap-1">
                   <Terminal className="h-3 w-3" /> {completedCount}/{toolStepCount} tools
@@ -1164,6 +1315,27 @@ export default function AgentPage() {
               <span>{liveSteps.filter(s => s.type === 'thinking').length} thoughts</span>
             </div>
           )}
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-6 px-2 text-[11px] ml-auto shrink-0"
+            onClick={handleCompact}
+            title="Compact older steps"
+          >
+            <Minimize2 className="h-3 w-3 mr-1" />
+            Compact
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-6 px-2 text-[11px] shrink-0 border-red-500/40 text-red-400 hover:bg-red-500/10 hover:text-red-300"
+            onClick={handleStop}
+          >
+            <Square className="h-3 w-3 fill-current mr-1" />
+            Stop
+          </Button>
         </div>
 
         {/* Step feed */}
@@ -1361,6 +1533,11 @@ export default function AgentPage() {
                             <p className="text-[10px] text-muted-foreground">{new Date(c.updated_at).toLocaleDateString()} · {c.message_count} msgs</p>
                           </div>
                           <Badge variant="outline" className="text-[10px] shrink-0">{c.current_phase}</Badge>
+                          <Button variant="ghost" size="icon" className="h-5 w-5 shrink-0 opacity-50 hover:opacity-100"
+                            title="Use as context for this hunt"
+                            onClick={(e) => { e.stopPropagation(); useHuntAsContext(c.session_id); }}>
+                            <FolderInput className="h-3 w-3" />
+                          </Button>
                           <Button variant="ghost" size="icon" className="h-5 w-5 shrink-0 opacity-50 hover:opacity-100"
                             onClick={(e) => { e.stopPropagation(); deleteConversation(c.session_id); }}>
                             <Trash2 className="h-3 w-3" />
@@ -1628,15 +1805,52 @@ export default function AgentPage() {
                           {sessionId.slice(0, 8)}
                         </span>
                       )}
+                      {(liveCost != null || (spendLimit != null && spendLimit > 0)) && (
+                        <span className="flex items-center gap-1 text-[10px] font-mono tabular-nums text-muted-foreground">
+                          <DollarSign className="h-3 w-3" />
+                          ${(liveCost ?? 0).toFixed(3)}
+                          {spendLimit != null && spendLimit > 0 ? ` / $${spendLimit.toFixed(2)}` : ''}
+                        </span>
+                      )}
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 px-2 text-xs"
+                        onClick={handleCompact}
+                        disabled={!sessionId || agentAvailable === false}
+                        title="Compact older steps (CAI /compact)"
+                      >
+                        <Minimize2 className="h-3.5 w-3.5 mr-1" />
+                        Compact
+                      </Button>
                     </div>
 
                     {urlPrefilled && <p className="text-xs text-muted-foreground">Pre-filled from link — press Send to start.</p>}
+                    {pendingLoadSessionId && (
+                      <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+                        <FolderInput className="h-3 w-3" />
+                        Next send will load hunt {pendingLoadSessionId.slice(0, 8)} as context.
+                        <button
+                          type="button"
+                          className="underline"
+                          onClick={() => setPendingLoadSessionId(null)}
+                        >
+                          clear
+                        </button>
+                      </p>
+                    )}
+                    {loading && (
+                      <p className="text-xs text-muted-foreground">Hunt is running — type a redirect and press Send to steer without stopping.</p>
+                    )}
 
                     {/* Input row */}
                     <div className="flex gap-2">
                       <Textarea
                         placeholder={
-                          pendingAnswer
+                          loading
+                            ? 'Steer this hunt — e.g. stop fuzzing /admin, the app is GraphQL…'
+                            : pendingAnswer
                             ? 'Type your answer to the agent…'
                             : selectedPlaybookId === 'custom'
                             ? 'Ask a question or describe a task…'
@@ -1647,19 +1861,44 @@ export default function AgentPage() {
                         onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
                         rows={2}
                         className="resize-none text-sm"
-                        disabled={loading || agentAvailable === false}
+                        disabled={agentAvailable === false}
                       />
+                      {loading && (
+                        <Button
+                          onClick={handleStop}
+                          size="icon"
+                          variant="outline"
+                          className="shrink-0 h-auto py-3 border-red-500/40 text-red-400 hover:bg-red-500/10"
+                          title="Stop this run"
+                        >
+                          <Square className="h-4 w-4 fill-current" />
+                        </Button>
+                      )}
                       <Button
                         onClick={handleSend}
-                        disabled={loading || agentAvailable === false || (selectedPlaybookId === 'custom' ? !question.trim() : false)}
+                        disabled={
+                          agentAvailable === false
+                          || (loading ? !question.trim() : (selectedPlaybookId === 'custom' ? !question.trim() : false))
+                        }
                         size="icon"
                         className="shrink-0 h-auto py-3"
+                        title={loading ? 'Steer this hunt' : 'Send'}
                       >
-                        {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                        <Send className="h-4 w-4" />
                       </Button>
                     </div>
                   </CardContent>
                 </Card>
+
+                {engagementReplay.length > 0 && (
+                  <div className="mt-4 w-full">
+                    <EngagementReplay
+                      steps={engagementReplay}
+                      tokenUsage={replayUsage}
+                      costUsd={replayCost}
+                    />
+                  </div>
+                )}
 
                 {/* Capability map + hunt queue (browser walkthrough) */}
                 {capabilityMap && (

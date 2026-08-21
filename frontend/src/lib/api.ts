@@ -613,6 +613,18 @@ class ApiClient {
     return response.data;
   }
 
+  async downloadAssetOpenapi(assetId: number) {
+    const response = await this.client.get(`/assets/${assetId}/openapi.yaml`, {
+      responseType: 'blob',
+    });
+    return response.data as Blob;
+  }
+
+  async getAssetApiSpec(assetId: number, index: number = 0) {
+    const response = await this.client.get(`/assets/${assetId}/api-specs/${index}`);
+    return response.data;
+  }
+
   async updateAsset(id: number, data: { 
     in_scope?: boolean; 
     is_monitored?: boolean;
@@ -2012,7 +2024,13 @@ class ApiClient {
   async queryAgent(
     question: string,
     sessionId?: string,
-    options?: { playbookId?: string; target?: string; mode?: 'assist' | 'agent' }
+    options?: {
+      playbookId?: string;
+      target?: string;
+      mode?: 'assist' | 'agent';
+      loadSessionId?: string;
+      priceLimitUsd?: number;
+    }
   ) {
     const response = await this.client.post('/agent/query', {
       question,
@@ -2020,6 +2038,8 @@ class ApiClient {
       playbook_id: options?.playbookId ?? undefined,
       target: options?.target ?? undefined,
       mode: options?.mode ?? 'assist',
+      load_session_id: options?.loadSessionId ?? undefined,
+      price_limit_usd: options?.priceLimitUsd ?? undefined,
     }, { timeout: 720000 });
     return response.data;
   }
@@ -2039,6 +2059,32 @@ class ApiClient {
       answer,
     }, { timeout: 720000 });
     return response.data;
+  }
+
+  async stopAgentRun(sessionId: string) {
+    const response = await this.client.post(`/agent/sessions/${sessionId}/stop`);
+    return response.data as { ok: boolean; cancelled: boolean; session_id: string };
+  }
+
+  async steerAgentRun(sessionId: string, message: string) {
+    const response = await this.client.post(`/agent/sessions/${sessionId}/steer`, {
+      session_id: sessionId,
+      message,
+    });
+    return response.data as { ok: boolean; queued: boolean; run_in_progress: boolean; session_id: string };
+  }
+
+  async compactAgentRun(sessionId: string) {
+    const response = await this.client.post(`/agent/sessions/${sessionId}/compact`);
+    return response.data as { ok: boolean; compact_queued: boolean; session_id: string };
+  }
+
+  async loadPriorHunt(sessionId: string, sourceSessionId: string) {
+    const response = await this.client.post(`/agent/sessions/${sessionId}/load`, {
+      session_id: sessionId,
+      source_session_id: sourceSessionId,
+    });
+    return response.data as { ok: boolean; session_id: string; source_session_id: string };
   }
 
   // ---------------------------------------------------------------------------

@@ -118,6 +118,11 @@ SAFE_RECON_TOOLS = {
     "get_coverage",
     "httpx_help",
     "dnsx_help",
+    "mutate_list",
+    "list_captured_requests",
+    "fetch_lazy_chunks",
+    "extract_js_endpoints",
+    "fingerprint_api",
 }
 
 

@@ -53,6 +53,7 @@ from app.services.agent.state import (
     summarize_trace_for_response,
     migrate_legacy_objective,
     utc_now,
+    clip_text,
 )
 from app.services.agent.prompts import (
     REACT_SYSTEM_PROMPT,
@@ -105,6 +106,27 @@ class DateTimeEncoder(json.JSONEncoder):
 def json_dumps_safe(obj, **kwargs):
     """JSON dumps with datetime support."""
     return json.dumps(obj, cls=DateTimeEncoder, **kwargs)
+
+
+def llm_text(content: Any) -> str:
+    """Normalize LangChain message content (str | list | None) to a string."""
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: List[str] = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                parts.append(str(block.get("text") or block.get("content") or ""))
+            else:
+                text = getattr(block, "text", None)
+                if text:
+                    parts.append(str(text))
+        return "\n".join(p for p in parts if p)
+    return str(content)
 
 
 # Keys whose values are credentials/secrets and must never be persisted to the
@@ -576,6 +598,8 @@ class AgentOrchestrator:
         execution_trace: list = []
         interceptor_job_id: Optional[str] = None
         recon_worker_briefs: List[str] = []
+        kickoff: Any = {}
+        auto_enrich_target: Optional[str] = None
         if seed:
             session_id = state.get("session_id")
             org_id = state.get("organization_id")
@@ -620,6 +644,20 @@ class AgentOrchestrator:
                     streams = []
 
                 kickoff_brief = (kickoff or {}).get("brief") or ""
+                kickoff_techs = [
+                    str(t) for t in ((kickoff or {}).get("technologies") or []) if t
+                ]
+                if kickoff_techs:
+                    existing = list(target_info.get("technologies") or [])
+                    merged: list = []
+                    seen = set()
+                    for t in existing + kickoff_techs:
+                        key = str(t).lower()
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        merged.append(str(t))
+                    target_info["technologies"] = merged
                 if isinstance(queued, dict) and queued.get("job_id"):
                     interceptor_job_id = str(queued["job_id"])
                     qnote = (
@@ -646,11 +684,61 @@ class AgentOrchestrator:
                     )
                     kickoff_brief = (kickoff_brief + snote) if kickoff_brief else snote.strip()
 
+                needs_dirs = bool((kickoff or {}).get("needs_dir_brute"))
+                if needs_dirs:
+                    try:
+                        enrich = await recon_workers.spawn_workers(
+                            url=seed,
+                            session_id=str(session_id or ""),
+                            pack="enrich",
+                            tools_manager=self.tool_manager,
+                            user_id=uid_int,
+                            organization_id=org_id if isinstance(org_id, int) else None,
+                        )
+                        if isinstance(enrich, list) and enrich:
+                            auto_enrich_target = seed
+                            kinds = ", ".join(
+                                f"{s.get('kind')}({s.get('note')})"
+                                for s in enrich if isinstance(s, dict)
+                            )
+                            dnote = (
+                                f"\n  404/empty root — auto-started directory brute + crawl enrich: {kinds}. "
+                                "Do not complete; mine parameters on whatever answers."
+                            )
+                            kickoff_brief = (kickoff_brief + dnote) if kickoff_brief else dnote.strip()
+                    except Exception as enrich_err:
+                        logger.warning("auto enrich spawn on empty root failed: %s", enrich_err)
+
+                try:
+                    if isinstance(org_id, int) and seed:
+                        from app.services.rest_inventory_service import persist_rest_inventory_safe
+
+                        spec_hits = []
+                        for h in (kickoff or {}).get("hits") or []:
+                            path = str(h.get("path") or h.get("url") or "")
+                            st = h.get("status") or 0
+                            if st == 200 and any(
+                                x in path.lower()
+                                for x in ("swagger", "openapi", "api-docs", "api/schema")
+                            ):
+                                spec_hits.append(h.get("url") or path)
+                        persist_rest_inventory_safe(
+                            None,
+                            org_id,
+                            seed,
+                            urls=spec_hits or None,
+                            source="openapi",
+                            probe_specs=not spec_hits,
+                        )
+                except Exception:
+                    pass
+
                 if kickoff_brief:
                     next_steps = [
                         "execute_interceptor (attaches to early job if queued)",
-                        "spawn_recon_workers(pack='enrich') for ferox+katana streams",
-                        "ingest_urls_into_map → sync_engagement_brain",
+                        "spawn_recon_workers(pack='enrich') for ferox+katana streams (auto on 404)",
+                        "ingest_urls_into_map → discover_parameters/arjun",
+                        "sync_engagement_brain → fireteam_dispatch(specialists='auto')",
                     ]
                     execution_trace.append(
                         ExecutionStep(
@@ -663,6 +751,8 @@ class AgentOrchestrator:
                                 "url": seed,
                                 "interceptor_job_id": interceptor_job_id,
                                 "streams": streams if isinstance(streams, list) else [],
+                                "root_status": (kickoff or {}).get("root_status"),
+                                "needs_dir_brute": bool((kickoff or {}).get("needs_dir_brute")),
                             },
                             tool_output=kickoff_brief,
                             success=bool((kickoff or {}).get("success")) or bool(interceptor_job_id),
@@ -674,6 +764,19 @@ class AgentOrchestrator:
                             recommended_next_steps=next_steps,
                         ).model_dump()
                     )
+                    if auto_enrich_target:
+                        execution_trace.append(
+                            ExecutionStep(
+                                iteration=0,
+                                phase="informational",
+                                thought="404/empty root — started ferox+katana enrich",
+                                reasoning="Directory brute is part of the assessment pipeline",
+                                tool_name="spawn_recon_workers",
+                                tool_args={"pack": "enrich", "target": auto_enrich_target},
+                                tool_output="auto-spawned enrich pack (ferox_dirs + katana_urls)",
+                                success=True,
+                            ).model_dump()
+                        )
             except Exception as e:
                 logger.warning("assessment kickoff skipped: %s", e)
                 kickoff_brief = ""
@@ -697,10 +800,22 @@ class AgentOrchestrator:
             "kickoff_brief": kickoff_brief or None,
             "interceptor_job_id": interceptor_job_id,
             "recon_worker_briefs": recon_worker_briefs,
+            "needs_dir_brute": bool((kickoff or {}).get("needs_dir_brute")) if isinstance(kickoff, dict) else False,
             "awaiting_user_approval": False,
             "phase_transition_pending": None,
             "qa_history": [],
             "mode": mode,
+            "token_usage": {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "cost_usd": 0.0,
+                "calls": [],
+            },
+            "operator_steers": [],
+            "prior_hunt_brief": None,
+            "compacted_brief": None,
+            "price_limit_usd": getattr(settings, "AGENT_PRICE_LIMIT_USD", 0) or 0,
         }
     
     def _wordpress_hunt_note(self, state: AgentState) -> str:
@@ -713,13 +828,26 @@ class AgentOrchestrator:
             for t in (state.get("target_info", {}) or {}).get("technologies", [])
         )
         blob = tech
+        blob += " " + str(state.get("kickoff_brief") or "").lower()
+        for brief in state.get("recon_worker_briefs") or []:
+            blob += " " + str(brief).lower()[:800]
         for s in state.get("execution_trace", []) or []:
-            blob += " " + str(s.get("tool_output") or "").lower()[:400]
+            if not isinstance(s, dict):
+                continue
+            blob += " " + str(s.get("tool_output") or "").lower()[:800]
             blob += " " + str(s.get("thought") or "").lower()[:200]
-        if "wordpress" not in blob and "wp-content" not in blob and "wp-json" not in blob:
+        wp_markers = (
+            "wordpress", "wp-content", "wp-json", "wp-admin",
+            "wp-login", "wp-includes",
+        )
+        if not any(m in blob for m in wp_markers):
             return ""
 
-        ran = {s.get("tool_name") for s in (state.get("execution_trace") or []) if s.get("tool_name")}
+        ran = {
+            s.get("tool_name")
+            for s in (state.get("execution_trace") or [])
+            if isinstance(s, dict) and s.get("tool_name")
+        }
         origin = ((state.get("target_info") or {}).get("primary_target") or "").rstrip("/")
         url = origin or "https://TARGET"
 
@@ -800,6 +928,13 @@ class AgentOrchestrator:
         cmap = state.get("capability_map") or {}
 
         suggestions: List[str] = []
+        try:
+            from app.services.agent.tester_loop import tester_loop_progress
+            loop = tester_loop_progress(state)
+            if loop.get("next_action"):
+                suggestions.append(loop["next_action"])
+        except Exception:
+            pass
         if "wordpress" in tech and "execute_wpscan" not in ran:
             suggestions.append(
                 "run execute_wpscan (WordPress detected — enumerate plugins, "
@@ -818,8 +953,8 @@ class AgentOrchestrator:
             suggestions.append("run execute_cmseek to fingerprint the CMS")
         if not suggestions:
             suggestions.append(
-                "synthesize your findings and finish (action=complete) instead "
-                "of repeating tools"
+                "continue the tester loop (crawl, dir brute, params, fireteam) — "
+                "do not repeat tools or declare the host clean"
             )
         alt = "; ".join(f"({i + 1}) {s}" for i, s in enumerate(suggestions))
 
@@ -841,6 +976,49 @@ class AgentOrchestrator:
         
         logger.info(f"[{user_id}] Think node - iteration {iteration}, phase: {phase}")
 
+        from app.services.agent.run_control import (
+            consume_compact,
+            drain_load_briefs,
+            drain_steers,
+            get_price_limit,
+            is_stop_requested,
+        )
+        from app.services.agent.session_ops import (
+            compact_execution_trace,
+            over_budget,
+            price_limit_usd,
+            should_auto_compact,
+        )
+
+        session_id = state.get("session_id")
+        if is_stop_requested(session_id):
+            return {
+                "task_complete": True,
+                "completion_reason": "Stopped by operator",
+                "messages": [AIMessage(content=(
+                    "Stopped by operator. No further LLM or tool calls will run."
+                ))],
+            }
+
+        limit_usd = price_limit_usd(get_price_limit(session_id) or state.get("price_limit_usd"))
+        if over_budget(state.get("token_usage"), limit_usd):
+            spent = float((state.get("token_usage") or {}).get("cost_usd") or 0)
+            msg = (
+                f"Spend cap reached (${spent:.4f} of ${limit_usd:.2f}). "
+                "Stopping before more LLM calls."
+            )
+            await self._emit_status({
+                "type": "cost",
+                "cost_usd": spent,
+                "limit_usd": limit_usd,
+                "capped": True,
+            })
+            return {
+                "task_complete": True,
+                "completion_reason": "Spend cap reached",
+                "messages": [AIMessage(content=msg)],
+            }
+
         await self._emit_status({
             "type": "thinking",
             "iteration": iteration,
@@ -848,8 +1026,34 @@ class AgentOrchestrator:
             "thought": "Reasoning about next action...",
         })
         
+        # Operator steer / prior-hunt load (CAI HITL + /load).
+        steer_notes = drain_steers(session_id)
+        load_briefs = drain_load_briefs(session_id)
+        prior_hunt_brief = (state.get("prior_hunt_brief") or "").strip()
+        if load_briefs:
+            extra = "\n\n".join(load_briefs)
+            prior_hunt_brief = f"{prior_hunt_brief}\n\n{extra}".strip() if prior_hunt_brief else extra
+        operator_steers = list(state.get("operator_steers") or []) + steer_notes
+        if steer_notes:
+            await self._emit_status({
+                "type": "steered",
+                "message": steer_notes[-1][:400],
+                "pending": len(steer_notes),
+            })
+
+        compacted_brief = (state.get("compacted_brief") or "").strip()
+        compacted_trace = list(state.get("execution_trace", []) or [])
+        if consume_compact(session_id) or should_auto_compact(compacted_trace):
+            compacted_trace, compact_note = compact_execution_trace(compacted_trace)
+            if compact_note:
+                compacted_brief = compact_note
+                await self._emit_status({
+                    "type": "compacted",
+                    "brief": compact_note[:500],
+                    "kept_steps": len(compacted_trace),
+                })
+
         # Set tenant context for tools (including session_id for save_note/get_notes)
-        session_id = state.get("session_id")
         if org_id:
             set_tenant_context(
                 int(user_id) if user_id.isdigit() else 0,
@@ -899,7 +1103,15 @@ class AgentOrchestrator:
         # Get current objective
         objectives = state.get("conversation_objectives", [])
         current_idx = state.get("current_objective_index", 0)
-        current_objective = objectives[current_idx].get("content", "") if current_idx < len(objectives) else state.get("original_objective", "")
+        current_objective = ""
+        if current_idx < len(objectives):
+            obj = objectives[current_idx]
+            if isinstance(obj, dict):
+                current_objective = obj.get("content") or ""
+            elif obj is not None:
+                current_objective = str(obj)
+        if not current_objective:
+            current_objective = state.get("original_objective") or ""
         
         # Session notes for prompt
         session_notes = (
@@ -930,128 +1142,214 @@ class AgentOrchestrator:
             )
 
         # Build prompt
-        merged_trace = list(state.get("execution_trace", []) or []) + drain_trace_extra
-        execution_trace_formatted = format_execution_trace(merged_trace)
-        todo_list_formatted = format_todo_list(state.get("todo_list", []))
-        target_info_formatted = json_dumps_safe(state.get("target_info", {}), indent=2)
-        qa_history_formatted = format_qa_history(state.get("qa_history", []))
-        objective_history_formatted = format_objective_history(state.get("objective_history", []))
-        available_tools = get_phase_tools(phase)
-        available_tools += self._unavailable_tools_note()
+        merged_trace = list(compacted_trace) + drain_trace_extra
+        target_info_raw = state.get("target_info") or {}
 
-        # Append prior session intelligence to knowledge context
-        combined_knowledge = knowledge_context
-        if prior_chain_context:
-            combined_knowledge = f"{knowledge_context}\n\n{prior_chain_context}"
-        kickoff_brief = (state.get("kickoff_brief") or "").strip()
-        if kickoff_brief and iteration <= 2:
-            combined_knowledge = (
-                f"{combined_knowledge}\n\n## Kickoff recon (already ran — use this)\n{kickoff_brief}"
+        # Production pipeline: crawl → dir brute → fireteam is not optional.
+        # Do not spend a reasoning turn asking Joshua whether to assess.
+        forced = None
+        if not operator_steers:
+            try:
+                from app.services.agent.tester_loop import forced_next_step
+                forced = forced_next_step({**state, "execution_trace": merged_trace})
+            except Exception:
+                logger.exception("forced assessment step failed")
+
+        if forced:
+            decision = LLMDecision(
+                thought=forced["thought"],
+                reasoning=(
+                    "Deterministic assessment pipeline — crawl, directory brute-force, "
+                    "API fingerprint, lazy JS chunks, endpoint extract, then fireteam. "
+                    "Fingerprint-only recon is not an assessment."
+                ),
+                action="use_tool",
+                tool_name=forced["tool_name"],
+                tool_args=forced.get("tool_args") or {},
             )
-        if drained_briefs:
-            from app.services.agent.recon_workers import format_briefs_for_prompt
-            # Only show the most recent briefs in the prompt (full text is in execution_trace)
-            recent_for_prompt = [
-                {"kind": "stream", "status": "completed", "worker_id": "cached", "brief": b}
-                for b in drained_briefs[-6:]
-            ]
-            combined_knowledge = (
-                f"{combined_knowledge}\n\n{format_briefs_for_prompt(recent_for_prompt)}"
+            step_usage = {}
+            logger.info(
+                "[%s] Forced assessment step: %s",
+                user_id,
+                forced["tool_name"],
+            )
+            await self._emit_status({
+                "type": "thinking",
+                "iteration": iteration,
+                "phase": phase,
+                "thought": (forced["thought"] or "")[:400],
+                "action": "use_tool",
+                "tool_name": forced["tool_name"],
+            })
+        else:
+            execution_trace_formatted = format_execution_trace(merged_trace)
+            todo_list_formatted = format_todo_list(state.get("todo_list") or [])
+            target_info_formatted = json_dumps_safe(state.get("target_info") or {}, indent=2)
+            qa_history_formatted = format_qa_history(state.get("qa_history") or [])
+            objective_history_formatted = format_objective_history(state.get("objective_history") or [])
+            available_tools = get_phase_tools(phase)
+            available_tools += self._unavailable_tools_note()
+
+            # Append prior session intelligence to knowledge context
+            combined_knowledge = knowledge_context
+            if prior_chain_context:
+                combined_knowledge = f"{knowledge_context}\n\n{prior_chain_context}"
+            kickoff_brief = (state.get("kickoff_brief") or "").strip()
+            if kickoff_brief and iteration <= 2:
+                combined_knowledge = (
+                    f"{combined_knowledge}\n\n## Kickoff recon (already ran — use this)\n{kickoff_brief}"
+                )
+            if drained_briefs:
+                from app.services.agent.recon_workers import format_briefs_for_prompt
+                # Only show the most recent briefs in the prompt (full text is in execution_trace)
+                recent_for_prompt = [
+                    {"kind": "stream", "status": "completed", "worker_id": "cached", "brief": b}
+                    for b in drained_briefs[-6:]
+                ]
+                combined_knowledge = (
+                    f"{combined_knowledge}\n\n{format_briefs_for_prompt(recent_for_prompt)}"
+                )
+            if compacted_brief:
+                combined_knowledge = (
+                    f"{combined_knowledge}\n\n## Compacted earlier context\n{compacted_brief}"
+                )
+            if prior_hunt_brief:
+                combined_knowledge = (
+                    f"{combined_knowledge}\n\n{prior_hunt_brief}"
+                )
+            if operator_steers:
+                steer_block = "\n".join(f"- {s}" for s in operator_steers[-6:])
+                combined_knowledge = (
+                    f"{combined_knowledge}\n\n## OPERATOR STEER — follow this now, before any other plan\n{steer_block}"
+                )
+
+            # Auto tool recommendations based on discovered state
+            primary_target = target_info_raw.get("primary_target") or ""
+            # Extract WAF from execution trace
+            waf_detected = None
+            for step in reversed(state.get("execution_trace") or []):
+                if not isinstance(step, dict):
+                    continue
+                if step.get("tool_name") == "execute_wafw00f" and step.get("success"):
+                    output = step.get("tool_output") or ""
+                    if "is behind" in output.lower() or "detected" in output.lower():
+                        waf_detected = output[:200]
+                    break
+            # Extract discovered parameters
+            discovered_params = {}
+            for step in reversed(state.get("execution_trace") or []):
+                if not isinstance(step, dict):
+                    continue
+                if step.get("tool_name") == "discover_parameters" and step.get("success"):
+                    try:
+                        import json as _json
+                        param_data = _json.loads(step.get("tool_output") or "{}")
+                        discovered_params = param_data.get("parameters", {})
+                    except Exception:
+                        pass
+                    break
+
+            tool_recommendations = ""
+            if primary_target:
+                tool_recommendations = get_tool_recommendations(
+                    target=primary_target,
+                    target_info=target_info_raw,
+                    execution_trace=state.get("execution_trace") or [],
+                    current_phase=phase,
+                    parameters=discovered_params,
+                    waf_detected=waf_detected,
+                )
+            # WordPress-specific hunt: once WP is fingerprinted, do not wait for
+            # methodology cards — run wpscan + REST user enum + ajax SQLi probes.
+            tool_recommendations += self._wordpress_hunt_note(state)
+            # Break unproductive loops: if the model has been hammering one tool
+            # without new findings, steer it to a different, higher-value action.
+            tool_recommendations += self._repetition_guard_note(state, phase)
+            try:
+                from app.services.agent.tester_loop import (
+                    format_tester_loop_for_prompt,
+                    tester_loop_progress,
+                )
+                loop_txt = format_tester_loop_for_prompt(tester_loop_progress(state))
+                if loop_txt:
+                    tool_recommendations = loop_txt + "\n\n" + tool_recommendations
+            except Exception:
+                logger.debug("tester loop prompt injection skipped", exc_info=True)
+
+            from app.services.agent.capability_map import format_capability_map_for_prompt
+            from app.services.agent.engagement_brain import format_engagement_brain_for_prompt
+            capability_map_formatted = format_capability_map_for_prompt(
+                state.get("capability_map")
+            )
+            engagement_brain_formatted = format_engagement_brain_for_prompt(
+                state.get("engagement_brain")
             )
 
-        # Auto tool recommendations based on discovered state
-        target_info_raw = state.get("target_info", {})
-        primary_target = target_info_raw.get("primary_target") or ""
-        # Extract WAF from execution trace
-        waf_detected = None
-        for step in reversed(state.get("execution_trace", [])):
-            if step.get("tool_name") == "execute_wafw00f" and step.get("success"):
-                output = step.get("tool_output", "")
-                if "is behind" in output.lower() or "detected" in output.lower():
-                    waf_detected = output[:200]
-                break
-        # Extract discovered parameters
-        discovered_params = {}
-        for step in reversed(state.get("execution_trace", [])):
-            if step.get("tool_name") == "discover_parameters" and step.get("success"):
-                try:
-                    import json as _json
-                    param_data = _json.loads(step.get("tool_output", "{}"))
-                    discovered_params = param_data.get("parameters", {})
-                except Exception:
-                    pass
-                break
-
-        tool_recommendations = ""
-        if primary_target:
-            tool_recommendations = get_tool_recommendations(
-                target=primary_target,
-                target_info=target_info_raw,
-                execution_trace=state.get("execution_trace", []),
+            system_prompt = REACT_SYSTEM_PROMPT.format(
                 current_phase=phase,
-                parameters=discovered_params,
-                waf_detected=waf_detected,
+                available_tools=available_tools,
+                iteration=iteration,
+                max_iterations=state.get("max_iterations", settings.AGENT_MAX_ITERATIONS),
+                objective=current_objective,
+                objective_history_summary=objective_history_formatted,
+                execution_trace=execution_trace_formatted,
+                todo_list=todo_list_formatted,
+                target_info=target_info_formatted,
+                capability_map=capability_map_formatted,
+                engagement_brain=engagement_brain_formatted,
+                session_notes=session_notes,
+                knowledge_context=combined_knowledge,
+                qa_history=qa_history_formatted,
+                tool_recommendations=tool_recommendations,
             )
-        # WordPress-specific hunt: once WP is fingerprinted, do not wait for
-        # methodology cards — run wpscan + REST user enum + ajax SQLi probes.
-        tool_recommendations += self._wordpress_hunt_note(state)
-        # Break unproductive loops: if the model has been hammering one tool
-        # without new findings, steer it to a different, higher-value action.
-        tool_recommendations += self._repetition_guard_note(state, phase)
 
-        from app.services.agent.capability_map import format_capability_map_for_prompt
-        from app.services.agent.engagement_brain import format_engagement_brain_for_prompt
-        capability_map_formatted = format_capability_map_for_prompt(
-            state.get("capability_map")
-        )
-        engagement_brain_formatted = format_engagement_brain_for_prompt(
-            state.get("engagement_brain")
-        )
+            # Get LLM decision
+            steer_prompt = "Based on the current state, what is your next action? Output EXACTLY ONE valid JSON object."
+            if operator_steers:
+                steer_prompt = (
+                    "OPERATOR STEER (highest priority this turn):\n"
+                    + "\n".join(f"- {s}" for s in operator_steers[-6:])
+                    + "\n\n"
+                    + steer_prompt
+                )
+            messages = [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=steer_prompt),
+            ]
 
-        system_prompt = REACT_SYSTEM_PROMPT.format(
-            current_phase=phase,
-            available_tools=available_tools,
-            iteration=iteration,
-            max_iterations=state.get("max_iterations", settings.AGENT_MAX_ITERATIONS),
-            objective=current_objective,
-            objective_history_summary=objective_history_formatted,
-            execution_trace=execution_trace_formatted,
-            todo_list=todo_list_formatted,
-            target_info=target_info_formatted,
-            capability_map=capability_map_formatted,
-            engagement_brain=engagement_brain_formatted,
-            session_notes=session_notes,
-            knowledge_context=combined_knowledge,
-            qa_history=qa_history_formatted,
-            tool_recommendations=tool_recommendations,
-        )
-        
-        # Get LLM decision
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content="Based on the current state, what is your next action? Output EXACTLY ONE valid JSON object.")
-        ]
-        
-        llm = self._resolve_llm(state, LLMTask.REASONING)
-        response = await llm.ainvoke(messages)
-        response_text = response.content.strip()
-        
-        logger.debug(f"LLM response: {response_text[:500]}...")
-        
-        # Parse decision
-        decision = self._parse_llm_decision(response_text)
-        
-        logger.info(f"[{user_id}] Decision: action={decision.action}, tool={decision.tool_name}")
+            llm = self._resolve_llm(state, LLMTask.REASONING)
+            response = await llm.ainvoke(messages)
+            from app.services.agent.observability import model_id, record_llm_usage
+            step_usage = record_llm_usage(
+                state, response, task=LLMTask.REASONING, model=model_id(llm),
+            )
+            usage_bucket = state.get("token_usage") or {}
+            await self._emit_status({
+                "type": "cost",
+                "cost_usd": float(usage_bucket.get("cost_usd") or 0),
+                "input_tokens": int(usage_bucket.get("input_tokens") or 0),
+                "output_tokens": int(usage_bucket.get("output_tokens") or 0),
+                "limit_usd": limit_usd,
+                "capped": False,
+            })
+            response_text = llm_text(response.content).strip()
 
-        await self._emit_status({
-            "type": "thinking",
-            "iteration": iteration,
-            "phase": phase,
-            "thought": decision.thought[:300],
-            "action": decision.action,
-            "tool_name": decision.tool_name,
-        })
-        
+            logger.debug(f"LLM response: {clip_text(response_text, 500)}...")
+
+            # Parse decision
+            decision = self._parse_llm_decision(response_text)
+
+            logger.info(f"[{user_id}] Decision: action={decision.action}, tool={decision.tool_name}")
+
+            await self._emit_status({
+                "type": "thinking",
+                "iteration": iteration,
+                "phase": phase,
+                "thought": clip_text(decision.thought, 300),
+                "action": decision.action,
+                "tool_name": decision.tool_name,
+            })
+
         # Fill execute_* args at decision time so empty {} never reaches the UI/gate
         tool_args_for_step = decision.tool_args if decision.action == "use_tool" else None
         if (
@@ -1099,6 +1397,8 @@ class AgentOrchestrator:
             reasoning=decision.reasoning,
             tool_name=decision.tool_name if decision.action == "use_tool" else None,
             tool_args=tool_args_for_step,
+            token_usage=step_usage,
+            llm_model=step_usage.get("model") if isinstance(step_usage, dict) else None,
         )
         
         # Update todo list
@@ -1110,8 +1410,13 @@ class AgentOrchestrator:
             "_current_step": step.model_dump(),
             "_decision": decision.model_dump(),
             "recon_worker_briefs": drained_briefs[-12:],
+            "token_usage": state.get("token_usage"),
+            "operator_steers": operator_steers[-12:],
+            "prior_hunt_brief": prior_hunt_brief or None,
+            "compacted_brief": compacted_brief or None,
+            "price_limit_usd": limit_usd,
         }
-        if drain_trace_extra:
+        if drain_trace_extra or compacted_brief:
             updates["execution_trace"] = merged_trace
 
         
@@ -1124,6 +1429,23 @@ class AgentOrchestrator:
                 or "defer remaining" in reason
                 or "non-browser" in reason
             )
+            from app.services.agent.tester_loop import complete_blocked_reason
+            tester_block = None if force_complete else complete_blocked_reason(
+                state, completion_reason=decision.completion_reason or ""
+            )
+            if tester_block:
+                step.thought = (
+                    (step.thought or "")
+                    + " | Complete blocked — curious-tester loop incomplete."
+                )
+                step.tool_name = None
+                blocked = decision.model_dump()
+                blocked["action"] = "use_tool"
+                blocked["tool_name"] = None
+                updates["_decision"] = blocked
+                updates["_current_step"] = step.model_dump()
+                updates["messages"] = [AIMessage(content=tester_block)]
+                return updates
             brain_state = state.get("engagement_brain") or {}
             cmap = state.get("capability_map") or {}
             webby = bool(cmap) or any(
@@ -1145,6 +1467,10 @@ class AgentOrchestrator:
                             + " | Complete blocked — unresolved methodologies, coverage, or pending verify."
                         )
                         step.tool_name = None
+                        blocked = decision.model_dump()
+                        blocked["action"] = "use_tool"
+                        blocked["tool_name"] = None
+                        updates["_decision"] = blocked
                         updates["_current_step"] = step.model_dump()
                         updates["messages"] = [AIMessage(content=(
                             "Cannot complete yet — application assessment methodology incomplete.\n"
@@ -1160,6 +1486,19 @@ class AgentOrchestrator:
                         return updates
                 except Exception:
                     logger.exception("methodology complete-gate failed")
+                    step.thought = (step.thought or "") + " | Complete blocked — gate error (fail closed)."
+                    step.tool_name = None
+                    blocked = decision.model_dump()
+                    blocked["action"] = "use_tool"
+                    blocked["tool_name"] = None
+                    updates["_decision"] = blocked
+                    updates["_current_step"] = step.model_dump()
+                    updates["messages"] = [AIMessage(content=(
+                        "Cannot complete — methodology gate failed closed. Continue the tester loop: "
+                        "crawl, directory brute-force, parameter mining, then "
+                        "fireteam_dispatch(specialists='auto')."
+                    ))]
+                    return updates
             updates["task_complete"] = True
             updates["completion_reason"] = decision.completion_reason or "Task completed"
         
@@ -1190,6 +1529,7 @@ class AgentOrchestrator:
                     "call **execute_deep_crawl** on the primary URL (click links/menus), "
                     "review the capability map / methodology cards, then "
                     "**sync_engagement_brain** + **fireteam_dispatch(specialists='auto')**. "
+                    "Joshua schedules the task graph; specialists hunt. "
                     "If this target is not a web app, request the transition again with reason "
                     "containing 'non-browser'."
                 ))]
@@ -1268,6 +1608,17 @@ class AgentOrchestrator:
         tool_args = dict(step_data.get("tool_args") or {})
         phase = state.get("current_phase", "informational")
         iteration = state.get("current_iteration", 0)
+
+        from app.services.agent.run_control import is_stop_requested
+        if is_stop_requested(session_id):
+            step_data["tool_output"] = "Stopped by operator."
+            step_data["success"] = False
+            return {
+                "_current_step": step_data,
+                "task_complete": True,
+                "completion_reason": "Stopped by operator",
+                "messages": [AIMessage(content="Stopped by operator. Tool execution skipped.")],
+            }
 
         if not tool_name:
             step_data["tool_output"] = "Error: No tool specified"
@@ -1424,11 +1775,11 @@ class AgentOrchestrator:
         
         # Inject agent state context for auto_select_tools
         if tool_name == "auto_select_tools":
-            tool_args["_target_info"] = state.get("target_info", {})
-            tool_args["_execution_trace"] = state.get("execution_trace", [])
+            tool_args["_target_info"] = state.get("target_info") or {}
+            tool_args["_execution_trace"] = state.get("execution_trace") or []
             tool_args["_current_phase"] = phase
             # Extract params and WAF from trace
-            for step in reversed(state.get("execution_trace", [])):
+            for step in reversed(state.get("execution_trace") or []):
                 if step.get("tool_name") == "discover_parameters" and step.get("success"):
                     try:
                         param_data = json.loads(step.get("tool_output", "{}"))
@@ -1436,9 +1787,9 @@ class AgentOrchestrator:
                     except Exception:
                         pass
                     break
-            for step in reversed(state.get("execution_trace", [])):
+            for step in reversed(state.get("execution_trace") or []):
                 if step.get("tool_name") == "execute_wafw00f" and step.get("success"):
-                    output = step.get("tool_output", "")
+                    output = step.get("tool_output") or ""
                     if "is behind" in output.lower() or "detected" in output.lower():
                         tool_args["_waf_detected"] = output[:200]
                     break
@@ -1714,7 +2065,13 @@ class AgentOrchestrator:
             step_data["auth_session"] = result.get("auth_session")
 
         # ingest_urls_into_map / sync tools return JSON with capability_map embedded
-        if tool_name in ("ingest_urls_into_map", "sync_engagement_brain") and not step_data.get("capability_map"):
+        if tool_name in (
+            "ingest_urls_into_map",
+            "sync_engagement_brain",
+            "fetch_lazy_chunks",
+            "extract_js_endpoints",
+            "fingerprint_api",
+        ) and not step_data.get("capability_map"):
             try:
                 parsed_out = json.loads(step_data.get("tool_output") or "")
                 if isinstance(parsed_out, dict) and parsed_out.get("capability_map"):
@@ -1773,6 +2130,13 @@ class AgentOrchestrator:
     
     async def _analyze_output_node(self, state: AgentState, config=None) -> dict:
         """Analyze tool output and extract intelligence."""
+        from app.services.agent.run_control import is_stop_requested
+        if is_stop_requested(state.get("session_id")):
+            return {
+                "task_complete": True,
+                "completion_reason": "Stopped by operator",
+                "messages": [AIMessage(content="Stopped by operator. Analysis skipped.")],
+            }
         step_data = state.get("_current_step") or {}
         tool_output = step_data.get("tool_output") or ""
         tool_name = step_data.get("tool_name") or "unknown"
@@ -1794,7 +2158,9 @@ class AgentOrchestrator:
         
         llm = self._resolve_llm(state, LLMTask.OFFENSIVE)
         response = await llm.ainvoke([HumanMessage(content=analysis_prompt)])
-        analysis = self._parse_analysis_response(response.content)
+        from app.services.agent.observability import model_id, record_llm_usage
+        record_llm_usage(state, response, task=LLMTask.OFFENSIVE, model=model_id(llm))
+        analysis = self._parse_analysis_response(llm_text(response.content))
         
         # Update step with analysis
         step_data["output_analysis"] = analysis.interpretation
@@ -1802,7 +2168,7 @@ class AgentOrchestrator:
         step_data["recommended_next_steps"] = analysis.recommended_next_steps or []
         
         # Merge target info
-        current_target = TargetInfo(**state.get("target_info", {}))
+        current_target = TargetInfo(**(state.get("target_info") or {}))
         new_target = TargetInfo(
             primary_target=analysis.extracted_info.primary_target,
             ports=analysis.extracted_info.ports,
@@ -1813,7 +2179,7 @@ class AgentOrchestrator:
         merged_target = current_target.merge_from(new_target)
         
         # Add to execution trace
-        execution_trace = state.get("execution_trace", []) + [step_data]
+        execution_trace = (state.get("execution_trace") or []) + [step_data]
 
         # EvoGraph: record actionable findings
         session_id = state.get("session_id", "")
@@ -1839,7 +2205,8 @@ class AgentOrchestrator:
             "_current_step": step_data,
             "execution_trace": execution_trace,
             "target_info": merged_target.model_dump(),
-            "messages": [AIMessage(content=f"**Step {step_data.get('iteration')}** [{state.get('current_phase')}]\n\n{analysis.interpretation[:500]}")],
+            "messages": [AIMessage(content=f"**Step {step_data.get('iteration')}** [{state.get('current_phase')}]\n\n{clip_text(analysis.interpretation, 500)}")],
+            "token_usage": state.get("token_usage"),
         }
 
         # Persist browser walkthrough → capability map into session state
@@ -1853,15 +2220,42 @@ class AgentOrchestrator:
                 state.get("capability_map"),
                 raw_map,
             )
+            try:
+                from app.services.sitemap_service import persist_capability_map_safe
+                src = "interceptor" if tool_name == "execute_interceptor" else (
+                    "deep_crawl" if tool_name == "execute_deep_crawl" else (tool_name or "agent")
+                )
+                persist_capability_map_safe(
+                    state.get("organization_id"),
+                    updates["capability_map"],
+                    source=src,
+                )
+            except Exception:
+                pass
             await self._emit_status({
                 "type": "capability_map_update",
                 "quality_score": updates["capability_map"].get("quality_score"),
                 "ready_for_attack": updates["capability_map"].get("ready_for_attack"),
                 "capabilities": updates["capability_map"].get("capabilities", []),
-                "ranked_hunt_queue": updates["capability_map"].get("ranked_hunt_queue", [])[:8],
+                "ranked_hunt_queue": (updates["capability_map"].get("ranked_hunt_queue") or [])[:8],
                 "authenticated": updates["capability_map"].get("authenticated"),
                 "api_sample_count": len(updates["capability_map"].get("api_samples") or []),
             })
+            spawned_enrich = await self._maybe_spawn_dir_brute(state, updates["capability_map"])
+            if spawned_enrich:
+                from app.services.agent.tester_loop import primary_web_target
+                seed = (updates["capability_map"] or {}).get("target") or primary_web_target(state)
+                extra = ExecutionStep(
+                    iteration=step_data.get("iteration") or 0,
+                    phase=state.get("current_phase") or "informational",
+                    thought="Thin/404 surface — started ferox+katana enrich",
+                    reasoning="Directory brute is part of the assessment pipeline",
+                    tool_name="spawn_recon_workers",
+                    tool_args={"pack": "enrich", "target": seed},
+                    tool_output="auto-spawned enrich pack (ferox_dirs + katana_urls)",
+                    success=True,
+                ).model_dump()
+                updates["execution_trace"] = (updates.get("execution_trace") or execution_trace) + [extra]
 
         if step_data.get("auth_session"):
             updates["auth_session"] = step_data["auth_session"]
@@ -2018,10 +2412,12 @@ class AgentOrchestrator:
     
     async def _await_approval_node(self, state: AgentState, config=None) -> dict:
         """Request user approval for phase transition."""
-        transition = state.get("phase_transition_pending", {})
+        transition = state.get("phase_transition_pending") or {}
+        if not isinstance(transition, dict):
+            transition = {}
         
-        planned_actions = "\n".join(f"- {a}" for a in transition.get("planned_actions", []))
-        risks = "\n".join(f"- {r}" for r in transition.get("risks", []))
+        planned_actions = "\n".join(f"- {a}" for a in (transition.get("planned_actions") or []))
+        risks = "\n".join(f"- {r}" for r in (transition.get("risks") or []))
         
         message = PHASE_TRANSITION_MESSAGE.format(
             from_phase=transition.get("from_phase", "informational"),
@@ -2039,7 +2435,9 @@ class AgentOrchestrator:
     async def _process_approval_node(self, state: AgentState, config=None) -> dict:
         """Process user's approval response."""
         approval = state.get("user_approval_response")
-        transition = state.get("phase_transition_pending", {})
+        transition = state.get("phase_transition_pending") or {}
+        if not isinstance(transition, dict):
+            transition = {}
         
         clear_state = {
             "awaiting_user_approval": False,
@@ -2079,9 +2477,11 @@ class AgentOrchestrator:
     
     async def _await_question_node(self, state: AgentState, config=None) -> dict:
         """Request user answer to a question."""
-        question = state.get("pending_question", {})
+        question = state.get("pending_question") or {}
+        if not isinstance(question, dict):
+            question = {}
         
-        options_text = "\n".join(f"- {opt}" for opt in question.get("options", [])) if question.get("options") else "Free text"
+        options_text = "\n".join(f"- {opt}" for opt in (question.get("options") or [])) if question.get("options") else "Free text"
         
         message = USER_QUESTION_MESSAGE.format(
             question=question.get("question", ""),
@@ -2099,11 +2499,13 @@ class AgentOrchestrator:
     async def _process_answer_node(self, state: AgentState, config=None) -> dict:
         """Process user's answer to a question."""
         answer = state.get("user_question_answer")
-        question = state.get("pending_question", {})
+        question = state.get("pending_question") or {}
+        if not isinstance(question, dict):
+            question = {}
         
         qa_entry = QAHistoryEntry(
-            question=UserQuestionRequest(**question),
-            answer={"question_id": question.get("question_id", ""), "answer": answer or ""},
+            question=UserQuestionRequest(**question) if question else UserQuestionRequest(question=""),
+            answer={"question_id": question.get("question_id") or "", "answer": answer or ""},
             answered_at=utc_now(),
         )
         
@@ -2122,6 +2524,15 @@ class AgentOrchestrator:
     
     async def _generate_response_node(self, state: AgentState, config=None) -> dict:
         """Generate final response."""
+        from app.services.agent.run_control import is_stop_requested
+        if is_stop_requested(state.get("session_id")):
+            return {
+                "messages": [AIMessage(content=(
+                    "Stopped by operator. No further LLM or tool calls will run."
+                ))],
+                "task_complete": True,
+                "completion_reason": "Stopped by operator",
+            }
         completion_reason = state.get("completion_reason")
         if not completion_reason and self._turn_budget_exceeded():
             completion_reason = (
@@ -2135,19 +2546,81 @@ class AgentOrchestrator:
             iteration_count=state.get("current_iteration", 0),
             final_phase=state.get("current_phase", "informational"),
             completion_reason=completion_reason,
-            execution_trace=format_execution_trace(state.get("execution_trace", [])),
-            target_info=json_dumps_safe(state.get("target_info", {}), indent=2),
-            todo_list=format_todo_list(state.get("todo_list", [])),
+            execution_trace=format_execution_trace(state.get("execution_trace") or []),
+            target_info=json_dumps_safe(state.get("target_info") or {}, indent=2),
+            todo_list=format_todo_list(state.get("todo_list") or []),
         )
         
         llm = self._resolve_llm(state, LLMTask.REPORT)
         response = await llm.ainvoke([HumanMessage(content=report_prompt)])
+        from app.services.agent.observability import model_id, record_llm_usage
+        record_llm_usage(state, response, task=LLMTask.REPORT, model=model_id(llm))
         
         return {
-            "messages": [AIMessage(content=response.content)],
+            "messages": [AIMessage(content=llm_text(response.content))],
             "task_complete": True,
             "completion_reason": completion_reason,
+            "token_usage": state.get("token_usage"),
         }
+
+    async def _maybe_spawn_dir_brute(
+        self,
+        state: AgentState,
+        cmap: Optional[Dict[str, Any]] = None,
+    ) -> Optional[list]:
+        """After a thin/404 crawl, start ferox+katana without waiting for Joshua."""
+        from app.services.agent.tester_loop import (
+            normalized_tools_run,
+            primary_web_target,
+            surface_looks_empty,
+        )
+
+        ran = normalized_tools_run(state.get("execution_trace"))
+        if ran & {"execute_feroxbuster", "recon_worker:ferox_dirs", "dir_brute_started"}:
+            return None
+        thin = not bool((cmap or {}).get("ready_for_attack"))
+        if not thin and not surface_looks_empty(state) and not state.get("needs_dir_brute"):
+            return None
+        seed = primary_web_target(state) or (cmap or {}).get("target")
+        if not seed:
+            return None
+        session_id = state.get("session_id")
+        org_id = state.get("organization_id")
+        uid_raw = state.get("user_id")
+        try:
+            uid_int = int(uid_raw) if uid_raw is not None and str(uid_raw).isdigit() else None
+        except Exception:
+            uid_int = None
+        try:
+            from app.services.agent import recon_workers
+            spawned = await recon_workers.spawn_workers(
+                url=str(seed),
+                session_id=str(session_id or ""),
+                pack="enrich",
+                tools_manager=self.tool_manager,
+                user_id=uid_int,
+                organization_id=org_id if isinstance(org_id, int) else None,
+            )
+            logger.info(
+                "auto-spawned dir-brute enrich on %s (thin=%s empty=%s spawned=%s)",
+                seed,
+                thin,
+                surface_looks_empty(state),
+                len(spawned) if isinstance(spawned, list) else spawned,
+            )
+            await self._emit_status({
+                "type": "thinking",
+                "phase": state.get("current_phase") or "informational",
+                "thought": (
+                    "Thin/404 surface — started ferox+katana enrich. "
+                    "Mine parameters on new paths; do not complete."
+                ),
+            })
+            if isinstance(spawned, list) and spawned:
+                return spawned
+        except Exception:
+            logger.warning("auto dir-brute enrich spawn failed", exc_info=True)
+        return None
     
     # =========================================================================
     # ROUTING FUNCTIONS
@@ -2161,6 +2634,9 @@ class AgentOrchestrator:
         return "think"
     
     def _route_after_think(self, state: AgentState) -> str:
+        from app.services.agent.run_control import is_stop_requested
+        if is_stop_requested(state.get("session_id")):
+            return "generate_response"
         if self._turn_budget_exceeded():
             return "generate_response"
         if state.get("current_iteration", 0) >= state.get("max_iterations", 15):
@@ -2176,7 +2652,9 @@ class AgentOrchestrator:
         action = decision.get("action", "use_tool")
         
         if action == "complete":
-            return "generate_response"
+            if state.get("task_complete"):
+                return "generate_response"
+            return "think"
         elif action == "ask_user" and state.get("pending_question"):
             return "await_question"
         elif action == "transition_phase" and state.get("phase_transition_pending"):
@@ -2184,9 +2662,12 @@ class AgentOrchestrator:
         elif action == "use_tool" and decision.get("tool_name"):
             return "execute_tool"
         else:
-            return "generate_response"
+            return "think"
     
     def _route_after_analyze(self, state: AgentState) -> str:
+        from app.services.agent.run_control import is_stop_requested
+        if is_stop_requested(state.get("session_id")):
+            return "generate_response"
         if state.get("task_complete"):
             return "generate_response"
         if self._turn_budget_exceeded():
@@ -2211,6 +2692,8 @@ class AgentOrchestrator:
     
     def _extract_json(self, text: str) -> Optional[str]:
         """Extract JSON from text."""
+        if not text:
+            return None
         json_start = text.find("{")
         json_end = text.rfind("}") + 1
         if json_start >= 0 and json_end > json_start:
@@ -2219,6 +2702,7 @@ class AgentOrchestrator:
     
     def _parse_llm_decision(self, text: str) -> LLMDecision:
         """Parse LLM decision from response."""
+        text = llm_text(text)
         try:
             json_str = self._extract_json(text)
             if json_str:
@@ -2289,6 +2773,7 @@ class AgentOrchestrator:
     
     def _parse_analysis_response(self, text: str) -> OutputAnalysis:
         """Parse analysis response."""
+        text = llm_text(text)
         try:
             json_str = self._extract_json(text)
             if json_str:
@@ -2298,7 +2783,7 @@ class AgentOrchestrator:
             logger.warning(f"Failed to parse analysis: {e}")
         
         return OutputAnalysis(
-            interpretation=text[:1000],
+            interpretation=clip_text(text, 1000),
             extracted_info=ExtractedTargetInfo(),
             actionable_findings=[],
             recommended_next_steps=[],
@@ -2329,6 +2814,8 @@ class AgentOrchestrator:
         mode: str = "assist",
         status_callback: StatusCallback = None,
         max_iterations: Optional[int] = None,
+        load_session_id: Optional[str] = None,
+        price_limit_usd: Optional[float] = None,
     ) -> InvokeResponse:
         """Main entry point for agent invocation.
         
@@ -2336,6 +2823,9 @@ class AgentOrchestrator:
             max_iterations: Override the default iteration cap. REST routes
                 pass AGENT_REST_MAX_ITERATIONS to keep responses under proxy
                 timeout limits.
+            load_session_id: Inject a compact brief from a prior conversation
+                (CAI /load analog).
+            price_limit_usd: Per-run spend cap override (0 = unlimited).
         """
         if not self._initialized:
             await self.initialize()
@@ -2347,6 +2837,35 @@ class AgentOrchestrator:
         self._start_turn_deadline()
         set_autonomous_mode(mode == "agent")
         logger.info(f"[{user_id}/{session_id}] Invoking with: {question[:100]}... (mode={mode}, max_iter={max_iterations or 'default'})")
+
+        from app.services.agent.run_control import (
+            clear_stop,
+            queue_load_brief,
+            register_run,
+            set_price_limit,
+            unregister_run,
+        )
+        this_task = asyncio.current_task()
+        if this_task is not None and this_task.cancelling():
+            return self._stopped_response()
+        clear_stop(session_id)
+        register_run(session_id, this_task)
+        if price_limit_usd is not None:
+            set_price_limit(session_id, float(price_limit_usd))
+        if load_session_id:
+            try:
+                from app.db.database import SessionLocal
+                from app.services.agent.session_ops import load_prior_conversation_brief
+
+                db = SessionLocal()
+                try:
+                    brief = load_prior_conversation_brief(db, organization_id, load_session_id)
+                    if brief:
+                        queue_load_brief(session_id, brief)
+                finally:
+                    db.close()
+            except Exception:
+                logger.debug("prior hunt load skipped", exc_info=True)
 
         if status_callback:
             self.set_status_callback(status_callback)
@@ -2387,11 +2906,18 @@ class AgentOrchestrator:
 
             return response
         
+        except asyncio.CancelledError:
+            logger.info(f"[{user_id}/{session_id}] Stopped by operator")
+            evograph.record_chain_end(
+                session_id=session_id, status="cancelled", outcome="Stopped by operator",
+            )
+            return self._stopped_response()
         except Exception as e:
             logger.exception(f"[{user_id}/{session_id}] Error: {e}")
             evograph.record_chain_end(session_id=session_id, status="error", outcome=str(e)[:300])
             return InvokeResponse(error=str(e))
         finally:
+            unregister_run(session_id, this_task)
             if status_callback:
                 self.clear_status_callback()
     
@@ -2423,6 +2949,10 @@ class AgentOrchestrator:
             return InvokeResponse(error="Agent not initialized")
 
         self._start_turn_deadline()
+        from app.services.agent.run_control import clear_stop, register_run, unregister_run
+        clear_stop(session_id)
+        this_task = asyncio.current_task()
+        register_run(session_id, this_task)
         if status_callback:
             self.set_status_callback(status_callback)
         
@@ -2441,10 +2971,14 @@ class AgentOrchestrator:
             self._persist_palace_brain(organization_id, session_id, final_state)
             return self._build_response(final_state)
         
+        except asyncio.CancelledError:
+            logger.info(f"[{user_id}/{session_id}] Stopped by operator during resume")
+            return self._stopped_response()
         except Exception as e:
             logger.error(f"[{user_id}/{session_id}] Resume error: {e}")
             return InvokeResponse(error=str(e))
         finally:
+            unregister_run(session_id, this_task)
             if status_callback:
                 self.clear_status_callback()
     
@@ -2461,6 +2995,10 @@ class AgentOrchestrator:
             return InvokeResponse(error="Agent not initialized")
 
         self._start_turn_deadline()
+        from app.services.agent.run_control import clear_stop, register_run, unregister_run
+        clear_stop(session_id)
+        this_task = asyncio.current_task()
+        register_run(session_id, this_task)
         if status_callback:
             self.set_status_callback(status_callback)
         
@@ -2478,13 +3016,24 @@ class AgentOrchestrator:
             self._persist_palace_brain(organization_id, session_id, final_state)
             return self._build_response(final_state)
         
+        except asyncio.CancelledError:
+            logger.info(f"[{user_id}/{session_id}] Stopped by operator during resume")
+            return self._stopped_response()
         except Exception as e:
             logger.error(f"[{user_id}/{session_id}] Resume error: {e}")
             return InvokeResponse(error=str(e))
         finally:
+            unregister_run(session_id, this_task)
             if status_callback:
                 self.clear_status_callback()
     
+    @staticmethod
+    def _stopped_response() -> InvokeResponse:
+        return InvokeResponse(
+            answer="Stopped by operator. No further LLM or tool calls will run.",
+            task_complete=True,
+        )
+
     def _persist_palace_brain(
         self,
         organization_id: int,
@@ -2516,8 +3065,13 @@ class AgentOrchestrator:
         step = state.get("_current_step", {})
 
         from app.services.agent.model_router import consume_llm_degrade_notice
+        from app.services.agent.observability import replay_from_execution_trace
         warning = consume_llm_degrade_notice()
-        
+        replay = replay_from_execution_trace(
+            state.get("execution_trace") or [],
+            token_usage=state.get("token_usage"),
+        )
+
         return InvokeResponse(
             answer=final_answer,
             tool_used=step.get("tool_name"),
@@ -2526,12 +3080,17 @@ class AgentOrchestrator:
             iteration_count=state.get("current_iteration", 0),
             task_complete=state.get("task_complete", False),
             todo_list=state.get("todo_list", []),
-            execution_trace_summary=summarize_trace_for_response(state.get("execution_trace", [])),
+            execution_trace_summary=summarize_trace_for_response(state.get("execution_trace") or []),
             awaiting_approval=state.get("awaiting_user_approval", False),
             approval_request=state.get("phase_transition_pending"),
             awaiting_question=state.get("awaiting_user_question", False),
             question_request=state.get("pending_question"),
             warning=warning,
+            engagement_replay=replay.get("steps") or [],
+            token_usage=replay.get("token_usage"),
+            cost_usd=replay.get("cost_usd"),
+            price_limit_usd=state.get("price_limit_usd"),
+            compacted=bool(state.get("compacted_brief")),
         )
 
 
