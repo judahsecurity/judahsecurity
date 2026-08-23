@@ -128,6 +128,43 @@ def test_hmac_signing_key_is_critical_for_marcus():
     assert parsed["confirmed_severity"] == "critical"
 
 
+def test_emailjs_and_encryption_key_are_critical_for_marcus():
+    from app.services.js_client_signing_secrets import allows_critical_ra
+    from app.services.agent.risk_assessment import validate_risk_assessment
+
+    assert allows_critical_ra(
+        "EmailJS service_abc template_xyz user_id browser canary send via api.emailjs.com"
+    )
+    assert allows_critical_ra(
+        "Client encryption_key in public JavaScript env object on estart.example.com"
+    )
+    packet = dict(APPSMITH_RA)
+    packet["confirmed_severity"] = "critical"
+    packet["verdict"] = "confirm"
+    packet["ticket_title"] = "Critical — EmailJS keys in production JS"
+    packet["why_this_severity"] = (
+        "Production main.js embeds EmailJS service_id, user_id, and template_id. "
+        "A browser-context canary POST to api.emailjs.com returned 200 OK to the "
+        "engagement inbox. Same env object ships a client encryption_key."
+    )
+    packet["why_not_lower"] = (
+        "Keys are in a public bundle with no auth. Authorized ESP send is phishing "
+        "as the brand. encryption_key is a separate CWE-321 exposure in the same file."
+    )
+    packet["ra_note"] = (
+        "Confirm Critical EmailJS unauthorized send. Do not file High. Split the "
+        "client encryption_key into its own Critical card. Rotate user_id and the key."
+    )
+    packet["business_risk"] = (
+        "Rockwell Automation eStart: attacker can send mail as the company and "
+        "decrypt or forge client-encrypted payloads using the public encryption_key."
+    )
+    packet["cwes"] = ["CWE-798", "CWE-321"]
+    parsed, gaps = validate_risk_assessment(packet, proposed_severity="critical")
+    assert gaps == [], gaps
+    assert parsed["confirmed_severity"] == "critical"
+
+
 def test_critical_without_write_is_rejected():
     inflated = dict(APPSMITH_RA)
     inflated["confirmed_severity"] = "critical"

@@ -2774,8 +2774,8 @@ def queue_followups_for_finding(
         ):
             continue
         hmac_only = any(
-            t in hay for t in ("hmac", "hs256", "cwe-321", "signing key")
-        ) and "client_secret" not in hay and "emailjs" not in hay
+            t in hay for t in ("hmac", "hs256", "signing key", "object.keys")
+        ) and "client_secret" not in hay and "emailjs" not in hay and "encryption_key" not in hay
         if hmac_only and suffix in (
             "js-hostname-cred-map",
             "js-cred-live-api",

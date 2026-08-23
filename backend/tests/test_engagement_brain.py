@@ -461,6 +461,7 @@ def test_emailjs_finding_queues_browser_canary_and_stashes_keys():
     rec = next(c for c in brain.credentials if c.secret_type == "emailjs")
     assert rec.username == "service_exampletest"
     assert rec.secret == "AbcdefghijkLMNOP"
+    assert any("encryption" in h.title.lower() for h in created)
 
 
 def test_oauth_js_secrets_skips_emailjs_cards():

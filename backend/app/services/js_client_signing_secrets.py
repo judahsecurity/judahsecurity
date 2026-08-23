@@ -385,6 +385,8 @@ def analyze_js_client_secrets(text: str, source_url: str = "") -> List[Dict[str,
         value = (m.group(1) or "").strip()
         if not value or value.strip().lower() in _PLACEHOLDER_VALUES:
             continue
+        if re.search(r"your[_-]?key|placeholder|changeme|example|xxxx", value, re.I):
+            continue
         if value.isalpha() and len(set(value.lower())) < 6:
             continue
         key = ("client_encryption_key", value)
