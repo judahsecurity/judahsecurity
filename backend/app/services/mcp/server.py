@@ -1245,7 +1245,11 @@ class MCPServer:
             description=(
                 "Download one or more http(s) URLs (typically .js bundles from Katana/crawl), "
                 "write them to a temp directory, run Gitleaks in --no-git mode for hardcoded secrets, "
-                "and add regex-based hints (API keys, tokens) per URL. "
+                "add regex-based hints (API keys, tokens) per URL, and structurally detect CWE-321 "
+                "HMAC-SHA256 keys / MQTT / RFID credentials reconstructed via Object.keys(obj).join('') "
+                "(the secret is property names, not a string literal). Large Angular main-es2015 "
+                "bundles (5–10MB) are in scope. If client_signing_summary.submit_without_live_api "
+                "is true, the public bundle is the finding — API timeout is not a kill. "
                 "Pass newline- or comma-separated URLs. Use after execute_katana to scan discovered script URLs."
             ),
             tool_type=ToolType.SCAN,
@@ -1826,6 +1830,26 @@ class MCPServer:
     async def _execute_curl(self, args: str) -> Dict[str, Any]:
         # SSRF prevention is enforced centrally by Lictor.block_ssrf_targets.
         # Per-handler max-time still applies as a transport safety lid.
+        try:
+            from app.services.agent.unauth_account_lookup import spray_violation_in_text
+
+            blocked = spray_violation_in_text(args or "")
+            if blocked:
+                return {"success": False, "error": blocked, "stdout": "", "stderr": blocked}
+        except Exception:
+            logger.debug("account-lookup canary check failed", exc_info=True)
+        try:
+            from app.services.agent.unauth_settings_write import (
+                destructive_violation_in_text,
+                rewrite_cli_args as rewrite_settings_cli,
+            )
+
+            args, _note = rewrite_settings_cli(args or "")
+            blocked = destructive_violation_in_text(args)
+            if blocked:
+                return {"success": False, "error": blocked, "stdout": "", "stderr": blocked}
+        except Exception:
+            logger.debug("settings-write canary check failed", exc_info=True)
         cmd = ["curl", "--max-time", "30"] + self._parse_args(args)
         return await self._run_command(cmd, timeout=60)
     

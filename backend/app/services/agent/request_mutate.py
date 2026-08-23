@@ -14,6 +14,29 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 LOCATIONS = ("query", "header", "body_json", "body_form", "path", "method")
 
 
+def coerce_request_body(
+    spec: Dict[str, Any],
+    headers: Optional[Dict[str, str]] = None,
+) -> Tuple[Optional[str], Dict[str, str]]:
+    """Turn body/json (dict or str) into a wire string + headers.
+
+    Agents often pass ``json={...}``; compare_requests must not drop it.
+    Dict/list bodies are JSON-encoded and get Content-Type if missing.
+    """
+    hdrs = {str(k): str(v) for k, v in dict(headers or spec.get("headers") or {}).items()}
+    body = spec.get("body")
+    if body is None and spec.get("json") is not None:
+        body = spec.get("json")
+    if isinstance(body, (dict, list)):
+        raw = json.dumps(body, separators=(",", ":"))
+        if not any(k.lower() == "content-type" for k in hdrs):
+            hdrs["Content-Type"] = "application/json"
+        return raw, hdrs
+    if body is None:
+        return None, hdrs
+    return str(body), hdrs
+
+
 def samples_from_map(cmap: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not isinstance(cmap, dict):
         return []

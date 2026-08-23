@@ -375,6 +375,7 @@ class ASMToolsManager:
             "save_note": self.save_note,
             "get_notes": self.get_notes,
             "create_finding": self.create_finding,
+            "assess_finding_risk": self.assess_finding_risk,
             "sanitize_evidence": self.sanitize_evidence,
             # LLM Red Team Scanner
             "execute_llm_red_team": self.execute_llm_red_team,
@@ -536,7 +537,9 @@ class ASMToolsManager:
             "mutate_list": self.mutate_list,
             "fetch_lazy_chunks": self.fetch_lazy_chunks,
             "extract_js_endpoints": self.extract_js_endpoints,
+            "scan_js_sinks": self.scan_js_sinks,
             "fingerprint_api": self.fingerprint_api,
+            "probe_registry_anonymous": self.probe_registry_anonymous,
             "compact_context": self.compact_context,
             "load_prior_hunt": self.load_prior_hunt,
         }
@@ -843,6 +846,9 @@ class ASMToolsManager:
                 f"- [{a['type']}] {a['value']} (ID: {a['id']}, Risk: {a.get('risk_score', 'N/A')})"
                 for a in result
             )
+        except Exception as e:
+            logger.exception("query_assets failed")
+            return f"Error querying assets: {e}"
         finally:
             db.close()
     
@@ -917,6 +923,9 @@ class ASMToolsManager:
                 f"- [{v['severity'].upper()}] {v['title']} ({v['cve_id'] or 'No CVE'}) on {v['asset']}"
                 for v in result
             )
+        except Exception as e:
+            logger.exception("query_vulnerabilities failed")
+            return f"Error querying vulnerabilities: {e}"
         finally:
             db.close()
     
@@ -986,6 +995,9 @@ class ASMToolsManager:
                 f"- {pk}: {pv['service'] or 'unknown'} ({pv['count']} hosts){' [RISKY]' if pv['risky'] else ''}"
                 for pk, pv in sorted(port_summary.items())
             )
+        except Exception as e:
+            logger.exception("query_ports failed")
+            return f"Error querying ports: {e}"
         finally:
             db.close()
     
@@ -1041,6 +1053,9 @@ class ASMToolsManager:
                 f"- {tk}: {tv['count']} instances" + (f" (versions: {', '.join(tv['versions'])})" if tv['versions'] else "")
                 for tk, tv in sorted(tech_summary.items(), key=lambda x: -x[1]["count"])
             )
+        except Exception as e:
+            logger.exception("query_technologies failed")
+            return f"Error querying technologies: {e}"
         finally:
             db.close()
     
@@ -1172,6 +1187,9 @@ class ASMToolsManager:
             report += f"- Risky ports: {risky_ports}\n"
             
             return report
+        except Exception as e:
+            logger.exception("analyze_attack_surface failed")
+            return f"Error analyzing attack surface: {e}"
         finally:
             db.close()
 
@@ -1314,6 +1332,9 @@ class ASMToolsManager:
                 "ranked_count": len(ranked[:limit]),
                 "ranked_assets": ranked[:limit],
             }, indent=2, default=str)[:_tool_output_max_chars()]
+        except Exception as e:
+            logger.exception("rank_attack_surface failed")
+            return f"Error ranking attack surface: {e}"
         finally:
             db.close()
 
@@ -1413,6 +1434,9 @@ class ASMToolsManager:
                     details += f"- {tech.name}{version} ({tech.category or 'unknown'})\n"
             
             return details
+        except Exception as e:
+            logger.exception("get_asset_details failed")
+            return f"Error getting asset details: {e}"
         finally:
             db.close()
     
@@ -1457,6 +1481,9 @@ class ASMToolsManager:
                 result += f"... and {len(vulns) - 20} more affected assets.\n"
             
             return result
+        except Exception as e:
+            logger.exception("search_cve failed")
+            return f"Error searching CVE: {e}"
         finally:
             db.close()
 
@@ -2039,6 +2066,7 @@ class ASMToolsManager:
         not_demonstrated: Optional[str] = None,
         context: Optional[str] = None,
         references: Optional[str] = None,
+        risk_assessment: Optional[str] = None,
         **kwargs: Any,
     ) -> str:
         """Create a vulnerability/finding in the platform findings table.
@@ -2053,6 +2081,9 @@ class ASMToolsManager:
         - references: vendor hardening docs and OWASP/CWE URLs
         - demonstrated_chain: JSON array of proof steps [{summary, outcome, tool, args, result}]
         - not_demonstrated: what was NOT attempted (hash cracking, data modification, lateral movement)
+        - risk_assessment: optional Marcus RA JSON (verdict, why_not_higher, CVSS, retest_criteria).
+          Medium+ findings without a passing RA stay RA-pending; call assess_finding_risk next.
+          Complete is blocked while RA is pending.
         Default/weak login alone is not a finding until privileged impact is proven.
         If demonstrated_chain is omitted, the last live execute_* calls against this target are attached.
         """
@@ -2134,6 +2165,82 @@ class ASMToolsManager:
             db.add(vuln)
             db.commit()
             db.refresh(vuln)
+            ra_msg = ""
+            try:
+                from app.services.agent.risk_assessment import (
+                    attach_to_vulnerability,
+                    complete_payload,
+                    pending_payload,
+                    queue_pending_ra,
+                    severity_requires_ra,
+                    validate_risk_assessment,
+                )
+                ra_raw = risk_assessment or kwargs.get("risk_assessment")
+                needs_ra = severity_requires_ra(severity)
+                if ra_raw:
+                    parsed, gaps = validate_risk_assessment(
+                        ra_raw, proposed_severity=severity
+                    )
+                    if parsed:
+                        attach_to_vulnerability(
+                            vuln, complete_payload(parsed, finding_id=vuln.id)
+                        )
+                        db.commit()
+                        ra_msg = (
+                            f", RA complete (Marcus {parsed.get('verdict')} "
+                            f"{parsed.get('confirmed_severity')} "
+                            f"CVSS {parsed.get('cvss_score')})"
+                        )
+                    else:
+                        attach_to_vulnerability(
+                            vuln,
+                            pending_payload(
+                                title=title or "",
+                                severity=severity or "info",
+                                finding_id=vuln.id,
+                            ),
+                        )
+                        db.commit()
+                        from app.services.agent.risk_assessment import format_gaps
+                        ra_msg = (
+                            f", RA pending — {format_gaps(gaps)} "
+                            "Call assess_finding_risk(finding_id="
+                            f"{vuln.id}, assessment=<fixed JSON>)."
+                        )
+                        needs_ra = True
+                elif needs_ra:
+                    attach_to_vulnerability(
+                        vuln,
+                        pending_payload(
+                            title=title or "",
+                            severity=severity or "info",
+                            finding_id=vuln.id,
+                        ),
+                    )
+                    db.commit()
+                    ra_msg = (
+                        f", RA pending — call assess_finding_risk(finding_id={vuln.id}) "
+                        "with the demonstrated packet (no live retest)."
+                    )
+                if needs_ra and "RA complete" not in ra_msg:
+                    try:
+                        from app.services.agent.engagement_brain import (
+                            engagement_brain_from_dict,
+                        )
+                        brain = engagement_brain_from_dict(
+                            getattr(self, "_engagement_brain", None)
+                        )
+                        queue_pending_ra(
+                            brain,
+                            finding_id=vuln.id,
+                            title=title or "",
+                            severity=severity or "info",
+                        )
+                        self._engagement_brain = brain.to_dict()
+                    except Exception:
+                        logger.debug("queue pending RA failed", exc_info=True)
+            except Exception:
+                logger.debug("create_finding RA attach failed", exc_info=True)
             # Optional benchmark sink: mirror the finding to a JSONL file so the
             # local harness can score the agent's output (see harness/README.md).
             _emit_finding_to_sink(
@@ -2152,6 +2259,7 @@ class ASMToolsManager:
                 f"Finding created: id={vuln.id}, title={vuln.title[:60]}..., "
                 f"severity={vuln.severity.value}, asset={asset.value}"
                 f"{f', demonstrated_chain={chain_n} steps' if chain_n else ''}"
+                f"{ra_msg}"
             )
             # CVE→CWE loop-back into engagement brain methodologies
             if vuln.cve_id:
@@ -2213,6 +2321,134 @@ class ASMToolsManager:
             db.rollback()
             logger.exception("create_finding failed")
             return f"Error creating finding: {e}"
+        finally:
+            db.close()
+
+    async def assess_finding_risk(
+        self,
+        finding_id: Optional[int] = None,
+        assessment: Optional[str] = None,
+        title: Optional[str] = None,
+        verdict: Optional[str] = None,
+        confirmed_severity: Optional[str] = None,
+        why_this_severity: Optional[str] = None,
+        why_not_higher: Optional[str] = None,
+        why_not_lower: Optional[str] = None,
+        cvss_score: Optional[str] = None,
+        cvss_vector: Optional[str] = None,
+        demonstrated: Optional[str] = None,
+        not_demonstrated: Optional[str] = None,
+        control_failures: Optional[str] = None,
+        business_risk: Optional[str] = None,
+        remediation_sequence: Optional[str] = None,
+        retest_criteria: Optional[str] = None,
+        ticket_title: Optional[str] = None,
+        ra_note: Optional[str] = None,
+        sla: Optional[str] = None,
+        cwes: Optional[str] = None,
+        **kwargs: Any,
+    ) -> str:
+        """Marcus risk assessment — score a demonstrated finding. No live retest.
+
+        Required for every medium+ finding after create_finding. Pass assessment
+        as JSON (preferred) or flattened fields. Quality gate rejects inflation
+        (Critical without write/RCE/cloud creds), missing why_not_higher,
+        missing done_when close criteria, and missing retest_criteria.
+
+        Args:
+            finding_id: Platform finding id from create_finding (required to persist).
+            assessment: JSON with verdict, confirmed_severity, why_this_severity,
+                why_not_higher, why_not_lower, cvss_score, cvss_vector,
+                demonstrated[], not_demonstrated[], control_failures[],
+                business_risk, remediation_sequence[{when,action,done_when}],
+                retest_criteria[], ticket_title, ra_note, sla, cwes.
+        """
+        from app.services.agent.risk_assessment import (
+            attach_to_vulnerability,
+            complete_payload,
+            complete_pending_ra,
+            format_gaps,
+            validate_risk_assessment,
+        )
+
+        extra = {
+            "verdict": verdict or kwargs.get("verdict"),
+            "confirmed_severity": confirmed_severity or kwargs.get("confirmed_severity"),
+            "why_this_severity": why_this_severity or kwargs.get("why_this_severity"),
+            "why_not_higher": why_not_higher or kwargs.get("why_not_higher"),
+            "why_not_lower": why_not_lower or kwargs.get("why_not_lower"),
+            "cvss_score": cvss_score if cvss_score is not None else kwargs.get("cvss_score"),
+            "cvss_vector": cvss_vector or kwargs.get("cvss_vector"),
+            "demonstrated": demonstrated or kwargs.get("demonstrated"),
+            "not_demonstrated": not_demonstrated or kwargs.get("not_demonstrated"),
+            "control_failures": control_failures or kwargs.get("control_failures"),
+            "business_risk": business_risk or kwargs.get("business_risk"),
+            "remediation_sequence": remediation_sequence or kwargs.get("remediation_sequence"),
+            "retest_criteria": retest_criteria or kwargs.get("retest_criteria"),
+            "ticket_title": ticket_title or kwargs.get("ticket_title") or title,
+            "ra_note": ra_note or kwargs.get("ra_note"),
+            "sla": sla or kwargs.get("sla"),
+            "cwes": cwes or kwargs.get("cwes"),
+        }
+        extra = {k: v for k, v in extra.items() if v is not None and v != ""}
+        parsed, gaps = validate_risk_assessment(assessment, extra=extra or None)
+        if gaps:
+            return format_gaps(gaps)
+
+        fid = finding_id or kwargs.get("finding_id")
+        try:
+            fid = int(fid) if fid is not None else None
+        except (TypeError, ValueError):
+            fid = None
+        if not fid:
+            return json.dumps({
+                "status": "complete",
+                "persisted": False,
+                "warning": "No finding_id — RA validated but not saved. Pass finding_id from create_finding.",
+                "assessment": parsed,
+            }, indent=2)[:8000]
+
+        _, org_id = get_tenant_context()
+        db = SessionLocal()
+        try:
+            from app.models.vulnerability import Vulnerability
+            from app.models.asset import Asset
+
+            vuln = db.query(Vulnerability).filter(Vulnerability.id == fid).first()
+            if not vuln:
+                return f"Error: finding id={fid} not found."
+            if org_id:
+                asset = db.query(Asset).filter(Asset.id == vuln.asset_id).first()
+                if asset and asset.organization_id != org_id:
+                    return f"Error: finding id={fid} is out of organization scope."
+            payload = attach_to_vulnerability(
+                vuln, complete_payload(parsed, finding_id=fid)
+            )
+            db.commit()
+            try:
+                from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+                brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+                complete_pending_ra(brain, fid)
+                self._engagement_brain = brain.to_dict()
+            except Exception:
+                logger.debug("complete pending RA brain update failed", exc_info=True)
+            return json.dumps({
+                "status": "complete",
+                "persisted": True,
+                "finding_id": fid,
+                "verdict": payload.get("verdict"),
+                "confirmed_severity": payload.get("confirmed_severity"),
+                "cvss_score": payload.get("cvss_score"),
+                "cvss_vector": payload.get("cvss_vector"),
+                "sla": payload.get("sla"),
+                "ticket_title": payload.get("ticket_title"),
+                "ra_note": payload.get("ra_note"),
+            }, indent=2)
+        except Exception as e:
+            db.rollback()
+            logger.exception("assess_finding_risk persist failed")
+            return f"Error persisting RA: {e}"
         finally:
             db.close()
 
@@ -2299,7 +2535,7 @@ class ASMToolsManager:
         urls: str,
         max_urls: int = 30,
     ) -> str:
-        """Fetch remote JS/text URLs, run Gitleaks --no-git, and regex hints. urls = newline- or comma-separated https URLs."""
+        """Fetch remote JS/text URLs, run Gitleaks --no-git, regex hints, and CWE-321 client HMAC/MQTT/RFID reconstruction. urls = newline- or comma-separated https URLs."""
         import asyncio
 
         from app.services.js_url_secrets_service import scan_js_urls_for_secrets as run_scan
@@ -3221,6 +3457,28 @@ class ASMToolsManager:
             result["capability_map"] = merged
         return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
 
+    async def scan_js_sinks(self, urls: str = "", **kwargs: Any) -> str:
+        """Scan first-party JS for DOM sinks (eval, innerHTML, postMessage, location)."""
+        from app.services.agent.js_sinks import scan_js_sinks as run_scan
+
+        raw = urls or kwargs.get("url") or ""
+        parsed: List[str] = []
+        if isinstance(raw, list):
+            parsed = [str(u).strip() for u in raw]
+        else:
+            blob = str(raw).strip()
+            if blob.startswith("["):
+                try:
+                    parsed = [str(u).strip() for u in json.loads(blob)]
+                except json.JSONDecodeError:
+                    parsed = []
+            if not parsed:
+                parsed = [p.strip() for p in blob.replace(",", "\n").splitlines() if p.strip()]
+        if not parsed:
+            parsed = self._js_urls_from_map()
+        result = await run_scan(parsed, origin_host=self._origin_host())
+        return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
+
     async def fingerprint_api(self, **kwargs: Any) -> str:
         """Fingerprint API hosts/tech from captured Interceptor/crawl samples (no Caido/Codex)."""
         from app.services.agent.api_fingerprint import fingerprint_from_map
@@ -3231,6 +3489,31 @@ class ASMToolsManager:
             target = str(cmap.get("target") or "")
         target = target or (getattr(self, "_fallback_target", None) or "")
         result = fingerprint_from_map(cmap if isinstance(cmap, dict) else {}, target=target)
+        return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
+
+    async def probe_registry_anonymous(
+        self,
+        host: Optional[str] = None,
+        url: Optional[str] = None,
+        args: Optional[str] = None,
+        **kwargs: Any,
+    ) -> str:
+        """Read-only ACR anonymous-pull check (oauth2 token + catalog names).
+
+        Never pulls image layers, never pushes, never authenticates recovered
+        tokens against GitHub. If verdict=SUBMIT, call create_finding High.
+
+        Args:
+            host: *.azurecr.io hostname (required). URL form is accepted.
+            url: Alias for host.
+            args: Optional free-text hostname if the model omits host=.
+        """
+        from app.services.agent.registry_surface import probe_anonymous_pull
+
+        raw = host or url or args or kwargs.get("target") or ""
+        if not str(raw).strip():
+            raw = getattr(self, "_fallback_target", None) or ""
+        result = await probe_anonymous_pull(str(raw).strip())
         return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
 
     async def compact_context(self) -> str:
@@ -3340,6 +3623,29 @@ class ASMToolsManager:
             {"vuln": "JWT bypass proven by 401 siblings vs 500/200 lookup", "severity": "critical", "why": "Protected /api/auth/profile/ and /users/me/ return 401 without a token. The lookup reaches app code (200 or 500). A down database is not a kill."},
             {"vuln": "Privilege-targeted credential attacks", "severity": "high", "why": "Enumerating is_staff/role lets an attacker aim password attacks at admin/maintainer accounts. One canary email only — do not spray employee inboxes or dump ICS users."},
         ],
+        "unauth_settings_write": [
+            {"vuln": "Unauth POST /api/Settings/SaveSettings accepted (ASP.NET void 200)", "severity": "high", "why": "Missing [Authorize] on SettingsController. Paired proof: sibling write (TaskAdmin/UpdateTask) returns 401 without a token; SaveSettings returns 200 Content-Length: 0. Any internet user can overwrite org-wide config."},
+            {"vuln": "Sibling controllers also skip auth middleware", "severity": "high", "why": "The same missing-attribute pattern usually hits LogQuery, Audit, ReadTasks, OpenDocument, Metadata. Probe unauth; file separately if they process without 401. Empty arrays and Graph-downstream 500s are missing-auth, not this write."},
+            {"vuln": "Authenticated non-admin can still SaveSettings (BFLA)", "severity": "high", "why": "Class-level [Authorize] without Roles=Admin still lets any logged-in user change notifications, Planner flags, PowerBI report IDs, and arbitrary key/value settings."},
+            {"vuln": "Canary key persisted / production flags mutated", "severity": "high", "why": "If SaveSettings replaces the collection, a one-item canary body can wipe production settings. Confirm merge vs replace; restore if needed. Do not flip enableNotifications/createPlannerTasks/powerBIReportId."},
+        ],
+        "email_change_ato": [
+            {"vuln": "Unauth POST reset_email 204 while set_password 401s", "severity": "high", "why": "djoser reset_email skips JWT. The remaining control is a token mailed to the attacker-controlled address. One canary; do not complete ATO on a real mailbox."},
+            {"vuln": "reset_email_confirm uid enumeration (MQ = user 1)", "severity": "high", "why": "Confirm locates the user without a session. Existing ids return 'Invalid token for given user'; missing ids return 'Invalid user id'. 2–4 uids max."},
+            {"vuln": "No rate-limit / lockout on email-change", "severity": "medium", "why": "Bounded 8 unauth reset_email posts with no 429 lets an attacker spray mailbox changes. Do not hydra; do not hit employee inboxes."},
+        ],
+        "auth_header_bypass": [
+            {"vuln": "OIDC/JWT middleware skipped when Authorization is absent", "severity": "high", "why": "ByPassAuthorization / fail-open: no-header reaches the controller (200/400) while invalid Bearer is 401. 400 missing-params is still a bypass."},
+            {"vuln": "Always-open mutating sibling (Notes / UpdateNote)", "severity": "high", "why": "Some controllers skip auth even with an invalid Bearer. Empty/canary body only; do not mutate production rows."},
+        ],
+        "socketio_idor": [
+            {"vuln": "Anonymous get_stream returns url_key for fabricated siteId", "severity": "high", "why": "No server-side authz on siteId/analyzerId. Do not fetch the video stream. Do not send null crash loops against ICS."},
+            {"vuln": "Socket.IO CORS + hardcoded Admin params in client JS", "severity": "high", "why": "ACAO+credentials on /socket.io/ plus hardcoded siteId/userType=Admin. Queue cors_credentials and js_secrets. Do not dump footage."},
+        ],
+        "ml_pipeline_rbac": [
+            {"vuln": "Self-reg JWT can POST train or DELETE celery-task", "severity": "high", "why": "Authentication without authorization. Do not delete production models; one canary train or OPTIONS/authz probe."},
+            {"vuln": "Celery / optimize queue injection as any registrant", "severity": "high", "why": "BFLA after open signup. Do not inject pickle/code. Record 202 vs 403."},
+        ],
         "business_logic": [
             {"vuln": "Race Condition on Transaction / Balance", "severity": "high", "why": "Concurrent requests exploit TOCTOU in balance/inventory checks."},
             {"vuln": "Negative Price / Discount Stacking", "severity": "high", "why": "Missing input validation on price/discount fields."},
@@ -3416,7 +3722,10 @@ class ASMToolsManager:
             {"vuln": "Hardcoded secrets in public GitLab files", "severity": "critical", "why": "Unauth /api/v4/projects then one-file sample for passwords/keys."},
         ],
         "docker_registry": [
-            {"vuln": "Registry image pull / possible push", "severity": "high", "why": "/v2/_catalog with no auth; do not push."},
+            {"vuln": "ACR/Docker anonymous catalog listing", "severity": "high", "why": "Anonymous oauth2 token (registry:catalog:*) plus /v2/_catalog returns first-party repository names. Do not push."},
+            {"vuln": "Secrets in anonymously pullable images (lockfile PAT / history)", "severity": "critical", "why": "Bounded 1–3 tag config/history or package-lock.json git+https PATs. ghp_* with repo/workflow/admin is Critical. Do not pull the whole catalog; do not authenticate recovered tokens."},
+            {"vuln": "Recurring ghs_* leak from copying .git into the image", "severity": "high", "why": "Expired GitHub App installation tokens in extraheader prove every new build ships a fresh short-TTL token."},
+            {"vuln": "Internal-only Artifactory/NATS/Keycloak strings in image history", "severity": "high", "why": "Rotate even if the host does not resolve on the public internet. Do not hunt internal services from outside."},
         ],
         "django_debug": [
             {"vuln": "Leaked Redis key from DEBUG traceback", "severity": "critical", "why": "admin:admin + DEBUG=True 500 dumps Azure Redis and env; ping only, no FLUSHALL."},
@@ -3449,6 +3758,8 @@ class ASMToolsManager:
             {"vuln": "Cross-environment secret reuse (sandbox ships prod)", "severity": "critical", "why": "A sandbox UI bundle that contains production client_secret requires rotating ALL env pairs, not just sandbox."},
             {"vuln": "Bulk enumeration via search/queryText", "severity": "high", "why": "Authenticated search parameters enable targeted or bulk record retrieval — prove with a bounded sample, then recommend rate limits."},
             {"vuln": "EmailJS unauthorized send (phishing via authorized ESP)", "severity": "critical", "why": "Hardcoded EmailJS user_id/service_id/template_id in JS lets any site send mail as the app from a visitor's browser; template_params set the recipient."},
+            {"vuln": "CWE-321 client HMAC-SHA256 signing key in public JS", "severity": "critical", "why": "Object.keys(obj).join('') reconstructs an HS256 key the backend trusts; Gitleaks misses it because the secret is property names. Public bundle is enough — API timeout is not a kill."},
+            {"vuln": "ICS MQTT / RFID credentials in the same bundle", "severity": "critical", "why": "MQTT username/password reconstructed the same way, plus plaintext RFID, let an attacker reach SCADA/digital-twin brokers. Rotate and keep creds off the client."},
         ],
         "azure_function_env_dump": [
             {"vuln": "Classify runtime secret classes", "severity": "critical", "why": "Anonymous Tester/debug HTTP trigger returns process env: Cosmos master keys, Storage account keys, MACHINEKEY, EasyAuth WEBSITE_AUTH_*, AAD client secrets, App Insights, Key Vault URIs."},
@@ -3479,7 +3790,8 @@ class ASMToolsManager:
                        host_header, saml, graphql, default_login, js_secrets,
                        elasticsearch_unauth, azure_function_env_dump, arangodb_default,
                        mongodb_unauth, emqx_default, cors_credentials, unauth_account_lookup,
-                       client_role_param,
+                       unauth_settings_write, email_change_ato, auth_header_bypass,
+                       socketio_idor, ml_pipeline_rbac, client_role_param,
                        vendorjson_unauth, auth0_mgmt_token, gitlab_unauth, docker_registry,
                        django_debug, openai_proxy_unauth, wiki_open_reg, binary_hardcoded_creds,
                        client_side_auth.
@@ -3513,6 +3825,8 @@ class ASMToolsManager:
             "js_secrets": "js_secrets", "hardcoded_credentials": "js_secrets",
             "client_secret": "js_secrets", "cwe_312": "js_secrets", "cwe-312": "js_secrets",
             "cwe_540": "js_secrets", "cwe-540": "js_secrets",
+            "cwe_321": "js_secrets", "cwe-321": "js_secrets",
+            "hmac": "js_secrets", "hmac_key": "js_secrets", "signing_key": "js_secrets",
             "emailjs": "js_secrets", "email_js": "js_secrets",
             "elasticsearch": "elasticsearch_unauth",
             "elasticsearch_unauth": "elasticsearch_unauth",
@@ -3539,11 +3853,31 @@ class ASMToolsManager:
             "account_enumeration": "unauth_account_lookup",
             "cwe-204": "unauth_account_lookup",
             "cwe_204": "unauth_account_lookup",
+            "unauth_settings_write": "unauth_settings_write",
+            "savesettings": "unauth_settings_write",
+            "save_settings": "unauth_settings_write",
+            "missing_authorize": "unauth_settings_write",
+            "email_change_ato": "email_change_ato",
+            "reset_email": "email_change_ato",
+            "djoser": "email_change_ato",
+            "auth_header_bypass": "auth_header_bypass",
+            "bypassauthorization": "auth_header_bypass",
+            "missing_authorization_header": "auth_header_bypass",
+            "socketio_idor": "socketio_idor",
+            "get_stream": "socketio_idor",
+            "url_key": "socketio_idor",
+            "ml_pipeline_rbac": "ml_pipeline_rbac",
+            "celery_task": "ml_pipeline_rbac",
+            "celery-task": "ml_pipeline_rbac",
             "usertype": "client_role_param", "client_role_param": "client_role_param",
             "vendorjson": "vendorjson_unauth", "vendorjson_unauth": "vendorjson_unauth",
             "auth0": "auth0_mgmt_token", "auth0_mgmt_token": "auth0_mgmt_token",
             "gitlab": "gitlab_unauth", "gitlab_unauth": "gitlab_unauth",
             "docker_registry": "docker_registry",
+            "acr": "docker_registry",
+            "azurecr": "docker_registry",
+            "anonymous_pull": "docker_registry",
+            "anonymouspullenabled": "docker_registry",
             "django": "django_debug", "django_debug": "django_debug",
             "openai_proxy": "openai_proxy_unauth", "openai_proxy_unauth": "openai_proxy_unauth",
             "wiki": "wiki_open_reg", "wiki_open_reg": "wiki_open_reg",
@@ -3769,12 +4103,20 @@ class ASMToolsManager:
             ),
         })
 
-        # Q11: Azure Function env dump — classify secret classes, not 'env leaked'
+        # Q11: Azure Function env dump — classify secret classes, not 'env leaked'.
+        # Do NOT match bare *.azurewebsites.net (ASP.NET App Service missing-[Authorize]
+        # writes live there too). Require Function/Tester/env-dump language.
         azfn_finding = any(w in text for w in [
             "azure function", "function app", "authlevel", "azurewebjobsstorage",
-            "machinekey", "website_auth", "tester function", "azurewebsites.net",
+            "machinekey", "website_auth", "tester function",
             "cwe-526", "cwe 526",
-        ])
+        ]) or (
+            "azurewebsites.net" in text
+            and any(w in text for w in [
+                "tester", "function app", "authlevel", "env dump",
+                "environment variable", "azurewebjobs",
+            ])
+        )
         azfn_classified = any(w in text for w in [
             "cosmos", "storage account", "azurewebjobsstorage", "machinekey",
             "easyauth", "website_auth", "client secret", "application insights",
@@ -3890,7 +4232,7 @@ class ASMToolsManager:
         })
 
         # Q15: Unauth OpenAPI account lookup — schema unauth + privilege fields
-        # and/or 401 siblings vs 200/500 lookup. DB down is not a fail.
+        # and/or 401 siblings vs 200/404/500 lookup. DB down / 404 is not a fail.
         acct_finding = any(w in text for w in [
             "/api/auth/account", "account lookup", "user enumeration",
             "user account statistics", "account statistics without",
@@ -3899,25 +4241,210 @@ class ASMToolsManager:
         acct_proof = any(w in text for w in [
             "security: {}", "security:{}", "without authentication",
             "is_staff", "valid_through",
-            "401 vs 500", "401 vs 200", "vs 401", "versus 401",
+            "401 vs 500", "401 vs 200", "401 vs 404", "vs 401", "versus 401",
+            "user does not exist",
             "bypasses the jwt", "bypasses jwt", "jwt authentication middleware",
-        ]) or ("401" in text and ("500" in text or "is_staff" in text or "role" in text))
+        ]) or ("401" in text and (
+            "500" in text or "404" in text or "is_staff" in text or "role" in text
+        ))
         q15 = (not acct_finding) or acct_proof
         questions.append({
             "question": (
                 "For unauth account lookup: is security: {} / 'without authentication' "
                 "quoted with privilege fields (is_staff/role), OR is JWT skip proven by "
-                "sibling 401 vs lookup 200/500 — not merely 'swagger found'? A down "
-                "database is not a fail. One canary email; do not spray."
+                "sibling 401 vs lookup 200/404/500 — not merely 'swagger found'? A down "
+                "database or 404 'User does not exist!' is not a fail. One canary email; "
+                "do not spray. Do not claim a 200 UserAccount body unless stdout has it."
             ),
             "pass": q15,
             "feedback": (
-                "PASS — schema-unauth + privilege fields or 401-vs-500/200 proven, "
+                "PASS — schema-unauth + privilege fields or 401-vs-200/404/500 proven, "
                 "or not an account-lookup finding." if q15 else
                 "FAIL — OpenAPI without security: {} / privilege fields / 401-vs-500 "
                 "is a foothold. Quote the public operation and UserAccount fields, or "
                 "compare_requests a 401 sibling vs the lookup. Do not kill because the "
-                "DB is down or the canary email is unregistered. Do not spray inboxes."
+                "DB is down, the canary is unregistered, or the lookup is 404. Do not "
+                "spray inboxes. Do not claim a 200 role body unless stdout has it."
+            ),
+        })
+
+        # Q16: Unauth ASP.NET / API settings write — paired 401 vs 200 void.
+        # GET 500 / missing read-back is not a fail. Do not require destructive overwrite.
+        from app.services.agent.unauth_settings_write import (
+            has_settings_write_proof,
+            is_settings_write_finding,
+        )
+
+        settings_write_finding = is_settings_write_finding(text)
+        settings_write_proof = has_settings_write_proof(text)
+        q16 = (not settings_write_finding) or settings_write_proof
+        questions.append({
+            "question": (
+                "For unauth settings/config write: is missing auth proven by a sibling "
+                "write 401 vs SaveSettings (or mapped Save*/Write*) 200 void — not merely "
+                "'endpoint exists'? GET 500 / no read-back is not a fail. One canary key; "
+                "do not replace production settings."
+            ),
+            "pass": q16,
+            "feedback": (
+                "PASS — paired 401-vs-200 void proven, or not a settings-write finding."
+                if q16 else
+                "FAIL — 'Settings API exists' is a foothold. compare_requests a protected "
+                "write (expect 401) vs unauth POST /api/Settings/SaveSettings (200 + "
+                "Content-Length: 0 is ASP.NET void success). Do not kill because "
+                "GetSettings is 500. One canary key (aegis-verify-*); do not flip "
+                "enableNotifications/createPlannerTasks/powerBIReportId."
+            ),
+        })
+
+        # Q19: Unauth email-change ATO (djoser reset_email).
+        email_change_finding = any(w in text for w in [
+            "reset_email", "reset-email", "email change", "change email",
+            "email-change", "djoser", "reset_email_confirm",
+        ])
+        email_change_proof = (
+            ("401" in text and any(s in text for s in ("204", "200")))
+            or any(w in text for w in [
+                "set_password", "invalid token for given user", "uid=mq",
+                "aegis-ato-canary",
+            ])
+        )
+        q19 = (not email_change_finding) or email_change_proof
+        questions.append({
+            "question": (
+                "For unauth email-change: is JWT skip proven by set_password 401 vs "
+                "reset_email 204/200 — not merely 'endpoint exists'? One canary; do not "
+                "complete ATO on a real mailbox."
+            ),
+            "pass": q19,
+            "feedback": (
+                "PASS — sibling 401 vs reset_email 204 proven, or not an email-change finding."
+                if q19 else
+                "FAIL — 'reset_email exists' is a foothold. compare_requests unauth "
+                "set_password (401) vs reset_email canary (204). Do not spray inboxes."
+            ),
+        })
+
+        # Q20: Auth middleware skipped when Authorization header is absent.
+        header_bypass_finding = any(w in text for w in [
+            "bypassauthorization", "bypass authorization",
+            "missing authorization header", "no authorization header",
+            "without an authorization header", "auth middleware",
+            "middleware bypass", "auth_header_bypass",
+        ])
+        header_bypass_proof = (
+            ("401" in text and any(s in text for s in ("400", "200")))
+            or any(w in text for w in [
+                "aegis-invalid", "invalid bearer", "no-header", "no header",
+                "controller ran", "missing params",
+            ])
+        )
+        q20 = (not header_bypass_finding) or header_bypass_proof
+        questions.append({
+            "question": (
+                "For auth-header bypass: is middleware skip proven by no-header 200/400 "
+                "(controller ran) vs invalid Bearer 401 — not merely 'API exists'? "
+                "400 missing-params is a bypass, not a fail."
+            ),
+            "pass": q20,
+            "feedback": (
+                "PASS — no-header vs invalid-bearer differential proven, or not this finding."
+                if q20 else
+                "FAIL — omit Authorization and send Bearer aegis-invalid on the same path. "
+                "SUBMIT if no-header is 200/400 AND invalid-bearer is 401. Do not dump."
+            ),
+        })
+
+        # Q21: Socket.IO get_stream IDOR.
+        socketio_finding = any(w in text for w in [
+            "get_stream", "url_key", "socketio_idor",
+        ]) or (
+            ("socket.io" in text or "socketio" in text)
+            and any(w in text for w in ["idor", "siteid", "camera stream", "unauth"])
+            and "cors" not in text
+        )
+        socketio_proof = any(w in text for w in [
+            "url_key", "get_stream", "fabricated", "siteid", "namespace",
+        ])
+        q21 = (not socketio_finding) or socketio_proof
+        questions.append({
+            "question": (
+                "For Socket.IO stream IDOR: did anonymous get_stream return a url_key for "
+                "a fabricated siteId — not merely 'socket.io open'? Do not fetch video; "
+                "do not send null crash loops."
+            ),
+            "pass": q21,
+            "feedback": (
+                "PASS — url_key for fabricated siteId proven, or not a Socket.IO IDOR finding."
+                if q21 else
+                "FAIL — Engine.IO polling then 42[\"get_stream\", fabricated siteId]. "
+                "SUBMIT on url_key. Do not dump footage. Do not crash the Node process."
+            ),
+        })
+
+        # Q22: ML pipeline missing RBAC.
+        ml_finding = any(w in text for w in [
+            "celery-task", "celery_task", "/api/v1/train", "logixtwin",
+            "ml pipeline", "ml model training", "ml_pipeline_rbac",
+            "missing rbac", "missing role-based",
+        ])
+        ml_proof = any(w in text for w in [
+            "self-reg", "self-registered", "throwaway", "low-priv",
+            "200", "202", "204", "non-admin", "any user",
+        ])
+        q22 = (not ml_finding) or ml_proof
+        questions.append({
+            "question": (
+                "For ML train/delete missing RBAC: can a self-registered / low-priv session "
+                "train or delete — not merely 'endpoint exists'? Do not delete production models."
+            ),
+            "pass": q22,
+            "feedback": (
+                "PASS — low-priv train/delete proven, or not an ML-RBAC finding."
+                if q22 else
+                "FAIL — throwaway self-reg (if open) then POST /api/v1/train/ or DELETE "
+                "celery-task. Do not destroy production models."
+            ),
+        })
+
+        # Q17/Q18: ACR / Docker Registry anonymous pull.
+        from app.services.agent.finding_gate import acr_anonymous_pull_signals
+
+        acr_sig = acr_anonymous_pull_signals(text)
+        q17 = (not acr_sig["is_finding"]) or acr_sig["has_anon_proof"]
+        questions.append({
+            "question": (
+                "For ACR/Docker anonymous pull: was an anonymous oauth2 bearer "
+                "(registry:catalog:*) issued AND/OR /v2/_catalog returned repository "
+                "names — not merely 'registry exists'? Do not pull the whole catalog."
+            ),
+            "pass": q17,
+            "feedback": (
+                "PASS — anonymous token/catalog proven, or not a registry finding."
+                if q17 else
+                "FAIL — hostname/banner is a foothold. Prove unauth /oauth2/token "
+                "issues an access_token and /v2/_catalog lists repositories. Do not "
+                "push; do not pull every image."
+            ),
+        })
+        sev_l = (severity or "").strip().lower()
+        q18 = (
+            not (acr_sig["is_finding"] and acr_sig["live_privileged_token"])
+            or sev_l == "critical"
+        )
+        questions.append({
+            "question": (
+                "For registry image secrets: if a classic GitHub PAT / git+https "
+                "token with repo/workflow/admin was recovered, is severity Critical "
+                "— not High 'anonymous pull' only? Do not re-authenticate recovered PATs."
+            ),
+            "pass": q18,
+            "feedback": (
+                "PASS — severity matches blast radius, or no live privileged token in images."
+                if q18 else
+                "FAIL — raise to Critical. Anonymously pullable images with live ghp_* "
+                "(admin/workflow/packages) are org-repo/CI compromise, not a High "
+                "misconfiguration. Expired ghs_* stays a leak pattern. Do not re-hit GitHub."
             ),
         })
 
@@ -3974,8 +4501,32 @@ class ASMToolsManager:
             verdict_detail = (
                 "OpenAPI/Swagger without a public account operation is a foothold. "
                 "Quote security: {} / 'without authentication' and is_staff/role, or "
-                "prove JWT skip (sibling 401 vs lookup 200/500). A down database is "
-                "not a kill. One canary email; do not spray employee inboxes."
+                "prove JWT skip (sibling 401 vs lookup 200/404/500). A down database or "
+                "404 existence oracle is not a kill. File Critical. One canary email; "
+                "do not spray employee inboxes. Do not claim a 200 UserAccount body "
+                "unless demonstrated_chain stdout contains those bytes."
+            )
+        elif settings_write_finding and not settings_write_proof:
+            verdict = "IMPROVE"
+            verdict_detail = (
+                "Settings/config API existence is a foothold. Prove missing [Authorize] "
+                "with a paired write: protected sibling 401 vs unauth SaveSettings 200 "
+                "(ASP.NET void, Content-Length: 0). GET 500 is not a kill. One canary "
+                "key; do not replace the production settings collection."
+            )
+        elif acr_sig["is_finding"] and not acr_sig["has_anon_proof"]:
+            verdict = "IMPROVE"
+            verdict_detail = (
+                "ACR/Docker registry existence is a foothold. Prove an anonymous "
+                "oauth2 access_token (registry:catalog:*) and/or /v2/_catalog "
+                "repository names. Do not push; do not pull the whole catalog."
+            )
+        elif acr_sig["is_finding"] and acr_sig["live_privileged_token"] and sev_l != "critical":
+            verdict = "IMPROVE"
+            verdict_detail = (
+                "Raise to Critical. Anonymous catalog is High; live classic GitHub PATs "
+                "(repo/workflow/admin) in pullable images are org-repo and CI compromise. "
+                "Do not re-authenticate recovered tokens. Expired ghs_* is a leak pattern."
             )
         elif score >= total - 1:
             verdict = "SUBMIT"
@@ -4855,7 +5406,7 @@ class ASMToolsManager:
         method: str,
         url: str,
         headers: Optional[Dict[str, str]] = None,
-        body: Optional[str] = None,
+        body: Optional[Any] = None,
         cookies: Optional[Any] = None,
         use_auth_session: bool = True,
         timeout: int = 25,
@@ -4865,13 +5416,18 @@ class ASMToolsManager:
         import httpx
 
         method = (method or "GET").upper().strip()
-        hdrs = {str(k): str(v) for k, v in (headers or {}).items()}
+        from app.services.agent.request_mutate import coerce_request_body
+
+        raw_body, hdrs = coerce_request_body(
+            {"body": body, "headers": headers or {}},
+            headers or {},
+        )
         hdrs = self._resolve_request_cookies(hdrs, cookies, use_auth_session)
         start = _time.monotonic()
         async with httpx.AsyncClient(
             follow_redirects=follow_redirects, verify=False, timeout=timeout
         ) as client:
-            resp = await client.request(method, url, headers=hdrs, content=body)
+            resp = await client.request(method, url, headers=hdrs, content=raw_body)
         elapsed_s = round(_time.monotonic() - start, 3)
         body_text = resp.text or ""
         return {
@@ -4882,7 +5438,7 @@ class ASMToolsManager:
                     k: ("***" if k.lower() in ("authorization", "cookie") else v)
                     for k, v in hdrs.items()
                 },
-                "body_len": len(body or ""),
+                "body_len": len(raw_body or ""),
             },
             "response": {
                 "status": resp.status_code,
@@ -4899,7 +5455,7 @@ class ASMToolsManager:
         method: str = "GET",
         url: str = "",
         headers: Optional[Dict[str, str]] = None,
-        body: Optional[str] = None,
+        body: Optional[Any] = None,
         cookies: Optional[Any] = None,
         use_auth_session: bool = True,
         timeout: int = 25,
@@ -4912,24 +5468,53 @@ class ASMToolsManager:
         if not url or not str(url).strip():
             return "Error: url is required (e.g. from capability_map.api_samples)."
 
+        from app.services.agent.unauth_account_lookup import spray_violation
+        from app.services.agent.request_mutate import coerce_request_body
+        from app.services.agent.unauth_settings_write import (
+            sanitize_settings_write,
+            should_force_unauth_session,
+        )
+
+        blocked = spray_violation(str(url))
+        if blocked:
+            return json.dumps({"error": blocked}, indent=2)
+
+        raw_body, hdrs = coerce_request_body(
+            {"body": body, "headers": headers or {}},
+            headers or {},
+        )
+        raw_body, hdrs, rewrite_note = sanitize_settings_write(
+            url=url, method=method, body=raw_body, headers=hdrs
+        )
+        if should_force_unauth_session(url, url, hdrs, hdrs):
+            use_auth_session = False
+
         try:
             exchange = await self._http_exchange(
                 method=method,
                 url=url,
-                headers=headers,
-                body=body,
+                headers=hdrs,
+                body=raw_body,
                 cookies=cookies,
                 use_auth_session=use_auth_session,
                 timeout=timeout,
             )
+            note = (
+                "Use this to tamper method/headers/body on captured APIs. "
+                "Prefer compare_requests when proving authz/tenant/Host logic bugs. "
+                "Pair with execute_interactsh for blind OOB sinks."
+            )
+            if rewrite_note:
+                note = rewrite_note + " " + note
+            if not use_auth_session:
+                note = (
+                    "use_auth_session=false for missing-[Authorize] settings write. "
+                    + note
+                )
             out = {
                 "request": exchange["request"],
                 "response": exchange["response"],
-                "note": (
-                    "Use this to tamper method/headers/body on captured APIs. "
-                    "Prefer compare_requests when proving authz/tenant/Host logic bugs. "
-                    "Pair with execute_interactsh for blind OOB sinks."
-                ),
+                "note": note,
             }
             return json.dumps(out, indent=2)[:_tool_output_max_chars()]
         except Exception as exc:
@@ -4950,15 +5535,21 @@ class ASMToolsManager:
         A 200 alone is never enough; this tool diffs status/length/body/fields.
 
         Args:
-            baseline: {method, url, headers?, body?, cookies?}
-            mutant: same shape; typically one trust signal changed (Host, object id, header)
+            baseline: {method, url, headers?, body?, json?, cookies?}
+            mutant: same shape; typically one trust signal changed (Host, object id, header).
+              ``json`` is accepted as an alias for a JSON body (dict or list).
             interest_fields: optional JSON/body keys to extract and compare (owner_id, email, tenant…)
-            use_auth_session: attach deep_crawl auth cookies when Cookie absent
+            use_auth_session: attach deep_crawl auth cookies when Cookie absent.
+              For missing-[Authorize] / unauth writes, pass **false** (session cookies
+              would turn the 401 sibling into 200 and hide the bug). Forced false when
+              either URL is a Settings/SaveSettings write and Authorization is absent.
             timeout: per-request timeout
             hypothesis_id: optional engagement hypothesis to annotate with result
         """
         import json as _json
         import re as _re
+
+        rewrite_notes: List[str] = []
 
         def _norm(spec: Optional[Dict[str, Any]], label: str) -> Dict[str, Any]:
             if not isinstance(spec, dict):
@@ -4968,11 +5559,28 @@ class ASMToolsManager:
                 raise ValueError(f"{label}.url is required")
             if not url.startswith(("http://", "https://")):
                 url = f"https://{url}"
+            from app.services.agent.unauth_account_lookup import spray_violation
+
+            blocked = spray_violation(url)
+            if blocked:
+                raise ValueError(blocked)
+            from app.services.agent.request_mutate import coerce_request_body
+            from app.services.agent.unauth_settings_write import sanitize_settings_write
+
+            raw_body, hdrs = coerce_request_body(spec, spec.get("headers") or {})
+            raw_body, hdrs, note = sanitize_settings_write(
+                url=url,
+                method=spec.get("method") or "GET",
+                body=raw_body,
+                headers=hdrs,
+            )
+            if note:
+                rewrite_notes.append(f"{label}: {note}")
             return {
                 "method": spec.get("method") or "GET",
                 "url": url,
-                "headers": spec.get("headers") or {},
-                "body": spec.get("body"),
+                "headers": hdrs,
+                "body": raw_body,
                 "cookies": spec.get("cookies"),
             }
 
@@ -4981,6 +5589,15 @@ class ASMToolsManager:
             m = _norm(mutant, "mutant")
         except ValueError as exc:
             return json.dumps({"error": str(exc)}, indent=2)
+
+        from app.services.agent.unauth_settings_write import should_force_unauth_session
+
+        if should_force_unauth_session(b["url"], m["url"], b["headers"], m["headers"]):
+            use_auth_session = False
+            rewrite_notes.append(
+                "use_auth_session forced false (missing-[Authorize] settings write; "
+                "crawl cookies would hide the 401 sibling)"
+            )
 
         try:
             base_ex = await self._http_exchange(
@@ -5077,6 +5694,15 @@ class ASMToolsManager:
             verdict = "MUTANT_DENIED"
         elif base_ex["response"]["status"] in (401, 403) and mut_ex["response"]["status"] < 400:
             verdict = "MUTANT_BYPASS_CANDIDATE"
+        # ASP.NET Core void-action: unauth write accepted (200 + empty body) while
+        # a sibling write is 401. This is the SaveSettings missing-[Authorize] proof.
+        if (
+            base_ex["response"]["status"] in (401, 403)
+            and mut_ex["response"]["status"] in (200, 204)
+            and int(mut_ex["response"].get("length") or 0) == 0
+        ):
+            signals.append("aspnet_void_unauth_write")
+            verdict = "MUTANT_BYPASS_CANDIDATE"
 
         out = {
             "verdict": verdict,
@@ -5099,12 +5725,16 @@ class ASMToolsManager:
             "interest_fields": {"baseline": b_fields, "mutant": m_fields, "deltas": field_deltas},
             "baseline": base_ex,
             "mutant": mut_ex,
+            "notes": rewrite_notes or None,
             "guidance": (
                 "TIME_BASED_INJECTION_CANDIDATE → mutant took ≥1.5s longer (SLEEP/WAIT). "
                 "Confirm with a second delay (SLEEP(0) vs SLEEP(2) vs SLEEP(4)); "
                 "then execute_sqlmap --technique=BT and create_finding with the timing table. "
                 "LIKELY_IMPACT / MUTANT_BYPASS_CANDIDATE → update_hypothesis(status='proven') "
                 "with evidence, validate_finding, create_finding, then queue_finding_followups. "
+                "aspnet_void_unauth_write (sibling 401 vs SaveSettings 200 Content-Length: 0) "
+                "is SUBMIT High — GET GetSettings 500 is not a kill; one canary key; "
+                "use_auth_session=false. "
                 "NO_MATERIAL_DIFF / MUTANT_DENIED → update_hypothesis(status='killed') unless "
                 "another mutation remains. Never report on status-200 alone."
             ),
@@ -6137,8 +6767,13 @@ class ASMToolsManager:
         if auto:
             chosen = [
                 n for n in (chosen or [])
-                if n not in ("finding_judge", "independent_verifier")
+                if n not in ("finding_judge", "independent_verifier", "risk_assessor")
             ]
+
+        from app.services.agent.risk_assessment import pending_ra_rows
+        pending_ra = pending_ra_rows(brain)
+        if pending_ra and "risk_assessor" not in (chosen or []):
+            chosen = list(chosen or []) + ["risk_assessor"]
 
         if not mission or not str(mission).strip():
             if brain.hypotheses:
@@ -6173,6 +6808,25 @@ class ASMToolsManager:
         # every specialist.
         llm = self._cheap_llm()
 
+        from app.services.agent.model_router import LLMTask as _LLMTask
+
+        def _llm_for_profile(profile):
+            task = getattr(profile, "llm_task", None) or _LLMTask.OFFENSIVE
+            try:
+                _, org_id = get_tenant_context()
+                db = SessionLocal()
+                try:
+                    from app.services.agent.model_router import get_llm_for_task
+                    return get_llm_for_task(
+                        db, org_id, task,
+                        temperature=0, timeout=120, max_retries=2,
+                    )
+                finally:
+                    db.close()
+            except Exception:
+                logger.warning("per-specialist LLM failed for %s", getattr(profile, "name", ""), exc_info=True)
+                return llm
+
         from app.services.agent.aegis_pantheon import epithet_for, pantheon_line
         from app.services.agent.fireteam_service import get_specialist
         from app.services.agent.operation_directive import directives_from_hypotheses
@@ -6198,6 +6852,7 @@ class ASMToolsManager:
             tools_manager=self,
             max_parallel=max_parallel,
             directives=directives,
+            llm_for_specialist=_llm_for_profile,
         )
 
         from app.services.agent.auto_prompter import (
@@ -6249,6 +6904,7 @@ class ASMToolsManager:
                     tools_manager=self,
                     max_parallel=max_parallel,
                     directives=retry_directives,
+                    llm_for_specialist=_llm_for_profile,
                 )
                 result.reports.extend(list(retry_result.reports))
                 result.specialists_run = list(result.specialists_run) + list(

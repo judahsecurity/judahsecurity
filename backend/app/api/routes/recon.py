@@ -211,6 +211,17 @@ async def ingest_recon(
 
     envelope = jobs.envelope_from_normalized(recon, auth_session=body.auth_session)
     await jobs.push_map_updates(body.session_id, envelope)
+    try:
+        from app.services.sitemap_service import persist_capability_map_safe
+        persist_capability_map_safe(
+            body.organization_id,
+            envelope.get("capability_map"),
+            source="interceptor",
+            db=db,
+        )
+        db.commit()
+    except Exception:
+        pass
 
     return ReconIngestResponse(
         knowledge_id=doc.id,
@@ -324,6 +335,17 @@ async def complete_recon_job(
     if recon and body.success:
         try:
             _persist_knowledge(db, organization_id=existing.organization_id, recon=recon)
+        except Exception:
+            pass
+        try:
+            from app.services.sitemap_service import persist_capability_map_safe
+            persist_capability_map_safe(
+                existing.organization_id,
+                envelope.get("capability_map"),
+                source="interceptor",
+                db=db,
+            )
+            db.commit()
         except Exception:
             pass
 

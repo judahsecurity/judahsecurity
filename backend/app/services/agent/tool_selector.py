@@ -193,6 +193,9 @@ class ToolSelector:
                 types.add("database")
 
         # Default: if nothing detected, assume web
+        tgt = (self.target or "").lower()
+        if "azurecr.io" in tgt or "azure container registry" in tech_str:
+            types.add("acr")
         if not types:
             types.add("web")
 
@@ -372,6 +375,25 @@ class ToolSelector:
         """Technology-specific tool recommendations."""
         recs = []
 
+        acr_hit = (
+            "acr" in self._target_types
+            or "azurecr.io" in (self.target or "").lower()
+            or any("azurecr" in t or "azure container registry" in t for t in self._technologies)
+        )
+        if acr_hit and "probe_registry_anonymous" not in self._tools_already_run:
+            recs.append(ToolRecommendation(
+                tool_name="probe_registry_anonymous",
+                args_template="{target}",
+                priority=1,
+                rationale=(
+                    "Azure Container Registry in-play — probe_registry_anonymous NOW. "
+                    "Unauth oauth2 token + /v2/_catalog names is High. Do not docker pull, "
+                    "do not crawl /v2/ as a website."
+                ),
+                phase_required="informational",
+                category="cloud",
+            ))
+
         es_hit = (
             "elasticsearch" in self._target_types
             or "elasticsearch" in self._services
@@ -474,8 +496,29 @@ class ToolSelector:
                 ),
                 priority=5,
                 rationale=(
-                    "Unauth account lookup: sibling 401 vs lookup 200/500 proves JWT was "
-                    "skipped. One canary email only — do not spray. A down database is SUBMIT."
+                    "Unauth account lookup: sibling 401 vs lookup 200/404/500 proves JWT was "
+                    "skipped. File Critical. One canary email only — do not spray. A down "
+                    "database or 404 existence oracle is SUBMIT. Do not claim a 200 role body "
+                    "unless stdout has it."
+                ),
+                category="api",
+            ))
+            recs.append(ToolRecommendation(
+                tool_name="compare_requests",
+                args_template=(
+                    '{"baseline":{"method":"POST","url":"https://{target}/api/TaskAdmin/UpdateTask",'
+                    '"headers":{"Content-Type":"application/json"},"json":{"taskId":"aegis-auth-probe"}},'
+                    '"mutant":{"method":"POST","url":"https://{target}/api/Settings/SaveSettings",'
+                    '"headers":{"Content-Type":"application/json"},'
+                    '"json":{"settings":[{"key":"aegis-verify-key","value":"aegis-verify-value",'
+                    '"description":"aegis-canary"}]}}}'
+                ),
+                priority=5,
+                rationale=(
+                    "Unauth settings write: sibling write 401 vs SaveSettings 200 "
+                    "Content-Length: 0 (ASP.NET void) proves missing [Authorize]. "
+                    "Pass use_auth_session=false. One canary key only; omit production "
+                    "flags; GET 500 is SUBMIT."
                 ),
                 category="api",
             ))

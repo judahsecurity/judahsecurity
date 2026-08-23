@@ -20,6 +20,7 @@ MAX_OUTCOME = 280
 # Tools whose output can constitute proof. Query/memory/judge tools are skipped.
 PROOF_TOOLS = frozenset({
     "execute_curl",
+    "probe_registry_anonymous",
     "execute_httpx",
     "execute_browser",
     "execute_nuclei",
@@ -43,6 +44,7 @@ PROOF_TOOLS = frozenset({
 
 _SKIP_RECORD = frozenset({
     "create_finding",
+    "assess_finding_risk",
     "validate_finding",
     "save_note",
     "get_notes",

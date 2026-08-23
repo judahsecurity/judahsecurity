@@ -32,9 +32,10 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from ..config import HarnessConfig, default_config
+from ..cost import cost_metrics, load_trace_summary
 from ..findings import load_findings
 from ..llm import build_llm_call
-from ..runner import run_scan
+from ..runner import run_scan, slugify
 from .judge import FlagResult, JudgeResult, judge, judge_flag_capture
 from .targets import TargetManager
 
@@ -109,9 +110,14 @@ def cmd_run(config: HarnessConfig, args: argparse.Namespace) -> int:
         findings_path = out_root / name / "findings.jsonl"
         target_url = spec.get("target")
 
+        trace_dir = findings_path.parent
+        scan_cost_summary = None
         if args.tally_only:
             findings = load_findings(findings_path)
             print(f"[{name}] tally-only ({mode}): {len(findings)} findings from prior run")
+            scan_cost_summary = load_trace_summary(trace_dir)
+            if scan_cost_summary is None and target_url:
+                scan_cost_summary = load_trace_summary(out_root / slugify(target_url))
         else:
             if tm is not None and (spec.get("setup") or {}):
                 print(f"[{name}] setup …")
@@ -127,6 +133,8 @@ def cmd_run(config: HarnessConfig, args: argparse.Namespace) -> int:
                 print(f"[{name}] scanning {target_url} ({mode} mode) …")
                 result = run_scan(target_url, config, out_root, scope=spec.get("scope"))
                 findings = result.findings
+                trace_dir = result.out_dir
+                scan_cost_summary = result.trace_summary
                 print(
                     f"[{name}] scan {result.status}: {result.finding_count} findings "
                     f"in {result.duration_sec:.0f}s"
@@ -180,6 +188,25 @@ def cmd_run(config: HarnessConfig, args: argparse.Namespace) -> int:
                 encoding="utf-8",
             )
 
+        tp = 0
+        if name in findings_results:
+            tp = findings_results[name].true_positive_count
+        costs = cost_metrics(
+            scan_cost_summary or load_trace_summary(trace_dir),
+            finding_count=len(findings),
+            true_positives=tp,
+        )
+        report_targets[name].update(costs)
+        if costs.get("cost_usd"):
+            print(
+                f"        cost=${costs['cost_usd']:.4f}"
+                + (
+                    f"  $/TP={costs['cost_per_true_positive']:.4f}"
+                    if costs.get("cost_per_true_positive") is not None
+                    else ""
+                )
+            )
+
     aggregate: Dict[str, object] = {}
     if findings_results:
         aggregate["findings"] = _aggregate_findings_metrics(findings_results)
@@ -190,6 +217,18 @@ def cmd_run(config: HarnessConfig, args: argparse.Namespace) -> int:
             "solved": solved,
             "total": total,
             "success_rate": round(solved / total, 4) if total else 0.0,
+        }
+
+    cost_rows = [
+        t for t in report_targets.values()
+        if isinstance(t, dict) and t.get("cost_usd")
+    ]
+    if cost_rows:
+        total_cost = sum(float(t.get("cost_usd") or 0) for t in cost_rows)
+        tp_all = sum(int(t.get("true_positives") or 0) for t in report_targets.values() if isinstance(t, dict))
+        aggregate["cost"] = {
+            "cost_usd": round(total_cost, 6),
+            "cost_per_true_positive": round(total_cost / tp_all, 6) if tp_all else None,
         }
 
     report = {
@@ -228,6 +267,12 @@ def _print_summary(report: dict, backend: str) -> None:
             f"  flag mode:     {fl['solved']}/{fl['total']} solved "
             f"(success rate {fl['success_rate']:.2%})"
         )
+    if "cost" in agg:
+        c = agg["cost"]
+        extra = ""
+        if c.get("cost_per_true_positive") is not None:
+            extra = f"  $/TP={c['cost_per_true_positive']:.4f}"
+        print(f"  llm cost:      ${c['cost_usd']:.4f}{extra}")
     if report["scan_errors"]:
         print(f"  scan errors:   {len(report['scan_errors'])} ({', '.join(report['scan_errors'])})")
     print("=" * 60)
@@ -249,6 +294,14 @@ def _exit_code(report: dict, args: argparse.Namespace) -> int:
             print(
                 f"\n[gate] success rate {sr:.2f} < "
                 f"--min-success-rate {args.min_success_rate} → exit 2"
+            )
+            return 2
+    if args.max_cost_per_tp is not None and "cost" in agg:
+        cpt = agg["cost"].get("cost_per_true_positive")
+        if cpt is not None and cpt > args.max_cost_per_tp:
+            print(
+                f"\n[gate] cost/TP {cpt:.4f} > "
+                f"--max-cost-per-tp {args.max_cost_per_tp} → exit 2"
             )
             return 2
     return 0
@@ -283,6 +336,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--fail-on-scan-error", action="store_true",
         help="CI gate: exit 3 if any target failed to scan/setup",
+    )
+    parser.add_argument(
+        "--max-cost-per-tp", type=float, default=None,
+        help="CI gate: exit 2 if LLM cost per true-positive exceeds this USD amount",
     )
     return parser
 

@@ -83,6 +83,7 @@ def test_specialists_from_open_hypotheses_priority():
     assert names[0] == "app_mapper"
     assert "finding_judge" not in names
     assert "independent_verifier" not in names
+    assert "risk_assessor" not in names
     assert len(names) <= 6
     # Should prefer attack specialists over empty
     assert any(n in names for n in ("host_tenant", "api_authz", "auth_logic", "injection", "js_secrets"))
@@ -197,7 +198,12 @@ def test_update_hypothesis_and_prompt_format():
     assert "Proven:" in text
     assert "compare_requests" in text
     assert "/api/auth/account" in text or "401" in text
-    assert "down database is not a kill" in text.lower() or "500/app error vs sibling 401" in text.lower()
+    assert (
+        "down database" in text.lower()
+        or "404 existence" in text.lower()
+        or "500" in text.lower()
+    )
+    assert "not a kill" in text.lower()
 
 
 def test_classify_finding_type():
@@ -235,6 +241,9 @@ def test_classify_finding_type():
     ) == "default_login"
     assert classify_finding_type(title="EMQX Dashboard - Default Login Credentials") == "emqx_default"
     assert classify_finding_type(title="Exposed Docker Registry") == "docker_registry"
+    assert classify_finding_type(
+        title="Azure Container Registry Anonymous Pull Enabled"
+    ) == "docker_registry"
     assert classify_finding_type(title="Unauthenticated GitLab API") == "gitlab_unauth"
     assert classify_finding_type(
         title="DRF mass assignment — writable id on GroupRequest"
@@ -249,6 +258,25 @@ def test_classify_finding_type():
         title="Public user account statistics without authentication",
         description="OpenAPI security: {} returns is_staff and role for an email",
     ) == "unauth_account_lookup"
+    assert classify_finding_type(
+        title="Unauthenticated Application Settings Write via /api/Settings/SaveSettings",
+        description="Missing [Authorize] on SettingsController; sibling UpdateTask returned 401",
+    ) == "unauth_settings_write"
+    assert classify_finding_type(
+        title="Unauthenticated Email Change Endpoints Enable Account Takeover Chain"
+    ) == "email_change_ato"
+    assert classify_finding_type(
+        title="Backend API Authentication Middleware Bypass via Missing Authorization Header"
+    ) == "auth_header_bypass"
+    assert classify_finding_type(
+        title="Unauthenticated Camera Stream Access via Socket.IO IDOR"
+    ) == "socketio_idor"
+    assert classify_finding_type(
+        title="CORS Misconfiguration on Socket.IO Endpoint Enables Cross-Origin Camera Stream Access"
+    ) == "cors_credentials"
+    assert classify_finding_type(
+        title="Missing Authorization on ML Model Training and Deletion Endpoints"
+    ) == "ml_pipeline_rbac"
 
 
 def test_guard_catalog_queues_arangodb_and_auth0():
@@ -270,6 +298,24 @@ def test_guard_catalog_queues_arangodb_and_auth0():
     )
     assert auth0
     assert any("per_page=1" in h.test for h in auth0)
+
+
+def test_acr_anonymous_pull_queues_image_secret_scan():
+    created = queue_followups_for_finding(
+        engagement_brain_from_dict(None),
+        vuln_type="docker_registry",
+        title="Azure Container Registry Anonymous Pull Enabled",
+        target="https://digipdevelopment.azurecr.io",
+        evidence="anonymous oauth2 access_token; /v2/_catalog returned repositories",
+    )
+    assert created
+    tests = " ".join(h.test.lower() for h in created)
+    titles = " ".join(h.title.lower() for h in created)
+    assert "catalog" in tests or "oauth2" in tests
+    assert "secret" in titles or "package-lock" in tests or "ghp_" in tests
+    assert "github" in tests
+    assert "do not" in tests
+    assert any("1–3" in h.test or "1-3" in h.test or "at most" in h.test.lower() for h in created)
 
 
 def test_couchdb_default_login_queues_sibling_trivial_admins():
@@ -537,13 +583,37 @@ def test_unauth_account_lookup_queues_401_vs_500_and_does_not_spray():
     blob = f"{titles} {tests} {kills} {assumptions}"
     assert "security" in blob or "is_staff" in blob or "role" in blob
     assert "401" in blob and "500" in blob
+    assert "404" in blob
     assert "do not kill" in kills or "unavailable" in kills
     assert "canary" in tests
     assert "do not spray" in tests or "do not enumerate" in tests
     assert "aegis-enum-canary@example.invalid" in tests
+    assert "do not claim" in tests.lower() or "stdout" in tests.lower()
     assert not any("hydra" in h.test.lower() for h in created)
     assert not any("cosmos" in h.title.lower() for h in created)
     assert not any("grafana" in h.title.lower() for h in created)
+
+
+def test_unauth_settings_write_queues_sibling_controllers_and_bfla():
+    brain = engagement_brain_from_dict(None)
+    created = queue_followups_for_finding(
+        brain,
+        vuln_type="unauth_settings_write",
+        title="Unauthenticated Application Settings Write via /api/Settings/SaveSettings",
+        target="https://doccentrum-sensia.azurewebsites.net",
+        evidence="POST SaveSettings 200 void; UpdateTask 401; GetSettings 500",
+    )
+    assert created
+    titles = " ".join(h.title.lower() for h in created)
+    tests = " ".join(h.test.lower() for h in created)
+    kills = " ".join(h.kill_criteria.lower() for h in created)
+    blob = f"{titles} {tests} {kills}"
+    assert "logquery" in blob or "sibling" in blob
+    assert "admin" in blob or "bfla" in titles or "roles" in blob
+    assert "do not" in tests and ("replace" in tests or "flip" in tests or "dump" in tests)
+    assert "401" in blob
+    assert not any("cosmos" in h.title.lower() for h in created)
+    assert not any("hydra" in h.test.lower() for h in created)
 
 
 def test_mass_assignment_also_queues_unauth_account_lookup_followup():
@@ -560,3 +630,71 @@ def test_mass_assignment_also_queues_unauth_account_lookup_followup():
     assert "account" in titles or "email" in tests
     assert "401" in tests or "aegis-enum-canary@example.invalid" in tests
     assert "unauth_account_lookup" in tests
+
+
+def test_email_change_ato_queues_confirm_enum_and_nolockout():
+    brain = engagement_brain_from_dict(None)
+    created = queue_followups_for_finding(
+        brain,
+        vuln_type="email_change_ato",
+        title="Unauthenticated Email Change Endpoints Enable Account Takeover Chain",
+        target="https://guardianaicoe.azurewebsites.net",
+        evidence="POST reset_email 204; set_password 401",
+    )
+    assert created
+    tests = " ".join(h.test.lower() for h in created)
+    assert "reset_email" in tests
+    assert "set_password" in tests
+    assert "canary" in tests
+    assert "uid=mq" in tests or "mq" in tests
+    assert all(
+        "hydra" not in h.test.lower() or "do not hydra" in h.test.lower()
+        for h in created
+    )
+
+
+def test_auth_header_bypass_queues_missing_vs_invalid_bearer():
+    brain = engagement_brain_from_dict(None)
+    created = queue_followups_for_finding(
+        brain,
+        vuln_type="auth_header_bypass",
+        title="Backend API Authentication Middleware Bypass via Missing Authorization Header",
+        target="https://ofmdockerapi.azurewebsites.net",
+        evidence="no header 400; Bearer aegis-invalid 401",
+    )
+    assert created
+    tests = " ".join(h.test.lower() for h in created)
+    assert "aegis-invalid" in tests or "invalid" in tests
+    assert "401" in tests
+    assert "400" in tests or "no authorization" in tests or "no-header" in tests.replace(" ", "")
+
+
+def test_socketio_idor_queues_url_key_and_forbids_crash_loops():
+    brain = engagement_brain_from_dict(None)
+    created = queue_followups_for_finding(
+        brain,
+        vuln_type="socketio_idor",
+        title="Unauthenticated Camera Stream Access via Socket.IO IDOR",
+        target="https://vstream.glensserver.com",
+        evidence="get_stream url_key for fabricated siteId",
+    )
+    assert created
+    tests = " ".join(h.test.lower() for h in created)
+    assert "url_key" in tests or "get_stream" in tests
+    assert "null" in tests
+    assert "video" in tests
+
+
+def test_ml_pipeline_rbac_queues_train_delete_without_destroying_models():
+    brain = engagement_brain_from_dict(None)
+    created = queue_followups_for_finding(
+        brain,
+        vuln_type="ml_pipeline_rbac",
+        title="Missing Authorization on ML Model Training and Deletion Endpoints",
+        target="https://webapp-djangotwin.azurewebsites.net",
+        evidence="self-reg POST /api/v1/train/ 202",
+    )
+    assert created
+    tests = " ".join(h.test.lower() for h in created)
+    assert "train" in tests or "celery" in tests
+    assert "do not delete" in tests or "production" in tests

@@ -13,6 +13,11 @@ is documented separately: [docs/TESTER_PROCESS_AND_ENGAGEMENT_BRAIN.md](../docs/
 The harness evaluates **Vanguard** detection quality; use ground-truth tags that
 mirror those chain classes when you care about logic/SSRF/default-cred recall.
 
+Offline **page-assessment** scoring for the in-product swarm (no LLM) lives in
+`local_harness/agent_eval.py` and `backend/tests/test_page_assessment.py`:
+did Joshua's "how a human would start" list match the observed login/IDOR/XSS
+surface, and did auto-dispatch avoid Nuclei-first?
+
 > **Authorization:** Only scan targets you are explicitly authorized to test.
 
 ---
@@ -142,6 +147,7 @@ Both runners return non-zero so they can block a pipeline:
 |---|---|---|---|
 | `--min-recall 0.6` | benchmark | 2 | findings-mode recall below threshold |
 | `--min-success-rate 0.8` | benchmark | 2 | flag-mode success rate below threshold |
+| `--max-cost-per-tp 2.0` | benchmark | 2 | LLM cost per true-positive above USD threshold |
 | `--fail-on-scan-error` | benchmark | 3 | a target failed to scan/setup |
 | `--fail-on-findings` | batch scan | 2 | any vulnerability was found |
 | `--fail-on-error` | batch scan | 3 | any target failed to scan |

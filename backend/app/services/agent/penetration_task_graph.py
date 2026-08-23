@@ -31,7 +31,7 @@ _OPEN_HYP = {"open", "in_progress"}
 _HIGH_PRI = {"critical", "high"}
 _COVERAGE_SPECIALISTS = {"coverage"}
 _COVERAGE_METHOD_IDS = {"coverage_known_vulns"}
-_JUDGE_ROLES = {"finding_judge", "independent_verifier"}
+_JUDGE_ROLES = {"finding_judge", "independent_verifier", "risk_assessor"}
 
 # Verdicts executors may return in the summary contract.
 VALID_VERDICTS = {"proven", "killed", "blocked", "retry", "inconclusive"}

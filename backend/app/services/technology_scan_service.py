@@ -348,7 +348,9 @@ async def _scan_hosts_async(
     Returns:
         Summary dict with scan statistics
     """
-    wappalyzer = WappalyzerService()
+    from app.services.wappalyzer_service import get_wappalyzer_service
+
+    wappalyzer = get_wappalyzer_service()
     whatruns = get_whatruns_service() if source in ("whatruns", "both") else None
     whatweb = WhatWebService() if source in ("whatweb", "both") else None
     

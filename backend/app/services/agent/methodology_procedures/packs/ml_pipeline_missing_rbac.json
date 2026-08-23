@@ -1,0 +1,26 @@
+{
+  "id": "ml_pipeline_missing_rbac",
+  "title": "Self-registered user can train/delete ML models (missing RBAC)",
+  "summary": "Prove JWT authenticates but train/celery-task/delete have no role checks. Do not delete production models.",
+  "steps": [
+    "Map POST /api/v1/train/, DELETE /api/v1/celery-task/, POST celery-task / optimize / logixtwin-train.",
+    "If signup is open: create ONE throwaway account. Otherwise use a mapped low-priv token.",
+    "compare_requests that identity vs a documented admin-only sibling on train/delete/celery.",
+    "PASS if the self-reg/low-priv session is 200/202/204. Prefer OPTIONS/authz or one tiny canary train.",
+    "Do not delete production models. Do not dump training datasets. Do not inject pickle/code into Celery.",
+    "Open signup is the internet exposure, not a second finding.",
+    "submit_finding_candidate High. queue_finding_followups(vuln_type='ml_pipeline_rbac')."
+  ],
+  "tools": ["compare_requests", "execute_curl", "execute_browser"],
+  "pass_signals": [
+    "Self-registered or low-priv session can train, delete, or queue ML/Celery jobs"
+  ],
+  "kill_signals": [
+    "Train/delete/celery return 403 for non-admin"
+  ],
+  "references": [
+    "CWE-285",
+    "CWE-863",
+    "OWASP A01:2021 Broken Access Control"
+  ]
+}

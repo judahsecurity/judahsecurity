@@ -26,7 +26,12 @@ Unlike a fixed pipeline, you operate in a **reasoning loop**:
 
 ### Multi-Agent Pipeline
 
-Four specialized agents hand off to each other:
+Platform swarm (source of truth): engagement brain as shared memory, methodology
+cards as a Penetration Task Graph, Joshua schedules ready nodes, specialists are
+short-lived executors with a summary contract. See
+[`docs/AEGIS_ARCHITECTURE.md`](../docs/AEGIS_ARCHITECTURE.md).
+
+This CLI still uses a sequential handoff chain plus a parallel hunter fireteam:
 
 ```
  Orchestrator
@@ -36,8 +41,9 @@ Four specialized agents hand off to each other:
  (maps surface)              (finds vulns)              (validates)                   (reports)
 ```
 
-Each agent has its own tools, instructions, and reasoning. Handoffs pass
-accumulated findings to the next agent so nothing is lost.
+Handoffs pass **summaries and findings**, not raw nmap dumps. Phase 2 fans out
+specialist hunters in parallel (the swarm-shaped part of this CLI). Do not collapse
+back into a single ReAct loop that carries the whole session in one context window.
 
 ### Key Differences from Fixed Pipeline
 

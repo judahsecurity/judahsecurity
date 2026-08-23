@@ -77,6 +77,10 @@ def test_secrets_and_cloud_use_real_tools():
     assert "execute_hermes" in allowlists["secrets_hunter"]
     assert "execute_hermes" in allowlists["js_secrets"]
     assert "execute_themis" in allowlists["cloud_audit"]
+    assert "execute_curl" in allowlists["cloud_audit"]
+    assert "probe_registry_anonymous" in allowlists["cloud_audit"]
+    assert "queue_finding_followups" in allowlists["cloud_audit"]
+    assert "probe_registry_anonymous" in allowlists["coverage"]
 
 
 def test_injection_and_auth_have_new_arsenal_tools():
@@ -91,9 +95,15 @@ def test_injection_and_auth_have_new_arsenal_tools():
     assert "fingerprint_api" in allowlists["content_api"]
     assert "fingerprint_api" in allowlists["app_mapper"]
     assert "fetch_lazy_chunks" in allowlists["spa_client"]
+    assert "scan_js_sinks" in allowlists["spa_client"]
+    assert "scan_js_sinks" in allowlists["js_secrets"]
+    assert "scan_js_sinks" in allowlists["content_api"]
     assert "run_custom_probe" in allowlists["injection"]
     assert "mutate_captured_request" in allowlists["injection"]
     assert "mutate_captured_request" in allowlists["api_authz"]
+    assert "execute_xsstrike" in allowlists["xss"]
+    assert "execute_sqlmap" in allowlists["sqli"]
+    assert "execute_interactsh" in allowlists["ssrf"]
 
 
 
@@ -101,10 +111,15 @@ def test_credential_assault_and_finding_judge_exist():
     allowlists = _specialist_allowlists_from_ast()
     assert "credential_assault" in allowlists
     assert "finding_judge" in allowlists
+    assert "risk_assessor" in allowlists
     assert "execute_hydra" in allowlists["credential_assault"]
     assert "validate_finding" in allowlists["finding_judge"]
+    assert "assess_finding_risk" in allowlists["risk_assessor"]
+    assert "execute_curl" not in allowlists["risk_assessor"]
+    assert "create_finding" not in allowlists["risk_assessor"]
     assert "fireteam_dispatch" not in allowlists["credential_assault"]
     assert "fireteam_dispatch" not in allowlists["finding_judge"]
+    assert "fireteam_dispatch" not in allowlists["risk_assessor"]
 
 
 def test_pantheon_covers_specialists():
@@ -164,6 +179,11 @@ def test_coverage_skill_pack_mentions_existing_prometheus_proxy():
     assert "webpack" in js.lower() or "hash" in js.lower()
     assert "emailjs" in js.lower()
     assert "binary" in js.lower() or "firmware" in js.lower()
+    assert "cwe-321" in js.lower() or "hmac" in js.lower()
+    assert "object.keys" in js.lower()
+    judge = ss.skill_pack_for("finding_judge")
+    assert "cwe-321" in judge.lower() or "hmac" in judge.lower()
+    assert "timeout" in judge.lower()
     auth = ss.skill_pack_for("auth_logic")
     assert "wiki" in auth.lower()
     assert "elogbook" in auth.lower() or "client-side" in auth.lower()
@@ -198,10 +218,59 @@ def test_coverage_skill_pack_mentions_existing_prometheus_proxy():
     api = ss.skill_pack_for("api_authz")
     assert "/api/auth/account" in api or "unauth_account_lookup" in api
     assert "401" in api and "500" in api
+    assert "404" in api
     assert "aegis-enum-canary@example.invalid" in api or "do not spray" in api.lower()
+    assert "do not claim" in api.lower() or "stdout" in api.lower()
     judge = ss.skill_pack_for("finding_judge")
     assert "account lookup" in judge.lower() or "/api/auth/account" in judge
     assert "401" in judge and "500" in judge
+    assert "404" in judge
+    verifier = ss.skill_pack_for("independent_verifier")
+    assert "404" in verifier or "existence" in verifier.lower()
+    assert "aegis-enum-canary@example.invalid" in verifier
+    marcus = ss.skill_pack_for("risk_assessor")
+    assert "account" in marcus.lower() or "is_staff" in marcus.lower()
+    assert "critical" in marcus.lower()
+    api = ss.skill_pack_for("api_authz")
+    assert "SaveSettings" in api or "savesettings" in api.lower()
+    assert "unauth_settings_write" in api
+    assert "canary" in api.lower()
+    judge = ss.skill_pack_for("finding_judge")
+    assert "SaveSettings" in judge or "settings write" in judge.lower()
+    assert "void" in judge.lower() or "content-length" in judge.lower()
+    auth = ss.skill_pack_for("auth_logic")
+    assert "SaveSettings" in auth or "unauth_settings_write" in auth
+    verifier = ss.skill_pack_for("independent_verifier")
+    assert "SaveSettings" in verifier or "canary" in verifier.lower()
+    assert "use_auth_session=false" in api or "use_auth_session=false" in verifier
+    inj = ss.skill_pack_for("injection")
+    assert "wp-json" in inj.lower()
+    assert "wpscan" in inj.lower() or "tax_query" in inj.lower()
+    judge = ss.skill_pack_for("finding_judge")
+    assert "wp-json" in judge.lower() or "wordpress" in judge.lower()
+    coverage = ss.skill_pack_for("coverage")
+    assert "azurecr" in coverage.lower() or "oauth2" in coverage.lower()
+    assert "package-lock" in coverage.lower() or "ghp_" in coverage.lower()
+    judge = ss.skill_pack_for("finding_judge")
+    assert "azurecr" in judge.lower() or "anonymous pull" in judge.lower()
+    assert "ask marcus" in judge.lower() or "verdict" in judge.lower()
+    cloud = ss.skill_pack_for("cloud_audit")
+    assert "azurecr" in cloud.lower() or "anonymous" in cloud.lower()
+    secrets = ss.skill_pack_for("secrets_hunter")
+    assert "package-lock" in secrets.lower() or "ghp_" in secrets.lower()
+    api = ss.skill_pack_for("api_authz")
+    assert "auth_header_bypass" in api
+    assert "socketio_idor" in api or "get_stream" in api
+    assert "ml_pipeline_rbac" in api
+    auth = ss.skill_pack_for("auth_logic")
+    assert "email_change_ato" in auth or "reset_email" in auth
+    judge = ss.skill_pack_for("finding_judge")
+    assert "reset_email" in judge or "email-change" in judge.lower()
+    assert "aegis-invalid" in judge or "no-header" in judge
+    assert "url_key" in judge or "get_stream" in judge
+    verifier = ss.skill_pack_for("independent_verifier")
+    assert "reset_email" in verifier or "email-change" in verifier.lower()
+    assert "aegis-invalid" in verifier or "no-authorization" in verifier.lower()
 
 
 def test_js_secrets_allowlist_can_prove_live_api():
@@ -216,3 +285,12 @@ def test_js_secrets_allowlist_can_prove_live_api():
     assert "queue_finding_followups" in tools
     assert "validate_finding" in tools
     assert "add_engagement_credential" in tools
+
+
+def test_risk_assessor_skill_pack_is_marcus():
+    ss = _load_specialist_skills()
+    pack = ss.skill_pack_for("risk_assessor")
+    assert "Marcus" in pack
+    assert "assess_finding_risk" in pack
+    assert "why_not_higher" in pack
+    assert "live retest" in pack.lower() or "no live retest" in pack.lower()

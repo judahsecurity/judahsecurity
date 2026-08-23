@@ -103,6 +103,21 @@ def directives_from_hypotheses(
         if not profile:
             continue
         matched = [h for h in open_hyps if getattr(h, "specialist", None) == name]
+        # Combined injection lane still inherits XSS/SQLi/SSRF methodology cards.
+        if name == "injection":
+            related = [
+                h
+                for h in open_hyps
+                if getattr(h, "specialist", None) in ("xss", "sqli", "ssrf")
+            ]
+            seen = {id(h) for h in related}
+            matched = related + [h for h in matched if id(h) not in seen]
+        elif name in ("xss", "sqli", "ssrf") and not any(
+            getattr(h, "cwe_ids", None) or getattr(h, "methodology_id", None) for h in matched
+        ):
+            matched = matched + [
+                h for h in open_hyps if getattr(h, "specialist", None) == "injection"
+            ]
         if matched:
             h0 = matched[0]
             # Combine tests when multiple methodology cards map to one specialist

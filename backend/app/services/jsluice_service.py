@@ -408,6 +408,17 @@ def persist_jsluice_findings(
             existing_params = list(a.parameters or [])
             merged_params = list(dict.fromkeys(existing_params + sorted(_by_host_params[hostname])))[:1000]
             a.parameters = merged_params
+        try:
+            from app.services.sitemap_service import ingest_urls_for_asset
+            ingest_urls_for_asset(
+                db,
+                organization_id,
+                a,
+                list(_by_host_endpoints[hostname]) + list(_by_host_js[hostname]),
+                source="jsluice",
+            )
+        except Exception:
+            pass
 
     # ── paths with parameters → Vulnerability rows ─────────────────────────
     for p in result.paths:
@@ -524,6 +535,14 @@ def persist_jsluice_findings(
         )
         db.add(vuln)
         created += 1
+
+    secret_urls = [s.source_js for s in result.secrets if getattr(s, "source_js", None)]
+    if secret_urls:
+        try:
+            from app.services.sitemap_service import mark_secrets_on_urls
+            mark_secrets_on_urls(db, organization_id, secret_urls, source="jsluice")
+        except Exception:
+            pass
 
     db.commit()
     return created

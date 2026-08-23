@@ -22,6 +22,8 @@ A "skill" is a named, bounded workflow the agent knows how to run:
     * ``nextjs-stack`` / ``springboot-stack`` / ``laravel-stack`` - Tech-conditional hunts
     * ``spa-api-discovery`` - Hidden APIs from JS bundles
     * ``api-test``     - Interceptor → lazy chunks ∥ fingerprint → JS endpoints
+    * ``jshero``       - Exhaustive first-party JS collection + extract + sinks
+    * ``wordpress``    - REST user enum + admin-ajax tax_query timing (WPScan optional)
     * ``evidence-hygiene`` - Redact sensitive evidence before reporting
 
 In chat, the user can invoke any skill with::
@@ -211,6 +213,7 @@ SKILLS: list[Skill] = [
             "chunks the crawl never loaded. "
             "3) extract_js_endpoints (IDOR/SSRF/redirect triage) then ingest_urls_into_map. "
             "4) scan_js_urls_for_secrets / gitleaks on the same bundles. "
+            "5) scan_js_sinks for eval/innerHTML/postMessage (prove, don't just list). "
             "api_samples are XHR only; script tags live in js_files."
         ),
     ),
@@ -326,10 +329,15 @@ SKILLS: list[Skill] = [
             "responses when credentials are available. On /api/schema/: hunt security: {} "
             "on /api/auth/account/?email= (is_staff/role). compare_requests unauth "
             "/api/auth/profile/ (401) vs the lookup with aegis-enum-canary@example.invalid "
-            "(200 or 500). A down database is still SUBMIT. One canary; do not spray. "
-            "Look for sensitive data, PII, bulk records, secrets, and missing 401/403 "
-            "controls. Do not modify data or exercise unsafe methods unless explicitly "
-            "authorized."
+            "(200 or 500 or 404 existence oracle). A down database is still SUBMIT Critical. "
+            "One canary; do not spray. Do not claim a 200 role body unless stdout has it. "
+            "On ASP.NET / Settings: compare_requests unauth POST a 401 sibling write vs "
+            "POST /api/Settings/SaveSettings with one canary key and use_auth_session=false. "
+            "200 Content-Length: 0 is void success. GET 500 is still SUBMIT. Do not replace "
+            "production settings. Look for sensitive data, PII, bulk records, secrets, and "
+            "missing 401/403 controls. Do not replace production data. The SaveSettings "
+            "canary POST (one aegis-verify-* key, no session cookies) is in-scope for "
+            "missing-[Authorize] proof."
         ),
     ),
     Skill(
@@ -366,7 +374,8 @@ SKILLS: list[Skill] = [
             "2) For each candidate, send the SAME request under: anonymous, user A, user B "
             "(use provided auth headers/cookies; ask if missing). "
             "3) Compare status, length, owner fields, and sensitive data. "
-            "4) Classify: missing_auth | idor_bola | bfla | no_issue. "
+            "4) Classify: missing_auth | idor_bola | bfla | no_issue. ASP.NET writes: "
+            "missing_auth = sibling 401 vs SaveSettings 200 void (one canary key). "
             "5) Only create_finding when cross-identity or unauth impact is proven with "
             "response evidence. Call sanitize_evidence, then validate_finding, then "
             "detect_bug_chains for confirmed authz bugs."
@@ -456,6 +465,52 @@ SKILLS: list[Skill] = [
             "Triage /api, IDOR, SSRF/redirect. Do not write all_endpoints.txt.\n"
             "Final report: origin, chunk ok/FAIL, fingerprint hosts+tech+coverage, "
             "endpoint count, highest-value leads. Map surface; do not claim vulns yet."
+        ),
+    ),
+    Skill(
+        id="jshero",
+        aliases=["js-hero", "js_hero", "js-collect"],
+        title="JShero (collect + extract + sinks)",
+        description=(
+            "Exhaustive first-party JS: interceptor, lazy chunks, endpoint/method/param "
+            "extract, DOM sinks. Optional gau/wayback JS URLs. Not operator Chrome."
+        ),
+        playbook_id="jshero",
+        required_inputs=["target"],
+        system_context=(
+            "You are running /jshero (Judah). Not Codex, not operator Chrome, not a VPS waymore hop.\n"
+            "If target is missing, ask for the URL and stop.\n"
+            "1) execute_interceptor (interact=true). Fallback execute_deep_crawl.\n"
+            "2) fetch_lazy_chunks (dry_run then download).\n"
+            "3) Optional: execute_gau / execute_waybackurls, keep in-scope *.js, fetch into the map.\n"
+            "4) extract_js_endpoints (methods + params + reseed ingest).\n"
+            "5) scan_js_sinks on the same bundles.\n"
+            "6) One reseed pass if new URLs/chunks appeared. Then secrets + fireteam.\n"
+            "Listing endpoints/sinks is not a finding."
+        ),
+    ),
+    Skill(
+        id="wordpress",
+        aliases=["wordpress-stack", "wp", "wpscan", "wp-json"],
+        title="WordPress stack hunt",
+        description=(
+            "Mandatory WordPress probes: unauth REST user enum and admin-ajax "
+            "tax_query timing. WPScan is optional and must never block those."
+        ),
+        playbook_id="wordpress_stack",
+        required_inputs=["target"],
+        system_context=(
+            "You are running the WORDPRESS skill. WordPress fingerprint is enough "
+            "even on a thin marketing site — do not wait for a rich map or WPScan.\n"
+            "1) execute_curl GET {target}/wp-json/wp/v2/users?per_page=100. "
+            "200 + slug/name → create_finding (CWE-200). 401/403/empty → kill with evidence.\n"
+            "2) compare_requests POST {target}/wp-admin/admin-ajax.php loadmore tax_query "
+            "SLEEP(0) vs SLEEP(2), timeout=20. Delta ≥1.5s → SLEEP(4) then sqlmap --technique=BT. "
+            "Timing table is the finding. Status 200 is not.\n"
+            "3) Login oracle: ONE POST /wp-login.php per discovered username. No hydra.\n"
+            "4) If a probe is WAF/403/timeout blocked: compare_requests or run_custom_probe "
+            "with one mutation, then prove or kill. Do not return empty.\n"
+            "5) OPTIONAL execute_wpscan. Skip on quota abort. Never block steps 1–2 on WPScan."
         ),
     ),
     Skill(
@@ -840,6 +895,18 @@ def build_skill_context(skill: Skill, args: dict, free_text: str = "") -> str:
 
         parts.append(pipeline_prompt(str((args or {}).get("target") or free_text or "")))
         md = (skill_body("api_test") or "").strip()
+        if md:
+            parts.append(md)
+    if skill.id == "jshero":
+        from app.services.agent.skill_md import skill_body
+
+        md = (skill_body("jshero") or "").strip()
+        if md:
+            parts.append(md)
+    if skill.id == "wordpress":
+        from app.services.agent.skill_md import skill_body
+
+        md = (skill_body("wordpress") or "").strip()
         if md:
             parts.append(md)
     if args:

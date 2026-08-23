@@ -105,6 +105,8 @@ def test_skill_md_packs_load():
     assert "interceptor" in names
     assert "api_fingerprint" in names
     assert "api_test" in names
+    assert "jshero" in names
+    assert "wordpress" in names
     lazy = load_skill_md("lazy_chunk_downloader")
     assert lazy and "webpack" in lazy["body"].lower()
     assert "fetch_lazy_chunks" in skill_body("lazy_chunk_downloader")
@@ -164,3 +166,48 @@ def test_api_test_slash_command_positional_target():
     assert next_step(["execute_interceptor", "fetch_lazy_chunks"])["id"] == "chunks_and_fingerprint"
     assert next_step(["execute_interceptor", "fetch_lazy_chunks", "fingerprint_api"])["id"] == "extract"
     assert next_step(["execute_interceptor", "fetch_lazy_chunks", "fingerprint_api", "extract_js_endpoints"]) is None
+
+
+def test_jshero_methods_params_and_template_routes():
+    from app.services.agent.js_endpoints import extract_from_body, extract_methods_and_params
+
+    body = """
+    xhr.open("POST", "/api/v1/actions/execute");
+    axios.post("/api/v1/users", { data: { url: inner, user_id: x } });
+    const path = `${base}/users/${id}/profile`;
+    """
+    extra = extract_methods_and_params(body)
+    methods = {m["method"] + " " + m["url"] for m in extra["methods"]}
+    assert any(m.startswith("POST ") and "actions/execute" in m for m in methods)
+    assert "url" in extra["params"] or "user_id" in extra["params"]
+    found = extract_from_body(body)
+    assert any("actions/execute" in p for p in found)
+    assert any("EXPR" in p and "users" in p for p in found)
+
+
+def test_jshero_sink_scan_high_signal_only():
+    from app.services.agent.js_sinks import scan_body
+
+    hits = scan_body("eval(user); el.innerHTML = q; fetch('/api'); document.cookie = 1;")
+    types = {h["type"] for h in hits}
+    assert "eval" in types
+    assert "innerHTML" in types
+    assert "fetch" not in types
+    assert "cookie" not in types
+
+
+def test_jshero_skill_slash_command():
+    from app.services.agent.skill_md import list_skill_packs, skill_body
+    from app.services.agent.skills_service import get_skill, parse_skill_prefix, resolve
+
+    assert "jshero" in list_skill_packs()
+    assert "fetch_lazy_chunks" in skill_body("jshero")
+    assert "VPS" in skill_body("jshero") or "waymore" in skill_body("jshero").lower()
+    skill = get_skill("jshero")
+    assert skill and skill.playbook_id == "jshero"
+    parsed, args, rest = parse_skill_prefix("/jshero https://appsmith-dmpc.unifytwin.com")
+    assert parsed and parsed.id == "jshero"
+    assert args.get("target") == "https://appsmith-dmpc.unifytwin.com"
+    hit = resolve("/jshero https://example.com")
+    assert hit["matched"] is True
+    assert "scan_js_sinks" in hit["system_context"]

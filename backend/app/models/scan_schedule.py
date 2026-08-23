@@ -460,6 +460,20 @@ CONTINUOUS_SCAN_TYPES = {
         },
         "recommended_frequency": "weekly",
     },
+    "tester_process": {
+        "name": "Aegis tester-process hunt",
+        "description": (
+            "Run Joshua's observe → page assessment → fireteam loop on in-scope "
+            "web targets (not Nuclei). Emails notification_emails when finished."
+        ),
+        "default_config": {
+            "playbook_id": "tester_process",
+            "mode": "agent",
+            "max_targets": 3,
+            "price_limit_usd": 8.0,
+        },
+        "recommended_frequency": "weekly",
+    },
     "geo_enrich": {
         "name": "Geolocation Enrichment",
         "description": "Enrich all assets with country, region, and lat/lon coordinates. Uses netblock country data (no API) and IP geolocation APIs. Essential for geographic risk analysis and compliance mapping.",

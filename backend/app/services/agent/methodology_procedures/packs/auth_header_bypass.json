@@ -1,0 +1,26 @@
+{
+  "id": "auth_header_bypass",
+  "title": "Auth middleware skipped when Authorization header is absent",
+  "summary": "Prove JWT/OIDC middleware only runs when an Authorization header is present (ByPassAuthorization / fail-open).",
+  "steps": [
+    "Pick 2–4 mapped authenticated APIs (GetMenu, GetEntitiesById, Notes, OpenAPI security: jwt/bearer).",
+    "compare_requests: (1) no Authorization header vs (2) Authorization: Bearer aegis-invalid.",
+    "PASS if no-header is 200 or 400 (controller ran — missing required params still counts) AND invalid-bearer is 401.",
+    "Repeat on mapped POST/PUT/DELETE. File separately if invalid-bearer is also 200/400 (always-open write). Empty/canary body only — do not mutate production rows.",
+    "Do not dump records. Kill only if missing header is 401/403 like invalid Bearer.",
+    "submit_finding_candidate High. queue_finding_followups(vuln_type='auth_header_bypass')."
+  ],
+  "tools": ["compare_requests", "execute_curl", "list_captured_requests"],
+  "pass_signals": [
+    "Request without Authorization is 200/400 while invalid Bearer is 401",
+    "400 missing-params on no-header (controller executed)"
+  ],
+  "kill_signals": [
+    "Missing header returns 401/403 like invalid Bearer"
+  ],
+  "references": [
+    "CWE-287",
+    "CWE-306",
+    "OWASP A07:2021 Identification and Authentication Failures"
+  ]
+}

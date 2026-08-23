@@ -197,65 +197,83 @@ def _save_conversation(
     result=None,
     mode: str = "assist",
 ):
-    """Upsert conversation record and append the message."""
-    conv = db.query(AgentConversation).filter(AgentConversation.session_id == session_id).first()
-    if not conv:
-        title = content[:80] if role == "user" else None
-        conv = AgentConversation(
-            session_id=session_id,
-            user_id=user_id,
-            organization_id=org_id,
-            title=title,
-            mode=mode,
-            messages=[],
-        )
-        db.add(conv)
+    """Upsert conversation record and append the message.
 
-    msgs = list(conv.messages or [])
-    msgs.append({"role": role, "content": content[:5000]})
-
-    if result:
-        if role != "agent":
-            msgs.append({"role": "agent", "content": (result.answer or "")[:5000]})
-        conv.current_phase = result.current_phase
-        conv.is_active = not result.task_complete
-        conv.todo_list = result.todo_list or []
-        conv.execution_summary = result.execution_trace_summary or ""
-        if getattr(result, "engagement_replay", None) is not None:
-            conv.engagement_replay = result.engagement_replay
-        if getattr(result, "token_usage", None) is not None:
-            conv.token_usage = result.token_usage
-        if getattr(result, "cost_usd", None) is not None:
-            conv.cost_usd = result.cost_usd
-        try:
-            from app.services.agent.observability import export_otlp_replay
-
-            export_otlp_replay(
-                {
-                    "steps": result.engagement_replay or [],
-                    "token_usage": result.token_usage or {},
-                },
-                service_name="judah-agent",
-                session_id=session_id,
-            )
-        except Exception:
-            logger.debug("OTLP replay export skipped", exc_info=True)
-
-    conv.messages = msgs
-    db.commit()
+    Always uses a short-lived session. The request-scoped ``db`` can sit idle
+    for the whole invoke (tens of minutes) and then fail on commit with a
+    stale-connection SQLAlchemyError — which the API surfaces as
+    "A database error occurred." and kills a successful agent run.
+    Persistence failure must not fail the agent request.
+    """
+    del db  # request session is often stale after a long invoke
+    session = SessionLocal()
     try:
-        from app.services.agent.palace_memory import mine_conversation_turn
-
-        mine_conversation_turn(org_id, role, content, session_id=session_id)
-        if result and role != "agent":
-            mine_conversation_turn(
-                org_id,
-                "agent",
-                result.answer or "",
+        conv = session.query(AgentConversation).filter(AgentConversation.session_id == session_id).first()
+        if not conv:
+            title = content[:80] if role == "user" else None
+            conv = AgentConversation(
                 session_id=session_id,
+                user_id=user_id,
+                organization_id=org_id,
+                title=title,
+                mode=mode,
+                messages=[],
             )
+            session.add(conv)
+
+        msgs = list(conv.messages or [])
+        msgs.append({"role": role, "content": content[:5000]})
+
+        if result:
+            if role != "agent":
+                msgs.append({"role": "agent", "content": (result.answer or "")[:5000]})
+            conv.current_phase = result.current_phase
+            conv.is_active = not result.task_complete
+            conv.todo_list = result.todo_list or []
+            conv.execution_summary = result.execution_trace_summary or ""
+            if getattr(result, "engagement_replay", None) is not None:
+                conv.engagement_replay = result.engagement_replay
+            if getattr(result, "token_usage", None) is not None:
+                conv.token_usage = result.token_usage
+            if getattr(result, "cost_usd", None) is not None:
+                conv.cost_usd = result.cost_usd
+            try:
+                from app.services.agent.observability import export_otlp_replay
+
+                export_otlp_replay(
+                    {
+                        "steps": result.engagement_replay or [],
+                        "token_usage": result.token_usage or {},
+                    },
+                    service_name="judah-agent",
+                    session_id=session_id,
+                )
+            except Exception:
+                logger.debug("OTLP replay export skipped", exc_info=True)
+
+        conv.messages = msgs
+        session.commit()
+        try:
+            from app.services.agent.palace_memory import mine_conversation_turn
+
+            mine_conversation_turn(org_id, role, content, session_id=session_id)
+            if result and role != "agent":
+                mine_conversation_turn(
+                    org_id,
+                    "agent",
+                    result.answer or "",
+                    session_id=session_id,
+                )
+        except Exception:
+            logger.debug("palace conversation mine skipped", exc_info=True)
     except Exception:
-        logger.debug("palace conversation mine skipped", exc_info=True)
+        logger.exception("Failed to persist agent conversation session=%s", session_id)
+        try:
+            session.rollback()
+        except Exception:
+            pass
+    finally:
+        session.close()
 
 
 def _agent_runtime_available() -> bool:
@@ -778,6 +796,9 @@ class WebSocketManager:
                 await ws.send_json(message)
             except Exception:
                 self.disconnect(session_id)
+
+
+ws_manager = WebSocketManager()
 
 
 def _stop_agent_session(session_id: str) -> bool:

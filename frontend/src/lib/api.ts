@@ -797,6 +797,18 @@ class ApiClient {
     return response.data;
   }
 
+  async askMarcus(vulnId: number) {
+    const response = await this.client.post(`/vulnerabilities/${vulnId}/risk-assessment/ask`);
+    return response.data;
+  }
+
+  async writeRiskAssessment(vulnId: number, assessment: Record<string, unknown>) {
+    const response = await this.client.post(`/vulnerabilities/${vulnId}/risk-assessment`, {
+      assessment,
+    });
+    return response.data;
+  }
+
   async getValidationResult(vulnId: number) {
     const response = await this.client.get(`/vulnerabilities/${vulnId}/validation`);
     return response.data;
@@ -1919,6 +1931,13 @@ class ApiClient {
     max_paths?: number;
   }) {
     const response = await this.client.get('/graph/attack-paths', { params });
+    return response.data;
+  }
+
+  async getAttackWorkspace(organizationId?: number) {
+    const response = await this.client.get('/attacks/workspace', {
+      params: organizationId ? { organization_id: organizationId } : undefined,
+    });
     return response.data;
   }
 

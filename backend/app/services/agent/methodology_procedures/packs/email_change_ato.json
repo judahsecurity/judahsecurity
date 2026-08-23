@@ -1,0 +1,28 @@
+{
+  "id": "email_change_ato",
+  "title": "Unauthenticated email-change ATO (djoser reset_email)",
+  "summary": "Prove JWT skip on reset_email / reset_email_confirm with a 401 sibling vs 204 canary. Do not complete ATO on a real mailbox.",
+  "steps": [
+    "Map POST /api/auth/users/reset_email/, reset_email_confirm/, and set_password/ from OpenAPI or crawl.",
+    "Baseline: unauth POST set_password (or another account-mod). Expect 401.",
+    "Mutant: unauth POST reset_email with email=aegis-ato-canary@example.invalid. Expect 204/200.",
+    "Then unauth POST reset_email_confirm uid=MQ (base64 user 1) + garbage token. 'Invalid token for given user' vs 'Invalid user id' enumerates users. 2–4 uids max.",
+    "PASS: sibling 401 AND reset_email accepted without a session. OPTIONS 401 or schema jwtAuth is NOT a kill.",
+    "One canary email. Do not complete ATO on a production mailbox. Do not spray employee inboxes.",
+    "submit_finding_candidate High. queue_finding_followups(vuln_type='email_change_ato')."
+  ],
+  "tools": ["compare_requests", "execute_curl", "list_captured_requests"],
+  "pass_signals": [
+    "Unauth reset_email returns 204/200 while set_password returns 401",
+    "reset_email_confirm locates a user without a session"
+  ],
+  "kill_signals": [
+    "Both email-change endpoints return 401/403 like set_password"
+  ],
+  "references": [
+    "CWE-306",
+    "CWE-640",
+    "CWE-204",
+    "https://djoser.readthedocs.io/en/latest/settings.html#send-activation-email"
+  ]
+}

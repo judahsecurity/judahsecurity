@@ -111,6 +111,30 @@ CWE_TO_CAPEC = {
             "Try Common Usernames and Passwords",
         ],
     },
+    "CWE-259": {  # Hardcoded Password
+        "capec_ids": ["CAPEC-70"],
+        "attack_techniques": ["T1552.001"],
+        "description": "Use of Hard-coded Password",
+        "attack_patterns": [
+            "Try Common Usernames and Passwords",
+        ],
+    },
+    "CWE-321": {  # Hardcoded Cryptographic Key
+        "capec_ids": ["CAPEC-20"],
+        "attack_techniques": ["T1552.004"],
+        "description": "Use of Hard-coded Cryptographic Key",
+        "attack_patterns": [
+            "Encryption Brute Forcing",
+        ],
+    },
+    "CWE-307": {  # Improper Restriction of Excessive Authentication Attempts
+        "capec_ids": ["CAPEC-49"],
+        "attack_techniques": ["T1110"],
+        "description": "Improper Restriction of Excessive Authentication Attempts",
+        "attack_patterns": [
+            "Password Brute Forcing",
+        ],
+    },
     "CWE-522": {  # Insufficiently Protected Credentials
         "capec_ids": ["CAPEC-49", "CAPEC-50"],
         "attack_techniques": ["T1552"],
@@ -383,6 +407,46 @@ ATTACK_TECHNIQUES = {
         "name": "Credentials In Files",
         "tactic": "Credential Access",
         "description": "Adversaries may search local file systems for files containing credentials.",
+    },
+    "T1552.004": {
+        "name": "Private Keys",
+        "tactic": "Credential Access",
+        "description": "Adversaries may search for private key material or hardcoded cryptographic secrets.",
+    },
+    "T1592.004": {
+        "name": "Gather Victim Host Information: Client Configurations",
+        "tactic": "Reconnaissance",
+        "description": "Adversaries may gather client configuration files and publicly exposed application bundles.",
+    },
+    "T1565.002": {
+        "name": "Data Manipulation: Transmitted Data Manipulation",
+        "tactic": "Impact",
+        "description": "Adversaries may alter data in transit to bypass integrity controls.",
+    },
+    "T1595.002": {
+        "name": "Active Scanning: Vulnerability Scanning",
+        "tactic": "Reconnaissance",
+        "description": "Adversaries may scan victims for vulnerabilities that can be used during targeting.",
+    },
+    "T1046": {
+        "name": "Network Service Discovery",
+        "tactic": "Discovery",
+        "description": "Adversaries may attempt to get a listing of services running on remote hosts.",
+    },
+    "T1110": {
+        "name": "Brute Force",
+        "tactic": "Credential Access",
+        "description": "Adversaries may use brute force techniques to gain access to accounts.",
+    },
+    "T1550.001": {
+        "name": "Application Access Token",
+        "tactic": "Defense Evasion, Persistence, Privilege Escalation, Initial Access",
+        "description": "Adversaries may steal or forge application access tokens to bypass authentication.",
+    },
+    "T1550": {
+        "name": "Use Alternate Authentication Material",
+        "tactic": "Defense Evasion, Persistence, Privilege Escalation, Initial Access",
+        "description": "Adversaries may use alternate authentication material to bypass typical authentication.",
     },
     "T1557": {
         "name": "Adversary-in-the-Middle",

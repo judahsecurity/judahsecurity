@@ -120,6 +120,11 @@ class Asset(Base):
     )
     port_services = relationship("PortService", back_populates="asset", cascade="all, delete-orphan")
     screenshots = relationship("Screenshot", back_populates="asset", cascade="all, delete-orphan", order_by="desc(Screenshot.captured_at)")
+    sitemap_entries = relationship(
+        "SitemapEntry",
+        back_populates="asset",
+        cascade="all, delete-orphan",
+    )
     
     # Labels (many-to-many relationship)
     labels = relationship("Label", secondary="asset_labels", back_populates="assets")
@@ -140,6 +145,10 @@ class Asset(Base):
     endpoints = Column(JSON, default=list)  # List of discovered URL paths/endpoints
     parameters = Column(JSON, default=list)  # List of discovered URL parameters
     js_files = Column(JSON, default=list)  # JavaScript files found (often contain secrets/endpoints)
+    # Vespasian / OpenAPI REST catalog — method, path, params, access, response
+    rest_endpoints = Column(JSON, default=list)
+    # Discovered swagger/openapi documents [{url, title, version, spec, last_captured}]
+    api_specs = Column(JSON, default=list)
     
     # IP Resolution - multi-value to handle load balancers, CDNs, and IP changes over time
     ip_addresses = Column(JSON, default=list)  # Current IPs: ["1.2.3.4", "5.6.7.8"]
@@ -246,3 +255,7 @@ class Asset(Base):
     
     def __repr__(self):
         return f"<Asset {self.asset_type.value}: {self.value}>"
+
+
+# Register mapper target for sitemap_entries (workers often import Asset only).
+from app.models.sitemap_entry import SitemapEntry  # noqa: E402, F401

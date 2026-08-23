@@ -693,6 +693,17 @@ def persist_js_findings(
             existing_params = list(asset.parameters or [])
             merged_params = list(dict.fromkeys(existing_params + sorted(_asset_params[hostname])))[:1000]
             asset.parameters = merged_params
+        try:
+            from app.services.sitemap_service import ingest_urls_for_asset
+            ingest_urls_for_asset(
+                db,
+                organization_id,
+                asset,
+                list(endpoints) + list(_asset_js.get(hostname) or []),
+                source="js_recon",
+            )
+        except Exception:
+            pass
 
     for f in findings:
         if f.kind not in reportable_kinds:
@@ -771,6 +782,20 @@ def persist_js_findings(
         )
         db.add(vuln)
         created += 1
+
+    secret_urls = []
+    for f in findings:
+        if f.kind == "secret":
+            if f.source_url:
+                secret_urls.append(f.source_url)
+            if f.match and str(f.match).startswith("http"):
+                secret_urls.append(f.match)
+    if secret_urls:
+        try:
+            from app.services.sitemap_service import mark_secrets_on_urls
+            mark_secrets_on_urls(db, organization_id, secret_urls, source="js_recon")
+        except Exception:
+            pass
 
     db.commit()
     return created

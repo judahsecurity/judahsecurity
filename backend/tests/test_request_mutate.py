@@ -1,6 +1,6 @@
 """Captured-request one-field mutate."""
 
-from app.services.agent.request_mutate import apply_one_mutation, summarize_samples
+from app.services.agent.request_mutate import apply_one_mutation, coerce_request_body, summarize_samples
 
 
 def test_mutate_query_one_field():
@@ -40,3 +40,20 @@ def test_summarize_indexes():
     assert rows[0]["index"] == 0
     assert "id" in rows[0]["fields"]
     assert rows[1]["has_body"] is True
+
+
+def test_coerce_json_alias_sets_content_type():
+    raw, hdrs = coerce_request_body(
+        {"json": {"settings": [{"key": "aegis-verify-key", "value": "x"}]}}
+    )
+    assert raw is not None
+    assert "aegis-verify-key" in raw
+    assert hdrs["Content-Type"] == "application/json"
+
+
+def test_coerce_dict_body_does_not_clobber_existing_content_type():
+    raw, hdrs = coerce_request_body(
+        {"body": {"a": 1}, "headers": {"Content-Type": "application/merge-patch+json"}}
+    )
+    assert raw == '{"a":1}'
+    assert hdrs["Content-Type"] == "application/merge-patch+json"

@@ -145,6 +145,18 @@ def _process_capture_results(
             if screenshot.file_path:
                 asset.latest_screenshot_id = screenshot.id
                 assets_updated += 1
+            try:
+                from app.services.sitemap_service import link_screenshot
+                link_screenshot(
+                    db,
+                    asset,
+                    result.url,
+                    screenshot_id=screenshot.id if result.success else None,
+                    http_status=result.http_status,
+                    response_title=result.page_title,
+                )
+            except Exception:
+                pass
         else:
             total_failed += 1
     return (total_captured, total_failed, assets_updated)

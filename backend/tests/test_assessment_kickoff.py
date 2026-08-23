@@ -1,6 +1,7 @@
 """Kickoff tech fingerprinting: local Wappalyzer + WhatRuns."""
 
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -133,6 +134,24 @@ def test_wordpress_hunt_note_sees_kickoff_technologies():
     assert "/wp-json/wp/v2/users" in note
 
 
+def test_registry_hunt_note_sees_kickoff_host():
+    from app.services.agent.orchestrator import AgentOrchestrator
+
+    note = AgentOrchestrator._registry_hunt_note(
+        None,
+        {
+            "target_info": {
+                "technologies": ["Azure Container Registry"],
+                "primary_target": "https://contoso.azurecr.io",
+            },
+            "execution_trace": [],
+            "kickoff_brief": "Registry: *.azurecr.io — probe_registry_anonymous",
+        },
+    )
+    assert "probe_registry_anonymous" in note
+    assert "contoso.azurecr.io" in note
+
+
 def test_wordpress_hunt_note_sees_wp_admin_path():
     from app.services.agent.orchestrator import AgentOrchestrator
 
@@ -148,6 +167,118 @@ def test_wordpress_hunt_note_sees_wp_admin_path():
         },
     )
     assert "WordPress detected" in note
+
+
+def test_appsmith_spa_catchall_is_not_wordpress():
+    """Same HTML 200 on /wp-json is an SPA shell, not WordPress."""
+    spa = (
+        '<!doctype html><html lang="en"><head><title>Appsmith</title></head>'
+        "<body>loader</body></html>"
+    )
+
+    class _SpaClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, follow_redirects=True, timeout=8.0):
+            headers = {
+                "content-type": "text/html; charset=utf-8",
+                "x-appsmith-request-id": "abc",
+            }
+            return _FakeResp(str(url), status=200, text=spa, headers=headers)
+
+    async def fake_whatruns(base):
+        return []
+
+    async def fake_wapp(base, root):
+        return []
+
+    async def _run():
+        with (
+            patch("httpx.AsyncClient", _SpaClient),
+            patch("app.services.agent.assessment_kickoff._run_wappalyzer", fake_wapp),
+            patch("app.services.agent.assessment_kickoff._run_whatruns", fake_whatruns),
+        ):
+            return await run_assessment_kickoff("https://appsmith-dmpc.unifytwin.com/")
+
+    result = asyncio.run(_run())
+    assert result["success"] is True
+    assert "CMS: WordPress" not in result["brief"]
+    assert "SPA catch-all" in result["brief"]
+    assert "Appsmith" in result["brief"]
+    kind = (result.get("assessment") or {}).get("app_kind")
+    assert kind != "wordpress"
+    start = (result.get("assessment") or {}).get("start_here") or []
+    specs = [r.get("specialist") for r in start]
+    assert "injection" not in specs or not any(r.get("hunt") == "wordpress" for r in start)
+    assert "credential_assault" in specs or "spa_client" in specs
+    assert "ssrf" in specs
+    assert "sqli" in specs
+
+
+def test_kickoff_acr_probes_token_and_catalog_not_website_paths(monkeypatch):
+    class _AcrClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, follow_redirects=True, timeout=8.0):
+            u = str(url)
+            if "/oauth2/token" in u:
+                return _FakeResp(
+                    u,
+                    status=200,
+                    text=json.dumps({"access_token": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}),
+                    headers={"content-type": "application/json"},
+                )
+            if "/v2/_catalog" in u:
+                return _FakeResp(
+                    u,
+                    status=200,
+                    text=json.dumps({"repositories": ["app/web"]}),
+                    headers={"content-type": "application/json"},
+                )
+            return _FakeResp(u, status=401, text="unauthorized")
+
+    async def fake_whatruns(base):
+        return []
+
+    async def fake_wapp(base, root):
+        return []
+
+    monkeypatch.setattr(
+        "app.services.agent.assessment_kickoff._run_whatruns",
+        fake_whatruns,
+    )
+
+    async def _run():
+        with (
+            patch("httpx.AsyncClient", _AcrClient),
+            patch("app.services.agent.assessment_kickoff._run_wappalyzer", fake_wapp),
+        ):
+            return await run_assessment_kickoff("https://contoso.azurecr.io")
+
+    result = asyncio.run(_run())
+    assert result["success"] is True
+    assert result["needs_dir_brute"] is False
+    assert "Azure Container Registry" in result["technologies"]
+    paths = [str(h.get("path") or "") for h in result["hits"]]
+    assert any("oauth2/token" in p for p in paths)
+    assert any("_catalog" in p for p in paths)
+    assert not any("wp-admin" in p for p in paths)
+    assert "probe_registry_anonymous" in result["brief"]
+    assert "docker pull" in result["brief"].lower() or "do not" in result["brief"].lower()
 
 
 def test_kickoff_404_flags_dir_brute(monkeypatch):

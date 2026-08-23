@@ -1348,11 +1348,12 @@ def run_js_url_secret_scan(
     urls: str,
     bridge: ASMBridge,
     max_urls: int = 30,
-    max_bytes: int = 2 * 1024 * 1024,
-    fetch_timeout: float = 35.0,
+    max_bytes: int = 16 * 1024 * 1024,
+    fetch_timeout: float = 60.0,
 ) -> Dict[str, Any]:
     """
-    Download http(s) assets (typically .js from Katana), run gitleaks --no-git, regex hints.
+    Download http(s) assets (typically .js from Katana), run gitleaks --no-git, regex hints,
+    and CWE-321 Object.keys HMAC / MQTT / RFID reconstruction.
     Submits gitleaks hits to the platform as vulnerabilities.
     """
     import httpx
@@ -1361,12 +1362,38 @@ def run_js_url_secret_scan(
     if not parsed:
         return {"success": False, "error": "No valid http(s) URLs", "urls_scanned": 0}
 
-    if not _tool_available("gitleaks"):
-        logger.error("gitleaks not installed")
-        return {"success": False, "error": "gitleaks not installed", "urls_scanned": 0}
+    def _client_signing(text: str, url: str):
+        try:
+            from app.services.js_client_signing_secrets import (
+                analyze_js_client_secrets,
+                summarize_client_signing_findings,
+            )
+            hits = analyze_js_client_secrets(text, source_url=url)
+            return hits, summarize_client_signing_findings(hits)
+        except Exception:
+            try:
+                import sys
+                from pathlib import Path
+                backend = str(Path(__file__).resolve().parents[1] / "backend")
+                if backend not in sys.path:
+                    sys.path.insert(0, backend)
+                from app.services.js_client_signing_secrets import (
+                    analyze_js_client_secrets,
+                    summarize_client_signing_findings,
+                )
+                hits = analyze_js_client_secrets(text, source_url=url)
+                return hits, summarize_client_signing_findings(hits)
+            except Exception:
+                return [], {}
+
+    has_gitleaks = _tool_available("gitleaks")
+    if not has_gitleaks:
+        logger.warning("gitleaks not installed — still running CWE-321 client-signing scan")
 
     downloads: List[Dict[str, Any]] = []
     regex_hints: List[Dict[str, Any]] = []
+    client_signing: List[Dict[str, Any]] = []
+    signing_summary: Dict[str, Any] = {}
 
     with tempfile.TemporaryDirectory(prefix="js_secrets_") as tmp:
         files_dir = os.path.join(tmp, "files")
@@ -1381,80 +1408,120 @@ def run_js_url_secret_scan(
                             downloads.append({"url": url, "ok": False, "error": f"HTTP {resp.status_code}"})
                             continue
                         buf = bytearray()
+                        truncated = False
                         for chunk in resp.iter_bytes():
                             buf.extend(chunk)
                             if len(buf) > max_bytes:
-                                downloads.append({"url": url, "ok": False, "error": "content too large"})
+                                truncated = True
+                                del buf[max_bytes:]
                                 break
-                        else:
-                            body = bytes(buf)
-                            fname = _js_filename(url)
-                            path = os.path.join(files_dir, fname)
-                            with open(path, "wb") as f:
-                                f.write(body)
-                            name_to_url[fname] = url
-                            text = body.decode("utf-8", errors="replace")
-                            h = _regex_js_hints(text)
-                            if h:
-                                regex_hints.append({"url": url, "hints": h})
-                            downloads.append({"url": url, "ok": True, "bytes": len(body), "file": fname})
+                        body = bytes(buf)
+                        fname = _js_filename(url)
+                        path = os.path.join(files_dir, fname)
+                        with open(path, "wb") as f:
+                            f.write(body)
+                        name_to_url[fname] = url
+                        text = body.decode("utf-8", errors="replace")
+                        h = _regex_js_hints(text)
+                        if h:
+                            regex_hints.append({"url": url, "hints": h})
+                        hits, summary = _client_signing(text, url)
+                        if hits:
+                            client_signing.extend(hits)
+                            signing_summary = summary or signing_summary
+                        downloads.append({
+                            "url": url, "ok": True, "bytes": len(body), "file": fname,
+                            "truncated": truncated, "client_signing_hits": len(hits),
+                        })
                 except Exception as e:
                     downloads.append({"url": url, "ok": False, "error": str(e)})
 
-        gl_cmd = [
-            "gitleaks", "detect",
-            "--source", files_dir,
-            "--no-git",
-            "--report-format", "json",
-            "--exit-code", "0",
-            "--redact",
-        ]
-        proc = subprocess.run(gl_cmd, capture_output=True, text=True, timeout=300)
-        raw = (proc.stdout or "").strip()
         gl_findings: List[dict] = []
-        if raw:
-            try:
-                data = json.loads(raw)
-                if isinstance(data, list):
-                    gl_findings = data
-                elif isinstance(data, dict):
-                    gl_findings = [data]
-            except json.JSONDecodeError:
-                for line in raw.splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        gl_findings.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        continue
+        if has_gitleaks:
+            gl_cmd = [
+                "gitleaks", "detect",
+                "--source", files_dir,
+                "--no-git",
+                "--report-format", "json",
+                "--exit-code", "0",
+                "--redact",
+            ]
+            proc = subprocess.run(gl_cmd, capture_output=True, text=True, timeout=300)
+            raw = (proc.stdout or "").strip()
+            if raw:
+                try:
+                    data = json.loads(raw)
+                    if isinstance(data, list):
+                        gl_findings = data
+                    elif isinstance(data, dict):
+                        gl_findings = [data]
+                except json.JSONDecodeError:
+                    for line in raw.splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            gl_findings.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            continue
 
-        for finding in gl_findings:
-            fn = (finding.get("File") or finding.get("file") or "").split("/")[-1]
-            src = name_to_url.get(fn)
-            if src:
-                finding["source_url"] = src
-            host = urlparse(src or "").hostname or (finding.get("source_url") or "unknown")
-            rule = finding.get("RuleID") or finding.get("rule_id") or "secret"
+            for finding in gl_findings:
+                fn = (finding.get("File") or finding.get("file") or "").split("/")[-1]
+                src = name_to_url.get(fn)
+                if src:
+                    finding["source_url"] = src
+                host = urlparse(src or "").hostname or (finding.get("source_url") or "unknown")
+                rule = finding.get("RuleID") or finding.get("rule_id") or "secret"
+                bridge.submit_vulnerability(
+                    host=host,
+                    title=f"JS secret ({rule})",
+                    severity="high",
+                    source="js_secrets",
+                    url=src or finding.get("source_url"),
+                    description=json.dumps({k: finding.get(k) for k in ("RuleID", "Secret", "Match", "StartLine", "EndLine") if finding.get(k)}, default=str),
+                    tags=["javascript", "secret", "gitleaks"],
+                )
+            bridge.flush()
+
+        for hit in client_signing:
+            src = hit.get("source_url") or ""
+            host = urlparse(src).hostname or "unknown"
             bridge.submit_vulnerability(
                 host=host,
-                title=f"JS secret ({rule})",
-                severity="high",
+                title=f"JS {hit.get('kind') or 'client secret'} ({hit.get('cwe') or 'CWE-321'})",
+                severity=str(hit.get("severity") or "critical"),
                 source="js_secrets",
-                url=src or finding.get("source_url"),
-                description=json.dumps({k: finding.get(k) for k in ("RuleID", "Secret", "Match", "StartLine", "EndLine") if finding.get(k)}, default=str),
-                tags=["javascript", "secret", "gitleaks"],
+                url=src,
+                description=json.dumps({
+                    "kind": hit.get("kind"),
+                    "cwe": hit.get("cwe"),
+                    "object_ref": hit.get("object_ref"),
+                    "reconstruction": hit.get("reconstruction"),
+                    "redacted": hit.get("redacted"),
+                    "note": hit.get("note"),
+                }, default=str),
+                tags=["javascript", "secret", "cwe-321", "client-hmac"],
             )
-        bridge.flush()
+        if client_signing:
+            bridge.flush()
 
-    return {
+    out = {
         "success": True,
         "urls_requested": len(parsed),
         "urls_scanned": sum(1 for d in downloads if d.get("ok")),
         "downloads": downloads,
         "gitleaks_findings": gl_findings,
+        "gitleaks_error": None if has_gitleaks else "gitleaks not installed",
         "regex_hints": regex_hints,
+        "client_signing_findings": client_signing,
+        "client_signing_summary": signing_summary,
     }
+    if signing_summary.get("submit_without_live_api"):
+        out["guidance"] = (
+            "CWE-321/CWE-798 client secrets reconstructed from a public bundle. "
+            "Public reconstruction is the finding; API timeout is not a kill."
+        )
+    return out
 
 
 # =========================================================================

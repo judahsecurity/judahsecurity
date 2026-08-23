@@ -39,11 +39,24 @@ if [ -n "$sink" ]; then
   sinkenv=(-e "AEGIS_FINDINGS_SINK=/sink/${sfile}")
 fi
 
+envfile=()
+if [ -n "${AEGIS_ENV_FILE:-}" ] && [ -f "$AEGIS_ENV_FILE" ]; then
+  envfile=(--env-file "$AEGIS_ENV_FILE")
+fi
+
+# Only pass -e VAR when the host has a value. Bare `-e VAR` would otherwise
+# override --env-file with an empty string.
+passthrough=(-e AEGIS_TRACING=false)
+for v in ANTHROPIC_API_KEY OPENAI_API_KEY AEGIS_MODEL AEGIS_LLM_BACKEND; do
+  if [ -n "${!v:-}" ]; then
+    passthrough+=(-e "$v")
+  fi
+done
+
 exec docker run --rm \
   --add-host=host.docker.internal:host-gateway \
-  -e ANTHROPIC_API_KEY \
-  -e AEGIS_MODEL \
-  -e AEGIS_TRACING=false \
+  "${envfile[@]}" \
+  "${passthrough[@]}" \
   "${sinkenv[@]}" \
   "${mount[@]}" \
   "$IMAGE" python3 run_pentest.py "${args[@]}"

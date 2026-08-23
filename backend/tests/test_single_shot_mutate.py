@@ -28,6 +28,18 @@ def test_xss_list():
     assert any("alert" in x for x in out["items"])
 
 
+def test_aspnet_host_prepends_settings_save_paths():
+    out = generate_mutations(
+        "paths",
+        "https://doccentrum-sensia.azurewebsites.net/api/",
+        count=20,
+    )
+    items = out["items"]
+    assert "/api/Settings/SaveSettings" in items
+    assert "/api/TaskAdmin/UpdateTask" in items
+    assert items.index("/api/Settings/SaveSettings") < items.index("/api")
+
+
 def test_rejects_bad_kind():
     out = generate_mutations("nuclei", "")
     assert out["ok"] is False

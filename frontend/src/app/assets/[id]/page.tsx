@@ -74,6 +74,7 @@ import { api, getApiErrorMessage } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { formatDate } from '@/lib/utils';
 import { ApplicationMap } from '@/components/assets/ApplicationMap';
+import { SitemapInventory } from '@/components/assets/SitemapInventory';
 import { DiscoveryPath } from '@/components/assets/DiscoveryPath';
 import { AddFindingDialog } from '@/components/findings/AddFindingDialog';
 import { LaunchAssessmentDialog } from '@/components/agent/LaunchAssessmentDialog';
@@ -234,6 +235,15 @@ interface Asset {
   js_files?: string[];
   // Login portals / discovered paths on this host (from login portal scan)
   login_portals?: Array<{ url: string; type?: string; status?: number; title?: string; verified?: boolean }>;
+  rest_endpoints?: Array<{
+    method?: string;
+    path?: string;
+    parameters?: string[];
+    param_count?: number;
+    access?: string;
+    status?: number | null;
+  }>;
+  api_specs?: Array<{ url?: string; title?: string; version?: string; last_captured?: string }>;
 }
 
 const assetTypeIcons: Record<string, any> = {
@@ -275,7 +285,22 @@ export default function AssetDetailPage() {
   const [editingAcs, setEditingAcs] = useState(5);
   const [savingAcs, setSavingAcs] = useState(false);
   const [appStructure, setAppStructure] = useState<{
-    summary: { total_paths: number; total_urls: number; total_parameters: number; total_js_files: number; total_api_endpoints: number; total_interesting_urls: number; scans_included: number };
+    summary: {
+      total_paths: number;
+      total_urls: number;
+      total_parameters: number;
+      total_js_files: number;
+      total_api_endpoints: number;
+      total_interesting_urls: number;
+      scans_included: number;
+      sitemap_count?: number;
+      rest_api_count?: number;
+      external_count?: number;
+      secrets_count?: number;
+      login_count?: number;
+      sso_count?: number;
+      screenshot_count?: number;
+    };
     paths: string[];
     urls: string[];
     parameters: string[];
@@ -283,6 +308,23 @@ export default function AssetDetailPage() {
     api_endpoints: string[];
     interesting_urls: string[];
     source_breakdown: Record<string, Record<string, number>>;
+    sitemap?: Array<{
+      kind: string;
+      path: string;
+      url: string;
+      host?: string | null;
+      method?: string | null;
+      has_secrets?: boolean;
+      has_login?: boolean;
+      has_sso?: boolean;
+      screenshot_count?: number;
+      http_status?: number | null;
+    }>;
+    rest_api_endpoints?: Array<any>;
+    external_urls?: Array<any>;
+    sitemap_filters?: Record<string, number>;
+    rest_summary?: Record<string, any>;
+    api_specs?: Array<Record<string, any>>;
   } | null>(null);
   const [addFindingDialogOpen, setAddFindingDialogOpen] = useState(false);
   const [exportingReport, setExportingReport] = useState(false);
@@ -433,7 +475,11 @@ export default function AssetDetailPage() {
         js_files: [],
         api_endpoints: [],
         interesting_urls: [],
-        source_breakdown: {}
+        source_breakdown: {},
+        sitemap: [],
+        rest_api_endpoints: [],
+        external_urls: [],
+        sitemap_filters: {},
       });
     } finally {
       setAppStructureLoading(false);
@@ -1715,7 +1761,7 @@ export default function AssetDetailPage() {
                       Discovered from {appStructure?.summary?.scans_included || 0} Scans
                     </CardTitle>
                     <CardDescription>
-                      All paths, URLs, parameters, and JS files from Katana, ParamSpider, and Wayback scans that contain <code className="text-primary">{asset.value}</code>
+                      Same-origin sitemap, REST APIs, and third-party URLs for <code className="text-primary">{asset.value}</code>
                     </CardDescription>
                   </CardHeader>
                 </Card>
@@ -1788,6 +1834,22 @@ export default function AssetDetailPage() {
                     </CardContent>
                   </Card>
                 </div>
+
+                <SitemapInventory
+                  sitemap={appStructure?.sitemap || []}
+                  restApi={appStructure?.rest_api_endpoints || []}
+                  external={appStructure?.external_urls || []}
+                  restSummary={appStructure?.rest_summary}
+                  apiSpecs={appStructure?.api_specs}
+                  assetId={asset.id}
+                  filters={{
+                    secrets: appStructure?.summary?.secrets_count || 0,
+                    login: appStructure?.summary?.login_count || 0,
+                    sso: appStructure?.summary?.sso_count || 0,
+                    screenshots: appStructure?.summary?.screenshot_count || 0,
+                    response: appStructure?.sitemap_filters?.with_response || 0,
+                  }}
+                />
 
                 {/* Technologies (from asset) */}
                 {asset.technologies && asset.technologies.length > 0 && (

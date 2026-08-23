@@ -614,25 +614,36 @@ class AgentOrchestrator:
                 from app.services.agent import recon_workers
 
                 kickoff_coro = run_assessment_kickoff(seed)
-                queue_coro = queue_early_pentester_crawl(
-                    seed,
-                    session_id=session_id,
-                    organization_id=org_id,
-                )
-                streams_coro = recon_workers.spawn_workers(
-                    url=seed,
-                    session_id=str(session_id or ""),
-                    pack="early",
-                    tools_manager=self.tool_manager,
-                    user_id=uid_int,
-                    organization_id=org_id if isinstance(org_id, int) else None,
-                )
-                kickoff, queued, streams = await asyncio.wait_for(
-                    asyncio.gather(
-                        kickoff_coro, queue_coro, streams_coro, return_exceptions=True
-                    ),
-                    timeout=28.0,
-                )
+                acr_seed = False
+                try:
+                    from app.services.agent.registry_surface import host_is_azurecr
+
+                    acr_seed = host_is_azurecr(seed)
+                except Exception:
+                    acr_seed = False
+                if acr_seed:
+                    kickoff = await asyncio.wait_for(kickoff_coro, timeout=28.0)
+                    queued, streams = {}, []
+                else:
+                    queue_coro = queue_early_pentester_crawl(
+                        seed,
+                        session_id=session_id,
+                        organization_id=org_id,
+                    )
+                    streams_coro = recon_workers.spawn_workers(
+                        url=seed,
+                        session_id=str(session_id or ""),
+                        pack="early",
+                        tools_manager=self.tool_manager,
+                        user_id=uid_int,
+                        organization_id=org_id if isinstance(org_id, int) else None,
+                    )
+                    kickoff, queued, streams = await asyncio.wait_for(
+                        asyncio.gather(
+                            kickoff_coro, queue_coro, streams_coro, return_exceptions=True
+                        ),
+                        timeout=28.0,
+                    )
                 if isinstance(kickoff, Exception):
                     logger.warning("assessment kickoff failed: %s", kickoff)
                     kickoff = {}
@@ -734,12 +745,18 @@ class AgentOrchestrator:
                     pass
 
                 if kickoff_brief:
-                    next_steps = [
-                        "execute_interceptor (attaches to early job if queued)",
-                        "spawn_recon_workers(pack='enrich') for ferox+katana streams (auto on 404)",
-                        "ingest_urls_into_map → discover_parameters/arjun",
-                        "sync_engagement_brain → fireteam_dispatch(specialists='auto')",
-                    ]
+                    if acr_seed:
+                        next_steps = [
+                            "probe_registry_anonymous on the *.azurecr.io host",
+                            "create_finding if verdict=SUBMIT (High; Critical only if later secret scan finds ghp_*)",
+                        ]
+                    else:
+                        next_steps = [
+                            "execute_interceptor (attaches to early job if queued)",
+                            "spawn_recon_workers(pack='enrich') for ferox+katana streams (auto on 404)",
+                            "ingest_urls_into_map → discover_parameters/arjun",
+                            "sync_engagement_brain → fireteam_dispatch(specialists='auto')",
+                        ]
                     execution_trace.append(
                         ExecutionStep(
                             iteration=0,
@@ -781,7 +798,7 @@ class AgentOrchestrator:
                 logger.warning("assessment kickoff skipped: %s", e)
                 kickoff_brief = ""
         
-        return {
+        out = {
             "current_iteration": 0,
             "max_iterations": _max_iterations_var.get(None) or settings.AGENT_MAX_ITERATIONS,
             "task_complete": False,
@@ -817,75 +834,74 @@ class AgentOrchestrator:
             "compacted_brief": None,
             "price_limit_usd": getattr(settings, "AGENT_PRICE_LIMIT_USD", 0) or 0,
         }
+        try:
+            from app.services.agent.wordpress_surface import (
+                stamp_stack_on_map,
+                wordpress_detected,
+                wordpress_origin,
+            )
+
+            stub_state = {
+                "target_info": target_info,
+                "kickoff_brief": kickoff_brief,
+                "execution_trace": execution_trace,
+            }
+            if wordpress_detected(stub_state):
+                out["capability_map"] = stamp_stack_on_map(
+                    {"target": wordpress_origin(stub_state) or "", "notes": []},
+                    stub_state,
+                )
+        except Exception:
+            pass
+        try:
+            from app.services.agent.registry_surface import (
+                registry_detected,
+                stamp_registry_on_map,
+            )
+
+            stub_state = {
+                "target_info": target_info,
+                "kickoff_brief": kickoff_brief,
+                "execution_trace": execution_trace,
+                "organization_id": org_id,
+                "capability_map": out.get("capability_map"),
+            }
+            if registry_detected(stub_state):
+                out["capability_map"] = stamp_registry_on_map(
+                    out.get("capability_map")
+                    or {"target": (target_info or {}).get("primary_target") or "", "notes": []},
+                    stub_state,
+                )
+        except Exception:
+            pass
+        try:
+            from app.services.agent.run_snapshot import load_run_snapshot
+
+            snap = load_run_snapshot(org_id, session_id)
+            if snap.get("capability_map"):
+                out["capability_map"] = snap["capability_map"]
+            if snap.get("engagement_brain"):
+                out["engagement_brain"] = snap["engagement_brain"]
+            if snap.get("todo_list") and not todo_list:
+                out["todo_list"] = snap["todo_list"]
+            if snap.get("auth_session"):
+                out["auth_session"] = snap["auth_session"]
+            if snap.get("current_phase"):
+                out["current_phase"] = snap["current_phase"]
+        except Exception:
+            logger.debug("run snapshot resume skipped", exc_info=True)
+        return out
     
     def _wordpress_hunt_note(self, state: AgentState) -> str:
-        """When WordPress is fingerprinted, force the high-value WP surfaces
-        that a human tester (and Claude) hits immediately: WPScan, REST user
-        enum, login oracle, admin-ajax injection. Returns empty when WP is
-        not in play."""
-        tech = " ".join(
-            str(t).lower()
-            for t in (state.get("target_info", {}) or {}).get("technologies", [])
-        )
-        blob = tech
-        blob += " " + str(state.get("kickoff_brief") or "").lower()
-        for brief in state.get("recon_worker_briefs") or []:
-            blob += " " + str(brief).lower()[:800]
-        for s in state.get("execution_trace", []) or []:
-            if not isinstance(s, dict):
-                continue
-            blob += " " + str(s.get("tool_output") or "").lower()[:800]
-            blob += " " + str(s.get("thought") or "").lower()[:200]
-        wp_markers = (
-            "wordpress", "wp-content", "wp-json", "wp-admin",
-            "wp-login", "wp-includes",
-        )
-        if not any(m in blob for m in wp_markers):
-            return ""
+        """When WordPress is fingerprinted, force REST user enum + ajax SQLi."""
+        from app.services.agent.wordpress_surface import wordpress_hunt_note
 
-        ran = {
-            s.get("tool_name")
-            for s in (state.get("execution_trace") or [])
-            if isinstance(s, dict) and s.get("tool_name")
-        }
-        origin = ((state.get("target_info") or {}).get("primary_target") or "").rstrip("/")
-        url = origin or "https://TARGET"
+        return wordpress_hunt_note(state)
 
-        lines = [
-            "\n\n## WordPress detected — hunt these surfaces NOW",
-            "WPScan is OPTIONAL (known CVEs / plugin list). Do not wait on it, "
-            "and do not retry it. Claude-style findings on WordPress come from "
-            "REST user enum + admin-ajax time-based SQLi, not from WPScan.",
-        ]
-        lines.append(
-            f"1. Unauth REST user enum FIRST: execute_curl(args=\"-sS -D- {url}/wp-json/wp/v2/users?per_page=100\"). "
-            "A 200 with slug/name is a finding (user enumeration). Then create_finding "
-            "with title/description/severity/target filled in."
-        )
-        lines.append(
-            f"2. Time-based SQLi PoC (do this even if WPScan failed). "
-            f"compare_requests on POST {url}/wp-admin/admin-ajax.php with "
-            "Content-Type: application/x-www-form-urlencoded. "
-            "baseline body: action=loadmore&page=1&query={{\"tax_query\":{{\"0\":{{\"terms\":[\"1\"]}}}}}} "
-            "mutant body: same but terms=[\"1) AND (SELECT 1 FROM (SELECT SLEEP(2))x)-- -\"]. "
-            "timeout=20. If elapsed_s delta ≥ 1.5s (TIME_BASED_INJECTION_CANDIDATE), "
-            "repeat with SLEEP(4) then execute_sqlmap --technique=BT and create_finding "
-            "with the timing table as evidence."
-        )
-        lines.append(
-            f"3. Login oracle (ONE attempt per username, no brute force): POST {url}/wp-login.php "
-            "and compare 'not registered' vs 'password you entered for the username X is incorrect'."
-        )
-        if "execute_wpscan" not in ran:
-            lines.append(
-                "4. OPTIONAL later: execute_wpscan for plugin CVE mapping. Skip if it aborted "
-                "(token/quota). Do not block the ajax/REST hunts on WPScan."
-            )
-        else:
-            lines.append(
-                "4. WPScan already ran or aborted — do NOT call it again. Continue ajax/REST."
-            )
-        return "\n".join(lines)
+    def _registry_hunt_note(self, state: AgentState) -> str:
+        from app.services.agent.registry_surface import registry_hunt_note
+
+        return registry_hunt_note(state)
 
     def _repetition_guard_note(self, state: AgentState, phase: str) -> str:
         """Detect an unproductive loop — the model re-running the same tool over
@@ -940,7 +956,11 @@ class AgentOrchestrator:
                 "run execute_wpscan (WordPress detected — enumerate plugins, "
                 "themes, users, and known CVEs)"
             )
-        if "fireteam_dispatch" not in ran and cmap.get("ready_for_attack"):
+        if "fireteam_dispatch" not in ran and (
+            cmap.get("ready_for_attack")
+            or "wordpress" in " ".join(str(c) for c in (cmap.get("capabilities") or [])).lower()
+            or "wordpress" in tech
+        ):
             suggestions.append(
                 "dispatch fireteam_dispatch(specialists='auto') to hunt the "
                 "capability-map surfaces with specialists"
@@ -1262,6 +1282,7 @@ class AgentOrchestrator:
             # WordPress-specific hunt: once WP is fingerprinted, do not wait for
             # methodology cards — run wpscan + REST user enum + ajax SQLi probes.
             tool_recommendations += self._wordpress_hunt_note(state)
+            tool_recommendations += self._registry_hunt_note(state)
             # Break unproductive loops: if the model has been hammering one tool
             # without new findings, steer it to a different, higher-value action.
             tool_recommendations += self._repetition_guard_note(state, phase)
@@ -1477,7 +1498,8 @@ class AgentOrchestrator:
                             f"{progress.get('summary')}\n"
                             f"Blocking: {blocker_txt}\n\n"
                             "Prove or kill those cards (update_hypothesis), "
-                            "independent_verify pending candidates, and "
+                            "independent_verify pending candidates, "
+                            "assess_finding_risk on published medium+ findings, and "
                             "record_surface_coverage for untested inventory "
                             "(finding | tested_clean | skipped+reason), then complete. "
                             "Or set completion_reason to include 'defer methodologies' / "
@@ -1512,10 +1534,14 @@ class AgentOrchestrator:
                 else ""
             )
             non_browser = "non-browser" in reason.lower() or "force" in reason.lower()
+            from app.services.agent.wordpress_surface import wordpress_detected
+
+            wp_ready = wordpress_detected(state)
             if (
                 to_phase == "exploitation"
                 and not map_ready
                 and not non_browser
+                and not wp_ready
             ):
                 # Keep thinking — require browser walkthrough first (tester methodology)
                 step.thought = (
@@ -2216,10 +2242,23 @@ class AgentOrchestrator:
             raw_map = None
         if raw_map:
             from app.services.agent.capability_map import merge_capability_maps
-            updates["capability_map"] = merge_capability_maps(
-                state.get("capability_map"),
-                raw_map,
+            from app.services.agent.wordpress_surface import stamp_stack_on_map
+            updates["capability_map"] = stamp_stack_on_map(
+                merge_capability_maps(
+                    state.get("capability_map"),
+                    raw_map,
+                ),
+                {**state, "capability_map": raw_map},
             )
+            try:
+                from app.services.agent.registry_surface import stamp_registry_on_map
+
+                updates["capability_map"] = stamp_registry_on_map(
+                    updates["capability_map"],
+                    {**state, "capability_map": updates["capability_map"]},
+                )
+            except Exception:
+                pass
             try:
                 from app.services.sitemap_service import persist_capability_map_safe
                 src = "interceptor" if tool_name == "execute_interceptor" else (
@@ -2229,6 +2268,13 @@ class AgentOrchestrator:
                     state.get("organization_id"),
                     updates["capability_map"],
                     source=src,
+                )
+                from app.services.agent.run_snapshot import save_run_snapshot
+
+                save_run_snapshot(
+                    state.get("organization_id"),
+                    state.get("session_id"),
+                    {**state, "capability_map": updates["capability_map"]},
                 )
             except Exception:
                 pass
@@ -3052,6 +3098,12 @@ class AgentOrchestrator:
             )
         except Exception:
             logger.debug("palace engagement brain persist skipped", exc_info=True)
+        try:
+            from app.services.agent.run_snapshot import save_run_snapshot
+
+            save_run_snapshot(organization_id, session_id, final_state if isinstance(final_state, dict) else None)
+        except Exception:
+            logger.debug("run snapshot persist skipped", exc_info=True)
 
     def _build_response(self, state: dict) -> InvokeResponse:
         """Build response from final state."""

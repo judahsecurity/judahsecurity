@@ -28,6 +28,8 @@ def test_benchmark_full_run(stub_env, sample_ground_truth):
     agg = report["aggregate"]["findings"]
     assert agg["true_positives"] == 2
     assert round(agg["recall"], 2) == 0.67
+    assert report["targets"]["demo"]["cost_usd"] == 0.375
+    assert report["aggregate"]["cost"]["cost_usd"] == 0.375
 
 
 def test_benchmark_tally_only_reuses_artifacts(stub_env, sample_ground_truth):

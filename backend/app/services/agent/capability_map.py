@@ -59,6 +59,8 @@ class CapabilityMap:
     quality_score: float = 0.0
     ready_for_attack: bool = False
     notes: List[str] = field(default_factory=list)
+    # How a human would start given this surface (deterministic; no LLM).
+    assessment: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -224,6 +226,13 @@ def finalize_capability_map(cmap: CapabilityMap) -> CapabilityMap:
         caps.append("injectable_params")
     if cmap.forms:
         caps.append("forms")
+    try:
+        from app.services.agent.wordpress_surface import wordpress_from_map
+
+        if wordpress_from_map(cmap) and "wordpress" not in caps:
+            caps.append("wordpress")
+    except Exception:
+        pass
     cmap.capabilities = caps
 
     # Observation → methodologies first; hunt queue collapses those + legacy hunts
@@ -243,12 +252,25 @@ def finalize_capability_map(cmap: CapabilityMap) -> CapabilityMap:
         if h.get("hunt") not in seen_hunts:
             merged_queue.append(h)
             seen_hunts.add(h.get("hunt"))
-    cmap.ranked_hunt_queue = merged_queue[:18]
+    cmap.ranked_hunt_queue = merged_queue[:22]
+    from app.services.agent.page_assessment import assess_page
+
+    cmap.assessment = assess_page(cmap)
     cmap.quality_score = _score_map(cmap)
+    wp = "wordpress" in (cmap.capabilities or [])
     # Ready when we actually browsed something useful — not just a blank fail.
+    # WordPress fingerprint (even a thin homepage) is enough to hunt REST/ajax.
     cmap.ready_for_attack = (
         cmap.quality_score >= 0.35
         and (len(cmap.pages_visited) >= 1 or len(cmap.api_endpoints) >= 1)
+    ) or (
+        wp
+        and (
+            len(cmap.pages_visited) >= 1
+            or len(cmap.api_endpoints) >= 1
+            or len(cmap.js_files) >= 1
+            or any("wordpress" in str(n).lower() for n in (cmap.notes or []))
+        )
     )
     if not cmap.ready_for_attack:
         cmap.notes.append(
@@ -301,11 +323,99 @@ def _build_hunt_queue(cmap: CapabilityMap) -> List[Dict[str, str]]:
                 "critical",
                 "unauth_account_lookup",
                 "OpenAPI/schema or /api/auth/account — unauth email lookup (security: {}) "
-                "and 401 siblings vs 200/500 lookup. One canary email; do not spray.",
+                "and 401 siblings vs 200/404/500 lookup. File Critical. One canary email; "
+                "do not spray. Do not claim a 200 role body unless stdout has it.",
                 next(
                     (p for p in cmap.pages_visited
                      if re.search(r"/api/auth/account|/api/schema|swagger|openapi", str(p), re.I)),
                     "/api/auth/account/",
+                ),
+            )
+        if re.search(
+            r"/api/settings|savesettings|getsettings|doccentrum|docutrack|"
+            r"/api/\w+/(save|update|write)\w*|asp\.net|"
+            r"/api/[A-Z][A-Za-z]+/[A-Z][A-Za-z]+",
+            blob + " " + (cmap.target or ""),
+        ):
+            add(
+                "high",
+                "unauth_settings_write",
+                "ASP.NET / Settings/Save* APIs — paired unauth write: sibling 401 vs "
+                "SaveSettings 200 void. One canary key; do not replace production settings.",
+                next(
+                    (
+                        e.get("path", "")
+                        for e in cmap.api_endpoints
+                        if isinstance(e, dict)
+                        and re.search(r"settings|save|write", str(e.get("path") or ""), re.I)
+                    ),
+                    next(
+                        (p for p in cmap.pages_visited
+                         if re.search(r"settings|azurewebsites", str(p), re.I)),
+                        cmap.target or "/api/Settings/SaveSettings",
+                    ),
+                ),
+            )
+        if re.search(
+            r"reset_email|change_email|update_email|/api/auth/users",
+            blob,
+            re.I,
+        ):
+            add(
+                "high",
+                "email_change_ato",
+                "djoser reset_email — unauth 204 vs set_password 401. One canary; "
+                "do not complete ATO on a real mailbox.",
+                next(
+                    (p for p in cmap.pages_visited
+                     if re.search(r"reset_email|change_email|/api/auth/users", str(p), re.I)),
+                    "/api/auth/users/reset_email/",
+                ),
+            )
+        if re.search(
+            r"authorization|bearer|jwt|oidc|openid|bypassauthorization",
+            blob,
+            re.I,
+        ) or cmap.has_oauth_sso:
+            add(
+                "high",
+                "auth_header_bypass",
+                "JWT/OIDC middleware often skips when Authorization is absent — "
+                "no-header 200/400 vs invalid Bearer 401.",
+                (cmap.api_endpoints[0].get("path", "") if cmap.api_endpoints else "api"),
+            )
+        if re.search(r"socket\.io|get_stream|url_key", blob, re.I):
+            add(
+                "high",
+                "socketio_idor",
+                "Socket.IO get_stream — anonymous url_key for fabricated siteId. "
+                "Do not fetch video; do not send null crash loops.",
+                next(
+                    (w for w in cmap.websockets if w),
+                    next(
+                        (p for p in cmap.pages_visited if re.search(r"socket", str(p), re.I)),
+                        "/socket.io/",
+                    ),
+                ),
+            )
+        if re.search(
+            r"/api/v1/train|celery-task|logixtwin|ml.?model|model.?train",
+            blob,
+            re.I,
+        ):
+            add(
+                "high",
+                "ml_pipeline_rbac",
+                "ML train/delete/celery — self-reg JWT often has no RBAC. "
+                "Do not delete production models.",
+                next(
+                    (
+                        e.get("path", "")
+                        for e in cmap.api_endpoints
+                        if isinstance(e, dict)
+                        and re.search(r"train|celery", str(e.get("path") or ""), re.I)
+                    ),
+                    "/api/v1/train/",
                 ),
             )
     # Multi-host / subdomain pages → host-header tenant isolation card
@@ -331,9 +441,18 @@ def _build_hunt_queue(cmap: CapabilityMap) -> List[Dict[str, str]]:
             "Multiple forms/workflows — step skip, mass assignment, state tamper",
             (cmap.forms[0].get("action") if cmap.forms else "") or "",
         )
-    if cmap.param_rich_paths or cmap.has_search:
-        add("high", "injection", "Query/body params or search forms — SQLi/XSS/SSTI candidates",
+    if cmap.has_search or any("?" in (p or "") and re.search(r"[?&](q|query|search)=", p or "", re.I) for p in cmap.param_rich_paths):
+        add("high", "xss", "Search/reflect params — XSS canaries on those inputs",
             (cmap.param_rich_paths[0] if cmap.param_rich_paths else "search"))
+    if cmap.param_rich_paths:
+        add("high", "sqli", "Mapped params — SQLi/SSTI/cmd canaries (not a generic injection dump)",
+            cmap.param_rich_paths[0])
+    blob_ssrf = " ".join(cmap.param_rich_paths) + " " + " ".join(
+        str(e.get("path") or "") for e in cmap.api_endpoints if isinstance(e, dict)
+    )
+    if re.search(r"webhook|callback|proxy|import|datasource|requesturl", blob_ssrf, re.I):
+        add("high", "ssrf", "URL-fetch/webhook/proxy fields — OOB + in-scope canary",
+            next((p for p in cmap.param_rich_paths if re.search(r"url|webhook|proxy", p, re.I)), "url-fetch"))
     if cmap.has_admin:
         add("medium", "admin_surface", "Admin/dashboard paths — privilege and exposure checks",
             next((p for p in cmap.pages_visited if _ADMIN_RE.search(p)), ""))
@@ -348,10 +467,10 @@ def _build_hunt_queue(cmap: CapabilityMap) -> List[Dict[str, str]]:
             "high" if next_admin else "medium",
             "js_secrets",
             (
-                "Admin/Next.js bundles — hunt hostname-keyed client_id/client_secret maps "
-                "and prove live API impact"
+                "Admin/Next.js/Angular bundles — hunt hostname-keyed client_id/client_secret, "
+                "CWE-321 Object.keys HMAC signing keys, and MQTT/RFID ICS creds"
                 if next_admin
-                else "JS bundles present — secrets, source maps, retire.js CVEs"
+                else "JS bundles present — secrets, CWE-321 client HMAC, source maps, retire.js CVEs"
             ),
             cmap.js_files[0] if cmap.js_files else "",
         )
@@ -388,6 +507,16 @@ def _build_hunt_queue(cmap: CapabilityMap) -> List[Dict[str, str]]:
                 cmap.target or "",
             ),
         )
+    if re.search(r"azurecr\.io|/v2/_catalog|docker.?registry", az_blob, re.I):
+        add(
+            "high",
+            "docker_registry",
+            "ACR/Docker registry — anonymous oauth2 token + catalog; bounded 1–3 image secret scan",
+            next(
+                (p for p in (cmap.pages_visited or []) if re.search(r"azurecr|_catalog|registry", p, re.I)),
+                cmap.target or "",
+            ),
+        )
     if not queue and cmap.pages_visited:
         add("medium", "baseline_web", "Browsable UI with limited signals — baseline web vulns + nuclei",
             cmap.pages_visited[0])
@@ -415,6 +544,8 @@ def _score_map(cmap: CapabilityMap) -> float:
         score += 0.05
     if cmap.has_ai_agent:
         score += 0.12  # chatbot/agent surface is high-value even with few pages
+    if "wordpress" in (cmap.capabilities or []):
+        score += 0.20  # CMS fingerprint is enough to hunt REST enum + ajax SQLi
     blob = " ".join(str(p) for p in (cmap.pages_visited or [])) + " " + " ".join(
         str(e.get("path") or "") for e in (cmap.api_endpoints or [])
     )
@@ -437,9 +568,12 @@ ATTACK_SPECIALIST_NAMES = [
     "auth_logic",
     "api_authz",
     "host_tenant",
-    "business_logic",
-    "injection",
-    "graphql_api",
+        "business_logic",
+        "injection",
+        "xss",
+        "sqli",
+        "ssrf",
+        "graphql_api",
     "js_secrets",
     "file_upload",
     "saml_sso",
@@ -469,15 +603,28 @@ def select_specialists_for_map(
         else:
             # Empty/404/thin maps still have unlinked dirs, params, and JS APIs.
             thin = ["content_api", "app_mapper", "js_secrets", "api_authz"]
+        if cmap and "wordpress" in (getattr(cmap, "capabilities", None) or []):
+            if "injection" not in thin:
+                thin.insert(1, "injection")
         # Critical hunts still deserve their specialist even when quality is low.
         thin_hunt_map = {
             "path_enum": "content_api",
             "unauth_account_lookup": "api_authz",
+            "unauth_settings_write": "api_authz",
+            "email_change_ato": "auth_logic",
+            "auth_header_bypass": "api_authz",
+            "socketio_idor": "api_authz",
+            "ml_pipeline_rbac": "api_authz",
             "api_authz": "api_authz",
             "azure_function": "coverage",
+            "docker_registry": "coverage",
             "elasticsearch_unauth": "coverage",
             "agent_tools": "agent_tools",
             "injection": "injection",
+            "wordpress": "injection",
+            "xss": "xss",
+            "sqli": "sqli",
+            "ssrf": "ssrf",
         }
         if cmap:
             for item in cmap.ranked_hunt_queue or []:
@@ -487,7 +634,10 @@ def select_specialists_for_map(
         return (thin if not include_recon
                 else ["web_recon"] + thin[1:])[:max_specialists]
 
-    selected: List[str] = ["app_mapper"]
+    from app.services.agent.page_assessment import specialists_from_assessment
+
+    human = specialists_from_assessment(getattr(cmap, "assessment", None) or {}, max_specialists=max_specialists)
+    selected: List[str] = list(human) if human else ["app_mapper"]
     hunt_to_specialist = {
         "credential_assault": "credential_assault",
         "auth_logic": "auth_logic",
@@ -496,15 +646,26 @@ def select_specialists_for_map(
         "file_upload": "file_upload",
         "api_authz": "api_authz",
         "unauth_account_lookup": "api_authz",
+        "unauth_settings_write": "api_authz",
+        "email_change_ato": "auth_logic",
+        "auth_header_bypass": "api_authz",
+        "socketio_idor": "api_authz",
+        "ml_pipeline_rbac": "api_authz",
         "mass_assignment": "api_authz",
         "path_enum": "content_api",
         "host_tenant": "host_tenant",
         "business_logic": "business_logic",
         "injection": "injection",
+        "wordpress": "injection",
+        "xss": "xss",
+        "sqli": "sqli",
+        "ssrf": "ssrf",
         "js_secrets": "js_secrets",
         "spa_client": "spa_client",
         "agent_tools": "agent_tools",
         "coverage": "coverage",
+        "azure_function": "coverage",
+        "docker_registry": "coverage",
         "admin_surface": "auth_logic",
         "realtime": "api_authz",
         "baseline_web": "injection",
@@ -516,20 +677,22 @@ def select_specialists_for_map(
         if len(selected) >= max_specialists - 1:
             break
 
-    # Strong observed surfaces always get a slot (don't let hunt-queue order drop them).
+    # Strong observed surfaces always get a slot (don't let hunt-queue / human
+    # start_here overflow drop GraphQL, WP, or dir-brute).
     forced: List[str] = []
     if getattr(cmap, "has_graphql", False):
         forced.append("graphql_api")
+    if "wordpress" in (getattr(cmap, "capabilities", None) or []):
+        forced.append("injection")
     if any((item.get("hunt") or "") == "path_enum" for item in (cmap.ranked_hunt_queue or [])):
         forced.append("content_api")
-    for name in forced:
-        if name in selected:
-            continue
-        if len(selected) >= max_specialists - 1:
-            selected.insert(1, name)
-            selected = selected[: max_specialists - 1]
-        else:
-            selected.append(name)
+    if any((item.get("hunt") or "") == "docker_registry" for item in (cmap.ranked_hunt_queue or [])):
+        forced.append("coverage")
+    ordered: List[str] = []
+    for name in ["app_mapper", *forced, *selected]:
+        if name and name not in ordered:
+            ordered.append(name)
+    selected = ordered[: max_specialists - 1]
 
     # Close with Solomon (finding judge) — demonstrated-compromise bar
     if "finding_judge" not in selected:
@@ -555,7 +718,10 @@ def format_capability_map_for_prompt(cmap: Optional[CapabilityMap | Dict[str, An
     if isinstance(cmap, dict):
         cmap = build_capability_map_from_dict(cmap)
 
+    from app.services.agent.page_assessment import format_page_assessment_for_prompt
+
     lines = [
+        format_page_assessment_for_prompt(cmap.assessment or None),
         f"Target: {cmap.target or '(unknown)'}  scope={cmap.scope or '?'}",
         f"Quality: {cmap.quality_score:.2f}  ready_for_attack={cmap.ready_for_attack}  "
         f"authenticated={cmap.authenticated}",

@@ -103,6 +103,24 @@ def test_filter_batch_drops_noise_keeps_brand():
     assert any("spi4" in h for h, _ in rejected)
 
 
+def test_accepts_brand_named_azurecr():
+    decision = hostname_attributed_to_org(
+        "rockwelldev.azurecr.io",
+        _rockwell_tokens(),
+    )
+    assert decision.accept is True
+    assert is_shared_paas_hostname("rockwelldev.azurecr.io")
+
+
+def test_rejects_unrelated_azurecr():
+    decision = hostname_attributed_to_org(
+        "unrelatedregistry.azurecr.io",
+        _rockwell_tokens(),
+    )
+    assert decision.accept is False
+    assert decision.paas_suffix == "azurecr.io"
+
+
 def test_without_brand_tokens_shared_paas_is_rejected():
     decision = hostname_attributed_to_org(
         "anything.azurewebsites.net",

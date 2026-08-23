@@ -44,7 +44,7 @@ NEVER_SUBMIT_AND_CHAINS = """
 - Self-XSS without CSRF delivery to victim
 - Open redirect alone (need OAuth token theft or SSRF chain)
 - CORS `*` without ACAC:true + credentialed data exfil
-- OpenAPI/Swagger found without quoting `security: {}` / privilege fields or a 401-vs-500
+- OpenAPI/Swagger found without quoting `security: {}` / privilege fields or a 401-vs-200/404/500
   differential on the account lookup (foothold, not a finding)
 - SSRF DNS/OOB ping only (need internal HTTP data or metadata)
 - Host header injection alone (need password-reset poisoning PoC)
@@ -130,7 +130,9 @@ AUTHZ_PATTERNS = """
 - OpenAPI `security: {}` on email/account lookup (GET /api/auth/account/?email=): missing
   auth + UserAccount fields is_staff/role/valid_through is **missing authentication**, not IDOR
 - Differential: unauth GET /api/auth/profile/ → 401, unauth GET /api/auth/account/?email=
-  → 200 **or 500**. A 500 (DB down / OperationalError) still proves JWT middleware was skipped
+  → 200, **404** ('User does not exist!'), **or 500**. A 500 (DB down) or 404 (existence
+  oracle) still proves JWT middleware was skipped. File **Critical**. Do not claim a
+  200 UserAccount body unless stdout contains is_staff/role bytes.
 - One canary email only (`aegis-enum-canary@example.invalid`). Do not spray employee inboxes.
   Do not dump ICS/OT users. ACAO `*` without credentials is extra, not this finding.
 
@@ -139,8 +141,8 @@ AUTHZ_PATTERNS = """
 - Same data visible to both identities by design (public profile) → not IDOR
 - Admin-only endpoint requiring admin session → not BFLA for low-priv
 - Account lookup returns 401/403 like siblings, or schema requires JWT and body is a
-  non-enumerating boolean → KILL. Do **not** kill because the database is down or the
-  canary email is unregistered.
+  non-enumerating boolean → KILL. Do **not** kill because the database is down, the
+  canary email is unregistered, or the lookup is 404.
 """
 
 AUTH_PATTERNS = """

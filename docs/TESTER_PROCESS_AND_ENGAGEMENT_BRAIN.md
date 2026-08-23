@@ -32,6 +32,9 @@ Batch / accuracy harness: [`harness/README.md`](../harness/README.md)
 execute_deep_crawl (+ katana/gau → ingest_urls_into_map)
         │
         ▼
+page assessment (app kind + how a human would start)
+        │
+        ▼
 sync_engagement_brain          ← seeds CWE/CAPEC cards + Penetration Task Graph
         │
         ▼
@@ -105,7 +108,8 @@ Seeded from the capability map hunt queue when the map is attack-ready:
 | `api_authz` | IDOR / BOLA / missing auth |
 | `host_tenant` | Host / `X-Forwarded-Host` tenant isolation |
 | `business_logic` | Workflow skip, mass assignment, state tamper |
-| `injection` | SQLi / XSS / SSTI on mapped params |
+| `injection` | SQLi / XSS / SSTI on mapped params (legacy combined lane) |
+| `xss` / `sqli` / `ssrf` | Split from injection when search, params, or URL-fetch fields are observed |
 | `graphql_api` | Introspection + authz on GraphQL |
 | `file_upload` / `saml_sso` / `spa_client` / `js_secrets` | Surface-specific |
 | `coverage` | Nuclei / known CVE leftovers (after logic hunts) |
@@ -127,7 +131,8 @@ Call `queue_finding_followups(vuln_type=..., title=..., target=..., evidence=...
 | `host_header` | Tenant isolation bypass; password-reset poisoning |
 | `idor` | Write/export variants on the same object family; **OpenAPI/DRF mass assignment of `id`/`user`/`owner`** (schema first) |
 | `mass_assignment` | Count request serializers missing `readOnly` on `id`/`created`/`user`/`schedule`; writable ownership; list ops that document **shared across all users**. **DB down is still SUBMIT**. Also enqueue unauth `/api/auth/account/` lookup on the same schema |
-| `unauth_account_lookup` | OpenAPI `security: {}` on `/api/auth/account/?email=` returning `is_staff`/`role`/`valid_through`; **sibling 401 vs lookup 200/500 is SUBMIT**. One canary email; do not spray. **DB down is still SUBMIT** |
+| `unauth_account_lookup` | OpenAPI `security: {}` on `/api/auth/account/?email=` returning `is_staff`/`role`/`valid_through`; **sibling 401 vs lookup 200/404/500 is SUBMIT Critical**. 404 is an existence oracle. One canary email; do not spray; do not invent a 200 role body. **DB down is still SUBMIT** |
+| `unauth_settings_write` | Sibling write 401 (e.g. `POST /api/TaskAdmin/UpdateTask`) vs unauth `POST /api/Settings/SaveSettings` **200 Content-Length: 0** (ASP.NET void). **SUBMIT High**. GET GetSettings 500 is **not** a kill. One `aegis-verify-*` key; do not replace production settings or flip `enableNotifications`/`createPlannerTasks`/`powerBIReportId`. `use_auth_session=false`. `*.azurewebsites.net` is App Service, not a Function env dump |
 | `cors_credentials` | Canary Origin reflected in ACAO **and** `Access-Control-Allow-Credentials: true`; OPTIONS allows `Authorization` + POST; **Keycloak `webOrigins=*`** on token/userinfo/admin. Header proof is SUBMIT (no victim tab). Socket.IO `url_key` only |
 | `keycloak_password_grant` | **admin-cli public + password grant** (`invalid_grant` without `client_secret`); **no 429/lockout on ≤8 fake attempts**. Do not hydra. Guessing a valid password is not required. Tiny defaults only |
 | `ssrf` | Metadata / internal pivot canaries |
@@ -149,7 +154,7 @@ Grafana-specific cards (`grafana-*` suffixes), CouchDB-specific cards (`couchdb-
 11. **OpenAPI/DRF mass assignment** (CWE-915 / API3) — `GET /api/schema/` (or swagger.json). Count `*Request` serializers where `id`, `created`, `updated`, `user`/`owner`, `schedule`, or `periodic_task` are writable (not `readOnly`). Quote list operations that say **shared across all users**. **Missing database is still SUBMIT** (schema proves the contract). One bounded canary write if the DB is up; do not enable ICS/OT schedules; do not dump the hierarchy. Fix: `read_only=True` / `extra_kwargs`; object-level permissions; tenant-scope lists.
 12. **Keycloak / CORS `webOrigins=*`** (CWE-942) — canary `Origin` reflected in `Access-Control-Allow-Origin` **with** `Access-Control-Allow-Credentials: true` on token, userinfo, JWKS, and `/auth/admin/realms/<realm>/*`. OPTIONS allows `Authorization` + POST/PUT/DELETE. **Header proof is SUBMIT** (no victim browser tab). Do not dump `/users`; do not ship an HTML exploit. Fix: client `webOrigins` explicit allowlist or `+` (valid redirect URIs), never `*`; audit reverse-proxy CORS overrides.
 13. **Keycloak `admin-cli` password grant / no lockout** (CWE-307) — public client (no `client_secret`) with Direct Access Grants on `master` and app realms. `invalid_grant` without a secret proves the grant. **≤8 failed attempts with no 429/lockout is SUBMIT** — do not hydra/rockyou; do not kill because a valid password was not guessed. Disable Direct Access Grants; enable Brute Force Detection; if the grant must stay, confidential client + network ACL.
-14. **Unauth OpenAPI account lookup** (CWE-204 / CWE-200 / CWE-862) — `GET /api/auth/account/?email=` documented with `security: {}` (“public API … without authentication”) returning `email`, `is_active`, `valid_through`, `is_staff`, `role`. Quote the schema **or** prove JWT skip: protected siblings (`/api/auth/profile/`, `/api/auth/users/me/`) return **401** while the lookup is **200** or **500** (app/DB error still reached application code). **Missing database is still SUBMIT**. One canary email (`aegis-enum-canary@example.invalid`); do not spray employee inboxes; do not dump ICS/OT users. `Access-Control-Allow-Origin: *` is extra, not the CORS-credentials finding. Fix: require JWT; if a pre-login check is needed, boolean `is_active` only + rate limit; do not confirm account existence.
+14. **Unauth OpenAPI account lookup** (CWE-204 / CWE-200 / CWE-862) — `GET /api/auth/account/?email=` documented with `security: {}` (“public API … without authentication”) returning `email`, `is_active`, `valid_through`, `is_staff`, `role`. Quote the schema **or** prove JWT skip: protected siblings (`/api/auth/profile/`, `/api/auth/users/me/`) return **401** while the lookup is **200**, **404** (`User does not exist!` — existence oracle), or **500** (app/DB error still reached application code). **Missing database is still SUBMIT. File Critical.** One canary email (`aegis-enum-canary@example.invalid`); do not spray employee inboxes; do not dump ICS/OT users. Do not claim a 200 UserAccount payload unless stdout contains those bytes. `Access-Control-Allow-Origin: *` is extra, not the CORS-credentials finding. Fix: require JWT; if a pre-login check is needed, boolean `is_active` only + rate limit; do not confirm account existence.
 
 Findings must be demonstrated-compromise writeups: **Vulnerability Description**, **Impact** (what was retrieved), **Assets Affected**, **Recommendation** — not “login succeeded”.
 

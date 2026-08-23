@@ -105,6 +105,7 @@ def test_methodologies_from_rich_crawl():
     assert "path_directory_context" in ids
     assert "path_parameter_mining" in ids
     assert "realtime_channel_auth" in ids
+    assert "js_client_hmac_signing" in ids
     assert "admin_surface_exposure" in ids
     assert "coverage_known_vulns" in ids
     assert "registration_invite_abuse" in ids
@@ -248,20 +249,20 @@ def test_operation_directive_includes_cwe_and_methodologies():
             self.max_iterations = 6
 
     profiles = {
-        "injection": _P("injection"),
+        "xss": _P("xss"),
         "api_authz": _P("api_authz"),
         "app_mapper": _P("app_mapper"),
     }
     directives = directives_from_hypotheses(
         brain=brain,
         profiles_by_name=profiles,
-        specialists=["injection", "api_authz"],
+        specialists=["xss", "api_authz"],
         default_target=cmap.target,
     )
-    inj = directives["injection"]
-    assert inj.methodology_ids
-    assert inj.cwe_ids
-    block = inj.to_prompt_block()
+    xss = directives["xss"]
+    assert xss.methodology_ids
+    assert xss.cwe_ids
+    block = xss.to_prompt_block()
     assert "Methodologies:" in block
     assert "CWE:" in block
 
@@ -383,6 +384,26 @@ def test_azure_function_host_seeds_anonymous_env_methodology():
     assert "azure_function" in hunts
 
 
+def test_acr_host_seeds_anonymous_pull_methodology():
+    cmap = build_capability_map_from_crawl(
+        _fake_crawl(
+            target="https://digipdevelopment.azurecr.io",
+            pages_visited=[
+                "https://digipdevelopment.azurecr.io/v2/",
+            ],
+        )
+    )
+    methods = methodologies_from_capability_map(cmap.to_dict())
+    ids = {m.id for m in methods}
+    assert "acr_anonymous_pull" in ids
+    acr = next(m for m in methods if m.id == "acr_anonymous_pull")
+    assert "CWE-306" in acr.cwe_ids
+    assert "oauth2" in acr.test.lower() or "catalog" in acr.test.lower()
+    assert "do not push" in acr.test.lower() or "do not pull the whole catalog" in acr.test.lower()
+    hunts = [h["hunt"] for h in cmap.ranked_hunt_queue]
+    assert "docker_registry" in hunts
+
+
 def test_couchdb_hostname_seeds_default_admin_methodology():
     cmap = build_capability_map_from_crawl(
         _fake_crawl(
@@ -502,7 +523,9 @@ def test_api_schema_path_seeds_mass_assignment_methodology():
     assert "CWE-204" in acct.cwe_ids
     assert "do not kill" in acct.kill_criteria.lower() or "unavailable" in acct.kill_criteria.lower()
     assert "401" in acct.test and "500" in acct.test
+    assert "404" in acct.test
     assert "aegis-enum-canary@example.invalid" in acct.test
+    assert "critical" in acct.test.lower() or acct.priority == "critical"
     assert any(h.get("hunt") == "unauth_account_lookup" for h in cmap.ranked_hunt_queue)
 
 
@@ -526,6 +549,55 @@ def test_auth_account_path_seeds_unauth_lookup_methodology():
     assert "do not spray" in acct.test.lower() or "one canary" in acct.test.lower()
     assert acct.hunt == "unauth_account_lookup"
     assert any(h.get("hunt") == "unauth_account_lookup" for h in cmap.ranked_hunt_queue)
+
+
+def test_settings_save_path_seeds_unauth_settings_write_methodology():
+    cmap = build_capability_map_from_crawl(
+        _fake_crawl(
+            target="https://doccentrum-sensia.azurewebsites.net",
+            pages_visited=[
+                "https://doccentrum-sensia.azurewebsites.net/",
+            ],
+            forms=[],
+            api_calls={
+                "doccentrum-sensia.azurewebsites.net": {
+                    "POST /api/Settings/SaveSettings",
+                    "GET /api/Settings/GetSettings",
+                    "POST /api/TaskAdmin/UpdateTask",
+                }
+            },
+        )
+    )
+    methods = methodologies_from_capability_map(cmap.to_dict())
+    ids = {m.id for m in methods}
+    assert "aspnet_unauth_settings_write" in ids
+    card = next(m for m in methods if m.id == "aspnet_unauth_settings_write")
+    assert card.hunt == "unauth_settings_write"
+    assert "CWE-306" in card.cwe_ids
+    assert "CWE-862" in card.cwe_ids
+    assert "401" in card.test and "200" in card.test
+    assert "canary" in card.test.lower()
+    assert "do not kill" in card.kill_criteria.lower() or "GetSettings" in card.kill_criteria
+    assert any(h.get("hunt") == "unauth_settings_write" for h in cmap.ranked_hunt_queue)
+
+
+def test_azure_function_tester_does_not_require_settings_write_card():
+    cmap = build_capability_map_from_crawl(
+        _fake_crawl(
+            target="https://ra-teamplanner-fa.azurewebsites.net",
+            pages_visited=[
+                "https://ra-teamplanner-fa.azurewebsites.net/api/Tester",
+            ],
+            forms=[],
+            api_calls={
+                "ra-teamplanner-fa.azurewebsites.net": {"GET /api/Tester"},
+            },
+        )
+    )
+    methods = methodologies_from_capability_map(cmap.to_dict())
+    ids = {m.id for m in methods}
+    assert "azure_function_anonymous_env" in ids
+    assert "aspnet_unauth_settings_write" not in ids
 
 
 def test_keycloak_hostname_seeds_cors_web_origins_methodology():
@@ -555,3 +627,103 @@ def test_keycloak_hostname_seeds_cors_web_origins_methodology():
     cors = next(m for m in methods if m.id == "cors_acao_credentials")
     assert "credentials" in cors.pass_criteria.lower()
     assert "victim" in cors.kill_criteria.lower() or "session" in cors.kill_criteria.lower()
+
+
+def test_reset_email_path_seeds_email_change_ato_methodology():
+    cmap = build_capability_map_from_crawl(
+        _fake_crawl(
+            target="https://guardianaicoe.azurewebsites.net",
+            pages_visited=["https://guardianaicoe.azurewebsites.net/api/schema/"],
+            forms=[],
+            api_calls={
+                "guardianaicoe.azurewebsites.net": {
+                    "POST /api/auth/users/reset_email/",
+                    "POST /api/auth/users/reset_email_confirm/",
+                    "POST /api/auth/users/set_password/",
+                }
+            },
+        )
+    )
+    methods = methodologies_from_capability_map(cmap.to_dict())
+    ids = {m.id for m in methods}
+    assert "email_change_ato" in ids
+    card = next(m for m in methods if m.id == "email_change_ato")
+    assert card.hunt == "email_change_ato"
+    assert "CWE-306" in card.cwe_ids
+    assert "CWE-640" in card.cwe_ids
+    assert "set_password" in card.test
+    assert "canary" in card.test.lower()
+    assert "do not" in card.test.lower()
+    assert any(h.get("hunt") == "email_change_ato" for h in cmap.ranked_hunt_queue)
+
+
+def test_jwt_api_seeds_auth_header_bypass_methodology():
+    cmap = build_capability_map_from_crawl(
+        _fake_crawl(
+            target="https://ofmdockerapi.azurewebsites.net",
+            pages_visited=["https://ofmdockerapi.azurewebsites.net/"],
+            forms=[],
+            api_calls={
+                "ofmdockerapi.azurewebsites.net": {
+                    "GET /GetMenu",
+                    "POST /GetEntitiesById",
+                    "POST /Notes",
+                }
+            },
+        )
+    )
+    methods = methodologies_from_capability_map(cmap.to_dict())
+    ids = {m.id for m in methods}
+    assert "auth_header_bypass" in ids
+    card = next(m for m in methods if m.id == "auth_header_bypass")
+    assert card.hunt == "auth_header_bypass"
+    assert "CWE-287" in card.cwe_ids
+    assert "aegis-invalid" in card.test
+    assert "400" in card.kill_criteria or "400" in card.test
+    assert any(h.get("hunt") == "auth_header_bypass" for h in cmap.ranked_hunt_queue)
+
+
+def test_socketio_path_seeds_stream_idor_methodology():
+    cmap = build_capability_map_from_crawl(
+        _fake_crawl(
+            target="https://vstream.glensserver.com",
+            pages_visited=["https://vstream.glensserver.com/"],
+            forms=[],
+            api_calls={},
+            websockets={"wss://vstream.glensserver.com/socket.io/?EIO=3&transport=websocket"},
+        )
+    )
+    methods = methodologies_from_capability_map(cmap.to_dict())
+    ids = {m.id for m in methods}
+    assert "socketio_unauth_stream_idor" in ids
+    card = next(m for m in methods if m.id == "socketio_unauth_stream_idor")
+    assert card.hunt == "socketio_idor"
+    assert "CWE-639" in card.cwe_ids
+    assert "url_key" in card.test.lower() or "get_stream" in card.test
+    assert "null" in card.test.lower()
+    assert any(h.get("hunt") == "socketio_idor" for h in cmap.ranked_hunt_queue)
+
+
+def test_ml_train_path_seeds_rbac_methodology():
+    cmap = build_capability_map_from_crawl(
+        _fake_crawl(
+            target="https://webapp-djangotwin.azurewebsites.net",
+            pages_visited=["https://webapp-djangotwin.azurewebsites.net/"],
+            forms=[],
+            api_calls={
+                "webapp-djangotwin.azurewebsites.net": {
+                    "POST /api/v1/train/",
+                    "DELETE /api/v1/celery-task/",
+                    "POST /api/token-pair/",
+                }
+            },
+        )
+    )
+    methods = methodologies_from_capability_map(cmap.to_dict())
+    ids = {m.id for m in methods}
+    assert "ml_pipeline_missing_rbac" in ids
+    card = next(m for m in methods if m.id == "ml_pipeline_missing_rbac")
+    assert card.hunt == "ml_pipeline_rbac"
+    assert "CWE-285" in card.cwe_ids
+    assert "do not delete" in card.test.lower()
+    assert any(h.get("hunt") == "ml_pipeline_rbac" for h in cmap.ranked_hunt_queue)

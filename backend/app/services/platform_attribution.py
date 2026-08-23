@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 # evidence of ownership by itself — only the tenant label can attribute it.
 SHARED_PAAS_SUFFIXES: tuple[str, ...] = (
     "azurewebsites.net",
+    "azurecr.io",
     "azurestaticapps.net",
     "cloudapp.net",
     "cloudapp.azure.com",

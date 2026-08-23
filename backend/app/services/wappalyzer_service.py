@@ -80,19 +80,27 @@ def parse_pattern_with_tags(pattern: str) -> tuple[str, int, Optional[str]]:
     """
     confidence = 100
     version_template = None
-    
-    # Split on \; to find tags
-    parts = pattern.split('\\;')
-    regex_pattern = parts[0]
+    raw = pattern if isinstance(pattern, str) else str(pattern)
+
+    # Delimiter is \; — Python/JSON copies this as \\; , \; , or ;version:
+    normalized = raw.replace("\\\\;", "\x1e").replace("\\;", "\x1e")
+    normalized = re.sub(
+        r";(?=(?:version|confidence):)",
+        "\x1e",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    parts = [p for p in normalized.split("\x1e") if p != ""]
+    regex_pattern = (parts[0] if parts else raw).rstrip("\\")
     
     for part in parts[1:]:
-        if part.startswith('confidence:'):
+        if part.startswith("confidence:"):
             try:
-                confidence = int(part.split(':')[1])
+                confidence = int(part.split(":", 1)[1])
             except (ValueError, IndexError):
                 pass
-        elif part.startswith('version:'):
-            version_template = part.split(':', 1)[1] if ':' in part else None
+        elif part.startswith("version:"):
+            version_template = part.split(":", 1)[1] if ":" in part else None
     
     return regex_pattern, confidence, version_template
 
@@ -136,15 +144,17 @@ def extract_version(match: re.Match, version_template: Optional[str]) -> Optiona
         except IndexError:
             version = version.replace(m.group(0), if_false)
     
-    # Handle simple group references: \\1
+    # Handle simple group references: \\1 and \1
     for i in range(len(match.groups()), 0, -1):
-        placeholder = f'\\\\{i}'
         try:
-            value = match.group(i) or ''
-            version = version.replace(placeholder, value)
+            value = match.group(i) or ""
         except IndexError:
-            version = version.replace(placeholder, '')
+            value = ""
+        version = version.replace(f"\\\\{i}", value)
+        version = version.replace(f"\\{i}", value)
     
+    if version.strip() in ("\\1", "\\\\1") and match.groups():
+        return match.group(1) or None
     return version.strip() if version.strip() else None
 
 
@@ -1531,6 +1541,31 @@ class WappalyzerService:
         import asyncio
         return asyncio.run(self.analyze_url(url, min_confidence=min_confidence, require_html=require_html))
     
+    def analyze_page(
+        self,
+        url: str,
+        html: str = "",
+        headers: Optional[Dict[str, str]] = None,
+        cookies: Optional[Dict[str, str]] = None,
+        min_confidence: int = 0,
+        require_html: bool = False,
+    ) -> list[DetectedTechnology]:
+        """Analyze already-fetched HTML/headers (no extra HTTP round trip)."""
+        html = html or ""
+        headers = {str(k).lower(): str(v) for k, v in (headers or {}).items()}
+        cookies = dict(cookies or {})
+        content_type = (headers.get("content-type") or "").lower()
+        has_html = "text/html" in content_type or bool(html.strip())
+        if require_html and not has_html:
+            return []
+        return self._detect_from_document(
+            url=url,
+            html=html,
+            headers=headers,
+            cookies=cookies,
+            min_confidence=min_confidence,
+        )
+
     def _analyze_response(
         self,
         response: httpx.Response,
@@ -1550,16 +1585,34 @@ class WappalyzerService:
         Returns:
             List of detected technologies
         """
-        detected: Dict[str, Dict[str, Any]] = {}
-        
-        # Parse HTML
-        html = response.text
-        content_type = (response.headers.get("content-type") or "").lower()
-        has_html = "text/html" in content_type or bool(html.strip())
-        if require_html and not has_html:
-            return []
+        html = response.text or ""
         headers = {k.lower(): v for k, v in response.headers.items()}
-        cookies = {c.name: c.value for c in response.cookies.jar}
+        cookies: Dict[str, str] = {}
+        try:
+            cookies = {c.name: c.value for c in response.cookies.jar}
+        except Exception:
+            try:
+                cookies = {k: str(v) for k, v in dict(response.cookies).items()}
+            except Exception:
+                cookies = {}
+        return self.analyze_page(
+            url=url,
+            html=html,
+            headers=headers,
+            cookies=cookies,
+            min_confidence=min_confidence,
+            require_html=require_html,
+        )
+
+    def _detect_from_document(
+        self,
+        url: str,
+        html: str,
+        headers: Dict[str, str],
+        cookies: Dict[str, str],
+        min_confidence: int = 0,
+    ) -> list[DetectedTechnology]:
+        detected: Dict[str, Dict[str, Any]] = {}
         
         # Parse meta tags
         meta_tags = self._extract_meta_tags(html)
@@ -1933,8 +1986,29 @@ class WappalyzerService:
         """
         path = Path(dirpath)
         if not path.is_dir():
-            logger.error(f"Directory not found: {dirpath}")
+            logger.debug("Wappalyzer fingerprint directory not found: %s", dirpath)
             return
         
         for json_file in path.glob("*.json"):
             self.load_fingerprints_from_file(str(json_file))
+
+
+def default_fingerprint_dir() -> Path:
+    env = (os.environ.get("WAPPALYZER_FINGERPRINTS_DIR") or "").strip()
+    if env:
+        return Path(env)
+    return Path(__file__).resolve().parents[2] / "data" / "wappalyzer" / "technologies"
+
+
+_wappalyzer_service: Optional[WappalyzerService] = None
+
+
+def get_wappalyzer_service() -> WappalyzerService:
+    """Singleton with built-in fingerprints plus optional tomnomnom JSON catalog."""
+    global _wappalyzer_service
+    if _wappalyzer_service is None:
+        _wappalyzer_service = WappalyzerService()
+        extra = default_fingerprint_dir()
+        if extra.is_dir():
+            _wappalyzer_service.load_fingerprints_from_directory(str(extra))
+    return _wappalyzer_service

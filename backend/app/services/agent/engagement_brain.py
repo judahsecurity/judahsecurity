@@ -105,6 +105,7 @@ class EngagementBrain:
     candidates: List[Dict[str, Any]] = field(default_factory=list)
     coverage: List[Dict[str, Any]] = field(default_factory=list)
     task_graph: Dict[str, Any] = field(default_factory=dict)
+    pending_risk_assessments: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -123,6 +124,7 @@ class EngagementBrain:
             "candidates": list(self.candidates or []),
             "coverage": list(self.coverage or []),
             "task_graph": dict(self.task_graph or {}),
+            "pending_risk_assessments": list(self.pending_risk_assessments or []),
         }
 
 
@@ -209,6 +211,33 @@ _HUNT_CARDS: Dict[str, Dict[str, str]] = {
         "specialist": "injection",
         "priority": "high",
     },
+    "xss": {
+        "title": "XSS on search and reflect params",
+        "assumption": "User-controlled search/reflect params are rendered without neutralization",
+        "test": "XSS canaries into observed search/reflect params; confirm via browser or HTML context",
+        "pass_criteria": "Script execution or unambiguous HTML context injection with a concrete param",
+        "kill_criteria": "Output encoded/escaped; CSP-only block without a bypass attempt is incomplete",
+        "specialist": "xss",
+        "priority": "high",
+    },
+    "sqli": {
+        "title": "SQLi/SSTI/command injection on mapped params",
+        "assumption": "Query/body params are unsafely interpolated into queries/templates/shell",
+        "test": "Canaries first; sqlmap/commix only on anomalous hits",
+        "pass_criteria": "Error/time/boolean differential or template/command impact with a concrete param",
+        "kill_criteria": "No anomalous responses after disciplined probes",
+        "specialist": "sqli",
+        "priority": "high",
+    },
+    "ssrf": {
+        "title": "SSRF via URL-fetch / webhook / proxy",
+        "assumption": "Server fetches attacker-controlled URLs",
+        "test": "interactsh + in-scope canary vs benign URL; never metadata/localhost if Lictor blocks",
+        "pass_criteria": "OOB hit plus internal body, or confirmed internal content",
+        "kill_criteria": "URL fetch blocked / egress filtered; OOB-only without internal body",
+        "specialist": "ssrf",
+        "priority": "high",
+    },
     "business_logic": {
         "title": "Workflow / business-logic abuse",
         "assumption": "Multi-step or state-changing flows trust client-controlled steps/fields",
@@ -247,9 +276,13 @@ _HUNT_CARDS: Dict[str, Dict[str, str]] = {
     },
     "js_secrets": {
         "title": "Secrets / sensitive data in JS",
-        "assumption": "Bundles leak credentials, keys, or hidden admin APIs",
-        "test": "scan_js_urls_for_secrets + retire.js on first-party bundles from the map",
-        "pass_criteria": "Live or clearly production credential / sensitive key with validation notes",
+        "assumption": "Bundles leak credentials, HMAC signing keys, ICS MQTT/RFID, or hidden admin APIs",
+        "test": "scan_js_urls_for_secrets (incl. client_signing_findings) + retire.js on first-party bundles from the map",
+        "pass_criteria": (
+            "Live or clearly production credential / CWE-321 reconstructed HMAC key / "
+            "ICS MQTT-RFID creds in a public bundle. HMAC/ICS: reconstruction is enough; "
+            "API timeout is not a kill."
+        ),
         "kill_criteria": "Only public config / test stubs",
         "specialist": "js_secrets",
         "priority": "medium",
@@ -349,17 +382,42 @@ _HUNT_CARDS: Dict[str, Dict[str, str]] = {
         "test": (
             "Quote security: {} / 'without authentication'. compare_requests unauth "
             "GET /api/auth/profile/ vs /api/auth/account/?email=aegis-enum-canary@example.invalid. "
-            "PASS on 200 with privilege fields OR 500 vs sibling 401. One canary; do not spray."
+            "PASS on 200 with privilege fields OR 404 existence oracle OR 500 vs sibling 401. "
+            "File Critical. One canary; do not spray. Do not claim a 200 role body unless stdout has it."
         ),
         "pass_criteria": (
-            "Schema unauth + is_staff/role, OR lookup is not 401 while a protected sibling is"
+            "Schema unauth + is_staff/role, OR lookup is not 401 while a protected sibling is "
+            "(200, 404, or 500 all count)"
         ),
         "kill_criteria": (
             "Lookup 401/403 like siblings; schema requires JWT; generic boolean only. "
-            "Do not kill because the database is unavailable"
+            "Do not kill because the database is unavailable or the lookup is 404"
         ),
         "specialist": "api_authz",
         "priority": "critical",
+    },
+    "unauth_settings_write": {
+        "title": "Unauthenticated ASP.NET / API settings write (missing [Authorize])",
+        "assumption": (
+            "SettingsController or mapped Save*/Write* config APIs lack [Authorize] while "
+            "sibling writes on the same app return 401. ASP.NET void success is 200 "
+            "Content-Length: 0. GET 500 is not an auth rejection"
+        ),
+        "test": (
+            "compare_requests: unauth POST a protected write sibling (TaskAdmin/UpdateTask) "
+            "vs unauth POST /api/Settings/SaveSettings with one canary key (aegis-verify-*). "
+            "PASS on sibling 401 AND SaveSettings 200 void. Do not replace the settings "
+            "collection; do not flip production flags. GET GetSettings 500 is not a kill."
+        ),
+        "pass_criteria": (
+            "Unauth settings/config write is accepted (200/204) while a sibling write is 401"
+        ),
+        "kill_criteria": (
+            "SaveSettings 401/403 like siblings. Do not kill because GetSettings is 500 "
+            "or the canary was not read back"
+        ),
+        "specialist": "api_authz",
+        "priority": "high",
     },
     "client_role_param": {
         "title": "Client-supplied userType/admin role",
@@ -398,11 +456,18 @@ _HUNT_CARDS: Dict[str, Dict[str, str]] = {
         "priority": "critical",
     },
     "docker_registry": {
-        "title": "Unauth Docker Registry catalog",
-        "assumption": "/v2/_catalog requires no credentials",
-        "test": "GET /v2/ then GET /v2/_catalog. Count names. Do not push images.",
-        "pass_criteria": "200 catalog with repository names",
-        "kill_criteria": "401 WWW-Authenticate",
+        "title": "Unauth Docker / ACR catalog + bounded image secrets",
+        "assumption": (
+            "Registry /v2/_catalog (ACR: anonymous oauth2 token for registry:catalog:*) "
+            "requires no credentials; images may embed PATs in lockfiles/history"
+        ),
+        "test": (
+            "Unauth oauth2 token then GET /v2/_catalog. Count names. Then tags/list + "
+            "config/history on at most 1–3 first-party repos. Do not pull the catalog; "
+            "do not push; do not authenticate recovered PATs."
+        ),
+        "pass_criteria": "Anonymous catalog with repository names (High); image secrets raise Critical",
+        "kill_criteria": "Anonymous token denied; catalog 401",
         "specialist": "coverage",
         "priority": "high",
     },
@@ -461,6 +526,65 @@ _HUNT_CARDS: Dict[str, Dict[str, str]] = {
         "kill_criteria": "401/403 on APIs; UI hide-only with empty bodies",
         "specialist": "auth_logic",
         "priority": "critical",
+    },
+    "email_change_ato": {
+        "title": "Unauthenticated email-change ATO (djoser reset_email)",
+        "assumption": (
+            "reset_email / reset_email_confirm skip JWT while set_password returns 401. "
+            "Token mailed to the attacker-controlled address is the remaining control"
+        ),
+        "test": (
+            "compare_requests unauth POST set_password (401) vs reset_email with "
+            "aegis-ato-canary@example.invalid (204). Then confirm uid=MQ + garbage token "
+            "for user enum. One canary; do not complete ATO on a real mailbox."
+        ),
+        "pass_criteria": "Unauth email-change accepted while a sibling account-mod is 401",
+        "kill_criteria": (
+            "Both email-change endpoints 401/403 like set_password. "
+            "Do not kill because OPTIONS is 401 or the schema claims jwtAuth"
+        ),
+        "specialist": "auth_logic",
+        "priority": "high",
+    },
+    "auth_header_bypass": {
+        "title": "Auth middleware skipped when Authorization header is absent",
+        "assumption": (
+            "JWT/OIDC middleware only runs when an Authorization header is present "
+            "(ByPassAuthorization). No header reaches the controller"
+        ),
+        "test": (
+            "compare_requests: no Authorization vs Authorization: Bearer aegis-invalid. "
+            "PASS if no-header is 200/400 (controller ran) AND invalid-bearer is 401. "
+            "Do not dump. 400 missing-params is still a bypass."
+        ),
+        "pass_criteria": "Missing header is not 401 while invalid Bearer is 401",
+        "kill_criteria": "Missing header is 401/403 like invalid Bearer",
+        "specialist": "api_authz",
+        "priority": "high",
+    },
+    "socketio_idor": {
+        "title": "Unauth Socket.IO get_stream IDOR (url_key)",
+        "assumption": "Anonymous Socket.IO get_stream returns a stream namespace for arbitrary siteId",
+        "test": (
+            "Engine.IO polling then 42[\"get_stream\", fabricated siteId]. PASS on url_key. "
+            "Do not fetch video. Do not send null crash loops."
+        ),
+        "pass_criteria": "Anonymous get_stream returns url_key for a fabricated siteId",
+        "kill_criteria": "Auth required; no url_key. Do not kill because video was not downloaded",
+        "specialist": "api_authz",
+        "priority": "high",
+    },
+    "ml_pipeline_rbac": {
+        "title": "Self-registered user can train/delete ML models",
+        "assumption": "JWT authenticates but train/celery-task/delete have no role checks",
+        "test": (
+            "Throwaway self-reg if open. Probe POST /api/v1/train/ and DELETE "
+            "/api/v1/celery-task/. Do not delete production models."
+        ),
+        "pass_criteria": "Low-priv/self-reg session can train, delete, or queue ML jobs",
+        "kill_criteria": "403 for non-admin. Do not kill solely because signup is closed",
+        "specialist": "api_authz",
+        "priority": "high",
     },
     "coverage": {
         "title": "Coverage scan for known vulns/misconfig",
@@ -989,6 +1113,54 @@ _CHAIN_CARDS: Dict[str, List[Dict[str, str]]] = {
             "priority": "critical",
             "id_suffix": "emailjs-send-canary",
         },
+        {
+            "title": "CWE-321 client HMAC-SHA256 signing key in public JS",
+            "assumption": (
+                "The public bundle reconstructs an HMAC key from empty-string object "
+                "property names (Object.keys(obj).join('') or for-in concat) and uses it "
+                "to mint HS256 JWTs for every API request"
+            ),
+            "test": (
+                "scan_js_urls_for_secrets on main*.js / main-es2015*.js (16MB cap; do not "
+                "skip large Angular bundles). Read client_signing_findings. Reconstruction "
+                "plus adjacent HmacSHA256 / alg:HS256 is PASS. Stash secret_type=hmac_key. "
+                "Live token accept is optional extra proof; API timeout is NOT a kill. "
+                "Do not require minting a token or connecting to MQTT to file this card."
+            ),
+            "pass_criteria": (
+                "Public unauthenticated bundle reconstructs a signing secret and signs "
+                "with HS256/HmacSHA256 in the same file"
+            ),
+            "kill_criteria": (
+                "No Object.keys/for-in reconstruction; HMAC uses a server-issued session "
+                "secret; placeholders only"
+            ),
+            "specialist": "js_secrets",
+            "priority": "critical",
+            "id_suffix": "hmac-client-signing",
+        },
+        {
+            "title": "MQTT / RFID ICS credentials in the same client bundle",
+            "assumption": (
+                "The same webpack chunk that signs APIs also embeds MQTT broker "
+                "username/password (Object.keys join) and RFID plaintext creds for "
+                "ICS/SCADA topics (hmi/live_tags, digital twin)"
+            ),
+            "test": (
+                "From client_signing_findings, record mqtt username/password reconstruction "
+                "and rfidUserName/rfidPassword. Stash mqtt and rfid credentials. Remediation "
+                "must rotate broker + badge accounts and keep them off the client. "
+                "Do not brute-force or persist an ICS broker session."
+            ),
+            "pass_criteria": (
+                "MQTT and/or RFID credentials recovered from a public JS bundle that "
+                "references a broker or RFID fields"
+            ),
+            "kill_criteria": "Placeholders only; no MQTT/RFID usage in the bundle",
+            "specialist": "js_secrets",
+            "priority": "critical",
+            "id_suffix": "mqtt-ics-creds",
+        },
     ],
     "azure_function_env_dump": [
         {
@@ -1419,18 +1591,66 @@ _CHAIN_CARDS: Dict[str, List[Dict[str, str]]] = {
     ],
     "docker_registry": [
         {
-            "title": "Unauth Docker Registry /v2/_catalog",
-            "assumption": "Registry /v2 and /v2/_catalog require no credentials",
-            "test": (
-                "GET /v2/ then GET /v2/_catalog. Record image name count (not all tags). "
-                "Do not push images. Do not pull secrets from layers unless a single manifest "
-                "clearly embeds a credential."
+            "title": "Unauth Docker / ACR /v2/_catalog",
+            "assumption": (
+                "Registry /v2 and /v2/_catalog require no credentials. On *.azurecr.io "
+                "anonymousPullEnabled issues an oauth2 bearer for registry:catalog:*"
             ),
-            "pass_criteria": "200 on /v2/_catalog with repository names",
-            "kill_criteria": "401 WWW-Authenticate; registry closed",
+            "test": (
+                "Unauth GET /oauth2/token?service=<host>&scope=registry:catalog:* "
+                "(generic registry: GET /v2/ then /v2/_catalog). Record repository count "
+                "(not all tags). Do not push. Do not pull the whole catalog."
+            ),
+            "pass_criteria": "Anonymous token and/or 200 catalog with repository names",
+            "kill_criteria": "Anonymous token denied; 401 WWW-Authenticate; registry closed",
             "specialist": "coverage",
             "priority": "high",
             "id_suffix": "docker-catalog",
+        },
+        {
+            "title": "Bounded image secret scan (lockfile PAT / history / .git)",
+            "assumption": (
+                "Anonymously pullable first-party images bake git+https PATs into "
+                "package-lock.json, ghs_* into .git/config extraheaders, and build-history "
+                "Artifactory/NATS/Keycloak strings"
+            ),
+            "test": (
+                "tags/list + config/history on at most 1–3 first-party repos "
+                "(prefer *-graphql*, *-enrollment*, :latest). Classify ghp_ / git+https / "
+                "ghs_ / Artifactory / NATS. Raise to Critical if a classic PAT or admin/"
+                "workflow/packages scope is in the image. Do not pull every catalog entry. "
+                "Do not authenticate recovered tokens against api.github.com. Do not list "
+                "Actions secrets. Expired ghs_* is a leak pattern. Internal-only hosts: "
+                "rotate, do not hunt from the internet."
+            ),
+            "pass_criteria": (
+                "Named secret class recovered from config/history/lockfile of a sampled image"
+            ),
+            "kill_criteria": (
+                "Sampled configs have no credential patterns. Do NOT kill the catalog card "
+                "because extra tags were not pulled"
+            ),
+            "specialist": "coverage",
+            "priority": "critical",
+            "id_suffix": "acr-image-secrets",
+        },
+        {
+            "title": "Rotate leaked tokens and rebuild without .git/lockfile secrets",
+            "assumption": (
+                "Old tags remain pullable until deleted; new builds will re-leak ghs_* if "
+                ".git is copied into the image"
+            ),
+            "test": (
+                "Remediation-only: disable anonymousPullEnabled; revoke ghp_*; rotate "
+                "NPM/Actions/Artifactory/NATS; rebuild without resolved git URLs or .git; "
+                "delete secret-bearing tags. Retest is deny-only (anonymous token refused). "
+                "Do not re-pull production images to 'confirm' the leak."
+            ),
+            "pass_criteria": "Owner confirms anonymous pull denied and leaked tokens revoked",
+            "kill_criteria": "Not a hunt card — skip if catalog already 401",
+            "specialist": "cloud_audit",
+            "priority": "high",
+            "id_suffix": "acr-rotate-rebuild",
         },
     ],
     "django_debug": [
@@ -1607,11 +1827,13 @@ _CHAIN_CARDS: Dict[str, List[Dict[str, str]]] = {
             "test": (
                 "Quote security: {} / 'without authentication'. compare_requests unauth "
                 "GET /api/auth/profile/ (expect 401) vs /api/auth/account/?email="
-                "aegis-enum-canary@example.invalid (200 with role/is_staff OR 500). "
-                "One canary only. queue_finding_followups(vuln_type='unauth_account_lookup')."
+                "aegis-enum-canary@example.invalid (200 with role/is_staff OR 404 OR 500). "
+                "File Critical. One canary only. Do not claim a 200 role body unless stdout "
+                "has it. queue_finding_followups(vuln_type='unauth_account_lookup')."
             ),
             "pass_criteria": (
-                "Schema unauth + privilege fields, OR lookup is not 401 while siblings are"
+                "Schema unauth + privilege fields, OR lookup is not 401 while siblings are "
+                "(200, 404 existence oracle, or 500)"
             ),
             "kill_criteria": (
                 "Lookup 401/403; JWT required in schema. Do NOT kill because the DB is down"
@@ -1653,20 +1875,220 @@ _CHAIN_CARDS: Dict[str, List[Dict[str, str]]] = {
             "test": (
                 "compare_requests: unauth GET sibling vs GET /api/auth/account/?email="
                 "aegis-enum-canary@example.invalid. PASS on 200 with UserAccount fields OR "
-                "500/OperationalError vs 401 on siblings. One canary email. Do not enumerate "
-                "employee inboxes. Do not dump ICS/OT users."
+                "404 'User does not exist!' OR 500/OperationalError vs 401 on siblings. "
+                "One canary email. Do not enumerate employee inboxes. Do not dump ICS/OT "
+                "users. Do not claim a 200 role body unless stdout has it."
             ),
             "pass_criteria": (
                 "Lookup is not 401/403 while a protected sibling is 401, or 200 discloses "
-                "is_staff/role/valid_through"
+                "is_staff/role/valid_through, or 404 is an existence oracle"
             ),
             "kill_criteria": (
                 "Lookup 401/403 matching siblings. Do NOT kill solely because the database "
-                "is unavailable or the canary email is unregistered"
+                "is unavailable, the canary email is unregistered, or the lookup is 404"
             ),
             "specialist": "api_authz",
             "priority": "critical",
             "id_suffix": "account-401-vs-500",
+        },
+    ],
+    "unauth_settings_write": [
+        {
+            "title": "Sibling controllers also skip [Authorize] (LogQuery/Audit/ReadTasks/OpenDocument)",
+            "assumption": (
+                "Missing [Authorize] is usually class-level and repeats across controllers "
+                "that were never added to the auth convention"
+            ),
+            "test": (
+                "Unauth GET/POST mapped siblings: /api/LogQuery/QueryLog, /api/Audit/WriteAudit, "
+                "/api/ReadTasks/*, /api/OpenDocument/Open, /api/Metadata/ValidMediaTypes. "
+                "Record status. File a separate missing-auth card if they process without 401. "
+                "Empty arrays and Graph-downstream 500s/Forbidden are missing-auth, not the "
+                "High settings write. Do not dump logs or open production documents."
+            ),
+            "pass_criteria": (
+                "One or more sibling controllers reach app code (non-401) without credentials"
+            ),
+            "kill_criteria": (
+                "All siblings 401/403 like TaskAdmin. Do NOT kill because Graph returns "
+                "Forbidden or a GET 500s"
+            ),
+            "specialist": "api_authz",
+            "priority": "high",
+            "id_suffix": "settings-sibling-controllers",
+        },
+        {
+            "title": "SaveSettings is authenticated but not admin-only (BFLA)",
+            "assumption": (
+                "Adding [Authorize] without Roles=Admin still lets any logged-in user "
+                "overwrite org-wide notifications, Planner flags, and PowerBI IDs"
+            ),
+            "test": (
+                "If a low-priv session exists: POST SaveSettings with the same canary key. "
+                "PASS on 200 from a non-admin identity. Do not flip production flags. "
+                "queue_finding_followups stays on unauth_settings_write."
+            ),
+            "pass_criteria": "Authenticated non-admin can SaveSettings (200/204)",
+            "kill_criteria": (
+                "Non-admin is 403; only Admin/role policy can write. Unauth 401 is the "
+                "parent finding, not this card"
+            ),
+            "specialist": "api_authz",
+            "priority": "high",
+            "id_suffix": "settings-bfla-admin",
+        },
+    ],
+    "email_change_ato": [
+        {
+            "title": "Unauth reset_email accepted while set_password 401s",
+            "assumption": (
+                "djoser reset_email is supposed to be IsAuthenticated. Unauth 204 vs "
+                "sibling set_password 401 proves JWT was skipped"
+            ),
+            "test": (
+                "compare_requests unauth POST /api/auth/users/set_password/ vs "
+                "POST /api/auth/users/reset_email/ {email: aegis-ato-canary@example.invalid}. "
+                "PASS on 204/200 vs 401. One canary; do not complete ATO on a real mailbox."
+            ),
+            "pass_criteria": "Unauth reset_email 204/200 AND set_password 401",
+            "kill_criteria": (
+                "reset_email 401/403 like set_password. Do not kill because OPTIONS is 401 "
+                "or OpenAPI declares jwtAuth"
+            ),
+            "specialist": "auth_logic",
+            "priority": "high",
+            "id_suffix": "reset-email-unauth",
+        },
+        {
+            "title": "reset_email_confirm enumerates users by uid (MQ = user 1)",
+            "assumption": (
+                "Confirm validates the token against the target user without a session. "
+                "Existing users return 'Invalid token for given user'; missing ids return "
+                "'Invalid user id'"
+            ),
+            "test": (
+                "Unauth POST reset_email_confirm uid=MQ (base64 of 1) + garbage token, "
+                "then uid=NA== (id 4+). Record the two error classes. Do not spray uids; "
+                "2–4 probes max. Do not submit a real new_email for a production user."
+            ),
+            "pass_criteria": "Distinct errors for existing vs missing uid without a session",
+            "kill_criteria": "Confirm 401/403; identical errors; no user locator",
+            "specialist": "auth_logic",
+            "priority": "high",
+            "id_suffix": "reset-email-uid-enum",
+        },
+        {
+            "title": "Rate-limit / lockout on email-change (bounded)",
+            "assumption": "No throttle on reset_email lets an attacker spray mailbox changes",
+            "test": (
+                "At most 8 unauth reset_email posts to the canary. PASS if none return "
+                "429/lockout. Do not hydra; do not hit employee inboxes."
+            ),
+            "pass_criteria": "No 429/lockout on the bounded probe",
+            "kill_criteria": "429 or lockout within 8 attempts",
+            "specialist": "auth_logic",
+            "priority": "medium",
+            "id_suffix": "reset-email-nolockout",
+        },
+    ],
+    "auth_header_bypass": [
+        {
+            "title": "No Authorization header vs invalid Bearer (middleware skip)",
+            "assumption": (
+                "ByPassAuthorization / conditional OIDC only validates when Authorization "
+                "is present. No header reaches the controller"
+            ),
+            "test": (
+                "compare_requests on 2–4 mapped routes: no Authorization vs "
+                "Authorization: Bearer aegis-invalid. PASS if no-header is 200/400 "
+                "(controller ran) AND invalid-bearer is 401. 400 missing-params is a bypass. "
+                "Do not dump records."
+            ),
+            "pass_criteria": "Missing header is not 401 while invalid Bearer is 401",
+            "kill_criteria": "Missing header is 401/403 like invalid Bearer",
+            "specialist": "api_authz",
+            "priority": "high",
+            "id_suffix": "missing-vs-invalid-bearer",
+        },
+        {
+            "title": "Always-open mutating sibling (no header check at all)",
+            "assumption": (
+                "Some controllers (UpdateNote / Notes) skip auth even when a Bearer is sent"
+            ),
+            "test": (
+                "Repeat the pair on mapped POST/PUT/DELETE (Notes, UpdateNote, DeleteNote). "
+                "File separately if invalid-bearer is also 200/400. Do not mutate production "
+                "rows — empty/canary body only."
+            ),
+            "pass_criteria": "Mutating route processes without 401 even with an invalid Bearer",
+            "kill_criteria": "Invalid Bearer is 401 on mutating routes",
+            "specialist": "api_authz",
+            "priority": "high",
+            "id_suffix": "always-open-write",
+        },
+    ],
+    "socketio_idor": [
+        {
+            "title": "Anonymous get_stream returns url_key for fabricated siteId",
+            "assumption": "Socket.IO get_stream has no server-side authz on siteId/analyzerId",
+            "test": (
+                "Engine.IO polling handshake, then 42[\"get_stream\", fabricated siteId/"
+                "userId/userType]. PASS on url_key / namespace. 1–2 extra siteIds. "
+                "Do not fetch the video stream. Do not send null crash loops."
+            ),
+            "pass_criteria": "url_key returned without a session for a fabricated siteId",
+            "kill_criteria": (
+                "Auth required; no url_key. Do not kill because video was not downloaded"
+            ),
+            "specialist": "api_authz",
+            "priority": "high",
+            "id_suffix": "get-stream-url-key",
+        },
+        {
+            "title": "Socket.IO CORS + hardcoded Admin params in client JS",
+            "assumption": (
+                "ACAO reflection with credentials on /socket.io/ plus hardcoded "
+                "siteId/userType=Admin in the page JS"
+            ),
+            "test": (
+                "Canary Origin on /socket.io/ — queue cors_credentials if ACAO+credentials. "
+                "Quote hardcoded siteId/userType from the page — queue js_secrets. "
+                "Do not dump camera footage."
+            ),
+            "pass_criteria": "CORS credentials on socket.io AND/OR hardcoded Admin stream params",
+            "kill_criteria": "Allowlist rejects canary; no hardcoded admin params",
+            "specialist": "api_authz",
+            "priority": "high",
+            "id_suffix": "socketio-cors-js",
+        },
+    ],
+    "ml_pipeline_rbac": [
+        {
+            "title": "Self-reg / low-priv can POST train or DELETE celery-task",
+            "assumption": "ML pipeline endpoints authenticate JWT but do not check roles",
+            "test": (
+                "Throwaway self-reg if open. POST /api/v1/train/ or DELETE "
+                "/api/v1/celery-task/ as that user. Do not delete production models; "
+                "prefer OPTIONS/authz or one tiny canary train. Do not dump datasets."
+            ),
+            "pass_criteria": "Low-priv session gets 200/202/204 on train/delete/celery",
+            "kill_criteria": "403 for non-admin. Do not kill solely because signup is closed",
+            "specialist": "api_authz",
+            "priority": "high",
+            "id_suffix": "ml-train-delete",
+        },
+        {
+            "title": "Celery / optimize queue injection as any registrant",
+            "assumption": "POST /api/v1/celery-task/ or /api/v1/optimize/ is BFLA after signup",
+            "test": (
+                "One canary task payload as the throwaway user. Do not inject malicious "
+                "pickle/code. Record 202/queued vs 403."
+            ),
+            "pass_criteria": "Non-admin can enqueue Celery/optimize jobs",
+            "kill_criteria": "403 / admin-only",
+            "specialist": "api_authz",
+            "priority": "high",
+            "id_suffix": "ml-celery-queue",
         },
     ],
 }
@@ -1715,6 +2137,12 @@ _FINDING_CLASS_ALIASES = {
     "cwe_312": "js_secrets",
     "cwe-540": "js_secrets",
     "cwe_540": "js_secrets",
+    "cwe-321": "js_secrets",
+    "cwe_321": "js_secrets",
+    "hmac": "js_secrets",
+    "hmac_key": "js_secrets",
+    "client_hmac": "js_secrets",
+    "signing_key": "js_secrets",
     "emailjs": "js_secrets",
     "email_js": "js_secrets",
     "email-js": "js_secrets",
@@ -1760,6 +2188,11 @@ _FINDING_CLASS_ALIASES = {
     "gitlab": "gitlab_unauth",
     "docker_registry": "docker_registry",
     "docker-registry": "docker_registry",
+    "acr": "docker_registry",
+    "azurecr": "docker_registry",
+    "anonymous_pull": "docker_registry",
+    "anonymous-pull": "docker_registry",
+    "anonymouspullenabled": "docker_registry",
     "django_debug": "django_debug",
     "django": "django_debug",
     "openai_proxy_unauth": "openai_proxy_unauth",
@@ -1788,6 +2221,33 @@ _FINDING_CLASS_ALIASES = {
     "cwe_204": "unauth_account_lookup",
     "/api/auth/account": "unauth_account_lookup",
     "api/auth/account": "unauth_account_lookup",
+    "unauth_settings_write": "unauth_settings_write",
+    "unauth-settings-write": "unauth_settings_write",
+    "savesettings": "unauth_settings_write",
+    "save_settings": "unauth_settings_write",
+    "missing_authorize": "unauth_settings_write",
+    "missing-authorize": "unauth_settings_write",
+    "/api/settings": "unauth_settings_write",
+    "api/settings": "unauth_settings_write",
+    "email_change_ato": "email_change_ato",
+    "email-change-ato": "email_change_ato",
+    "reset_email": "email_change_ato",
+    "reset-email": "email_change_ato",
+    "change_email": "email_change_ato",
+    "djoser": "email_change_ato",
+    "auth_header_bypass": "auth_header_bypass",
+    "auth-header-bypass": "auth_header_bypass",
+    "bypassauthorization": "auth_header_bypass",
+    "missing_authorization_header": "auth_header_bypass",
+    "missing-authorization-header": "auth_header_bypass",
+    "socketio_idor": "socketio_idor",
+    "socketio-idor": "socketio_idor",
+    "get_stream": "socketio_idor",
+    "url_key": "socketio_idor",
+    "ml_pipeline_rbac": "ml_pipeline_rbac",
+    "ml-pipeline-rbac": "ml_pipeline_rbac",
+    "celery-task": "ml_pipeline_rbac",
+    "celery_task": "ml_pipeline_rbac",
 }
 
 
@@ -2030,6 +2490,66 @@ def queue_followups_for_finding(
         elif any(
             t in blob
             for t in (
+                "savesettings",
+                "save settings",
+                "/api/settings",
+                "missing [authorize]",
+                "missing authorize",
+                "unauth_settings_write",
+                "unauthenticated settings write",
+            )
+        ):
+            key = "unauth_settings_write"
+        elif any(
+            t in blob
+            for t in (
+                "reset_email",
+                "reset-email",
+                "email change",
+                "change email",
+                "email-change",
+                "djoser",
+            )
+        ):
+            key = "email_change_ato"
+        elif any(
+            t in blob
+            for t in (
+                "missing authorization header",
+                "bypassauthorization",
+                "bypass authorization",
+                "auth middleware",
+                "middleware bypass",
+                "no authorization header",
+                "without an authorization header",
+            )
+        ):
+            key = "auth_header_bypass"
+        elif any(t in blob for t in ("get_stream", "url_key")) or (
+            ("socket.io" in blob or "socketio" in blob)
+            and any(t in blob for t in ("idor", "unauth", "siteid", "camera stream"))
+            and "cors" not in blob
+            and "origin" not in blob
+            and "acao" not in blob
+        ):
+            key = "socketio_idor"
+        elif any(
+            t in blob
+            for t in (
+                "celery-task",
+                "celery_task",
+                "ml model",
+                "ml pipeline",
+                "/api/v1/train",
+                "logixtwin",
+                "missing rbac",
+                "missing role-based",
+            )
+        ):
+            key = "ml_pipeline_rbac"
+        elif any(
+            t in blob
+            for t in (
                 "mass assignment",
                 "mass-assignment",
                 "writable id",
@@ -2056,7 +2576,14 @@ def queue_followups_for_finding(
             key = "auth0_mgmt_token"
         elif "gitlab" in blob:
             key = "gitlab_unauth"
-        elif "docker registry" in blob or "/v2/_catalog" in blob:
+        elif (
+            "docker registry" in blob
+            or "/v2/_catalog" in blob
+            or "azurecr" in blob
+            or "anonymous pull" in blob
+            or "anonymouspullenabled" in blob
+            or ("container registry" in blob and "anonymous" in blob)
+        ):
             key = "docker_registry"
         elif "vendorjson" in blob:
             key = "vendorjson_unauth"
@@ -2120,6 +2647,12 @@ def queue_followups_for_finding(
                 "js bundle",
                 "_next/static",
                 "emailjs",
+                "hmac",
+                "hs256",
+                "cwe-321",
+                "signing key",
+                "rfid",
+                "mqtt",
             )
         ):
             key = "js_secrets"
@@ -2180,7 +2713,9 @@ def queue_followups_for_finding(
             continue
         if suffix.startswith("gitlab-") and "gitlab" not in hay:
             continue
-        if suffix.startswith("docker-") and "docker" not in hay and "registry" not in hay:
+        if suffix.startswith("docker-") and not any(
+            t in hay for t in ("docker", "registry", "azurecr", "anonymous pull", "catalog")
+        ):
             continue
         if suffix.startswith("django-") and "django" not in hay:
             continue
@@ -2191,6 +2726,35 @@ def queue_followups_for_finding(
         ):
             continue
         if suffix.startswith("emailjs-") and "emailjs" not in hay:
+            continue
+        if suffix.startswith("hmac-") and not any(
+            t in hay
+            for t in (
+                "hmac",
+                "hs256",
+                "cwe-321",
+                "cwe_321",
+                "signing key",
+                "object.keys",
+                "waste",
+            )
+        ):
+            continue
+        if suffix.startswith("mqtt-") and not any(
+            t in hay
+            for t in ("mqtt", "rfid", "scada", "ilens", "broker", "ics", "hmi/")
+        ):
+            continue
+        hmac_only = any(
+            t in hay for t in ("hmac", "hs256", "cwe-321", "signing key")
+        ) and "client_secret" not in hay and "emailjs" not in hay
+        if hmac_only and suffix in (
+            "js-hostname-cred-map",
+            "js-cred-live-api",
+            "js-cred-cross-env",
+            "emailjs-keys",
+            "emailjs-send-canary",
+        ):
             continue
         hid = _hyp_id(target or brain.target, key, card.get("id_suffix") or card["title"])
         if hid in existing:
@@ -2499,6 +3063,18 @@ def format_engagement_brain_for_prompt(
             if isinstance(c, dict):
                 lines.append(f"  - [{c.get('severity')}] {c.get('title')} id={c.get('id')}")
 
+    pending_ras = [
+        r for r in (brain.pending_risk_assessments or [])
+        if isinstance(r, dict) and r.get("status") != "complete"
+    ]
+    if pending_ras:
+        lines.append(
+            f"Marcus RA pending: {len(pending_ras)} finding(s). "
+            "Call assess_finding_risk (no live retest) before complete."
+        )
+        for r in pending_ras[:6]:
+            lines.append(f"  - [{r.get('severity')}] {r.get('title')} id={r.get('finding_id')}")
+
     if brain.coverage:
         try:
             cov = coverage_progress(brain)
@@ -2540,6 +3116,8 @@ def format_engagement_brain_for_prompt(
         "(Grafana: /api/admin/settings, /api/datasources, /api/serviceaccounts/search, "
         "existing Prometheus datasource proxy). JS-leaked client_id/client_secret is a "
         "foothold until a live in-scope API returns non-public records (bounded sample). "
+        "CWE-321 client HMAC / Object.keys-join signing keys and MQTT/RFID ICS creds in a "
+        "public bundle are the finding — reconstruction is enough; API timeout is not a kill. "
         "EmailJS keys in JS are a foothold until a browser-context canary send to an "
         "engagement-controlled inbox (never employees). "
         "Anonymous Azure Function env dump: classify leaked secret classes (Cosmos, Storage, "
@@ -2548,8 +3126,15 @@ def format_engagement_brain_for_prompt(
         "even if the database is down; a 'shared across all users' list description is "
         "missing tenant isolation — do not dump ICS/OT hierarchies. "
         "Unauth OpenAPI account lookup (/api/auth/account/?email=): security: {} plus "
-        "is_staff/role, OR 500/app error vs sibling 401, is SUBMIT — a down database is "
-        "not a kill. One canary email only; do not spray employee inboxes. "
+        "is_staff/role, OR 200/404/500 vs sibling 401, is SUBMIT Critical — a down "
+        "database or 404 existence oracle is not a kill. One canary email only; do "
+        "not spray employee inboxes. Do not claim a 200 role body unless stdout has it. "
+        "Unauth ASP.NET settings write: sibling write 401 vs POST /api/Settings/SaveSettings "
+        "200 Content-Length: 0 (void success) is SUBMIT (High). GET GetSettings 500 is "
+        "not a kill. One canary key (aegis-verify-*); do not replace the settings "
+        "collection or flip enableNotifications/createPlannerTasks. Remediation is "
+        "[Authorize] + Admin role / FallbackPolicy. *.azurewebsites.net App Service is "
+        "not an Azure Function env dump. "
         "CORS: ACAO reflecting a canary Origin AND credentials=true is SUBMIT (header proof; "
         "no victim tab required). Keycloak webOrigins=* on token/userinfo/admin is the IdP "
         "variant — do not dump /users; do not ship an HTML exploit page. "
@@ -2628,6 +3213,66 @@ def classify_finding_type(title: str = "", description: str = "", tags: Optional
     if any(
         t in blob
         for t in (
+            "savesettings",
+            "save settings",
+            "/api/settings",
+            "missing [authorize]",
+            "missing authorize",
+            "unauthenticated settings write",
+            "unauth_settings_write",
+        )
+    ):
+        return "unauth_settings_write"
+    if any(
+        t in blob
+        for t in (
+            "reset_email",
+            "reset-email",
+            "email change",
+            "change email",
+            "email-change",
+            "djoser",
+        )
+    ):
+        return "email_change_ato"
+    if any(
+        t in blob
+        for t in (
+            "missing authorization header",
+            "bypassauthorization",
+            "bypass authorization",
+            "auth middleware",
+            "middleware bypass",
+            "no authorization header",
+            "without an authorization header",
+        )
+    ):
+        return "auth_header_bypass"
+    if any(t in blob for t in ("get_stream", "url_key")) or (
+        ("socket.io" in blob or "socketio" in blob)
+        and any(t in blob for t in ("idor", "unauth", "siteid", "camera stream"))
+        and "cors" not in blob
+        and "origin" not in blob
+        and "acao" not in blob
+    ):
+        return "socketio_idor"
+    if any(
+        t in blob
+        for t in (
+            "celery-task",
+            "celery_task",
+            "ml model",
+            "ml pipeline",
+            "/api/v1/train",
+            "logixtwin",
+            "missing rbac",
+            "missing role-based",
+        )
+    ):
+        return "ml_pipeline_rbac"
+    if any(
+        t in blob
+        for t in (
             "mass assignment",
             "mass-assignment",
             "writable id",
@@ -2656,7 +3301,14 @@ def classify_finding_type(title: str = "", description: str = "", tags: Optional
         return "auth0_mgmt_token"
     if "gitlab" in blob:
         return "gitlab_unauth"
-    if "docker registry" in blob or "/v2/_catalog" in blob:
+    if (
+        "docker registry" in blob
+        or "/v2/_catalog" in blob
+        or "azurecr" in blob
+        or "anonymous pull" in blob
+        or "anonymouspullenabled" in blob
+        or ("container registry" in blob and "anonymous" in blob)
+    ):
         return "docker_registry"
     if "django debug" in blob or ("django" in blob and "debug" in blob):
         return "django_debug"
@@ -2731,6 +3383,12 @@ def classify_finding_type(title: str = "", description: str = "", tags: Optional
             "cwe-312",
             "cwe-540",
             "emailjs",
+            "hmac",
+            "hs256",
+            "cwe-321",
+            "signing key",
+            "mqtt",
+            "rfid",
         )
     ):
         return "js_secrets"
@@ -2820,10 +3478,15 @@ def methodology_progress(
         c for c in (brain.candidates or [])
         if (c.get("status") if isinstance(c, dict) else getattr(c, "status", "")) == "pending"
     ]
+    pending_ras = [
+        r for r in (brain.pending_risk_assessments or [])
+        if isinstance(r, dict) and r.get("status") != "complete"
+    ]
     ready_to_complete = (
         ready_to_complete_methods
         and cov.get("ready_to_complete_coverage", True)
         and not pending_candidates
+        and not pending_ras
     )
     blockers = [
         {
@@ -2856,6 +3519,16 @@ def methodology_progress(
                 "status": "pending",
             })
 
+    for r in pending_ras[:6]:
+        blockers.append({
+            "id": r.get("finding_id"),
+            "methodology_id": "risk_assessment",
+            "title": f"pending RA: {r.get('title')}",
+            "specialist": "risk_assessor",
+            "priority": "high",
+            "status": "pending",
+        })
+
     return {
         "seeded": seeded,
         "map_ready": map_ready,
@@ -2871,13 +3544,15 @@ def methodology_progress(
         "ready_to_complete_methods": ready_to_complete_methods,
         "coverage": cov,
         "pending_candidates": len(pending_candidates),
+        "pending_risk_assessments": len(pending_ras),
         "blockers": blockers,
         "checklist": checklist,
         "summary": (
             f"Methodologies: {len(proven)} proven, {len(killed)} killed, "
             f"{len(open_cards)} open ({len(blocking)} high-priority blocking complete). "
             f"Coverage: {cov.get('summary', '')}. "
-            f"Candidates pending verify: {len(pending_candidates)}."
+            f"Candidates pending verify: {len(pending_candidates)}. "
+            f"Findings pending Marcus RA: {len(pending_ras)}."
         ),
     }
 
@@ -2902,6 +3577,12 @@ def format_methodology_progress_for_prompt(progress: Dict[str, Any]) -> str:
         lines.append(
             f"Pending independent_verify: {progress.get('pending_candidates')} candidate(s). "
             "Do not create_finding until confirmed."
+        )
+    if progress.get("pending_risk_assessments"):
+        lines.append(
+            f"Pending Marcus RA: {progress.get('pending_risk_assessments')} finding(s). "
+            "Call assess_finding_risk (or fireteam_dispatch specialists=risk_assessor). "
+            "Do not complete until RA is complete."
         )
     blockers = progress.get("blockers") or []
     if blockers:

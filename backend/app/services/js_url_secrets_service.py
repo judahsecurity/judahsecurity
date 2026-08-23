@@ -4,6 +4,10 @@ Download web-accessible JavaScript (or text) assets and scan for hardcoded secre
 Uses Gitleaks in --no-git mode on a temp directory of fetched files, and merges
 lightweight regex heuristics from KatanaService.extract_secrets_from_js for
 patterns Gitleaks may not label (e.g. some minified bundles).
+
+Also runs a structural scanner for CWE-321 client HMAC keys reconstructed via
+Object.keys(obj).join("") / for-in concatenation (iLens/Angular main-es2015
+bundles are often 5–10MB; a 2MB cap would miss them).
 """
 
 from __future__ import annotations
@@ -19,12 +23,19 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+from app.services.js_client_signing_secrets import (
+    analyze_js_client_secrets,
+    summarize_client_signing_findings,
+)
 from app.services.katana_service import KatanaService
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MAX_BYTES = 2 * 1024 * 1024
-DEFAULT_TIMEOUT = 35.0
+# Angular main-es2015 production bundles commonly exceed 6MB; secrets often sit
+# in APP_CONSTANTS near the end of the file. 2MB dropped those findings.
+DEFAULT_MAX_BYTES = 16 * 1024 * 1024
+DEFAULT_TAIL_BYTES = 8 * 1024 * 1024
+DEFAULT_TIMEOUT = 60.0
 
 
 def _parse_url_list(urls: str) -> List[str]:
@@ -54,19 +65,59 @@ def _safe_filename(url: str) -> str:
 
 def _fetch_url(
     client: httpx.Client, url: str, max_bytes: int, timeout: float
-) -> Tuple[Optional[bytes], Optional[str]]:
+) -> Tuple[Optional[bytes], Optional[str], Dict[str, Any]]:
+    """Fetch a JS asset. Truncated bodies are still returned for scanning.
+
+    If Content-Length exceeds max_bytes, also pull the last DEFAULT_TAIL_BYTES
+    via Range so APP_CONSTANTS at the end of webpack bundles are not dropped.
+    """
+    meta: Dict[str, Any] = {"truncated": False, "range_tail": False, "content_length": None}
     try:
         with client.stream("GET", url, follow_redirects=True, timeout=timeout) as resp:
             if resp.status_code != 200:
-                return None, f"HTTP {resp.status_code}"
+                return None, f"HTTP {resp.status_code}", meta
+            try:
+                cl = int(resp.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                cl = 0
+            if cl:
+                meta["content_length"] = cl
             buf = bytearray()
+            truncated = False
             for chunk in resp.iter_bytes():
                 buf.extend(chunk)
                 if len(buf) > max_bytes:
-                    return None, f"content exceeds max_bytes ({max_bytes})"
-            return bytes(buf), None
+                    truncated = True
+                    del buf[max_bytes:]
+                    break
+            body = bytes(buf)
+            meta["truncated"] = truncated
+        if truncated:
+            tail = _fetch_range_tail(client, url, timeout)
+            if tail:
+                meta["range_tail"] = True
+                # Keep head + tail; overlap is fine — analyzer is idempotent.
+                body = body + b"\n" + tail
+        return body, None, meta
     except Exception as e:
-        return None, str(e)
+        return None, str(e), meta
+
+
+def _fetch_range_tail(
+    client: httpx.Client, url: str, timeout: float, tail_bytes: int = DEFAULT_TAIL_BYTES
+) -> Optional[bytes]:
+    try:
+        resp = client.get(
+            url,
+            headers={"Range": f"bytes=-{int(tail_bytes)}"},
+            follow_redirects=True,
+            timeout=timeout,
+        )
+        if resp.status_code in (200, 206) and resp.content:
+            return bytes(resp.content[: tail_bytes + 1])
+    except Exception as e:
+        logger.debug("Range tail fetch failed for %s: %s", url[:80], e)
+    return None
 
 
 def _run_gitleaks_no_git(source_dir: str, timeout: int = 180) -> Tuple[List[Dict[str, Any]], Optional[str]]:
@@ -139,7 +190,8 @@ def scan_js_urls_for_secrets(
 
     Returns:
         Dict with success, urls_scanned, downloads (per-URL status), gitleaks_findings,
-        regex_hints (by URL), errors.
+        regex_hints (by URL), client_signing_findings (CWE-321 Object.keys HMAC /
+        MQTT / RFID), errors.
     """
     parsed = _parse_url_list(urls)[: max(1, min(max_urls, 100))]
     if not parsed:
@@ -149,19 +201,21 @@ def scan_js_urls_for_secrets(
             "urls_scanned": 0,
             "gitleaks_findings": [],
             "regex_hints": [],
+            "client_signing_findings": [],
             "downloads": [],
         }
 
     ks = KatanaService()
     downloads: List[Dict[str, Any]] = []
     regex_hints: List[Dict[str, Any]] = []
+    client_signing: List[Dict[str, Any]] = []
 
     with tempfile.TemporaryDirectory(prefix="js_secrets_") as tmp:
         files_dir = f"{tmp}/files"
         os.makedirs(files_dir, exist_ok=True)
         with httpx.Client(headers={"User-Agent": "JudahSecurity-JS-Secrets/1.0"}) as client:
             for url in parsed:
-                body, err = _fetch_url(client, url, max_bytes, timeout)
+                body, err, meta = _fetch_url(client, url, max_bytes, timeout)
                 if err or body is None:
                     downloads.append({"url": url, "ok": False, "error": err or "empty"})
                     continue
@@ -177,7 +231,21 @@ def scan_js_urls_for_secrets(
                 hints = _non_empty_regex_hits(ks.extract_secrets_from_js(text))
                 if hints:
                     regex_hints.append({"url": url, "hints": hints})
-                downloads.append({"url": url, "ok": True, "bytes": len(body), "file": fname})
+                signing = analyze_js_client_secrets(text, source_url=url)
+                if signing:
+                    client_signing.extend(signing)
+                downloads.append(
+                    {
+                        "url": url,
+                        "ok": True,
+                        "bytes": len(body),
+                        "file": fname,
+                        "truncated": bool(meta.get("truncated")),
+                        "range_tail": bool(meta.get("range_tail")),
+                        "content_length": meta.get("content_length"),
+                        "client_signing_hits": len(signing),
+                    }
+                )
 
         name_to_url: Dict[str, str] = {}
         for d in downloads:
@@ -191,6 +259,7 @@ def scan_js_urls_for_secrets(
             if base in name_to_url:
                 finding["source_url"] = name_to_url[base]
 
+    signing_summary = summarize_client_signing_findings(client_signing)
     out: Dict[str, Any] = {
         "success": True,
         "urls_requested": len(parsed),
@@ -199,7 +268,16 @@ def scan_js_urls_for_secrets(
         "gitleaks_findings": gl,
         "gitleaks_error": gl_err,
         "regex_hints": regex_hints,
+        "client_signing_findings": client_signing,
+        "client_signing_summary": signing_summary,
     }
+    if signing_summary.get("submit_without_live_api"):
+        out["guidance"] = (
+            "CWE-321/CWE-798 client secrets reconstructed from a public bundle. "
+            "submit_finding_candidate now. Live API/MQTT accept is optional extra "
+            "proof; timeout or unreachable backend is NOT a kill. "
+            "queue_finding_followups(vuln_type='js_secrets')."
+        )
     if gl_err and not gl:
         out["note"] = gl_err
     return out

@@ -77,6 +77,23 @@ def main() -> int:
         for f in findings:
             fh.write(json.dumps(f) + "\n")
 
+    traces_dir = os.environ.get("AEGIS_TRACES_DIR")
+    if traces_dir:
+        os.makedirs(traces_dir, exist_ok=True)
+        with open(os.path.join(traces_dir, "trace_stub.json"), "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "summary": {
+                        "session_id": "stub",
+                        "model": "claude-sonnet-4-6",
+                        "tokens": {"input": 100000, "output": 5000, "total": 105000},
+                        "estimated_cost_usd": 0.375,
+                    },
+                    "spans": [],
+                },
+                fh,
+            )
+
     print(f"stub scan complete for {args.target}: {len(findings)} findings")
     return 0
 

@@ -188,7 +188,12 @@ def crawl_urls(target_url: str, depth: int = 5, timeout: int = 600) -> str:
 
 @security_tool(category="recon", risk="safe")
 def scan_js_urls_for_secrets(urls: str, max_urls: int = 30) -> str:
-    """Download remote JavaScript or text URLs and scan for hardcoded secrets (Gitleaks + regex).
+    """Download remote JavaScript and scan for hardcoded secrets (Gitleaks + regex + CWE-321 client HMAC).
+
+    Detects Object.keys(obj).join("") HMAC-SHA256 signing keys, MQTT/RFID ICS creds,
+    client_id/client_secret, and EmailJS keys. Large Angular main-es2015 bundles (5–10MB)
+    are in scope. If client_signing_summary.submit_without_live_api is true, public
+    reconstruction is the finding — API timeout is not a kill.
 
     Use after crawl_urls or discover_historical_urls: pass discovered .js URLs (newline- or comma-separated).
 
@@ -1051,6 +1056,25 @@ def send_http_request(
     return json.dumps(result, default=str)
 
 
+@security_tool(category="exploit", risk="medium")
+def run_custom_probe(source: str, allowed_hosts: str = "", timeout_sec: float = 20.0) -> str:
+    """Run a short sandboxed Python HTTP probe (json/re/httpx only). Not a shell.
+
+    Use when wrappers miss a one-off request. Source is AST-gated and DNS is
+    limited to allowed_hosts. No os, subprocess, eval, or files.
+
+    Args:
+        source: Python that prints results to stdout
+        allowed_hosts: Comma-separated in-scope hosts (required)
+        timeout_sec: Max seconds (capped at 45)
+    """
+    from agent.custom_probe import run_custom_probe as _run
+
+    hosts = [h.strip() for h in (allowed_hosts or "").split(",") if h.strip()]
+    result = _run(source, allowed_hosts=hosts, timeout_sec=timeout_sec)
+    return json.dumps(result, default=str)
+
+
 @security_tool(category="vuln_analysis", risk="low")
 def test_cors_policy(target_url: str, timeout: int = 60) -> str:
     """Test CORS policy by probing with attacker-controlled Origin headers.
@@ -1376,6 +1400,7 @@ EXPLOIT_TOOLS = [
     "janus_dast_full",
     # Manual probing tools
     "send_http_request", "test_cors_policy", "test_race_condition", "test_file_upload",
+    "run_custom_probe",
 ]
 
 REPORT_TOOLS = [

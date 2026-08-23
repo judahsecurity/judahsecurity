@@ -50,8 +50,10 @@ from app.api.routes import detection_feedback as detection_feedback_router
 from app.api.routes import detection_suppression as detection_suppression_router
 from app.api.routes import recon as recon_router
 from app.api.routes import workflows as workflows_router
+from app.api.routes import attacks as attacks_router
 from app.models.agent_palace import AgentPalaceDrawer  # noqa: F401 — palace memory table
 from app.models.recon_job import ReconJob, ReconWorkerHeartbeat  # noqa: F401 — interceptor workers
+from app.models.sitemap_entry import SitemapEntry  # noqa: F401 — Praetorian-style app sitemap
 from app.models.workflow import (  # noqa: F401 — ensure workflow tables are created
     Workflow,
     WorkflowVersion,
@@ -188,6 +190,7 @@ app.include_router(llm_red_team_router.router, prefix=settings.API_PREFIX)
 app.include_router(detection_feedback_router.router, prefix=settings.API_PREFIX)
 app.include_router(detection_suppression_router.router, prefix=settings.API_PREFIX)
 app.include_router(workflows_router.router, prefix=settings.API_PREFIX)
+app.include_router(attacks_router.router, prefix=settings.API_PREFIX)
 
 
 # ── Scoring pipeline lifecycle ────────────────────────────────────────────────
@@ -635,6 +638,18 @@ def apply_oracle_migrations():
 
         # ── Forced password reset for admin-provisioned accounts ──────────────
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT FALSE",
+
+        "ALTER TABLE agent_conversations ADD COLUMN IF NOT EXISTS engagement_replay JSONB DEFAULT '[]'",
+        "ALTER TABLE agent_conversations ADD COLUMN IF NOT EXISTS token_usage JSONB",
+        "ALTER TABLE agent_conversations ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION",
+        "ALTER TABLE pentest_sessions ADD COLUMN IF NOT EXISTS engagement_replay JSONB DEFAULT '[]'",
+        "ALTER TABLE pentest_sessions ADD COLUMN IF NOT EXISTS token_usage JSONB",
+        "ALTER TABLE pentest_sessions ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION",
+
+        # Vespasian / OpenAPI inventory — create_all will not add these to an
+        # existing assets table, so any full Asset load 500s without them.
+        "ALTER TABLE assets ADD COLUMN IF NOT EXISTS rest_endpoints JSON DEFAULT '[]'::json",
+        "ALTER TABLE assets ADD COLUMN IF NOT EXISTS api_specs JSON DEFAULT '[]'::json",
     ]
 
     try:

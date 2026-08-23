@@ -70,6 +70,7 @@ import { RemediationPanel } from '@/components/remediation/RemediationPanel';
 import { DemonstratedChain, type AgentDetection } from '@/components/findings/DemonstratedChain';
 import { DetectionPanel, hasScannerDetection, type ScannerDetection } from '@/components/findings/DetectionPanel';
 import { FindingWriteup } from '@/components/findings/FindingWriteup';
+import { RiskAssessmentPanel, raStatusLabel, type RiskAssessment } from '@/components/findings/RiskAssessmentPanel';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
   Select,
@@ -162,6 +163,7 @@ interface Finding {
   steps_to_reproduce?: string;
   affected_component?: string;
   agent_detection?: AgentDetection;
+  risk_assessment?: RiskAssessment;
   detection?: ScannerDetection;
   remediation_deadline?: string;
   detected_by?: string;
@@ -1165,6 +1167,7 @@ export default function FindingsPage() {
     // ── Finding validation (native detector / steps replay) ─────────────────────
   const [validationResult, setValidationResult] = useState<any>(null);
   const [validating, setValidating] = useState(false);
+  const [askingMarcus, setAskingMarcus] = useState(false);
   const [detectionIssueText, setDetectionIssueText] = useState('');
   const [loggingIssue, setLoggingIssue] = useState(false);
   const [detectionFeedback, setDetectionFeedback] = useState<any>(null);
@@ -1259,6 +1262,51 @@ export default function FindingsPage() {
       });
     } finally {
       setValidating(false);
+    }
+  };
+
+  const pollMarcus = async (findingId: number) => {
+    for (let i = 0; i < 90; i++) {
+      await new Promise((r) => setTimeout(r, 4000));
+      if (openFindingIdRef.current !== findingId) return;
+      let fresh: Finding;
+      try {
+        fresh = await api.getVulnerability(findingId);
+      } catch {
+        continue;
+      }
+      if (openFindingIdRef.current !== findingId) return;
+      setSelectedFinding(fresh);
+      setFindings((prev) => prev.map((f) => (f.id === findingId ? { ...f, ...fresh } : f)));
+      const status = (fresh.risk_assessment?.status || '').toLowerCase();
+      if (status === 'complete' || status === 'failed') return;
+    }
+  };
+
+  const handleAskMarcus = async () => {
+    if (!selectedFinding) return;
+    const findingId = selectedFinding.id;
+    setAskingMarcus(true);
+    try {
+      await api.askMarcus(findingId);
+      setSelectedFinding((prev) =>
+        prev && prev.id === findingId
+          ? { ...prev, risk_assessment: { ...(prev.risk_assessment || {}), status: 'queued' } }
+          : prev
+      );
+      toast({
+        title: 'Marcus queued',
+        description: 'Scoring the demonstrated packet. No live retest.',
+      });
+      await pollMarcus(findingId);
+    } catch (err: unknown) {
+      toast({
+        title: 'Could not start Marcus',
+        description: getApiErrorMessage(err),
+        variant: 'destructive',
+      });
+    } finally {
+      setAskingMarcus(false);
     }
   };
 
@@ -2194,6 +2242,11 @@ export default function FindingsPage() {
                     CVSS: {selectedFinding.cvss_score.toFixed(1)}
                   </Badge>
                 )}
+                {raStatusLabel(selectedFinding?.risk_assessment) && (
+                  <Badge variant="outline">
+                    {raStatusLabel(selectedFinding?.risk_assessment)}
+                  </Badge>
+                )}
               </div>
               <div className="flex items-center justify-between mt-2 gap-2 pr-8">
                 <SheetTitle className="text-xl text-left">
@@ -2625,6 +2678,12 @@ export default function FindingsPage() {
                     : selectedFinding?.references || selectedFinding?.reference
                 }
                 notDemonstrated={selectedFinding?.agent_detection?.not_demonstrated}
+              />
+
+              <RiskAssessmentPanel
+                assessment={selectedFinding?.risk_assessment}
+                asking={askingMarcus}
+                onAskMarcus={handleAskMarcus}
               />
 
               {hasScannerDetection(selectedFinding?.detection) && (

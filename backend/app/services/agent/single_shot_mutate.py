@@ -20,6 +20,18 @@ _PATH_SEEDS = [
     "/export", "/upload", "/console", "/manager", "/phpinfo.php", "/server-status",
     "/.env", "/config.json", "/api/actions/execute", "/api/v1/actions/execute",
 ]
+_ASPNET_API_PATHS = [
+    "/api/Settings/SaveSettings",
+    "/api/Settings/GetSettings",
+    "/api/TaskAdmin/UpdateTask",
+    "/api/TaskAdmin/GetAllUserTasks",
+    "/api/LogQuery/QueryLog",
+    "/api/Audit/WriteAudit",
+    "/api/ReadTasks/GetTaskCardHtml",
+    "/api/OpenDocument/Open",
+    "/api/Metadata/ValidMediaTypes",
+    "/api/DocumentCentre",
+]
 _PARAM_SEEDS = [
     "url", "uri", "redirect", "next", "callback", "returnUrl", "dest", "target",
     "webhook", "proxy", "fetch", "requestUrl", "datasource", "query", "q",
@@ -92,6 +104,8 @@ def _seeds(kind: str, observed: str) -> List[str]:
             out.extend([f"/{first}", f"/api/{first}", f"/{first}-api"])
         if "404" in blob or "not found" in blob:
             out.extend(["/app", "/dashboard", "/static", "/assets", "/_next"])
+        if re.search(r"azurewebsites|asp\.net|aspnet|iis|/api/settings|doccentrum|docutrack", blob):
+            out = list(_ASPNET_API_PATHS) + out
         return out
     if kind == "params":
         out = list(_PARAM_SEEDS)

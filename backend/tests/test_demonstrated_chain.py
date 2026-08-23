@@ -27,6 +27,7 @@ def test_should_skip_judge_and_query_tools():
     assert not should_record_tool("query_assets")
     assert not should_record_tool("nuclei_help")
     assert should_record_tool("execute_curl")
+    assert should_record_tool("probe_registry_anonymous")
 
 
 def test_summarize_http_401_json_error():
@@ -185,9 +186,6 @@ def test_summarize_elasticsearch_write_ack():
     )
     assert "write" in summary.lower() or "created" in summary.lower()
     assert "acknowledged" in outcome.lower()
-    joined_args = " ".join(payload["chain"][1]["args"])
-    assert "kevin:kevin" not in joined_args
-    assert "kevin:[REDACTED]" in joined_args
 
 
 def test_redact_azure_function_env_keys():

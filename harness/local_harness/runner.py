@@ -46,6 +46,8 @@ class ScanResult:
     log_path: Path
     findings: List[NormalizedFinding] = field(default_factory=list)
     error: Optional[str] = None
+    cost_usd: Optional[float] = None
+    trace_summary: Optional[dict] = None
 
     @property
     def finding_count(self) -> int:
@@ -107,6 +109,7 @@ def run_scan(
 
     env = dict(os.environ)
     env["AEGIS_FINDINGS_SINK"] = str(findings_path)
+    env["AEGIS_TRACES_DIR"] = str(out_dir)
 
     cmd = build_command(config, target, scope)
 
@@ -141,6 +144,13 @@ def run_scan(
 
     findings = load_findings(findings_path)
 
+    from .cost import load_trace_summary
+
+    trace_summary = load_trace_summary(out_dir)
+    cost_usd = None
+    if trace_summary:
+        cost_usd = float(trace_summary.get("estimated_cost_usd") or 0)
+
     return ScanResult(
         target=target,
         slug=slug,
@@ -152,4 +162,6 @@ def run_scan(
         log_path=log_path,
         findings=findings,
         error=error,
+        cost_usd=cost_usd,
+        trace_summary=trace_summary,
     )

@@ -5,6 +5,7 @@
   "steps": [
     "From api_samples, try verb swaps (GET↔PUT/DELETE) on sensitive resources.",
     "compare_requests across anon/A/B roles for the same endpoint.",
+    "Missing [Authorize] writes: compare_requests unauth POST a 401 sibling vs SaveSettings/Save*/Write* with one canary json body and use_auth_session=false. 200 Content-Length: 0 is ASP.NET void success.",
     "Mass-assignment: add role/is_admin/owner fields when serializers are exposed.",
     "On PASS: unauthorized verb/role succeeds with state or data proof."
   ],

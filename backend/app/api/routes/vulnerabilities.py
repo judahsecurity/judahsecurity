@@ -163,6 +163,9 @@ def build_vuln_response(
         agent_detection = vuln.metadata_.get("agent_detection")
         if agent_detection:
             d["agent_detection"] = agent_detection
+        risk_assessment = vuln.metadata_.get("risk_assessment")
+        if risk_assessment:
+            d["risk_assessment"] = risk_assessment
         nuclei_matched = vuln.metadata_.get("nuclei_matched_at")
         if nuclei_matched:
             d["matched_at"] = nuclei_matched
@@ -1710,6 +1713,99 @@ def get_finding_validation(
     if not validation:
         return None
     return _validation_to_dict(validation)
+
+
+class RiskAssessmentWrite(BaseModel):
+    """Analyst or agent RA payload. Validated by Marcus quality gate."""
+    assessment: Optional[dict] = None
+    force: bool = False
+
+
+@router.post("/{vuln_id}/risk-assessment")
+def write_finding_risk_assessment(
+    vuln_id: int,
+    payload: RiskAssessmentWrite,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Persist a Marcus-quality risk assessment on a finding (no live retest)."""
+    from app.services.agent.risk_assessment import (
+        attach_to_vulnerability,
+        complete_payload,
+        format_gaps,
+        validate_risk_assessment,
+    )
+
+    vuln = db.query(Vulnerability).filter(Vulnerability.id == vuln_id).first()
+    if not vuln:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vulnerability not found")
+    if not check_org_access(db, current_user, vuln.asset_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    parsed, gaps = validate_risk_assessment(
+        payload.assessment or {},
+        proposed_severity=getattr(getattr(vuln, "severity", None), "value", None),
+    )
+    if gaps:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=format_gaps(gaps))
+    ra = attach_to_vulnerability(vuln, complete_payload(parsed, finding_id=vuln.id))
+    db.commit()
+    return ra
+
+
+@router.post("/{vuln_id}/risk-assessment/ask")
+async def ask_marcus(
+    vuln_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Queue Marcus RA from the published packet. Does not retest the live host."""
+    from app.services.agent.risk_assessment import attach_to_vulnerability, pending_payload
+    from app.core.config import settings
+    from app.services.agent.model_router import ollama_fallback_available
+
+    if not (
+        settings.OPENAI_API_KEY
+        or settings.ANTHROPIC_API_KEY
+        or getattr(settings, "DEEPSEEK_API_KEY", None)
+        or getattr(settings, "MOONSHOT_API_KEY", None)
+        or getattr(settings, "GROQ_API_KEY", None)
+        or ollama_fallback_available()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI agent not available — configure a cloud LLM API key or enable Ollama.",
+        )
+    vuln = db.query(Vulnerability).filter(Vulnerability.id == vuln_id).first()
+    if not vuln:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vulnerability not found")
+    if not check_org_access(db, current_user, vuln.asset_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    asset = db.query(Asset).filter(Asset.id == vuln.asset_id).first()
+    organization_id = asset.organization_id if asset else current_user.organization_id
+    existing = (vuln.metadata_ or {}).get("risk_assessment") or {}
+    if existing.get("status") in ("queued", "in_progress"):
+        return {"status": existing.get("status"), "finding_id": vuln.id, "queued": True}
+    ra = dict(existing) if existing else pending_payload(
+        title=vuln.title, severity=getattr(vuln.severity, "value", str(vuln.severity)), finding_id=vuln.id
+    )
+    ra["status"] = "queued"
+    attach_to_vulnerability(vuln, ra)
+    db.commit()
+
+    async def _run():
+        from app.services.agent.marcus_service import run_marcus_for_finding
+        try:
+            await run_marcus_for_finding(
+                finding_id=vuln_id,
+                user_id=current_user.id,
+                organization_id=organization_id,
+            )
+        except Exception:
+            logger.exception("Ask Marcus failed for finding %s", vuln_id)
+
+    background_tasks.add_task(_run)
+    return {"status": "queued", "finding_id": vuln.id}
 
 
 @router.post("/{vuln_id}/detection-feedback")

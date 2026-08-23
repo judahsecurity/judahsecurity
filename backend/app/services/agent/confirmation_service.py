@@ -94,6 +94,7 @@ SAFE_RECON_TOOLS = {
     "execute_wappalyzer",
     "execute_whatweb",
     "execute_curl",
+    "probe_registry_anonymous",
     "execute_katana",
     "execute_gau",
     "execute_waybackurls",
@@ -122,6 +123,7 @@ SAFE_RECON_TOOLS = {
     "list_captured_requests",
     "fetch_lazy_chunks",
     "extract_js_endpoints",
+    "scan_js_sinks",
     "fingerprint_api",
 }
 

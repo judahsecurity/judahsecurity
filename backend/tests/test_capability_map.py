@@ -81,9 +81,19 @@ def test_select_specialists_auto_from_map():
     assert "app_mapper" in names
     assert "auth_logic" in names or "saml_sso" in names
     assert "graphql_api" in names
-    assert "content_api" in names
+    assert "xss" in names or "injection" in names
     assert "independent_verifier" not in names
+    assert "risk_assessor" not in names
     assert len(names) <= 8
+
+
+def test_graphql_survives_long_human_start_here():
+    """Forced GraphQL slot is not dropped when start_here already fills the cap."""
+    cmap = build_capability_map_from_crawl(_fake_crawl())
+    names = select_specialists_for_map(cmap, max_specialists=6)
+    assert "app_mapper" in names
+    assert "graphql_api" in names
+    assert names.index("graphql_api") < names.index("finding_judge") if "finding_judge" in names else True
 
 
 def test_ai_agent_surface_hunts_agent_tools():
@@ -170,3 +180,60 @@ def test_openapi_schema_surfaces_unauth_account_lookup_hunt():
     names = select_specialists_for_map(cmap, max_specialists=8)
     assert "api_authz" in names
     assert cmap.ready_for_attack is True or "api_authz" in names
+
+
+def test_settings_save_surfaces_unauth_settings_write_hunt():
+    cmap = build_capability_map_from_crawl(
+        _fake_crawl(
+            target="https://doccentrum-sensia.azurewebsites.net",
+            pages_visited=["https://doccentrum-sensia.azurewebsites.net/"],
+            forms=[],
+            api_calls={
+                "doccentrum-sensia.azurewebsites.net": {
+                    "POST /api/Settings/SaveSettings",
+                    "POST /api/TaskAdmin/UpdateTask",
+                }
+            },
+        )
+    )
+    hunts = [h["hunt"] for h in cmap.ranked_hunt_queue]
+    assert "unauth_settings_write" in hunts
+    why = " ".join(
+        h.get("why", "") for h in cmap.ranked_hunt_queue if h["hunt"] == "unauth_settings_write"
+    )
+    assert "401" in why or "void" in why.lower() or "SaveSettings" in why
+    names = select_specialists_for_map(cmap, max_specialists=8)
+    assert "api_authz" in names
+
+
+def test_socketio_and_reset_email_surface_dedicated_hunts():
+    cmap = build_capability_map_from_crawl(
+        _fake_crawl(
+            target="https://vstream.glensserver.com",
+            pages_visited=["https://vstream.glensserver.com/socket.io/"],
+            forms=[],
+            api_calls={
+                "vstream.glensserver.com": {"GET /socket.io/?EIO=3&transport=polling"}
+            },
+            websockets={"wss://vstream.glensserver.com/socket.io/"},
+        )
+    )
+    hunts = [h["hunt"] for h in cmap.ranked_hunt_queue]
+    assert "socketio_idor" in hunts
+    names = select_specialists_for_map(cmap, max_specialists=8)
+    assert "api_authz" in names
+
+    cmap2 = build_capability_map_from_crawl(
+        _fake_crawl(
+            target="https://guardianaicoe.azurewebsites.net",
+            pages_visited=["https://guardianaicoe.azurewebsites.net/api/schema/"],
+            forms=[],
+            api_calls={
+                "guardianaicoe.azurewebsites.net": {
+                    "POST /api/auth/users/reset_email/",
+                }
+            },
+        )
+    )
+    hunts2 = [h["hunt"] for h in cmap2.ranked_hunt_queue]
+    assert "email_change_ato" in hunts2

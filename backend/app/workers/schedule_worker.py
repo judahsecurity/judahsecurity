@@ -280,6 +280,10 @@ class ScheduleWorker:
         targets, ipv6_skipped = filter_ipv6_targets(targets, schedule.scan_type)
         if ipv6_skipped > 0:
             logger.info(f"Filtered out {ipv6_skipped} IPv6 targets for {schedule.scan_type} scan (IPv6 not supported)")
+
+        if schedule.scan_type == "tester_process":
+            await self._run_tester_process_schedule(db, schedule, targets)
+            return
         
         if not targets:
             # Check what's missing to give a better error message
@@ -462,7 +466,49 @@ class ScheduleWorker:
             logger.info(f"Created scan {scan.id} for schedule {schedule.name}, {len(targets)} targets (sent to SQS)")
         else:
             logger.info(f"Created scan {scan.id} for schedule {schedule.name}, {len(targets)} targets (database polling)")
-    
+
+    async def _run_tester_process_schedule(self, db: Session, schedule: ScanSchedule, targets: list):
+        """Observe→assess→fireteam hunt, not a Nuclei Scan row."""
+        from app.services.agent.scheduled_hunt import (
+            notify_emails,
+            run_tester_process_targets,
+            web_targets,
+        )
+
+        cfg = schedule.config or {}
+        limit = max(1, int(cfg.get("max_targets") or 3))
+        urls = web_targets(targets, limit=limit)
+        if not urls:
+            schedule.last_error = "No web URLs for tester_process (need http(s) hosts)"
+            schedule.next_run_at = schedule.calculate_next_run()
+            schedule.consecutive_failures = (schedule.consecutive_failures or 0) + 1
+            db.commit()
+            return
+        price = float(cfg.get("price_limit_usd") or 8.0)
+        user_id = schedule.created_by or "scheduler"
+        result = await run_tester_process_targets(
+            organization_id=schedule.organization_id,
+            user_id=str(user_id),
+            targets=urls,
+            price_limit_usd=price,
+            schedule_name=schedule.name,
+        )
+        digest = result.get("digest") or ""
+        failed = any(r.get("error") for r in (result.get("results") or []))
+        schedule.last_run_at = datetime.now(timezone.utc)
+        schedule.run_count = (schedule.run_count or 0) + 1
+        schedule.next_run_at = schedule.calculate_next_run()
+        schedule.last_error = None if not failed else digest[:2000]
+        schedule.consecutive_failures = (schedule.consecutive_failures or 0) + 1 if failed else 0
+        db.commit()
+        if schedule.notify_on_completion or schedule.notify_on_findings:
+            notify_emails(
+                schedule.notification_emails or [],
+                f"[Judah] tester-process: {schedule.name}",
+                digest,
+            )
+        logger.info("tester_process schedule %s finished: %s", schedule.id, digest[:300])
+
     async def run_daily_commoncrawl_refresh(self):
         """
         Queue a CommonCrawl subdomain enumeration scan for every active organization

@@ -143,6 +143,8 @@ class AssetResponse(AssetBase):
     endpoints: List[str] = []
     parameters: List[str] = []
     js_files: List[str] = []
+    rest_endpoints: List[dict] = []
+    api_specs: List[dict] = []
     
     # Technologies
     technologies: List[TechnologySummary] = []

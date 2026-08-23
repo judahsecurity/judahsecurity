@@ -73,7 +73,8 @@ PLAYBOOKS: List[Dict[str, Any]] = [
         "objective": (
             "Run a tester-process engagement (not a scanner spray).\n\n"
             "CONTROL LOOP (mandatory methodology):\n"
-            "1) Observe — execute_deep_crawl on the primary web target.\n"
+            "1) Observe — execute_deep_crawl on the primary web target. Read the page "
+            "assessment (app kind + how a human would start) before any hunter.\n"
             "2) Enrich — execute_katana/gau then ingest_urls_into_map so passive URLs "
             "update methodologies.\n"
             "3) Aim — sync_engagement_brain bootstraps a threat model + methodology cards "
@@ -367,19 +368,38 @@ PLAYBOOKS: List[Dict[str, Any]] = [
             "security: {} — especially GET /api/auth/account/?email=. Quote UserAccount "
             "fields (is_staff, role, valid_through). compare_requests unauth GET a protected "
             "sibling (/api/auth/profile/, /api/auth/users/me/) vs the lookup with "
-            "email=aegis-enum-canary@example.invalid. HTTP 500 (DB down) vs sibling 401 is "
-            "SUBMIT — JWT was skipped. One canary only; do not spray employee inboxes. "
+            "email=aegis-enum-canary@example.invalid. HTTP 200 with is_staff/role, HTTP 404 "
+            "('User does not exist!'), or HTTP 500 (DB down) vs sibling 401 is SUBMIT "
+            "Critical — JWT was skipped. One canary only; do not spray employee inboxes. "
+            "Do not claim a 200 role body unless stdout has it. "
             "queue_finding_followups(vuln_type='unauth_account_lookup').\n"
+            "5b) ASP.NET / Settings write: compare_requests unauth POST a protected write "
+            "sibling (expect 401) vs POST /api/Settings/SaveSettings with one canary key "
+            "(aegis-verify-*) and **use_auth_session=false**. HTTP 200 Content-Length: 0 is "
+            "void success — SUBMIT High. GET GetSettings 500 is not a kill. Do not replace "
+            "the settings collection; do not flip enableNotifications/createPlannerTasks. "
+            "Probe LogQuery/Audit/ReadTasks/OpenDocument without 401 as a sibling card. "
+            "queue_finding_followups(vuln_type='unauth_settings_write').\n"
             "5) If an OpenAPI/Swagger spec exists and active testing is approved, request "
             "the exploitation phase and use execute_astf (OWASP API Top 10), execute_schemathesis, or targeted curl requests "
-            "to validate documented endpoints. Avoid POST/PUT/PATCH/DELETE unless explicitly "
-            "authorized. Do not treat schemathesis 500s as the account-lookup proof — "
+            "to validate documented endpoints. Avoid destructive POST/PUT/PATCH/DELETE except "
+            "the bounded canary writes this playbook names (SaveSettings one aegis-verify-* "
+            "key with use_auth_session=false; do not replace production settings). "
+            "Do not treat schemathesis 500s as the account-lookup proof — "
             "the 401-vs-500 differential on the lookup vs siblings is the proof.\n\n"
             "**Phase 3 - Evidence and reporting**\n"
             "6) A valid finding needs proof of meaningful impact: missing 401/403, sensitive "
             "data, PII, secrets, bulk records, tenant data, or privileged operations exposed. "
             "Schema-documented unauth account lookup returning is_staff/role is impact even "
             "when the database is down.\n"
+            "6b) Unauth SaveSettings 200 void vs sibling 401 is High impact even when "
+            "GetSettings is 500. One canary key; do not overwrite production flags.\n"
+            "6c) Unauth reset_email 204 vs set_password 401 is an ATO chain. One canary; "
+            "do not complete takeover on a real mailbox.\n"
+            "6d) No-Authorization 200/400 vs invalid Bearer 401 is middleware skip "
+            "(ByPassAuthorization). 400 missing-params still counts.\n"
+            "6e) Socket.IO get_stream url_key for a fabricated siteId is High. Do not "
+            "fetch video; do not send null crash loops.\n"
             "7) Call sanitize_evidence to redact credentials, cookies, PII, and response "
             "bodies before create_finding. "
             "Store only the endpoint, status codes, request context, and short redacted snippets.\n"
@@ -387,7 +407,10 @@ PLAYBOOKS: List[Dict[str, Any]] = [
         ),
         "initial_todos": [
             {"description": "Map candidate API endpoints and any API specs", "status": "pending", "priority": "high"},
-            {"description": "Quote OpenAPI security: {} on /api/auth/account/; compare_requests 401 siblings vs lookup 200/500", "status": "pending", "priority": "high"},
+            {"description": "Quote OpenAPI security: {} on /api/auth/account/; compare_requests 401 siblings vs lookup 200/404/500; file Critical", "status": "pending", "priority": "high"},
+            {"description": "Paired unauth write: sibling 401 vs Settings/SaveSettings 200 void (one canary key)", "status": "pending", "priority": "high"},
+            {"description": "Unauth email-change: set_password 401 vs reset_email 204 (one canary)", "status": "pending", "priority": "high"},
+            {"description": "Auth header bypass: no Authorization vs invalid Bearer 401", "status": "pending", "priority": "high"},
             {"description": "Compare unauthenticated and authorized responses with safe methods", "status": "pending", "priority": "high"},
             {"description": "Confirm meaningful exposed data or access-control impact", "status": "pending", "priority": "high"},
             {"description": "Create redacted findings or save exhausted endpoint notes", "status": "pending", "priority": "medium"},
@@ -526,13 +549,29 @@ PLAYBOOKS: List[Dict[str, Any]] = [
             "identify what else to test that commonly chains with this vulnerability.\n"
             "8) Save chain recommendations with save_note(category='artifact').\n\n"
             "IMPORTANT: Never create_finding for a DROP verdict. Only create_finding after SUBMIT. "
-            "Write description + impact + assets + remediation."
+            "Write description + impact + assets + remediation.\n\n"
+            "**Phase 4 — Pasted finding review (Ask Marcus)**\n"
+            "9) If the operator pasted an existing writeup: do NOT re-probe the live target "
+            "unless they explicitly ask for a deny-check retest.\n"
+            "10) Write: Verdict (keep/raise/drop severity and Demonstrated); What is proven; "
+            "What is not proven; Severity rationale; Ticket guidance; defensive retest bar.\n"
+            "11) ACR anonymous pull: keep Demonstrated and raise High→Critical when sampled "
+            "images contained live privileged GitHub PATs (repo/workflow/admin). Expired ghs_* "
+            "is a leak pattern. Internal-only secrets still count — rotate; do not hunt "
+            "internal hosts. Retest bar is anonymous token denied / catalog 401 / revoked PAT 401.\n\n"
+            "**Phase 5 — Marcus RA (required after publish)**\n"
+            "12) After create_finding on medium+, call assess_finding_risk(finding_id, assessment JSON).\n"
+            "13) Score the demonstrated packet only — no live retest. Include why_not_higher, "
+            "CVSS, control_failures, remediation done_when, and retest_criteria.\n"
+            "14) Critical requires demonstrated write/RCE/cloud credential theft. Non-blind "
+            "SSRF with IMDS blocked is High. If RA IMPROVE, fix gaps and retry once."
         ),
         "initial_todos": [
             {"description": "Run validate_finding on the proposed finding(s)", "status": "pending", "priority": "high"},
             {"description": "Address failing questions if IMPROVE verdict", "status": "pending", "priority": "high"},
             {"description": "Run detect_bug_chains on confirmed findings", "status": "pending", "priority": "medium"},
             {"description": "Create findings only for SUBMIT verdicts", "status": "pending", "priority": "high"},
+            {"description": "assess_finding_risk (Marcus RA) on each published medium+ finding", "status": "pending", "priority": "high"},
         ],
     },
     {
@@ -756,7 +795,9 @@ PLAYBOOKS: List[Dict[str, Any]] = [
             "**Phase 2 — Matrix**\n"
             "3) For each candidate, send the same read-only request as: anonymous, user A, user B.\n"
             "4) Record status, length, owner identifiers, and whether foreign PII/objects appear.\n"
-            "5) Classify each row: missing_auth | idor_bola | bfla | no_issue.\n\n"
+            "5) Classify each row: missing_auth | idor_bola | bfla | no_issue. "
+            "ASP.NET writes: missing_auth is sibling 401 vs SaveSettings 200 void "
+            "(one canary key; do not replace production settings).\n\n"
             "**Phase 3 — Report**\n"
             "6) create_finding only for proven cross-identity or unauth impact.\n"
             "7) sanitize_evidence → validate_finding → detect_bug_chains(vuln_type='idor').\n"
@@ -864,6 +905,52 @@ PLAYBOOKS: List[Dict[str, Any]] = [
             {"description": "execute_interceptor on the target; record origin + js_files", "status": "pending", "priority": "high"},
             {"description": "Parallel: fetch_lazy_chunks + fingerprint_api", "status": "pending", "priority": "high"},
             {"description": "extract_js_endpoints + ingest_urls_into_map; report leads", "status": "pending", "priority": "high"},
+        ],
+    },
+    {
+        "id": "jshero",
+        "name": "/jshero (JS collect → chunks → extract → sinks)",
+        "description": (
+            "Exhaustive first-party JavaScript collection and mining. Interceptor, "
+            "lazy chunks, endpoint/method/param extract, DOM sinks."
+        ),
+        "objective": (
+            "Run /jshero against the given URL (authorized recon only).\n"
+            "Not operator Chrome. Not a VPS waymore hop.\n"
+            "1) execute_interceptor (interact=true); fallback execute_deep_crawl.\n"
+            "2) fetch_lazy_chunks (dry-run then download).\n"
+            "3) Optional execute_gau/waybackurls for in-scope *.js.\n"
+            "4) extract_js_endpoints (methods, params, reseed ingest).\n"
+            "5) scan_js_sinks. One reseed if new URLs appeared.\n"
+            "Listing endpoints/sinks is not a finding — fireteam proves impact."
+        ),
+        "initial_todos": [
+            {"description": "execute_interceptor; record js_files", "status": "pending", "priority": "high"},
+            {"description": "fetch_lazy_chunks then extract_js_endpoints", "status": "pending", "priority": "high"},
+            {"description": "scan_js_sinks; ingest reseed URLs", "status": "pending", "priority": "high"},
+        ],
+    },
+    {
+        "id": "wordpress_stack",
+        "name": "WordPress stack hunt",
+        "description": (
+            "Mandatory WordPress probes: REST user enum and admin-ajax tax_query "
+            "timing. WPScan is optional."
+        ),
+        "objective": (
+            "Hunt WordPress as soon as it is fingerprinted. A thin marketing site is in-play.\n"
+            "1) execute_curl GET /wp-json/wp/v2/users?per_page=100. 200+slug/name is a finding.\n"
+            "2) compare_requests POST /wp-admin/admin-ajax.php nested tax_query SLEEP(0) vs "
+            "SLEEP(2); confirm SLEEP(4) if delta ≥1.5s. Timing table is evidence.\n"
+            "3) Login oracle: one POST /wp-login.php per username. No brute force.\n"
+            "4) If WAF/403/timeout: rewrite via compare_requests or run_custom_probe, then "
+            "prove or kill. Do not complete with no results.\n"
+            "5) OPTIONAL execute_wpscan. Never block 1–2 on WPScan quota."
+        ),
+        "initial_todos": [
+            {"description": "REST /wp-json/wp/v2/users enum (do not wait on WPScan)", "status": "pending", "priority": "high"},
+            {"description": "admin-ajax tax_query SLEEP differential", "status": "pending", "priority": "high"},
+            {"description": "create_finding or kill with evidence", "status": "pending", "priority": "high"},
         ],
     },
     {

@@ -15,6 +15,11 @@ def test_packs_on_disk():
     assert "api_idor_bola" in ids
     assert "open_redirect" in ids
     assert "session_token_quality" in ids
+    assert "aspnet_unauth_settings_write" in ids
+    assert "email_change_ato" in ids
+    assert "auth_header_bypass" in ids
+    assert "socketio_unauth_stream_idor" in ids
+    assert "ml_pipeline_missing_rbac" in ids
     assert len(ids) >= 10
 
 

@@ -4,6 +4,7 @@ import logging
 from typing import Dict, List, Optional, Literal, Any
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Query, BackgroundTasks
+from fastapi.responses import Response, JSONResponse
 from sqlalchemy.orm import Session, joinedload, selectinload, noload
 from sqlalchemy import func, case, inspect as sa_inspect
 
@@ -306,6 +307,8 @@ def build_asset_response(
         "endpoints": safe_get("endpoints", []),
         "parameters": safe_get("parameters", []),
         "js_files": safe_get("js_files", []),
+        "rest_endpoints": safe_get("rest_endpoints", []),
+        "api_specs": safe_get("api_specs", []),
         "created_at": safe_get("created_at"),
         "updated_at": safe_get("updated_at"),
         # Computed fields
@@ -802,6 +805,76 @@ def get_asset(
 
     # Build full response with port services and technologies
     return build_asset_response(asset)
+
+
+@router.get("/{asset_id}/openapi.yaml")
+def download_asset_openapi(
+    asset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Download discovered OpenAPI YAML for this asset (View Spec / Download)."""
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if not check_org_access(current_user, asset.organization_id):
+        raise HTTPException(status_code=403, detail="Access denied")
+    from app.services.rest_inventory_service import to_openapi_yaml
+
+    yaml_text = to_openapi_yaml(asset)
+    if not yaml_text:
+        raise HTTPException(status_code=404, detail="No API spec or REST inventory on this asset")
+    filename = f"{asset.value.replace('.', '_')}-openapi.yaml"
+    return Response(
+        content=yaml_text,
+        media_type="application/yaml",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get("/{asset_id}/api-specs")
+def get_asset_api_specs(
+    asset_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Return stored swagger/openapi documents (without huge bodies unless requested)."""
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if not check_org_access(current_user, asset.organization_id):
+        raise HTTPException(status_code=403, detail="Access denied")
+    specs = []
+    for spec in asset.api_specs or []:
+        if not isinstance(spec, dict):
+            continue
+        item = {k: v for k, v in spec.items() if k != "spec"}
+        item["has_spec"] = bool(spec.get("spec"))
+        specs.append(item)
+    return {"specs": specs, "rest_endpoints": asset.rest_endpoints or []}
+
+
+@router.get("/{asset_id}/api-specs/{spec_index}")
+def get_asset_api_spec_body(
+    asset_id: int,
+    spec_index: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """View a stored OpenAPI/Swagger document."""
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    if not check_org_access(current_user, asset.organization_id):
+        raise HTTPException(status_code=403, detail="Access denied")
+    specs = [s for s in (asset.api_specs or []) if isinstance(s, dict)]
+    if spec_index < 0 or spec_index >= len(specs):
+        raise HTTPException(status_code=404, detail="Spec not found")
+    spec = specs[spec_index]
+    body = spec.get("spec")
+    if not body:
+        raise HTTPException(status_code=404, detail="Spec body was not stored (too large); use the spec URL")
+    return JSONResponse(content=body)
 
 
 @router.get("/{asset_id}/ports", response_model=AssetPortsSummary)

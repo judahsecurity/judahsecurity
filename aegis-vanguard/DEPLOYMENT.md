@@ -56,6 +56,10 @@ export GEMINI_API_KEY=...
 export AEGIS_MODEL=claude-sonnet-4-6        # override default model
 export AEGIS_LLM_BACKEND=auto                       # auto|anthropic|litellm
 export AEGIS_TRACING=true                           # default on
+# Optional internal trace sink (self-hosted Phoenix or Langfuse OTLP). Redacts
+# cookies/Authorization before export. Do not point this at Langfuse Cloud.
+# export AEGIS_TRACES_DIR=/tmp/aegis-traces
+# export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:6006/v1/traces
 export AEGIS_GUARDRAILS=true                        # default on
 export ASM_API_URL=http://your-asm-platform:8000    # if shipping findings
 export ASM_API_KEY=tfasm_...                        # agent API key from platform

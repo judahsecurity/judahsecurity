@@ -74,20 +74,25 @@ def rewrite_note(failure: str, summary: ExecutorSummary, directive: Any = None) 
         TOOLS_FAILED: (
             "AUTO-PROMPTER: every tool call failed. Change approach: smaller args, "
             "different path from the executor slice, or kill the card with the error. "
-            "Do not repeat the identical tool+args."
+            "Do not repeat the identical tool+args. If the target blocked you (WAF, 403, "
+            "timeout), read the defense body and call compare_requests or run_custom_probe "
+            "with one mutation that avoids the blocked pattern — then prove or kill."
         ),
         EMPTY_VERDICT: (
             "AUTO-PROMPTER: you returned no evidence. Execute ONE differential or "
             "procedure step from the directive, then verdict=proven|killed with "
-            "tool-backed evidence. Inconclusive without a tool result is a failure."
+            "tool-backed evidence. Inconclusive without a tool result is a failure. "
+            "Silence is not a kill."
+        ),
+        INCONCLUSIVE: (
+            "AUTO-PROMPTER: last verdict was inconclusive. Pick the next procedure "
+            "step you have not tried. Do not re-run the same technique. If a scanner "
+            "was blocked, rewrite the probe (compare_requests / run_custom_probe) "
+            "instead of stopping."
         ),
         EXHAUSTED: (
             "AUTO-PROMPTER: you burned the iteration budget. Run at most two tools, "
             "then done=true with a binary verdict. Narrow to a single hypothesis id."
-        ),
-        INCONCLUSIVE: (
-            "AUTO-PROMPTER: last verdict was inconclusive. Pick the next procedure "
-            "step you have not tried. Do not re-run the same technique."
         ),
         LLM_ERROR: (
             "AUTO-PROMPTER: prior LLM error. Shorter JSON only: one tool_calls array "

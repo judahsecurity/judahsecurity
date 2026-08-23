@@ -77,9 +77,9 @@ class LLMTask:
     REASONING = "reasoning"   # agent planning / analysis / orchestration
     OFFENSIVE = "offensive"   # exploit agents, pentest, red-team (Claude-leaning)
     REPORT = "report"         # findings write-up / summarization
+    RECON = "recon"           # fireteam recon/coverage — cheaper model
 
-
-ALL_TASKS = (LLMTask.REASONING, LLMTask.OFFENSIVE, LLMTask.REPORT)
+ALL_TASKS = (LLMTask.REASONING, LLMTask.OFFENSIVE, LLMTask.REPORT, LLMTask.RECON)
 
 # Prefer these clouds (in order) when the primary is unavailable / out of credits.
 _CLOUD_FALLBACK_ORDER = (
@@ -177,8 +177,19 @@ def resolve_model_spec_for_task(agent_config: Optional[dict], task: str) -> str:
     task_models = cfg.get("task_models") or {}
     if isinstance(task_models, dict):
         spec = task_models.get(task) or task_models.get("default")
+        if not spec and task == LLMTask.RECON:
+            spec = task_models.get(LLMTask.REPORT)
         if spec:
             return str(spec)
+
+    # Recon defaults to Haiku when the org has not set a per-task model and the
+    # global provider is Anthropic — flagship stays on offensive/reasoning.
+    if task == LLMTask.RECON:
+        provider = (cfg.get("llm_provider") or "").strip().lower() or (
+            (getattr(settings, "AI_PROVIDER", "") or "").strip().lower()
+        )
+        if provider in ("", ExternalService.ANTHROPIC, "anthropic"):
+            return "anthropic:claude-haiku-4-5"
 
     # Legacy single-model fields.
     provider = (cfg.get("llm_provider") or "").strip().lower()

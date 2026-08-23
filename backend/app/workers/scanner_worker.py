@@ -64,6 +64,35 @@ def trigger_graph_sync(organization_id: int) -> None:
     except Exception as e:
         logger.debug(f"Graph sync not available: {e}")
 
+
+def persist_sitemap(db, organization_id: int, asset, *, urls=None, endpoints=None, api_urls=None, source: str = "scan", **flags) -> None:
+    """Write discovered URLs into sitemap_entries. Never fails the scan."""
+    if asset is None:
+        return
+    try:
+        from app.services.sitemap_service import ingest_urls_for_asset, persist_crawl_urls
+        if flags:
+            ingest_urls_for_asset(
+                db,
+                organization_id,
+                asset,
+                list(urls or endpoints or []) or [],
+                source=source,
+                **flags,
+            )
+        else:
+            persist_crawl_urls(
+                db,
+                organization_id,
+                asset,
+                urls=urls,
+                endpoints=endpoints,
+                api_urls=api_urls,
+                source=source,
+            )
+    except Exception as e:
+        logger.warning("sitemap persist failed (%s): %s", source, e)
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -3666,6 +3695,14 @@ class ScannerWorker:
                                 existing_portals.append(p)
                         asset.login_portals = existing_portals
                         asset.last_seen = datetime.utcnow()
+                        persist_sitemap(
+                            db,
+                            organization_id,
+                            asset,
+                            urls=host_portals,
+                            source="login_portal",
+                            has_login=True,
+                        )
                         assets_flagged += 1
                         logger.info(f"Flagged {host} with {len(host_portals)} login portals")
                     else:
@@ -3694,6 +3731,15 @@ class ScannerWorker:
                             discovery_source="login_portal_scan",
                         )
                         db.add(new_asset)
+                        db.flush()
+                        persist_sitemap(
+                            db,
+                            organization_id,
+                            new_asset,
+                            urls=host_portals,
+                            source="login_portal",
+                            has_login=True,
+                        )
                         assets_flagged += 1
                         logger.info(f"Created host asset {host} with {len(host_portals)} login portals")
                 
@@ -3962,6 +4008,14 @@ class ScannerWorker:
                             asset.parameters = list(set(existing_params + result.parameters))
                             asset.js_files = list(set(existing_js + result.js_files[:100]))
                             asset.last_seen = datetime.utcnow()
+                            persist_sitemap(
+                                db,
+                                organization_id,
+                                asset,
+                                urls=result.urls,
+                                endpoints=result.endpoints,
+                                source="paramspider",
+                            )
                             assets_updated += 1
                         
                         logger.info(f"ParamSpider for {result.domain}: {len(result.parameters)} params, {len(result.endpoints)} endpoints")
@@ -4111,6 +4165,14 @@ class ScannerWorker:
                         asset.endpoints = list(set(existing_endpoints + result.unique_paths[:500]))
                         
                         asset.last_seen = datetime.utcnow()
+                        persist_sitemap(
+                            db,
+                            organization_id,
+                            asset,
+                            urls=result.urls,
+                            endpoints=result.unique_paths,
+                            source="wayback",
+                        )
                         assets_updated += 1
             
             db.commit()
@@ -4378,6 +4440,15 @@ class ScannerWorker:
                                     asset.metadata_["katana_urls_found"] = len(data["urls"])
                                     asset.metadata_["katana_api_endpoints"] = sorted(data["api"])[:50]
                                     asset.last_seen = datetime.utcnow()
+                                    persist_sitemap(
+                                        db,
+                                        organization_id,
+                                        asset,
+                                        urls=data["urls"],
+                                        endpoints=data["endpoints"],
+                                        api_urls=data["api"],
+                                        source="katana",
+                                    )
                                     assets_updated += 1
                                 except Exception as e:
                                     logger.warning(f"Batch attribution for {host}: {e}")
@@ -4416,6 +4487,15 @@ class ScannerWorker:
                             asset.metadata_['katana_api_endpoints'] = result.api_endpoints[:50]
                             
                             asset.last_seen = datetime.utcnow()
+                            persist_sitemap(
+                                db,
+                                organization_id,
+                                asset,
+                                urls=result.urls,
+                                endpoints=result.endpoints,
+                                api_urls=result.api_endpoints,
+                                source="katana",
+                            )
                             assets_updated += 1
                         
                         logger.info(

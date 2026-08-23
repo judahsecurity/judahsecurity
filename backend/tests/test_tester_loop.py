@@ -97,15 +97,24 @@ def test_forced_pipeline_crawl_then_enrich_then_fireteam():
         ],
     }
     step = forced_next_step(after_js)
+    assert step and step["tool_name"] == "sync_engagement_brain"
+
+    after_aim = {
+        **empty,
+        "execution_trace": after_js["execution_trace"] + [
+            {"tool_name": "sync_engagement_brain", "success": True},
+        ],
+        "engagement_brain": {"hypotheses": [{"id": "h1"}], "threat_model": {"threats": []}},
+    }
+    step = forced_next_step(after_aim)
     assert step and step["tool_name"] == "fireteam_dispatch"
     assert (step.get("tool_args") or {}).get("specialists") == "auto"
 
     after_hunt = {
-        **after_js,
-        "execution_trace": after_js["execution_trace"] + [
+        **after_aim,
+        "execution_trace": after_aim["execution_trace"] + [
             {"tool_name": "fireteam_dispatch", "success": True},
         ],
-        "engagement_brain": {"hypotheses": [{"id": "h1"}]},
     }
     assert forced_next_step(after_hunt) is None
     assert complete_blocked_reason(after_hunt) is None

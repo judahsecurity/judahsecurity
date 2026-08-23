@@ -20,6 +20,8 @@ Local analysis after an in-scope fetch. Not a secret scanner.
 3. Filter `.css` / `.png` / `.woff` / third-party hosts. Keep in-scope API.
 4. Reconstruct from `API_BASE` / `baseURL` constants. `ingest_urls_into_map`.
 5. Prove: `mutate_captured_request` / `discover_parameters` on IDOR/SSRF leads.
-   Then `scan_js_urls_for_secrets` on the same bundles.
+   Then `scan_js_urls_for_secrets` on the same bundles (includes CWE-321 client HMAC /
+   Object.keys-join signing keys and MQTT/RFID ICS creds — submit on reconstruction,
+   do not wait for a live API).
 
 Output is the triaged list (Judah does not write `all_endpoints.txt` to disk).

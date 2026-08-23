@@ -95,6 +95,11 @@ services:
       - AGENT_TOOL_OUTPUT_MAX_CHARS=${AGENT_TOOL_OUTPUT_MAX_CHARS:-20000}
       - AGENT_REQUEST_TIMEOUT_SECONDS=${AGENT_REQUEST_TIMEOUT_SECONDS:-660}
       - AGENT_REST_MAX_ITERATIONS=${AGENT_REST_MAX_ITERATIONS:-15}
+      # Optional: redacted OTLP traces to a self-hosted Phoenix/Langfuse sidecar
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      - OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS:-}
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
       # GitHub Secret Scanning (optional)
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
       # WPScan API token — required for --enumerate vp/vt (CVE mapping).
@@ -483,6 +488,23 @@ services:
     profiles:
       - ollama
 
+  # Internal LLM trace UI (Phoenix). Not a customer feature.
+  #   COMPOSE_PROFILES=observability
+  #   OTEL_EXPORTER_OTLP_ENDPOINT=http://phoenix:6006/v1/traces
+  # Bound to loopback so pentest spans never hit a public interface.
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    container_name: asm_phoenix
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6006:6006"
+    volumes:
+      - phoenix_data:/phoenix/data
+    networks:
+      - asm_network
+    profiles:
+      - observability
+
 networks:
   asm_network:
     driver: bridge
@@ -513,4 +535,6 @@ volumes:
   letsencrypt_www:
     driver: local
   ollama_data:
+    driver: local
+  phoenix_data:
     driver: local

@@ -60,6 +60,8 @@ def test_writeup_guidance_requires_privileged_impact():
     g = _load()
     text = g.FINDING_WRITEUP_GUIDANCE.lower()
     assert "demonstrated-compromise" in text
+    assert "assess_finding_risk" in text or "marcus" in text
+    assert "why_not_higher" in text or "risk assessment" in text
     assert "login" in text
     assert "impact" in text
     assert "remediation" in text
@@ -78,6 +80,49 @@ def test_writeup_guidance_requires_privileged_impact():
     assert "password grant" in text or "invalid_grant" in text
     assert "cwe-204" in text or "/api/auth/account" in text
     assert "is_staff" in text or "user account" in text
+    assert "404" in text or "existence oracle" in text
+    assert "do not claim" in text or "stdout" in text
+    assert "critical" in text
+    assert "savesettings" in text or "missing [authorize]" in text or "cwe-306" in text
+    assert "void" in text or "content-length" in text
     assert "arangodb" in text
     assert "wiki" in text
     assert "binary" in text
+    assert "azurecr" in text or "anonymous pull" in text
+    assert "anonymouspullenabled" in text or "oauth2" in text
+    assert "package-lock" in text or "ghp_" in text
+    assert "ask marcus" in text or "verdict" in text
+    review = g.FINDING_REVIEW_GUIDANCE.lower()
+    assert "verdict" in review
+    assert "retest" in review
+    assert "do not re-probe" in review or "deny-check" in review
+    assert "savesettings" in review or "void 200" in review
+    assert "account" in review or "is_staff" in review
+    assert "404" in review or "existence oracle" in review
+
+
+def test_acr_anonymous_pull_signals():
+    g = _load()
+    catalog = g.acr_anonymous_pull_signals(
+        "Azure Container Registry Anonymous Pull Enabled "
+        "https://digipdevelopment.azurecr.io oauth2/token issued an access_token "
+        "scope=registry:catalog:* GET /v2/_catalog repositories "
+        "ads-namespace-graphql-service"
+    )
+    assert catalog["is_finding"]
+    assert catalog["has_anon_proof"]
+    assert not catalog["live_privileged_token"]
+
+    banner = g.acr_anonymous_pull_signals(
+        "https://fdudevaksregistry.azurecr.io resolves on the public internet"
+    )
+    assert banner["is_finding"]
+    assert not banner["has_anon_proof"]
+
+    pats = g.acr_anonymous_pull_signals(
+        "azurecr.io anonymous pull catalog repositories "
+        "ghp_ token in package-lock.json git+https classic personal access "
+        "permissions admin write:packages workflow"
+    )
+    assert pats["has_secret_class"]
+    assert pats["live_privileged_token"]

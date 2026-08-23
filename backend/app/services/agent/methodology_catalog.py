@@ -80,12 +80,66 @@ _AZURE_FUNCTION_RE = re.compile(
     r"(azurewebsites\.net|azurefunctions\.net|/api/Tester\b|functions\.azure\.com)",
     re.I,
 )
+_ACR_RE = re.compile(
+    r"(azurecr\.io|anonymous.?pull|anonymousPullEnabled|/v2/_catalog|docker.?registry)",
+    re.I,
+)
+_SETTINGS_WRITE_RE = re.compile(
+    r"("
+    r"/api/settings|savesettings|getsettings|appsettings|"
+    r"/api/\w*settings|"
+    r"/api/logquery|/api/audit\b|/api/readtasks|/api/opendocument|"
+    r"/api/\w+/(save|update|write|create)\w*"
+    r")",
+    re.I,
+)
+_ASPNET_API_RE = re.compile(
+    r"("
+    r"asp\.net|aspnetcore|microsoft-iis|"
+    r"x-powered-by:\s*asp\.net|"
+    r"doccentrum|docutrack"
+    r")",
+    re.I,
+)
+_ASPNET_MVC_ACTION_RE = re.compile(r"/api/[A-Z][A-Za-z]+/[A-Z][A-Za-z]+")
+_WP_RE = re.compile(
+    r"wordpress|wp-content|wp-json|wp-admin|wp-login|wp-includes|xmlrpc\.php",
+    re.I,
+)
 _AI_AGENT_RE = re.compile(
     r"("
     r"/api/chat|/api/message|/api/ask|/api/completions|/v1/chat|/v1/messages|"
     r"chatbot|copilot|assistant|/mcp\b|model.?context.?protocol|"
     r"openai|anthropic|langchain|langgraph|function.?call|tool.?call|"
     r"intercom|drift|zendesk.?chat|crisp\.chat|tawk\.to|livechat|freshchat"
+    r")",
+    re.I,
+)
+_EMAIL_CHANGE_RE = re.compile(
+    r"("
+    r"reset_email|reset_email_confirm|change_email|update_email|"
+    r"/email/change|/users/set_email|set_email|"
+    r"users/reset_email"
+    r")",
+    re.I,
+)
+_JWT_AUTH_RE = re.compile(
+    r"("
+    r"authorization|bearer|jwt|oidc|openid|"
+    r"bypassauthorization|bypass.?auth|"
+    r"oidcapiauthorization|jwtAuth"
+    r")",
+    re.I,
+)
+_SOCKETIO_RE = re.compile(
+    r"(socket\.io|/socket\.io/|get_stream\b|url_key)",
+    re.I,
+)
+_ML_PIPELINE_RE = re.compile(
+    r"("
+    r"/api/v1/train|/api/v1/celery-task|logixtwin-train|"
+    r"/api/drf-celery|/api/v1/optimize|"
+    r"celery-task|model.?train|ml.?pipeline"
     r")",
     re.I,
 )
@@ -147,6 +201,68 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             return
         seen.add(m.id)
         out.append(m)
+
+    # --- WordPress (thin maps still hunt; do not wait on WPScan) ---
+    try:
+        from app.services.agent.wordpress_surface import wordpress_from_map
+        has_wordpress = wordpress_from_map(cmap) or bool(_WP_RE.search(combined))
+    except Exception:
+        has_wordpress = bool(_WP_RE.search(combined))
+    if has_wordpress:
+        origin = str(g("target") or "")
+        wp_ev = next(
+            (p for p in pages if _WP_RE.search(str(p))),
+            next(
+                (
+                    str(e.get("path") or "")
+                    for e in apis
+                    if isinstance(e, dict) and _WP_RE.search(str(e.get("path") or ""))
+                ),
+                origin or "wordpress",
+            ),
+        )
+        add(Methodology(
+            id="wp_rest_user_enum",
+            title="WordPress REST user enumeration",
+            hunt="wordpress",
+            specialist="injection",
+            priority="high",
+            assumption="Unauthenticated GET /wp-json/wp/v2/users returns slugs/names",
+            test=(
+                "execute_curl GET {origin}/wp-json/wp/v2/users?per_page=100. "
+                "Do not wait on WPScan. 200 + slug/name is SUBMIT (CWE-200)."
+            ).replace("{origin}", origin.rstrip("/") or "https://TARGET"),
+            pass_criteria="JSON lists at least one user slug or name without auth",
+            kill_criteria="401/403/empty list/HTML login — record status as kill evidence",
+            cwe_ids=["CWE-200", "CWE-204"],
+            capec_ids=["CAPEC-169"],
+            owasp="A01:2021 Broken Access Control",
+            evidence=wp_ev,
+            why="WordPress fingerprinted — REST user enum is mandatory on thin maps",
+        ))
+        add(Methodology(
+            id="wp_ajax_tax_query_sqli",
+            title="WordPress admin-ajax nested tax_query time-based SQLi",
+            hunt="wordpress",
+            specialist="injection",
+            priority="high",
+            assumption=(
+                "POST /wp-admin/admin-ajax.php loadmore/tax_query interpolates terms "
+                "into WP_Query (CVE-2022-21661 class / plugin variants)"
+            ),
+            test=(
+                "compare_requests POST admin-ajax.php action=loadmore nested tax_query "
+                "SLEEP(0) vs SLEEP(2), timeout=20. Delta ≥1.5s → SLEEP(4) then "
+                "execute_sqlmap --technique=BT. Timing table is the finding."
+            ),
+            pass_criteria="Elapsed delta ≥ 1.5s that scales with SLEEP(4)",
+            kill_criteria="No timing delta after both sleeps; record the table and kill",
+            cwe_ids=["CWE-89"],
+            capec_ids=["CAPEC-66"],
+            owasp="A03:2021 Injection",
+            evidence=wp_ev,
+            why="WordPress fingerprinted — ajax SQLi is the human-tester next probe, not WPScan",
+        ))
 
     # --- Auth / credentials ---
     if has_login or has_auth:
@@ -648,22 +764,56 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             why="GitLab API observed",
         ))
 
-    if re.search(r"docker.?registry|/v2/_catalog", es_blob, re.I):
+    if _ACR_RE.search(es_blob):
+        acr_host = bool(re.search(r"azurecr\.io|anonymous.?pull", es_blob, re.I))
         add(Methodology(
-            id="docker_registry_unauth",
-            title="Unauth Docker Registry catalog (CWE-306)",
+            id="acr_anonymous_pull" if acr_host else "docker_registry_unauth",
+            title=(
+                "Azure Container Registry anonymous pull (CWE-306 / CWE-798)"
+                if acr_host
+                else "Unauth Docker Registry catalog (CWE-306)"
+            ),
             hunt="docker_registry",
             specialist="coverage",
             priority="high",
-            assumption="/v2/_catalog requires no credentials",
-            test="GET /v2/ then GET /v2/_catalog. Count names. Do not push images.",
-            pass_criteria="200 catalog with repository names",
-            kill_criteria="401 WWW-Authenticate",
-            cwe_ids=["CWE-306"],
-            capec_ids=["CAPEC-115"],
+            assumption=(
+                "ACR anonymousPullEnabled issues an oauth2 bearer for registry:catalog:* "
+                "with no credentials, then /v2/_catalog lists first-party images"
+                if acr_host
+                else "/v2/_catalog requires no credentials"
+            ),
+            test=(
+                "Unauth GET /oauth2/token?service=<registry>&scope=registry:catalog:*. "
+                "If an access_token is issued, GET /v2/_catalog (n<=200) with the bearer. "
+                "Record repository count. Then tags/list + config/history on at most 1–3 "
+                "first-party repos (prefer graphql/enrollment/:latest) for ghp_ / git+https "
+                "/ ghs_ / Artifactory / NATS. queue_finding_followups("
+                "vuln_type='docker_registry'). Do not pull the whole catalog; do not push; "
+                "do not delete tags; do not authenticate recovered PATs against GitHub."
+                if acr_host
+                else (
+                    "GET /v2/ then GET /v2/_catalog. Count names. Optional one manifest/"
+                    "config if a credential is obvious. Do not push images."
+                )
+            ),
+            pass_criteria=(
+                "Anonymous token issued AND catalog returns repository names"
+                if acr_host
+                else "200 catalog with repository names"
+            ),
+            kill_criteria=(
+                "Anonymous token denied; catalog 401/403. Do NOT kill because a secret "
+                "scan of extra tags was skipped"
+            ),
+            cwe_ids=["CWE-306", "CWE-798", "CWE-540"] if acr_host else ["CWE-306"],
+            capec_ids=["CAPEC-115", "CAPEC-37"],
             owasp="A01:2021 Broken Access Control",
             evidence=target,
-            why="Docker Registry observed",
+            why=(
+                "Azure Container Registry hostname / anonymous-pull surface observed"
+                if acr_host
+                else "Docker Registry observed"
+            ),
         ))
 
     if re.search(r"django|/admin/login|/api/token-pair", es_blob, re.I):
@@ -705,6 +855,55 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             owasp="A01:2021 Broken Access Control",
             evidence=target,
             why="Chat/OpenAI proxy observed",
+        ))
+
+    if _ML_PIPELINE_RE.search(combined):
+        ev = next(
+            (
+                f"{e.get('method', '')} {e.get('path', '')}".strip()
+                for e in apis
+                if isinstance(e, dict) and _ML_PIPELINE_RE.search(
+                    f"{e.get('method', '')} {e.get('path', '')}"
+                )
+            ),
+            None,
+        ) or next(
+            (str(p) for p in pages if _ML_PIPELINE_RE.search(str(p))),
+            "/api/v1/train/",
+        )
+        add(Methodology(
+            id="ml_pipeline_missing_rbac",
+            title="Self-registered user can train/delete ML models (missing RBAC)",
+            hunt="ml_pipeline_rbac",
+            specialist="api_authz",
+            priority="high",
+            assumption=(
+                "JWT authenticates but does not authorize: any self-registered account "
+                "can POST /api/v1/train/, DELETE /api/v1/celery-task/, or queue Celery "
+                "jobs. Open signup is the internet exposure, not a second finding"
+            ),
+            test=(
+                "If signup is open: create ONE throwaway account. compare_requests a "
+                "privileged ML write (POST /api/v1/train/ or DELETE /api/v1/celery-task/) "
+                "as that user vs a documented admin-only sibling. PASS if the self-reg "
+                "session is 200/202/204. Do not delete production models; prefer OPTIONS/"
+                "authz probe or one canary train on a tiny fixture. Do not dump datasets. "
+                "queue_finding_followups(vuln_type='ml_pipeline_rbac')."
+            ),
+            pass_criteria=(
+                "Self-registered (or low-priv) session can train, delete, or queue ML/"
+                "Celery jobs that should be admin/ML-engineer only"
+            ),
+            kill_criteria=(
+                "Train/delete/celery return 403 for non-admin; role checks hold. "
+                "Do not kill solely because signup is closed — still probe mapped "
+                "low-priv tokens"
+            ),
+            cwe_ids=["CWE-285", "CWE-863", "CWE-269"],
+            capec_ids=["CAPEC-122", "CAPEC-1"],
+            owasp="A01:2021 Broken Access Control",
+            evidence=str(ev),
+            why="ML train / Celery / optimize APIs observed — self-reg often has no RBAC",
         ))
 
     if re.search(
@@ -804,6 +1003,61 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             owasp="A07:2021 Identification and Authentication Failures",
             evidence=ev,
             why="Password reset / recovery surface observed",
+        ))
+
+    if (
+        _EMAIL_CHANGE_RE.search(combined)
+        or (
+            _OPENAPI_RE.search(combined)
+            and re.search(r"/api/auth/users", combined, re.I)
+        )
+    ):
+        ev = next(
+            (str(p) for p in pages if _EMAIL_CHANGE_RE.search(str(p))),
+            None,
+        ) or next(
+            (
+                f"{e.get('method', '')} {e.get('path', '')}".strip()
+                for e in apis
+                if isinstance(e, dict) and _EMAIL_CHANGE_RE.search(
+                    f"{e.get('method', '')} {e.get('path', '')}"
+                )
+            ),
+            "/api/auth/users/reset_email/",
+        )
+        add(Methodology(
+            id="email_change_ato",
+            title="Unauthenticated email-change endpoints (djoser reset_email ATO chain)",
+            hunt="email_change_ato",
+            specialist="auth_logic",
+            priority="high",
+            assumption=(
+                "POST /api/auth/users/reset_email/ and reset_email_confirm/ skip JWT "
+                "even when OpenAPI declares jwtAuth. set_password correctly 401s. "
+                "The remaining control is a token mailed to the attacker-controlled address"
+            ),
+            test=(
+                "compare_requests: unauth POST /api/auth/users/set_password/ (expect 401) "
+                "vs unauth POST /api/auth/users/reset_email/ with "
+                "email=aegis-ato-canary@example.invalid (204/200). Then unauth POST "
+                "reset_email_confirm with uid=MQ (base64 user 1) + garbage token — "
+                "'Invalid token for given user' vs 'Invalid user id' enumerates users. "
+                "One canary email; do not complete ATO on a real mailbox; do not spray. "
+                "queue_finding_followups(vuln_type='email_change_ato')."
+            ),
+            pass_criteria=(
+                "Unauth reset_email is accepted while a sibling account-mod (set_password) "
+                "is 401, AND/OR confirm locates a user without a session"
+            ),
+            kill_criteria=(
+                "Both email-change endpoints 401/403 like set_password. "
+                "Do not kill because OPTIONS is 401 or the schema claims jwtAuth"
+            ),
+            cwe_ids=["CWE-306", "CWE-862", "CWE-640", "CWE-204"],
+            capec_ids=["CAPEC-50", "CAPEC-575"],
+            owasp="A07:2021 Identification and Authentication Failures",
+            evidence=str(ev),
+            why="Email-change / djoser users API observed — unauth reset_email is an ATO chain",
         ))
 
     if has_oauth or re.search(r"(oauth|/sso|/saml|/oidc|/authorize|/callback)", combined, re.I):
@@ -933,18 +1187,21 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
                 "statistics, plus UserAccount fields (is_staff, role, valid_through). "
                 "compare_requests: unauth GET a protected sibling (/api/auth/profile/, "
                 "/api/auth/users/me/) vs GET /api/auth/account/?email=aegis-enum-canary@example.invalid. "
-                "PASS if the lookup is 200 with those fields OR 500/app error while siblings are 401. "
+                "PASS if the lookup is 200 with those fields OR 404 'User does not exist!' "
+                "OR 500/app error while siblings are 401. File Critical. "
                 "One canary email only — do not spray employee inboxes. Do not dump ICS users. "
-                "ACAO * is extra, not a substitute for the 401-vs-500 differential."
+                "Do not claim a 200 role body unless stdout has it. "
+                "ACAO * is extra, not a substitute for the 401-vs-500/404 differential."
             ),
             pass_criteria=(
                 "Schema documents unauth account lookup returning privilege fields, AND/OR "
-                "unauth request reaches app code (200 or 500) while protected siblings 401"
+                "unauth request reaches app code (200, 404 existence oracle, or 500) while "
+                "protected siblings 401"
             ),
             kill_criteria=(
                 "Lookup returns 401/403 like siblings; schema requires JWT; response is a "
                 "generic non-enumerating boolean. Do NOT kill solely because the database "
-                "is unavailable or no registered email was found"
+                "is unavailable, the canary is unregistered, or the lookup is 404"
             ),
             cwe_ids=["CWE-204", "CWE-200", "CWE-862"],
             capec_ids=["CAPEC-575", "CAPEC-169"],
@@ -955,6 +1212,124 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
                 or "/api/auth/account/"
             ),
             why="Public account/email lookup in schema or crawl — unauth user enum + role leak",
+        ))
+
+    settings_ev = next(
+        (
+            f"{e.get('method', '')} {e.get('path', '')}".strip()
+            for e in apis
+            if isinstance(e, dict) and _SETTINGS_WRITE_RE.search(
+                f"{e.get('method', '')} {e.get('path', '')}"
+            )
+        ),
+        None,
+    ) or next(
+        (str(p) for p in pages if _SETTINGS_WRITE_RE.search(str(p))),
+        None,
+    )
+    if (
+        has_api
+        and (
+            settings_ev
+            or _SETTINGS_WRITE_RE.search(combined)
+            or _ASPNET_API_RE.search(combined)
+            or _ASPNET_MVC_ACTION_RE.search(combined)
+        )
+    ):
+        add(Methodology(
+            id="aspnet_unauth_settings_write",
+            title="Unauthenticated ASP.NET / API settings write (missing [Authorize])",
+            hunt="unauth_settings_write",
+            specialist="api_authz",
+            priority="high",
+            assumption=(
+                "SettingsController (or mapped Save*/Write* config APIs) lack [Authorize] "
+                "while sibling controllers on the same app enforce it. ASP.NET Core void "
+                "actions return HTTP 200 Content-Length: 0 when the write is accepted. "
+                "GET 500 / NullReferenceException is not an auth rejection"
+            ),
+            test=(
+                "compare_requests: unauth POST a protected write sibling "
+                "(/api/TaskAdmin/UpdateTask or another 401 write) vs unauth POST "
+                "/api/Settings/SaveSettings (or mapped Save*/Write*) with a JSON body "
+                "matching the settings schema. PASS on sibling 401 AND SaveSettings 200 "
+                "with Content-Length: 0 (void success). One canary key only "
+                "(aegis-verify-<rand>); do not replace the full settings collection; "
+                "do not flip enableNotifications/createPlannerTasks/powerBIReportId. "
+                "GET GetSettings 500 is NOT a kill. Then probe other controllers "
+                "(LogQuery, Audit, ReadTasks, OpenDocument) without 401 — file those "
+                "as a sibling missing-auth card, not this High write. "
+                "queue_finding_followups(vuln_type='unauth_settings_write')."
+            ),
+            pass_criteria=(
+                "Unauth config/settings write is accepted (200/204 void) while a sibling "
+                "write on the same app returns 401 without credentials"
+            ),
+            kill_criteria=(
+                "SaveSettings returns 401/403 like siblings. Do NOT kill because "
+                "GetSettings is 500, the canary was not read back, or Graph-downstream "
+                "calls fail. Do not kill solely because the host is azurewebsites.net"
+            ),
+            cwe_ids=["CWE-306", "CWE-862", "CWE-284"],
+            capec_ids=["CAPEC-1", "CAPEC-122"],
+            owasp="A01:2021 Broken Access Control",
+            evidence=str(
+                settings_ev
+                or next((p for p in pages if _ASPNET_API_RE.search(str(p))), None)
+                or (g("target") if g("target") else "/api/Settings/SaveSettings")
+            ),
+            why=(
+                "Settings/Save*/ASP.NET API surface — missing [Authorize] on writes "
+                "is demonstrated by a 401 sibling vs 200 void"
+            ),
+        ))
+
+    if has_api and (
+        _JWT_AUTH_RE.search(combined)
+        or _OPENAPI_RE.search(combined)
+        or has_auth
+        or has_oauth
+    ):
+        ev = next(
+            (
+                f"{e.get('method', '')} {e.get('path', '')}".strip()
+                for e in apis
+                if isinstance(e, dict) and e.get("path")
+            ),
+            target or "api",
+        )
+        add(Methodology(
+            id="auth_header_bypass",
+            title="Auth middleware skipped when Authorization header is absent",
+            hunt="auth_header_bypass",
+            specialist="api_authz",
+            priority="high",
+            assumption=(
+                "OIDC/JWT middleware (ByPassAuthorization / 'skip if no header') only "
+                "validates when Authorization is present. No header reaches the "
+                "controller (400 missing params / 200). Invalid Bearer returns 401"
+            ),
+            test=(
+                "compare_requests on mapped authenticated APIs: (1) no Authorization "
+                "header vs (2) Authorization: Bearer aegis-invalid. PASS if no-header "
+                "reaches app code (200/400 business error) AND invalid-bearer is 401. "
+                "A 400 on missing body is still a bypass — the controller ran. Probe "
+                "2–4 mapped routes (GetMenu, GetEntitiesById, Notes). Do not dump. "
+                "queue_finding_followups(vuln_type='auth_header_bypass')."
+            ),
+            pass_criteria=(
+                "Request without Authorization is not 401/403 while the same path with "
+                "an invalid Bearer is 401 (middleware only runs when a header is sent)"
+            ),
+            kill_criteria=(
+                "Missing header is 401/403 like invalid Bearer. Do not kill because "
+                "the no-header response is 400 (missing required params)"
+            ),
+            cwe_ids=["CWE-287", "CWE-306", "CWE-862"],
+            capec_ids=["CAPEC-115", "CAPEC-1"],
+            owasp="A07:2021 Identification and Authentication Failures",
+            evidence=str(ev),
+            why="JWT/OIDC/OpenAPI APIs — conditional middleware often skips when the header is omitted",
         ))
 
     # --- Authorization / IDOR ---
@@ -1162,8 +1537,8 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
         add(Methodology(
             id="reflected_xss",
             title="Reflected / stored XSS on search & reflect params",
-            hunt="injection",
-            specialist="injection",
+            hunt="xss",
+            specialist="xss",
             priority="high",
             assumption="User-controlled search/reflect params are rendered without neutralization",
             test=(
@@ -1186,8 +1561,8 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
         add(Methodology(
             id="param_injection",
             title="Injection on mapped parameters (SQLi/SSTI/cmd)",
-            hunt="injection",
-            specialist="injection",
+            hunt="sqli",
+            specialist="sqli",
             priority="high",
             assumption="Query/body params from the map are unsafely interpolated into queries/templates/shell",
             test=(
@@ -1214,8 +1589,8 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
         add(Methodology(
             id="ssrf_url_fetch",
             title="SSRF via URL-fetch / webhook / proxy features",
-            hunt="injection",
-            specialist="injection",
+            hunt="ssrf",
+            specialist="ssrf",
             priority="high",
             assumption="Server fetches attacker-controlled URLs (webhooks, imports, previews, proxies)",
             test=(
@@ -1284,9 +1659,12 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             title="WebSocket / SSE channel abuse",
             hunt="realtime",
             specialist="api_authz",
-            priority="medium",
+            priority="high" if _SOCKETIO_RE.search(combined) else "medium",
             assumption="Realtime channels lack auth on upgrade or accept injected messages",
-            test="Connect without/with weak auth; attempt cross-user subscription and message injection",
+            test=(
+                "Connect without/with weak auth; attempt cross-user subscription and "
+                "message injection. Socket.IO: also run the get_stream / url_key card."
+            ),
             pass_criteria="Unauth channel data or cross-user message impact",
             kill_criteria="Upgrade requires auth; messages scoped to identity",
             cwe_ids=["CWE-306", "CWE-284"],
@@ -1294,6 +1672,52 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             owasp="A01:2021 Broken Access Control",
             evidence=str(ev),
             why="WebSocket/SSE channels observed",
+        ))
+
+    if _SOCKETIO_RE.search(combined) or any(
+        _SOCKETIO_RE.search(str(w)) for w in (websockets or [])
+    ):
+        ev = next(
+            (str(w) for w in (websockets or []) if _SOCKETIO_RE.search(str(w))),
+            None,
+        ) or next(
+            (str(p) for p in pages if _SOCKETIO_RE.search(str(p))),
+            "/socket.io/",
+        )
+        add(Methodology(
+            id="socketio_unauth_stream_idor",
+            title="Unauth Socket.IO get_stream IDOR (url_key / camera namespace)",
+            hunt="socketio_idor",
+            specialist="api_authz",
+            priority="high",
+            assumption=(
+                "Socket.IO accepts anonymous connections and get_stream (or sibling "
+                "events) returns a url_key / stream namespace for arbitrary siteId/"
+                "analyzerId. Client JS may hardcode userType=Admin — cosmetic, not auth"
+            ),
+            test=(
+                "Engine.IO polling: GET /socket.io/?EIO=3&transport=polling then POST "
+                "42[\"get_stream\", {siteId: fabricated, userId: ATTACKER, userType: "
+                "Anonymous}]. PASS if a url_key / namespace is returned without a "
+                "session. Repeat 1–2 other siteIds. Do not fetch the video stream. "
+                "Do not send null/malformed crash loops (ICS availability). "
+                "queue_finding_followups(vuln_type='socketio_idor'). Then CORS on "
+                "/socket.io/ (queue cors_credentials) and JS hardcoded siteId "
+                "(queue js_secrets)."
+            ),
+            pass_criteria=(
+                "Anonymous get_stream (or sibling) returns url_key / stream namespace "
+                "for a fabricated siteId"
+            ),
+            kill_criteria=(
+                "Upgrade/event requires auth; get_stream 401/403; no url_key. "
+                "Do not kill because the video URL was not downloaded"
+            ),
+            cwe_ids=["CWE-639", "CWE-306", "CWE-284"],
+            capec_ids=["CAPEC-1", "CAPEC-87"],
+            owasp="A01:2021 Broken Access Control",
+            evidence=str(ev),
+            why="Socket.IO / get_stream observed — unauth industrial camera streams are a recurring miss",
         ))
 
     if js_files:
@@ -1305,9 +1729,9 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             priority="medium",
             assumption="Bundles leak credentials, keys, or ship known-CVE client libraries",
             test="scan_js_urls_for_secrets + execute_retirejs on first-party bundles from the map",
-            pass_criteria="Live/production credential or confirmed vulnerable library with CVE",
+            pass_criteria="Live/production credential, CWE-321 reconstructed HMAC key, ICS MQTT/RFID creds, or confirmed vulnerable library with CVE",
             kill_criteria="Only public config / test stubs; no actionable CVEs",
-            cwe_ids=["CWE-798", "CWE-200", "CWE-1104", "CWE-312"],
+            cwe_ids=["CWE-798", "CWE-200", "CWE-1104", "CWE-312", "CWE-321"],
             capec_ids=["CAPEC-70"],
             owasp="A02:2021 Cryptographic Failures",
             evidence=js_files[0],
@@ -1393,6 +1817,36 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
                 ),
                 why="EmailJS identifiers observed in JS surface",
             ))
+        add(Methodology(
+            id="js_client_hmac_signing",
+            title="CWE-321 client HMAC-SHA256 / ICS creds in public JS",
+            hunt="js_secrets",
+            specialist="js_secrets",
+            priority="high",
+            assumption=(
+                "Webpack/Angular bundles hide HMAC signing keys as empty-string object "
+                "property names (Object.keys join / for-in) and embed MQTT/RFID ICS creds"
+            ),
+            test=(
+                "scan_js_urls_for_secrets on main*.js / main-es2015*.js (do not skip 5–10MB "
+                "bundles). Read client_signing_findings. Reconstruction + HmacSHA256/HS256 "
+                "or MQTT/RFID fields is PASS. Live API/broker accept is extra; timeout is "
+                "not a kill. Do not require token minting."
+            ),
+            pass_criteria=(
+                "Public bundle reconstructs a signing secret used with HS256, or MQTT/RFID "
+                "credentials are present next to broker/RFID usage"
+            ),
+            kill_criteria="No reconstruction; HMAC uses a server-issued session secret; placeholders only",
+            cwe_ids=["CWE-321", "CWE-798", "CWE-312"],
+            capec_ids=["CAPEC-191", "CAPEC-70"],
+            owasp="A02:2021 Cryptographic Failures",
+            evidence=next(
+                (f for f in js_files if re.search(r"main[-.]|es2015", f, re.I)),
+                js_files[0],
+            ),
+            why="First-party JS bundles — client HMAC and ICS creds are a recurring CWE-321 leak",
+        ))
 
     if has_spa or source_maps or len(js_files) >= 3:
         add(Methodology(
@@ -1540,7 +1994,7 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             id="baseline_web",
             title="Baseline web vulnerability checks",
             hunt="baseline_web",
-            specialist="injection",
+            specialist="xss",
             priority="medium",
             assumption="Browsable UI may have common web flaws despite thin signals",
             test="Baseline XSS/open-redirect/header checks on browsed pages + light nuclei",
@@ -1577,7 +2031,7 @@ def methodologies_to_hunt_queue(methodologies: Sequence[Methodology]) -> List[Di
             "methodology_id": m.id,
             "cwe_ids": ",".join(m.cwe_ids),
         })
-    return queue[:18]
+    return queue[:22]
 
 
 def format_methodologies_for_prompt(methodologies: Optional[Sequence[Any]]) -> str:

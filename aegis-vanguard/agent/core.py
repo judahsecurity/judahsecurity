@@ -12,6 +12,7 @@ Supports multi-agent handoffs: an agent can transfer control to a
 specialized sub-agent, passing accumulated context.
 """
 
+import inspect
 import json
 import logging
 import os
@@ -34,6 +35,7 @@ except Exception:  # pragma: no cover - optional until Phase 2 deps installed
 from agent.tools import ToolDef, ToolRegistry
 from agent.guardrails import GuardrailEngine
 from agent.tracing import Tracer, TokenUsage
+from agent.session_ops import compact_message_tool_results, over_budget
 
 # Cloud billing / quota / auth signals (Anthropic, OpenAI, etc.) that should
 # trigger a local Ollama retry when OLLAMA_FALLBACK_ENABLED is on.
@@ -161,6 +163,17 @@ class RunResult:
     context: Dict[str, Any] = field(default_factory=dict)
 
 
+def _anthropic_create_kwargs(create_fn: Callable, kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop kwargs the installed anthropic SDK's Messages.create() does not accept."""
+    try:
+        params = inspect.signature(create_fn).parameters
+    except (TypeError, ValueError):
+        return kwargs
+    if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return kwargs
+    return {k: v for k, v in kwargs.items() if k in params}
+
+
 class AgentRunner:
     """Executes the ReACT loop for one or more agents."""
 
@@ -169,12 +182,16 @@ class AgentRunner:
         guardrails: Optional[GuardrailEngine] = None,
         tracer: Optional[Tracer] = None,
         default_model: str = "",
+        price_limit_usd: float = 0.0,
+        compact_keep_recent: int = 6,
     ):
         self.registry = ToolRegistry()
         self.guardrails = guardrails or GuardrailEngine()
         self.tracer = tracer or Tracer(enabled=False)
         self.default_model = default_model or os.environ.get("AEGIS_MODEL", "claude-sonnet-4-6")
         self.llm_backend = os.environ.get("AEGIS_LLM_BACKEND", "auto").lower()
+        self.price_limit_usd = float(price_limit_usd or 0)
+        self.compact_keep_recent = int(compact_keep_recent or 6)
         api_key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key and self.llm_backend in ("auto", "anthropic"):
             logger.warning("ANTHROPIC_API_KEY not set - agent loop will fail")
@@ -221,6 +238,20 @@ class AgentRunner:
         backend = self._backend_for_model(model)
 
         for turn in range(agent.max_turns):
+            spent = self.tracer.tokens.cost(model)
+            if over_budget(spent, self.price_limit_usd):
+                final_text = (
+                    f"Spend cap reached (${spent:.4f} of ${self.price_limit_usd:.2f}). "
+                    "Stopping before more LLM calls."
+                )
+                logger.warning("[%s] %s", agent.name, final_text)
+                messages.append({"role": "assistant", "content": final_text})
+                break
+
+            messages = compact_message_tool_results(
+                messages, keep_recent=self.compact_keep_recent,
+            )
+
             with self.tracer.span(
                 f"turn_{turn}", "agent_turn", agent_name=agent.name,
                 turn=turn, model=model, llm_backend=backend,
@@ -250,6 +281,14 @@ class AgentRunner:
                     ),
                     model=model,
                 )
+                spent = self.tracer.tokens.cost(model)
+                if over_budget(spent, self.price_limit_usd):
+                    final_text = (
+                        f"Spend cap reached (${spent:.4f} of ${self.price_limit_usd:.2f}). "
+                        "Stopping after this turn."
+                    )
+                    logger.warning("[%s] %s", agent.name, final_text)
+                    break
 
                 assistant_content = response.content
                 messages.append({"role": "assistant", "content": assistant_content})
@@ -509,14 +548,18 @@ class AgentRunner:
         backend = self._backend_for_model(model)
         try:
             if backend == "anthropic":
-                return self.client.messages.create(
-                    model=model,
-                    max_tokens=8192,
-                    temperature=agent.temperature,
-                    system=system_prompt,
-                    tools=tools_schemas,
-                    messages=messages,
-                )
+                create_fn = self.client.messages.create
+                payload = {
+                    "model": model,
+                    "max_tokens": 8192,
+                    "temperature": agent.temperature,
+                    "system": system_prompt,
+                    "tools": tools_schemas,
+                    "messages": messages,
+                }
+                # anthropic 1.0 dropped temperature from Messages.create;
+                # keep sending it on 0.x SDKs.
+                return create_fn(**_anthropic_create_kwargs(create_fn, payload))
 
             return self._call_litellm(
                 model=model,

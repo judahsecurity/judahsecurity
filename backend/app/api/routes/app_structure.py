@@ -39,6 +39,36 @@ class AppStructureSummary(BaseModel):
     total_api_endpoints: int
     total_interesting_urls: int
     scans_included: int
+    sitemap_count: int = 0
+    rest_api_count: int = 0
+    external_count: int = 0
+    secrets_count: int = 0
+    login_count: int = 0
+    sso_count: int = 0
+    screenshot_count: int = 0
+
+
+class SitemapNode(BaseModel):
+    """Praetorian-style sitemap / API / external row."""
+    kind: str
+    path: str
+    url: str
+    host: Optional[str] = None
+    method: Optional[str] = None
+    has_secrets: bool = False
+    has_login: bool = False
+    has_sso: bool = False
+    screenshot_count: int = 0
+    screenshot_id: Optional[int] = None
+    http_status: Optional[int] = None
+    response_title: Optional[str] = None
+    source: Optional[str] = None
+    sources: List[str] = Field(default_factory=list)
+    first_seen: Optional[str] = None
+    last_seen: Optional[str] = None
+    parameters: List[str] = Field(default_factory=list)
+    param_count: int = 0
+    access: Optional[str] = None
 
 
 class AppStructureResponse(BaseModel):
@@ -52,6 +82,12 @@ class AppStructureResponse(BaseModel):
     interesting_urls: List[str]
     file_extensions: Dict[str, int]
     source_breakdown: Dict[str, Dict[str, int]]
+    sitemap: List[SitemapNode] = Field(default_factory=list)
+    rest_api_endpoints: List[SitemapNode] = Field(default_factory=list)
+    external_urls: List[SitemapNode] = Field(default_factory=list)
+    sitemap_filters: Dict[str, int] = Field(default_factory=dict)
+    rest_summary: Dict[str, Any] = Field(default_factory=dict)
+    api_specs: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class AppStructureDetailedResponse(BaseModel):
@@ -562,25 +598,124 @@ async def get_app_structure_by_asset(
             j_lower = j_str.lower()
             if asset_value in j_lower or (root_domain and root_domain in j_lower):
                 all_js.add(j_str)
-    
+
+    sitemap_nodes: List[SitemapNode] = []
+    rest_nodes: List[SitemapNode] = []
+    external_nodes: List[SitemapNode] = []
+    sitemap_filters: Dict[str, int] = {}
+    try:
+        from app.services.sitemap_service import (
+            KIND_API,
+            KIND_EXTERNAL,
+            entries_for_asset,
+            hydrate_from_asset_json,
+            summarize_entries,
+        )
+        hydrated = hydrate_from_asset_json(db, asset)
+        if hydrated:
+            db.commit()
+        rows = entries_for_asset(db, asset.id, limit=8000)
+        sitemap_filters = summarize_entries(rows)
+        for row in rows:
+            node = SitemapNode.model_validate(row.to_dict())
+            if row.kind == KIND_API:
+                rest_nodes.append(node)
+                all_api.add(row.url or row.path)
+            elif row.kind == KIND_EXTERNAL:
+                external_nodes.append(node)
+            else:
+                sitemap_nodes.append(node)
+            if row.path:
+                all_paths.add(row.path)
+            if row.url:
+                all_urls.add(row.url)
+    except Exception:
+        sitemap_filters = {}
+
+    rest_summary: Dict[str, Any] = {}
+    api_specs_out: List[Dict[str, Any]] = []
+    try:
+        from app.services.rest_inventory_service import summarize_rest
+
+        stored = [e for e in (asset.rest_endpoints or []) if isinstance(e, dict)]
+        if not stored:
+            from app.services.rest_inventory_service import hydrate_rest_from_existing
+
+            if hydrate_rest_from_existing(asset, sitemap_api=rest_nodes):
+                db.add(asset)
+                db.commit()
+                stored = [e for e in (asset.rest_endpoints or []) if isinstance(e, dict)]
+        if stored:
+            rest_nodes = []
+            for e in stored:
+                path = e.get("path") or "/"
+                method = e.get("method") or "GET"
+                rest_nodes.append(
+                    SitemapNode(
+                        kind="api",
+                        path=path,
+                        url=e.get("url") or path,
+                        method=method,
+                        source=e.get("source"),
+                        sources=list(e.get("sources") or []),
+                        http_status=e.get("status"),
+                        last_seen=e.get("last_seen"),
+                        first_seen=e.get("first_seen"),
+                        parameters=list(e.get("parameters") or []),
+                        param_count=int(e.get("param_count") or len(e.get("parameters") or [])),
+                        access=e.get("access"),
+                    )
+                )
+                all_api.add(f"{method} {path}")
+        rest_summary = summarize_rest(asset)
+        for spec in asset.api_specs or []:
+            if not isinstance(spec, dict):
+                continue
+            api_specs_out.append(
+                {
+                    "url": spec.get("url"),
+                    "title": spec.get("title"),
+                    "version": spec.get("version"),
+                    "endpoint_count": spec.get("endpoint_count"),
+                    "discovered_by": spec.get("discovered_by"),
+                    "last_captured": spec.get("last_captured"),
+                    "has_spec": bool(spec.get("spec")),
+                }
+            )
+    except Exception:
+        pass
+
     return AppStructureResponse(
         summary=AppStructureSummary(
             total_paths=len(all_paths),
             total_urls=len(all_urls),
             total_parameters=len(all_params),
             total_js_files=len(all_js),
-            total_api_endpoints=len(all_api),
+            total_api_endpoints=max(len(all_api), len(rest_nodes)),
             total_interesting_urls=len(all_interesting),
-            scans_included=scans_with_data
+            scans_included=scans_with_data,
+            sitemap_count=len(sitemap_nodes),
+            rest_api_count=len(rest_nodes),
+            external_count=len(external_nodes),
+            secrets_count=int(sitemap_filters.get("secrets") or 0),
+            login_count=int(sitemap_filters.get("login") or 0),
+            sso_count=int(sitemap_filters.get("sso") or 0),
+            screenshot_count=int(sitemap_filters.get("screenshots") or 0),
         ),
-        paths=sorted(list(all_paths))[:1000],
-        urls=sorted(list(all_urls))[:1000],
+        paths=sorted(list(all_paths))[:5000],
+        urls=sorted(list(all_urls))[:5000],
         parameters=sorted(list(all_params)),
         js_files=sorted(list(all_js)),
-        api_endpoints=sorted(list(all_api)),
+        api_endpoints=sorted(list(all_api))[:2000],
         interesting_urls=sorted(list(all_interesting))[:500],
         file_extensions=dict(sorted(all_extensions.items(), key=lambda x: x[1], reverse=True)[:50]),
-        source_breakdown=source_breakdown
+        source_breakdown=source_breakdown,
+        sitemap=sitemap_nodes,
+        rest_api_endpoints=rest_nodes,
+        external_urls=external_nodes,
+        sitemap_filters=sitemap_filters,
+        rest_summary=rest_summary,
+        api_specs=api_specs_out,
     )
 
 

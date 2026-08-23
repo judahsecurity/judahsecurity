@@ -188,15 +188,23 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
         ((state.get("engagement_brain") or {}).get("hypotheses") or [])
     )
     web = is_web_target(state)
+    registry_only = False
+    try:
+        from app.services.agent.registry_surface import is_registry_primary
+
+        registry_only = is_registry_primary(state)
+    except Exception:
+        pass
+    pipeline = web and not registry_only
 
     missing: List[Dict[str, str]] = []
-    if web and not crawled:
+    if pipeline and not crawled:
         missing.append({
             "id": "crawl",
             "title": "Walk the app (execute_interceptor or execute_deep_crawl)",
             "next": "execute_interceptor (or execute_deep_crawl) on the primary URL",
         })
-    if web and (empty or not dir_brute):
+    if pipeline and (empty or not dir_brute):
         why = (
             "Root looks empty/404 — directory brute-force is mandatory"
             if empty and not dir_brute
@@ -208,7 +216,7 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
                 "title": why,
                 "next": "spawn_recon_workers(pack='enrich') or execute_feroxbuster with /opt/wordlists/app-dirs-common.txt",
             })
-    if web and crawled and not js_surface:
+    if pipeline and crawled and not js_surface:
         if "fingerprint_api" not in ran:
             missing.append({
                 "id": "fingerprint",
@@ -227,24 +235,36 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
                 "title": "JS endpoint extraction not run",
                 "next": "extract_js_endpoints then ingest_urls_into_map",
             })
-    if web and not fireteam:
+    if pipeline and not fireteam:
         missing.append({
             "id": "fireteam",
             "title": "Fireteam never dispatched — no specialist hunted unknown bugs",
             "next": "fireteam_dispatch(specialists='auto') — content_api mines params on live paths",
         })
-    if web and not params and not fireteam:
+    if pipeline and not params and not fireteam:
         missing.append({
             "id": "params",
             "title": "Parameter discovery not run (forms, query, hidden, JS, Arjun)",
             "next": "discover_parameters on live URLs, then execute_arjun, or fireteam_dispatch so content_api mines params",
         })
-    if web and not brain:
+    if pipeline and not brain:
         missing.append({
             "id": "brain",
-            "title": "Engagement brain / methodology cards not seeded",
-            "next": "sync_engagement_brain after the crawl/dir-brute map updates",
+            "title": "Threat model / methodology cards not seeded",
+            "next": "sync_engagement_brain (or build_threat_model) — aim before fireteam",
         })
+    try:
+        from app.services.agent.registry_surface import registry_missing_probes
+
+        missing.extend(registry_missing_probes(state))
+    except Exception:
+        pass
+    try:
+        from app.services.agent.wordpress_surface import wordpress_missing_probes
+
+        missing.extend(wordpress_missing_probes(state))
+    except Exception:
+        pass
 
     next_action = missing[0]["next"] if missing else ""
     return {
@@ -289,6 +309,13 @@ def format_tester_loop_for_prompt(progress: Dict[str, Any]) -> str:
             "Surface loop done. Hunt unknown vulns via fireteam summaries "
             "(authz, params, SSRF/URL-fetch, logic) — Nuclei is coverage leftover only."
         )
+    cmap = (state or {}).get("capability_map") or {}
+    assessment = cmap.get("assessment") if isinstance(cmap, dict) else None
+    if assessment:
+        from app.services.agent.page_assessment import format_page_assessment_for_prompt
+        brief = format_page_assessment_for_prompt(assessment)
+        if brief:
+            lines.append(brief)
     return "\n".join(lines)
 
 
@@ -318,7 +345,11 @@ def complete_blocked_reason(
             "Fingerprint-only recon is not an assessment. Crawl, brute dirs "
             "(especially on 404), fingerprint APIs, reconstruct lazy JS chunks, "
             "extract endpoints, mine parameters, dispatch the fireteam, then "
-            "prove or kill methodology cards. Nuclei/known-CVE spray is last, not first.\n"
+            "prove or kill methodology cards. If WordPress was fingerprinted, "
+            "REST user enum and admin-ajax timing must have run. "
+            "If *.azurecr.io is in inventory or the target, "
+            "probe_registry_anonymous must have run. "
+            "Nuclei/known-CVE spray is last, not first.\n"
             "Or set completion_reason to include 'defer methodologies' / "
             "'force complete' if intentionally skipping."
         )
@@ -333,6 +364,20 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
     tool_args, or None once crawl + dir brute + JS/API recon + fireteam have run.
     """
     state = state or {}
+    try:
+        from app.services.agent.registry_surface import (
+            is_registry_primary,
+            registry_forced_step,
+        )
+
+        reg_step = registry_forced_step(state)
+        if reg_step:
+            return reg_step
+        if is_registry_primary(state):
+            # Registry hosts are not websites — do not Interceptor-crawl /v2/.
+            return None
+    except Exception:
+        pass
     if not is_web_target(state):
         return None
     target = primary_web_target(state)
@@ -370,6 +415,15 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
                 "'no vulns' conclusion."
             ),
         }
+
+    try:
+        from app.services.agent.wordpress_surface import wordpress_forced_step
+
+        wp_step = wordpress_forced_step(state)
+        if wp_step:
+            return wp_step
+    except Exception:
+        pass
 
     if not dir_done:
         if dir_started and waits < 2:
@@ -419,6 +473,17 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             ),
         }
 
+    if "sync_engagement_brain" not in ran and "build_threat_model" not in ran:
+        return {
+            "tool_name": "sync_engagement_brain",
+            "tool_args": {},
+            "thought": (
+                "Assessment pipeline: aim — threat-model the app (actors, assets, "
+                "ranked outcomes, focus areas) before dispatching hunters. "
+                "This is the map; vulns are the metal detector."
+            ),
+        }
+
     if not fireteam:
         return {
             "tool_name": "fireteam_dispatch",
@@ -433,8 +498,25 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             },
             "thought": (
                 "Assessment pipeline: dispatch fireteam (content_api, api_authz, "
-                "injection, …). Fingerprints are not an assessment."
+                "xss, sqli, ssrf, …). Fingerprints are not an assessment."
             ),
         }
+
+    try:
+        from app.services.agent.wordpress_surface import wordpress_forced_step
+
+        wp_step = wordpress_forced_step(state)
+        if wp_step:
+            return wp_step
+    except Exception:
+        pass
+    try:
+        from app.services.agent.registry_surface import registry_forced_step
+
+        reg_step = registry_forced_step(state)
+        if reg_step:
+            return reg_step
+    except Exception:
+        pass
     return None
 

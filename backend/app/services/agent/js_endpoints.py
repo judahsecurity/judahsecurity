@@ -25,6 +25,27 @@ _FETCH_HINT = re.compile(
     r"""(?:fetch|\.get|\.post|\.ajax|\.load|axios)\s*\(\s*['"`]([^'"`]+)['"`]""",
     re.I,
 )
+# JShero / jsluice: method + URL from XHR and axios/jQuery verbs.
+_XHR_OPEN = re.compile(
+    r"""\.open\s*\(\s*['"`](GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)['"`]\s*,\s*['"`]([^'"`]{1,600})['"`]""",
+    re.I,
+)
+_VERB_CALL = re.compile(
+    r"""\b(?:axios\.(get|post|put|delete|patch)|\$\.(get|post)|jQuery\.(get|post))\s*\(\s*['"`]([^'"`]{1,600})['"`]""",
+    re.I,
+)
+_ASSIGN_SINK = re.compile(
+    r"""(?:\blocation\b(?:\.(?:href|assign|replace))?|[\w$.]+\.(?:href|src)|this\.(?:url|_url|baseUrl))\s*=\s*['"`]([^'"`]{1,600})['"`]""",
+    re.I,
+)
+_TEMPLATE = re.compile(r"`([^`]{1,1000})`")
+_TEMPLATE_EXPR = re.compile(r"\$\{[^}]{0,200}\}")
+_PARAM_OBJ = re.compile(
+    r"""\b(?:data|params|body|query|form|json)\s*:\s*\{([^{}]{0,2000})\}""",
+    re.I,
+)
+_OBJ_KEY = re.compile(r"""['"]?([A-Za-z_$][\w$\-]{0,60})['"]?\s*:""")
+_PARAM_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_\-]{2,99}$")
 # Portable port of extract_endpoints.sh (Perl): split minified JS, then
 # https URLs / quoted /paths / fetch|.get|.post|.ajax|.load targets.
 _EXTRACT = re.compile(
@@ -87,6 +108,41 @@ def triage_endpoints(
     }
 
 
+def _normalize_template(s: str) -> str:
+    return _TEMPLATE_EXPR.sub("EXPR", s or "")
+
+
+def extract_methods_and_params(body: str) -> Dict[str, Any]:
+    """JShero/jsluice extras: HTTP methods, config-object params, template routes."""
+    text = body or ""
+    methods: List[Dict[str, str]] = []
+    params: Set[str] = set()
+    extra: List[str] = []
+    for m in _XHR_OPEN.finditer(text):
+        url = (m.group(2) or "").strip()
+        if url:
+            extra.append(url)
+            methods.append({"method": m.group(1).upper(), "url": url[:300]})
+    for m in _VERB_CALL.finditer(text):
+        verb = (m.group(1) or m.group(2) or m.group(3) or "").upper()
+        url = (m.group(4) or "").strip()
+        if url:
+            extra.append(url)
+            methods.append({"method": verb, "url": url[:300]})
+    for m in _ASSIGN_SINK.finditer(text):
+        extra.append((m.group(1) or "").strip())
+    for m in _TEMPLATE.finditer(text):
+        cand = _normalize_template(m.group(1)).strip()
+        if cand and "EXPR" in cand and cand.replace("EXPR", "").replace("/", "").strip():
+            extra.append(cand)
+    for m in _PARAM_OBJ.finditer(text):
+        for km in _OBJ_KEY.finditer(m.group(1) or ""):
+            key = km.group(1)
+            if _PARAM_NAME.match(key) and key != "EXPR":
+                params.add(key)
+    return {"extra_urls": [u for u in extra if u], "methods": methods[:80], "params": sorted(params)[:80]}
+
+
 def extract_from_body(body: str) -> List[str]:
     found: List[str] = []
     seen: Set[str] = set()
@@ -106,6 +162,8 @@ def extract_from_body(body: str) -> List[str]:
         add(m.group(1) or "")
     for m in _BASE_URL.finditer(body or ""):
         add(m.group(1) or "")
+    for u in extract_methods_and_params(body).get("extra_urls") or []:
+        add(u)
     return found
 
 
@@ -120,6 +178,8 @@ async def extract_js_endpoints(
         return {"ok": False, "error": "no https URLs"}
     origin_host = origin_host or (urlparse(urls[0]).hostname or "")
     all_eps: List[str] = []
+    methods: List[Dict[str, str]] = []
+    params: Set[str] = set()
     analyzed = 0
     errors: List[str] = []
     async with httpx.AsyncClient(follow_redirects=True, verify=False, timeout=timeout) as client:
@@ -128,6 +188,9 @@ async def extract_js_endpoints(
                 r = await client.get(url)
                 body = (r.text or "")[:MAX_BYTES]
                 all_eps.extend(extract_from_body(body))
+                extra = extract_methods_and_params(body)
+                methods.extend(extra.get("methods") or [])
+                params.update(extra.get("params") or [])
                 analyzed += 1
             except Exception as exc:
                 errors.append(f"{url}: {exc}"[:180])
@@ -139,15 +202,19 @@ async def extract_js_endpoints(
             if item not in seen:
                 seen.add(item)
                 flat.append(item)
+    reseed = [u for u in flat if u.startswith("http") or u.startswith("/")][:80]
     return {
         "ok": True,
         "js_analyzed": analyzed,
         "endpoint_count": len(flat),
         "endpoints": flat[:200],
         "triage": groups,
+        "methods": methods[:80],
+        "params": sorted(params)[:80],
+        "reseed_urls": reseed,
         "errors": errors[:8],
         "next": (
-            "ingest_urls_into_map the in-scope paths, then mutate_captured_request / "
-            "discover_parameters on IDOR/SSRF candidates"
+            "ingest_urls_into_map the in-scope paths (reseed), then mutate_captured_request / "
+            "discover_parameters on IDOR/SSRF candidates. scan_js_sinks on the same bundles."
         ),
     }

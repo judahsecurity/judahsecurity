@@ -165,6 +165,30 @@ def parse_verdict_from_text(text: str) -> str:
 
 
 def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> str:
+    from app.services.agent.unauth_account_lookup import (
+        VERIFIER_ADDENDUM as ACCOUNT_VERIFIER_ADDENDUM,
+        is_account_lookup_finding,
+    )
+    from app.services.agent.unauth_settings_write import (
+        VERIFIER_ADDENDUM as SETTINGS_VERIFIER_ADDENDUM,
+        is_settings_write_finding,
+    )
+
+    packet = " ".join(
+        [
+            candidate.title or "",
+            candidate.description or "",
+            candidate.evidence or "",
+            candidate.claimed_request or "",
+        ]
+    )
+    addenda = []
+    if is_account_lookup_finding(packet):
+        addenda.append(ACCOUNT_VERIFIER_ADDENDUM)
+    if is_settings_write_finding(packet):
+        addenda.append(SETTINGS_VERIFIER_ADDENDUM)
+    class_addendum = ("\n\n" + "\n\n".join(addenda)) if addenda else ""
+
     return (
         "You are an ADVERSARIAL verifier in a FRESH session. You did not see the "
         "finder's transcript. Actively look for reasons this claim is WRONG.\n"
@@ -180,7 +204,8 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         f"Claimed request: {candidate.claimed_request or '—'}\n"
         f"Finder evidence (untrusted):\n{(candidate.evidence or '')[:2500]}\n"
         f"Description (untrusted):\n{(candidate.description or '')[:1500]}\n\n"
-        f"{threat_slice}\n\n"
+        f"{threat_slice}\n"
+        f"{class_addendum}\n"
         "When done, call record_verify_verdict(candidate_id, verdict, evidence) "
         "with verdict confirmed|refuted|inconclusive, then done=true. "
         "confirmed = you reproduced impact with your own request/response. "

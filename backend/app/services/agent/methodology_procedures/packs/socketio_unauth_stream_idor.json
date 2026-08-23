@@ -1,0 +1,25 @@
+{
+  "id": "socketio_unauth_stream_idor",
+  "title": "Unauth Socket.IO get_stream IDOR (url_key)",
+  "summary": "Prove anonymous get_stream returns a stream namespace for a fabricated siteId. Do not fetch video. Do not crash the Node process.",
+  "steps": [
+    "Confirm Socket.IO: GET /socket.io/?EIO=3&transport=polling (sid) or wss://…/socket.io/.",
+    "POST Engine.IO packet 42[\"get_stream\", {siteId: fabricated, userId: ATTACKER, userType: Anonymous}].",
+    "PASS if a url_key / namespace is returned without a session. Repeat 1–2 other siteIds.",
+    "Do not fetch the video stream. Do not send null or malformed crash loops (ICS availability).",
+    "Then canary Origin on /socket.io/ (queue cors_credentials) and quote hardcoded siteId/userType=Admin from page JS (queue js_secrets).",
+    "submit_finding_candidate High. queue_finding_followups(vuln_type='socketio_idor')."
+  ],
+  "tools": ["execute_curl", "execute_browser", "compare_requests"],
+  "pass_signals": [
+    "Anonymous get_stream returns url_key for a fabricated siteId"
+  ],
+  "kill_signals": [
+    "Upgrade/event requires auth; get_stream 401/403; no url_key"
+  ],
+  "references": [
+    "CWE-639",
+    "CWE-306",
+    "https://socket.io/docs/v4/server-socket-instance/"
+  ]
+}

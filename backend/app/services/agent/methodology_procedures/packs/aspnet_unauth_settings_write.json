@@ -1,0 +1,27 @@
+{
+  "id": "aspnet_unauth_settings_write",
+  "title": "Unauthenticated ASP.NET / API settings write",
+  "summary": "Prove missing [Authorize] on Settings/Save* writes with a paired 401 sibling vs 200 void.",
+  "steps": [
+    "Map POST/PUT Save*/Write*/Settings endpoints from crawl, JS, or OpenAPI (e.g. /api/Settings/SaveSettings).",
+    "Baseline: unauth POST a sibling write that should be protected (/api/TaskAdmin/UpdateTask or similar) with use_auth_session=false. Expect 401.",
+    "Mutant: unauth POST SaveSettings with one canary key (aegis-verify-<rand>) matching the settings schema (pass json= body). Do not send a replacement settings collection. Do not flip enableNotifications/createPlannerTasks/powerBIReportId.",
+    "PASS: sibling 401 AND SaveSettings 200 with Content-Length: 0 (ASP.NET Core void success). GET GetSettings 500 / NullReferenceException is NOT a kill.",
+    "submit_finding_candidate High with the paired statuses. queue_finding_followups(vuln_type='unauth_settings_write').",
+    "Then probe LogQuery/Audit/ReadTasks/OpenDocument without 401 as a sibling missing-auth card — empty arrays and Graph 500s are not this write."
+  ],
+  "tools": ["compare_requests", "execute_curl", "list_captured_requests"],
+  "pass_signals": [
+    "Protected sibling write returns 401 without Authorization",
+    "SaveSettings returns 200 Content-Length: 0 without Authorization"
+  ],
+  "kill_signals": [
+    "SaveSettings returns 401/403 like siblings"
+  ],
+  "references": [
+    "CWE-306",
+    "CWE-862",
+    "OWASP A01:2021 Broken Access Control",
+    "https://learn.microsoft.com/en-us/aspnet/core/security/authorization/simple"
+  ]
+}

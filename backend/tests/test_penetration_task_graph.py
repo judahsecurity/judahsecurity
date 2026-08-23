@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from app.services.agent.auto_prompter import (
     SOLILOQUY,
+    TOOLS_FAILED,
     classify_failure,
     rewrite_note,
     should_rewrite,
@@ -175,6 +176,26 @@ def test_auto_prompter_rewrites_soliloquy():
     rewrite = should_rewrite(graph, summary, report)
     assert rewrite is not None
     assert rewrite.failure == SOLILOQUY
+
+
+def test_auto_prompter_blocked_tools_rewrites_to_custom_probe():
+    summary = ExecutorSummary(
+        specialist="injection",
+        verdict="retry",
+        soliloquy=False,
+        summary="WAF blocked sqlmap",
+        tools_run=["execute_sqlmap"],
+        evidence="",
+    )
+    report = SimpleNamespace(
+        tool_calls=[SimpleNamespace(success=False)],
+        error=None,
+        summary="WAF blocked sqlmap",
+    )
+    assert classify_failure(summary, report) == TOOLS_FAILED
+    note = rewrite_note(TOOLS_FAILED, summary)
+    assert "compare_requests" in note or "run_custom_probe" in note
+    assert "waf" in note.lower() or "blocked" in note.lower()
 
 
 def test_auto_prompter_stops_after_max_attempts():

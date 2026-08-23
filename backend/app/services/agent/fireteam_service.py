@@ -41,6 +41,8 @@ class SpecialistProfile:
     max_tools_per_iteration: int = 4
     system_prompt_suffix: str = ""
     epithet: str = ""  # Aegis pantheon display name (Samson, Daniel, …)
+    # model_router task: recon (cheap) vs offensive (flagship proof)
+    llm_task: str = "offensive"
 
     def __post_init__(self) -> None:
         if not self.epithet:
@@ -78,6 +80,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_feroxbuster",
         ],
         max_iterations=8,
+        llm_task="recon",
     ),
     SpecialistProfile(
         name="content_api",
@@ -106,21 +109,24 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "fingerprint_api",
             "extract_js_endpoints",
             "fetch_lazy_chunks",
+            "scan_js_sinks",
         ],
         max_iterations=12,
+        llm_task="recon",
     ),
     SpecialistProfile(
         name="js_secrets",
         role=(
             "JavaScript recon specialist. Extract endpoints from bundles, "
-            "find secrets (especially hostname-keyed client_id/client_secret maps "
-            "in Next.js admin chunks), then prove live API impact with a bounded read."
+            "find secrets (hostname-keyed OAuth maps, CWE-321 client HMAC via "
+            "Object.keys join, MQTT/RFID ICS creds), then prove impact."
         ),
         allowed_tools=[
             "query_assets",
             "scan_js_urls_for_secrets",
             "fetch_lazy_chunks",
             "extract_js_endpoints",
+            "scan_js_sinks",
             "ingest_urls_into_map",
             "execute_retirejs",
             "execute_gitleaks",
@@ -142,16 +148,23 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "create_scan",
         ],
         max_iterations=12,
+        llm_task="recon",
         system_prompt_suffix=(
-            "First fetch_lazy_chunks (dry_run then download) on webpack/Vite/Next runtime bundles, "
-            "then extract_js_endpoints, ingest_urls_into_map, then secrets. "
-            "Hunt first-party /_next/static/chunks/*.js and admin bundles for "
-            "hostname-keyed config objects (prod/dev/qa → client_id + client_secret). "
-            "Credentials are often sent as client_id/client_secret HTTP headers, not Bearer. "
+            "First fetch_lazy_chunks (dry_run then download) on webpack/Vite/Next/Angular "
+            "runtime bundles, then extract_js_endpoints, ingest_urls_into_map, then secrets. "
+            "Hunt first-party /_next/static/chunks/*.js, Angular main-es2015.*.js, and "
+            "main.*.js (often 5–10MB — do not skip). "
+            "CWE-321: scan_js_urls_for_secrets client_signing_findings reconstructs "
+            "Object.keys(obj).join('') / for-in HMAC-SHA256 keys (iLens this.waste) and "
+            "MQTT/RFID creds. SUBMIT on public reconstruction + HmacSHA256/HS256 in the "
+            "same unauth bundle. Live token accept is extra; backend timeout is NOT a kill. "
+            "Stash hmac_key / mqtt / rfid via add_engagement_credential. Do not brute brokers. "
+            "Also hunt hostname-keyed config objects (prod/dev/qa → client_id + client_secret). "
+            "OAuth credentials are often sent as client_id/client_secret HTTP headers, not Bearer. "
             "Sandbox/admin UIs commonly ship PRODUCTION pairs — stash all envs, redact in evidence. "
-            "Prove impact with ONE read-only API call (count + 1-2 redacted sample fields). "
+            "For OAuth: prove impact with ONE read-only API call (count + 1-2 redacted sample fields). "
             "Do not paginate or bulk-export. Call prod APIs only if in scope. "
-            "On hit: add_engagement_credential(secret_type=oauth_client) + "
+            "On hit: add_engagement_credential + "
             "queue_finding_followups(vuln_type='js_secrets'). "
             "Also hunt EmailJS: emailjs_userid / emailjs_serviceid / emailjs_templateid "
             "(or service_id: service_*). Prove with ONE browser-context POST to "
@@ -159,9 +172,10 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "canary inbox (interactsh/operator) — never customer employees or arbitrary "
             "recipients. curl 403 from missing Origin is NOT a kill; retry execute_browser. "
             "Max one canary per template (cap two). "
-            "Write description + impact + assets + remediation (rotate ALL env pairs and "
-            "EmailJS user_id; never ship secrets to the browser — server-side proxy; "
-            "EmailJS origin allowlist + rate limit). CWE-798 / CWE-312 / CWE-540."
+            "Write description + impact + assets + remediation (rotate HMAC key, MQTT/RFID, "
+            "ALL env pairs and EmailJS user_id; never ship secrets to the browser — "
+            "server-side signing/proxy; EmailJS origin allowlist + rate limit). "
+            "CWE-321 / CWE-798 / CWE-312 / CWE-540."
         ),
     ),
     SpecialistProfile(
@@ -178,6 +192,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "analyze_attack_surface",
             "rank_attack_surface",
         ],
+        llm_task="recon",
     ),
     SpecialistProfile(
         name="secrets_hunter",
@@ -202,6 +217,11 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         allowed_tools=[
             "query_assets",
             "execute_themis",
+            "execute_curl",
+            "probe_registry_anonymous",
+            "validate_finding",
+            "submit_finding_candidate",
+            "queue_finding_followups",
             "search_cve",
             "analyze_attack_surface",
         ],
@@ -258,6 +278,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "mutate_list",
         ],
         max_iterations=4,
+        llm_task="recon",
         system_prompt_suffix=(
             "Output a ranked hunt queue with concrete URLs/forms/APIs from the mission. "
             "Call save_note(category='artifact') with the map summary."
@@ -294,7 +315,12 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         system_prompt_suffix=(
             "Prefer compare_requests (anonymous vs auth). On default/weak login success: "
             "add_engagement_credential + queue_finding_followups(vuln_type='default_login'). "
-            "Never invent credentials. Hand large sprays to credential_assault (Samson)."
+            "Never invent credentials. Hand large sprays to credential_assault (Samson). "
+            "ASP.NET SaveSettings: missing [Authorize] is sibling 401 vs unauth 200 void — "
+            "hand to api_authz; queue_finding_followups(vuln_type='unauth_settings_write'). "
+            "djoser reset_email: unauth 204 vs set_password 401 — hand to auth_logic; "
+            "queue_finding_followups(vuln_type='email_change_ato'). One canary; do not "
+            "complete ATO on a real mailbox."
         ),
     ),
     SpecialistProfile(
@@ -370,9 +396,24 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "OT/ICS asset trees. queue_finding_followups(vuln_type='mass_assignment'). "
             "Kill only if fields are readOnly / extra_kwargs or object-level 403. "
             "Unauth account lookup: schema security: {} on /api/auth/account/?email= "
-            "plus is_staff/role, or compare_requests sibling 401 vs lookup 200/500. "
+            "plus is_staff/role, or compare_requests sibling 401 vs lookup 200/404/500. "
             "One canary email (aegis-enum-canary@example.invalid) — do not spray. "
-            "DB down is SUBMIT. queue_finding_followups(vuln_type='unauth_account_lookup'). "
+            "DB down or 404 existence oracle is SUBMIT Critical. Do not claim a 200 "
+            "role body unless stdout has it. "
+            "queue_finding_followups(vuln_type='unauth_account_lookup'). "
+            "Unauth settings write: compare_requests protected write 401 vs POST "
+            "/api/Settings/SaveSettings 200 Content-Length: 0 (void) with "
+            "use_auth_session=false. GET 500 is SUBMIT. "
+            "One canary key (aegis-verify-*); do not replace production settings. "
+            "queue_finding_followups(vuln_type='unauth_settings_write'). "
+            "Auth header bypass: no Authorization vs Bearer aegis-invalid — SUBMIT if "
+            "no-header is 200/400 AND invalid-bearer is 401. 400 missing-params is a bypass. "
+            "queue_finding_followups(vuln_type='auth_header_bypass'). "
+            "Socket.IO get_stream: Engine.IO polling + fabricated siteId → url_key. "
+            "Do not fetch video; do not send null crash loops. "
+            "queue_finding_followups(vuln_type='socketio_idor'). "
+            "ML train/delete: self-reg JWT often has no RBAC. Do not delete production models. "
+            "queue_finding_followups(vuln_type='ml_pipeline_rbac'). "
             "CORS: canary Origin (not evil.com) vs none. SUBMIT if ACAO echoes AND "
             "credentials=true. OPTIONS preflight Authorization+POST. Keycloak: repeat on "
             "token, userinfo, /auth/admin/realms/<realm>/users — header proof is enough; "
@@ -472,6 +513,85 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ),
     ),
     SpecialistProfile(
+        name="xss",
+        role=(
+            "XSS specialist. Hunt reflected/stored/DOM XSS on search and reflect "
+            "params the map actually showed — not a generic injection dump."
+        ),
+        allowed_tools=[
+            "execute_xsstrike",
+            "execute_dalfox",
+            "execute_browser",
+            "execute_curl",
+            "compare_requests",
+            "mutate_list",
+            "list_captured_requests",
+            "mutate_captured_request",
+            "run_custom_probe",
+            "update_hypothesis",
+            "log_engagement_approach",
+            "validate_finding",
+            "submit_finding_candidate",
+        ],
+        max_iterations=10,
+        system_prompt_suffix=(
+            "Only params that reflect or render (q, search, name, message, comment, "
+            "redirect). Canary first, then browser confirm. Status 200 is not XSS."
+        ),
+    ),
+    SpecialistProfile(
+        name="sqli",
+        role=(
+            "SQL / template / command injection specialist. Probe mapped non-reflect "
+            "params with canaries; escalate to sqlmap/commix only on hits."
+        ),
+        allowed_tools=[
+            "discover_parameters",
+            "execute_arjun",
+            "execute_sqlmap",
+            "execute_commix",
+            "generate_injection_payloads",
+            "execute_curl",
+            "compare_requests",
+            "mutate_captured_request",
+            "run_custom_probe",
+            "update_hypothesis",
+            "log_engagement_approach",
+            "validate_finding",
+            "submit_finding_candidate",
+        ],
+        max_iterations=10,
+        system_prompt_suffix=(
+            "Canary → differential. sqlmap --batch only on confirmed candidates. "
+            "No os-shell. Status 200 is not SQLi."
+        ),
+    ),
+    SpecialistProfile(
+        name="ssrf",
+        role=(
+            "SSRF / URL-fetch specialist. Webhooks, proxies, imports, preview, "
+            "datasource, requestUrl fields from the map."
+        ),
+        allowed_tools=[
+            "execute_interactsh",
+            "execute_curl",
+            "compare_requests",
+            "list_captured_requests",
+            "mutate_captured_request",
+            "run_custom_probe",
+            "update_hypothesis",
+            "log_engagement_approach",
+            "validate_finding",
+            "submit_finding_candidate",
+        ],
+        max_iterations=10,
+        system_prompt_suffix=(
+            "Plant execute_interactsh, compare benign vs in-scope canary. "
+            "Never metadata/localhost if Lictor blocks. OOB-only without an "
+            "internal body is incomplete."
+        ),
+    ),
+    SpecialistProfile(
         name="file_upload",
         role=(
             "File upload specialist. Abuse upload forms/APIs from the map for "
@@ -519,6 +639,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "scan_js_urls_for_secrets",
             "fetch_lazy_chunks",
             "extract_js_endpoints",
+            "scan_js_sinks",
             "execute_retirejs",
             "execute_curl",
             "compare_requests",
@@ -573,6 +694,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_nikto",
             "execute_httpx",
             "execute_curl",
+            "execute_gitleaks",
+            "probe_registry_anonymous",
             "get_engagement_brain",
             "queue_finding_followups",
             "update_hypothesis",
@@ -582,6 +705,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "save_note",
         ],
         max_iterations=8,
+        llm_task="recon",
         system_prompt_suffix=(
             "Check get_engagement_brain for credentials before nuclei. "
             "Grafana default-login: execute_nuclei args='-u https://host -id grafana-default-login "
@@ -616,6 +740,12 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "(AzureWebJobsStorage, Cosmos keys, MACHINEKEY, WEBSITE_AUTH_*), classify secret "
             "classes, redact keys, queue_finding_followups(vuln_type='azure_function_env_dump'). "
             "Do not upload function packages or inject code. Probe the -dev- / production peer hostname. "
+            "ACR / Docker Registry (*.azurecr.io or /v2/_catalog): unauth GET "
+            "/oauth2/token?service=<host>&scope=registry:catalog:* then GET /v2/_catalog "
+            "with the bearer. Catalog names = SUBMIT High. Then tags/list + config/history "
+            "on at most 1–3 first-party repos. Do not pull the whole catalog; do not push; "
+            "do not authenticate recovered PATs. queue_finding_followups("
+            "vuln_type='docker_registry'). CWE-306. "
             "CVE-2024-9264 (Grafana): ANY authenticated session (Viewer / SA token is enough). "
             "POST /api/ds/query with type=sql. SUBMIT if the server forks /usr/local/bin/duckdb "
             "— including 'no such file or directory'. Missing DuckDB is NOT a kill. "
@@ -681,13 +811,46 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "in /metrics are NOT kills. "
             "OpenAPI/DRF mass assignment: SUBMIT on writable id/created/user without "
             "readOnly, or a list that documents 'all users' — even if the DB is down. "
-            "Unauth account lookup: SUBMIT on security: {} + is_staff/role, or 500/200 "
-            "vs sibling 401. Do not kill because the DB is down. One canary email; "
-            "do not spray. "
+            "Unauth account lookup: SUBMIT Critical on security: {} + is_staff/role, or "
+            "200/404/500 vs sibling 401. Do not kill because the DB is down or the "
+            "lookup is 404. One canary email; do not spray. Do not claim a 200 role "
+            "body unless stdout has it. "
+            "Unauth settings write: SUBMIT on sibling write 401 vs SaveSettings 200 "
+            "void (Content-Length: 0). GET GetSettings 500 is not a kill. One canary "
+            "key; do not replace production settings. "
             "CORS/Keycloak: SUBMIT if a canary Origin is reflected with credentials=true "
             "on token/userinfo/admin. Header proof is enough; do not dump /users. "
             "Keycloak admin-cli: SUBMIT if password grant works without client_secret and "
             "<=8 failures have no 429/lockout — do not require a guessed password; no hydra."
+        ),
+    ),
+    SpecialistProfile(
+        name="risk_assessor",
+        role=(
+            "Risk assessor (Marcus). Writes demonstrated-only risk assessments "
+            "on published findings — confirm/downgrade/upgrade severity, CVSS, "
+            "control failures, remediation with close criteria. Does not exploit "
+            "and does not live-retest."
+        ),
+        allowed_tools=[
+            "assess_finding_risk",
+            "query_vulnerabilities",
+            "get_notes",
+            "save_note",
+            "sanitize_evidence",
+            "get_engagement_brain",
+        ],
+        max_iterations=6,
+        epithet="Marcus",
+        llm_task="recon",
+        system_prompt_suffix=(
+            "You are Marcus. Score the published packet only. Call "
+            "assess_finding_risk(finding_id, assessment JSON). Do NOT "
+            "execute_curl, execute_browser, or create_finding. Critical "
+            "requires demonstrated write/RCE/cloud credentials — except unauth "
+            "/api/auth/account/ (schema security: {} + is_staff/role, or sibling "
+            "401 vs 200/404/500) which is Critical. Do not invent a 200 UserAccount "
+            "body. Non-blind SSRF with IMDS blocked is High. If RA IMPROVE, fix gaps once."
         ),
     ),
     SpecialistProfile(
@@ -700,6 +863,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "compare_requests",
             "execute_curl",
             "execute_httpx",
+            "scan_js_urls_for_secrets",
             "replay_http_request",
             "record_verify_verdict",
             "sanitize_evidence",
@@ -709,6 +873,12 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         max_iterations=6,
         system_prompt_suffix=(
             "You did not see the hunter's chain. Re-derive with your own requests. "
+            "CWE-321 HMAC/ICS in JS: re-run scan_js_urls_for_secrets on the cited bundle; "
+            "confirmed if client_signing_findings reconstructs the signing key or MQTT/RFID "
+            "creds. Do not require JWT mint or broker login. "
+            "Unauth account lookup: confirmed on schema security: {} + is_staff/role OR "
+            "sibling 401 vs lookup 200/404/500 with aegis-enum-canary@example.invalid. "
+            "404/500 is confirmed, not refuted. Do not spray emails. "
             "Call record_verify_verdict only. Never create_finding or "
             "submit_finding_candidate. Never call get_engagement_brain."
         ),
@@ -1098,6 +1268,7 @@ async def run_fireteam(
     max_parallel: int = 4,
     progress_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
     directives: Optional[Dict[str, Any]] = None,
+    llm_for_specialist: Optional[Callable[[SpecialistProfile], Any]] = None,
 ) -> FireteamResult:
     """Run a fireteam in parallel and return the merged result.
 
@@ -1133,11 +1304,18 @@ async def run_fireteam(
                     await progress_callback(label, "started")
                 except Exception:
                     pass
+            spec_llm = llm
+            if llm_for_specialist is not None:
+                try:
+                    spec_llm = llm_for_specialist(p) or llm
+                except Exception:
+                    logger.warning("llm_for_specialist failed for %s; using default", p.name, exc_info=True)
+                    spec_llm = llm
             rep = await _run_specialist(
                 p,
                 mission,
                 targets_list,
-                llm,
+                spec_llm,
                 tools_manager,
                 directive=directives.get(p.name),
             )
