@@ -98,6 +98,48 @@ _ES_CLUSTER_RE = re.compile(
 _ES_ACK_RE = re.compile(r'"acknowledged"\s*:\s*true', re.I)
 
 
+# Identifiers an agent must not invent in Detection summaries.
+_SERVICE_ID_RE = re.compile(r"\bservice_[A-Za-z0-9_-]+\b", re.I)
+_TEMPLATE_ID_RE = re.compile(r"\btemplate_[A-Za-z0-9_-]+\b", re.I)
+_QUOTED_SECRET_RE = re.compile(r"""['"]([A-Za-z0-9_!@#$%^&*+/=?.:-]{8,80})['"]""")
+_PAREN_ID_RE = re.compile(r"\(([A-Za-z0-9_-]{10,64})\)")
+_CLAIM_KEYWORD_EVIDENCE = (
+    ("emailjs", ("emailjs", "service_", "template_", "api.emailjs.com")),
+    ("encryption_key", ("encryption_key", "encryptionkey", "encryptionKey")),
+    ("encryptionkey", ("encryption_key", "encryptionkey", "encryptionKey")),
+)
+
+
+def claim_supported_by_output(claim: str, stdout: str, stderr: str = "") -> bool:
+    """True unless the claim invents identifiers or classes absent from tool output.
+
+    Detection step text must not say EmailJS IDs / encryption keys were extracted
+    when stdout is a failed regex hunt (YOUR_KEY, translateY, ('kevin','kevin')).
+    Generic paraphrases with no secret-like IDs are allowed.
+    """
+    text = (claim or "").strip()
+    if not text:
+        return True
+    blob = f"{stdout or ''}\n{stderr or ''}"
+    blob_l = blob.lower()
+    ids: List[str] = []
+    ids.extend(_SERVICE_ID_RE.findall(text))
+    ids.extend(_TEMPLATE_ID_RE.findall(text))
+    ids.extend(_QUOTED_SECRET_RE.findall(text))
+    ids.extend(_PAREN_ID_RE.findall(text))
+    for ident in ids:
+        token = str(ident or "").strip()
+        if len(token) < 8:
+            continue
+        if token.lower() not in blob_l:
+            return False
+    lower = text.lower()
+    for keyword, evidence_tokens in _CLAIM_KEYWORD_EVIDENCE:
+        if keyword in lower and not any(tok.lower() in blob_l for tok in evidence_tokens):
+            return False
+    return True
+
+
 def redact_secrets(text: Optional[str]) -> str:
     """Keep usernames visible; strip passwords, basic-auth blobs, and hash material."""
     if not text:
@@ -188,6 +230,27 @@ def summarize_output(tool: str, args: Sequence[str], stdout: str, stderr: str, e
 
     arg_preview = " ".join(args)[:120]
     tool_label = (tool or "tool").replace("execute_", "")
+
+    if "interactsh" in (tool or "").lower():
+        parsed = _coerce_json(blob) if blob.strip().startswith("{") else None
+        if isinstance(parsed, dict) and parsed.get("payload_domain") and parsed.get("new_interactions") is None:
+            domain = parsed.get("payload_domain")
+            url = parsed.get("payload_url") or f"https://{domain}"
+            return (
+                f"Registered Interactsh payload {domain}"[:MAX_SUMMARY],
+                f"session_id={parsed.get('session_id')} payload_url={url}"[:MAX_OUTCOME],
+            )
+        if isinstance(parsed, dict) and parsed.get("new_interactions") is not None:
+            n = int(parsed.get("new_interactions") or 0)
+            hits = parsed.get("interactions") if isinstance(parsed.get("interactions"), list) else []
+            protos = ",".join(
+                sorted({str(h.get("protocol") or "") for h in hits if isinstance(h, dict) and h.get("protocol")})
+            ) or "OOB"
+            domain = parsed.get("payload_domain") or "payload"
+            return (
+                f"Polled Interactsh ({n} new interaction{'s' if n != 1 else ''})"[:MAX_SUMMARY],
+                f"{n} {protos} callback(s) on {domain}"[:MAX_OUTCOME],
+            )
 
     if welcome and status == "200":
         summary = f"Authenticated to CouchDB and received welcome message"
@@ -286,6 +349,7 @@ DISPLAY_TOOLS = {
     "execute_interceptor": "click",
     "replay_http_request": "request",
     "compare_requests": "request",
+    "execute_interactsh": "oob",
 }
 
 MAX_JSON_LIST = 40
@@ -381,18 +445,23 @@ def claim_payload(tool: str, stdout: str, result: Optional[Dict[str, Any]] = Non
     result = result if isinstance(result, dict) else {}
     parsed = None
     for candidate in (result.get("payload"), result, _coerce_json(stdout)):
-        if isinstance(candidate, dict) and candidate:
-            parsed = candidate
-            break
+        if not isinstance(candidate, dict) or not candidate:
+            continue
+        if set(candidate.keys()) <= {"stdout", "stderr", "exit_code", "output", "error", "success"}:
+            continue
+        parsed = candidate
+        break
     if not isinstance(parsed, dict):
-        return None
-    if set(parsed.keys()) <= {"stdout", "stderr", "exit_code", "output", "error", "success"}:
         return None
     if any(k in parsed for k in ("dom_changed", "elements", "new_preview")):
         return _clip_click_payload(parsed)
     if any(k in parsed for k in ("raw_body", "response_headers")) or isinstance(parsed.get("response"), dict):
         return _clip_request_payload(parsed)
     alias = display_tool(tool)
+    if alias == "oob" or any(
+        k in parsed for k in ("payload_domain", "payload_url", "new_interactions", "interactions")
+    ):
+        return _clip_oob_payload(parsed)
     if alias == "click":
         return _clip_click_payload(parsed) if "elements" in parsed else None
     if alias == "request":
@@ -400,7 +469,48 @@ def claim_payload(tool: str, stdout: str, result: Optional[Dict[str, Any]] = Non
     return None
 
 
+def _clip_oob_payload(obj: Dict[str, Any]) -> Dict[str, Any]:
+    hits = obj.get("interactions") if isinstance(obj.get("interactions"), list) else []
+    slim = []
+    for hit in hits[:MAX_JSON_LIST]:
+        if not isinstance(hit, dict):
+            continue
+        slim.append({
+            "protocol": hit.get("protocol"),
+            "remote_address": hit.get("remote_address"),
+            "timestamp": hit.get("timestamp"),
+            "q_type": hit.get("q_type"),
+        })
+    domain = str(obj.get("payload_domain") or "")
+    out: Dict[str, Any] = {
+        "session_id": obj.get("session_id"),
+        "payload_domain": domain or None,
+        "payload_url": obj.get("payload_url") or (f"https://{domain}" if domain else None),
+        "payload_email": obj.get("payload_email") or (f"aegis@{domain}" if domain else None),
+    }
+    if obj.get("new_interactions") is not None:
+        out["new_interactions"] = obj.get("new_interactions")
+        out["interactions"] = slim
+    return {k: v for k, v in out.items() if v is not None and v != ""}
+
+
 def summarize_claim(alias: str, payload: Dict[str, Any]) -> tuple[str, str]:
+    if alias == "oob":
+        n = payload.get("new_interactions")
+        domain = payload.get("payload_domain") or "payload"
+        if n is not None:
+            hits = payload.get("interactions") if isinstance(payload.get("interactions"), list) else []
+            protos = ",".join(
+                sorted({str(h.get("protocol") or "") for h in hits if isinstance(h, dict) and h.get("protocol")})
+            ) or "OOB"
+            return (
+                f"Polled Interactsh ({n} new interaction{'s' if n != 1 else ''})"[:MAX_SUMMARY],
+                f"{n} {protos} callback(s) on {domain}"[:MAX_OUTCOME],
+            )
+        return (
+            f"Registered Interactsh payload {domain}"[:MAX_SUMMARY],
+            f"session_id={payload.get('session_id')} payload_url={payload.get('payload_url')}"[:MAX_OUTCOME],
+        )
     if alias == "click":
         preview = payload.get("new_preview") or []
         login = next(
@@ -458,7 +568,10 @@ def normalize_step(raw: Any, index: int) -> Optional[Dict[str, Any]]:
     alias = str(raw.get("display_tool") or display_tool(tool)).strip() or display_tool(tool)
     payload = None
     if isinstance(raw.get("result"), dict) and any(
-        k in raw["result"] for k in ("dom_changed", "elements", "raw_body", "response_headers", "url")
+        k in raw["result"] for k in (
+            "dom_changed", "elements", "raw_body", "response_headers", "url",
+            "payload_domain", "payload_url", "new_interactions",
+        )
     ):
         payload = claim_payload(tool, stdout, raw.get("result"))
     if payload is None:
@@ -469,8 +582,16 @@ def normalize_step(raw: Any, index: int) -> Optional[Dict[str, Any]]:
         claim_summary, claim_outcome = summarize_claim(alias, payload)
         auto_summary = claim_summary or auto_summary
         auto_outcome = claim_outcome or auto_outcome
-    summary = redact_secrets(str(raw.get("summary") or raw.get("description") or auto_summary).strip())
-    outcome = redact_secrets(str(raw.get("outcome") or raw.get("result_summary") or auto_outcome).strip())
+    support_blob = stdout
+    if payload:
+        try:
+            support_blob = f"{stdout}\n{json.dumps(payload, default=str)}"
+        except (TypeError, ValueError):
+            support_blob = f"{stdout}\n{payload}"
+    claimed_summary = redact_secrets(str(raw.get("summary") or raw.get("description") or auto_summary).strip())
+    claimed_outcome = redact_secrets(str(raw.get("outcome") or raw.get("result_summary") or auto_outcome).strip())
+    summary = claimed_summary if claim_supported_by_output(claimed_summary, support_blob, stderr) else auto_summary
+    outcome = claimed_outcome if claim_supported_by_output(claimed_outcome, support_blob, stderr) else auto_outcome
 
     try:
         step_n = int(raw.get("step") or index)
@@ -661,28 +782,4 @@ def build_agent_detection(
     asset_urls = parse_asset_urls(assets, fallback=target)
     if asset_urls:
         payload["assets"] = asset_urls
-    return payload
-    steps = normalize_chain(chain)
-    if not steps and invocations:
-        selected = select_proof_invocations(invocations, target=target)
-        steps = []
-        for i, inv in enumerate(selected, start=1):
-            step = invocation_to_step(inv, i)
-            if step:
-                steps.append(step)
-
-    payload: Dict[str, Any] = {
-        "source": "agent",
-        "chain": steps,
-        "step_count": len(steps),
-    }
-    if session_id:
-        payload["session_id"] = str(session_id)[:128]
-    if context:
-        payload["context"] = str(context)[:8000]
-    if not_demonstrated:
-        payload["not_demonstrated"] = str(not_demonstrated)[:4000]
-    refs = parse_references(references)
-    if refs:
-        payload["references"] = refs
     return payload

@@ -28,6 +28,7 @@ Required sections (map onto create_finding fields):
 - references: CWE (e.g. CWE-1393 default credentials) and vendor hardening docs
 Default/weak login or an OAuth client_secret sitting in a JS bundle is IMPROVE until privileged impact is proven.
 CWE-321 client HMAC (Object.keys join / HmacSHA256 HS256 in a public unauth bundle) and MQTT/RFID ICS credentials in that bundle are SUBMIT Critical — reconstruction is the proof. Live token/MQTT accept is extra; backend timeout is not a kill. Do not mint JWTs or connect to ICS brokers to file the card.
+EmailJS user_id/service_id/template_id in production JS is SUBMIT Critical (not High) after ONE browser-context canary to an engagement inbox (or 422/empty-params proving the keys are accepted). Never send to employees or arbitrary mailboxes. Detection step claims MUST match tool stdout — do not title a step 'extracted EmailJS keys' when stdout is YOUR_KEY / CSS translateY. A client encryption_key / encryptionKey in the same env object is a SEPARATE Critical CWE-321 card; do not bury it in EmailJS verification notes.
 Chain steps must be successful proof only — failed attempts (e.g. AuthSession HMAC with
 _users derived_key → 401) belong in not_demonstrated, not the chain.
 CouchDB after _admin: GET /_node/_local/_config (secret, timeout, admins salts) then prove
@@ -168,7 +169,12 @@ downgrade, CVSS on demonstrated evidence, why_not_higher, control failures,
 remediation with done_when, retest_criteria. Critical requires demonstrated
 write/RCE/cloud credential theft, unauth account lookup proof, or CWE-321
 client HMAC / ICS MQTT-RFID reconstructed from a public JS bundle. Non-blind
-SSRF with IMDS blocked is High.
+SSRF with IMDS blocked is High. Blind SSRF/XXE/OOB: IMPROVE until
+execute_interactsh poll shows a DNS/HTTP/SMTP interaction on the planted
+payload_url (or aegis@payload_domain for mail). Do not use Canarytokens or an
+operator inbox as the primary OOB channel. Non-blind SSRF with an internal
+HTTP body is SUBMIT without OOB. OOB DNS without an internal body is High,
+not Critical.
 Do not live-retest for RA. Complete is blocked while RA is pending."""
 
 
@@ -208,7 +214,11 @@ token was never accepted. Do not re-download the live bundle, mint JWTs, or
 connect to the MQTT broker unless the operator asks for a deny-check.
 why_not_higher: no live token accept, no broker session, no RFID badge use.
 Retest bar: new bundle has no waste/Object.keys reconstruction; old HMAC key
-rejected; MQTT and RFID accounts rotated."""
+rejected; MQTT and RFID accounts rotated.
+Blind SSRF/XXE (Ask Marcus): keep Demonstrated High when poll stdout has a
+DNS/HTTP/SMTP hit on the Interactsh payload. Do not drop because IMDS was
+not reached. Do not switch to Canarytokens. Retest bar: planted payload_url
+gets no new_interactions. Do not re-hit metadata."""
 
 
 def acr_anonymous_pull_signals(text: Optional[str]) -> Dict[str, bool]:

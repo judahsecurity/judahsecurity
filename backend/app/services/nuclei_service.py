@@ -349,6 +349,7 @@ class NucleiService:
         concurrency: int = 25,
         timeout: int = 10,
         max_runtime_seconds: Optional[int] = None,
+        interactsh: bool = True,
         progress_callback: Optional[Callable[[int, int], None]] = None
     ) -> NucleiScanResult:
         """
@@ -412,6 +413,10 @@ class NucleiService:
                 # Praetorian-style Detection (request, cURL, response).
                 "-irr",
             ]
+            # Nuclei OAST (same Interactsh/oast.* stack the agent uses). Default
+            # on so oast-tagged templates actually callback. -ni disables.
+            if not interactsh:
+                cmd.append("-ni")
             
             # Add severity filter
             if severity:

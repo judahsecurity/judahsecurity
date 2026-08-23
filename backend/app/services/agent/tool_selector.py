@@ -709,17 +709,29 @@ class ToolSelector:
                 if "ssrf" in vulns:
                     ssrf_params.append(name)
 
-            # Blind/OOB-prone params (SSRF, or blind SQLi/RCE) — stand up an OOB collaborator
+            # Blind/OOB-prone params (SSRF, or blind SQLi/RCE) — Interactsh, not Canarytokens
             if (ssrf_params or sqli_params) and "execute_interactsh" not in self._tools_already_run:
                 recs.append(ToolRecommendation(
                     tool_name="execute_interactsh",
                     args_template="register",
-                    priority=6,
+                    priority=5,
                     rationale=(
-                        "Params prone to blind SSRF/SQLi/RCE found — register an OOB collaborator, "
-                        "plant its payload URL in the sink, then poll for DNS/HTTP callbacks."
+                        "Params prone to blind SSRF/SQLi/RCE — execute_interactsh register, "
+                        "plant payload_url (or payload_email for mail), then poll. "
+                        "Do not use Canarytokens. A DNS/HTTP/SMTP callback is the proof."
                     ),
                     phase_required="exploitation",
+                    category="injection_testing",
+                ))
+            if ssrf_params and "generate_injection_payloads" not in self._tools_already_run:
+                recs.append(ToolRecommendation(
+                    tool_name="generate_injection_payloads",
+                    args_template="vuln_type=ssrf",
+                    priority=6,
+                    rationale=(
+                        "After register, pass collaborator_url=<payload_url> so SSRF "
+                        "payloads plant the Interactsh host."
+                    ),
                     category="injection_testing",
                 ))
 

@@ -505,7 +505,7 @@ def start_here_from_observations(
             start,
             hunt="ssrf",
             specialist="ssrf",
-            why="URL-fetch / webhook / proxy fields — plant OOB, compare benign vs in-scope canary",
+            why="URL-fetch / webhook / proxy fields — execute_interactsh register → plant payload_url → poll",
             evidence=ssrf_ev[:240],
         )
 

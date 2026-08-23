@@ -451,7 +451,7 @@ def _build_hunt_queue(cmap: CapabilityMap) -> List[Dict[str, str]]:
         str(e.get("path") or "") for e in cmap.api_endpoints if isinstance(e, dict)
     )
     if re.search(r"webhook|callback|proxy|import|datasource|requesturl", blob_ssrf, re.I):
-        add("high", "ssrf", "URL-fetch/webhook/proxy fields — OOB + in-scope canary",
+        add("high", "ssrf", "URL-fetch/webhook/proxy — execute_interactsh register → plant → poll",
             next((p for p in cmap.param_rich_paths if re.search(r"url|webhook|proxy", p, re.I)), "url-fetch"))
     if cmap.has_admin:
         add("medium", "admin_surface", "Admin/dashboard paths — privilege and exposure checks",

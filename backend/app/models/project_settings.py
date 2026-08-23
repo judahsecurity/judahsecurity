@@ -166,7 +166,7 @@ def default_nuclei_config():
         "concurrency": 25,
         "bulk_size": 25,
         "timeout": 10,
-        "interactsh": False,
+        "interactsh": True,
         "headless": False,
         "follow_redirects": True,
         "template_auto_update": True,

@@ -1717,7 +1717,8 @@ class ScannerWorker:
                 tags=tags if tags else None,
                 exclude_tags=exclude_tags if exclude_tags else None,
                 templates=extra_templates,
-                rate_limit=rate_limit
+                rate_limit=rate_limit,
+                interactsh=bool(config.get("interactsh", True)),
             )
             
             # Log Nuclei results

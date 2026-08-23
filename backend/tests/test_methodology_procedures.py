@@ -81,3 +81,14 @@ def test_catalog_seeds_new_auth_cards():
     assert "session_token_quality" in methods
     assert "open_redirect" in methods
     assert "auth_session_boundary" in methods
+
+
+def test_ssrf_pack_requires_interactsh_not_canarytokens():
+    pack = load_procedure("ssrf_url_fetch")
+    assert pack is not None
+    blob = " ".join(pack["steps"]).lower() + " " + " ".join(pack["tools"])
+    assert "execute_interactsh" in pack["tools"]
+    assert "register" in blob
+    assert "poll" in blob
+    assert "canarytokens" in blob
+

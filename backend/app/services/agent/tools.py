@@ -2114,6 +2114,14 @@ class ASMToolsManager:
             except Exception:
                 pass
         target_clean = target_clean.rstrip("/").split("/")[0].split(":")[0] or target
+        from app.services.js_client_signing_secrets import coerce_js_secret_severity
+
+        severity = coerce_js_secret_severity(
+            title or "",
+            description or "",
+            evidence or "",
+            severity or "info",
+        )
         sev_map = {"critical": Severity.CRITICAL, "high": Severity.HIGH, "medium": Severity.MEDIUM, "low": Severity.LOW, "info": Severity.INFO}
         severity_enum = sev_map.get((severity or "info").strip().lower(), Severity.INFO)
         db = SessionLocal()
@@ -3761,7 +3769,8 @@ class ASMToolsManager:
             {"vuln": "Live IAM/API gateway access with leaked headers", "severity": "critical", "why": "client_id/client_secret HTTP headers authenticate to locations/account APIs and return non-public records."},
             {"vuln": "Cross-environment secret reuse (sandbox ships prod)", "severity": "critical", "why": "A sandbox UI bundle that contains production client_secret requires rotating ALL env pairs, not just sandbox."},
             {"vuln": "Bulk enumeration via search/queryText", "severity": "high", "why": "Authenticated search parameters enable targeted or bulk record retrieval — prove with a bounded sample, then recommend rate limits."},
-            {"vuln": "EmailJS unauthorized send (phishing via authorized ESP)", "severity": "critical", "why": "Hardcoded EmailJS user_id/service_id/template_id in JS lets any site send mail as the app from a visitor's browser; template_params set the recipient."},
+            {"vuln": "EmailJS unauthorized send (phishing via authorized ESP)", "severity": "critical", "why": "Hardcoded EmailJS user_id/service_id/template_id in JS lets any site send mail as the app from a visitor's browser; template_params set the recipient. File Critical, not High."},
+            {"vuln": "Client encryption_key in public JS env object", "severity": "critical", "why": "Symmetric encryption_key/encryptionKey next to EmailJS ids in a public bundle. Separate CWE-321 card from EmailJS; rotate and keep crypto server-side."},
             {"vuln": "CWE-321 client HMAC-SHA256 signing key in public JS", "severity": "critical", "why": "Object.keys(obj).join('') reconstructs an HS256 key the backend trusts; Gitleaks misses it because the secret is property names. Public bundle is enough — API timeout is not a kill."},
             {"vuln": "ICS MQTT / RFID credentials in the same bundle", "severity": "critical", "why": "MQTT username/password reconstructed the same way, plus plaintext RFID, let an attacker reach SCADA/digital-twin brokers. Rotate and keep creds off the client."},
         ],
@@ -4396,6 +4405,31 @@ class ASMToolsManager:
             ),
         })
 
+        # Q23: Blind SSRF/XXE/OOB — Interactsh poll, not Canarytokens.
+        from app.services.agent.interactsh_proof import (
+            has_ssrf_proof,
+            is_oob_finding,
+        )
+
+        oob_finding = is_oob_finding(text)
+        oob_proof = has_ssrf_proof(text)
+        q23 = (not oob_finding) or oob_proof
+        questions.append({
+            "question": (
+                "For SSRF/XXE/OOB: did execute_interactsh poll show a DNS/HTTP/SMTP "
+                "interaction (or an internal HTTP body) — not merely 'webhook exists'? "
+                "Do not use Canarytokens."
+            ),
+            "pass": q23,
+            "feedback": (
+                "PASS — Interactsh poll or internal body proven, or not an OOB finding."
+                if q23 else
+                "FAIL — 'URL-fetch exists' is a foothold. execute_interactsh register, "
+                "plant payload_url, poll. Canarytokens/operator inbox is not proof. "
+                "Never 169.254.169.254 / localhost if Lictor blocks."
+            ),
+        })
+
         # Q17/Q18: ACR / Docker Registry anonymous pull.
         from app.services.agent.finding_gate import acr_anonymous_pull_signals
 
@@ -4529,6 +4563,14 @@ class ASMToolsManager:
                 "ML train/celery existence is a foothold. Prove a self-reg/low-priv "
                 "session gets 200/202/204 on POST /api/v1/train/. Do not DELETE "
                 "production models."
+            )
+        elif oob_finding and not oob_proof:
+            verdict = "IMPROVE"
+            verdict_detail = (
+                "URL-fetch/webhook existence is a foothold. Prove OOB with "
+                "execute_interactsh register → plant payload_url → poll (DNS/HTTP/SMTP), "
+                "or an internal HTTP body. Do not use Canarytokens. Never metadata/"
+                "localhost if Lictor blocks."
             )
         elif acr_sig["is_finding"] and not acr_sig["has_anon_proof"]:
             verdict = "IMPROVE"
@@ -6620,8 +6662,8 @@ class ASMToolsManager:
 
         Args:
             target: URL/host (defaults to session seed).
-            pack: ``early`` | ``enrich`` | ``full`` (optional if kinds set).
-            kinds: Explicit list: httpx_tech, waf_probe, whatweb, ferox_dirs, katana_urls.
+            pack: ``early`` | ``enrich`` | ``nuclei_recon`` | ``full`` (optional if kinds set).
+            kinds: Explicit list: httpx_tech, waf_probe, whatweb, nuclei_recon, ferox_dirs, katana_urls.
         """
         import json as _json
         from app.services.agent import recon_workers

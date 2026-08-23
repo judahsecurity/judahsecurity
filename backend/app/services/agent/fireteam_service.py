@@ -168,13 +168,14 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "queue_finding_followups(vuln_type='js_secrets'). "
             "Also hunt EmailJS: emailjs_userid / emailjs_serviceid / emailjs_templateid "
             "(or service_id: service_*). Prove with ONE browser-context POST to "
-            "https://api.emailjs.com/api/v1.0/email/send using an engagement-controlled "
-            "canary inbox (interactsh/operator) — never customer employees or arbitrary "
-            "recipients. curl 403 from missing Origin is NOT a kill; retry execute_browser. "
+            "https://api.emailjs.com/api/v1.0/email/send using execute_interactsh "
+            "payload_email (aegis@<payload_domain>) — never Canarytokens, never customer "
+            "employees or arbitrary recipients. curl 403 from missing Origin is NOT a kill; retry execute_browser. "
             "Max one canary per template (cap two). "
             "Write description + impact + assets + remediation (rotate HMAC key, MQTT/RFID, "
-            "ALL env pairs and EmailJS user_id; never ship secrets to the browser — "
-            "server-side signing/proxy; EmailJS origin allowlist + rate limit). "
+            "ALL env pairs, EmailJS user_id, and any client encryption_key — file encryption_key "
+            "as its own Critical CWE-321 card, not an EmailJS footnote; never ship secrets to "
+            "the browser — server-side signing/proxy; EmailJS origin allowlist + rate limit). "
             "CWE-321 / CWE-798 / CWE-312 / CWE-540."
         ),
     ),
@@ -507,9 +508,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         system_prompt_suffix=(
             "Start with discover_parameters + arjun on live paths if params are unknown. "
             "SQLi/XSS/SSTI/cmd as usual. Also treat url/uri/request/datasource/execute/"
-            "query fields as SSRF: plant execute_interactsh, compare benign vs internal "
-            "canary (do not use cloud-metadata/loopback if Lictor blocks — use in-scope "
-            "OOB). Status 200 is not a finding. Unknown-bug hunting beats Nuclei templates."
+            "query fields as SSRF: execute_interactsh register → plant payload_url → poll, "
+            "then compare benign vs internal canary (do not use cloud-metadata/loopback if Lictor blocks). "
+            "Do not use Canarytokens. Status 200 is not a finding. Unknown-bug hunting beats Nuclei templates."
         ),
     ),
     SpecialistProfile(
@@ -550,6 +551,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_arjun",
             "execute_sqlmap",
             "execute_commix",
+            "execute_interactsh",
             "generate_injection_payloads",
             "execute_curl",
             "compare_requests",
@@ -563,6 +565,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         max_iterations=10,
         system_prompt_suffix=(
             "Canary → differential. sqlmap --batch only on confirmed candidates. "
+            "Blind OOB SQLi/XXE: execute_interactsh register → plant payload_url → poll. "
             "No os-shell. Status 200 is not SQLi."
         ),
     ),
@@ -586,9 +589,10 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ],
         max_iterations=10,
         system_prompt_suffix=(
-            "Plant execute_interactsh, compare benign vs in-scope canary. "
+            "OOB is Interactsh only: execute_interactsh register → plant payload_url → poll. "
+            "Do not use Canarytokens. Compare benign vs in-scope canary. "
             "Never metadata/localhost if Lictor blocks. OOB-only without an "
-            "internal body is incomplete."
+            "internal body is incomplete for Critical."
         ),
     ),
     SpecialistProfile(
@@ -1077,7 +1081,7 @@ async def _run_specialist(
     try:
         from app.services.agent.tools import current_session_id, get_tenant_context
         from app.services.agent.palace_memory import wake_up as palace_wake_up
-        from app.services.agent.hunter_brief import format_hunter_brief
+        from app.services.agent.hunter_brief import OOB_SPECIALISTS, format_hunter_brief
 
         _uid, org_id = get_tenant_context()
         session_id = current_session_id.get() or None
@@ -1095,6 +1099,7 @@ async def _run_specialist(
             directive=directive if isinstance(directive, OperationDirective) else None,
             cmap=cmap if isinstance(cmap, dict) else {},
             palace_snippet=palace_snippet,
+            provision_oob=profile.name in OOB_SPECIALISTS,
         )
     except Exception:
         logger.debug("specialist hunt-brief skipped", exc_info=True)

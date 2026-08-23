@@ -181,18 +181,48 @@ def register(server: Optional[str] = None, token: Optional[str] = None) -> Dict[
     with _LOCK:
         _SESSIONS[sid] = session
 
+    return _public_session(session, reused=False)
+
+
+def _public_session(session: _Session, *, reused: bool = False) -> Dict[str, Any]:
+    domain = session.payload_domain or ""
+    sid = session.sid
     return {
         "success": True,
         "session_id": sid,
-        "payload_domain": session.payload_domain,
-        "payload_url": f"https://{session.payload_domain}",
-        "server": server or "default (oast.*)",
+        "payload_domain": domain,
+        "payload_url": f"https://{domain}" if domain else "",
+        "payload_email": f"aegis@{domain}" if domain else "",
+        "server": session.server or "default (oast.*)",
+        "reused": reused,
+        "next": (
+            "Plant payload_url in the sink (SSRF/XXE/webhook) or payload_email "
+            f"as the mail recipient. Then execute_interactsh poll {sid}. "
+            "Do not use Canarytokens."
+        ),
         "usage": (
-            "Inject the payload domain/URL into suspected blind sinks (SSRF url params, "
-            "XXE SYSTEM entities, Host/Referer headers, template/command args, email fields), "
-            f"then call execute_interactsh with 'poll {sid}' to see DNS/HTTP/SMTP callbacks."
+            "Plant payload_url in blind sinks (SSRF url params, XXE SYSTEM, "
+            "Host/Referer, webhooks) or payload_email as the mail recipient. "
+            f"Then execute_interactsh poll {sid}. Do not use Canarytokens. "
+            "Any DNS/HTTP/SMTP interaction is demonstrated OOB."
         ),
     }
+
+
+def ensure_session(
+    server: Optional[str] = None,
+    token: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Reuse a live Interactsh session or register a new one."""
+    with _LOCK:
+        _reap_locked()
+        for session in _SESSIONS.values():
+            if session.proc.poll() is None and session.payload_domain:
+                if server and session.server and session.server != server:
+                    continue
+                session.last_used = time.time()
+                return _public_session(session, reused=True)
+    return register(server, token)
 
 
 def _stop_locked_direct(session: _Session) -> None:

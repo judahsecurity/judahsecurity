@@ -259,3 +259,98 @@ def test_normalize_click_and_request_claims():
     assert steps[1]["display_tool"] == "request"
     assert steps[1]["result"]["status"] == 200
     assert "dashboard_summary" in steps[1]["result"]["url"]
+
+
+def test_agent_claim_rewritten_when_stdout_lacks_emailjs_ids():
+    from app.services.agent.demonstrated_chain import claim_supported_by_output, normalize_chain
+
+    stdout = (
+        "File size: 5782882 bytes\n"
+        "api_key: 1 matches\n"
+        "  YOUR_KEY\n"
+        "password: 1 matches\n"
+        "  password\n"
+        "cognitive: 3 matches\n"
+        "  translateY(0)\n"
+        "signUp: 1 matches\n"
+        "  ('kevin', 'kevin')\n"
+    )
+    assert not claim_supported_by_output(
+        "Extracted EmailJS credentials from production JS bundle",
+        stdout,
+    )
+    assert not claim_supported_by_output(
+        "Found hardcoded service_id (service_lizebi6), user_id (43nmA_Fhe-yfIFXQK)",
+        stdout,
+    )
+    steps = normalize_chain(
+        [
+            {
+                "summary": "Extracted EmailJS credentials from production JS bundle",
+                "outcome": "Found hardcoded service_id (service_lizebi6) in environment config",
+                "tool": "execute_python",
+                "result": {"stdout": stdout, "stderr": "", "exit_code": 0},
+            }
+        ]
+    )
+    assert steps
+    assert "emailjs" not in steps[0]["summary"].lower()
+    assert "service_lizebi6" not in steps[0]["outcome"]
+    assert "YOUR_KEY" in (steps[0]["result"].get("stdout") or stdout)
+
+
+
+def test_summarize_interactsh_register_and_poll():
+    import json
+
+    register = json.dumps({
+        "success": True,
+        "session_id": "abc123def456",
+        "payload_domain": "xyz.oast.fun",
+        "payload_url": "https://xyz.oast.fun",
+        "payload_email": "aegis@xyz.oast.fun",
+    })
+    summary, outcome = summarize_output("execute_interactsh", ["register"], register, "", 0)
+    assert "Registered" in summary
+    assert "xyz.oast.fun" in summary
+    assert "abc123def456" in outcome
+    assert "https://xyz.oast.fun" in outcome
+
+    poll = json.dumps({
+        "success": True,
+        "session_id": "abc123def456",
+        "payload_domain": "xyz.oast.fun",
+        "new_interactions": 1,
+        "interactions": [{"protocol": "dns", "remote_address": "203.0.113.9"}],
+    })
+    summary, outcome = summarize_output(
+        "execute_interactsh", ["poll", "abc123def456"], poll, "", 0,
+    )
+    assert "Polled" in summary
+    assert "1 new interaction" in summary
+    assert "dns" in outcome.lower()
+    assert "xyz.oast.fun" in outcome
+
+
+def test_normalize_interactsh_oob_claim():
+    import json
+
+    poll = json.dumps({
+        "success": True,
+        "session_id": "abc123def456",
+        "payload_domain": "xyz.oast.fun",
+        "payload_url": "https://xyz.oast.fun",
+        "new_interactions": 1,
+        "interactions": [{"protocol": "dns", "remote_address": "203.0.113.9"}],
+    })
+    steps = normalize_chain([{
+        "tool": "execute_interactsh",
+        "args": "poll abc123def456",
+        "output": poll,
+    }])
+    assert len(steps) == 1
+    assert steps[0]["display_tool"] == "oob"
+    assert steps[0]["result"]["new_interactions"] == 1
+    assert steps[0]["result"]["payload_domain"] == "xyz.oast.fun"
+    assert "dns" in steps[0]["outcome"].lower()
+    assert "stdout" not in steps[0]["result"]

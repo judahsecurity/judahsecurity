@@ -232,8 +232,8 @@ _HUNT_CARDS: Dict[str, Dict[str, str]] = {
     "ssrf": {
         "title": "SSRF via URL-fetch / webhook / proxy",
         "assumption": "Server fetches attacker-controlled URLs",
-        "test": "interactsh + in-scope canary vs benign URL; never metadata/localhost if Lictor blocks",
-        "pass_criteria": "OOB hit plus internal body, or confirmed internal content",
+        "test": "execute_interactsh register → plant payload_url → poll; then benign vs in-scope canary. Never Canarytokens. Never metadata/localhost if Lictor blocks",
+        "pass_criteria": "execute_interactsh poll DNS/HTTP/SMTP hit, or confirmed internal HTTP body",
         "kill_criteria": "URL fetch blocked / egress filtered; OOB-only without internal body",
         "specialist": "ssrf",
         "priority": "high",
@@ -1093,17 +1093,17 @@ _CHAIN_CARDS: Dict[str, List[Dict[str, str]]] = {
                 "template_params control the recipient, so any site embedding the keys can send"
             ),
             "test": (
-                "ONE canary per template, max two templates. Recipient MUST be an "
-                "engagement-controlled inbox (execute_interactsh mailbox or operator canary) — "
-                "never customer employees, never arbitrary third parties, never phishing lures. "
+                "ONE canary per template, max two templates. Recipient MUST be "
+                "aegis@<payload_domain> from execute_interactsh register — never "
+                "Canarytokens, never customer employees, never arbitrary third parties. "
                 "Prefer execute_browser fetch() from the target origin (curl/server POST is often "
                 "blocked by EmailJS origin checks; a 403 from curl is NOT a kill). "
                 "Body: service_id, template_id, user_id, template_params with the recipient field "
-                "from the bundle. PASS on HTTP 200 body OK or canary received. Then stop."
+                "from the bundle. PASS on HTTP 200 body OK or execute_interactsh poll SMTP/HTTP. Then stop."
             ),
             "pass_criteria": (
-                "Browser-context send returns 200/OK and/or the canary inbox received mail "
-                "from the application's EmailJS integration"
+                "Browser-context send returns 200/OK and/or execute_interactsh poll "
+                "shows SMTP/HTTP interaction from the EmailJS send"
             ),
             "kill_criteria": (
                 "Keys rejected from browser and server; domain allowlist blocks foreign origins "
@@ -1160,6 +1160,27 @@ _CHAIN_CARDS: Dict[str, List[Dict[str, str]]] = {
             "specialist": "js_secrets",
             "priority": "critical",
             "id_suffix": "mqtt-ics-creds",
+        },
+        {
+            "title": "CWE-321 client encryption_key in public JS env object",
+            "assumption": (
+                "The same production env object that embeds EmailJS ids also ships a "
+                "symmetric encryption_key / encryptionKey used to encrypt client payloads. "
+                "Anyone who fetches the bundle can decrypt or forge those payloads."
+            ),
+            "test": (
+                "From scan_js_urls_for_secrets client_signing_findings, record "
+                "kind=client_encryption_key. create_finding Critical, separate from EmailJS. "
+                "Stash secret_type=encryption_key (redact the value). Rotate the key; move "
+                "crypto server-side. Do not use the key to decrypt customer data in the report."
+            ),
+            "pass_criteria": (
+                "Public bundle contains a non-placeholder encryption_key/encryptionKey literal"
+            ),
+            "kill_criteria": "Placeholder only; key absent; crypto uses a server-issued secret",
+            "specialist": "js_secrets",
+            "priority": "critical",
+            "id_suffix": "encrypt-client-key",
         },
     ],
     "azure_function_env_dump": [
@@ -2651,6 +2672,8 @@ def queue_followups_for_finding(
                 "hs256",
                 "cwe-321",
                 "signing key",
+                "encryption_key",
+                "encryptionkey",
                 "rfid",
                 "mqtt",
             )
@@ -2668,6 +2691,7 @@ def queue_followups_for_finding(
     elif key == "js_secrets":
         _maybe_extract_oauth_client(brain, title=title, evidence=evidence, target=target)
         _maybe_extract_emailjs(brain, title=title, evidence=evidence, target=target)
+        _maybe_extract_encryption_key(brain, title=title, evidence=evidence, target=target)
 
     existing = {h.id for h in brain.hypotheses}
     created: List[Hypothesis] = []
@@ -2743,6 +2767,10 @@ def queue_followups_for_finding(
         if suffix.startswith("mqtt-") and not any(
             t in hay
             for t in ("mqtt", "rfid", "scada", "ilens", "broker", "ics", "hmi/")
+        ):
+            continue
+        if suffix.startswith("encrypt-") and not any(
+            t in hay for t in ("encryption_key", "encryptionkey", "emailjs")
         ):
             continue
         hmac_only = any(
@@ -3387,6 +3415,8 @@ def classify_finding_type(title: str = "", description: str = "", tags: Optional
             "hs256",
             "cwe-321",
             "signing key",
+            "encryption_key",
+            "encryptionkey",
             "mqtt",
             "rfid",
         )
@@ -4047,4 +4077,30 @@ def _maybe_extract_emailjs(
         source="js_bundle",
         valid_on=[target] if target else [],
         notes=(title[:200] or "JS-leaked EmailJS keys") + " (redact in findings)",
+    )
+
+
+def _maybe_extract_encryption_key(
+    brain: EngagementBrain,
+    *,
+    title: str,
+    evidence: str,
+    target: str,
+) -> None:
+    """Stash a client encryption_key leaked from a public JS env object."""
+    blob = f"{title}\n{evidence}"
+    m = re.search(
+        r"(?i)(?:encryption[_-]?key|encryptionKey)\s*[:\s=]+\s*['\"]([^'\"]{16,128})['\"]",
+        blob,
+    )
+    if not m:
+        return
+    add_credential(
+        brain,
+        username="encryption_key",
+        secret=m.group(1),
+        secret_type="encryption_key",
+        source="js_bundle",
+        valid_on=[target] if target else [],
+        notes=(title[:200] or "JS-leaked client encryption_key") + " (redact in findings)",
     )

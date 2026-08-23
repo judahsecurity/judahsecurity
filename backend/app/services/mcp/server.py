@@ -1475,9 +1475,11 @@ class MCPServer:
                 "Host/Referer/X-Forwarded-For header, template/command arg, email/webhook field); "
                 "(3) 'poll <session_id>' -> returns any DNS/HTTP/SMTP callbacks the target made "
                 "(a callback = confirmed OOB interaction, i.e. a real finding). "
+                "'ensure' reuses a live session instead of minting a new payload domain. "
                 "Also: 'list' (active sessions), 'stop <session_id>'. Optional flags on register: "
                 "'register --server <self-hosted> --token <t>'. Sessions persist across tool calls "
-                "and auto-expire after ~1h."
+                "and auto-expire after ~1h. Do not use Canarytokens — plant payload_url or "
+                "payload_email (aegis@payload_domain) then poll."
             ),
             tool_type=ToolType.EXPLOIT,
             parameters={
@@ -1485,7 +1487,8 @@ class MCPServer:
                     "type": "string",
                     "description": (
                         "Subcommand: 'register' [--server HOST --token TOKEN], "
-                        "'poll <session_id>', 'list', or 'stop <session_id>'."
+                        "'ensure' (reuse live session), 'poll <session_id>', "
+                        "'list', or 'stop <session_id>'."
                     )
                 }
             },
@@ -2449,16 +2452,22 @@ class MCPServer:
         parts = self._parse_args(args)
         sub = (parts[0].lower() if parts else "register")
 
+        def _server_token(rest: list) -> tuple:
+            server = token = None
+            for i, tok in enumerate(rest):
+                if tok in ("-s", "--server") and i + 1 < len(rest):
+                    server = rest[i + 1]
+                elif tok in ("-t", "--token") and i + 1 < len(rest):
+                    token = rest[i + 1]
+            return server, token
+
         try:
             if sub == "register":
-                server = token = None
-                rest = parts[1:]
-                for i, tok in enumerate(rest):
-                    if tok in ("-s", "--server") and i + 1 < len(rest):
-                        server = rest[i + 1]
-                    elif tok in ("-t", "--token") and i + 1 < len(rest):
-                        token = rest[i + 1]
+                server, token = _server_token(parts[1:])
                 result = await asyncio.to_thread(ish.register, server, token)
+            elif sub in ("ensure", "session"):
+                server, token = _server_token(parts[1:])
+                result = await asyncio.to_thread(ish.ensure_session, server, token)
             elif sub == "poll":
                 if len(parts) < 2:
                     return {"success": False, "output": "", "error": "poll requires a session_id", "exit_code": -1}
@@ -2472,7 +2481,7 @@ class MCPServer:
             else:
                 return {
                     "success": False, "output": "",
-                    "error": f"Unknown subcommand '{sub}'. Use register|poll|list|stop.",
+                    "error": f"Unknown subcommand '{sub}'. Use register|ensure|poll|list|stop.",
                     "exit_code": -1,
                 }
         except Exception as e:  # noqa: BLE001

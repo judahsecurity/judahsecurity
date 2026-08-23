@@ -92,6 +92,7 @@ def test_writeup_guidance_requires_privileged_impact():
     assert "anonymouspullenabled" in text or "oauth2" in text
     assert "package-lock" in text or "ghp_" in text
     assert "cwe-321" in text
+    assert "interactsh" in text or "payload_url" in text
     review = g.FINDING_REVIEW_GUIDANCE.lower()
     assert "verdict" in review
     assert "retest" in review
@@ -100,6 +101,7 @@ def test_writeup_guidance_requires_privileged_impact():
     assert "account" in review or "is_staff" in review
     assert "404" in review or "existence oracle" in review
     assert "cwe-321" in review or "hmac" in review
+    assert "interactsh" in review or "payload_url" in review
 
 
 def test_acr_anonymous_pull_signals():

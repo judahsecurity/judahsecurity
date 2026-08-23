@@ -514,6 +514,8 @@ class KatanaService:
             r'["\']?emailjs[_-]?template(?:_?id)?["\']?\s*[:=]\s*["\'](template_[A-Za-z0-9_-]+)["\']',
             r'["\']?service_id["\']?\s*[:=]\s*["\'](service_[A-Za-z0-9_-]+)["\']',
             r'["\']?template_id["\']?\s*[:=]\s*["\'](template_[A-Za-z0-9_-]+)["\']',
+            r'["\']?encryption[_-]?key["\']?\s*[:=]\s*["\']([^"\']{16,})["\']',
+            r'["\']?encryptionKey["\']?\s*[:=]\s*["\']([^"\']{16,})["\']',
             r'Bearer\s+([A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+)',  # JWT
         ]
         

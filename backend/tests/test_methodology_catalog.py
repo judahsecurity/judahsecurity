@@ -470,8 +470,33 @@ def test_emailjs_js_surface_seeds_send_methodology():
     assert "js_emailjs_client_send" in ids
     card = next(m for m in methods if m.id == "js_emailjs_client_send")
     assert "CWE-798" in card.cwe_ids
-    assert "canary" in card.test.lower()
+    assert "execute_interactsh" in card.test.lower()
+    assert "payload_domain" in card.test.lower()
     assert "browser" in card.test.lower()
+
+
+def test_js_files_seed_encryption_key_methodology():
+    cmap = {
+        "target": "https://estart.example.com",
+        "has_admin": False,
+        "has_login_form": False,
+        "pages_visited": ["https://estart.example.com/"],
+        "forms": [],
+        "api_endpoints": [],
+        "js_files": ["https://estart.example.com/main.09c599d56209cec4.js"],
+        "js_endpoints": [],
+        "websockets": [],
+        "sse": [],
+        "source_maps": [],
+        "param_rich_paths": [],
+        "api_samples": [],
+    }
+    methods = methodologies_from_capability_map(cmap)
+    ids = {m.id for m in methods}
+    assert "js_client_encryption_key" in ids
+    card = next(m for m in methods if m.id == "js_client_encryption_key")
+    assert "CWE-321" in card.cwe_ids
+    assert "emailjs" in card.test.lower()
 
 
 def test_enrich_cve_catalog_exposes_cwes():

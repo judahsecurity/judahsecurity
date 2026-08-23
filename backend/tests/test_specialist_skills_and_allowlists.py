@@ -103,6 +103,7 @@ def test_injection_and_auth_have_new_arsenal_tools():
     assert "mutate_captured_request" in allowlists["api_authz"]
     assert "execute_xsstrike" in allowlists["xss"]
     assert "execute_sqlmap" in allowlists["sqli"]
+    assert "execute_interactsh" in allowlists["sqli"]
     assert "execute_interactsh" in allowlists["ssrf"]
 
 

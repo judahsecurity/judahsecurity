@@ -9,6 +9,31 @@ from __future__ import annotations
 from typing import Any, Optional
 
 MAX_BRIEF_CHARS = 1400
+OOB_SPECIALISTS = frozenset({"ssrf", "injection", "sqli", "js_secrets"})
+
+
+def _live_oob_lines() -> list[str]:
+    try:
+        from app.services.interactsh_service import ensure_session
+
+        oob = ensure_session()
+    except Exception as exc:  # noqa: BLE001
+        return [
+            "- SSRF/OOB: execute_interactsh register → plant payload_url → poll "
+            f"(provision failed: {str(exc)[:80]}). Never Canarytokens; never 169.254.169.254."
+        ]
+    if not oob.get("success"):
+        err = str(oob.get("error") or "interactsh-client unavailable")[:100]
+        return [
+            "- SSRF/OOB: execute_interactsh register → plant payload_url → poll "
+            f"({err}). Never Canarytokens; never 169.254.169.254 / localhost."
+        ]
+    return [
+        f"- LIVE Interactsh session_id={oob.get('session_id')} "
+        f"payload_url={oob.get('payload_url')} mail={oob.get('payload_email')}",
+        f"- Plant that URL/email, then execute_interactsh poll {oob.get('session_id')}. "
+        "Never Canarytokens; never 169.254.169.254 / localhost.",
+    ]
 
 
 def format_hunter_brief(
@@ -18,6 +43,7 @@ def format_hunter_brief(
     cmap: Optional[dict] = None,
     palace_snippet: str = "",
     oob_hint: bool = True,
+    provision_oob: bool = False,
 ) -> str:
     lines = [
         f"HUNT NOTES — {specialist or 'specialist'} (not a scan dump)",
@@ -64,11 +90,13 @@ def format_hunter_brief(
             "- JS: fetch_lazy_chunks then extract_js_endpoints on first-party bundles "
             f"({len(js_files)} mapped)"
         )
-    if oob_hint:
+    if provision_oob:
+        lines.extend(_live_oob_lines())
+    elif oob_hint:
         lines.append(
-            "- SSRF/OOB: execute_interactsh register → plant payload_url "
-            "(never 169.254.169.254 / localhost; Lictor blocks those). "
-            "run_custom_probe may fetch Interactsh/OAST hosts."
+            "- SSRF/OOB: execute_interactsh register → plant payload_url → poll "
+            "(never Canarytokens; never 169.254.169.254 / localhost). "
+            "Mail: plant payload_email. run_custom_probe may fetch Interactsh/OAST hosts."
         )
     palace = (palace_snippet or "").strip()
     if palace:

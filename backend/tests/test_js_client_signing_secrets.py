@@ -83,6 +83,50 @@ def test_gitleaks_would_miss_the_literal():
     assert "kliLensKLiLensKL" not in ILENS_BUNDLE  # only exists after join of keys
 
 
+def test_env_encryption_key_is_separate_critical_hit():
+    from app.services.js_client_signing_secrets import (
+        analyze_js_client_secrets,
+        allows_critical_ra,
+        coerce_js_secret_severity,
+        summarize_client_signing_findings,
+    )
+
+    bundle = (
+        'const env={production:!0,emailjs_userid:"43nmA_Fhe-yfIFXQK",'
+        'emailjs_templateid:"template_cz6vvkl",emailjs_serviceid:"service_lizebi6",'
+        'encryption_key:"x!A%D*G-KaPdSgVkYp3s6v8y/B?E(H+MbQeThWmZq4t7w!z$C&F)J@NcRfUjXn2r"}'
+    )
+    hits = analyze_js_client_secrets(bundle, source_url="https://estart.example.com/main.js")
+    enc = [h for h in hits if h["kind"] == "client_encryption_key"]
+    assert enc, hits
+    assert enc[0]["cwe"] == "CWE-321"
+    assert enc[0]["severity"] == "critical"
+    assert enc[0]["reconstructed"].startswith("x!A%")
+    summary = summarize_client_signing_findings(hits)
+    assert summary["encryption_key_demonstrated"] is True
+    assert summary["submit_without_live_api"] is True
+    assert coerce_js_secret_severity(
+        "Exploitable EmailJS Service Credentials",
+        "Hardcoded EmailJS keys in the production JS bundle",
+        "api.emailjs.com 200 OK",
+        "high",
+    ) == "critical"
+    assert coerce_js_secret_severity(
+        "Client encryption_key in JavaScript bundle",
+        "Symmetric key in the public env object",
+        "encryption_key in main.js",
+        "high",
+    ) == "critical"
+    assert allows_critical_ra(
+        "EmailJS service_lizebi6 template_cz6vvkl browser canary send from client JS"
+    )
+    assert allows_critical_ra(
+        "Client encryption_key in a public JavaScript env object next to EmailJS"
+    )
+    assert analyze_js_client_secrets('encryption_key:"YOUR_KEY_PLACEHOLDER_XX"') == []
+
+
+
 def test_empty_config_object_without_join_is_ignored():
     benign = 'this.config={timeout:"",retry:"",debug:"",mode:""};export default this.config;'
     assert analyze_js_client_secrets(benign) == []
@@ -112,6 +156,7 @@ def test_js_files_seed_hmac_methodology():
     methods = methodologies_from_capability_map(cmap)
     ids = {m.id for m in methods}
     assert "js_client_hmac_signing" in ids
+    assert "js_client_encryption_key" in ids
     card = next(m for m in methods if m.id == "js_client_hmac_signing")
     assert "CWE-321" in card.cwe_ids
     assert "timeout is not a kill" in card.test.lower() or "timeout is" in card.test.lower()
@@ -136,6 +181,7 @@ def test_hmac_finding_queues_signing_and_mqtt_cards():
     assert "timeout is not a kill" in tests or "not a kill" in tests
     assert not any("hostname-keyed" in h.title.lower() for h in created)
     assert not any("emailjs" in h.title.lower() for h in created)
+    assert not any("encryption_key" in h.title.lower() for h in created)
 
 
 def test_oauth_js_secrets_still_skips_hmac_cards():

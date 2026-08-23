@@ -1,16 +1,18 @@
 {
   "id": "ssrf_url_fetch",
   "title": "SSRF via URL fetch features",
-  "summary": "Prove the server fetches attacker-controlled URLs and hits an internal/canary target.",
+  "summary": "Prove the server fetches attacker-controlled URLs with Interactsh, not Canarytokens.",
   "steps": [
     "Locate webhook/import/proxy/preview/url params from the map.",
-    "Point to engagement Collaborator/Interactsh or internal metadata IP only if in RoE.",
-    "Observe out-of-band hit or response body reflecting internal content.",
-    "Do not pivot freely into unrelated internal networks beyond RoE.",
-    "On PASS: OOB correlation or internal content in response with request evidence."
+    "execute_interactsh(args='register') — take payload_url (and payload_email for mail/webhooks).",
+    "Plant payload_url in one URL-fetch field (mutate_captured_request or compare_requests).",
+    "execute_interactsh(args='poll <session_id>'). DNS/HTTP/SMTP new_interactions ≥ 1 is proof.",
+    "Then compare_requests benign URL vs in-scope canary for an internal HTTP body.",
+    "Do not use canarytokens.org or an operator inbox. Never 169.254.169.254 / localhost if Lictor blocks.",
+    "On PASS: poll interaction and/or internal content in the response with request evidence."
   ],
-  "tools": ["execute_curl", "execute_interactsh", "compare_requests", "replay_http_request"],
-  "pass_signals": ["OOB callback correlated", "Internal service response body returned"],
-  "kill_signals": ["Allowlist blocks; no OOB; no internal bleed"],
+  "tools": ["execute_interactsh", "execute_curl", "compare_requests", "replay_http_request", "mutate_captured_request"],
+  "pass_signals": ["execute_interactsh poll new_interactions", "Internal service response body returned"],
+  "kill_signals": ["Allowlist blocks; poll empty; no internal bleed"],
   "references": ["CWE-918", "CAPEC-260"]
 }

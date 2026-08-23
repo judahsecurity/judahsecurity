@@ -89,9 +89,11 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "- MQTT/RFID/ICS creds in the same bundle: SUBMIT on reconstructed or plaintext "
         "credentials plus broker/RFID usage in the JS. Do not require a live broker "
         "login. Kill placeholders only.\n"
-        "- EmailJS keys in JS: DROP/IMPROVE until a browser-context send to an "
-        "engagement-controlled canary returns 200/OK (or mail received) — never phishing "
-        "to real employees.\n"
+        "- EmailJS keys in JS: DROP/IMPROVE until execute_interactsh register + "
+        "browser-context send to aegis@<payload_domain> returns 200/OK or poll SMTP — "
+        "never Canarytokens, never phishing to real employees. File Critical (not High). "
+        "Detection claims must match tool stdout. A sibling encryption_key in the same "
+        "env object is a separate create_finding (CWE-321), not a verification footnote.\n"
         "- Grafana CVE-2024-9264: SUBMIT if /api/ds/query type=sql is accepted and the "
         "server forks duckdb — including 'no such file or directory'. Missing binary and "
         "sqlExpressions=0 in /metrics are NOT kills. Kill only if patched authz rejects SQL "
@@ -311,9 +313,9 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "- SQLi: canary → execute_sqlmap --batch on confirmed candidates.\n"
         "- XSS: mutate_list(kind='xss') then mutate_captured_request / xsstrike / browser.\n"
         "- Command injection: execute_commix only on high-signal params; no blind spray.\n"
-        "- SSRF: url/uri/request/datasource/execute fields → execute_interactsh then "
-        "mutate_captured_request(location='body_json'|query, field=url, value=payload_url). "
-        "Prove with run_custom_probe if you need a 10-line PoC. Never metadata/localhost.\n"
+        "- SSRF: url/uri/request/datasource/execute fields → execute_interactsh register, "
+        "mutate_captured_request(location='body_json'|query, field=url, value=payload_url), "
+        "then poll. Do not use Canarytokens. Prove with run_custom_probe if you need a 10-line PoC. Never metadata/localhost.\n"
         "- Report with payload + response evidence; no status-only findings. Not a CVE checklist."
     ),
     "xss": (
@@ -336,9 +338,10 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
     "ssrf": (
         "SKILL PACK — SSRF / URL-fetch:\n"
         "- Fields: url, uri, webhook, callback, proxy, import, preview, datasource, requestUrl, execute.\n"
-        "- execute_interactsh register → plant payload_url → poll.\n"
+        "- OOB is Interactsh only: execute_interactsh register → plant payload_url → poll.\n"
+        "- Mail/EmailJS: plant payload_email (aegis@<payload_domain>), not Canarytokens, not an operator inbox.\n"
         "- compare_requests benign URL vs in-scope canary. Never 169.254.169.254 / localhost.\n"
-        "- OOB DNS without an internal body is incomplete. Prove with run_custom_probe if needed."
+        "- Poll DNS/HTTP/SMTP is SUBMIT High. OOB DNS without an internal body is incomplete for Critical."
     ),
     "file_upload": (
         "SKILL PACK — upload abuse:\n"
@@ -434,13 +437,17 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "- Public downloadable binaries (.exe/.msi/.apk/firmware): strings for password/"
         "connection patterns; prove ONE live login if safe. "
         "queue_finding_followups(vuln_type='binary_hardcoded_creds'). Do not reverse for exploits.\n"
-        "- EmailJS: extract service_id (service_*), user_id, template_id. Prove with "
-        "execute_browser POST to api.emailjs.com/api/v1.0/email/send — one canary to "
-        "interactsh/operator inbox only. Never send to employees or arbitrary addresses. "
-        "Server-side 403 is expected; browser origin is the real test.\n"
-        "- sanitize_evidence before create_finding; rotate ALL env pairs and EmailJS "
-        "user_id in remediation; recommend a server-side proxy, EmailJS domain allowlist, "
-        "and rate limiting (never ship API secrets to the browser)."
+        "- EmailJS: extract service_id (service_*), user_id, template_id. "
+        "execute_interactsh register, then execute_browser POST to "
+        "api.emailjs.com/api/v1.0/email/send with recipient payload_email "
+        "(aegis@<payload_domain>). Never Canarytokens, never employees. "
+        "Server-side 403 is expected; browser origin is the real test. Poll for SMTP. "
+        "create_finding severity=critical. If the env object also embeds encryption_key, "
+        "file that as a second finding (js_client_encryption_key) — do not fold it in.\n"
+        "- sanitize_evidence before create_finding; rotate ALL env pairs, EmailJS "
+        "user_id, and any client encryption_key in remediation; recommend a server-side "
+        "proxy, EmailJS domain allowlist, and rate limiting (never ship API secrets to "
+        "the browser)."
     ),
     "secrets_hunter": (
         "SKILL PACK — secrets:\n"
@@ -540,6 +547,11 @@ def skill_pack_for(specialist: str) -> str:
             REVIEW_RULES as EMAIL_REVIEW,
             VERIFIER_ADDENDUM as EMAIL_VERIFY,
         )
+        from app.services.agent.interactsh_proof import (
+            HUNTER_RULES as INTERACTSH_HUNTER,
+            REVIEW_RULES as INTERACTSH_REVIEW,
+            VERIFIER_ADDENDUM as INTERACTSH_VERIFY,
+        )
         from app.services.agent.ml_pipeline_rbac import (
             HUNTER_RULES as ML_HUNTER,
             REVIEW_RULES as ML_REVIEW,
@@ -556,6 +568,8 @@ def skill_pack_for(specialist: str) -> str:
             VERIFIER_ADDENDUM,
         )
 
+        if specialist in ("ssrf", "injection", "sqli", "js_secrets"):
+            parts.append(INTERACTSH_HUNTER)
         if specialist in ("api_authz", "auth_logic"):
             parts.append(HUNTER_RULES)
         if specialist == "auth_logic":
@@ -570,12 +584,14 @@ def skill_pack_for(specialist: str) -> str:
             parts.append(AUTH_HEADER_VERIFY)
             parts.append(SOCKETIO_VERIFY)
             parts.append(ML_VERIFY)
+            parts.append(INTERACTSH_VERIFY)
         elif specialist == "risk_assessor":
             parts.append(REVIEW_RULES)
             parts.append(EMAIL_REVIEW)
             parts.append(AUTH_HEADER_REVIEW)
             parts.append(SOCKETIO_REVIEW)
             parts.append(ML_REVIEW)
+            parts.append(INTERACTSH_REVIEW)
     except Exception:
         pass
     extra = {

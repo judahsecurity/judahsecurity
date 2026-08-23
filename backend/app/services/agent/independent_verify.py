@@ -211,6 +211,13 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         addenda.append(SOCKETIO_VERIFIER_ADDENDUM)
     if is_ml_rbac_finding(packet):
         addenda.append(ML_RBAC_VERIFIER_ADDENDUM)
+    from app.services.agent.interactsh_proof import (
+        VERIFIER_ADDENDUM as INTERACTSH_VERIFIER_ADDENDUM,
+        is_oob_finding,
+    )
+
+    if is_oob_finding(packet):
+        addenda.append(INTERACTSH_VERIFIER_ADDENDUM)
     class_addendum = ("\n\n" + "\n\n".join(addenda)) if addenda else ""
 
     return (

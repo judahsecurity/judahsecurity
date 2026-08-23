@@ -83,8 +83,14 @@ _CRED_JOIN_PREFIX_RE = re.compile(
 
 _PLACEHOLDER_VALUES = {
     "", "changeme", "password", "secret", "todo", "placeholder", "your_password",
-    "xxx", "test", "null", "undefined", "n/a", "na",
+    "xxx", "test", "null", "undefined", "n/a", "na", "your_key", "your-key",
 }
+
+# Literal AES/HMAC material shipped as env.encryption_key in SPA bundles (EmailJS-class).
+_ENCRYPTION_KEY_RE = re.compile(
+    r"""(?:encryption[_-]?key|encryptionKey|crypto[_-]?key|aes[_-]?key)\s*[:=]\s*['"]([^'"]{16,128})['"]""",
+    re.I,
+)
 
 _CONTEXT_WINDOW = 12_000
 _SNIPPET_RADIUS = 160
@@ -375,15 +381,94 @@ def analyze_js_client_secrets(text: str, source_url: str = "") -> List[Dict[str,
             }
         )
 
+    for m in _ENCRYPTION_KEY_RE.finditer(text):
+        value = (m.group(1) or "").strip()
+        if not value or value.strip().lower() in _PLACEHOLDER_VALUES:
+            continue
+        if value.isalpha() and len(set(value.lower())) < 6:
+            continue
+        key = ("client_encryption_key", value)
+        if key in seen:
+            continue
+        seen.add(key)
+        findings.append(
+            {
+                "kind": "client_encryption_key",
+                "role": "client_encryption_key",
+                "severity": "critical",
+                "cwe": "CWE-321",
+                "source_url": source_url,
+                "object_name": "encryption_key",
+                "object_ref": "encryption_key",
+                "property_keys": [],
+                "reconstruction": "plaintext env literal",
+                "reconstructed": value,
+                "redacted": _redact(value),
+                "usage": ["encryption_key"],
+                "offset": m.start(),
+                "joined_in_bundle": False,
+                "ics_signals": ics_signals,
+                "snippet": _snippet(text, m.start(), value),
+                "note": (
+                    "Symmetric encryption_key shipped in a public JavaScript env object. "
+                    "File as its own Critical CWE-321 card — do not bury it under EmailJS. "
+                    "Rotate the key; keep encryption server-side."
+                ),
+            }
+        )
+
     return findings
 
 
+def coerce_js_secret_severity(
+    title: str,
+    description: str = "",
+    evidence: str = "",
+    severity: str = "",
+) -> str:
+    """EmailJS unauthorized send and client encryption_key are Critical, not High."""
+    blob = f"{title or ''}\n{description or ''}\n{evidence or ''}".lower()
+    current = (severity or "").strip().lower() or "info"
+    order = ("info", "low", "medium", "high", "critical")
+    bump_to = current
+    if "emailjs" in blob or "api.emailjs.com" in blob:
+        bump_to = "critical"
+    enc = blob.replace("-", "_")
+    if "encryption_key" in enc or "encryptionkey" in blob:
+        if any(t in blob for t in ("javascript", "js bundle", ".js", "client", "webpack", "emailjs")):
+            bump_to = "critical"
+    try:
+        if order.index(bump_to) > order.index(current if current in order else "info"):
+            return bump_to
+    except ValueError:
+        return bump_to
+    return current if current in order else bump_to
+
+
 def allows_critical_ra(text: str) -> bool:
-    """Public CWE-321 HMAC reconstruction or ICS MQTT/RFID in JS is Critical.
+    """Public CWE-321 HMAC / EmailJS send keys / client encryption_key is Critical.
 
     Do not match CouchDB AuthSession HMAC or generic 'hmac' mentions.
     """
     blob = (text or "").lower()
+    emailjs = ("emailjs" in blob or "api.emailjs.com" in blob) and any(
+        t in blob
+        for t in ("service_", "template_", "user_id", "userid", "send", "canary")
+    )
+    enc_key = ("encryption_key" in blob or "encryptionkey" in blob) and any(
+        t in blob
+        for t in (
+            "javascript",
+            "js bundle",
+            "client",
+            "webpack",
+            "main.js",
+            "emailjs",
+            "env object",
+        )
+    )
+    if emailjs or enc_key:
+        return True
     reconstructed = any(
         t in blob
         for t in (
@@ -446,11 +531,19 @@ def summarize_client_signing_findings(findings: Sequence[Dict[str, Any]]) -> Dic
         f.get("kind") in {"obfuscated_credential", "plaintext_ics_credential"} and f.get("reconstructed")
         for f in findings
     )
+    enc_demonstrated = any(
+        f.get("kind") == "client_encryption_key" and f.get("reconstructed")
+        for f in findings
+    )
     return {
         "count": len(findings),
         "kinds": kinds,
         "hmac_key_demonstrated": demonstrated,
         "ics_creds_demonstrated": creds_demonstrated,
-        "submit_without_live_api": demonstrated or creds_demonstrated,
-        "cwe": "CWE-321" if demonstrated else ("CWE-798" if creds_demonstrated else None),
+        "encryption_key_demonstrated": enc_demonstrated,
+        "submit_without_live_api": demonstrated or creds_demonstrated or enc_demonstrated,
+        "cwe": (
+            "CWE-321" if demonstrated or enc_demonstrated
+            else ("CWE-798" if creds_demonstrated else None)
+        ),
     }

@@ -1594,10 +1594,14 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             priority="high",
             assumption="Server fetches attacker-controlled URLs (webhooks, imports, previews, proxies)",
             test=(
-                "Probe URL-accepting params with interactsh + safe internal canaries "
-                "(metadata IP, localhost version); compare_requests vs benign URL"
+                "execute_interactsh register → plant payload_url in the URL-fetch "
+                "param → poll. Then compare_requests benign URL vs in-scope canary. "
+                "Do not use Canarytokens. Never metadata/localhost if Lictor blocks."
             ),
-            pass_criteria="OOB hit plus internal HTTP body, or confirmed metadata/internal content",
+            pass_criteria=(
+                "execute_interactsh poll shows DNS/HTTP/SMTP interaction, and/or "
+                "internal HTTP body in the response"
+            ),
             kill_criteria="URL fetch blocked / egress filtered; OOB-only without internal body",
             cwe_ids=["CWE-918"],
             capec_ids=["CAPEC-664"],
@@ -1801,12 +1805,16 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
                     "POST api.emailjs.com from a visitor's browser and set the recipient"
                 ),
                 test=(
-                    "Extract emailjs_userid, emailjs_serviceid, emailjs_templateid. Prove with "
-                    "ONE browser-context POST /api/v1.0/email/send to an engagement-controlled "
-                    "canary (interactsh/operator). Never send to employees or arbitrary inboxes. "
-                    "curl Origin-block is not a kill. Cap two templates."
+                    "Extract emailjs_userid, emailjs_serviceid, emailjs_templateid. "
+                    "execute_interactsh register, then ONE browser-context POST "
+                    "/api/v1.0/email/send with recipient aegis@<payload_domain>. "
+                    "Never send to employees or arbitrary inboxes. curl Origin-block "
+                    "is not a kill. Cap two templates."
                 ),
-                pass_criteria="200/OK from browser send and/or canary mailbox received the mail",
+                pass_criteria=(
+                    "200/OK from browser send and/or execute_interactsh poll shows "
+                    "SMTP/HTTP interaction"
+                ),
                 kill_criteria="Keys rejected from browser; domain allowlist + auth required",
                 cwe_ids=["CWE-798", "CWE-312", "CWE-540"],
                 capec_ids=["CAPEC-70", "CAPEC-163"],
@@ -1846,6 +1854,36 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
                 js_files[0],
             ),
             why="First-party JS bundles — client HMAC and ICS creds are a recurring CWE-321 leak",
+        ))
+        add(Methodology(
+            id="js_client_encryption_key",
+            title="CWE-321 client encryption_key in public JS env object",
+            hunt="js_secrets",
+            specialist="js_secrets",
+            priority="critical",
+            assumption=(
+                "SPA env objects (often next to EmailJS ids) embed a symmetric "
+                "encryption_key / encryptionKey used to encrypt client payloads"
+            ),
+            test=(
+                "scan_js_urls_for_secrets on main*.js. Read client_signing_findings "
+                "kind=client_encryption_key. Presence of a non-placeholder encryption_key "
+                "literal in a public bundle is PASS. File a SEPARATE finding from EmailJS. "
+                "Do not bury the key in EmailJS verification notes."
+            ),
+            pass_criteria=(
+                "Public unauthenticated bundle contains a non-placeholder encryption_key "
+                "or encryptionKey string used for client-side crypto"
+            ),
+            kill_criteria="Placeholder only (YOUR_KEY / changeme); key not present; crypto is WebCrypto with server-issued material",
+            cwe_ids=["CWE-321", "CWE-798", "CWE-312"],
+            capec_ids=["CAPEC-37", "CAPEC-191"],
+            owasp="A02:2021 Cryptographic Failures",
+            evidence=next(
+                (f for f in js_files if re.search(r"main[-.]|es2015", f, re.I)),
+                js_files[0],
+            ),
+            why="Same env object that leaks EmailJS often also ships a client encryption_key",
         ))
 
     if has_spa or source_maps or len(js_files) >= 3:

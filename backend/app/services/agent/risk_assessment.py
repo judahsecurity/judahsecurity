@@ -49,7 +49,10 @@ Critical requires demonstrated write, RCE, or cloud credential theft — except 
 OpenAPI account lookup: schema security: {} + is_staff/role, or sibling 401 vs lookup
 200/404/500, is Critical. CWE-321 client HMAC (Object.keys join + HmacSHA256/HS256
 in a public bundle) and MQTT/RFID ICS creds in that bundle are also Critical;
-reconstruction is enough, API timeout is not a kill. OAuth client_secret in JS still
+reconstruction is enough, API timeout is not a kill. EmailJS user_id/service_id/template_id
+with a browser canary (or 422/empty-params proving keys accepted) is Critical, not High.
+A client encryption_key in the same JS env object is a separate Critical CWE-321 card.
+OAuth client_secret in JS still
 needs a live read. Do not invent a 200 UserAccount body. 404 'User does not
 exist!' is the existence oracle, not a kill. ACAO * is extra. Non-blind SSRF with
 IMDS blocked is High. Unauth Settings/SaveSettings (sibling 401 vs 200 void) is High;
@@ -309,16 +312,17 @@ def validate_risk_assessment(
     elif sev == "critical" and not (
         _CRITICAL_PROOF.search(demo_blob)
         or allows_critical_ra(packet_blob)
-        or hmac_allows_critical_ra(packet_blob)
-    ):
-        gaps.append(
-            "Critical requires demonstrated write, RCE, or cloud credential theft, "
-            "or unauth account lookup (security: {} + is_staff/role, or sibling 401 "
-            "vs lookup 200/404/500), or CWE-321 client HMAC / ICS MQTT-RFID secrets "
-            "reconstructed from a public JS bundle. Non-blind SSRF / internal read / "
-            "signup abuse is High unless that proof exists. Do not invent a 200 "
-            "UserAccount body. OAuth client_secret in JS still needs a live API read."
-        )
+            or hmac_allows_critical_ra(packet_blob)
+        ):
+            gaps.append(
+                "Critical requires demonstrated write, RCE, or cloud credential theft, "
+                "or unauth account lookup (security: {} + is_staff/role, or sibling 401 "
+                "vs lookup 200/404/500), or CWE-321 client HMAC / ICS MQTT-RFID secrets "
+                "reconstructed from a public JS bundle, or EmailJS send keys / client "
+                "encryption_key in that bundle. Non-blind SSRF / internal read / "
+                "signup abuse is High unless that proof exists. Do not invent a 200 "
+                "UserAccount body. OAuth client_secret in JS still needs a live API read."
+            )
 
     proposed = (proposed_severity or data.get("proposed_severity") or "").strip().lower()
     if data["verdict"] == "confirm" and proposed and sev and proposed != sev:
