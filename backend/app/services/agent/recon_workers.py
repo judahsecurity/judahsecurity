@@ -11,11 +11,14 @@ Worker kinds (bounded — not DirBuster-scale):
   ferox_dirs   — depth-1 common dirs (app-dirs-common.txt)
   katana_urls  — shallow URL/JS crawl enrich
   whatweb      — quick fingerprint
+  nuclei_recon — informational Nuclei (tech / exposure / panel). Not CVE spray.
 
 Packs:
-  early   — httpx_tech + waf_probe (+ interceptor already queued separately)
-  enrich  — ferox_dirs + katana_urls
-  full    — early + enrich
+  early        — httpx_tech + waf_probe + whatweb + nuclei_recon
+                 (auto on URL paste; interceptor queued separately)
+  enrich       — ferox_dirs + katana_urls
+  nuclei_recon — informational Nuclei only (explicit spawn)
+  full         — early + enrich
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -31,12 +35,27 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-WORKER_KINDS = ("httpx_tech", "waf_probe", "ferox_dirs", "katana_urls", "whatweb")
+WORKER_KINDS = (
+    "httpx_tech",
+    "waf_probe",
+    "ferox_dirs",
+    "katana_urls",
+    "whatweb",
+    "nuclei_recon",
+)
 
 PACKS: Dict[str, List[str]] = {
-    "early": ["httpx_tech", "waf_probe", "whatweb"],
+    "early": ["httpx_tech", "waf_probe", "whatweb", "nuclei_recon"],
     "enrich": ["ferox_dirs", "katana_urls"],
-    "full": ["httpx_tech", "waf_probe", "whatweb", "ferox_dirs", "katana_urls"],
+    "nuclei_recon": ["nuclei_recon"],
+    "full": [
+        "httpx_tech",
+        "waf_probe",
+        "whatweb",
+        "nuclei_recon",
+        "ferox_dirs",
+        "katana_urls",
+    ],
 }
 
 # Soft ceilings so background streams cannot eat the whole turn budget.
@@ -46,7 +65,57 @@ _KIND_TIMEOUT_SEC: Dict[str, float] = {
     "whatweb": 60.0,
     "ferox_dirs": 180.0,
     "katana_urls": 180.0,
+    "nuclei_recon": 120.0,
 }
+
+# Informational Nuclei only. Tags are OR'd; -etags keeps this off CVE/fuzz spray.
+# Confirmation gate treats this arg shape as safe recon (like httpx), not a
+# full execute_nuclei engagement scan.
+NUCLEI_RECON_TAGS = "tech,exposure,panel,misconfig,detect"
+NUCLEI_RECON_EXCLUDE_TAGS = "dos,fuzz"
+_ALLOWED_RECON_SEVERITIES = {"info", "low"}
+_ALLOWED_RECON_TAG_HINTS = {
+    "tech",
+    "exposure",
+    "panel",
+    "misconfig",
+    "detect",
+    "waf",
+    "cms",
+    "wordpress",
+    "login",
+}
+_BLOCKED_RECON_TAGS = {"cve", "rce", "exploit"}
+
+
+def nuclei_recon_args(url: str) -> str:
+    """Bounded Nuclei CLI for the parallel recon worker."""
+    return (
+        f"-u {url} -jsonl -silent -rate-limit 80 -c 20 -timeout 8 -retries 0 "
+        f"-severity info,low -tags {NUCLEI_RECON_TAGS} "
+        f"-etags {NUCLEI_RECON_EXCLUDE_TAGS}"
+    )
+
+
+def is_bounded_nuclei_recon_args(args: str) -> bool:
+    """True when execute_nuclei args are informational recon, not CVE spray."""
+    raw = (args or "").strip()
+    if not raw:
+        return False
+    lower = raw.lower()
+    sev_m = re.search(r"-severity(?:\s+|=)([^\s]+)", lower)
+    if not sev_m:
+        return False
+    sevs = {s.strip() for s in sev_m.group(1).split(",") if s.strip()}
+    if not sevs or sevs - _ALLOWED_RECON_SEVERITIES:
+        return False
+    tags_m = re.search(r"-tags(?:\s+|=)([^\s]+)", lower)
+    if not tags_m:
+        return False
+    tags = {t.strip() for t in tags_m.group(1).split(",") if t.strip()}
+    if not tags or tags & _BLOCKED_RECON_TAGS:
+        return False
+    return bool(tags & _ALLOWED_RECON_TAG_HINTS)
 
 _WORDLIST_CANDIDATES = (
     os.environ.get("ASM_APP_DIRS_WORDLIST") or "",
@@ -221,7 +290,34 @@ async def _worker_body(
             "HINT: call ingest_urls_into_map to fold URLs into the capability map."
         )
 
+    if kind == "nuclei_recon":
+        args = nuclei_recon_args(url)
+        res = await _run_mcp(
+            tools_manager, "execute_nuclei", args,
+            user_id=user_id, org_id=org_id, session_id=session_id,
+        )
+        out = _nuclei_recon_brief(res)
+        return (
+            f"[recon_worker:nuclei_recon] success={bool(res.get('success'))}\n{out}\n"
+            "HINT: informational Nuclei only (tech/exposure/panel). Follow Augur "
+            "pivots (WordPress → REST enum / wpscan, panel → bounded dir brute). "
+            "Full CVE nuclei remains coverage leftover — this is not a vuln scan."
+        )
+
     return f"[recon_worker:{kind}] unknown kind (host={host})"
+
+
+def _nuclei_recon_brief(res: Dict[str, Any]) -> str:
+    """Prefer Augur-filtered Nuclei text so Joshua sees signals, not JSONL."""
+    raw = str(res.get("output") or res.get("error") or "")
+    if res.get("augur"):
+        return _truncate(raw, 4500)
+    try:
+        from aegis_praetorium.augur import filter_nuclei
+
+        return _truncate(filter_nuclei(raw).to_text(), 4500)
+    except Exception:
+        return _truncate(raw, 4500)
 
 
 async def spawn_workers(

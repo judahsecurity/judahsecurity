@@ -7,6 +7,8 @@ to declare the host clean. Parameter mining and fireteam dispatch are required
 before complete on web targets.
 
 Known-CVE spray (Nuclei) is coverage leftover, never a substitute for this loop.
+Informational Nuclei (tech/exposure/panel) runs as a parallel recon stream
+(`nuclei_recon`) and does not count as that leftover coverage pass.
 """
 
 from __future__ import annotations

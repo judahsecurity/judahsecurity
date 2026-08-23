@@ -287,6 +287,21 @@ def _resolve_decision(policy_map: dict, tool_name: str) -> str:
     return best[1]
 
 
+def _is_bounded_nuclei_recon(tool_name: str, tool_args: Optional[dict]) -> bool:
+    """Informational Nuclei recon (tech/exposure/panel) is light recon, not CVE spray."""
+    if tool_name != "execute_nuclei":
+        return False
+    args = ""
+    if isinstance(tool_args, dict):
+        args = str(tool_args.get("args") or "")
+    try:
+        from app.services.agent.recon_workers import is_bounded_nuclei_recon_args
+
+        return is_bounded_nuclei_recon_args(args)
+    except Exception:
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Public gate
 # ---------------------------------------------------------------------------
@@ -330,9 +345,12 @@ async def gate(
     policy_map = policy_cfg.get("tool_confirmation_policy") or {}
     decision = _resolve_decision(policy_map, tool_name)
 
+    nuclei_recon = _is_bounded_nuclei_recon(tool_name, tool_args)
+
     # Light recon must not block assessment kickoff behind approve dialogs.
     # Explicit "deny" still wins; everything else becomes auto for SAFE_RECON_TOOLS.
-    if tool_name in SAFE_RECON_TOOLS and decision != "deny":
+    # Bounded informational Nuclei (tech/exposure/panel) is the same class as httpx.
+    if (tool_name in SAFE_RECON_TOOLS or nuclei_recon) and decision != "deny":
         decision = "auto"
 
     # RoE escalates "auto" -> "confirm" for non-readonly tools when enabled,
@@ -343,6 +361,7 @@ async def gate(
         and _roe_requires_confirmation(organization_id)
         and tool_name not in READONLY_TOOLS
         and tool_name not in SAFE_RECON_TOOLS
+        and not nuclei_recon
     ):
         decision = "confirm"
         roe_escalated = True
