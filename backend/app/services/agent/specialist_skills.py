@@ -178,8 +178,10 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "retest_criteria (≥3), ticket_title, ra_note.\n"
         "- Critical only if write, RCE, or cloud credential theft was demonstrated — "
         "except unauth /api/auth/account/: schema security: {} + is_staff/role, or "
-        "sibling 401 vs lookup 200/404/500, is Critical. Do not invent a 200 "
-        "UserAccount body. 404 is the existence oracle. ACAO * is extra. "
+        "sibling 401 vs lookup 200/404/500, is Critical. CWE-321 client HMAC / ICS "
+        "MQTT-RFID reconstructed from a public JS bundle is also Critical; timeout is "
+        "not a kill. OAuth client_secret in JS still needs a live API read. "
+        "Do not invent a 200 UserAccount body. 404 is the existence oracle. ACAO * is extra. "
         "Unauth SaveSettings 401-vs-200 void is High (not Critical) unless GetSettings "
         "round-trips the canary AND a security-control flag change is demonstrated. "
         "Non-blind SSRF / internal read / open signup is High when IMDS is blocked.\n"
@@ -528,6 +530,26 @@ def skill_pack_for(specialist: str) -> str:
         except Exception:
             pass
     try:
+        from app.services.agent.auth_header_bypass import (
+            HUNTER_RULES as AUTH_HEADER_HUNTER,
+            REVIEW_RULES as AUTH_HEADER_REVIEW,
+            VERIFIER_ADDENDUM as AUTH_HEADER_VERIFY,
+        )
+        from app.services.agent.email_change_ato import (
+            HUNTER_RULES as EMAIL_HUNTER,
+            REVIEW_RULES as EMAIL_REVIEW,
+            VERIFIER_ADDENDUM as EMAIL_VERIFY,
+        )
+        from app.services.agent.ml_pipeline_rbac import (
+            HUNTER_RULES as ML_HUNTER,
+            REVIEW_RULES as ML_REVIEW,
+            VERIFIER_ADDENDUM as ML_VERIFY,
+        )
+        from app.services.agent.socketio_idor import (
+            HUNTER_RULES as SOCKETIO_HUNTER,
+            REVIEW_RULES as SOCKETIO_REVIEW,
+            VERIFIER_ADDENDUM as SOCKETIO_VERIFY,
+        )
         from app.services.agent.unauth_settings_write import (
             HUNTER_RULES,
             REVIEW_RULES,
@@ -536,10 +558,24 @@ def skill_pack_for(specialist: str) -> str:
 
         if specialist in ("api_authz", "auth_logic"):
             parts.append(HUNTER_RULES)
+        if specialist == "auth_logic":
+            parts.append(EMAIL_HUNTER)
+        if specialist == "api_authz":
+            parts.append(AUTH_HEADER_HUNTER)
+            parts.append(SOCKETIO_HUNTER)
+            parts.append(ML_HUNTER)
         elif specialist == "independent_verifier":
             parts.append(VERIFIER_ADDENDUM)
+            parts.append(EMAIL_VERIFY)
+            parts.append(AUTH_HEADER_VERIFY)
+            parts.append(SOCKETIO_VERIFY)
+            parts.append(ML_VERIFY)
         elif specialist == "risk_assessor":
             parts.append(REVIEW_RULES)
+            parts.append(EMAIL_REVIEW)
+            parts.append(AUTH_HEADER_REVIEW)
+            parts.append(SOCKETIO_REVIEW)
+            parts.append(ML_REVIEW)
     except Exception:
         pass
     extra = {

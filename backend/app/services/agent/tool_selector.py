@@ -523,6 +523,39 @@ class ToolSelector:
                 category="api",
             ))
             recs.append(ToolRecommendation(
+                tool_name="compare_requests",
+                args_template=(
+                    '{"baseline":{"method":"POST","url":"https://{target}/api/auth/users/set_password/",'
+                    '"headers":{"Content-Type":"application/json"},'
+                    '"json":{"new_password":"aegis-unused"}},'
+                    '"mutant":{"method":"POST","url":"https://{target}/api/auth/users/reset_email/",'
+                    '"headers":{"Content-Type":"application/json"},'
+                    '"json":{"email":"aegis-ato-canary@example.invalid"}}}'
+                ),
+                priority=5,
+                rationale=(
+                    "Unauth email-change ATO: set_password 401 vs reset_email canary 204 "
+                    "proves JWT skip. Pass use_auth_session=false. One canary only — "
+                    "do not complete ATO; do not spray."
+                ),
+                category="api",
+            ))
+            recs.append(ToolRecommendation(
+                tool_name="compare_requests",
+                args_template=(
+                    '{"baseline":{"method":"GET","url":"https://{target}/api/"},'
+                    '"mutant":{"method":"GET","url":"https://{target}/api/",'
+                    '"headers":{"Authorization":"Bearer aegis-invalid"}}}'
+                ),
+                priority=5,
+                rationale=(
+                    "Auth-header bypass: no Authorization vs Bearer aegis-invalid on the "
+                    "same path. SUBMIT if no-header is 200/400 AND invalid-bearer is 401. "
+                    "400 missing-params is a bypass. Pass use_auth_session=false."
+                ),
+                category="api",
+            ))
+            recs.append(ToolRecommendation(
                 tool_name="execute_astf",
                 args_template='{"url":"https://{target}","token":""}',
                 priority=6,
@@ -926,7 +959,11 @@ class ToolSelector:
                 tool_name="scan_js_urls_for_secrets",
                 args_template="urls=<JS URLs from katana/deep_crawl/gau/interceptor>",
                 priority=6,
-                rationale="JS bundles discovered — hunt hardcoded API keys/tokens before deeper testing.",
+                rationale=(
+                    "JS bundles discovered — hunt CWE-321 Object.keys HMAC signing keys, "
+                    "MQTT/RFID ICS creds, and client_id/client_secret. Prioritize main*.js "
+                    "and main-es2015*.js (often 5–10MB)."
+                ),
                 category="reconnaissance",
             ))
             recs.append(ToolRecommendation(

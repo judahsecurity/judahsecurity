@@ -378,6 +378,60 @@ def analyze_js_client_secrets(text: str, source_url: str = "") -> List[Dict[str,
     return findings
 
 
+def allows_critical_ra(text: str) -> bool:
+    """Public CWE-321 HMAC reconstruction or ICS MQTT/RFID in JS is Critical.
+
+    Do not match CouchDB AuthSession HMAC or generic 'hmac' mentions.
+    """
+    blob = (text or "").lower()
+    reconstructed = any(
+        t in blob
+        for t in (
+            "object.keys",
+            'join("")',
+            "join('')",
+            "property name",
+            "reconstruct",
+            "waste={",
+            "wastename",
+            "gatewaypass",
+            "client_signing",
+        )
+    )
+    hmac_js = any(
+        t in blob
+        for t in (
+            "cwe-321",
+            "hmacsha256",
+            "hmac-sha256",
+            "alg:hs256",
+            'alg:"hs256"',
+            "hs256 jwt",
+            "client hmac",
+            "signing key",
+        )
+    )
+    ics_js = any(
+        t in blob
+        for t in ("mqtt", "rfidpassword", "rfidusername", "hmi/live_tags", "scada")
+    ) and any(
+        t in blob
+        for t in (
+            "javascript",
+            "js bundle",
+            "main-es2015",
+            "webpack",
+            "public bundle",
+            "client-side",
+        )
+    )
+    js_surface = any(
+        t in blob
+        for t in ("javascript", "js bundle", "public bundle", "main-es2015", "client-side")
+    )
+    return bool((hmac_js and (reconstructed or js_surface)) or (ics_js and reconstructed))
+
+
 def summarize_client_signing_findings(findings: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     """Compact agent-facing summary: counts, kinds, and whether CWE-321 is demonstrated."""
     kinds = sorted({str(f.get("kind") or "") for f in findings if f.get("kind")})

@@ -2550,7 +2550,11 @@ class ASMToolsManager:
         except Exception as e:
             logger.exception("scan_js_urls_for_secrets failed")
             return json.dumps({"success": False, "error": str(e)}, indent=2)
-        return json.dumps(result, indent=2, default=str)
+        dumped = json.dumps(result, indent=2, default=str)
+        cap = _tool_output_max_chars()
+        if len(dumped) > cap:
+            dumped = dumped[:cap] + f"\n... (truncated, total {len(dumped)} chars)"
+        return dumped
 
     async def scan_js_urls_for_vulns(
         self,
@@ -4298,17 +4302,13 @@ class ASMToolsManager:
         })
 
         # Q19: Unauth email-change ATO (djoser reset_email).
-        email_change_finding = any(w in text for w in [
-            "reset_email", "reset-email", "email change", "change email",
-            "email-change", "djoser", "reset_email_confirm",
-        ])
-        email_change_proof = (
-            ("401" in text and any(s in text for s in ("204", "200")))
-            or any(w in text for w in [
-                "set_password", "invalid token for given user", "uid=mq",
-                "aegis-ato-canary",
-            ])
+        from app.services.agent.email_change_ato import (
+            has_email_change_proof,
+            is_email_change_finding,
         )
+
+        email_change_finding = is_email_change_finding(text)
+        email_change_proof = has_email_change_proof(text)
         q19 = (not email_change_finding) or email_change_proof
         questions.append({
             "question": (
@@ -4326,19 +4326,13 @@ class ASMToolsManager:
         })
 
         # Q20: Auth middleware skipped when Authorization header is absent.
-        header_bypass_finding = any(w in text for w in [
-            "bypassauthorization", "bypass authorization",
-            "missing authorization header", "no authorization header",
-            "without an authorization header", "auth middleware",
-            "middleware bypass", "auth_header_bypass",
-        ])
-        header_bypass_proof = (
-            ("401" in text and any(s in text for s in ("400", "200")))
-            or any(w in text for w in [
-                "aegis-invalid", "invalid bearer", "no-header", "no header",
-                "controller ran", "missing params",
-            ])
+        from app.services.agent.auth_header_bypass import (
+            has_auth_header_proof,
+            is_auth_header_finding,
         )
+
+        header_bypass_finding = is_auth_header_finding(text)
+        header_bypass_proof = has_auth_header_proof(text)
         q20 = (not header_bypass_finding) or header_bypass_proof
         questions.append({
             "question": (
@@ -4356,16 +4350,13 @@ class ASMToolsManager:
         })
 
         # Q21: Socket.IO get_stream IDOR.
-        socketio_finding = any(w in text for w in [
-            "get_stream", "url_key", "socketio_idor",
-        ]) or (
-            ("socket.io" in text or "socketio" in text)
-            and any(w in text for w in ["idor", "siteid", "camera stream", "unauth"])
-            and "cors" not in text
+        from app.services.agent.socketio_idor import (
+            has_socketio_proof,
+            is_socketio_finding,
         )
-        socketio_proof = any(w in text for w in [
-            "url_key", "get_stream", "fabricated", "siteid", "namespace",
-        ])
+
+        socketio_finding = is_socketio_finding(text)
+        socketio_proof = has_socketio_proof(text)
         q21 = (not socketio_finding) or socketio_proof
         questions.append({
             "question": (
@@ -4383,15 +4374,13 @@ class ASMToolsManager:
         })
 
         # Q22: ML pipeline missing RBAC.
-        ml_finding = any(w in text for w in [
-            "celery-task", "celery_task", "/api/v1/train", "logixtwin",
-            "ml pipeline", "ml model training", "ml_pipeline_rbac",
-            "missing rbac", "missing role-based",
-        ])
-        ml_proof = any(w in text for w in [
-            "self-reg", "self-registered", "throwaway", "low-priv",
-            "200", "202", "204", "non-admin", "any user",
-        ])
+        from app.services.agent.ml_pipeline_rbac import (
+            has_ml_rbac_proof,
+            is_ml_rbac_finding,
+        )
+
+        ml_finding = is_ml_rbac_finding(text)
+        ml_proof = has_ml_rbac_proof(text)
         q22 = (not ml_finding) or ml_proof
         questions.append({
             "question": (
@@ -4513,6 +4502,33 @@ class ASMToolsManager:
                 "with a paired write: protected sibling 401 vs unauth SaveSettings 200 "
                 "(ASP.NET void, Content-Length: 0). GET 500 is not a kill. One canary "
                 "key; do not replace the production settings collection."
+            )
+        elif email_change_finding and not email_change_proof:
+            verdict = "IMPROVE"
+            verdict_detail = (
+                "reset_email existence is a foothold. Prove JWT skip with unauth "
+                "set_password 401 vs reset_email canary 204/200. One "
+                "aegis-ato-canary@example.invalid; do not complete ATO; do not spray."
+            )
+        elif header_bypass_finding and not header_bypass_proof:
+            verdict = "IMPROVE"
+            verdict_detail = (
+                "API existence is a foothold. Prove middleware skip: no Authorization "
+                "200/400 (controller ran) vs Bearer aegis-invalid 401. 400 missing-params "
+                "is a bypass. Do not dump."
+            )
+        elif socketio_finding and not socketio_proof:
+            verdict = "IMPROVE"
+            verdict_detail = (
+                "Socket.IO open is a foothold. Prove anonymous get_stream returns url_key "
+                "for a fabricated siteId. Do not fetch video. Do not send null crash loops."
+            )
+        elif ml_finding and not ml_proof:
+            verdict = "IMPROVE"
+            verdict_detail = (
+                "ML train/celery existence is a foothold. Prove a self-reg/low-priv "
+                "session gets 200/202/204 on POST /api/v1/train/. Do not DELETE "
+                "production models."
             )
         elif acr_sig["is_finding"] and not acr_sig["has_anon_proof"]:
             verdict = "IMPROVE"
@@ -5468,26 +5484,28 @@ class ASMToolsManager:
         if not url or not str(url).strip():
             return "Error: url is required (e.g. from capability_map.api_samples)."
 
-        from app.services.agent.unauth_account_lookup import spray_violation
-        from app.services.agent.request_mutate import coerce_request_body
-        from app.services.agent.unauth_settings_write import (
-            sanitize_settings_write,
-            should_force_unauth_session,
+        from app.services.agent.lane_proof import (
+            sanitize_live_request,
+            should_force_unauth_session as lane_force_unauth,
         )
-
-        blocked = spray_violation(str(url))
-        if blocked:
-            return json.dumps({"error": blocked}, indent=2)
+        from app.services.agent.request_mutate import coerce_request_body
 
         raw_body, hdrs = coerce_request_body(
             {"body": body, "headers": headers or {}},
             headers or {},
         )
-        raw_body, hdrs, rewrite_note = sanitize_settings_write(
-            url=url, method=method, body=raw_body, headers=hdrs
+        raw_body, hdrs, rewrite_note, blocked = sanitize_live_request(
+            url, method, raw_body, hdrs
         )
-        if should_force_unauth_session(url, url, hdrs, hdrs):
+        if blocked:
+            return json.dumps({"error": blocked}, indent=2)
+        force_unauth, force_note = lane_force_unauth(url, url, hdrs, hdrs)
+        if force_unauth:
             use_auth_session = False
+            if force_note:
+                rewrite_note = (
+                    f"{rewrite_note}; {force_note}" if rewrite_note else force_note
+                )
 
         try:
             exchange = await self._http_exchange(
@@ -5507,10 +5525,7 @@ class ASMToolsManager:
             if rewrite_note:
                 note = rewrite_note + " " + note
             if not use_auth_session:
-                note = (
-                    "use_auth_session=false for missing-[Authorize] settings write. "
-                    + note
-                )
+                note = "use_auth_session=false (unauth gold-bar pair). " + note
             out = {
                 "request": exchange["request"],
                 "response": exchange["response"],
@@ -5540,9 +5555,9 @@ class ASMToolsManager:
               ``json`` is accepted as an alias for a JSON body (dict or list).
             interest_fields: optional JSON/body keys to extract and compare (owner_id, email, tenant…)
             use_auth_session: attach deep_crawl auth cookies when Cookie absent.
-              For missing-[Authorize] / unauth writes, pass **false** (session cookies
-              would turn the 401 sibling into 200 and hide the bug). Forced false when
-              either URL is a Settings/SaveSettings write and Authorization is absent.
+              For missing-[Authorize] / unauth writes / email-change / auth-header skip,
+              pass **false** (session cookies would hide the 401 sibling). Forced false
+              on those gold-bar pairs when Authorization is absent.
             timeout: per-request timeout
             hypothesis_id: optional engagement hypothesis to annotate with result
         """
@@ -5559,21 +5574,18 @@ class ASMToolsManager:
                 raise ValueError(f"{label}.url is required")
             if not url.startswith(("http://", "https://")):
                 url = f"https://{url}"
-            from app.services.agent.unauth_account_lookup import spray_violation
-
-            blocked = spray_violation(url)
-            if blocked:
-                raise ValueError(blocked)
+            from app.services.agent.lane_proof import sanitize_live_request
             from app.services.agent.request_mutate import coerce_request_body
-            from app.services.agent.unauth_settings_write import sanitize_settings_write
 
             raw_body, hdrs = coerce_request_body(spec, spec.get("headers") or {})
-            raw_body, hdrs, note = sanitize_settings_write(
-                url=url,
-                method=spec.get("method") or "GET",
-                body=raw_body,
-                headers=hdrs,
+            raw_body, hdrs, note, blocked = sanitize_live_request(
+                url,
+                spec.get("method") or "GET",
+                raw_body,
+                hdrs,
             )
+            if blocked:
+                raise ValueError(blocked)
             if note:
                 rewrite_notes.append(f"{label}: {note}")
             return {
@@ -5590,14 +5602,15 @@ class ASMToolsManager:
         except ValueError as exc:
             return json.dumps({"error": str(exc)}, indent=2)
 
-        from app.services.agent.unauth_settings_write import should_force_unauth_session
+        from app.services.agent.lane_proof import should_force_unauth_session as lane_force_unauth
 
-        if should_force_unauth_session(b["url"], m["url"], b["headers"], m["headers"]):
+        force_unauth, force_note = lane_force_unauth(
+            b["url"], m["url"], b["headers"], m["headers"]
+        )
+        if force_unauth:
             use_auth_session = False
-            rewrite_notes.append(
-                "use_auth_session forced false (missing-[Authorize] settings write; "
-                "crawl cookies would hide the 401 sibling)"
-            )
+            if force_note:
+                rewrite_notes.append(force_note)
 
         try:
             base_ex = await self._http_exchange(
@@ -5704,6 +5717,22 @@ class ASMToolsManager:
             signals.append("aspnet_void_unauth_write")
             verdict = "MUTANT_BYPASS_CANDIDATE"
 
+        from app.services.agent.lane_proof import annotate_compare_proof as lane_annotate
+
+        extra_signals, proof, proof_verdict = lane_annotate(
+            baseline_url=b["url"],
+            mutant_url=m["url"],
+            baseline_headers=b["headers"],
+            mutant_headers=m["headers"],
+            baseline_status=base_ex["response"]["status"],
+            mutant_status=mut_ex["response"]["status"],
+            baseline_body=b_body,
+            mutant_body=m_body,
+        )
+        signals.extend(extra_signals)
+        if proof_verdict:
+            verdict = proof_verdict
+
         out = {
             "verdict": verdict,
             "signals": signals,
@@ -5726,6 +5755,7 @@ class ASMToolsManager:
             "baseline": base_ex,
             "mutant": mut_ex,
             "notes": rewrite_notes or None,
+            "proof": proof,
             "guidance": (
                 "TIME_BASED_INJECTION_CANDIDATE → mutant took ≥1.5s longer (SLEEP/WAIT). "
                 "Confirm with a second delay (SLEEP(0) vs SLEEP(2) vs SLEEP(4)); "
@@ -5735,6 +5765,13 @@ class ASMToolsManager:
                 "aspnet_void_unauth_write (sibling 401 vs SaveSettings 200 Content-Length: 0) "
                 "is SUBMIT High — GET GetSettings 500 is not a kill; one canary key; "
                 "use_auth_session=false. "
+                "email_change_unauth (set_password 401 vs reset_email 204 canary) is SUBMIT "
+                "High — one aegis-ato-canary; do not complete ATO. "
+                "auth_header_skip (no-header 200/400 vs Bearer aegis-invalid 401) is SUBMIT High. "
+                "socketio_url_key (anonymous get_stream url_key) is SUBMIT High — no video dump, "
+                "no null crash loops. "
+                "ml_rbac_bypass (low-priv POST /api/v1/train 200/202) is SUBMIT High — do not "
+                "DELETE production models. "
                 "NO_MATERIAL_DIFF / MUTANT_DENIED → update_hypothesis(status='killed') unless "
                 "another mutation remains. Never report on status-200 alone."
             ),

@@ -565,8 +565,9 @@ These tools implement specialized offensive test workflows and require the explo
 - **compare_requests**: Differential HTTP proof (baseline vs one mutation). Core tool for logic/authz/tenant bugs.
   Args: **baseline** (object: method/url/headers/body or json), **mutant** (same shape — change Host, object id, etc.),
   interest_fields (optional list e.g. ["owner_id","email","tenant"]), use_auth_session (default true;
-  pass **false** for missing-[Authorize] / unauth writes — forced false on Settings/SaveSettings when
-  Authorization is absent),
+  pass **false** for missing-[Authorize] / unauth writes / email-change / auth-header skip —
+  forced false on Settings/SaveSettings, reset_email, and no-header vs Bearer aegis-invalid
+  when Authorization is absent),
   hypothesis_id (optional — auto-annotates engagement brain).
   ``json`` is an alias for a JSON body (dict or list); Content-Type is set if missing.
   Verdicts: LIKELY_IMPACT | MUTANT_BYPASS_CANDIDATE | NO_MATERIAL_DIFF | MUTANT_DENIED | NEEDS_INTERPRETATION.
@@ -575,6 +576,14 @@ These tools implement specialized offensive test workflows and require the explo
   baseline={{"method":"POST","url":"https://app/api/TaskAdmin/UpdateTask"}},
   mutant={{"method":"POST","url":"https://app/api/Settings/SaveSettings",
   "json":{{"settings":[{{"key":"aegis-verify-key","value":"aegis-verify-ok"}}]}}}})
+  Email-change ATO: compare_requests(use_auth_session=false,
+  baseline={{"method":"POST","url":"https://app/api/auth/users/set_password/"}},
+  mutant={{"method":"POST","url":"https://app/api/auth/users/reset_email/",
+  "json":{{"email":"aegis-ato-canary@example.invalid"}}}})
+  Auth-header skip: compare_requests(use_auth_session=false,
+  baseline={{"method":"GET","url":"https://app/api/resource"}},
+  mutant={{"method":"GET","url":"https://app/api/resource",
+  "headers":{{"Authorization":"Bearer aegis-invalid"}}}})
 
 - **sync_engagement_brain**: Seed observation→methodology hypothesis cards AND a threat model from the capability map (call after deep_crawl / ingest_urls_into_map).
 - **build_threat_model**: Explicit threat-model bootstrap. source=auto|url|map|code. URL uses the crawl map (or a bare URL); code inventories a local checkout (never executes target code). Optional repo_path, languages, frameworks, owner_notes, rebuild.

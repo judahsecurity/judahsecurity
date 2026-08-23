@@ -165,6 +165,22 @@ def parse_verdict_from_text(text: str) -> str:
 
 
 def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> str:
+    from app.services.agent.auth_header_bypass import (
+        VERIFIER_ADDENDUM as AUTH_HEADER_VERIFIER_ADDENDUM,
+        is_auth_header_finding,
+    )
+    from app.services.agent.email_change_ato import (
+        VERIFIER_ADDENDUM as EMAIL_CHANGE_VERIFIER_ADDENDUM,
+        is_email_change_finding,
+    )
+    from app.services.agent.ml_pipeline_rbac import (
+        VERIFIER_ADDENDUM as ML_RBAC_VERIFIER_ADDENDUM,
+        is_ml_rbac_finding,
+    )
+    from app.services.agent.socketio_idor import (
+        VERIFIER_ADDENDUM as SOCKETIO_VERIFIER_ADDENDUM,
+        is_socketio_finding,
+    )
     from app.services.agent.unauth_account_lookup import (
         VERIFIER_ADDENDUM as ACCOUNT_VERIFIER_ADDENDUM,
         is_account_lookup_finding,
@@ -187,6 +203,14 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         addenda.append(ACCOUNT_VERIFIER_ADDENDUM)
     if is_settings_write_finding(packet):
         addenda.append(SETTINGS_VERIFIER_ADDENDUM)
+    if is_email_change_finding(packet):
+        addenda.append(EMAIL_CHANGE_VERIFIER_ADDENDUM)
+    if is_auth_header_finding(packet):
+        addenda.append(AUTH_HEADER_VERIFIER_ADDENDUM)
+    if is_socketio_finding(packet):
+        addenda.append(SOCKETIO_VERIFIER_ADDENDUM)
+    if is_ml_rbac_finding(packet):
+        addenda.append(ML_RBAC_VERIFIER_ADDENDUM)
     class_addendum = ("\n\n" + "\n\n".join(addenda)) if addenda else ""
 
     return (

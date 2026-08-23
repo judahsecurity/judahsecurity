@@ -91,7 +91,7 @@ def test_writeup_guidance_requires_privileged_impact():
     assert "azurecr" in text or "anonymous pull" in text
     assert "anonymouspullenabled" in text or "oauth2" in text
     assert "package-lock" in text or "ghp_" in text
-    assert "ask marcus" in text or "verdict" in text
+    assert "cwe-321" in text
     review = g.FINDING_REVIEW_GUIDANCE.lower()
     assert "verdict" in review
     assert "retest" in review
@@ -99,6 +99,7 @@ def test_writeup_guidance_requires_privileged_impact():
     assert "savesettings" in review or "void 200" in review
     assert "account" in review or "is_staff" in review
     assert "404" in review or "existence oracle" in review
+    assert "cwe-321" in review or "hmac" in review
 
 
 def test_acr_anonymous_pull_signals():

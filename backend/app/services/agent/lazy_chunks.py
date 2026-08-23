@@ -16,7 +16,7 @@ import httpx
 
 MAX_CHUNKS = 60
 MAX_DISCOVER = 200
-MAX_BYTES = 2_000_000
+MAX_BYTES = 16_000_000
 
 _WEBPACK_FN = re.compile(
     r"\.(?:u|miniCssF)\s*=\s*(?:function\s*)?\(?\s*([\w$]+)\s*\)?\s*(?:=>|\{)"
@@ -250,7 +250,7 @@ async def fetch_lazy_chunks(
     bundle_url: str,
     base_url: str = "",
     dry_run: bool = False,
-    timeout: float = 12.0,
+    timeout: float = 60.0,
 ) -> Dict[str, Any]:
     bundle_url = (bundle_url or "").strip()
     if not bundle_url.startswith("http"):

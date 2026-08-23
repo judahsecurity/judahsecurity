@@ -260,23 +260,25 @@ def scan_js_urls_for_secrets(
                 finding["source_url"] = name_to_url[base]
 
     signing_summary = summarize_client_signing_findings(client_signing)
+    # Signing hits first so 20k tool-output truncation cannot drop CWE-321.
     out: Dict[str, Any] = {
         "success": True,
+        "client_signing_summary": signing_summary,
+        "client_signing_findings": client_signing,
         "urls_requested": len(parsed),
         "urls_scanned": sum(1 for d in downloads if d.get("ok")),
         "downloads": downloads,
-        "gitleaks_findings": gl,
+        "gitleaks_findings": gl[:40],
         "gitleaks_error": gl_err,
-        "regex_hints": regex_hints,
-        "client_signing_findings": client_signing,
-        "client_signing_summary": signing_summary,
+        "regex_hints": regex_hints[:20],
     }
     if signing_summary.get("submit_without_live_api"):
         out["guidance"] = (
             "CWE-321/CWE-798 client secrets reconstructed from a public bundle. "
-            "submit_finding_candidate now. Live API/MQTT accept is optional extra "
-            "proof; timeout or unreachable backend is NOT a kill. "
-            "queue_finding_followups(vuln_type='js_secrets')."
+            "submit_finding_candidate NOW as Critical. Live API/MQTT accept is "
+            "optional extra proof; timeout or unreachable backend is NOT a kill. "
+            "queue_finding_followups(vuln_type='js_secrets'). "
+            "OAuth client_secret still needs a live read; HMAC/ICS do not."
         )
     if gl_err and not gl:
         out["note"] = gl_err

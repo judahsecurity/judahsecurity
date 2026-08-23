@@ -59,7 +59,15 @@ def test_ilens_mqtt_and_rfid_credentials():
     assert mqtt_user["kind"] == "obfuscated_credential"
 
 
-def test_summary_says_submit_without_live_api():
+def test_allows_critical_ra_hmac_not_couchdb():
+    from app.services.js_client_signing_secrets import allows_critical_ra
+
+    assert allows_critical_ra(
+        "CWE-321 HMAC-SHA256 signing key Object.keys join in public JS bundle"
+    )
+    assert not allows_critical_ra(
+        "AuthSession cookie base64 username hex_timestamp hmac using secret"
+    )
     hits = analyze_js_client_secrets(ILENS_BUNDLE)
     summary = summarize_client_signing_findings(hits)
     assert summary["hmac_key_demonstrated"] is True

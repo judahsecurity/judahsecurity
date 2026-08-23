@@ -26,7 +26,8 @@ Required sections (map onto create_finding fields):
 - demonstrated_chain: ordered live tool calls with args + observed stdout that prove impact
 - not_demonstrated: what was not attempted (hash cracking, data modification, lateral movement)
 - references: CWE (e.g. CWE-1393 default credentials) and vendor hardening docs
-Default/weak login or a client_secret sitting in a JS bundle is IMPROVE until privileged impact is proven.
+Default/weak login or an OAuth client_secret sitting in a JS bundle is IMPROVE until privileged impact is proven.
+CWE-321 client HMAC (Object.keys join / HmacSHA256 HS256 in a public unauth bundle) and MQTT/RFID ICS credentials in that bundle are SUBMIT Critical — reconstruction is the proof. Live token/MQTT accept is extra; backend timeout is not a kill. Do not mint JWTs or connect to ICS brokers to file the card.
 Chain steps must be successful proof only — failed attempts (e.g. AuthSession HMAC with
 _users derived_key → 401) belong in not_demonstrated, not the chain.
 CouchDB after _admin: GET /_node/_local/_config (secret, timeout, admins salts) then prove
@@ -165,7 +166,9 @@ After publish: Marcus risk assessment (assess_finding_risk) is required for
 medium+. Score the demonstrated packet only — confirm vs inflate vs
 downgrade, CVSS on demonstrated evidence, why_not_higher, control failures,
 remediation with done_when, retest_criteria. Critical requires demonstrated
-write/RCE/cloud credential theft. Non-blind SSRF with IMDS blocked is High.
+write/RCE/cloud credential theft, unauth account lookup proof, or CWE-321
+client HMAC / ICS MQTT-RFID reconstructed from a public JS bundle. Non-blind
+SSRF with IMDS blocked is High.
 Do not live-retest for RA. Complete is blocked while RA is pending."""
 
 
@@ -197,7 +200,15 @@ GetSettings is 500 / NRE (no read-back). Do not mix *.azurewebsites.net
 App Service with an Azure Function env dump. why_not_higher: no proven
 persistence, no flag flip, no BFLA with a low-priv session. Retest bar:
 unauth POST SaveSettings returns 401 like UpdateTask. Do not re-POST a
-replacement settings collection; do not flip production flags."""
+replacement settings collection; do not flip production flags.
+CWE-321 HMAC / ICS creds in public JS (Ask Marcus): keep Demonstrated Critical.
+Object.keys join reconstruction plus HmacSHA256/HS256 (and MQTT/RFID in the
+same bundle) is enough. Do not drop because /ilens_api timed out or a forged
+token was never accepted. Do not re-download the live bundle, mint JWTs, or
+connect to the MQTT broker unless the operator asks for a deny-check.
+why_not_higher: no live token accept, no broker session, no RFID badge use.
+Retest bar: new bundle has no waste/Object.keys reconstruction; old HMAC key
+rejected; MQTT and RFID accounts rotated."""
 
 
 def acr_anonymous_pull_signals(text: Optional[str]) -> Dict[str, bool]:

@@ -86,6 +86,48 @@ def test_appsmith_packet_confirms_high():
     assert parsed["confirmed_severity"] == "high"
 
 
+def test_hmac_signing_key_is_critical_for_marcus():
+    from app.services.js_client_signing_secrets import allows_critical_ra
+
+    assert allows_critical_ra(
+        "CWE-321 client HMAC-SHA256 signing key reconstructed via Object.keys "
+        "join in a public JavaScript bundle; HmacSHA256 alg HS256"
+    )
+    assert not allows_critical_ra(
+        "CouchDB AuthSession cookie hmac with couch_httpd_auth.secret"
+    )
+    packet = dict(APPSMITH_RA)
+    packet["confirmed_severity"] = "critical"
+    packet["verdict"] = "confirm"
+    packet["ticket_title"] = "Critical — CWE-321 HMAC signing key in public JS"
+    packet["why_this_severity"] = (
+        "Unauthenticated GET of main-es2015.js reconstructs an HMAC-SHA256 "
+        "signing key via Object.keys(this.waste).join('') and signs HS256 JWTs "
+        "for every API request. MQTT and RFID credentials are in the same bundle."
+    )
+    packet["why_not_lower"] = (
+        "The signing secret is in a public bundle with no auth. Backend timeout "
+        "does not reduce exposure. Gitleaks never sees a string literal."
+    )
+    packet["ra_note"] = (
+        "Confirm Critical CWE-321. Reconstruction is enough. Do not drop on "
+        "ilens_api timeout. Rotate HMAC, MQTT, and RFID. Move signing server-side."
+    )
+    packet["business_risk"] = (
+        "ICS/MES iLens digital twin: forged API signatures and SCADA MQTT access "
+        "from an internet-reachable Angular bundle."
+    )
+    packet["demonstrated"] = [
+        {"asset": "main-es2015.js", "result": "HTTP 200 no auth, Object.keys waste HMAC key"},
+        {"asset": "HmacSHA256 HS256", "result": "signs all API requests from reconstructed key"},
+        {"asset": "MQTT/RFID", "result": "broker and badge creds in the same chunk"},
+    ]
+    packet["cwes"] = ["CWE-321", "CWE-798"]
+    parsed, gaps = validate_risk_assessment(packet, proposed_severity="critical")
+    assert gaps == [], gaps
+    assert parsed["confirmed_severity"] == "critical"
+
+
 def test_critical_without_write_is_rejected():
     inflated = dict(APPSMITH_RA)
     inflated["confirmed_severity"] = "critical"

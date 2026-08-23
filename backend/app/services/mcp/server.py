@@ -1831,25 +1831,14 @@ class MCPServer:
         # SSRF prevention is enforced centrally by Lictor.block_ssrf_targets.
         # Per-handler max-time still applies as a transport safety lid.
         try:
-            from app.services.agent.unauth_account_lookup import spray_violation_in_text
+            from app.services.agent.lane_proof import cli_violation, rewrite_cli_args
 
-            blocked = spray_violation_in_text(args or "")
+            args, _note = rewrite_cli_args(args or "")
+            blocked = cli_violation(args)
             if blocked:
                 return {"success": False, "error": blocked, "stdout": "", "stderr": blocked}
         except Exception:
-            logger.debug("account-lookup canary check failed", exc_info=True)
-        try:
-            from app.services.agent.unauth_settings_write import (
-                destructive_violation_in_text,
-                rewrite_cli_args as rewrite_settings_cli,
-            )
-
-            args, _note = rewrite_settings_cli(args or "")
-            blocked = destructive_violation_in_text(args)
-            if blocked:
-                return {"success": False, "error": blocked, "stdout": "", "stderr": blocked}
-        except Exception:
-            logger.debug("settings-write canary check failed", exc_info=True)
+            logger.debug("lane-proof canary check failed", exc_info=True)
         cmd = ["curl", "--max-time", "30"] + self._parse_args(args)
         return await self._run_command(cmd, timeout=60)
     

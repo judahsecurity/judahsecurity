@@ -47,7 +47,10 @@ Required RA fields:
 - ticket_title + ra_note (pasteable)
 Critical requires demonstrated write, RCE, or cloud credential theft — except unauth
 OpenAPI account lookup: schema security: {} + is_staff/role, or sibling 401 vs lookup
-200/404/500, is Critical. Do not invent a 200 UserAccount body. 404 'User does not
+200/404/500, is Critical. CWE-321 client HMAC (Object.keys join + HmacSHA256/HS256
+in a public bundle) and MQTT/RFID ICS creds in that bundle are also Critical;
+reconstruction is enough, API timeout is not a kill. OAuth client_secret in JS still
+needs a live read. Do not invent a 200 UserAccount body. 404 'User does not
 exist!' is the existence oracle, not a kill. ACAO * is extra. Non-blind SSRF with
 IMDS blocked is High. Unauth Settings/SaveSettings (sibling 401 vs 200 void) is High;
 Critical needs GetSettings round-trip of the canary AND a demonstrated
@@ -259,8 +262,21 @@ def validate_risk_assessment(
         data.get("business_risk") or "",
         data.get("ticket_title") or "",
     ])
+    from app.services.agent.auth_header_bypass import (
+        caps_critical_as_high as auth_header_caps,
+    )
+    from app.services.agent.email_change_ato import (
+        caps_critical_as_high as email_change_caps,
+    )
+    from app.services.agent.ml_pipeline_rbac import (
+        caps_critical_as_high as ml_rbac_caps,
+    )
+    from app.services.agent.socketio_idor import (
+        caps_critical_as_high as socketio_caps,
+    )
     from app.services.agent.unauth_account_lookup import allows_critical_ra
     from app.services.agent.unauth_settings_write import caps_critical_as_high
+    from app.services.js_client_signing_secrets import allows_critical_ra as hmac_allows_critical_ra
 
     if sev == "critical" and caps_critical_as_high(packet_blob):
         gaps.append(
@@ -268,14 +284,40 @@ def validate_risk_assessment(
             "Critical requires GetSettings round-trip of the canary AND a demonstrated "
             "security-control change. Do not inflate on void 200 alone."
         )
+    elif sev == "critical" and email_change_caps(packet_blob):
+        gaps.append(
+            "Unauth reset_email is High on set_password 401 vs canary 204. "
+            "Critical requires a demonstrated live mailbox takeover — hunters must "
+            "not complete ATO on production. Do not inflate on 204 alone."
+        )
+    elif sev == "critical" and auth_header_caps(packet_blob):
+        gaps.append(
+            "Auth-header skip is High on no-header 200/400 vs invalid Bearer 401. "
+            "Critical needs demonstrated write/RCE. Do not inflate on 400 missing-params."
+        )
+    elif sev == "critical" and socketio_caps(packet_blob):
+        gaps.append(
+            "Socket.IO get_stream url_key is High. Do not inflate because video was "
+            "not dumped. Do not ask hunters to send null crash loops."
+        )
+    elif sev == "critical" and ml_rbac_caps(packet_blob):
+        gaps.append(
+            "ML train missing RBAC is High on self-reg/low-priv 200/202. Do not "
+            "require DELETE of production models. Critical needs demonstrated "
+            "write of production data or RCE."
+        )
     elif sev == "critical" and not (
-        _CRITICAL_PROOF.search(demo_blob) or allows_critical_ra(packet_blob)
+        _CRITICAL_PROOF.search(demo_blob)
+        or allows_critical_ra(packet_blob)
+        or hmac_allows_critical_ra(packet_blob)
     ):
         gaps.append(
             "Critical requires demonstrated write, RCE, or cloud credential theft, "
             "or unauth account lookup (security: {} + is_staff/role, or sibling 401 "
-            "vs lookup 200/404/500). Non-blind SSRF / internal read / signup abuse "
-            "is High unless that proof exists. Do not invent a 200 UserAccount body."
+            "vs lookup 200/404/500), or CWE-321 client HMAC / ICS MQTT-RFID secrets "
+            "reconstructed from a public JS bundle. Non-blind SSRF / internal read / "
+            "signup abuse is High unless that proof exists. Do not invent a 200 "
+            "UserAccount body. OAuth client_secret in JS still needs a live API read."
         )
 
     proposed = (proposed_severity or data.get("proposed_severity") or "").strip().lower()
