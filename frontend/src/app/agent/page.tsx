@@ -695,6 +695,7 @@ export default function AgentPage() {
   const wsAuthenticatedRef = useRef(false);
   const wsFailCountRef = useRef(0);
   const stopRequestedRef = useRef(false);
+  const handleWsMessageRef = useRef<(data: Record<string, unknown>, sid: string) => void>(() => {});
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [showHistory, setShowHistory] = useState(false);
   const [chainData, setChainData] = useState<ChainData | null>(null);
@@ -799,10 +800,15 @@ export default function AgentPage() {
 
   // ── WebSocket ─────────────────────────────────────────────────
   const connectWebSocket = useCallback((sid: string) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
+    if (
+      wsRef.current &&
+      (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
     const token = api.getToken();
     if (!token) { setConnectionMode('rest'); return; }
-    if (wsFailCountRef.current >= 1) { setConnectionMode('rest'); return; }
+    if (wsFailCountRef.current >= 5) { setConnectionMode('rest'); return; }
 
     setConnectionMode('connecting');
     const url = api.getAgentWebSocketUrl(sid);
@@ -812,10 +818,25 @@ export default function AgentPage() {
 
     ws.onopen = () => { ws.send(JSON.stringify({ type: 'init', token })); };
     ws.onmessage = (event) => {
-      try { const data = JSON.parse(event.data); handleWsMessage(data, sid); } catch { /* ignore */ }
+      try { handleWsMessageRef.current(JSON.parse(event.data), sid); } catch { /* ignore */ }
     };
-    ws.onerror = () => { wsFailCountRef.current += 1; wsRef.current = null; wsAuthenticatedRef.current = false; setConnectionMode('rest'); };
-    ws.onclose = () => { wsRef.current = null; wsAuthenticatedRef.current = false; setConnectionMode('rest'); };
+    ws.onerror = () => { /* onclose retries / falls back */ };
+    ws.onclose = () => {
+      if (wsRef.current !== ws) return;
+      const wasAuth = wsAuthenticatedRef.current;
+      wsRef.current = null;
+      wsAuthenticatedRef.current = false;
+      if (wasAuth) {
+        setTimeout(() => connectWebSocket(sid), 1000);
+        return;
+      }
+      wsFailCountRef.current += 1;
+      if (wsFailCountRef.current >= 5) {
+        setConnectionMode('rest');
+        return;
+      }
+      setTimeout(() => connectWebSocket(sid), 800 * wsFailCountRef.current);
+    };
   }, []);
 
   const handleWsMessage = useCallback((data: Record<string, unknown>, sid: string) => {
@@ -930,7 +951,13 @@ export default function AgentPage() {
     }
   }, []);
 
-  useEffect(() => () => { if (wsRef.current) { wsRef.current.close(); wsRef.current = null; } }, []);
+  handleWsMessageRef.current = handleWsMessage;
+
+  useEffect(() => () => {
+    const ws = wsRef.current;
+    wsRef.current = null;
+    ws?.close();
+  }, []);
 
   useEffect(() => {
     if (sessionId && agentAvailable) connectWebSocket(sessionId);
@@ -1024,6 +1051,24 @@ export default function AgentPage() {
     return false;
   };
 
+  const pollAgentConversation = async (sid: string) => {
+    const deadline = Date.now() + 90 * 60_000;
+    while (Date.now() < deadline) {
+      if (stopRequestedRef.current) return null;
+      await new Promise((r) => setTimeout(r, 2500));
+      try {
+        const conv = await api.getAgentConversation(sid);
+        const agentMsg = [...(conv.messages || [])].reverse().find(
+          (m: { role: string }) => m.role === 'agent',
+        );
+        if (agentMsg) return conv;
+      } catch {
+        /* keep polling — conversation row may lag the insert */
+      }
+    }
+    throw new Error('Agent is still running after 90 minutes. Reopen this chat from history later.');
+  };
+
   const handleSend = async () => {
     const q = question.trim();
     const usePreset = selectedPlaybookId !== 'custom';
@@ -1089,8 +1134,39 @@ export default function AgentPage() {
             ...(pendingLoadSessionId ? { loadSessionId: pendingLoadSessionId } : {}),
           });
           setPendingLoadSessionId(null);
-          setLoading(false);
           if (data.session_id) setSessionId(data.session_id);
+          const waitSid = data.session_id || sid;
+          if (
+            data.running
+            || (
+              !data.answer
+              && !data.error
+              && !data.task_complete
+              && !data.awaiting_approval
+              && !data.awaiting_question
+            )
+          ) {
+            toast({
+              title: 'Hunt running',
+              description: 'REST fallback — this page updates when the agent finishes. A Live badge means WebSocket is working.',
+            });
+            const conv = await pollAgentConversation(waitSid);
+            setLoading(false);
+            if (!conv) return;
+            const agentMsg = [...(conv.messages || [])].reverse().find(
+              (m: { role: string }) => m.role === 'agent',
+            );
+            appendAgentMessage({
+              answer: agentMsg?.content || '(No response)',
+              current_phase: conv.current_phase,
+              engagement_replay: conv.engagement_replay,
+              token_usage: conv.token_usage,
+              cost_usd: conv.cost_usd,
+            });
+            loadConversations();
+            return;
+          }
+          setLoading(false);
           appendAgentMessage(data);
           if (typeof data.warning === 'string' && data.warning.trim()) {
             toast({ title: 'AI provider degraded', description: data.warning });
@@ -1182,7 +1258,7 @@ export default function AgentPage() {
     // Prefer the WebSocket (streams progress, no timeout). If it hasn't
     // authenticated shortly, fall back to whatever connection is up.
     if (connectionMode === 'websocket') { fire(); return; }
-    const t = setTimeout(fire, 3000);
+    const t = setTimeout(fire, 15000);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pendingAutostart, agentAvailable, loading, connectionMode, selectedPlaybookId, question]);
@@ -1237,7 +1313,11 @@ export default function AgentPage() {
     setEngagementReplay([]); setReplayUsage(null); setReplayCost(null);
     setShowModifyInput(false); setModifyInput('');
     setLiveCost(null); setPendingLoadSessionId(null);
-    if (wsRef.current) { wsRef.current.close(); wsRef.current = null; }
+    if (wsRef.current) {
+      const ws = wsRef.current;
+      wsRef.current = null;
+      ws.close();
+    }
     wsAuthenticatedRef.current = false; wsFailCountRef.current = 0;
     setSessionId(crypto.randomUUID()); setConnectionMode('connecting');
   };

@@ -21,6 +21,14 @@ export function getApiErrorMessage(error: any, fallback: string = 'An error occu
     return 'The request timed out. The agent may still be running — check back shortly.';
   }
 
+  // No HTTP response at all (DNS, TLS, mixed content, connection refused, CORS block)
+  if (!error?.response && (error?.code === 'ERR_NETWORK' || error?.message === 'Network Error')) {
+    const target = error?.config?.baseURL || error?.config?.url;
+    return target
+      ? `Network Error — the browser never reached ${target}. Use the HTTPS site (nginx on 443), not host:8000.`
+      : 'Network Error — the browser never reached the API. Use the HTTPS site (nginx on 443), not host:8000.';
+  }
+
   // Cloud LLM credits exhausted (Ollama fallback may also have been unavailable)
   if (status === 402) {
     if (typeof detail === 'string' && detail.trim()) return detail;
@@ -84,6 +92,30 @@ const getApiUrl = () => {
 };
 
 const API_URL = getApiUrl();
+
+/** Same-origin API root in the browser so we never call :8000 or a Docker hostname. */
+function browserApiOrigin(): string | null {
+  if (typeof window === 'undefined') return null;
+  return window.location.origin;
+}
+
+/**
+ * WebSocket origin. Production nginx terminates TLS on 443 and upgrades
+ * /api/v1/agent/ws/*. Direct :8000 is only for `next dev` on localhost:3000.
+ */
+function browserWebSocketOrigin(): string {
+  if (typeof window === 'undefined') {
+    return 'ws://localhost:8000';
+  }
+  const { protocol, hostname, host, port } = window.location;
+  const wsProto = protocol === 'https:' ? 'wss:' : 'ws:';
+  const localNextDev =
+    (hostname === 'localhost' || hostname === '127.0.0.1') && port === '3000';
+  if (localNextDev) {
+    return `ws://${hostname}:8000`;
+  }
+  return `${wsProto}//${host}`;
+}
 
 // ── Jira shared types ─────────────────────────────────────────────────────
 
@@ -441,8 +473,14 @@ class ApiClient {
       },
     });
 
-    // Request interceptor to add auth token
+    // Request interceptor to add auth token and pin the browser to same-origin.
+    // Module-level API_URL can be baked to localhost:8000 / http://backend:8000
+    // at build time; that never reaches nginx and shows up as Axios "Network Error".
     this.client.interceptors.request.use((config) => {
+      const origin = browserApiOrigin();
+      if (origin) {
+        config.baseURL = `${origin}/api/v1`;
+      }
       if (this.token) {
         config.headers.Authorization = `Bearer ${this.token}`;
       }
@@ -2059,7 +2097,7 @@ class ApiClient {
       mode: options?.mode ?? 'assist',
       load_session_id: options?.loadSessionId ?? undefined,
       price_limit_usd: options?.priceLimitUsd ?? undefined,
-    }, { timeout: 720000 });
+    }, { timeout: 60000 });
     return response.data;
   }
 
@@ -2134,22 +2172,10 @@ class ApiClient {
 
   /**
    * Build a WebSocket URL for the agent endpoint.
-   * Handles http→ws and https→wss protocol conversion.
+   * Same-origin through nginx in production; localhost:8000 only for `next dev`.
    */
   getAgentWebSocketUrl(sessionId: string): string {
-    let base: string;
-    const configuredUrl = process.env.NEXT_PUBLIC_API_URL || '';
-
-    if (configuredUrl && configuredUrl !== 'http://localhost:8000' && typeof window !== 'undefined') {
-      base = configuredUrl;
-    } else if (typeof window !== 'undefined') {
-      base = `${window.location.protocol}//${window.location.hostname}:8000`;
-    } else {
-      base = 'http://localhost:8000';
-    }
-
-    const wsBase = base.replace(/^http/, 'ws');
-    return `${wsBase}/api/v1/agent/ws/${sessionId}`;
+    return `${browserWebSocketOrigin()}/api/v1/agent/ws/${sessionId}`;
   }
 
   async listAgentConfirmations(params?: { organization_id?: number; session_id?: string }) {

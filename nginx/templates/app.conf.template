@@ -14,6 +14,14 @@
 # dynamically after container restarts (prevents stale-IP 502 errors).
 resolver 127.0.0.11 valid=10s ipv6=off;
 
+# WebSocket upgrade. `$http_connection` is often "keep-alive" (or empty) even
+# on Upgrade requests; that plus upstream keepalive breaks the handshake and
+# the agent UI falls back to blocking REST (nginx 504 after 10 minutes).
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
 upstream asm_backend {
     server backend:8000;
     keepalive 32;
@@ -79,6 +87,24 @@ server {
     # Allow large scan result uploads / screenshots
     client_max_body_size 100M;
 
+    # Agent WebSocket — longest prefix wins over /api/. Hold the socket open
+    # for the duration of a hunt (tools can run many minutes without frames
+    # if the browser ping is delayed).
+    location /api/v1/agent/ws/ {
+        proxy_pass http://asm_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header Upgrade           $http_upgrade;
+        proxy_set_header Connection        $connection_upgrade;
+        proxy_read_timeout    7d;
+        proxy_send_timeout    7d;
+        proxy_connect_timeout 60s;
+        proxy_buffering off;
+    }
+
     # ----- Backend API (FastAPI) -----
     location /api/ {
         proxy_pass http://asm_backend;
@@ -89,13 +115,12 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Host  $host;
 
-        # Required for WebSocket upgrade (agent + pentest streaming endpoints)
         proxy_set_header Upgrade    $http_upgrade;
-        proxy_set_header Connection $http_connection;
+        proxy_set_header Connection $connection_upgrade;
 
-        # Long timeouts: AI agent calls + LLM tool loops can take minutes
-        proxy_read_timeout    600s;
-        proxy_send_timeout    600s;
+        # Long timeouts: leftover blocking agent REST (approve/answer) + uploads
+        proxy_read_timeout    1800s;
+        proxy_send_timeout    1800s;
         proxy_connect_timeout  60s;
 
         proxy_buffering off;

@@ -107,6 +107,9 @@ class AgentResponse(BaseModel):
     token_usage: Optional[dict] = None
     cost_usd: Optional[float] = None
     price_limit_usd: Optional[float] = None
+    # REST /query returns immediately and runs the hunt in the background so
+    # nginx/ALB cannot 504 the browser. Poll GET /conversations/{session_id}.
+    running: bool = False
 
 
 class ConversationSummary(BaseModel):
@@ -330,7 +333,6 @@ async def query_agent(
             ),
         )
     
-    orchestrator = await get_agent_orchestrator()
     session_id = request.session_id or str(uuid.uuid4())
     
     org_id = _resolve_agent_organization_id(current_user, db)
@@ -343,41 +345,88 @@ async def query_agent(
         objective, initial_todos = build_initial_objective(request.playbook_id, request.target)
         if objective:
             question = objective
-    
-    _save_conversation(db, session_id, current_user.id, org_id, "user", question, mode=request.mode or "assist")
 
-    try:
+    mode = request.mode or "assist"
+    _save_conversation(db, session_id, current_user.id, org_id, "user", question, mode=mode)
+
+    # Do not hold this HTTP request for the hunt. Playbooks against a live
+    # target routinely exceed nginx/ALB idle timeouts; the UI then shows 504
+    # with no agent message saved. Run in the background and let the client
+    # poll GET /conversations/{session_id}.
+    user_id = current_user.id
+    load_session_id = request.load_session_id
+    price_limit_usd = request.price_limit_usd
+    todos = initial_todos
+
+    async def _run_rest_query() -> None:
+        from app.services.agent.run_control import register_run
+
+        orch = await get_agent_orchestrator()
+        timeout_s = max(int(settings.AGENT_REQUEST_TIMEOUT_SECONDS), 3600)
         invoke_task = asyncio.create_task(
-            orchestrator.invoke(
+            orch.invoke(
                 question=question,
-                user_id=str(current_user.id),
+                user_id=str(user_id),
                 organization_id=org_id,
                 session_id=session_id,
-                initial_todos=initial_todos,
-                mode=request.mode or "assist",
-                max_iterations=settings.AGENT_REST_MAX_ITERATIONS,
-                load_session_id=request.load_session_id,
-                price_limit_usd=request.price_limit_usd,
+                initial_todos=todos,
+                mode=mode,
+                max_iterations=settings.AGENT_WS_MAX_ITERATIONS,
+                load_session_id=load_session_id,
+                price_limit_usd=price_limit_usd,
             )
         )
-        result = await asyncio.wait_for(
-            invoke_task,
-            timeout=settings.AGENT_REQUEST_TIMEOUT_SECONDS,
+        register_run(session_id, invoke_task)
+        try:
+            result = await asyncio.wait_for(invoke_task, timeout=timeout_s)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Background REST agent query timed out after %ss session=%s",
+                timeout_s,
+                session_id,
+            )
+            _save_conversation(
+                None,
+                session_id,
+                user_id,
+                org_id,
+                "agent",
+                f"The agent took longer than {timeout_s // 60} minutes and stopped.",
+                mode=mode,
+            )
+            return
+        except Exception:
+            logger.exception("Background REST agent query failed session=%s", session_id)
+            _save_conversation(
+                None,
+                session_id,
+                user_id,
+                org_id,
+                "agent",
+                "Agent run failed. Check backend logs.",
+                mode=mode,
+            )
+            return
+        if result.error:
+            _save_conversation(
+                None, session_id, user_id, org_id, "agent", result.error, result, mode=mode
+            )
+            return
+        _save_conversation(
+            None, session_id, user_id, org_id, "agent", result.answer or "", result, mode=mode
         )
-    except asyncio.TimeoutError:
-        logger.warning(f"Agent query timed out after {settings.AGENT_REQUEST_TIMEOUT_SECONDS}s for session {session_id}")
-        raise HTTPException(
-            status_code=504,
-            detail=f"The agent took longer than {settings.AGENT_REQUEST_TIMEOUT_SECONDS // 60} minutes. "
-                   "Try a more specific question, or use WebSocket mode for real-time streaming (avoids timeouts)."
-        )
-    
-    if result.error:
-        _handle_agent_error(result.error)
 
-    _save_conversation(db, session_id, current_user.id, org_id, "agent", result.answer or "", result)
-
-    return _build_agent_response(result, session_id)
+    asyncio.create_task(_run_rest_query())
+    return AgentResponse(
+        answer="",
+        session_id=session_id,
+        current_phase="running",
+        iteration_count=0,
+        task_complete=False,
+        todo_list=todos or [],
+        execution_trace_summary="Agent run started. This conversation will update when it finishes.",
+        running=True,
+    )
 
 
 @router.post("/approve", response_model=AgentResponse)
