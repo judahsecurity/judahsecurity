@@ -201,8 +201,10 @@ AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
 # Agent tool output truncation (chars passed to LLM; default 20000)
 # AGENT_TOOL_OUTPUT_MAX_CHARS=20000
 
-# Agent request timeout in seconds (default 660; increase for complex multi-tool runs)
-# AGENT_REQUEST_TIMEOUT_SECONDS=660
+# Agent request timeout in seconds (default 3600). WebSocket hunts use this too —
+# 11 minutes is too short for crawl + fireteam on a live app.
+# AGENT_REQUEST_TIMEOUT_SECONDS=3600
+# AGENT_TURN_BUDGET_SECONDS=1800
 
 # Agent max iterations per REST request (default 15; increase for longer tool chains)
 # AGENT_REST_MAX_ITERATIONS=15

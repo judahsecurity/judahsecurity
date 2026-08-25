@@ -683,7 +683,7 @@ export default function AgentPage() {
   const [playbooks, setPlaybooks] = useState<{ id: string; name: string; description: string }[]>([]);
   const [selectedPlaybookId, setSelectedPlaybookId] = useState<string>('custom');
   const [target, setTarget] = useState('');
-  const [mode, setMode] = useState<'assist' | 'agent'>('assist');
+  const [mode, setMode] = useState<'assist' | 'agent'>('agent');
   const [urlPrefilled, setUrlPrefilled] = useState(false);
   const [pendingAutostart, setPendingAutostart] = useState(false);
   const autostartFiredRef = useRef(false);
@@ -800,43 +800,52 @@ export default function AgentPage() {
 
   // ── WebSocket ─────────────────────────────────────────────────
   const connectWebSocket = useCallback((sid: string) => {
-    if (
-      wsRef.current &&
-      (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)
-    ) {
-      return;
-    }
-    const token = api.getToken();
-    if (!token) { setConnectionMode('rest'); return; }
-    if (wsFailCountRef.current >= 5) { setConnectionMode('rest'); return; }
+    void (async () => {
+      if (
+        wsRef.current &&
+        (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)
+      ) {
+        return;
+      }
+      if (wsFailCountRef.current >= 5) { setConnectionMode('rest'); return; }
 
-    setConnectionMode('connecting');
-    const url = api.getAgentWebSocketUrl(sid);
-    const ws = new WebSocket(url);
-    wsRef.current = ws;
-    wsAuthenticatedRef.current = false;
+      setConnectionMode('connecting');
+      const token = await api.ensureFreshToken();
+      if (!token) { setConnectionMode('rest'); return; }
+      if (
+        wsRef.current &&
+        (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)
+      ) {
+        return;
+      }
 
-    ws.onopen = () => { ws.send(JSON.stringify({ type: 'init', token })); };
-    ws.onmessage = (event) => {
-      try { handleWsMessageRef.current(JSON.parse(event.data), sid); } catch { /* ignore */ }
-    };
-    ws.onerror = () => { /* onclose retries / falls back */ };
-    ws.onclose = () => {
-      if (wsRef.current !== ws) return;
-      const wasAuth = wsAuthenticatedRef.current;
-      wsRef.current = null;
+      const url = api.getAgentWebSocketUrl(sid);
+      const ws = new WebSocket(url);
+      wsRef.current = ws;
       wsAuthenticatedRef.current = false;
-      if (wasAuth) {
-        setTimeout(() => connectWebSocket(sid), 1000);
-        return;
-      }
-      wsFailCountRef.current += 1;
-      if (wsFailCountRef.current >= 5) {
-        setConnectionMode('rest');
-        return;
-      }
-      setTimeout(() => connectWebSocket(sid), 800 * wsFailCountRef.current);
-    };
+
+      ws.onopen = () => { ws.send(JSON.stringify({ type: 'init', token })); };
+      ws.onmessage = (event) => {
+        try { handleWsMessageRef.current(JSON.parse(event.data), sid); } catch { /* ignore */ }
+      };
+      ws.onerror = () => { /* onclose retries / falls back */ };
+      ws.onclose = () => {
+        if (wsRef.current !== ws) return;
+        const wasAuth = wsAuthenticatedRef.current;
+        wsRef.current = null;
+        wsAuthenticatedRef.current = false;
+        if (wasAuth) {
+          setTimeout(() => connectWebSocket(sid), 1000);
+          return;
+        }
+        wsFailCountRef.current += 1;
+        if (wsFailCountRef.current >= 5) {
+          setConnectionMode('rest');
+          return;
+        }
+        setTimeout(() => connectWebSocket(sid), 800 * wsFailCountRef.current);
+      };
+    })();
   }, []);
 
   const handleWsMessage = useCallback((data: Record<string, unknown>, sid: string) => {
@@ -1051,6 +1060,49 @@ export default function AgentPage() {
     return false;
   };
 
+  const waitForAgentSocket = async (ms = 5000): Promise<boolean> => {
+    const deadline = Date.now() + ms;
+    while (Date.now() < deadline) {
+      if (wsRef.current?.readyState === WebSocket.OPEN && wsAuthenticatedRef.current) {
+        return true;
+      }
+      if (wsFailCountRef.current >= 5) return false;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    return Boolean(
+      wsRef.current?.readyState === WebSocket.OPEN && wsAuthenticatedRef.current
+    );
+  };
+
+  const applyPolledConversation = (conv: {
+    messages?: { role: string; content: string }[];
+    current_phase?: string;
+    engagement_replay?: ReplayStep[];
+    token_usage?: TokenUsage;
+    cost_usd?: number;
+  }) => {
+    const agentMsg = [...(conv.messages || [])].reverse().find(
+      (m) => m.role === 'agent',
+    );
+    appendAgentMessage({
+      answer: agentMsg?.content || '(No response)',
+      current_phase: conv.current_phase,
+      engagement_replay: conv.engagement_replay,
+      token_usage: conv.token_usage,
+      cost_usd: conv.cost_usd,
+    });
+    loadConversations();
+  };
+
+  const isHttpTimeoutError = (err: unknown): boolean => {
+    const ax = err as { response?: { status?: number }; code?: string; message?: string };
+    return (
+      ax?.response?.status === 504
+      || ax?.code === 'ECONNABORTED'
+      || /timed out/i.test(ax?.message || '')
+    );
+  };
+
   const pollAgentConversation = async (sid: string) => {
     const deadline = Date.now() + 90 * 60_000;
     while (Date.now() < deadline) {
@@ -1126,6 +1178,7 @@ export default function AgentPage() {
           wsMsg.load_session_id = pendingLoadSessionId;
           setPendingLoadSessionId(null);
         }
+        await waitForAgentSocket(5000);
         const sent = sendViaWs(wsMsg);
         if (!sent) {
           const data = await api.queryAgent(usePreset ? displayContent : q, sid, {
@@ -1153,17 +1206,7 @@ export default function AgentPage() {
             const conv = await pollAgentConversation(waitSid);
             setLoading(false);
             if (!conv) return;
-            const agentMsg = [...(conv.messages || [])].reverse().find(
-              (m: { role: string }) => m.role === 'agent',
-            );
-            appendAgentMessage({
-              answer: agentMsg?.content || '(No response)',
-              current_phase: conv.current_phase,
-              engagement_replay: conv.engagement_replay,
-              token_usage: conv.token_usage,
-              cost_usd: conv.cost_usd,
-            });
-            loadConversations();
+            applyPolledConversation(conv);
             return;
           }
           setLoading(false);
@@ -1179,8 +1222,30 @@ export default function AgentPage() {
         }
       }
     } catch (err: unknown) {
+      if (stopRequestedRef.current) {
+        setLoading(false);
+        return;
+      }
+      if (isHttpTimeoutError(err) && sid) {
+        toast({
+          title: 'Hunt may still be running',
+          description: 'The proxy closed the HTTP request. Waiting on this session instead of failing.',
+        });
+        try {
+          const conv = await pollAgentConversation(sid);
+          setLoading(false);
+          if (!conv) return;
+          applyPolledConversation(conv);
+          return;
+        } catch (pollErr: unknown) {
+          setLoading(false);
+          const msg = getApiErrorMessage(pollErr as Error, 'Hunt did not finish');
+          toast({ variant: 'destructive', title: 'Error', description: msg });
+          appendAgentMessage({ answer: `Error: ${msg}` });
+          return;
+        }
+      }
       setLoading(false);
-      if (stopRequestedRef.current) return;
       const msg = getApiErrorMessage(err as Error, 'Failed to send');
       toast({ variant: 'destructive', title: 'Error', description: msg });
       appendAgentMessage({ answer: `Error: ${msg}` });

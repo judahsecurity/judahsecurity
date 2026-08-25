@@ -31,6 +31,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/agent", tags=["Agent"])
 
 
+def _run_timeout_s() -> int:
+    """Wall-clock cap for one invoke. Never below 1h — nginx 60s must not win."""
+    return max(int(settings.AGENT_REQUEST_TIMEOUT_SECONDS), 3600)
+
+
 # =============================================================================
 # REQUEST/RESPONSE MODELS
 # =============================================================================
@@ -180,7 +185,7 @@ def _handle_agent_error(result_error: str):
         )
     ):
         raise HTTPException(
-            status_code=401,
+            status_code=502,
             detail=(
                 "Cloud LLM API key is invalid. Update ANTHROPIC_API_KEY / OPENAI_API_KEY "
                 "in .env, or enable local Ollama fallback "
@@ -362,7 +367,7 @@ async def query_agent(
         from app.services.agent.run_control import register_run
 
         orch = await get_agent_orchestrator()
-        timeout_s = max(int(settings.AGENT_REQUEST_TIMEOUT_SECONDS), 3600)
+        timeout_s = _run_timeout_s()
         invoke_task = asyncio.create_task(
             orch.invoke(
                 question=question,
@@ -465,12 +470,12 @@ async def approve_phase_transition(
         )
         result = await asyncio.wait_for(
             invoke_task,
-            timeout=settings.AGENT_REQUEST_TIMEOUT_SECONDS,
+            timeout=_run_timeout_s(),
         )
     except asyncio.TimeoutError:
         raise HTTPException(
             status_code=504,
-            detail=f"Agent timed out after {settings.AGENT_REQUEST_TIMEOUT_SECONDS // 60} minutes. Use WebSocket mode for long operations."
+            detail=f"Agent timed out after {_run_timeout_s() // 60} minutes. Use WebSocket mode for long operations."
         )
     
     if result.error:
@@ -514,12 +519,12 @@ async def answer_agent_question(
         )
         result = await asyncio.wait_for(
             invoke_task,
-            timeout=settings.AGENT_REQUEST_TIMEOUT_SECONDS,
+            timeout=_run_timeout_s(),
         )
     except asyncio.TimeoutError:
         raise HTTPException(
             status_code=504,
-            detail=f"Agent timed out after {settings.AGENT_REQUEST_TIMEOUT_SECONDS // 60} minutes. Use WebSocket mode for long operations."
+            detail=f"Agent timed out after {_run_timeout_s() // 60} minutes. Use WebSocket mode for long operations."
         )
 
     if result.error:
@@ -1101,16 +1106,20 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                                 load_session_id=load_id,
                                 price_limit_usd=limit,
                             ),
-                            timeout=settings.AGENT_REQUEST_TIMEOUT_SECONDS,
+                            timeout=_run_timeout_s(),
                         )
                         await finish_result(result, save_user_question=q, mode=run_mode)
                     except asyncio.CancelledError:
                         await emit_cancelled()
                     except asyncio.TimeoutError:
-                        logger.warning(f"WS agent query timed out after {settings.AGENT_REQUEST_TIMEOUT_SECONDS}s for session {session_id}")
+                        logger.warning(f"WS agent query timed out after {_run_timeout_s()}s for session {session_id}")
                         await websocket.send_json({
                             "type": "error",
-                            "message": f"The agent took longer than {settings.AGENT_REQUEST_TIMEOUT_SECONDS // 60} minutes and timed out. Try a more specific question.",
+                            "message": (
+                                f"The agent hit the {_run_timeout_s() // 60}-minute run cap. "
+                                "The hunt did not finish — reopen this chat from history or start a new one. "
+                                "Do not treat this as a clean bill of health."
+                            ),
                         })
                     except Exception as e:
                         logger.error(f"WS agent query error for session {session_id}: {e}")
@@ -1141,7 +1150,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                                 modification=modification,
                                 status_callback=status_callback,
                             ),
-                            timeout=settings.AGENT_REQUEST_TIMEOUT_SECONDS,
+                            timeout=_run_timeout_s(),
                         )
                         await finish_result(result)
                     except asyncio.CancelledError:
@@ -1185,7 +1194,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                                 answer=answer,
                                 status_callback=status_callback,
                             ),
-                            timeout=settings.AGENT_REQUEST_TIMEOUT_SECONDS,
+                            timeout=_run_timeout_s(),
                         )
                         await finish_result(result)
                     except asyncio.CancelledError:

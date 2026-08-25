@@ -10,10 +10,10 @@ export function getApiErrorMessage(error: any, fallback: string = 'An error occu
   const status = error?.response?.status;
   const data = error?.response?.data;
 
-  // Agent timeout — 504 from backend or proxy
+  // 504 from nginx/ALB while the hunt is still running on the worker.
   if (status === 504) {
-    if (typeof detail === 'string') return detail;
-    return 'The agent request timed out. Try a more specific question, or wait a moment and retry.';
+    if (typeof detail === 'string' && !/try a more specific/i.test(detail)) return detail;
+    return 'The proxy closed the HTTP request. The hunt may still be running — wait for Live steps or reopen this chat. Do not retry yet.';
   }
 
   // Axios network timeout (no response received)
@@ -2097,7 +2097,7 @@ class ApiClient {
       mode: options?.mode ?? 'assist',
       load_session_id: options?.loadSessionId ?? undefined,
       price_limit_usd: options?.priceLimitUsd ?? undefined,
-    }, { timeout: 60000 });
+    }, { timeout: 180000 });
     return response.data;
   }
 
