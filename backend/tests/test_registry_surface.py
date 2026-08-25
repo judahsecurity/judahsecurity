@@ -91,8 +91,8 @@ def test_wordpress_probes_still_win_after_crawl_without_org():
         "execution_trace": [{"tool_name": "execute_deep_crawl", "success": True}],
     }
     step = forced_next_step(state)
-    assert step and step["tool_name"] == "execute_curl"
-    assert "wp-json/wp/v2/users" in (step.get("tool_args") or {}).get("args", "")
+    assert step and step["tool_name"] == "check_cve_applicability"
+    assert "emulate3d.com" in (step.get("tool_args") or {}).get("url", "")
 
 
 def test_complete_blocked_until_registry_probe():

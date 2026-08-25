@@ -158,7 +158,9 @@ def refresh_token(request: Request, refresh_token: str = Body(..., embed=True), 
         )
     
     username = payload.get("sub")
-    user = db.query(User).filter(User.username == username).first()
+    user = db.query(User).filter(
+        (User.username == username) | (User.email == username)
+    ).first()
     
     if not user or not user.is_active:
         raise HTTPException(

@@ -163,6 +163,12 @@ WordPress unauth GET /wp-json/wp/v2/users returning slug/name is SUBMIT
 Kill 401/403/empty list with that evidence. WordPress admin-ajax nested
 tax_query timing (elapsed delta ≥1.5s that scales with SLEEP) is SUBMIT
 with the timing table; status 200 without delay is DROP.
+Passive product+version in a published CVE affected range (generator meta,
+Yoast/plugin HTML comment, `?ver=`, Server header) is SUBMIT. Quote the
+live evidence and the affected range. Do not require a working exploit
+payload. Severity follows preconditions: unauthenticated RCE → High/Critical;
+authenticated Contributor+ stored XSS → Medium. Kill only if the product
+is absent or the live version is above the fixed release.
 After publish: Marcus risk assessment (assess_finding_risk) is required for
 medium+. Score the demonstrated packet only — confirm vs inflate vs
 downgrade, CVSS on demonstrated evidence, why_not_higher, control failures,

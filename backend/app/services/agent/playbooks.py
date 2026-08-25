@@ -939,13 +939,15 @@ PLAYBOOKS: List[Dict[str, Any]] = [
         ),
         "objective": (
             "Hunt WordPress as soon as it is fingerprinted. A thin marketing site is in-play.\n"
+            "0) check_cve_applicability on the origin (generator / Yoast comment / ?ver=). "
+            "Version-in-range is a finding.\n"
             "1) execute_curl GET /wp-json/wp/v2/users?per_page=100. 200+slug/name is a finding.\n"
             "2) compare_requests POST /wp-admin/admin-ajax.php nested tax_query SLEEP(0) vs "
             "SLEEP(2); confirm SLEEP(4) if delta ≥1.5s. Timing table is evidence.\n"
             "3) Login oracle: one POST /wp-login.php per username. No brute force.\n"
             "4) If WAF/403/timeout: rewrite via compare_requests or run_custom_probe, then "
             "prove or kill. Do not complete with no results.\n"
-            "5) OPTIONAL execute_wpscan. Never block 1–2 on WPScan quota."
+            "5) OPTIONAL execute_wpscan. Never block 0–2 on WPScan quota."
         ),
         "initial_todos": [
             {"description": "REST /wp-json/wp/v2/users enum (do not wait on WPScan)", "status": "pending", "priority": "high"},

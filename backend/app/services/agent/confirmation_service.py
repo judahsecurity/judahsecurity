@@ -73,6 +73,8 @@ READONLY_TOOLS = {
     "query_graph",
     "get_asset_details",
     "search_cve",
+    "search_vulnx",
+    "vulnx_query",
     "analyze_attack_surface",
     "get_notes",
     "web_search",
@@ -125,6 +127,8 @@ SAFE_RECON_TOOLS = {
     "extract_js_endpoints",
     "scan_js_sinks",
     "fingerprint_api",
+    "fingerprint_passive_stack",
+    "check_cve_applicability",
 }
 
 

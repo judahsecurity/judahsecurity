@@ -27,6 +27,12 @@ upstream asm_backend {
     keepalive 32;
 }
 
+# WebSocket must not share the keepalive pool. Reusing a keep-alive connection
+# for Upgrade: websocket fails the handshake and the agent UI shows REST.
+upstream asm_backend_ws {
+    server backend:8000;
+}
+
 upstream asm_frontend {
     server frontend:3000;
     keepalive 32;
@@ -91,7 +97,7 @@ server {
     # for the duration of a hunt (tools can run many minutes without frames
     # if the browser ping is delayed).
     location /api/v1/agent/ws/ {
-        proxy_pass http://asm_backend;
+        proxy_pass http://asm_backend_ws;
         proxy_http_version 1.1;
         proxy_set_header Host              $host;
         proxy_set_header X-Real-IP         $remote_addr;
@@ -114,9 +120,13 @@ server {
         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_set_header X-Forwarded-Host  $host;
-
-        proxy_set_header Upgrade    $http_upgrade;
-        proxy_set_header Connection $connection_upgrade;
+        # Empty Connection enables upstream keepalive. Do not send Upgrade here:
+        # on HTTP/2 those hop-by-hop headers become ERR_HTTP2_PROTOCOL_ERROR,
+        # which Axios reports as "Network Error" with no status (GET may work).
+        proxy_set_header Connection "";
+        proxy_hide_header Connection;
+        proxy_hide_header Upgrade;
+        proxy_hide_header Keep-Alive;
 
         # Long timeouts: leftover blocking agent REST (approve/answer) + uploads
         proxy_read_timeout    1800s;

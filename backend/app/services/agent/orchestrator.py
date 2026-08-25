@@ -669,6 +669,8 @@ class AgentOrchestrator:
                         seen.add(key)
                         merged.append(str(t))
                     target_info["technologies"] = merged
+                if isinstance(kickoff, dict) and kickoff.get("passive_stack"):
+                    target_info["passive_stack"] = kickoff["passive_stack"]
                 if isinstance(queued, dict) and queued.get("job_id"):
                     interceptor_job_id = str(queued["job_id"])
                     qnote = (

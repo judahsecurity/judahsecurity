@@ -200,6 +200,40 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
     pipeline = web and not registry_only
 
     missing: List[Dict[str, str]] = []
+    try:
+        from app.services.agent.cve_applicability import (
+            cve_check_ran,
+            is_cve_applicability_question,
+        )
+
+        if is_cve_applicability_question(state):
+            if not cve_check_ran(state):
+                missing.append({
+                    "id": "cve_applicability",
+                    "title": "Named CVE not checked against the live homepage",
+                    "next": "check_cve_applicability — lookup the CVE, GET the URL, compare product+version",
+                })
+            next_action = missing[0]["next"] if missing else ""
+            return {
+                "is_web": web,
+                "surface_empty": empty,
+                "crawled": crawled,
+                "dir_brute": dir_brute,
+                "js_surface": js_surface,
+                "params": params or fireteam,
+                "fireteam": fireteam,
+                "brain": brain,
+                "missing": missing,
+                "ready_to_complete": not missing,
+                "next_action": next_action,
+                "cve_applicability_only": True,
+                "summary": (
+                    f"CVE applicability check: ran={cve_check_ran(state)} "
+                    f"missing={len(missing)}"
+                ),
+            }
+    except Exception:
+        pass
     if pipeline and not crawled:
         missing.append({
             "id": "crawl",
@@ -292,6 +326,23 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
 def format_tester_loop_for_prompt(progress: Dict[str, Any]) -> str:
     if not progress or not progress.get("is_web"):
         return ""
+    if progress.get("cve_applicability_only"):
+        lines = [
+            "### CVE applicability (Glasswing observe — do this before Interceptor)",
+            progress.get("summary") or "",
+        ]
+        missing = progress.get("missing") or []
+        if missing:
+            lines.append("Do NOT complete and do NOT crawl yet:")
+            for row in missing:
+                lines.append(f"  - {row.get('title')}: {row.get('next')}")
+        else:
+            lines.append(
+                "Applicability check ran. If VERDICT is applicable, create_finding "
+                "(quote version evidence + affected range; note auth preconditions). "
+                "Then complete — this question is not a full pentest."
+            )
+        return "\n".join(lines)
     lines = [
         "### Curious tester loop (mandatory — unknown bugs, not just known CVEs)",
         progress.get("summary") or "",
@@ -351,7 +402,9 @@ def complete_blocked_reason(
             "REST user enum and admin-ajax timing must have run. "
             "If *.azurecr.io is in inventory or the target, "
             "probe_registry_anonymous must have run. "
-            "Nuclei/known-CVE spray is last, not first.\n"
+            "Named CVE + URL: check_cve_applicability (homepage fingerprint) "
+            "runs first — version-in-range is a finding. "
+            "Nuclei spray is leftover coverage, not a substitute for that observe pass.\n"
             "Or set completion_reason to include 'defer methodologies' / "
             "'force complete' if intentionally skipping."
         )
@@ -382,6 +435,22 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         pass
     if not is_web_target(state):
         return None
+    try:
+        from app.services.agent.cve_applicability import (
+            applicability_pending_finding,
+            cve_applicability_forced_step,
+            is_cve_applicability_question,
+        )
+
+        cve_step = cve_applicability_forced_step(state)
+        if cve_step:
+            return cve_step
+        if applicability_pending_finding(state):
+            return None
+        if is_cve_applicability_question(state):
+            return None
+    except Exception:
+        pass
     target = primary_web_target(state)
     if not target:
         return None

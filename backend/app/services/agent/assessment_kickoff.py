@@ -330,6 +330,7 @@ async def run_assessment_kickoff(seed_url: str) -> Dict[str, Any]:
             "brief": f"Kickoff skipped (httpx unavailable). Seed: {base}",
         }
 
+    root: Dict[str, Any] = {}
     try:
         async with httpx.AsyncClient(
             verify=False,
@@ -404,6 +405,25 @@ async def run_assessment_kickoff(seed_url: str) -> Dict[str, Any]:
     technologies = merge_tech_labels(wapp_techs, wr_techs)
     if acr_host and "Azure Container Registry" not in technologies:
         technologies = ["Azure Container Registry"] + list(technologies)
+
+    root_headers = root.get("headers") if isinstance(root, dict) else {}
+    root_body = root.get("body") if isinstance(root, dict) else ""
+    passive_products: List[Dict[str, str]] = []
+    try:
+        from app.services.agent.passive_stack import (
+            format_passive_stack,
+            parse_passive_stack,
+            versioned_products,
+        )
+
+        passive_products = parse_passive_stack(root_body or "", root_headers or {})
+        for p in versioned_products(passive_products):
+            label = f"{p['name']}:{p['version']}"
+            if not any(str(t).lower() == label.lower() for t in technologies):
+                technologies.append(label)
+    except Exception:
+        format_passive_stack = None  # type: ignore
+
     tech_by_source = {
         "wappalyzer": [
             _tech_label(getattr(t, "name", ""), getattr(t, "version", None))
@@ -423,6 +443,8 @@ async def run_assessment_kickoff(seed_url: str) -> Dict[str, Any]:
         _format_tech_line("wappalyzer", wapp_techs, with_version=True),
         _format_tech_line("whatruns", wr_techs, with_version=False),
     ]
+    if passive_products and format_passive_stack:
+        lines.append(format_passive_stack(passive_products))
     blob = " ".join(technologies).lower()
     wp_real = wordpress_really_in_play(hits, technologies)
     if acr_host:
@@ -433,8 +455,10 @@ async def run_assessment_kickoff(seed_url: str) -> Dict[str, Any]:
         )
     elif wp_real or "wordpress" in blob:
         lines.append(
-            "  CMS: WordPress is in-play now — REST /wp-json/wp/v2/users and "
-            "wp-admin hunts should run immediately; do not wait on WPScan."
+            "  CMS: WordPress is in-play now — check_cve_applicability on homepage "
+            "plugin/core versions (Yoast HTML comment, generator, ?ver=) FIRST, then "
+            "REST /wp-json/wp/v2/users and wp-admin hunts. Do not wait on WPScan. "
+            "Version-in-range IS a finding."
         )
     spa_shells = [h for h in hits[1:] if h.get("spa_shell")]
     interesting = [
@@ -525,6 +549,7 @@ async def run_assessment_kickoff(seed_url: str) -> Dict[str, Any]:
         "base": base,
         "technologies": technologies,
         "tech_by_source": tech_by_source,
+        "passive_stack": passive_products,
         "root_status": root_status,
         "needs_dir_brute": needs_dirs,
         "assessment": pre,

@@ -263,6 +263,29 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             evidence=wp_ev,
             why="WordPress fingerprinted — ajax SQLi is the human-tester next probe, not WPScan",
         ))
+        add(Methodology(
+            id="wp_plugin_cves",
+            title="WordPress plugin/core version-in-range CVEs",
+            hunt="wordpress",
+            specialist="injection",
+            priority="high",
+            assumption=(
+                "Homepage HTML/headers announce plugin or core versions inside "
+                "published CVE ranges (Yoast comment, generator, ?ver=)"
+            ),
+            test=(
+                "check_cve_applicability on the origin (named CVE or all versioned "
+                "plugins). Quote the HTML evidence and the affected range. "
+                "Do not wait on WPScan or Nuclei."
+            ),
+            pass_criteria="Live version is inside the published affected range",
+            kill_criteria="Product absent or live version above the fixed release",
+            cwe_ids=["CWE-1395", "CWE-1104"],
+            capec_ids=["CAPEC-169"],
+            owasp="A06:2021 Vulnerable and Outdated Components",
+            evidence=wp_ev,
+            why="Glasswing observe — versioned plugins on the homepage are findings, not leftover Nuclei",
+        ))
 
     # --- Auth / credentials ---
     if has_login or has_auth:

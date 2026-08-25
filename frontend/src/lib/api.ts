@@ -1,4 +1,20 @@
-import axios, { AxiosError, AxiosInstance } from 'axios';
+import axios, { AxiosError, AxiosInstance, InternalAxiosRequestConfig } from 'axios';
+
+/** Resolve the URL Axios actually requested (baseURL + path), for error text. */
+export function resolveAxiosRequestUrl(error: { config?: { baseURL?: string; url?: string; method?: string } } | null | undefined): string {
+  const cfg = error?.config;
+  if (!cfg) return '';
+  const path = String(cfg.url || '');
+  if (/^https?:\/\//i.test(path)) return path;
+  const base = String(cfg.baseURL || '').replace(/\/+$/, '');
+  const rel = path.replace(/^\/+/, '');
+  let joined = base && rel ? `${base}/${rel}` : (base || path);
+  if (joined.startsWith('/') && typeof window !== 'undefined') {
+    joined = `${window.location.origin}${joined}`;
+  }
+  const method = String(cfg.method || '').toUpperCase();
+  return method ? `${method} ${joined}` : joined;
+}
 
 /**
  * Extract a user-friendly error message from an API error response.
@@ -21,12 +37,17 @@ export function getApiErrorMessage(error: any, fallback: string = 'An error occu
     return 'The request timed out. The agent may still be running — check back shortly.';
   }
 
-  // No HTTP response at all (DNS, TLS, mixed content, connection refused, CORS block)
+  // No HTTP response at all (DNS, TLS, mixed content, connection refused, CORS,
+  // or Chrome net::ERR_HTTP2_PROTOCOL_ERROR from nginx hop-by-hop Connection).
   if (!error?.response && (error?.code === 'ERR_NETWORK' || error?.message === 'Network Error')) {
-    const target = error?.config?.baseURL || error?.config?.url;
+    const target = resolveAxiosRequestUrl(error);
+    const directBackend = /:8000\b|\/\/backend(?:\/|:|\b)|localhost:8000/i.test(target);
+    if (directBackend) {
+      return `Network Error — the browser never reached ${target}. Use the HTTPS site (nginx on 443), not host:8000.`;
+    }
     return target
-      ? `Network Error — the browser never reached ${target}. Use the HTTPS site (nginx on 443), not host:8000.`
-      : 'Network Error — the browser never reached the API. Use the HTTPS site (nginx on 443), not host:8000.';
+      ? `Network Error — no HTTP response from ${target}. Yellow REST means WebSocket failed; this is usually nginx HTTP/2 + Connection headers on /api/. Reload nginx, do not retry against :8000.`
+      : 'Network Error — no HTTP response from the API. Yellow REST means WebSocket failed; reload nginx so /api/v1/agent/ws/ upgrades.';
   }
 
   // Cloud LLM credits exhausted (Ollama fallback may also have been unavailable)
@@ -35,9 +56,10 @@ export function getApiErrorMessage(error: any, fallback: string = 'An error occu
     return 'Cloud LLM credits are exhausted. Top up the provider or enable local Ollama fallback.';
   }
 
-  // Cloud LLM API key invalid (agent route); leave other 401s (JWT, etc.) alone
+  // Cloud LLM API key invalid (agent route). Historically 401; now 502 so the
+  // session interceptor does not treat it as a logged-out user.
   if (
-    status === 401 &&
+    (status === 401 || status === 502) &&
     typeof detail === 'string' &&
     /api key|anthropic|openai|ollama|llm/i.test(detail)
   ) {
@@ -93,6 +115,49 @@ const getApiUrl = () => {
 
 const API_URL = getApiUrl();
 
+const ACCESS_TOKEN_STORAGE_KEY = 'token';
+const REFRESH_TOKEN_STORAGE_KEY = 'refresh_token';
+/** Refresh this many ms before access-token expiry so in-flight UI calls stay valid. */
+const ACCESS_TOKEN_REFRESH_SKEW_MS = 60_000;
+
+type RetryableRequestConfig = InternalAxiosRequestConfig & { _authRetry?: boolean };
+
+function decodeJwtPayload(token: string): { exp?: number } | null {
+  try {
+    const part = token.split('.')[1];
+    if (!part) return null;
+    const b64 = part.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = b64 + '='.repeat((4 - (b64.length % 4)) % 4);
+    return JSON.parse(atob(padded));
+  } catch {
+    return null;
+  }
+}
+
+function isAccessTokenExpiringSoon(token: string | null, skewMs = ACCESS_TOKEN_REFRESH_SKEW_MS): boolean {
+  if (!token) return true;
+  const payload = decodeJwtPayload(token);
+  if (!payload?.exp) return false;
+  return payload.exp * 1000 - Date.now() < skewMs;
+}
+
+function isAuthEndpointUrl(url: string | undefined): boolean {
+  const u = url || '';
+  return u.includes('/auth/login') || u.includes('/auth/refresh') || u.includes('/auth/register');
+}
+
+function isNonSessionUnauthorized(error: AxiosError): boolean {
+  const data = error.response?.data as { detail?: unknown } | undefined;
+  const detail = data?.detail;
+  const text = typeof detail === 'string' ? detail : JSON.stringify(detail ?? '');
+  return /api key|anthropic|openai|ollama|\bllm\b|x-api-key|worker token|tfasm_/i.test(text);
+}
+
+function isRefreshAuthFailure(error: unknown): boolean {
+  const status = (error as AxiosError)?.response?.status;
+  return status === 401 || status === 403;
+}
+
 /** Same-origin API root in the browser so we never call :8000 or a Docker hostname. */
 function browserApiOrigin(): string | null {
   if (typeof window === 'undefined') return null;
@@ -101,7 +166,9 @@ function browserApiOrigin(): string | null {
 
 /**
  * WebSocket origin. Production nginx terminates TLS on 443 and upgrades
- * /api/v1/agent/ws/*. Direct :8000 is only for `next dev` on localhost:3000.
+ * /api/v1/agent/ws/*. Next.js on :3000 cannot proxy WebSocket upgrades, so
+ * talk to the published backend on :8000. Never use a Docker hostname
+ * (`backend`) — the browser cannot resolve it (Axios "Network Error" / REST badge).
  */
 function browserWebSocketOrigin(): string {
   if (typeof window === 'undefined') {
@@ -109,10 +176,10 @@ function browserWebSocketOrigin(): string {
   }
   const { protocol, hostname, host, port } = window.location;
   const wsProto = protocol === 'https:' ? 'wss:' : 'ws:';
-  const localNextDev =
-    (hostname === 'localhost' || hostname === '127.0.0.1') && port === '3000';
-  if (localNextDev) {
-    return `ws://${hostname}:8000`;
+  // Compose override publishes the frontend on :3000 without nginx. Next.js
+  // rewrites HTTP /api/* but does not upgrade WebSockets.
+  if (port === '3000') {
+    return `${wsProto}//${hostname}:8000`;
   }
   return `${wsProto}//${host}`;
 }
@@ -462,6 +529,8 @@ export interface F5SyncResult {
 class ApiClient {
   private client: AxiosInstance;
   private token: string | null = null;
+  private refreshToken: string | null = null;
+  private refreshInFlight: Promise<string> | null = null;
 
   constructor() {
     this.client = axios.create({
@@ -476,10 +545,18 @@ class ApiClient {
     // Request interceptor to add auth token and pin the browser to same-origin.
     // Module-level API_URL can be baked to localhost:8000 / http://backend:8000
     // at build time; that never reaches nginx and shows up as Axios "Network Error".
-    this.client.interceptors.request.use((config) => {
-      const origin = browserApiOrigin();
-      if (origin) {
-        config.baseURL = `${origin}/api/v1`;
+    this.client.interceptors.request.use(async (config) => {
+      // Relative /api/v1 stays same-origin (nginx or Next rewrites). Never bake
+      // http://backend:8000 or :8000 into browser requests.
+      if (typeof window !== 'undefined') {
+        config.baseURL = '/api/v1';
+      }
+      if (!isAuthEndpointUrl(config.url) && this.refreshToken && isAccessTokenExpiringSoon(this.token)) {
+        try {
+          await this.refreshSession();
+        } catch {
+          // Let the request proceed; the response interceptor handles a 401.
+        }
       }
       if (this.token) {
         config.headers.Authorization = `Bearer ${this.token}`;
@@ -487,39 +564,40 @@ class ApiClient {
       return config;
     });
 
-    // Response interceptor for error handling
+    // Refresh on session 401, then retry once. Never treat LLM/worker 401s as logout.
     this.client.interceptors.response.use(
       (response) => response,
-      (error: AxiosError) => {
-        if (error.response?.status === 401) {
-          // Only clear + redirect for genuine session-expiry scenarios.
-          // Skip auth endpoints (login/refresh) so a bad-password 401 doesn't
-          // bounce the user and wipe their half-typed credentials, and skip
-          // when we're already on /login so we don't cause reload loops.
-          const url = error.config?.url || '';
-          const isAuthEndpoint =
-            url.includes('/auth/login') ||
-            url.includes('/auth/refresh') ||
-            url.includes('/auth/register');
-
-          if (!isAuthEndpoint) {
-            this.token = null;
-            if (typeof window !== 'undefined') {
-              localStorage.removeItem('token');
-              const onLogin = window.location.pathname.startsWith('/login');
-              if (!onLogin) {
-                window.location.href = '/login';
-              }
-            }
-          }
+      async (error: AxiosError) => {
+        const original = error.config as RetryableRequestConfig | undefined;
+        if (error.response?.status !== 401 || !original) {
+          return Promise.reject(error);
         }
-        return Promise.reject(error);
+        if (isAuthEndpointUrl(original.url) || original._authRetry || isNonSessionUnauthorized(error)) {
+          return Promise.reject(error);
+        }
+        if (!this.refreshToken) {
+          this.forceLogout();
+          return Promise.reject(error);
+        }
+
+        original._authRetry = true;
+        try {
+          const newToken = await this.refreshSession();
+          original.headers = original.headers ?? {};
+          original.headers.Authorization = `Bearer ${newToken}`;
+          return this.client(original);
+        } catch (refreshError) {
+          if (isRefreshAuthFailure(refreshError)) {
+            this.forceLogout();
+          }
+          return Promise.reject(error);
+        }
       }
     );
 
-    // Load token from localStorage
     if (typeof window !== 'undefined') {
-      this.token = localStorage.getItem('token');
+      this.token = localStorage.getItem(ACCESS_TOKEN_STORAGE_KEY);
+      this.refreshToken = localStorage.getItem(REFRESH_TOKEN_STORAGE_KEY);
     }
   }
 
@@ -527,15 +605,97 @@ class ApiClient {
     this.token = token;
     if (typeof window !== 'undefined') {
       if (token) {
-        localStorage.setItem('token', token);
+        localStorage.setItem(ACCESS_TOKEN_STORAGE_KEY, token);
       } else {
-        localStorage.removeItem('token');
+        localStorage.removeItem(ACCESS_TOKEN_STORAGE_KEY);
+      }
+    }
+  }
+
+  setRefreshToken(token: string | null) {
+    this.refreshToken = token;
+    if (typeof window !== 'undefined') {
+      if (token) {
+        localStorage.setItem(REFRESH_TOKEN_STORAGE_KEY, token);
+      } else {
+        localStorage.removeItem(REFRESH_TOKEN_STORAGE_KEY);
       }
     }
   }
 
   getToken() {
     return this.token;
+  }
+
+  hasRefreshToken(): boolean {
+    return Boolean(this.refreshToken);
+  }
+
+  clearSession() {
+    this.setToken(null);
+    this.setRefreshToken(null);
+  }
+
+  /**
+   * Return a non-expired access token, refreshing if needed.
+   * Used by WebSocket init which cannot go through the Axios interceptor.
+   */
+  async ensureFreshToken(): Promise<string | null> {
+    if (this.token && !isAccessTokenExpiringSoon(this.token)) {
+      return this.token;
+    }
+    if (!this.refreshToken) {
+      return this.token;
+    }
+    try {
+      return await this.refreshSession();
+    } catch (refreshError) {
+      if (isRefreshAuthFailure(refreshError)) {
+        this.forceLogout();
+        return null;
+      }
+      return this.token;
+    }
+  }
+
+  private forceLogout() {
+    this.clearSession();
+    if (typeof window !== 'undefined' && !window.location.pathname.startsWith('/login')) {
+      window.location.href = '/login';
+    }
+  }
+
+  private async refreshSession(): Promise<string> {
+    if (this.refreshInFlight) {
+      return this.refreshInFlight;
+    }
+    this.refreshInFlight = this.performRefresh().finally(() => {
+      this.refreshInFlight = null;
+    });
+    return this.refreshInFlight;
+  }
+
+  private async performRefresh(): Promise<string> {
+    const refreshToken = this.refreshToken;
+    if (!refreshToken) {
+      throw new Error('No refresh token');
+    }
+    const refreshUrl = typeof window !== 'undefined'
+      ? '/api/v1/auth/refresh'
+      : `${browserApiOrigin() || API_URL}/api/v1/auth/refresh`;
+    const response = await axios.post(
+      refreshUrl,
+      { refresh_token: refreshToken },
+      { headers: { 'Content-Type': 'application/json' } },
+    );
+    const access = response.data?.access_token as string | undefined;
+    const nextRefresh = response.data?.refresh_token as string | undefined;
+    if (!access || !nextRefresh) {
+      throw new Error('Refresh response missing tokens');
+    }
+    this.setToken(access);
+    this.setRefreshToken(nextRefresh);
+    return access;
   }
 
   // Auth
@@ -561,6 +721,7 @@ class ApiClient {
 
     const response = await this.client.post('/auth/login', formData, { headers });
     this.setToken(response.data.access_token);
+    this.setRefreshToken(response.data.refresh_token ?? null);
     return response.data;
   }
 
@@ -568,7 +729,7 @@ class ApiClient {
     try {
       await this.client.post('/auth/logout');
     } finally {
-      this.setToken(null);
+      this.clearSession();
     }
   }
 

@@ -116,6 +116,8 @@ _SKIP_REMEMBER = {
     "search_cve",
     "search_vulnx",
     "vulnx_query",
+    "check_cve_applicability",
+    "fingerprint_passive_stack",
     "web_search",
 }
 

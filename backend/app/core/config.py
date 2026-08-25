@@ -69,8 +69,13 @@ class Settings(BaseSettings):
         "http://3.88.137.29:80",
         "http://3.88.137.29:3000",
         "http://3.88.137.29:8000",
+        "https://aegis.theforcesecurity.io",
+        "https://www.aegis.theforcesecurity.io",
         "https://aegis.judahsecurity.io",
     ]
+    # Always allow the production HTTPS frontends even if CORS_ORIGINS in .env
+    # is stale (missing theforcesecurity.io). Starlette fullmatch.
+    CORS_ORIGIN_REGEX: str = r"https://(.*\.)?(theforcesecurity|judahsecurity)\.io"
     
     # Pagination
     DEFAULT_PAGE_SIZE: int = 20

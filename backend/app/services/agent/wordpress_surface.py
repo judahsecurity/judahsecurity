@@ -184,6 +184,7 @@ def wordpress_probe_status(state: Optional[Dict[str, Any]] = None) -> Dict[str, 
     users = False
     ajax = False
     wpscan = False
+    plugin_cves = False
     for step in state.get("execution_trace") or [] if state else []:
         if not isinstance(step, dict):
             continue
@@ -191,13 +192,15 @@ def wordpress_probe_status(state: Optional[Dict[str, Any]] = None) -> Dict[str, 
         blob = _trace_blob(step)
         if name == "execute_wpscan":
             wpscan = True
+        if name == "check_cve_applicability":
+            plugin_cves = True
         if _USERS_PATH in blob or ("wp-json" in blob and "users" in blob):
             users = True
         if _AJAX_PATH in blob or "tax_query" in blob or (
             name == "compare_requests" and "sleep(" in blob
         ):
             ajax = True
-    return {"users_enum": users, "ajax_sqli": ajax, "wpscan": wpscan}
+    return {"users_enum": users, "ajax_sqli": ajax, "wpscan": wpscan, "plugin_cves": plugin_cves}
 
 
 def wordpress_missing_probes(
@@ -208,6 +211,15 @@ def wordpress_missing_probes(
     status = wordpress_probe_status(state)
     missing: List[Dict[str, str]] = []
     origin = wordpress_origin(state) or "https://TARGET"
+    if not status.get("plugin_cves"):
+        missing.append({
+            "id": "wp_plugin_cves",
+            "title": "WordPress plugin/core versions not mapped to CVEs",
+            "next": (
+                f"check_cve_applicability url={origin} — parse generator / Yoast "
+                "HTML comments / ?ver= and compare to published ranges"
+            ),
+        })
     if not status["users_enum"]:
         missing.append({
             "id": "wp_users_enum",
@@ -239,6 +251,23 @@ def wordpress_forced_step(
     if not origin:
         return None
     status = wordpress_probe_status(state)
+    if not status.get("plugin_cves"):
+        try:
+            from app.services.agent.cve_applicability import wordpress_cve_map_forced_step
+
+            step = wordpress_cve_map_forced_step(origin, state)
+            if step:
+                return step
+        except Exception:
+            pass
+        return {
+            "tool_name": "check_cve_applicability",
+            "tool_args": {"url": origin},
+            "thought": (
+                "WordPress fingerprint — map homepage plugin/core versions to "
+                "published CVEs (Glasswing observe) before REST enum."
+            ),
+        }
     if not status["users_enum"]:
         return {
             "tool_name": "execute_curl",
@@ -285,10 +314,22 @@ def wordpress_hunt_note(state: Optional[Dict[str, Any]] = None) -> str:
     status = wordpress_probe_status(state)
     lines = [
         "\n\n## WordPress detected — hunt these surfaces NOW",
-        "WPScan is OPTIONAL (known CVEs / plugin list). Do not wait on it, "
-        "and do not retry it. Findings come from REST user enum + admin-ajax "
-        "time-based SQLi, not from WPScan.",
+        "WPScan is OPTIONAL (known CVEs / plugin list). Do not wait on it. "
+        "Homepage plugin versions (Yoast HTML comment, generator meta, ?ver=) "
+        "ARE in-play — check_cve_applicability first. Then REST user enum + "
+        "admin-ajax time-based SQLi.",
     ]
+    if not status.get("plugin_cves"):
+        lines.append(
+            f"0. PASSIVE CVE MAP FIRST: check_cve_applicability(url=\"{origin}\"). "
+            "Quote generator / Yoast comment / ?ver= evidence. Version-in-range "
+            "is a finding (note auth preconditions). Do not skip this for WPScan."
+        )
+    else:
+        lines.append(
+            "0. Passive CVE map already ran — file create_finding for applicable "
+            "version-in-range hits before moving on."
+        )
     lines.append(
         f"1. Unauth REST user enum FIRST: execute_curl(args=\"-sS -D- {origin}"
         f"{_USERS_PATH}?per_page=100\"). "

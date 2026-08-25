@@ -539,6 +539,8 @@ class ASMToolsManager:
             "extract_js_endpoints": self.extract_js_endpoints,
             "scan_js_sinks": self.scan_js_sinks,
             "fingerprint_api": self.fingerprint_api,
+            "fingerprint_passive_stack": self.fingerprint_passive_stack,
+            "check_cve_applicability": self.check_cve_applicability,
             "probe_registry_anonymous": self.probe_registry_anonymous,
             "compact_context": self.compact_context,
             "load_prior_hunt": self.load_prior_hunt,
@@ -3502,6 +3504,189 @@ class ASMToolsManager:
         target = target or (getattr(self, "_fallback_target", None) or "")
         result = fingerprint_from_map(cmap if isinstance(cmap, dict) else {}, target=target)
         return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
+
+    async def fingerprint_passive_stack(self, url: str = "", **kwargs: Any) -> str:
+        """GET the homepage and extract CMS/plugin/server versions (browser-visible only)."""
+        from app.services.agent.cve_applicability import url_from_text
+        from app.services.agent.passive_stack import (
+            format_passive_stack,
+            origin_from_url,
+            parse_passive_stack,
+        )
+
+        target = origin_from_url(url or kwargs.get("args") or "") or url_from_text(
+            str(getattr(self, "_fallback_target", "") or "")
+        )
+        if not target:
+            return "Error: url is required (e.g. https://target.com)."
+        html, headers, final = await self._fetch_homepage(target)
+        products = parse_passive_stack(html, headers)
+        return (
+            f"URL: {final}\n"
+            + format_passive_stack(products)
+            + "\n\nVersioned products are CVE-applicability evidence. "
+            "Next: check_cve_applicability (named CVE) or vulnx_query by product."
+        )
+
+    async def check_cve_applicability(
+        self,
+        cve_id: str = "",
+        url: str = "",
+        **kwargs: Any,
+    ) -> str:
+        """Look up a CVE (or versioned plugins) and compare to a live homepage fingerprint."""
+        from app.services.agent.cve_applicability import (
+            CVE_RE,
+            cve_ids_in_text,
+            format_applicability_report,
+            match_cve_to_stack,
+            url_from_text,
+        )
+        from app.services.agent.passive_stack import (
+            origin_from_url,
+            parse_passive_stack,
+            versioned_products,
+        )
+
+        cve_id = (cve_id or kwargs.get("cve") or "").strip()
+        url = (url or kwargs.get("target") or kwargs.get("args") or "").strip()
+        if url and not url.startswith("http") and "cve-" in url.lower():
+            # Model stuffed the CVE into url
+            if not cve_id:
+                ids = cve_ids_in_text(url)
+                cve_id = ids[0] if ids else cve_id
+            url = ""
+        target = origin_from_url(url) or url_from_text(url)
+        if not target:
+            target = origin_from_url(str(getattr(self, "_fallback_target", "") or ""))
+        if not target:
+            return "Error: url is required (homepage to fingerprint)."
+
+        html, headers, final = await self._fetch_homepage(target)
+        products = parse_passive_stack(html, headers)
+
+        if not cve_id:
+            ids = cve_ids_in_text(str(getattr(self, "_current_objective", "") or ""))
+            cve_id = ids[0] if ids else ""
+
+        if cve_id:
+            cve_id = cve_id.strip().upper()
+            if not CVE_RE.match(cve_id):
+                return f"Invalid CVE ID format: {cve_id}. Expected CVE-YYYY-NNNNN."
+            intel, affected = await self._vulnx_record(cve_id)
+            if not intel and getattr(settings, "TAVILY_API_KEY", None):
+                intel = await self.web_search(f"{cve_id} vulnerability affected product version", max_results=5)
+            match = match_cve_to_stack(
+                cve_id=cve_id,
+                intel_text=intel,
+                products=products,
+                affected_products=affected,
+            )
+            return format_applicability_report(
+                url=final,
+                products=products,
+                match=match,
+                intel=intel,
+            )[:_tool_output_max_chars()]
+
+        # No named CVE — map each versioned product via vulnx search (bounded).
+        blocks = [
+            format_applicability_report(url=final, products=products),
+            "",
+            "## vulnx search for versioned products (max 5)",
+        ]
+        applicable = []
+        for prod in versioned_products(products)[:5]:
+            slug = str(prod.get("name") or "").replace(" ", "-")
+            query = f"{slug} && (severity:critical || severity:high || severity:medium)"
+            try:
+                intel = await self.vulnx_query(query=query, limit=8)
+            except Exception as e:
+                intel = f"(vulnx_query failed: {e})"
+            ids = cve_ids_in_text(intel)[:6]
+            for cid in ids:
+                m = match_cve_to_stack(
+                    cve_id=cid,
+                    intel_text=intel,
+                    products=[prod],
+                )
+                if m.get("verdict") == "applicable":
+                    applicable.append(m)
+            blocks.append(f"### {prod.get('name')} {prod.get('version')}\n{intel[:1800]}\n")
+        if applicable:
+            blocks.append("VERDICT: applicable")
+            for m in applicable:
+                blocks.append(f"- {m.get('cve_id')} on {m.get('hits')}")
+            blocks.append(
+                "File create_finding for each applicable CVE (quote version evidence + range)."
+            )
+        else:
+            blocks.append(
+                "No version-in-range CVE auto-matched from vulnx search. "
+                "Named CVEs still need check_cve_applicability(cve_id=...)."
+            )
+        return "\n".join(blocks)[:_tool_output_max_chars()]
+
+    async def _fetch_homepage(self, url: str) -> tuple:
+        from app.services.agent.passive_stack import origin_from_url
+
+        target = origin_from_url(url) or url
+        try:
+            async with httpx.AsyncClient(
+                verify=False,
+                headers={"User-Agent": "JudahASM-Kickoff/1.0"},
+                follow_redirects=True,
+                timeout=15.0,
+            ) as client:
+                resp = await client.get(target if target.endswith("/") else target + "/")
+                html = (resp.text or "")[:250_000]
+                headers = {str(k).lower(): str(v) for k, v in resp.headers.items()}
+                return html, headers, str(resp.url)
+        except Exception as e:
+            return "", {}, f"{target} (fetch failed: {e})"
+
+    async def _vulnx_record(self, cve_id: str) -> tuple:
+        """Return (formatted intel text, affected_products list)."""
+        cve_id = (cve_id or "").strip().upper()
+        base_url = "https://api.projectdiscovery.io"
+        headers = {"User-Agent": "aegis-vanguard/1.0"}
+        api_key = getattr(settings, "PDCP_API_KEY", None)
+        if api_key:
+            headers["X-PDCP-Key"] = api_key
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as client:
+                r = await client.get(f"{base_url}/v2/vulnerability/{cve_id}", headers=headers)
+                if r.status_code == 404:
+                    text = await self.search_vulnx(cve_id)
+                    return text, []
+                if r.status_code >= 400:
+                    text = await self.search_vulnx(cve_id)
+                    return text, []
+                data = (r.json() or {}).get("data") or {}
+        except Exception:
+            try:
+                text = await self.search_vulnx(cve_id)
+            except Exception as e:
+                return f"vulnx lookup failed: {e}", []
+            return text, []
+        affected = data.get("affected_products") or []
+        parts = [
+            f"{cve_id} severity={data.get('severity')} cvss={data.get('cvss_score')}",
+            str(data.get("description") or ""),
+            str(data.get("requirements") or ""),
+            str(data.get("remediation") or ""),
+        ]
+        for p in affected[:8]:
+            if isinstance(p, dict):
+                parts.append(f"{p.get('vendor','')} {p.get('product','')}")
+        text = "\n".join(parts)
+        try:
+            formatted = await self.search_vulnx(cve_id)
+            if formatted and "not found" not in formatted.lower():
+                text = formatted + "\n" + text
+        except Exception:
+            pass
+        return text, affected
 
     async def probe_registry_anonymous(
         self,

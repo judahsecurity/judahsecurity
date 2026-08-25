@@ -48,15 +48,24 @@ export const useAuth = create<AuthState>((set) => ({
   checkAuth: async () => {
     set({ isLoading: true });
     try {
-      if (!api.getToken()) {
+      if (!api.getToken() && !api.hasRefreshToken()) {
         set({ user: null, isAuthenticated: false, isLoading: false });
         return;
       }
       const user = await api.getCurrentUser();
       set({ user, isAuthenticated: true, isLoading: false });
-    } catch {
-      api.setToken(null);
-      set({ user: null, isAuthenticated: false, isLoading: false });
+    } catch (error: any) {
+      const status = error?.response?.status;
+      if (status === 401) {
+        api.clearSession();
+        set({ user: null, isAuthenticated: false, isLoading: false });
+        return;
+      }
+      // Backend blip / 5xx / network: keep tokens so a refresh does not log the user out.
+      set({
+        isAuthenticated: Boolean(api.getToken() || api.hasRefreshToken()),
+        isLoading: false,
+      });
     }
   },
 }));

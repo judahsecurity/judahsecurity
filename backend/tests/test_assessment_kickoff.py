@@ -17,6 +17,7 @@ WP_HTML = """<!doctype html>
 <head>
   <meta name="generator" content="WordPress 5.8.1">
   <title>Emulate3D</title>
+  <!-- This site is optimized with the Yoast SEO plugin v16.5 - https://yoast.com/wordpress/plugins/seo/ -->
   <link rel="https://api.w.org/" href="https://www.emulate3d.com/wp-json/" />
 </head>
 <body>
@@ -109,6 +110,9 @@ def test_kickoff_merges_wappalyzer_and_whatruns(monkeypatch):
     techs = " ".join(result["technologies"]).lower()
     assert "wordpress" in techs
     assert "5.8.1" in techs
+    assert "yoast" in result["brief"].lower()
+    assert "16.5" in result["brief"]
+    assert any("yoast" in str(p.get("name", "")).lower() for p in (result.get("passive_stack") or []))
     assert "contact form 7" in techs
     assert "Tech (wappalyzer)" in result["brief"]
     assert "Tech (whatruns)" in result["brief"]

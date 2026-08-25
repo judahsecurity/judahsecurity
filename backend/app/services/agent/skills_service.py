@@ -502,6 +502,8 @@ SKILLS: list[Skill] = [
         system_context=(
             "You are running the WORDPRESS skill. WordPress fingerprint is enough "
             "even on a thin marketing site — do not wait for a rich map or WPScan.\n"
+            "0) check_cve_applicability on {target} — generator / Yoast HTML comment / "
+            "?ver=. Version-in-range is a finding (note auth preconditions).\n"
             "1) execute_curl GET {target}/wp-json/wp/v2/users?per_page=100. "
             "200 + slug/name → create_finding (CWE-200). 401/403/empty → kill with evidence.\n"
             "2) compare_requests POST {target}/wp-admin/admin-ajax.php loadmore tax_query "
@@ -510,7 +512,7 @@ SKILLS: list[Skill] = [
             "3) Login oracle: ONE POST /wp-login.php per discovered username. No hydra.\n"
             "4) If a probe is WAF/403/timeout blocked: compare_requests or run_custom_probe "
             "with one mutation, then prove or kill. Do not return empty.\n"
-            "5) OPTIONAL execute_wpscan. Skip on quota abort. Never block steps 1–2 on WPScan."
+            "5) OPTIONAL execute_wpscan. Skip on quota abort. Never block steps 0–2 on WPScan."
         ),
     ),
     Skill(

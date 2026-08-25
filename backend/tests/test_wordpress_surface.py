@@ -47,6 +47,7 @@ def test_thin_wordpress_map_is_attack_ready_and_hunts():
     ids = {m.id for m in methodologies_from_capability_map(cmap)}
     assert "wp_rest_user_enum" in ids
     assert "wp_ajax_tax_query_sqli" in ids
+    assert "wp_plugin_cves" in ids
     hunts = [h["hunt"] for h in cmap.ranked_hunt_queue]
     assert "wordpress" in hunts
     names = select_specialists_for_map(cmap)
@@ -82,12 +83,26 @@ def test_forced_wp_probes_after_crawl():
     }
     assert wordpress_detected(state)
     step = forced_next_step(state)
+    assert step and step["tool_name"] == "check_cve_applicability"
+    assert "emulate3d.com" in (step.get("tool_args") or {}).get("url", "")
+
+    after_cves = {
+        **state,
+        "execution_trace": state["execution_trace"] + [
+            {
+                "tool_name": "check_cve_applicability",
+                "tool_args": {"url": url},
+                "success": True,
+            }
+        ],
+    }
+    step = wordpress_forced_step(after_cves)
     assert step and step["tool_name"] == "execute_curl"
     assert "wp-json/wp/v2/users" in (step.get("tool_args") or {}).get("args", "")
 
     after_users = {
-        **state,
-        "execution_trace": state["execution_trace"] + [
+        **after_cves,
+        "execution_trace": after_cves["execution_trace"] + [
             {
                 "tool_name": "execute_curl",
                 "tool_args": {"args": f"-sS -D- {url}/wp-json/wp/v2/users?per_page=100"},
@@ -122,9 +137,9 @@ def test_complete_blocked_until_wp_probes():
     }
     reason = complete_blocked_reason(state)
     assert reason
-    assert "wp_users_enum" in reason or "REST user enum" in reason
+    assert "wp_users_enum" in reason or "REST user enum" in reason or "plugin" in reason.lower()
     missing = wordpress_missing_probes(state)
-    assert {m["id"] for m in missing} >= {"wp_users_enum", "wp_ajax_sqli"}
+    assert {m["id"] for m in missing} >= {"wp_users_enum", "wp_ajax_sqli", "wp_plugin_cves"}
 
 
 def test_wp_probes_unlock_complete():
@@ -140,6 +155,11 @@ def test_wp_probes_unlock_complete():
             {"tool_name": "extract_js_endpoints", "success": True},
             {"tool_name": "sync_engagement_brain", "success": True},
             {"tool_name": "fireteam_dispatch", "success": True},
+            {
+                "tool_name": "check_cve_applicability",
+                "tool_args": {"url": url},
+                "success": True,
+            },
             {
                 "tool_name": "execute_curl",
                 "tool_args": {"args": f"-sS {url}/wp-json/wp/v2/users"},

@@ -240,6 +240,8 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         "When done, call record_verify_verdict(candidate_id, verdict, evidence) "
         "with verdict confirmed|refuted|inconclusive, then done=true. "
         "confirmed = you reproduced impact with your own request/response. "
+        "Version-in-range CVE applicability: confirmed if your GET still shows the "
+        "claimed product+version inside the published range — do not exploit it. "
         "refuted = control holds or the finder hallucinated. "
         "inconclusive = you could not re-derive and must not rubber-stamp."
     )

@@ -50,7 +50,7 @@ services:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-asm_user}:${POSTGRES_PASSWORD:-asm_password}@db:5432/${POSTGRES_DB:-asm_db}
       - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-change-in-production}
       - DEBUG=${DEBUG:-false}
-      - CORS_ORIGINS=${CORS_ORIGINS:-["http://localhost","http://localhost:80","http://localhost:3000","http://localhost:8000","http://frontend:3000"]}
+      - CORS_ORIGINS=${CORS_ORIGINS:-["https://aegis.theforcesecurity.io","https://aegis.judahsecurity.io","http://localhost","http://localhost:80","http://localhost:3000","http://localhost:8000","http://frontend:3000"]}
       - REDIS_URL=redis://redis:6379/0
       # AWS SQS Configuration (optional - for async scan job submission)
       - SQS_QUEUE_URL=${SQS_QUEUE_URL:-}
