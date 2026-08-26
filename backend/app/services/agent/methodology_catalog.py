@@ -42,6 +42,16 @@ _RESET_RE = re.compile(
 )
 _INVITE_RE = re.compile(r"(invite|invitation|/signup|/register|/join|create.?account)", re.I)
 _CHECKOUT_RE = re.compile(r"(checkout|cart|payment|order|billing|price|quantity)", re.I)
+_APPSMITH_RE = re.compile(r"\bappsmith\b", re.I)
+# Login/auth endpoints that are injection surfaces even with no query-string params.
+_LOGIN_INJECT_RE = re.compile(
+    r"("
+    r"/login\b|/signin\b|/sign-in|"
+    r"/auth/login|/api/login|/api/auth/login|"
+    r"/authenticate\b"
+    r")",
+    re.I,
+)
 _OPENAPI_RE = re.compile(
     r"(swagger|openapi|/api-docs|/v3/api-docs|/docs\.json|redoc|"
     r"/schema\.json|/api/schema|spectacular|swagger-ui)",
@@ -369,6 +379,77 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             owasp="A01:2021 Broken Access Control",
             evidence=login_ev,
             why="Authenticated cookie session enables CSRF testing on state-changing actions",
+        ))
+
+    # Login is an injection surface even when the crawl never recorded query params.
+    # Strix/CAI vulnbank hits were timing/error SQLi on /login — we previously only
+    # seeded param_injection when param_rich_paths or has_search existed.
+    login_inject_surface = (
+        has_login
+        or has_auth
+        or bool(_LOGIN_INJECT_RE.search(combined))
+    )
+    if login_inject_surface and not _APPSMITH_RE.search(combined):
+        add(Methodology(
+            id="login_injection",
+            title="SQL injection on login / auth fields",
+            hunt="sqli",
+            specialist="sqli",
+            priority="high",
+            assumption=(
+                "Username/password (or JSON login body) is interpolated into a query. "
+                "Absence of query-string params does not mean the POST body is safe"
+            ),
+            test=(
+                "On the mapped login form or POST /login|/signin|/api/auth/login: "
+                "compare_requests baseline vs one mutation at a time on username then "
+                "password (error canary, boolean pair, then timing pair). "
+                "generate_injection_payloads(vuln_type='sqli', technique='time_based') "
+                "and technique='auth_bypass' for the mutant values. "
+                "Timing delta that scales with SLEEP is SUBMIT with the timing table "
+                "(same bar as WP tax_query). Auth bypass (session issued from a canary) "
+                "is Critical. sqlmap --batch only after a canary. "
+                "If WAF/403/timeout: one compare_requests or run_custom_probe rewrite "
+                "from the defense body, then prove or kill. No os-shell, no table dump."
+            ),
+            pass_criteria=(
+                "Error/boolean/time differential on a named login field, or an "
+                "authenticated session from a canary — tool-backed, not status 200"
+            ),
+            kill_criteria=(
+                "No anomalous body/timing after error + boolean + timing canaries "
+                "and one blocked-probe rewrite. WAF/403 without a rewrite is incomplete"
+            ),
+            cwe_ids=["CWE-89", "CWE-287"],
+            capec_ids=["CAPEC-66", "CAPEC-7"],
+            owasp="A03:2021 Injection",
+            evidence=str(
+                next(
+                    (p for p in pages if _LOGIN_INJECT_RE.search(str(p))),
+                    "",
+                )
+                or next(
+                    (
+                        str(f.get("action") or "")
+                        for f in forms
+                        if isinstance(f, dict)
+                        and any(
+                            re.search(r"pass|user|email|login", i or "", re.I)
+                            for i in (f.get("inputs") or [])
+                        )
+                    ),
+                    "",
+                )
+                or next(
+                    (
+                        f"{e.get('method', '')} {e.get('path', '')}".strip()
+                        for e in apis
+                        if isinstance(e, dict) and _LOGIN_INJECT_RE.search(str(e.get("path") or ""))
+                    ),
+                    "login",
+                )
+            ),
+            why="Login/auth surface is an injection target even without query-string params",
         ))
 
     # Open redirect — login/OAuth/logout style params

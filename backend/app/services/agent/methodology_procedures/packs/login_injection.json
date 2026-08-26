@@ -1,0 +1,30 @@
+{
+  "id": "login_injection",
+  "title": "SQL injection on login / auth fields",
+  "summary": "Treat login username/password (or JSON /login body) as an injection surface even when the crawl recorded no query-string params.",
+  "steps": [
+    "Identify the mapped login form or POST /login|/signin|/api/auth/login (JSON body counts).",
+    "compare_requests: baseline valid-looking credentials vs one mutation on username, then password — error canary first.",
+    "If no SQL error: boolean pair (true vs false condition) on the same field.",
+    "If still quiet: timing pair. A delay that scales with SLEEP is SUBMIT with the timing table (same bar as WP tax_query).",
+    "generate_injection_payloads(vuln_type='sqli', technique='time_based') and technique='auth_bypass' for mutant values. sqlmap --batch only after a canary.",
+    "If WAF/403/timeout: one compare_requests or run_custom_probe rewrite from the defense body, then prove or kill. Do not re-run sqlmap with the same flags.",
+    "Auth bypass (session issued from a canary) is Critical. Blind timing without a session is High. Status 200 without a differential is not a finding. No os-shell, no table dump."
+  ],
+  "tools": [
+    "compare_requests",
+    "generate_injection_payloads",
+    "execute_curl",
+    "run_custom_probe",
+    "execute_sqlmap"
+  ],
+  "pass_signals": [
+    "Error/boolean/time differential on a named login field",
+    "Authenticated session issued from a canary",
+    "Timing delta that scales with SLEEP"
+  ],
+  "kill_signals": [
+    "No anomalous body/timing after error + boolean + timing canaries and one blocked-probe rewrite"
+  ],
+  "references": ["CWE-89", "CWE-287", "CAPEC-66", "OWASP A03 Injection"]
+}

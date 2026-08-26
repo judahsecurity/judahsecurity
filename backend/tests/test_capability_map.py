@@ -81,7 +81,7 @@ def test_select_specialists_auto_from_map():
     assert "app_mapper" in names
     assert "auth_logic" in names or "saml_sso" in names
     assert "graphql_api" in names
-    assert "xss" in names or "injection" in names
+    assert "xss" in names or "injection" in names or "sqli" in names
     assert "independent_verifier" not in names
     assert "risk_assessor" not in names
     assert len(names) <= 8

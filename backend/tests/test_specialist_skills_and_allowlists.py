@@ -247,6 +247,9 @@ def test_coverage_skill_pack_mentions_existing_prometheus_proxy():
     inj = ss.skill_pack_for("injection")
     assert "wp-json" in inj.lower()
     assert "wpscan" in inj.lower() or "tax_query" in inj.lower()
+    sqli = ss.skill_pack_for("sqli")
+    assert "login" in sqli.lower()
+    assert "compare_requests" in sqli
     judge = ss.skill_pack_for("finding_judge")
     assert "wp-json" in judge.lower() or "wordpress" in judge.lower()
     coverage = ss.skill_pack_for("coverage")

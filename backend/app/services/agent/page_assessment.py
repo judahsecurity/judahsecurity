@@ -291,6 +291,7 @@ def start_here_from_observations(
     start: List[Dict[str, str]] = []
     kind = classify_app_kind(cmap, kickoff=kickoff)
     blob = _blob(cmap) + " " + str(kickoff.get("brief") or "")
+    product = _product_name(cmap, kickoff, blob)
     pages: Sequence[Any] = []
     apis: Sequence[Any] = []
     forms: Sequence[Any] = []
@@ -403,6 +404,21 @@ def start_here_from_observations(
             why="After a foothold (or if defaults fail) probe session/forced-browse on mapped auth paths",
             evidence="login",
         )
+        if product != "appsmith":
+            login_ev = next(
+                (str(p) for p in pages if _LOGIN_RE.search(str(p))),
+                "login",
+            )
+            _add(
+                start,
+                hunt="login_injection",
+                specialist="sqli",
+                why=(
+                    "Login/auth fields are an injection surface even with no query params — "
+                    "error/boolean/time canaries on username then password, not creds-only"
+                ),
+                evidence=login_ev,
+            )
 
     id_ev = next(
         (str(p) for p in list(param_paths) + [str(e) for e in apis] if _ID_RE.search(str(p))),
@@ -551,7 +567,6 @@ def start_here_from_observations(
             evidence="graphql",
         )
 
-    product = _product_name(cmap, kickoff, blob)
     for row in _PRODUCT_HUNTS.get(product) or []:
         _add(
             start,

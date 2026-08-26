@@ -26,6 +26,16 @@ EXHAUSTED = "exhausted"
 INCONCLUSIVE = "inconclusive"
 LLM_ERROR = "llm_error"
 
+# Injection/auth retries need the full loop to write a custom probe from the
+# defense body. Shrinking them to 4 turns is how we miss login SQLi.
+KEEP_ITERATION_SPECIALISTS = frozenset({
+    "sqli",
+    "injection",
+    "auth_logic",
+    "xss",
+    "ssrf",
+})
+
 
 @dataclass
 class Rewrite:
@@ -76,7 +86,8 @@ def rewrite_note(failure: str, summary: ExecutorSummary, directive: Any = None) 
             "different path from the executor slice, or kill the card with the error. "
             "Do not repeat the identical tool+args. If the target blocked you (WAF, 403, "
             "timeout), read the defense body and call compare_requests or run_custom_probe "
-            "with one mutation that avoids the blocked pattern — then prove or kill."
+            "with one mutation that avoids the blocked pattern — then prove or kill. "
+            "Do not re-run sqlmap/nuclei with the same flags."
         ),
         EMPTY_VERDICT: (
             "AUTO-PROMPTER: you returned no evidence. Execute ONE differential or "
@@ -100,8 +111,16 @@ def rewrite_note(failure: str, summary: ExecutorSummary, directive: Any = None) 
         ),
     }.get(failure, "AUTO-PROMPTER: try a different test than last turn.")
     extra = []
+    spec = (getattr(summary, "specialist", "") or "").strip().lower()
+    if spec in KEEP_ITERATION_SPECIALISTS and failure in (
+        TOOLS_FAILED, INCONCLUSIVE, EMPTY_VERDICT
+    ):
+        extra.append(
+            "REQUIRED this turn: compare_requests or run_custom_probe using the "
+            "defense/error body — then prove or kill. Keep the full iteration budget."
+        )
     if hint:
-        extra.append(f"Hunter hint: {hint}")
+        extra.insert(0, f"Defense/error to adapt to: {hint[:600]}")
     if goal:
         extra.append(f"Stay on this test: {goal[:400]}")
     if extra:
@@ -146,12 +165,12 @@ def apply_rewrite_to_directive(directive: Any, rewrite: Rewrite) -> Any:
             directive.test = f"{current}\n{rewrite.note}".strip() if current else rewrite.note
     if hasattr(directive, "rewrite_note"):
         directive.rewrite_note = rewrite.note
-    # Shorter retry loop
-    if hasattr(directive, "max_iterations"):
-        try:
-            directive.max_iterations = min(int(directive.max_iterations or 6), 4)
-        except (TypeError, ValueError):
-            directive.max_iterations = 4
+    spec = (
+        rewrite.specialist
+        or getattr(directive, "specialist", "")
+        or ""
+    )
+    _maybe_shrink_iterations(directive, spec)
     return directive
 
 
@@ -160,12 +179,21 @@ def apply_rewrite_to_profile(profile: Any, rewrite: Rewrite) -> Any:
     suffix = getattr(profile, "system_prompt_suffix", "") or ""
     if rewrite.note not in suffix:
         profile.system_prompt_suffix = (suffix + "\n\n" + rewrite.note).strip()
-    if hasattr(profile, "max_iterations"):
-        try:
-            profile.max_iterations = min(int(profile.max_iterations or 6), 4)
-        except (TypeError, ValueError):
-            profile.max_iterations = 4
+    spec = rewrite.specialist or getattr(profile, "name", "") or ""
+    _maybe_shrink_iterations(profile, spec)
     return profile
+
+
+def _maybe_shrink_iterations(obj: Any, specialist: str) -> None:
+    """Cap retry loops except injection/auth lanes that need a custom-probe turn."""
+    if not hasattr(obj, "max_iterations"):
+        return
+    if (specialist or "").strip().lower() in KEEP_ITERATION_SPECIALISTS:
+        return
+    try:
+        obj.max_iterations = min(int(obj.max_iterations or 6), 4)
+    except (TypeError, ValueError):
+        obj.max_iterations = 4
 
 
 def record_failure_approach(brain: Any, summary: ExecutorSummary, failure: str) -> None:

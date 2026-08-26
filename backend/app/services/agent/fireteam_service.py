@@ -319,6 +319,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         system_prompt_suffix=(
             "Prefer compare_requests (anonymous vs auth). On default/weak login success: "
             "add_engagement_credential + queue_finding_followups(vuln_type='default_login'). "
+            "Login username/password (or JSON /login body) is also an injection surface — "
+            "spawn sqli for error/boolean/time canaries; do not treat login as creds-only. "
             "Never invent credentials. Hand large sprays to credential_assault (Samson). "
             "ASP.NET SaveSettings: missing [Authorize] is sibling 401 vs unauth 200 void — "
             "hand to api_authz; queue_finding_followups(vuln_type='unauth_settings_write'). "
@@ -567,8 +569,12 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ],
         max_iterations=10,
         system_prompt_suffix=(
+            "Login/auth fields are rank-1 even with no query params. "
+            "compare_requests error/boolean/time on username then password "
+            "(or JSON /login body). Timing that scales with SLEEP is SUBMIT. "
             "Canary → differential. sqlmap --batch only on confirmed candidates. "
             "Blind OOB SQLi/XXE: execute_interactsh register → plant payload_url → poll. "
+            "If WAF/403: run_custom_probe / encoding, then prove or kill. "
             "No os-shell. Status 200 is not SQLi."
         ),
     ),

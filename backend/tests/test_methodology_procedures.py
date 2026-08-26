@@ -15,6 +15,7 @@ def test_packs_on_disk():
     assert "api_idor_bola" in ids
     assert "open_redirect" in ids
     assert "session_token_quality" in ids
+    assert "login_injection" in ids
     assert "aspnet_unauth_settings_write" in ids
     assert "email_change_ato" in ids
     assert "auth_header_bypass" in ids
@@ -81,6 +82,12 @@ def test_catalog_seeds_new_auth_cards():
     assert "session_token_quality" in methods
     assert "open_redirect" in methods
     assert "auth_session_boundary" in methods
+    assert "login_injection" in methods
+    pack = load_procedure("login_injection")
+    assert pack is not None
+    assert "compare_requests" in pack["tools"]
+    assert "run_custom_probe" in pack["tools"]
+    assert any("login" in s.lower() for s in pack["steps"])
 
 
 def test_ssrf_pack_requires_interactsh_not_canarytokens():

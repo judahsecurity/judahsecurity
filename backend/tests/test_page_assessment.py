@@ -177,7 +177,53 @@ def test_auto_dispatch_is_not_nuclei_first():
     assert start[0] in ("credential_assault", "auth_logic", "api_authz", "xss", "content_api")
 
 
-def test_specialists_from_assessment_caps_and_skips_judge():
+def test_login_wall_starts_sqli_on_login_fields():
+    cmap = build_capability_map_from_crawl(
+        _crawl(
+            pages_visited=["https://app.example.com/login"],
+            forms=[
+                {
+                    "method": "POST",
+                    "action": "/login",
+                    "inputs": ["username", "password"],
+                    "page": "https://app.example.com/login",
+                }
+            ],
+            api_calls={},
+        )
+    )
+    start = cmap.assessment["start_here"]
+    specs = [r["specialist"] for r in start]
+    hunts = [r["hunt"] for r in start]
+    assert "sqli" in specs
+    assert "login_injection" in hunts or "sqli" in hunts
+    assert specs[0] != "coverage"
+
+
+def test_appsmith_login_wall_does_not_aim_login_field_sqli():
+    assessment = assess_page(
+        None,
+        kickoff={
+            "brief": "Product: Appsmith (low-code). SPA catch-all.",
+            "technologies": ["Tailwind CSS"],
+            "hits": [
+                {
+                    "kind": "path",
+                    "path": "user/login",
+                    "status": 200,
+                    "spa_shell": True,
+                    "title": "Appsmith",
+                    "product": "appsmith",
+                }
+            ],
+        },
+    )
+    login_sqli = [
+        r for r in assessment["start_here"]
+        if r.get("hunt") == "login_injection"
+    ]
+    assert login_sqli == []
+
     names = specialists_from_assessment(
         {
             "start_here": [

@@ -302,6 +302,14 @@ def _build_hunt_queue(cmap: CapabilityMap) -> List[Dict[str, str]]:
         add("high", "auth_logic", "Login/auth surface discovered — probe authz and session logic",
             next((p for p in cmap.pages_visited if _OAUTH_RE.search(p)), "")
             or (cmap.forms[0].get("action") if cmap.forms else ""))
+        if not re.search(r"\bappsmith\b", " ".join(cmap.pages_visited) + " " + (cmap.target or ""), re.I):
+            add(
+                "high",
+                "sqli",
+                "Login/auth fields — error/boolean/time canaries even when no query params",
+                next((p for p in cmap.pages_visited if _OAUTH_RE.search(p)), "")
+                or (cmap.forms[0].get("action") if cmap.forms else "login"),
+            )
     if cmap.has_oauth_sso:
         add("high", "saml_sso", "OAuth/SSO/SAML indicators — misconfig and redirect abuse",
             next((p for p in cmap.pages_visited if _OAUTH_RE.search(p)), ""))
@@ -624,6 +632,7 @@ def select_specialists_for_map(
             "wordpress": "injection",
             "xss": "xss",
             "sqli": "sqli",
+            "login_injection": "sqli",
             "ssrf": "ssrf",
         }
         if cmap:
@@ -659,6 +668,7 @@ def select_specialists_for_map(
         "wordpress": "injection",
         "xss": "xss",
         "sqli": "sqli",
+        "login_injection": "sqli",
         "ssrf": "ssrf",
         "js_secrets": "js_secrets",
         "spa_client": "spa_client",

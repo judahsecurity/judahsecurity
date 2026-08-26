@@ -222,10 +222,10 @@ _HUNT_CARDS: Dict[str, Dict[str, str]] = {
     },
     "sqli": {
         "title": "SQLi/SSTI/command injection on mapped params",
-        "assumption": "Query/body params are unsafely interpolated into queries/templates/shell",
-        "test": "Canaries first; sqlmap/commix only on anomalous hits",
+        "assumption": "Query/body params (including login username/password) are unsafely interpolated into queries/templates/shell",
+        "test": "Login fields first even with no query params: compare_requests error/boolean/time; then other ranked params. sqlmap/commix only on anomalous hits",
         "pass_criteria": "Error/time/boolean differential or template/command impact with a concrete param",
-        "kill_criteria": "No anomalous responses after disciplined probes",
+        "kill_criteria": "No anomalous responses after disciplined probes and one blocked-probe rewrite",
         "specialist": "sqli",
         "priority": "high",
     },

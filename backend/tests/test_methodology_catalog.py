@@ -96,6 +96,11 @@ def test_methodologies_from_rich_crawl():
     methods = methodologies_from_capability_map(cmap)
     ids = {m.id for m in methods}
     assert "default_weak_creds" in ids
+    assert "login_injection" in ids
+    login_sqli = next(m for m in methods if m.id == "login_injection")
+    assert login_sqli.specialist == "sqli"
+    assert "compare_requests" in login_sqli.test
+    assert "CWE-89" in login_sqli.cwe_ids
     assert "password_reset_abuse" in ids
     assert "api_idor_bola" in ids
     assert "host_tenant_isolation" in ids
@@ -752,3 +757,75 @@ def test_ml_train_path_seeds_rbac_methodology():
     assert "CWE-285" in card.cwe_ids
     assert "do not delete" in card.test.lower()
     assert any(h.get("hunt") == "ml_pipeline_rbac" for h in cmap.ranked_hunt_queue)
+
+
+def test_login_form_seeds_injection_without_query_params():
+    """Login POST body is an injection surface even with an empty param map."""
+    cmap = {
+        "target": "https://bank.example.com",
+        "has_login_form": True,
+        "has_auth": True,
+        "pages_visited": ["https://bank.example.com/login"],
+        "forms": [
+            {
+                "method": "POST",
+                "action": "/login",
+                "inputs": ["username", "password"],
+                "page": "https://bank.example.com/login",
+            }
+        ],
+        "param_rich_paths": [],
+        "api_endpoints": [],
+        "js_files": [],
+        "api_samples": [],
+    }
+    methods = methodologies_from_capability_map(cmap)
+    ids = {m.id for m in methods}
+    assert "login_injection" in ids
+    assert "param_injection" not in ids
+    card = next(m for m in methods if m.id == "login_injection")
+    assert card.specialist == "sqli"
+    assert card.hunt == "sqli"
+    assert "compare_requests" in card.test
+    assert "time" in card.test.lower()
+    assert "CWE-89" in card.cwe_ids
+
+
+def test_json_login_api_seeds_login_injection():
+    cmap = {
+        "target": "https://app.example.com",
+        "has_login_form": False,
+        "has_auth": False,
+        "pages_visited": ["https://app.example.com/"],
+        "forms": [],
+        "param_rich_paths": [],
+        "api_endpoints": [
+            {"method": "POST", "path": "/api/auth/login", "host": "app.example.com"},
+        ],
+        "js_files": [],
+        "api_samples": [],
+    }
+    ids = {m.id for m in methodologies_from_capability_map(cmap)}
+    assert "login_injection" in ids
+
+
+def test_appsmith_skips_login_field_injection():
+    cmap = {
+        "target": "https://appsmith.example.com",
+        "has_login_form": True,
+        "has_auth": True,
+        "pages_visited": ["https://appsmith.example.com/user/login"],
+        "forms": [
+            {
+                "method": "POST",
+                "action": "/user/login",
+                "inputs": ["email", "password"],
+            }
+        ],
+        "param_rich_paths": [],
+        "api_endpoints": [],
+        "js_files": [],
+        "api_samples": [],
+    }
+    ids = {m.id for m in methodologies_from_capability_map(cmap)}
+    assert "login_injection" not in ids

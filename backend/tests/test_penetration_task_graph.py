@@ -5,6 +5,8 @@ from types import SimpleNamespace
 from app.services.agent.auto_prompter import (
     SOLILOQUY,
     TOOLS_FAILED,
+    Rewrite,
+    apply_rewrite_to_directive,
     classify_failure,
     rewrite_note,
     should_rewrite,
@@ -207,6 +209,50 @@ def test_auto_prompter_stops_after_max_attempts():
             n.status = "retry"
             n.attempts = n.max_attempts
     assert should_rewrite(graph, summary, report) is None
+
+
+def test_auto_prompter_keeps_sqli_iteration_budget():
+    summary = ExecutorSummary(
+        specialist="sqli",
+        verdict="retry",
+        tools_run=["execute_sqlmap"],
+        rewrite_hint="403 WAF: SQL keyword blocked",
+        evidence="",
+    )
+    note = rewrite_note(TOOLS_FAILED, summary)
+    assert "run_custom_probe" in note or "compare_requests" in note
+    assert "403" in note or "WAF" in note
+    d = SimpleNamespace(
+        specialist="sqli",
+        test="login canary",
+        max_iterations=10,
+        rewrite_note="",
+    )
+    rewrite = Rewrite(
+        specialist="sqli",
+        failure=TOOLS_FAILED,
+        note=note,
+        rewritten_test=note,
+    )
+    apply_rewrite_to_directive(d, rewrite)
+    assert d.max_iterations == 10
+
+
+def test_auto_prompter_shrinks_non_injection_lanes():
+    d = SimpleNamespace(
+        specialist="api_authz",
+        test="idor",
+        max_iterations=10,
+        rewrite_note="",
+    )
+    rewrite = Rewrite(
+        specialist="api_authz",
+        failure=SOLILOQUY,
+        note="call a tool",
+        rewritten_test="call a tool",
+    )
+    apply_rewrite_to_directive(d, rewrite)
+    assert d.max_iterations == 4
 
 
 def test_spawn_adds_graphql_card():
