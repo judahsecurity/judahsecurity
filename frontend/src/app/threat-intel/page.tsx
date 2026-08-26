@@ -677,24 +677,29 @@ export default function ThreatIntelPage() {
   const [oracleResults, setOracleResults] = useState<Record<string, OracleResult>>({});
   const [analyzingCves, setAnalyzingCves] = useState<Set<string>>(new Set());
 
+  const [loadError, setLoadError] = useState<string | null>(null);
+
   const load = useCallback(async (isRefresh = false) => {
     if (isRefresh) setRefreshing(true);
     else setLoading(true);
+    setLoadError(null);
     try {
       const params: Record<string, string> = { days: String(days), limit: '500' };
       if (severityFilter !== 'all') params.severity = severityFilter;
       if (detectionFilter !== 'all') params.detection = detectionFilter;
       if (sourceFilter !== 'all') params.source = sourceFilter;
       // OTX is deferred to CVE detail — emerging used to fan-out ~10s/CVE and hang the UI.
-      const resp = await api.get('/threat-intel/emerging', params, { timeout: 60000 });
+      const resp = await api.get('/threat-intel/emerging', params, { timeout: 25000 });
       setData(resp.data);
     } catch (err: any) {
       const timedOut = err?.code === 'ECONNABORTED' || String(err?.message || '').toLowerCase().includes('timeout');
+      const message = timedOut
+        ? 'Request timed out while aggregating intel feeds. Retry or narrow the date window.'
+        : (err?.response?.data?.detail || err.message);
+      setLoadError(message);
       toast({
         title: 'Failed to load emerging threats',
-        description: timedOut
-          ? 'Request timed out while aggregating intel feeds. Retry or narrow the date window.'
-          : (err?.response?.data?.detail || err.message),
+        description: message,
         variant: 'destructive',
       });
     } finally {
@@ -927,11 +932,13 @@ export default function ThreatIntelPage() {
             {filtered.length === 0 ? (
               <div className="flex flex-col items-center justify-center py-16 text-muted-foreground">
                 <Shield className="h-10 w-10 mb-3 opacity-30" />
-                <p className="font-medium">No entries found</p>
-                <p className="text-sm mt-1">
-                  {!summary?.vulncheck_configured
-                    ? 'Configure VULNCHECK_API_TOKEN to see emerging KEV data'
-                    : 'Try adjusting your filters or time window'}
+                <p className="font-medium">{loadError ? 'Could not load intelligence feeds' : 'No entries found'}</p>
+                <p className="text-sm mt-1 text-center max-w-md">
+                  {loadError
+                    ? loadError
+                    : search || severityFilter !== 'all' || detectionFilter !== 'all' || sourceFilter !== 'all'
+                      ? 'Try adjusting your filters or time window'
+                      : 'CISA KEV, ENISA, and EUVD should appear here without a VulnCheck key. If this stays empty, the backend cannot reach those feeds from production.'}
                 </p>
               </div>
             ) : (

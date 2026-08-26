@@ -71,6 +71,8 @@ services:
       # Delphi extended KEV feeds (Shadowserver + KEVIntel via CIRCL). Default on.
       - DELPHI_EXTENDED_KEV_ENABLED=${DELPHI_EXTENDED_KEV_ENABLED:-true}
       - DELPHI_FIRE_CVE_PATH=${DELPHI_FIRE_CVE_PATH:-}
+      # Persist VulnCheck/CISA intel caches across container restarts
+      - DELPHI_CACHE_DIR=${DELPHI_CACHE_DIR:-/app/data/delphi_cache}
       # Neo4j Graph Database (optional - for asset relationship visualization)
       - NEO4J_URI=${NEO4J_URI:-}
       - NEO4J_USER=${NEO4J_USER:-neo4j}
@@ -154,6 +156,7 @@ services:
       - commoncrawl_data:/app/data/commoncrawl
       - sni_data:/app/data/sni-ip-ranges
       - panorama_data:/app/data/panorama
+      - delphi_cache:/app/data/delphi_cache
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -526,6 +529,8 @@ volumes:
   sni_data:
     driver: local
   panorama_data:
+    driver: local
+  delphi_cache:
     driver: local
   neo4j_data:
     driver: local

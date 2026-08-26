@@ -19,6 +19,7 @@
 #   shell       - Open shell in API container
 #   db-shell    - Open PostgreSQL shell
 #   init-db     - Initialize database with default users
+#   refresh-intel - Pull VulnCheck KEV (community) + CISA/ENISA into disk cache
 #   update-nuclei - Update Nuclei templates
 #   health      - Check service health
 #   ssl-setup   - Setup SSL with Let's Encrypt
@@ -29,9 +30,9 @@ set -euo pipefail
 
 # Detect app directory - use script location or current directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$SCRIPT_DIR/../../docker-compose.prod.yml" ]; then
+if [ -f "$SCRIPT_DIR/../../docker-compose.yml" ]; then
     APP_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-elif [ -f "./docker-compose.prod.yml" ]; then
+elif [ -f "./docker-compose.yml" ]; then
     APP_DIR="$(pwd)"
 elif [ -d "/opt/asm" ]; then
     APP_DIR="/opt/asm"
@@ -39,7 +40,10 @@ else
     APP_DIR="$(pwd)"
 fi
 
-COMPOSE_FILE="docker-compose.prod.yml"
+COMPOSE_FILE="docker-compose.yml"
+if [ ! -f "$APP_DIR/$COMPOSE_FILE" ] && [ -f "$APP_DIR/docker-compose.prod.yml" ]; then
+    COMPOSE_FILE="docker-compose.prod.yml"
+fi
 BACKUP_DIR="$APP_DIR/backups"
 
 # Colors
@@ -169,6 +173,13 @@ case "${1:-help}" in
         docker compose -f $COMPOSE_FILE exec backend python -m app.scripts.init_db
         log "Database initialized"
         ;;
+
+    refresh-intel)
+        log "Refreshing Vulnerability Intel caches (CISA + ENISA + VulnCheck KEV)..."
+        info "First VulnCheck pull downloads the community backup; later runs only merge new rows."
+        docker compose -f $COMPOSE_FILE exec -T backend python -m app.scripts.refresh_vuln_intel "${@:2}"
+        log "Intel cache refresh finished — reload /vulnerability-intel"
+        ;;
         
     update-nuclei)
         log "Updating Nuclei templates..."
@@ -278,6 +289,7 @@ case "${1:-help}" in
         echo "  shell         Open shell in API container"
         echo "  db-shell      Open PostgreSQL shell"
         echo "  init-db       Initialize database"
+        echo "  refresh-intel Pull VulnCheck/CISA/ENISA intel caches"
         echo "  update-nuclei Update Nuclei templates"
         echo "  health        Check service health"
         echo "  ssl-setup     Setup SSL with Let's Encrypt"

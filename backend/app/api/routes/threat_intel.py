@@ -33,52 +33,68 @@ from app.services.vuln_intel_enrichment import enrich_cve_catalog
 from app.services.vuln_intel_feeds import (
     CISA_KEV_URLS,
     fetch_kevintel_attestations,
-    fetch_shadowserver_exploited,
     fetch_shadowserver_from_circl_kev,
     fetch_vulncheck_kev,
+    read_json_cache,
+    write_json_cache,
 )
 
 router = APIRouter(prefix="/threat-intel", tags=["threat-intel"])
 logger = logging.getLogger(__name__)
 
-_HTTP_TIMEOUT = 20.0
+_HTTP_TIMEOUT = 8.0
 _ENRICH_CONCURRENCY = 8
+# Hard budget so the Vulnerability Intel list cannot hang behind CIRCL/VulnCheck.
+_FEED_TIMEOUT_S = 10.0
 
 
 def _get_vulncheck_token(db: Session, org_id: int | None = None) -> str:
-    return resolve_api_key(db, ExternalService.VULNCHECK, org_id) or ""
+    return (
+        resolve_api_key(db, ExternalService.VULNCHECK, org_id)
+        or getattr(settings, "VULNCHECK_API_TOKEN", None)
+        or ""
+    )
 
 
 def _get_pdcp_key(db: Session, org_id: int | None = None) -> str:
     return resolve_api_key(db, ExternalService.PDCP, org_id) or ""
 
 
+async def _feed_or_empty(name: str, coro, *, timeout: float = _FEED_TIMEOUT_S) -> list[dict]:
+    """Run one feed fetch; return [] on timeout or error so other sources still render."""
+    try:
+        result = await asyncio.wait_for(coro, timeout=timeout)
+        return result if isinstance(result, list) else []
+    except asyncio.TimeoutError:
+        logger.warning("threat-intel %s feed timed out after %.0fs", name, timeout)
+        return []
+    except Exception as exc:
+        logger.warning("threat-intel %s feed failed: %s", name, exc)
+        return []
+
+
 # ── VulnCheck KEV ─────────────────────────────────────────────────────────────
 
 async def _fetch_vulncheck_kev(client: httpx.AsyncClient, days: int, token: str) -> list[dict]:
     """
-    Fetch VulnCheck KEV via the shared disk-cached loader (correct start_cursor
-    pagination). Filters to the requested day window for the emerging feed.
+    Fetch VulnCheck KEV via the shared disk cache.
+
+    First call bootstraps the community catalog (backup, then index). Later
+    calls only merge newly added KEV rows.
     """
-    if not token:
-        return []
+    mapped = await asyncio.to_thread(
+        fetch_vulncheck_kev,
+        token or "",
+        cache_only=not bool(token),
+        request_timeout=20,
+        page_limit=100,
+    )
+
     cutoff = (
         datetime.now(timezone.utc) - timedelta(days=days)
         if days > 0
         else datetime.min.replace(tzinfo=timezone.utc)
     )
-    try:
-        refresh_hours = int(getattr(settings, "DELPHI_REFRESH_HOURS", 24))
-        mapped = await asyncio.to_thread(
-            fetch_vulncheck_kev,
-            token,
-            force=False,
-            refresh_hours=refresh_hours,
-        )
-    except Exception as exc:
-        logger.warning("VulnCheck KEV fetch failed: %s", exc)
-        return []
-
     entries: list[dict] = []
     for cve, entry in mapped.items():
         date_str = entry.get("date_added") or ""
@@ -117,7 +133,7 @@ async def _fetch_cisa_kev(client: httpx.AsyncClient, cutoff: datetime) -> list[d
             resp = await client.get(
                 url,
                 headers={"User-Agent": "aegis-oracle/1.0", "Accept": "application/json"},
-                timeout=30.0,
+                timeout=_HTTP_TIMEOUT,
             )
             resp.raise_for_status()
             payload = resp.json()
@@ -127,6 +143,19 @@ async def _fetch_cisa_kev(client: httpx.AsyncClient, cutoff: datetime) -> list[d
         except Exception as exc:
             logger.debug("CISA KEV fetch failed for %s: %s", url, exc)
             continue
+    if not vulns:
+        cached = await asyncio.to_thread(read_json_cache, "cisa_kev.json")
+        vulns = list((cached or {}).get("vulnerabilities") or [])
+    else:
+        await asyncio.to_thread(
+            write_json_cache,
+            "cisa_kev.json",
+            {
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+                "count": len(vulns),
+                "vulnerabilities": vulns,
+            },
+        )
     if not vulns:
         return []
 
@@ -196,7 +225,7 @@ async def _fetch_enisa_kev(client: httpx.AsyncClient, cutoff: datetime) -> list[
             resp = await client.get(
                 url,
                 headers={"User-Agent": "aegis-oracle/1.0", "Accept": "application/json"},
-                timeout=20.0,
+                timeout=_HTTP_TIMEOUT,
             )
             if resp.status_code == 404:
                 continue
@@ -207,9 +236,22 @@ async def _fetch_enisa_kev(client: httpx.AsyncClient, cutoff: datetime) -> list[
             logger.debug("ENISA EUKEV fetch failed for %s: %s", url, exc)
             continue
     if data is None:
+        cached = await asyncio.to_thread(read_json_cache, "enisa_eukev.json")
+        rows = list((cached or {}).get("rows") or [])
+    else:
+        rows = data if isinstance(data, list) else data.get("vulnerabilities") or data.get("data") or []
+        if isinstance(rows, list) and rows:
+            await asyncio.to_thread(
+                write_json_cache,
+                "enisa_eukev.json",
+                {
+                    "fetched_at": datetime.now(timezone.utc).isoformat(),
+                    "count": len(rows),
+                    "rows": [r for r in rows if isinstance(r, dict)],
+                },
+            )
+    if not rows:
         return []
-
-    rows = data if isinstance(data, list) else data.get("vulnerabilities") or data.get("data") or []
     entries = []
     for row in rows:
         if not isinstance(row, dict):
@@ -278,12 +320,20 @@ def _euvd_cve_ids(item: dict) -> list[str]:
     return out
 
 
-async def _fetch_euvd(client: httpx.AsyncClient, cutoff: datetime) -> list[dict]:
+async def _fetch_euvd(
+    client: httpx.AsyncClient,
+    cutoff: datetime,
+    *,
+    paginated: bool = False,
+) -> list[dict]:
     """
     Fetch ENISA EUVD exploited-in-the-wild entries (free, no auth).
 
     Uses euvdservices.enisa.europa.eu (the old euvd.enisa.europa.eu/api/v1/*
     paths now serve the SPA HTML shell).
+
+    paginated=False (list UI): one convenience request only, so this cannot
+    stall the emerging feed behind 25 search pages.
     """
     headers = {"User-Agent": "aegis-oracle/1.0", "Accept": "application/json"}
     entries: list[dict] = []
@@ -343,7 +393,7 @@ async def _fetch_euvd(client: httpx.AsyncClient, cutoff: datetime) -> list[dict]
         resp = await client.get(
             "https://euvdservices.enisa.europa.eu/api/exploitedvulnerabilities",
             headers=headers,
-            timeout=20.0,
+            timeout=_HTTP_TIMEOUT,
         )
         if resp.status_code == 200 and "application/json" in (resp.headers.get("content-type") or ""):
             data = resp.json()
@@ -352,7 +402,10 @@ async def _fetch_euvd(client: httpx.AsyncClient, cutoff: datetime) -> list[dict]
     except Exception as exc:
         logger.debug("EUVD exploitedvulnerabilities failed: %s", exc)
 
-    # 2) Search pagination for fuller exploited coverage
+    if not paginated:
+        return entries
+
+    # 2) Search pagination for fuller exploited coverage (detail/background only)
     page = 0
     per_page = 100
     for _ in range(25):
@@ -361,7 +414,7 @@ async def _fetch_euvd(client: httpx.AsyncClient, cutoff: datetime) -> list[dict]
                 "https://euvdservices.enisa.europa.eu/api/search",
                 params={"exploited": "true", "page": page, "size": per_page},
                 headers=headers,
-                timeout=20.0,
+                timeout=_HTTP_TIMEOUT,
             )
             if resp.status_code in (403, 404):
                 break
@@ -411,6 +464,8 @@ async def _fetch_shadowserver(cutoff: datetime) -> list[dict]:
             fetch_shadowserver_from_circl_kev,
             force=False,
             refresh_hours=refresh_hours,
+            cache_only=True,
+            stale_ok=True,
         )
         for cve, entry in mapped.items():
             date_str = entry.get("date_added") or ""
@@ -438,30 +493,8 @@ async def _fetch_shadowserver(cutoff: datetime) -> list[dict]:
     except Exception as exc:
         logger.debug("Shadowserver CIRCL-KEV fetch failed: %s", exc)
 
-    # Sightings fallback for all-time only (no reliable per-CVE dates).
-    if not entries and cutoff <= datetime.min.replace(tzinfo=timezone.utc):
-        try:
-            cves = await asyncio.to_thread(
-                fetch_shadowserver_exploited,
-                force=False,
-                refresh_hours=refresh_hours,
-            )
-            entries = [
-                {
-                    "cve_id": cve,
-                    "all_cves": [cve],
-                    "date_added": "",
-                    "vendor_project": "",
-                    "product": "",
-                    "vulnerability_name": "",
-                    "short_description": "Observed in Shadowserver honeypot exploited-vulnerabilities feed",
-                    "known_ransomware_use": "Unknown",
-                    "kev_sources": ["shadowserver"],
-                }
-                for cve in sorted(cves)
-            ]
-        except Exception:
-            return []
+    # Sightings fallback is a 40+ page CIRCL walk — never on the list path.
+    # Delphi warms that cache separately.
     return entries
 
 # ── KEVIntel (CIRCL KEV catalog) ───────────────────────────────────────────────
@@ -474,6 +507,8 @@ async def _fetch_kevintel(cutoff: datetime) -> list[dict]:
             fetch_kevintel_attestations,
             force=False,
             refresh_hours=refresh_hours,
+            cache_only=True,
+            stale_ok=True,
         )
     except Exception:
         return []
@@ -878,7 +913,7 @@ async def get_emerging_vulnerabilities(
         "otx_deferred": not include_otx,
     }
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(25.0, connect=10.0)) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(_HTTP_TIMEOUT, connect=5.0)) as client:
         (
             vulncheck_entries,
             cisa_entries,
@@ -887,12 +922,12 @@ async def get_emerging_vulnerabilities(
             shadowserver_entries,
             kevintel_entries,
         ) = await asyncio.gather(
-            _fetch_vulncheck_kev(client, days, vulncheck_token),
-            _fetch_cisa_kev(client, cutoff),
-            _fetch_enisa_kev(client, cutoff),
-            _fetch_euvd(client, cutoff),
-            _fetch_shadowserver(cutoff),
-            _fetch_kevintel(cutoff),
+            _feed_or_empty("vulncheck", _fetch_vulncheck_kev(client, days, vulncheck_token)),
+            _feed_or_empty("cisa", _fetch_cisa_kev(client, cutoff)),
+            _feed_or_empty("enisa", _fetch_enisa_kev(client, cutoff)),
+            _feed_or_empty("euvd", _fetch_euvd(client, cutoff, paginated=False)),
+            _feed_or_empty("shadowserver", _fetch_shadowserver(cutoff)),
+            _feed_or_empty("kevintel", _fetch_kevintel(cutoff)),
         )
 
         merged_entries = _merge_intel_sources([
@@ -924,10 +959,10 @@ async def get_emerging_vulnerabilities(
                     _fetch_otx_batch(client, cve_ids) if include_otx else _empty_otx(),
                     _fetch_epss_batch(client, cve_ids),
                 ),
-                timeout=45.0,
+                timeout=8.0,
             )
         except asyncio.TimeoutError:
-            logger.warning("threat-intel emerging enrichment timed out after 45s; returning feed-only data")
+            logger.warning("threat-intel emerging enrichment timed out after 8s; returning feed-only data")
             pdcp_map, otx_map, epss_map = {}, {}, {}
 
     # Oracle DB lookup (sync, local DB — no HTTP)
