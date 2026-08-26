@@ -338,11 +338,13 @@ RUN adduser --disabled-password --gecos '' appuser \
     && mkdir -p /home/appuser/.config/nuclei \
     && cp -r /root/.config/nuclei/* /home/appuser/.config/nuclei/ 2>/dev/null || true \
     && chown -R appuser:appuser /home/appuser \
-    && mkdir -p /app/data/screenshots \
+    && mkdir -p /app/data/screenshots /app/data/delphi_cache \
     && chown -R appuser:appuser /app/data \
-    && chown -R appuser:appuser /opt/EyeWitness
+    && chown -R appuser:appuser /opt/EyeWitness \
+    && chmod +x /app/docker-entrypoint.py
 
-USER appuser
+# Stay root so the entrypoint can chown named volumes (they mount as root:root),
+# then drop to appuser before uvicorn.
 ENV PATH="/usr/local/bin:${PATH}"
 ENV PD_HTTPX_BIN=/opt/projectdiscovery/httpx
 
@@ -351,4 +353,5 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
+ENTRYPOINT ["python", "/app/docker-entrypoint.py"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--timeout-keep-alive", "300"]

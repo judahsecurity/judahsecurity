@@ -31,12 +31,10 @@ from app.core.config import settings
 from app.models.api_config import ExternalService, resolve_api_key
 from app.services.vuln_intel_enrichment import enrich_cve_catalog
 from app.services.vuln_intel_feeds import (
-    CISA_KEV_URLS,
     fetch_kevintel_attestations,
     fetch_shadowserver_from_circl_kev,
     fetch_vulncheck_kev,
     read_json_cache,
-    write_json_cache,
 )
 
 router = APIRouter(prefix="/threat-intel", tags=["threat-intel"])
@@ -76,16 +74,13 @@ async def _feed_or_empty(name: str, coro, *, timeout: float = _FEED_TIMEOUT_S) -
 # ── VulnCheck KEV ─────────────────────────────────────────────────────────────
 
 async def _fetch_vulncheck_kev(client: httpx.AsyncClient, days: int, token: str) -> list[dict]:
-    """
-    Fetch VulnCheck KEV via the shared disk cache.
-
-    First call bootstraps the community catalog (backup, then index). Later
-    calls only merge newly added KEV rows.
-    """
+    """Serve VulnCheck KEV from disk cache. Live bootstrap is refresh_vuln_intel."""
+    # List path is cache-only. Live VulnCheck (backup / incremental) is the
+    # refresh_vuln_intel job — a hanging index call must not empty this page.
     mapped = await asyncio.to_thread(
         fetch_vulncheck_kev,
         token or "",
-        cache_only=not bool(token),
+        cache_only=True,
         request_timeout=20,
         page_limit=100,
     )
@@ -126,36 +121,9 @@ async def _fetch_vulncheck_kev(client: httpx.AsyncClient, days: int, token: str)
 # ── CISA KEV ──────────────────────────────────────────────────────────────────
 
 async def _fetch_cisa_kev(client: httpx.AsyncClient, cutoff: datetime) -> list[dict]:
-    """Fetch CISA Known Exploited Vulnerabilities catalog (free, no auth)."""
-    vulns: list = []
-    for url in CISA_KEV_URLS:
-        try:
-            resp = await client.get(
-                url,
-                headers={"User-Agent": "aegis-oracle/1.0", "Accept": "application/json"},
-                timeout=_HTTP_TIMEOUT,
-            )
-            resp.raise_for_status()
-            payload = resp.json()
-            vulns = payload.get("vulnerabilities", []) if isinstance(payload, dict) else []
-            if vulns:
-                break
-        except Exception as exc:
-            logger.debug("CISA KEV fetch failed for %s: %s", url, exc)
-            continue
-    if not vulns:
-        cached = await asyncio.to_thread(read_json_cache, "cisa_kev.json")
-        vulns = list((cached or {}).get("vulnerabilities") or [])
-    else:
-        await asyncio.to_thread(
-            write_json_cache,
-            "cisa_kev.json",
-            {
-                "fetched_at": datetime.now(timezone.utc).isoformat(),
-                "count": len(vulns),
-                "vulnerabilities": vulns,
-            },
-        )
+    """Serve CISA KEV from disk cache. Live pull is refresh_vuln_intel (cisa.gov often hangs from AWS)."""
+    cached = await asyncio.to_thread(read_json_cache, "cisa_kev.json")
+    vulns = list((cached or {}).get("vulnerabilities") or [])
     if not vulns:
         return []
 
@@ -188,13 +156,6 @@ async def _fetch_cisa_kev(client: httpx.AsyncClient, cutoff: datetime) -> list[d
 
 # ── ENISA EU KEV (CNW EUKEV) ──────────────────────────────────────────────────
 
-_ENISA_EUKEV_URLS = (
-    # Current official CNW EUKEV dump (enisaeu/KEV CSV repo was removed).
-    "https://raw.githubusercontent.com/enisaeu/CNW/refs/heads/main/advisories/eukev/eukev.json",
-    "https://raw.githubusercontent.com/enisaeu/CNW/main/advisories/eukev/eukev.json",
-)
-
-
 def _parse_enisa_date(date_str: str) -> datetime | None:
     """Parse ENISA date strings like 2026/07/31 or ISO timestamps."""
     raw = (date_str or "").strip()
@@ -218,38 +179,9 @@ def _parse_enisa_date(date_str: str) -> datetime | None:
 
 
 async def _fetch_enisa_kev(client: httpx.AsyncClient, cutoff: datetime) -> list[dict]:
-    """Fetch ENISA CNW EUKEV list (free, no auth) — JSON dump from enisaeu/CNW."""
-    data = None
-    for url in _ENISA_EUKEV_URLS:
-        try:
-            resp = await client.get(
-                url,
-                headers={"User-Agent": "aegis-oracle/1.0", "Accept": "application/json"},
-                timeout=_HTTP_TIMEOUT,
-            )
-            if resp.status_code == 404:
-                continue
-            resp.raise_for_status()
-            data = resp.json()
-            break
-        except Exception as exc:
-            logger.debug("ENISA EUKEV fetch failed for %s: %s", url, exc)
-            continue
-    if data is None:
-        cached = await asyncio.to_thread(read_json_cache, "enisa_eukev.json")
-        rows = list((cached or {}).get("rows") or [])
-    else:
-        rows = data if isinstance(data, list) else data.get("vulnerabilities") or data.get("data") or []
-        if isinstance(rows, list) and rows:
-            await asyncio.to_thread(
-                write_json_cache,
-                "enisa_eukev.json",
-                {
-                    "fetched_at": datetime.now(timezone.utc).isoformat(),
-                    "count": len(rows),
-                    "rows": [r for r in rows if isinstance(r, dict)],
-                },
-            )
+    """Serve ENISA EUKEV from disk cache. Live pull is refresh_vuln_intel."""
+    cached = await asyncio.to_thread(read_json_cache, "enisa_eukev.json")
+    rows = list((cached or {}).get("rows") or [])
     if not rows:
         return []
     entries = []

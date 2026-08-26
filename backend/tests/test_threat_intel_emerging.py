@@ -68,3 +68,77 @@ def test_euvd_default_is_not_paginated():
 def test_cutoff_epoch_is_timezone_aware():
     cutoff = datetime.min.replace(tzinfo=timezone.utc)
     assert cutoff.tzinfo is not None
+
+
+def test_list_path_vulncheck_is_cache_only():
+    import inspect
+    from app.api.routes.threat_intel import _fetch_vulncheck_kev
+
+    source = inspect.getsource(_fetch_vulncheck_kev)
+    assert "cache_only=True" in source
+    assert "cache_only=not bool(token)" not in source
+
+
+@pytest.mark.asyncio
+async def test_cisa_list_path_uses_cache_not_http(monkeypatch, tmp_path):
+    monkeypatch.setenv("DELPHI_CACHE_DIR", str(tmp_path))
+    from app.services.vuln_intel_feeds import write_json_cache
+    from app.api.routes.threat_intel import _fetch_cisa_kev
+
+    write_json_cache(
+        "cisa_kev.json",
+        {
+            "count": 1,
+            "vulnerabilities": [
+                {
+                    "cveID": "CVE-2024-1234",
+                    "dateAdded": "2099-01-01",
+                    "vendorProject": "Test",
+                    "product": "App",
+                    "vulnerabilityName": "Test vuln",
+                    "shortDescription": "n/a",
+                    "knownRansomwareUse": "Unknown",
+                }
+            ],
+        },
+    )
+
+    class _BoomClient:
+        async def get(self, *args, **kwargs):
+            raise AssertionError("CISA list path must not hit the network")
+
+    cutoff = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    rows = await _fetch_cisa_kev(_BoomClient(), cutoff)
+    assert rows[0]["cve_id"] == "CVE-2024-1234"
+
+
+@pytest.mark.asyncio
+async def test_enisa_list_path_uses_cache_not_http(monkeypatch, tmp_path):
+    monkeypatch.setenv("DELPHI_CACHE_DIR", str(tmp_path))
+    from app.services.vuln_intel_feeds import write_json_cache
+    from app.api.routes.threat_intel import _fetch_enisa_kev
+
+    write_json_cache(
+        "enisa_eukev.json",
+        {
+            "count": 1,
+            "rows": [
+                {
+                    "cveID": "CVE-2024-5678",
+                    "dateAdded": "2099-01-01",
+                    "vendorProject": "ENISA",
+                    "product": "App",
+                    "vulnerabilityName": "Test",
+                    "shortDescription": "n/a",
+                }
+            ],
+        },
+    )
+
+    class _BoomClient:
+        async def get(self, *args, **kwargs):
+            raise AssertionError("ENISA list path must not hit the network")
+
+    cutoff = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    rows = await _fetch_enisa_kev(_BoomClient(), cutoff)
+    assert rows[0]["cve_id"] == "CVE-2024-5678"

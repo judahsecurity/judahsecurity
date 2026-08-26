@@ -689,7 +689,7 @@ export default function ThreatIntelPage() {
       if (detectionFilter !== 'all') params.detection = detectionFilter;
       if (sourceFilter !== 'all') params.source = sourceFilter;
       // OTX is deferred to CVE detail — emerging used to fan-out ~10s/CVE and hang the UI.
-      const resp = await api.get('/threat-intel/emerging', params, { timeout: 25000 });
+      const resp = await api.get('/threat-intel/emerging', params, { timeout: 15000 });
       setData(resp.data);
     } catch (err: any) {
       const timedOut = err?.code === 'ECONNABORTED' || String(err?.message || '').toLowerCase().includes('timeout');
