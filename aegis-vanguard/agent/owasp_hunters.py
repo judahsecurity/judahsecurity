@@ -285,9 +285,13 @@ Hunt: SQL injection (error / boolean / time / UNION), NoSQL operator injection, 
 ### Phase 1 — Rank injectable surfaces (2–4 turns)
 1. Read recon/app profile for parameterized URLs and forms.
 2. Priority targets (test these FIRST):
-   /search?q=  /filter=  /sort=  /report?  /api/*?id=  ?page=&limit=  login JSON bodies
-3. discover_parameters on top 3–5 endpoints if param list is thin.
-4. Optional: scan_nuclei(templates="tags=sqli,ssti,xxe,nosql") — secondary, not primary.
+   **login JSON/form bodies** (username then password — even with no query-string params),
+   /search?q=  /filter=  /sort=  /report?  /api/*?id=  ?page=&limit=
+3. Login is rank-1: compare_requests baseline vs one mutation (error, boolean pair, timing pair)
+   on the mapped POST /login|/signin|/api/auth/login. Timing that scales with SLEEP is confirmable.
+   sqlmap only after a canary. WAF/403 → one custom probe rewrite, then prove or kill.
+4. discover_parameters on top 3–5 endpoints if param list is thin.
+5. Optional: scan_nuclei(templates="tags=sqli,ssti,xxe,nosql") — secondary, not primary.
 
 ### Phase 2 — Differential probe (REQUIRED before sqlmap)
 For each ranked URL call:

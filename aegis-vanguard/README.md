@@ -33,7 +33,9 @@ process (engagement brain, fireteam, differentials), see
 
 Phase 2 fans out specialist hunters (injection, XSS, auth, authz, SSRF, business
 logic, host-header, …) with surface-selected API/enterprise packs. See
-`agent/owasp_hunters.py`, `agent/hunt_patterns.py`, and `CLAUDE.md`.
+`agent/owasp_hunters.py`, `agent/hunt_patterns.py`, and
+`docs/vanguard-system-card.md`. Claude Code playbook: `CLAUDE.md` +
+`.claude/skills/` (see `docs/skills/README.md`). Pass a real checkout or URL.
 
 ## Setup
 
@@ -146,8 +148,10 @@ writes machine-readable `findings.jsonl` for judging. Details:
 | `asm_bridge.py` | Python client for the ASM platform ingestion API + optional findings sink |
 | `scanners.py` | Wrappers around security scanning tools |
 | `agent/` | ReACT agents, OWASP hunters, guardrails, parallel fireteam |
-| `CLAUDE.md` | Instructions for the Aegis Vanguard Claude agent |
 | `run_pentest.py` | Main ReACT pentest entrypoint |
+| `CLAUDE.md` | Claude Code runbook (skills front door) |
+| `.claude/skills/` | Thin playbook skills (`/aegis`, `/threat-model`, `/code-scan`, `/pentest`, `/triage`) |
+| `docs/vanguard-system-card.md` | ReAct CLI agent system card |
 | `validate_finding.py` | On-demand single-finding validator |
 | `Dockerfile` | Container image with all scanning tools pre-installed |
 | `DEPLOYMENT.md` | Local Python / compose / env reference |

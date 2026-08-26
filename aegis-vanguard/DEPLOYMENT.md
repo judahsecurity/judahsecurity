@@ -268,8 +268,11 @@ docker run --rm \
 
 Notes:
 
-- The `CLAUDE.md` in `aegis-vanguard/` is the Claude-side system card for the
-  agent. It is not required for CLI operation.
+- `docs/vanguard-system-card.md` is the Claude-side system card for the ReAct
+  CLI agent. It is not required for CLI operation.
+- Claude Code playbook: launch `claude` from `aegis-vanguard/` and run `/aegis`.
+  Skills are in `.claude/skills/`; see `docs/skills/README.md`. Pass the
+  checkout or URL you are authorized to test — there is no bundled target.
 - Keep `AEGIS_GUARDRAILS=true` (and Praetorium Lictor/Censor/Augur) enabled for
   defense-in-depth even when the host applies its own egress controls.
 
