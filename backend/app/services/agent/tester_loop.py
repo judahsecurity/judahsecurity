@@ -202,8 +202,11 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
     missing: List[Dict[str, str]] = []
     try:
         from app.services.agent.cve_applicability import (
+            create_finding_succeeded,
             cve_check_ran,
             is_cve_applicability_question,
+            last_cve_verdict,
+            validate_finding_submitted,
         )
 
         if is_cve_applicability_question(state):
@@ -213,7 +216,20 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
                     "title": "Named CVE not checked against the live homepage",
                     "next": "check_cve_applicability — lookup the CVE, GET the URL, compare product+version",
                 })
-            next_action = missing[0]["next"] if missing else ""
+            elif last_cve_verdict(state) == "applicable":
+                if not validate_finding_submitted(state):
+                    missing.append({
+                        "id": "cve_validate",
+                        "title": "Applicable CVE not judged",
+                        "next": "validate_finding with the version evidence, then create_finding",
+                    })
+                elif not create_finding_succeeded(state):
+                    missing.append({
+                        "id": "cve_finding",
+                        "title": "Applicable CVE not filed",
+                        "next": "create_finding (same title/target as validate_finding)",
+                    })
+            next_action = missing[0]["next"] if missing else "complete — applicability is answered; do not pentest"
             return {
                 "is_web": web,
                 "surface_empty": empty,
@@ -338,9 +354,9 @@ def format_tester_loop_for_prompt(progress: Dict[str, Any]) -> str:
                 lines.append(f"  - {row.get('title')}: {row.get('next')}")
         else:
             lines.append(
-                "Applicability check ran. If VERDICT is applicable, create_finding "
-                "(quote version evidence + affected range; note auth preconditions). "
-                "Then complete — this question is not a full pentest."
+                "Applicability is answered. If a finding was required it is filed. "
+                "COMPLETE now. Do not WPScan, Interceptor, fireteam, or admin-ajax. "
+                "This question is not a full pentest."
             )
         return "\n".join(lines)
     lines = [
@@ -437,16 +453,17 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         return None
     try:
         from app.services.agent.cve_applicability import (
-            applicability_pending_finding,
             cve_applicability_forced_step,
+            cve_applicability_writeup_forced_step,
             is_cve_applicability_question,
         )
 
         cve_step = cve_applicability_forced_step(state)
         if cve_step:
             return cve_step
-        if applicability_pending_finding(state):
-            return None
+        writeup = cve_applicability_writeup_forced_step(state)
+        if writeup:
+            return writeup
         if is_cve_applicability_question(state):
             return None
     except Exception:

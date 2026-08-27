@@ -115,9 +115,21 @@ def test_named_cve_question_forces_check_before_crawl():
     assert "clearpathrobotics.com" in step["tool_args"]["url"]
 
 
-def test_cve_question_does_not_block_complete_on_wp_probes():
+def _applicable_state(extra_trace=None):
     q = "can we check if CVE-2026-1293 is applicable to https://clearpathrobotics.com"
-    state = {
+    trace = [
+        {
+            "tool_name": "check_cve_applicability",
+            "success": True,
+            "tool_output": (
+                "CVE: CVE-2026-1293\nVERDICT: applicable\n"
+                "  - yoast seo 24.3 → IN RANGE (html_comment)\n"
+            ),
+        }
+    ]
+    if extra_trace:
+        trace.extend(extra_trace)
+    return {
         "original_objective": q,
         "objective": q,
         "target_info": {
@@ -125,19 +137,94 @@ def test_cve_question_does_not_block_complete_on_wp_probes():
             "technologies": ["WordPress:6.7.7"],
         },
         "kickoff_brief": "WordPress 6.7.7",
+        "execution_trace": trace,
+    }
+
+
+def test_applicable_check_forces_validate_not_wpscan():
+    from app.services.agent.cve_applicability import (
+        cve_only_tool_block,
+        cve_applicability_should_complete,
+    )
+
+    state = _applicable_state()
+    assert cve_check_ran(state)
+    assert applicability_pending_finding(state)
+    step = forced_next_step(state)
+    assert step and step["tool_name"] == "validate_finding"
+    assert step["tool_args"]["cve_id"] == "CVE-2026-1293"
+    assert "clearpathrobotics.com" in step["tool_args"]["target"]
+    assert not cve_applicability_should_complete(state)
+    assert cve_only_tool_block("execute_wpscan", state)
+    assert cve_only_tool_block("fireteam_dispatch", state)
+    assert complete_blocked_reason(state)
+
+
+def test_judge_gate_bounce_still_pending():
+    state = _applicable_state([
+        {
+            "tool_name": "create_finding",
+            "success": True,
+            "tool_output": "JUDGE GATE: medium+ findings require validate_finding",
+        }
+    ])
+    assert applicability_pending_finding(state)
+    step = forced_next_step(state)
+    assert step and step["tool_name"] == "validate_finding"
+
+
+def test_submit_then_create_then_complete():
+    from app.services.agent.cve_applicability import cve_applicability_should_complete
+
+    after_validate = _applicable_state([
+        {
+            "tool_name": "validate_finding",
+            "success": True,
+            "tool_output": '{"verdict": "SUBMIT", "receipt_id": "abc"}',
+        }
+    ])
+    step = forced_next_step(after_validate)
+    assert step and step["tool_name"] == "create_finding"
+
+    filed = _applicable_state([
+        {
+            "tool_name": "validate_finding",
+            "success": True,
+            "tool_output": '{"verdict": "SUBMIT"}',
+        },
+        {
+            "tool_name": "create_finding",
+            "success": True,
+            "tool_output": "Finding created id=42 title=CVE-2026-1293",
+        },
+    ])
+    assert not applicability_pending_finding(filed)
+    assert forced_next_step(filed) is None
+    assert cve_applicability_should_complete(filed)
+    assert complete_blocked_reason(filed) is None
+
+
+def test_not_applicable_completes_without_hunt():
+    from app.services.agent.cve_applicability import cve_applicability_should_complete
+
+    q = "can we check if CVE-2026-1293 is applicable to https://clearpathrobotics.com"
+    state = {
+        "original_objective": q,
+        "objective": q,
+        "target_info": {"primary_target": "https://clearpathrobotics.com"},
         "execution_trace": [
             {
                 "tool_name": "check_cve_applicability",
                 "success": True,
-                "tool_output": "VERDICT: applicable\nYoast SEO 24.3 IN RANGE",
+                "tool_output": "VERDICT: not_applicable\nYoast SEO 27.0 OUT OF RANGE",
             }
         ],
     }
-    assert cve_check_ran(state)
-    assert applicability_pending_finding(state)
-    # Let Joshua file the finding — do not hijack into Interceptor.
     assert forced_next_step(state) is None
+    assert cve_applicability_should_complete(state)
     assert complete_blocked_reason(state) is None
+    from app.services.agent.cve_applicability import cve_only_tool_block
+    assert cve_only_tool_block("fireteam_dispatch", state)
 
 
 def test_full_assessment_still_requires_tester_loop():
@@ -161,3 +248,87 @@ def test_search_vulnx_allowed_in_informational():
     assert is_tool_allowed_in_phase("vulnx_query", "informational")
     assert is_tool_allowed_in_phase("check_cve_applicability", "informational")
     assert is_tool_allowed_in_phase("fingerprint_passive_stack", "informational")
+
+
+def test_clearpath_transcript_flags_applicability_hunt_loop():
+    """Replay of the 90-minute Clearpath run: check → JUDGE GATE → ajax/WPscan/fireteam."""
+    from app.services.agent.cve_applicability import detect_applicability_hunt_loop
+
+    no_diff = (
+        '{"verdict": "NO_MATERIAL_DIFF", "status": {"baseline": 403, "mutant": 403}}'
+    )
+    state = _applicable_state([
+        {
+            "tool_name": "create_finding",
+            "success": True,
+            "tool_output": "JUDGE GATE: medium+ findings require validate_finding",
+        },
+        {
+            "tool_name": "execute_curl",
+            "success": True,
+            "tool_output": "HTTP/1.1 401 Unauthorized /wp-json/wp/v2/users",
+        },
+        {"tool_name": "compare_requests", "success": True, "tool_output": no_diff},
+        {"tool_name": "compare_requests", "success": True, "tool_output": no_diff},
+        {"tool_name": "compare_requests", "success": True, "tool_output": no_diff},
+        {
+            "tool_name": "fireteam_dispatch",
+            "success": False,
+            "tool_output": "Tool 'fireteam_dispatch' exceeded its 600s time budget",
+        },
+        {
+            "tool_name": "execute_wpscan",
+            "success": False,
+            "tool_output": "WPSCAN_API_TOKEN is not set; Scan Aborted: HTTP Error 401",
+        },
+    ])
+    hit = detect_applicability_hunt_loop(state)
+    assert hit and hit["loop"] is True
+    assert hit["kind"] == "cve_applicability_hunt"
+    assert hit["judge_gate_bounce"] is True
+    assert hit["pending_finding"] is True
+    assert hit["compare_no_diff"] >= 3
+    assert hit["hunt_tools"]["compare_requests"] >= 3
+    assert hit["hunt_tools"]["fireteam_dispatch"] == 1
+    assert hit["hunt_tools"]["execute_wpscan"] == 1
+    assert "complete" in hit["next"].lower() or "STOP" in hit["next"]
+
+
+def test_filed_applicability_is_not_a_hunt_loop():
+    from app.services.agent.cve_applicability import detect_applicability_hunt_loop
+
+    filed = _applicable_state([
+        {
+            "tool_name": "validate_finding",
+            "success": True,
+            "tool_output": '{"verdict": "SUBMIT"}',
+        },
+        {
+            "tool_name": "create_finding",
+            "success": True,
+            "tool_output": "Finding created id=42",
+        },
+    ])
+    assert detect_applicability_hunt_loop(filed) is None
+
+
+def test_full_pentest_fireteam_is_not_applicability_hunt_loop():
+    from app.services.agent.cve_applicability import detect_applicability_hunt_loop
+
+    state = {
+        "original_objective": (
+            "Perform an authorized web application security assessment of "
+            "https://clearpathrobotics.com"
+        ),
+        "objective": (
+            "Perform an authorized web application security assessment of "
+            "https://clearpathrobotics.com"
+        ),
+        "execution_trace": [
+            {"tool_name": "check_cve_applicability", "success": True, "tool_output": "VERDICT: applicable"},
+            {"tool_name": "fireteam_dispatch", "success": True, "tool_output": "{}"},
+            {"tool_name": "compare_requests", "success": True, "tool_output": "{}"},
+        ],
+    }
+    assert not is_cve_applicability_question(state)
+    assert detect_applicability_hunt_loop(state) is None

@@ -615,13 +615,24 @@ class AgentOrchestrator:
 
                 kickoff_coro = run_assessment_kickoff(seed)
                 acr_seed = False
+                cve_only = False
                 try:
                     from app.services.agent.registry_surface import host_is_azurecr
 
                     acr_seed = host_is_azurecr(seed)
                 except Exception:
                     acr_seed = False
-                if acr_seed:
+                try:
+                    from app.services.agent.cve_applicability import is_cve_applicability_question
+
+                    cve_only = is_cve_applicability_question({
+                        "original_objective": latest_message,
+                        "objective": latest_message,
+                        "target_info": {"primary_target": seed},
+                    })
+                except Exception:
+                    cve_only = False
+                if acr_seed or cve_only:
                     kickoff = await asyncio.wait_for(kickoff_coro, timeout=28.0)
                     queued, streams = {}, []
                 else:
@@ -917,6 +928,18 @@ class AgentOrchestrator:
         endpoints) is legitimate.
         """
         trace = state.get("execution_trace", []) or []
+        try:
+            from app.services.agent.cve_applicability import (
+                detect_applicability_hunt_loop,
+                format_applicability_hunt_loop_note,
+            )
+
+            cve_loop = detect_applicability_hunt_loop(state)
+            if cve_loop:
+                return format_applicability_hunt_loop_note(cve_loop)
+        except Exception:
+            pass
+
         recent = [s for s in trace[-8:] if s.get("tool_name")]
         if len(recent) < 3:
             return ""
@@ -949,16 +972,26 @@ class AgentOrchestrator:
         try:
             from app.services.agent.tester_loop import tester_loop_progress
             loop = tester_loop_progress(state)
-            if loop.get("next_action"):
+            if loop.get("cve_applicability_only"):
+                suggestions.append(
+                    loop.get("next_action")
+                    or "complete — named CVE applicability is answered"
+                )
+            elif loop.get("next_action"):
                 suggestions.append(loop["next_action"])
         except Exception:
             pass
-        if "wordpress" in tech and "execute_wpscan" not in ran:
+        try:
+            from app.services.agent.cve_applicability import is_cve_applicability_question
+            skip_hunt_hints = is_cve_applicability_question(state)
+        except Exception:
+            skip_hunt_hints = False
+        if not skip_hunt_hints and "wordpress" in tech and "execute_wpscan" not in ran:
             suggestions.append(
                 "run execute_wpscan (WordPress detected — enumerate plugins, "
                 "themes, users, and known CVEs)"
             )
-        if "fireteam_dispatch" not in ran and (
+        if not skip_hunt_hints and "fireteam_dispatch" not in ran and (
             cmap.get("ready_for_attack")
             or "wordpress" in " ".join(str(c) for c in (cmap.get("capabilities") or [])).lower()
             or "wordpress" in tech
@@ -967,11 +1000,11 @@ class AgentOrchestrator:
                 "dispatch fireteam_dispatch(specialists='auto') to hunt the "
                 "capability-map surfaces with specialists"
             )
-        if "execute_nuclei" not in ran:
+        if not skip_hunt_hints and "execute_nuclei" not in ran:
             suggestions.append(
                 "run execute_nuclei for template-based vulnerability detection"
             )
-        if "execute_cmseek" not in ran and "wordpress" not in tech:
+        if not skip_hunt_hints and "execute_cmseek" not in ran and "wordpress" not in tech:
             suggestions.append("run execute_cmseek to fingerprint the CMS")
         if not suggestions:
             suggestions.append(
@@ -1170,17 +1203,33 @@ class AgentOrchestrator:
         # Production pipeline: crawl → dir brute → fireteam is not optional.
         # Do not spend a reasoning turn asking Joshua whether to assess.
         forced = None
+        forced_complete = False
         if not operator_steers:
             try:
                 from app.services.agent.tester_loop import forced_next_step
                 forced = forced_next_step({**state, "execution_trace": merged_trace})
             except Exception:
                 logger.exception("forced assessment step failed")
+            if not forced:
+                try:
+                    from app.services.agent.cve_applicability import (
+                        cve_applicability_should_complete,
+                    )
+                    forced_complete = cve_applicability_should_complete(
+                        {**state, "execution_trace": merged_trace}
+                    )
+                except Exception:
+                    forced_complete = False
 
         if forced:
+            cve_writeup = forced["tool_name"] in (
+                "validate_finding", "create_finding", "check_cve_applicability",
+            )
             decision = LLMDecision(
                 thought=forced["thought"],
                 reasoning=(
+                    "Named CVE applicability — version fingerprint, file if in range, stop."
+                    if cve_writeup else
                     "Deterministic assessment pipeline — crawl, directory brute-force, "
                     "API fingerprint, lazy JS chunks, endpoint extract, then fireteam. "
                     "Fingerprint-only recon is not an assessment."
@@ -1202,6 +1251,26 @@ class AgentOrchestrator:
                 "thought": (forced["thought"] or "")[:400],
                 "action": "use_tool",
                 "tool_name": forced["tool_name"],
+            })
+        elif forced_complete:
+            decision = LLMDecision(
+                thought=(
+                    "Named CVE applicability is answered. Completing without a full pentest."
+                ),
+                reasoning=(
+                    "Applicability-only question — homepage version check is the whole job."
+                ),
+                action="complete",
+                completion_reason="CVE applicability answered; defer methodologies",
+            )
+            step_usage = {}
+            logger.info("[%s] Forced CVE-applicability complete", user_id)
+            await self._emit_status({
+                "type": "thinking",
+                "iteration": iteration,
+                "phase": phase,
+                "thought": decision.thought[:400],
+                "action": "complete",
             })
         else:
             execution_trace_formatted = format_execution_trace(merged_trace)
@@ -1477,6 +1546,15 @@ class AgentOrchestrator:
             )
             if webby and not force_complete:
                 try:
+                    from app.services.agent.cve_applicability import (
+                        is_cve_applicability_question,
+                    )
+                    if is_cve_applicability_question(state):
+                        webby = False
+                except Exception:
+                    pass
+            if webby and not force_complete:
+                try:
                     from app.services.agent.engagement_brain import methodology_progress
                     progress = methodology_progress(brain_state, cmap=cmap)
                     if not progress.get("ready_to_complete"):
@@ -1652,6 +1730,25 @@ class AgentOrchestrator:
             step_data["tool_output"] = "Error: No tool specified"
             step_data["success"] = False
             return {"_current_step": step_data}
+
+        try:
+            from app.services.agent.cve_applicability import cve_only_tool_block
+
+            blocked = cve_only_tool_block(tool_name, state)
+            if blocked:
+                step_data["tool_output"] = blocked
+                step_data["success"] = False
+                step_data["error_message"] = "cve_applicability_only"
+                await self._emit_status({
+                    "type": "tool_complete",
+                    "tool_name": tool_name,
+                    "success": False,
+                    "output_summary": blocked[:300],
+                    "iteration": iteration,
+                })
+                return {"_current_step": step_data}
+        except Exception:
+            pass
 
         # Resolve seed URL/host for execute_* arg recovery (empty tool_args loop)
         seed_target = ""

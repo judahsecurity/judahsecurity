@@ -355,7 +355,8 @@ def consume_or_check_receipt(
             "JUDGE GATE: medium+ findings require validate_finding → verdict SUBMIT "
             f"for this title/target first (receipt key={key}). "
             "Call validate_finding with the same title/target/evidence, then retry "
-            "create_finding only if verdict is SUBMIT."
+            "create_finding only if verdict is SUBMIT. Do not claim the finding exists. "
+            "Do not fireteam_dispatch, WPScan, or crawl until this finding is filed."
         )
     if receipt.get("verdict") != "SUBMIT":
         return False, f"JUDGE GATE: receipt exists but verdict={receipt.get('verdict')}"
