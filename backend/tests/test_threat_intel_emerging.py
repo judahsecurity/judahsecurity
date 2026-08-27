@@ -185,3 +185,47 @@ def test_severity_from_string_cvss():
     assert _severity_from_cvss("9.8") == "critical"
     assert _severity_from_cvss("not-a-score") == "unknown"
     assert _severity_from_cvss(float("nan")) == "unknown"
+
+
+def test_parse_intel_date_rfc3339nano():
+    from app.api.routes.threat_intel import _parse_intel_date
+
+    parsed = _parse_intel_date("2025-10-22T17:27:39.163357849Z")
+    assert parsed is not None
+    assert parsed.year == 2025
+    assert _parse_intel_date("2024-06-07T00:00:00Z") is not None
+    assert _parse_intel_date("2026-08-26") is not None
+
+
+def test_merge_keeps_vulncheck_when_cisa_is_recent():
+    from datetime import timedelta
+    from app.api.routes.threat_intel import _entry_in_window, _merge_intel_sources
+
+    yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
+    merged = _merge_intel_sources([
+        [{
+            "cve_id": "CVE-2015-3246",
+            "date_added": "2015-07-01T00:00:00Z",
+            "source_dates": ["2015-07-01T00:00:00Z"],
+            "kev_sources": ["vulncheck_kev"],
+            "vendor_project": "Red Hat",
+            "product": "libuser",
+            "vulnerability_name": "race",
+            "short_description": "",
+            "known_ransomware_use": "Unknown",
+        }],
+        [{
+            "cve_id": "CVE-2015-3246",
+            "date_added": yesterday,
+            "source_dates": [yesterday],
+            "kev_sources": ["cisa_kev"],
+            "vendor_project": "Red Hat",
+            "product": "Libuser",
+            "vulnerability_name": "Race Condition",
+            "short_description": "",
+            "known_ransomware_use": "Unknown",
+        }],
+    ])
+    assert merged[0]["kev_sources"] == ["cisa_kev", "vulncheck_kev"]
+    cutoff = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=30)
+    assert _entry_in_window(merged[0], cutoff, days=30) is True

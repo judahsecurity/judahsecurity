@@ -247,16 +247,21 @@ def _map_vulncheck_row(entry: Dict[str, Any]) -> Optional[Tuple[str, Dict[str, A
         or entry.get("knownRansomwareUse")
         or "Unknown"
     )
+    try:
+        cvss_val = float(cvss_score) if cvss_score is not None else None
+    except (TypeError, ValueError):
+        cvss_val = None
     return cve, {
         "cve_id": cve,
         "all_cves": [str(c).upper() for c in cves if str(c).upper().startswith("CVE-")],
+        "cisa_date_added": entry.get("cisa_date_added") or "",
         "date_added": entry.get("dateAdded") or entry.get("date_added"),
         "vendor_project": entry.get("vendorProject") or "",
         "product": entry.get("product") or "",
         "vulnerability_name": entry.get("vulnerabilityName") or "",
         "short_description": entry.get("shortDescription") or "",
         "known_ransomware_use": ransomware,
-        "cvss_score": float(cvss_score) if cvss_score is not None else None,
+        "cvss_score": cvss_val,
         "source": "vulncheck_kev",
     }
 

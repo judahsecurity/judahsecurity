@@ -34,6 +34,13 @@ def test_euvd_cve_ids_from_aliases():
     assert _euvd_cve_ids(item) == ["CVE-2024-1234"]
 
 
+def test_euvd_cve_ids_strips_ghsa_suffix():
+    assert _euvd_cve_ids({
+        "id": "EUVD-2023-1",
+        "aliases": ["CVE-2023-49105 GHSA-585G-F852-V6P4"],
+    }) == ["CVE-2023-49105"]
+
+
 def test_euvd_cve_ids_from_id_field():
     assert _euvd_cve_ids({"id": "CVE-2021-44228"}) == ["CVE-2021-44228"]
 

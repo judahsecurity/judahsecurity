@@ -19,6 +19,7 @@ Enriched with:
 
 import asyncio
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -44,6 +45,7 @@ _HTTP_TIMEOUT = 8.0
 _ENRICH_CONCURRENCY = 8
 # Hard budget so the Vulnerability Intel list cannot hang behind CIRCL/VulnCheck.
 _FEED_TIMEOUT_S = 10.0
+_CVE_ID_RE = re.compile(r"(CVE-\d{4}-\d+)", re.I)
 
 
 def _get_vulncheck_token(db: Session, org_id: int | None = None) -> str:
@@ -56,6 +58,51 @@ def _get_vulncheck_token(db: Session, org_id: int | None = None) -> str:
 
 def _get_pdcp_key(db: Session, org_id: int | None = None) -> str:
     return resolve_api_key(db, ExternalService.PDCP, org_id) or ""
+
+
+def _canonical_cve_id(value: Any) -> str:
+    match = _CVE_ID_RE.search(str(value or ""))
+    return match.group(1).upper() if match else ""
+
+
+def _parse_intel_date(value: Any) -> datetime | None:
+    """Parse CISA YYYY-MM-DD, ENISA slashes, and RFC3339Nano (VulnCheck) dates."""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    raw = raw.replace("Z", "+00:00")
+    if "." in raw:
+        head, rest = raw.split(".", 1)
+        digits = []
+        tz = ""
+        for idx, char in enumerate(rest):
+            if char.isdigit():
+                digits.append(char)
+            else:
+                tz = rest[idx:]
+                break
+        raw = f"{head}.{''.join(digits + ['0'] * 6)[:6]}{tz}"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        parsed = _parse_enisa_date(str(value or "").strip())
+        return parsed
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _entry_in_window(entry: dict, cutoff: datetime, *, days: int) -> bool:
+    """Keep a merged CVE if any source listed it inside the window."""
+    if days <= 0:
+        return True
+    raw_dates = list(entry.get("source_dates") or [])
+    if entry.get("date_added") and entry.get("date_added") not in raw_dates:
+        raw_dates.append(entry.get("date_added"))
+    parsed = [dt for dt in (_parse_intel_date(d) for d in raw_dates) if dt is not None]
+    if not parsed:
+        return False
+    return any(dt >= cutoff for dt in parsed)
 
 
 async def _feed_or_empty(name: str, coro, *, timeout: float = _FEED_TIMEOUT_S) -> list[dict]:
@@ -85,28 +132,19 @@ async def _fetch_vulncheck_kev(client: httpx.AsyncClient, days: int, token: str)
         page_limit=100,
     )
 
-    cutoff = (
-        datetime.now(timezone.utc) - timedelta(days=days)
-        if days > 0
-        else datetime.min.replace(tzinfo=timezone.utc)
-    )
     entries: list[dict] = []
     for cve, entry in mapped.items():
+        cve_id = _canonical_cve_id(cve) or _canonical_cve_id(entry.get("cve_id"))
+        if not cve_id:
+            continue
         date_str = entry.get("date_added") or ""
-        try:
-            added = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
-            if added.tzinfo is None:
-                added = added.replace(tzinfo=timezone.utc)
-            if added < cutoff:
-                continue
-        except ValueError:
-            # Keep undated rows for all-time queries only.
-            if days > 0:
-                continue
+        extra_dates = [entry.get("cisa_date_added"), entry.get("_timestamp")]
+        source_dates = [d for d in [date_str, *extra_dates] if d]
         entries.append({
-            "cve_id": cve,
-            "all_cves": entry.get("all_cves") or [cve],
+            "cve_id": cve_id,
+            "all_cves": entry.get("all_cves") or [cve_id],
             "date_added": date_str,
+            "source_dates": source_dates,
             "vendor_project": entry.get("vendor_project", ""),
             "product": entry.get("product", ""),
             "vulnerability_name": entry.get("vulnerability_name", ""),
@@ -132,21 +170,14 @@ async def _fetch_cisa_kev(client: httpx.AsyncClient, cutoff: datetime) -> list[d
         if not isinstance(v, dict):
             continue
         date_str = v.get("dateAdded") or ""
-        try:
-            added = datetime.fromisoformat(date_str)
-            if added.tzinfo is None:
-                added = added.replace(tzinfo=timezone.utc)
-            if added < cutoff:
-                continue
-        except ValueError:
-            pass
-        cve_id = v.get("cveID", "")
+        cve_id = _canonical_cve_id(v.get("cveID"))
         if not cve_id:
             continue
         entries.append({
             "cve_id": cve_id,
             "all_cves": [cve_id],
             "date_added": date_str,
+            "source_dates": [date_str] if date_str else [],
             "vendor_project": v.get("vendorProject", ""),
             "product": v.get("product", ""),
             "vulnerability_name": v.get("vulnerabilityName", ""),
@@ -190,8 +221,10 @@ async def _fetch_enisa_kev(client: httpx.AsyncClient, cutoff: datetime) -> list[
     for row in rows:
         if not isinstance(row, dict):
             continue
-        cve_id = (row.get("cveID") or row.get("CVE ID") or row.get("cve_id") or row.get("CVE") or "").strip()
-        if not cve_id or not cve_id.upper().startswith("CVE-"):
+        cve_id = _canonical_cve_id(
+            row.get("cveID") or row.get("CVE ID") or row.get("cve_id") or row.get("CVE")
+        )
+        if not cve_id:
             continue
         date_str = (
             row.get("dateReported")
@@ -199,18 +232,17 @@ async def _fetch_enisa_kev(client: httpx.AsyncClient, cutoff: datetime) -> list[
             or row.get("Date Added")
             or row.get("date_added")
             or ""
-        ).strip()
-        added = _parse_enisa_date(date_str)
-        if added is not None and added < cutoff:
-            continue
+        )
+        date_str = str(date_str).strip()
         ransomware = "Unknown"
         exploitation = (row.get("exploitationType") or "").strip().lower()
         if "ransomware" in exploitation:
             ransomware = "Known"
         entries.append({
-            "cve_id": cve_id.upper(),
-            "all_cves": [cve_id.upper()],
+            "cve_id": cve_id,
+            "all_cves": [cve_id],
             "date_added": date_str,
+            "source_dates": [date_str] if date_str else [],
             "vendor_project": row.get("vendorProject") or row.get("Vendor/Project") or "",
             "product": row.get("product") or row.get("Product") or "",
             "vulnerability_name": (
@@ -231,20 +263,21 @@ async def _fetch_enisa_kev(client: httpx.AsyncClient, cutoff: datetime) -> list[
 def _euvd_cve_ids(item: dict) -> list[str]:
     """Extract CVE IDs from an EUVD record (aliases / nested fields)."""
     found: list[str] = []
+    blobs: list[Any] = []
     for key in ("aliases", "assigner", "cve", "cves"):
-        val = item.get(key)
-        if isinstance(val, list):
-            for v in val:
-                s = str(v).strip().upper()
-                if s.startswith("CVE-"):
-                    found.append(s)
-        elif isinstance(val, str) and val.strip().upper().startswith("CVE-"):
-            found.append(val.strip().upper())
+        blobs.append(item.get(key))
     for key in ("id", "euvdId", "cveId", "cve_id"):
-        s = str(item.get(key) or "").strip().upper()
-        if s.startswith("CVE-"):
-            found.append(s)
-    # Deduplicate preserving order
+        blobs.append(item.get(key))
+    for blob in blobs:
+        if isinstance(blob, list):
+            for item_val in blob:
+                cve = _canonical_cve_id(item_val)
+                if cve:
+                    found.append(cve)
+        else:
+            cve = _canonical_cve_id(blob)
+            if cve:
+                found.append(cve)
     out: list[str] = []
     seen = set()
     for cve in found:
@@ -289,9 +322,6 @@ async def _fetch_euvd(
                 or ""
             )
             date_str = str(date_str).strip()
-            added = _parse_enisa_date(date_str) if date_str else None
-            if added is not None and added < cutoff:
-                continue
             vendors = item.get("enisaIdVendor") or item.get("vendor") or []
             products = item.get("enisaIdProduct") or item.get("product") or []
             vendor = ""
@@ -313,6 +343,7 @@ async def _fetch_euvd(
                     "cve_id": cve_id,
                     "all_cves": [cve_id],
                     "date_added": date_str,
+                    "source_dates": [date_str] if date_str else [],
                     "vendor_project": vendor,
                     "product": product,
                     "vulnerability_name": desc[:120],
@@ -402,21 +433,15 @@ async def _fetch_shadowserver(cutoff: datetime) -> list[dict]:
             stale_ok=True,
         )
         for cve, entry in mapped.items():
+            cve_id = _canonical_cve_id(cve)
+            if not cve_id:
+                continue
             date_str = entry.get("date_added") or ""
-            try:
-                added = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
-                if added.tzinfo is None:
-                    added = added.replace(tzinfo=timezone.utc)
-                if added < cutoff:
-                    continue
-            except ValueError:
-                # Undated CIRCL rows only for all-time windows.
-                if cutoff > datetime.min.replace(tzinfo=timezone.utc):
-                    continue
             entries.append({
-                "cve_id": cve,
-                "all_cves": [cve],
+                "cve_id": cve_id,
+                "all_cves": [cve_id],
                 "date_added": date_str,
+                "source_dates": [date_str] if date_str else [],
                 "vendor_project": entry.get("vendor_project", ""),
                 "product": entry.get("product", ""),
                 "vulnerability_name": entry.get("vulnerability_name", ""),
@@ -448,19 +473,15 @@ async def _fetch_kevintel(cutoff: datetime) -> list[dict]:
         return []
     entries = []
     for cve, entry in mapped.items():
+        cve_id = _canonical_cve_id(cve)
+        if not cve_id:
+            continue
         date_str = entry.get("date_added") or ""
-        try:
-            added = datetime.fromisoformat(str(date_str).replace("Z", "+00:00"))
-            if added.tzinfo is None:
-                added = added.replace(tzinfo=timezone.utc)
-            if added < cutoff:
-                continue
-        except ValueError:
-            pass
         entries.append({
-            "cve_id": cve,
-            "all_cves": [cve],
+            "cve_id": cve_id,
+            "all_cves": [cve_id],
             "date_added": date_str,
+            "source_dates": [date_str] if date_str else [],
             "vendor_project": entry.get("vendor_project", ""),
             "product": entry.get("product", ""),
             "vulnerability_name": entry.get("vulnerability_name", ""),
@@ -475,43 +496,39 @@ async def _fetch_kevintel(cutoff: datetime) -> list[dict]:
 
 def _merge_intel_sources(source_lists: list[list[dict]]) -> list[dict]:
     """
-    Merge CVE entries from multiple sources, deduplicating by CVE ID.
-    When the same CVE appears in multiple sources, their kev_sources lists
-    are combined and metadata is filled from whichever source has richer data.
+    Merge CVE entries from multiple sources, deduplicating by canonical CVE ID.
+    Keep every source that knows the CVE; display date is the most recent listing.
     """
     merged: dict[str, dict] = {}
     for entries in source_lists:
         for entry in entries:
-            cve_id = str(entry.get("cve_id") or "").upper()
+            cve_id = _canonical_cve_id(entry.get("cve_id"))
             if not cve_id:
                 continue
+            incoming = dict(entry)
+            incoming["cve_id"] = cve_id
+            incoming["source_dates"] = [
+                d for d in (incoming.get("source_dates") or [incoming.get("date_added")]) if d
+            ]
             if cve_id not in merged:
-                merged[cve_id] = dict(entry)
-            else:
-                existing = merged[cve_id]
-                # Combine source lists
-                existing["kev_sources"] = sorted(set(
-                    existing.get("kev_sources", []) + entry.get("kev_sources", [])
-                ))
-                # Prefer richer metadata from later sources
-                for field in ("vulnerability_name", "short_description", "vendor_project", "product"):
-                    if not existing.get(field) and entry.get(field):
-                        existing[field] = entry[field]
-                # Prefer the earliest dateAdded across sources
-                try:
-                    existing_date = datetime.fromisoformat(
-                        existing.get("date_added", "").replace("Z", "+00:00")
-                    )
-                    new_date = datetime.fromisoformat(
-                        entry.get("date_added", "").replace("Z", "+00:00")
-                    )
-                    if new_date < existing_date:
-                        existing["date_added"] = entry["date_added"]
-                except (ValueError, AttributeError):
-                    pass
-                # Ransomware: Known > Unknown
-                if entry.get("known_ransomware_use") == "Known":
-                    existing["known_ransomware_use"] = "Known"
+                merged[cve_id] = incoming
+                continue
+            existing = merged[cve_id]
+            existing["kev_sources"] = sorted(set(
+                (existing.get("kev_sources") or []) + (incoming.get("kev_sources") or [])
+            ))
+            existing["source_dates"] = list(dict.fromkeys(
+                (existing.get("source_dates") or []) + (incoming.get("source_dates") or [])
+            ))
+            for field in ("vulnerability_name", "short_description", "vendor_project", "product"):
+                if not existing.get(field) and incoming.get(field):
+                    existing[field] = incoming[field]
+            parsed_dates = [dt for dt in (_parse_intel_date(d) for d in existing["source_dates"]) if dt]
+            if parsed_dates:
+                latest = max(parsed_dates)
+                existing["date_added"] = latest.date().isoformat()
+            if incoming.get("known_ransomware_use") == "Known":
+                existing["known_ransomware_use"] = "Known"
     return list(merged.values())
 
 
@@ -890,6 +907,14 @@ async def get_emerging_vulnerabilities(
         "vulncheck_configured": bool(vulncheck_token),
         "pdcp_configured": bool(pdcp_key),
         "otx_deferred": not include_otx,
+        "catalog": {
+            "cisa_kev": 0,
+            "vulncheck_kev": 0,
+            "enisa_kev": 0,
+            "euvd": 0,
+            "shadowserver": 0,
+            "kevintel": 0,
+        },
     }
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(_HTTP_TIMEOUT, connect=5.0)) as client:
@@ -934,6 +959,21 @@ async def get_emerging_vulnerabilities(
                 for row in group
                 if isinstance(row, dict) and row.get("cve_id")
             ]
+
+        catalog = {
+            "cisa_kev": len(cisa_entries),
+            "vulncheck_kev": len(vulncheck_entries),
+            "enisa_kev": len(enisa_entries),
+            "euvd": len(euvd_entries),
+            "shadowserver": len(shadowserver_entries),
+            "kevintel": len(kevintel_entries),
+        }
+        empty_summary["catalog"] = catalog
+
+        merged_entries = [
+            row for row in merged_entries
+            if _entry_in_window(row, cutoff, days=days)
+        ]
 
         if not merged_entries:
             return {
@@ -1041,6 +1081,7 @@ async def get_emerging_vulnerabilities(
         "vulncheck_configured": bool(vulncheck_token),
         "pdcp_configured": bool(pdcp_key),
         "otx_deferred": not include_otx,
+        "catalog": catalog,
     }
 
     return {
