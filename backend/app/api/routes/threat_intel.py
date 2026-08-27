@@ -129,7 +129,9 @@ async def _fetch_cisa_kev(client: httpx.AsyncClient, cutoff: datetime) -> list[d
 
     entries = []
     for v in vulns:
-        date_str = v.get("dateAdded", "")
+        if not isinstance(v, dict):
+            continue
+        date_str = v.get("dateAdded") or ""
         try:
             added = datetime.fromisoformat(date_str)
             if added.tzinfo is None:
@@ -480,7 +482,7 @@ def _merge_intel_sources(source_lists: list[list[dict]]) -> list[dict]:
     merged: dict[str, dict] = {}
     for entries in source_lists:
         for entry in entries:
-            cve_id = entry["cve_id"].upper()
+            cve_id = str(entry.get("cve_id") or "").upper()
             if not cve_id:
                 continue
             if cve_id not in merged:
@@ -704,16 +706,71 @@ def _detection_tier(pdcp: dict) -> str:
     return "no_detection"
 
 
+def _safe_float(value: Any) -> Optional[float]:
+    """Coerce CVSS/EPSS to a JSON-safe float. Strings, NaN, and inf become None."""
+    if value is None or value is False:
+        return None
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    if parsed != parsed or parsed in (float("inf"), float("-inf")):
+        return None
+    return parsed
+
+
 def _severity_from_cvss(score: Optional[float]) -> str:
-    if score is None:
+    parsed = _safe_float(score)
+    if parsed is None:
         return "unknown"
-    if score >= 9.0:
+    if parsed >= 9.0:
         return "critical"
-    if score >= 7.0:
+    if parsed >= 7.0:
         return "high"
-    if score >= 4.0:
+    if parsed >= 4.0:
         return "medium"
     return "low"
+
+
+def _normalize_severity(value: Any, cvss: Optional[float]) -> str:
+    if isinstance(value, str) and value.strip():
+        return value.strip().lower()
+    if hasattr(value, "value"):
+        return str(getattr(value, "value") or "").strip().lower() or _severity_from_cvss(cvss)
+    return _severity_from_cvss(cvss)
+
+
+def _as_tag_list(value: Any) -> list[str]:
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    if not isinstance(value, list):
+        return []
+    tags: list[str] = []
+    for item in value:
+        if isinstance(item, str) and item.strip():
+            tags.append(item.strip())
+        elif isinstance(item, dict):
+            label = item.get("name") or item.get("tag") or item.get("label")
+            if label:
+                tags.append(str(label))
+    return tags[:10]
+
+
+def _as_affected_products(value: Any) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    products: list[dict] = []
+    for item in value[:5]:
+        if isinstance(item, dict):
+            products.append({
+                "vendor": str(item.get("vendor") or ""),
+                "product": str(item.get("product") or item.get("name") or ""),
+            })
+        elif isinstance(item, str) and item.strip():
+            products.append({"vendor": "", "product": item.strip()})
+    return products
 
 
 def _build_entry(
@@ -723,59 +780,49 @@ def _build_entry(
     oracle: dict,
     epss: dict | None = None,
 ) -> dict:
+    if not isinstance(pdcp, dict):
+        pdcp = {}
+    if not isinstance(oracle, dict):
+        oracle = {}
     cve_id = kev["cve_id"]
-    # CVSS: prefer PDCP (most accurate), fall back to what KEV source provided
-    cvss = (
+    cvss = _safe_float(
         pdcp.get("cvss_score")
         or pdcp.get("cvss")
         or oracle.get("cvss_score")
         or kev.get("cvss_score")
     )
-    # EPSS: prefer PDCP, fall back to FIRST.org batch result
-    epss_score = pdcp.get("epss_score") or (epss or {}).get("epss_score")
-    severity = (
-        pdcp.get("severity")
-        or oracle.get("severity")
-        or _severity_from_cvss(cvss)
-    )
-    tags = pdcp.get("tags") or []
-    affected = pdcp.get("affected_products") or []
+    epss_score = _safe_float(pdcp.get("epss_score"))
+    if epss_score is None:
+        epss_score = _safe_float((epss or {}).get("epss_score"))
+    epss_percentile = _safe_float((epss or {}).get("epss_percentile"))
+    severity = _normalize_severity(pdcp.get("severity") or oracle.get("severity"), cvss)
+    try:
+        pulses = int(otx_count or 0)
+    except (TypeError, ValueError):
+        pulses = 0
 
     return {
         "cve_id": cve_id,
-        "date_added_kev": kev.get("date_added", ""),
-        "vendor_project": kev.get("vendor_project", ""),
-        "product": kev.get("product", ""),
-        "vulnerability_name": kev.get("vulnerability_name", "") or pdcp.get("name", ""),
-        "short_description": kev.get("short_description", "") or pdcp.get("description", ""),
-        "known_ransomware_use": kev.get("known_ransomware_use", "Unknown"),
-        "kev_sources": kev.get("kev_sources", ["vulncheck_kev"]),
-
-        # Severity / scoring
+        "date_added_kev": kev.get("date_added") or "",
+        "vendor_project": kev.get("vendor_project") or "",
+        "product": kev.get("product") or "",
+        "vulnerability_name": kev.get("vulnerability_name") or pdcp.get("name") or "",
+        "short_description": kev.get("short_description") or pdcp.get("description") or "",
+        "known_ransomware_use": kev.get("known_ransomware_use") or "Unknown",
+        "kev_sources": kev.get("kev_sources") or ["vulncheck_kev"],
         "severity": severity,
         "cvss_score": cvss,
         "epss_score": epss_score,
-        "epss_percentile": (epss or {}).get("epss_percentile"),
-
-        # Detection coverage — the 'can we find this?' answer
+        "epss_percentile": epss_percentile,
         "is_template": bool(pdcp.get("is_template") or pdcp.get("nuclei_templates")),
         "is_poc": bool(pdcp.get("is_poc")),
         "is_remote": bool(pdcp.get("is_remote")),
         "detection_tier": _detection_tier(pdcp),
         "template_count": pdcp.get("template_count") or (1 if pdcp.get("is_template") else 0),
-
-        # Attacker community interest
-        "otx_pulse_count": otx_count,
-        "otx_active_campaign": otx_count >= 20,
-
-        # Tags / context
-        "tags": tags[:10] if tags else [],
-        "affected_products": [
-            {"vendor": p.get("vendor", ""), "product": p.get("product", "")}
-            for p in (affected[:5] if affected else [])
-        ],
-
-        # Oracle analysis (if this CVE has been scored already)
+        "otx_pulse_count": pulses,
+        "otx_active_campaign": pulses >= 20,
+        "tags": _as_tag_list(pdcp.get("tags")),
+        "affected_products": _as_affected_products(pdcp.get("affected_products")),
         "oracle_analyzed": bool(oracle),
         "opes_score": oracle.get("opes_score"),
         "opes_category": oracle.get("opes_category"),
@@ -862,14 +909,31 @@ async def get_emerging_vulnerabilities(
             _feed_or_empty("kevintel", _fetch_kevintel(cutoff)),
         )
 
-        merged_entries = _merge_intel_sources([
-            vulncheck_entries,
-            cisa_entries,
-            enisa_entries,
-            euvd_entries,
-            shadowserver_entries,
-            kevintel_entries,
-        ])
+        try:
+            merged_entries = _merge_intel_sources([
+                vulncheck_entries,
+                cisa_entries,
+                enisa_entries,
+                euvd_entries,
+                shadowserver_entries,
+                kevintel_entries,
+            ])
+        except Exception:
+            logger.exception("threat-intel merge failed; serving unmerged feed rows")
+            merged_entries = [
+                row
+                for group in (
+                    vulncheck_entries,
+                    cisa_entries,
+                    enisa_entries,
+                    euvd_entries,
+                    shadowserver_entries,
+                    kevintel_entries,
+                )
+                if isinstance(group, list)
+                for row in group
+                if isinstance(row, dict) and row.get("cve_id")
+            ]
 
         if not merged_entries:
             return {
@@ -893,9 +957,16 @@ async def get_emerging_vulnerabilities(
                 ),
                 timeout=8.0,
             )
-        except asyncio.TimeoutError:
-            logger.warning("threat-intel emerging enrichment timed out after 8s; returning feed-only data")
+        except Exception as exc:
+            logger.warning("threat-intel emerging enrichment failed (%s); returning feed-only data", exc)
             pdcp_map, otx_map, epss_map = {}, {}, {}
+
+    if not isinstance(pdcp_map, dict):
+        pdcp_map = {}
+    if not isinstance(otx_map, dict):
+        otx_map = {}
+    if not isinstance(epss_map, dict):
+        epss_map = {}
 
     # Oracle DB lookup (sync, local DB — no HTTP)
     oracle_map = _get_oracle_analysis_for_cves(db, cve_ids)
@@ -906,13 +977,17 @@ async def get_emerging_vulnerabilities(
         cve_id = kev.get("cve_id", "")
         if not cve_id or cve_id not in cve_ids_set:
             continue
-        entry = _build_entry(
-            kev=kev,
-            pdcp=pdcp_map.get(cve_id, {}),
-            otx_count=otx_map.get(cve_id, 0),
-            oracle=oracle_map.get(cve_id, {}),
-            epss=epss_map.get(cve_id),
-        )
+        try:
+            entry = _build_entry(
+                kev=kev,
+                pdcp=pdcp_map.get(cve_id) or {},
+                otx_count=otx_map.get(cve_id, 0),
+                oracle=oracle_map.get(cve_id) or {},
+                epss=epss_map.get(cve_id),
+            )
+        except Exception:
+            logger.warning("threat-intel skipped malformed row %s", cve_id, exc_info=True)
+            continue
         entries.append(entry)
 
     # Apply filters
@@ -932,8 +1007,8 @@ async def get_emerging_vulnerabilities(
     # Sort: multi-source CVEs first, then by severity
     _sev_order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "unknown": 4}
     entries.sort(key=lambda e: (
-        -len(e.get("kev_sources", [])),
-        _sev_order.get(e.get("severity", "unknown"), 4),
+        -len(e.get("kev_sources") or []),
+        _sev_order.get(str(e.get("severity") or "unknown"), 4),
     ))
 
     # Summary stats

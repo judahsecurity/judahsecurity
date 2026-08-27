@@ -142,3 +142,46 @@ async def test_enisa_list_path_uses_cache_not_http(monkeypatch, tmp_path):
     cutoff = datetime(2020, 1, 1, tzinfo=timezone.utc)
     rows = await _fetch_enisa_kev(_BoomClient(), cutoff)
     assert rows[0]["cve_id"] == "CVE-2024-5678"
+
+
+def test_build_entry_survives_messy_pdcp_payload():
+    from app.api.routes.threat_intel import _build_entry
+
+    entry = _build_entry(
+        kev={
+            "cve_id": "CVE-2024-1234",
+            "date_added": None,
+            "vendor_project": "Acme",
+            "product": "Widget",
+            "vulnerability_name": "RCE",
+            "short_description": "bad",
+            "known_ransomware_use": "Unknown",
+            "kev_sources": ["cisa_kev"],
+            "cvss_score": "9.8",
+        },
+        pdcp={
+            "cvss_score": "9.8",
+            "severity": ["critical"],
+            "tags": {"rce": True},
+            "affected_products": ["Apache HTTP Server", {"vendor": "Acme", "product": "Widget"}],
+            "epss_score": "nan",
+        },
+        otx_count="3",
+        oracle={},
+        epss={"epss_score": "0.9", "epss_percentile": "0.99"},
+    )
+    assert entry["cve_id"] == "CVE-2024-1234"
+    assert entry["cvss_score"] == 9.8
+    assert entry["severity"] == "critical"
+    assert entry["tags"] == []
+    assert entry["affected_products"][0]["product"] == "Apache HTTP Server"
+    assert entry["epss_score"] == 0.9
+    assert entry["otx_pulse_count"] == 3
+
+
+def test_severity_from_string_cvss():
+    from app.api.routes.threat_intel import _severity_from_cvss
+
+    assert _severity_from_cvss("9.8") == "critical"
+    assert _severity_from_cvss("not-a-score") == "unknown"
+    assert _severity_from_cvss(float("nan")) == "unknown"
