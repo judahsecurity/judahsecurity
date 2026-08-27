@@ -53,8 +53,12 @@ If `<target>` is a directory, read the tree. Skip `node_modules`, `.git`,
 3. Partition 3–6 focus areas with a specialist name and surfaces.
 4. List open questions. Do not invent owner intent.
 
-If `<target>` is a URL, bootstrap from fetched HTML/headers/JS URLs only after
-the operator confirmed authorization. Same artifact schema.
+If `<target>` is a URL, work from the operator's notes / pasted
+HTML / headers / JS (offline — live fetching is `/pentest`'s job, after
+authorization). Read [../_lib/curiosity.md](../_lib/curiosity.md) and turn each
+observed surface into a **hypothesis**: bug class + the one signal that would
+confirm it. Rank with the map's rank-then-hunt order. Each hypothesis becomes a
+Threat row (surface + shape) and feeds a Focus area. Same artifact schema.
 
 ## Interview
 

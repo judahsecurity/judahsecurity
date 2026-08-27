@@ -8,7 +8,7 @@ load a second copy of `playbooks.py` into context.
 | File | Max lines | Loaded when |
 |------|-----------|-------------|
 | `SKILL.md` | **150** | Skill is invoked |
-| Linked reference (`schema.md`, `gate.md`, `researchers.md`) | **200** | Skill tells Claude to Read it |
+| Linked reference (`schema.md`, `gate.md`, `researchers.md`, `_lib/curiosity.md`) | **200** | Skill tells Claude to Read it |
 | This README / operator docs | unbounded | Humans, not the session |
 
 `tests/test_skills_size.py` enforces the SKILL.md cap.
@@ -18,6 +18,12 @@ load a second copy of `playbooks.py` into context.
 Put in `SKILL.md`: when to use, arguments, the next command, artifact names, stop conditions.
 
 Put in a sibling file (one hop only): schemas, researcher protocol, judge questions.
+
+Shared across skills: `_lib/curiosity.md` — the observe → hypothesis → signal
+map (page-type → bug-class), rank-then-hunt order, and never-submit-alone
+rules. `/threat-model` (URL branch) and `/pentest` (Observe) both read it. It
+is the session-mode distillation of `agent/hunt_patterns.py`; keep the two in
+sync when either changes.
 
 Never: CWE catalogs, Nuclei flags, or paste from
 `backend/app/services/agent/playbooks.py`.

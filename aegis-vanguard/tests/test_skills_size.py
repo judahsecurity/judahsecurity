@@ -5,7 +5,7 @@ from pathlib import Path
 SKILLS_ROOT = Path(__file__).resolve().parents[1] / ".claude" / "skills"
 MAX_SKILL_LINES = 150
 MAX_REFERENCE_LINES = 200
-REFERENCE_NAMES = {"schema.md", "gate.md", "researchers.md"}
+REFERENCE_NAMES = {"schema.md", "gate.md", "researchers.md", "curiosity.md"}
 
 
 def test_skill_md_under_line_cap():
