@@ -140,7 +140,11 @@ def run(corpus_root: Path, only: Optional[List[str]] = None, live: bool = False,
 
         compose = d / "docker-compose.yml"
         cport = container_port_of(compose, default=80)
-        spec = {"setup": {"up": f"make -C {d} run", "down": f"make -C {d} stop",
+        # Tear down with `compose down` (not `make stop`, which only stops the
+        # container and leaks the network) so Docker doesn't exhaust its address
+        # pools across 23 challenges. Image stays cached, so re-runs are fast.
+        spec = {"setup": {"up": f"make -C {d} run",
+                          "down": f"docker compose -f {compose} down --remove-orphans",
                           "compose_file": str(compose), "container_port": cport,
                           "ready_timeout": 180, "up_timeout": 900}}
         res = tm.setup(spec)

