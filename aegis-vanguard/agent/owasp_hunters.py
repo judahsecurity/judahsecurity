@@ -110,6 +110,7 @@ XSS_TOOLS = [
     "probe_xss_reflection",
     "xss_test",
     "test_dom_xss",
+    "solve_xss_bot_challenge",
     "scan_nuclei",
     "send_http_request",
     "confirm_vulnerability_poc",
@@ -368,6 +369,17 @@ Read reflections[]:
 When SPA / hash routing / heavy JS / postMessage:
   test_dom_xss(target_url=..., params="q,search,redirect")
 This catches sinks XSStrike misses.
+
+### Phase 4b — Checker / bot-backed reflection (auto-solve)
+If the endpoint reflects your input AND runs it itself — a server-side headless
+browser, a "submit your XSS / report to admin" flow, a preview renderer, or a
+CTF checker that answers with a flag or a filter hint ("can't use 'script'",
+"alert with X instead of XSS") — do NOT hand-iterate payloads. Call:
+  solve_xss_bot_challenge(target_url=..., param="<field>", method="POST"|"GET")
+It runs the context/technique ladder, reads the response, learns the filter, and
+adapts (autofocus/onfocus and quote-free markers beat most blacklists; the
+headless checker often fires focus on autofocus elements). On solved, pass its
+flag/payload straight to confirm_vulnerability_poc.
 
 ### Phase 5 — Stored XSS
 Probe comment/profile/filename/label fields with unique canary, re-fetch page,

@@ -1092,6 +1092,67 @@ def test_cors_policy(target_url: str, timeout: int = 60) -> str:
 
 
 @security_tool(category="exploit", risk="medium")
+def solve_xss_bot_challenge(
+    target_url: str,
+    param: str,
+    method: str = "POST",
+    marker: str = "XSS",
+    seed_blacklist: str = "",
+    success_regex: str = "",
+    max_attempts: int = 16,
+) -> str:
+    """Adaptively solve a checker/bot-backed reflected-XSS endpoint.
+
+    For endpoints that reflect an input, run it in a real/headless browser, and
+    return a result — a flag on success, a hint on failure ("can't use 'script'",
+    "alert with X instead of XSS"). Tries a context/technique ladder that fires
+    alert(marker), reads the response, learns the filter, and adapts. Use when a
+    form field or param is reflected AND the app runs the payload itself (CTF XSS
+    bot, support-agent preview, server-side renderer). Not for blind stored XSS
+    needing external OOB exfil.
+
+    Args:
+        target_url: Full URL of the reflecting endpoint (in-scope; direct target,
+            not loopback via send_http_request)
+        param: The parameter/form field the payload goes into (e.g. "solution", "q")
+        method: GET or POST (default POST)
+        marker: String the alert must contain to win (default "XSS")
+        seed_blacklist: Comma-separated tokens known to be filtered (optional)
+        success_regex: Custom regex for the win/flag (optional; defaults to flag{...})
+        max_attempts: Max payloads to try (default 16)
+    """
+    import re as _re
+    import httpx
+    from agent.xss_bot_solver import solve
+
+    seeds = [t for t in (seed_blacklist or "").split(",") if t.strip()]
+    rx = _re.compile(success_regex) if success_regex else None
+
+    def _send(m: str, url: str, p: str, payload: str) -> str:
+        try:
+            with httpx.Client(timeout=20, follow_redirects=True, verify=False) as client:
+                if m.upper() == "GET":
+                    resp = client.get(url, params={p: payload})
+                else:
+                    resp = client.post(url, data={p: payload})
+                return resp.text
+        except Exception as exc:  # a transport error is just a failed attempt
+            return f"__send_error__: {exc}"
+
+    res = solve(_send, target_url, param=param, method=method, marker=marker,
+                seed_blacklist=seeds, success_regex=rx, max_attempts=int(max_attempts))
+    return json.dumps({
+        "solved": res.solved,
+        "flag": res.flag,
+        "technique": res.technique,
+        "payload": res.payload,
+        "attempts": res.attempts,
+        "learned_blacklist": res.learned_blacklist,
+        "hint": None if res.solved else res.last_snippet,
+    }, default=str)
+
+
+@security_tool(category="exploit", risk="medium")
 def test_race_condition(
     url: str,
     method: str = "POST",
