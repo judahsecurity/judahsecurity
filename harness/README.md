@@ -152,8 +152,8 @@ corpus below.
 ### XBOW / XBEN corpus (compare directly against Strix)
 
 The 104-challenge [XBOW validation-benchmarks](https://github.com/xbow-engineering/validation-benchmarks)
-corpus is the same one Strix reports 96% on. Import it (flags are computed
-offline — `FLAG{sha256(challenge-name)}`, no secrets read):
+corpus is the same one Strix reports 96% on. Import it (each challenge's flag
+is read from its `.env` — the value docker-compose bakes into the app):
 
 ```bash
 git clone https://github.com/xbow-engineering/validation-benchmarks /tmp/xben
@@ -175,19 +175,18 @@ python -m local_harness.benchmark.run \
     --setup --min-success-rate 0.8
 ```
 
-> **Decoy-flag warning (real, in this corpus):** every flag in the committed
-> `XBEN.json` is the lowercase `.env` value `flag{uuid}`, while the smoke
-> corpus uses image-verified `FLAG{sha256}`. They disagree, so one is wrong.
-> Settle it definitively with one command — `--setup` brings the challenge up,
-> `--live` reads the flag the container actually serves, `--fix` writes it back,
-> and teardown runs automatically:
+> **Flag scheme (resolved against the corpus, 2026-08):** the baked flag is
+> each challenge's `.env` `FLAG` value (`flag{uuid}`), passed into the app as a
+> build arg — **not** the `FLAG{sha256(name)}` `common.mk` default. All 104
+> `XBEN.json` flags match their `.env`; `verify_flags --corpus` confirms this
+> offline. If you ever suspect a challenge bakes something else, `--live`
+> settles it against the running container (with `--setup` to auto up/down):
 > ```bash
 > python -m local_harness.benchmark.verify_flags \
 >     --ground-truth local_harness/benchmark/ground_truth/XBEN.json \
 >     --repos XBEN-001-24 --live --setup --fix \
 >     --out local_harness/benchmark/ground_truth/XBEN.json
 > ```
-> Once one challenge confirms the scheme, the full run scores truthfully.
 
 ### CI gates (exit codes)
 

@@ -76,6 +76,17 @@ def test_verify_mismatch_when_gt_matches_nothing(tmp_path):
     assert res["matched_source"] is None
 
 
+def test_env_flag_is_authoritative_over_sha256(tmp_path):
+    # Regression: a ground-truth flag equal to the sha256 default but NOT the
+    # challenge's real .env value must be MISMATCH — the .env flag is what the
+    # image bakes. (This is the exact bug that would have false-passed the
+    # original XBEN_SMOKE.json sha256 flags.)
+    _mk_challenge(tmp_path, "XBEN-071-24", env_flag="flag{real-uuid-value}")
+    gt = {"XBEN-071-24": {"flag": compute_flag("XBEN-071-24")}}  # sha256, not env
+    [res] = verify_corpus(gt, tmp_path)
+    assert res["status"] == "MISMATCH"
+
+
 def test_verify_no_dir_reported(tmp_path):
     gt = {"XBEN-999-24": {"flag": "FLAG{x}"}}
     [res] = verify_corpus(gt, tmp_path)

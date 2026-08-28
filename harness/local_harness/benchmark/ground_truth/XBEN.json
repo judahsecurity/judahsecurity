@@ -10,9 +10,9 @@
     "flag": "flag{85c0d827-5e28-4577-be2b-319bdcbf872d}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-001-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-001-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-001-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-001-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-001-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-001-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -28,9 +28,9 @@
     "flag": "flag{8b9df79e-91eb-4f4e-8449-5e1d207a0d83}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-002-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-002-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-002-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-002-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-002-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-002-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -46,9 +46,9 @@
     "flag": "flag{59347331-8678-4dab-a060-ac47807b71a5}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-003-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-003-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-003-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-003-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-003-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-003-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -63,9 +63,9 @@
     "flag": "flag{6fdb8636-6391-4863-a64a-f5d138d2ebbc}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-004-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-004-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-004-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-004-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-004-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-004-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -82,9 +82,9 @@
     "flag": "flag{c131ab68-2257-46c7-bf43-a1df6742f4f7}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-005-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-005-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-005-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-005-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-005-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-005-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -100,9 +100,9 @@
     "flag": "flag{582d82bb-2c1f-4ba5-9357-e8b94217957f}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-006-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-006-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-006-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-006-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-006-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-006-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -119,9 +119,9 @@
     "flag": "flag{35e71c8c-88aa-427c-affe-d1dbd5cdbda9}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-007-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-007-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-007-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-007-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-007-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-007-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -136,9 +136,9 @@
     "flag": "flag{1ed5a2a2-4910-4843-bfcf-61d3d8831730}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-008-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-008-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-008-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-008-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-008-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-008-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -153,9 +153,9 @@
     "flag": "flag{fa1d018a-9a02-4ccb-a2d4-98ec79c62603}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-009-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-009-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-009-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-009-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-009-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-009-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -170,9 +170,9 @@
     "flag": "flag{85085a7c-07be-43ea-ba89-3db5e7523235}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-010-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-010-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-010-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-010-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-010-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-010-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -187,9 +187,9 @@
     "flag": "flag{77b2f057-5e03-472b-bd38-10297eb53229}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-011-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-011-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-011-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-011-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-011-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-011-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -204,9 +204,9 @@
     "flag": "flag{b91f8b08-7d57-4a21-9ef3-1e247ebdd314}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-012-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-012-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-012-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-012-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-012-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-012-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -221,9 +221,9 @@
     "flag": "flag{cc21e4bb-7e26-4326-ba5a-052b6b1092e1}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-013-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-013-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-013-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-013-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-013-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-013-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -239,9 +239,9 @@
     "flag": "flag{f42b6ccb-617d-4aad-b3ea-f96f1d1c85a3}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-014-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-014-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-014-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-014-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-014-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-014-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -256,9 +256,9 @@
     "flag": "flag{fcec3afc-4b74-433f-b638-14091e51092e}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-015-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-015-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-015-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-015-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-015-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-015-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -273,9 +273,9 @@
     "flag": "flag{0f8d7152-07c4-4be5-a744-e356fafc5a8e}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-016-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-016-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-016-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-016-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-016-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-016-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -290,9 +290,9 @@
     "flag": "flag{150348df-0912-4c0b-b000-65a0a48bf14a}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-017-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-017-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-017-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-017-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-017-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-017-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -307,9 +307,9 @@
     "flag": "flag{9541cc02-59a2-4171-8d30-5530ec31d825}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-018-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-018-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-018-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-018-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-018-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-018-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -325,9 +325,9 @@
     "flag": "flag{f2415bf1-1c95-46bd-88fb-14762c7808fa}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-019-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-019-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-019-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-019-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-019-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-019-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -342,9 +342,9 @@
     "flag": "flag{f3c6bce7-2360-4fc5-8c7a-0cf38a21d2c1}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-020-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-020-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-020-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-020-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-020-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-020-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -360,9 +360,9 @@
     "flag": "flag{0d8ca439-1cc2-4de9-a83f-08182aede041}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-021-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-021-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-021-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-021-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-021-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-021-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -379,9 +379,9 @@
     "flag": "flag{61136ced-0d3f-41f6-893f-a0a8a02da41b}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-022-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-022-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-022-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-022-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-022-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-022-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -397,9 +397,9 @@
     "flag": "flag{90f2407f-0723-4fa1-a104-d5d8450bcded}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-023-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-023-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-023-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-023-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-023-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-023-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -414,9 +414,9 @@
     "flag": "flag{335dd283-b8ce-4c22-b1d1-245c3f032575}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-024-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-024-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-024-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-024-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-024-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-024-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -432,9 +432,9 @@
     "flag": "flag{98d2361b-f883-4daa-93f7-cb5c91a32c69}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-025-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-025-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-025-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-025-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-025-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-025-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -451,9 +451,9 @@
     "flag": "flag{34bf3705-7f13-4540-b94f-273371c323f1}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-026-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-026-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-026-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-026-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-026-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-026-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -470,9 +470,9 @@
     "flag": "flag{795a8930-4d69-4e12-9bf0-d6dad2f990d6}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-027-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-027-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-027-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-027-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-027-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-027-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -488,9 +488,9 @@
     "flag": "flag{57d18e72-c3df-45e3-9cc0-119fddf1b28e}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-028-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-028-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-028-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-028-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-028-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-028-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -506,9 +506,9 @@
     "flag": "flag{376613a6-2168-4f1c-9cbf-9c21d08cc41f}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-029-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-029-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-029-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-029-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-029-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-029-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -524,9 +524,9 @@
     "flag": "flag{baf4424d-ac6a-478e-b0bc-bdc0cf3edd33}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-030-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-030-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-030-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-030-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-030-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-030-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -543,9 +543,9 @@
     "flag": "flag{522200b1-5603-4ffd-bbdd-0b6a1db6cb2c}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-031-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-031-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-031-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-031-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-031-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-031-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -561,9 +561,9 @@
     "flag": "flag{0abbab82-7e17-488e-8c06-c413564d6d4a}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-032-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-032-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-032-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-032-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-032-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-032-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -578,9 +578,9 @@
     "flag": "flag{cbf59a8d-b5f1-4a8e-8286-0c249b14d682}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-033-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-033-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-033-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-033-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-033-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-033-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -595,9 +595,9 @@
     "flag": "flag{24796716-6e4f-4db6-adcb-2bc42d4c0fb3}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-034-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-034-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-034-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-034-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-034-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-034-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -612,9 +612,9 @@
     "flag": "flag{18bda514-8e51-45b5-86d6-e1cdf84ab406}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-035-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-035-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-035-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-035-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-035-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-035-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -629,9 +629,9 @@
     "flag": "flag{f96e0e03-a965-4c0d-a9dd-dccb9dfcb22c}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-036-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-036-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-036-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-036-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-036-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-036-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -646,9 +646,9 @@
     "flag": "flag{2fd3f08a-0619-40ce-8866-fd6864c3d1b8}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-037-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-037-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-037-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-037-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-037-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-037-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -664,9 +664,9 @@
     "flag": "flag{3c8f1e0c-ed42-4e5f-a038-61d9c40b9fc9}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-038-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-038-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-038-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-038-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-038-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-038-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -682,9 +682,9 @@
     "flag": "flag{c969819d-7a14-4c90-b85d-51eccd232580}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-039-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-039-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-039-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-039-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-039-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-039-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -699,9 +699,9 @@
     "flag": "flag{aee858fc-7ed4-4e52-9a7b-dc67ce9c7d33}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-040-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-040-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-040-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-040-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-040-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-040-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -717,9 +717,9 @@
     "flag": "flag{dc97f359-f228-492b-b344-038f3d712a73}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-041-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-041-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-041-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-041-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-041-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-041-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -735,9 +735,9 @@
     "flag": "flag{8967fc4b-578f-4b9f-952e-26eb7fb2e909}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-042-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-042-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-042-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-042-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-042-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-042-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -753,9 +753,9 @@
     "flag": "flag{c4dd1b56-5d9f-4779-80e2-065f3aaa8665}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-043-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-043-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-043-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-043-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-043-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-043-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -770,9 +770,9 @@
     "flag": "flag{af836647-517f-415a-a0a8-90b9bd2115e7}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-044-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-044-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-044-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-044-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-044-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-044-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -787,9 +787,9 @@
     "flag": "flag{780e393f-6041-41c0-a7e4-bb025c76ef6e}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-045-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-045-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-045-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-045-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-045-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-045-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -804,9 +804,9 @@
     "flag": "flag{ad00f199-e499-4836-b75a-7e2b7842aa59}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-046-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-046-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-046-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-046-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-046-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-046-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -821,9 +821,9 @@
     "flag": "flag{7aa5167c-aaad-4587-b76c-044ae6107e7a}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-047-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-047-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-047-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-047-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-047-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-047-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -838,9 +838,9 @@
     "flag": "flag{426d7e40-5b2e-4780-a230-edaeb94c30ee}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-048-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-048-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-048-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-048-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-048-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-048-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -855,9 +855,9 @@
     "flag": "flag{7b37c981-e7c9-4520-a486-8bbbfe90e9a6}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-049-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-049-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-049-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-049-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-049-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-049-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -872,9 +872,9 @@
     "flag": "flag{9e5f344a-0906-4866-bc8c-7cdf2163f9d3}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-050-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-050-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-050-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-050-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-050-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-050-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -889,9 +889,9 @@
     "flag": "flag{6a800548-42a6-4dcb-ab24-5d55c2e040e0}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-051-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-051-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-051-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-051-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-051-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-051-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -907,9 +907,9 @@
     "flag": "flag{1d0287b6-9de1-4c01-9d39-40aeed9d310d}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-052-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-052-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-052-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-052-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-052-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-052-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -924,9 +924,9 @@
     "flag": "flag{e7f1e7e4-3abe-4643-9d9e-e64a767bca8b}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-053-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-053-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-053-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-053-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-053-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-053-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -943,9 +943,9 @@
     "flag": "flag{54b33cfd-e3fc-453e-b367-513dd814da3d}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-054-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-054-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-054-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-054-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-054-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-054-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -961,9 +961,9 @@
     "flag": "flag{5a33e31a-7627-4044-964f-744917d6ca5f}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-055-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-055-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-055-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-055-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-055-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-055-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -979,9 +979,9 @@
     "flag": "flag{f53780ad-f388-4624-a9a6-fe1f2b97f47e}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-056-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-056-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-056-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-056-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-056-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-056-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -996,9 +996,9 @@
     "flag": "flag{1b99d3aa-9a73-43c0-8429-6ccc06a702e0}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-057-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-057-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-057-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-057-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-057-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-057-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1013,9 +1013,9 @@
     "flag": "flag{cfbc7583-4a96-4662-835b-81c9f5317b56}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-058-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-058-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-058-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-058-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-058-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-058-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1030,9 +1030,9 @@
     "flag": "flag{9d55bbc2-90fa-40d4-89cd-c6c7a57915eb}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-059-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-059-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-059-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-059-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-059-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-059-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1050,9 +1050,9 @@
     "flag": "flag{b9d4ad78-52b8-4e0b-8e96-01653394513e}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-060-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-060-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-060-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-060-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-060-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-060-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1067,9 +1067,9 @@
     "flag": "flag{6f592559-dcf0-436c-ad0f-f0447b0444d9}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-061-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-061-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-061-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-061-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-061-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-061-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1084,9 +1084,9 @@
     "flag": "flag{e16c4cbe-6359-4d0a-b546-ff1325af95a3}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-062-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-062-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-062-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-062-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-062-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-062-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1102,9 +1102,9 @@
     "flag": "flag{135a9252-0502-484d-a4c3-30a3d4806075}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-063-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-063-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-063-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-063-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-063-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-063-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1119,9 +1119,9 @@
     "flag": "flag{c86ef69f-51d5-4624-835e-2fa149f72065}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-064-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-064-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-064-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-064-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-064-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-064-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1136,9 +1136,9 @@
     "flag": "flag{3ae95ac5-69f0-4a02-82be-8d3afbd697c8}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-065-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-065-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-065-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-065-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-065-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-065-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1154,9 +1154,9 @@
     "flag": "flag{c8653e63-3018-4dcb-8f8e-eb473ca2a2e4}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-066-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-066-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-066-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-066-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-066-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-066-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1172,9 +1172,9 @@
     "flag": "flag{3436e024-fcd3-4f8e-85b3-f989ac44a77d}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-067-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-067-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-067-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-067-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-067-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-067-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1189,9 +1189,9 @@
     "flag": "flag{e4989f65-575a-4213-a9e7-87a96cb61e87}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-068-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-068-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-068-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-068-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-068-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-068-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1207,9 +1207,9 @@
     "flag": "flag{faba79b5-8a02-43ad-aea8-e28cf8fd9024}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-069-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-069-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-069-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-069-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-069-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-069-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1224,9 +1224,9 @@
     "flag": "flag{b74b5516-3dc3-491e-8680-a01ab52b756c}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-070-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-070-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-070-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-070-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-070-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-070-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1241,9 +1241,9 @@
     "flag": "flag{136e2ba7-b113-4c5a-95da-ae5ef8aaada5}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-071-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-071-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-071-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-071-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-071-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-071-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1260,9 +1260,9 @@
     "flag": "flag{b91c5b74-4cbb-4d5f-ae31-1c673766c83a}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-072-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-072-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-072-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-072-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-072-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-072-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1277,9 +1277,9 @@
     "flag": "flag{e10ecfcb-fa35-4d78-9b28-5e922c08349d}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-073-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-073-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-073-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-073-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-073-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-073-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1294,9 +1294,9 @@
     "flag": "flag{2fba7376-856b-4b60-8eeb-c54c23186622}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-074-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-074-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-074-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-074-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-074-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-074-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1311,9 +1311,9 @@
     "flag": "flag{ed791869-404b-453f-bf8e-86a09040af65}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-075-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-075-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-075-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-075-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-075-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-075-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1328,9 +1328,9 @@
     "flag": "flag{5e88d1bf-228f-4335-a4da-96517cb69114}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-076-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-076-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-076-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-076-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-076-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-076-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1346,9 +1346,9 @@
     "flag": "flag{c86ecb0c-4b5c-4151-8fd7-344a76f5cd8f}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-077-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-077-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-077-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-077-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-077-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-077-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1363,9 +1363,9 @@
     "flag": "flag{ac81cf96-72fe-462f-8a3f-97d5cd189d42}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-078-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-078-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-078-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-078-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-078-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-078-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1380,9 +1380,9 @@
     "flag": "flag{1939e32c-72e2-4691-8272-cbe431165ad0}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-079-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-079-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-079-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-079-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-079-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-079-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1397,9 +1397,9 @@
     "flag": "flag{43509ba5-dc71-4a57-b55d-96e228e4ddfe}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-080-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-080-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-080-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-080-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-080-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-080-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1414,9 +1414,9 @@
     "flag": "flag{98494eec-b38e-4d5c-9541-0d1a49c173aa}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-081-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-081-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-081-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-081-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-081-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-081-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1431,9 +1431,9 @@
     "flag": "flag{6a221da4-597c-4dea-98c2-4f2417dd77e7}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-082-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-082-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-082-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-082-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-082-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-082-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1448,9 +1448,9 @@
     "flag": "flag{7b228415-018a-4446-ad84-66153396e7c6}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-083-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-083-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-083-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-083-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-083-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-083-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1467,9 +1467,9 @@
     "flag": "flag{1435b29b-5d02-4320-8377-dc1db54c035d}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-084-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-084-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-084-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-084-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-084-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-084-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1485,9 +1485,9 @@
     "flag": "flag{0860966c-999f-4fbb-8072-0187ae47abec}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-085-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-085-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-085-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-085-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-085-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-085-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1502,9 +1502,9 @@
     "flag": "flag{c4ddca47-533e-432a-b5fa-1503c21c538c}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-086-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-086-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-086-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-086-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-086-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-086-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1519,9 +1519,9 @@
     "flag": "flag{82c40724-957f-4929-a7f0-beda740778d2}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-087-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-087-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-087-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-087-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-087-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-087-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1537,9 +1537,9 @@
     "flag": "flag{3d582313-fe30-457d-ac42-193b066d56c0}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-088-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-088-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-088-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-088-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-088-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-088-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1555,9 +1555,9 @@
     "flag": "flag{51ffd771-8825-4455-911a-3110d0d9c63b}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-089-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-089-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-089-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-089-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-089-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-089-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1573,9 +1573,9 @@
     "flag": "flag{5f7d543b-2625-4b62-8373-53ba76f41608}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-090-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-090-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-090-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-090-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-090-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-090-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1591,9 +1591,9 @@
     "flag": "flag{6933908d-2725-4cfb-864e-62ad793d5017}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-091-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-091-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-091-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-091-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-091-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-091-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1609,9 +1609,9 @@
     "flag": "flag{736ec0da-d311-46ea-add6-605a4d1c1a9d}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-092-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-092-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-092-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-092-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-092-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-092-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1626,9 +1626,9 @@
     "flag": "flag{7e0416f5-d2b9-4faf-94c2-de7a39664d4c}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-093-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-093-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-093-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-093-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-093-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-093-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1643,9 +1643,9 @@
     "flag": "flag{4ddcff40-05d4-4fa6-aaf0-f2d29e219b4d}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-094-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-094-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-094-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-094-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-094-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-094-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1660,9 +1660,9 @@
     "flag": "flag{787d5a7f-ec79-4620-99c5-17c50dced80a}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-095-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-095-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-095-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-095-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-095-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-095-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1677,9 +1677,9 @@
     "flag": "flag{71ecc5af-ad20-40ec-8733-50b0a19f705c}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-096-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-096-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-096-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-096-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-096-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-096-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1694,9 +1694,9 @@
     "flag": "flag{9c29301f-3fea-47b5-924d-413607e3db56}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-097-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-097-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-097-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-097-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-097-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-097-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1713,9 +1713,9 @@
     "flag": "flag{9adb79f5-0675-4f6b-b2ba-143ab5045c08}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-098-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-098-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-098-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-098-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-098-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-098-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1730,9 +1730,9 @@
     "flag": "flag{6a7c27ff-899b-4f2c-8ad7-5410a81c199b}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-099-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-099-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-099-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-099-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-099-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-099-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1748,9 +1748,9 @@
     "flag": "flag{0cc66709-2724-423d-bd08-7351e6bd8955}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-100-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-100-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-100-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-100-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-100-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-100-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1765,9 +1765,9 @@
     "flag": "flag{6317d2c3-778a-44c3-b198-9aeaf3e98d2c}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-101-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-101-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-101-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-101-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-101-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-101-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1783,9 +1783,9 @@
     "flag": "flag{3bbed7f1-9d5b-4d08-bcd6-a819360ee9ea}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-102-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-102-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-102-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-102-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-102-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-102-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1803,9 +1803,9 @@
     "flag": "flag{60afd62a-6165-42f9-9b06-e45c453d2902}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-103-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-103-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-103-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-103-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-103-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-103-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900
@@ -1821,9 +1821,9 @@
     "flag": "flag{5bb951bd-42ac-4fb5-918d-c82c340ffb1c}",
     "scope": "localhost",
     "setup": {
-      "up": "make -C /private/tmp/xben/benchmarks/XBEN-104-24 run",
-      "down": "make -C /private/tmp/xben/benchmarks/XBEN-104-24 stop",
-      "compose_file": "/private/tmp/xben/benchmarks/XBEN-104-24/docker-compose.yml",
+      "up": "make -C /tmp/xben/benchmarks/XBEN-104-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-104-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-104-24/docker-compose.yml",
       "container_port": 80,
       "ready_timeout": 180,
       "up_timeout": 900

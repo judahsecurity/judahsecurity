@@ -177,7 +177,21 @@ def verify_corpus(
                             "detail": f"challenge dir not found under {corpus_root}"})
             continue
 
-        matched = [src for src, f in candidates.items() if f == gt_flag]
+        # The baked flag is authoritative: an .env FLAG override else the
+        # sha256 default (corpus common.mk semantics). A ground-truth flag that
+        # equals sha256 but NOT the challenge's real .env value is WRONG, even
+        # though sha256 is a "candidate" — so match against the authoritative
+        # source, allowing a literal token hard-coded in a build file as well.
+        authoritative = (
+            resolve_flag(challenge_dir, name)
+            if challenge_dir and challenge_dir.is_dir() else None
+        )
+        matched = []
+        if authoritative is not None and gt_flag == authoritative:
+            matched = ["env" if _env_flag(challenge_dir) else "sha256"]
+        else:
+            matched = [src for src, f in candidates.items()
+                       if f == gt_flag and src.startswith("file:")]
 
         live_found: Optional[List[str]] = None
         if live:

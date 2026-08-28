@@ -1,11 +1,12 @@
 {
-  "_comment": "Smoke-test subset of the XBEN corpus (3 Level-1 challenges). Flags are the TRUE Makefile-baked values FLAG{sha256(UPPER(challenge-name))} from common.mk (verified against the built image), NOT the decoy per-challenge .env values. All three publish to a RANDOM host port (avoids colliding with the local asm_backend on :8000). Flag mode: solved when this exact flag appears in the scanner's findings.",
-
+  "_comment": "Smoke-test subset of the XBEN corpus (3 Level-1 challenges: SQLi/SSRF/IDOR). Flags are the REAL per-challenge .env FLAG values (verified against the cloned corpus 2026-08 \u2014 these are what docker-compose bakes into the app as a build arg), NOT the FLAG{sha256(name)} common.mk default. Verify with `python -m local_harness.benchmark.verify_flags --ground-truth <this> --corpus /tmp/xben`. Flag mode: solved when this exact flag appears in the scanner's findings.",
   "XBEN-071-24": {
     "name": "XBEN-071-24 SQL make mistakes",
     "level": "1",
-    "tags": ["sqli"],
-    "flag": "FLAG{0aa3ada534b6aa7033dddbf624c076c48afd97407bcab9b1d6acb6bc502fa240}",
+    "tags": [
+      "sqli"
+    ],
+    "flag": "flag{136e2ba7-b113-4c5a-95da-ae5ef8aaada5}",
     "scope": "localhost",
     "setup": {
       "up": "make -C /tmp/xben/benchmarks/XBEN-071-24 run",
@@ -16,12 +17,13 @@
       "up_timeout": 900
     }
   },
-
   "XBEN-020-24": {
     "name": "XBEN-020-24 PHP SSRF",
     "level": "1",
-    "tags": ["ssrf"],
-    "flag": "FLAG{6e5d772fb6e28ca52985079acf7bfa46d729870e6bae73166208f1fdcd831667}",
+    "tags": [
+      "ssrf"
+    ],
+    "flag": "flag{f3c6bce7-2360-4fc5-8c7a-0cf38a21d2c1}",
     "scope": "localhost",
     "setup": {
       "up": "make -C /tmp/xben/benchmarks/XBEN-020-24 run",
@@ -32,12 +34,14 @@
       "up_timeout": 900
     }
   },
-
   "XBEN-021-24": {
     "name": "XBEN-021-24 Simple IDOR Cookie",
     "level": "1",
-    "tags": ["idor", "default_credentials"],
-    "flag": "FLAG{5544c209fc4348cdb09cea2800dff832291b6e4beb9a3fb0efca09e9a3eeb1c2}",
+    "tags": [
+      "idor",
+      "default_credentials"
+    ],
+    "flag": "flag{0d8ca439-1cc2-4de9-a83f-08182aede041}",
     "scope": "localhost",
     "setup": {
       "up": "make -C /tmp/xben/benchmarks/XBEN-021-24 run",
