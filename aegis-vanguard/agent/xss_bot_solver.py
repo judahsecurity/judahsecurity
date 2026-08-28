@@ -235,12 +235,13 @@ def _cli(argv=None) -> int:
     rx = re.compile(a.success_regex) if a.success_regex else None
     res = solve(_send, a.url, param=a.param, method=a.method, marker=a.marker,
                 seed_blacklist=seeds, success_regex=rx, max_attempts=a.max_attempts)
+    # Single-line JSON so a subprocess caller can parse stdout directly.
     print(_json.dumps({
         "solved": res.solved, "flag": res.flag, "technique": res.technique,
         "payload": res.payload, "attempts": res.attempts,
         "learned_blacklist": res.learned_blacklist,
         "hint": None if res.solved else res.last_snippet,
-    }, indent=2))
+    }))
     return 0 if res.solved else 2
 
 

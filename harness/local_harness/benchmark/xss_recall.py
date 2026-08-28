@@ -100,7 +100,18 @@ def _solve_live(solver: Path, url: str, param: str, method: str, timeout: int = 
             capture_output=True, text=True, timeout=timeout,
         )
         out = (p.stdout or "").strip()
-        return json.loads(out.splitlines()[-1]) if out else {"solved": False, "error": "no output"}
+        if not out:
+            return {"solved": False, "error": f"no output (rc={p.returncode}); stderr={(p.stderr or '')[:200]}"}
+        # The solver prints one JSON object; parse the whole thing, falling back
+        # to the last JSON-looking line if extra output precedes it.
+        try:
+            return json.loads(out)
+        except json.JSONDecodeError:
+            for line in reversed(out.splitlines()):
+                line = line.strip()
+                if line.startswith("{"):
+                    return json.loads(line)
+            return {"solved": False, "error": f"unparseable output: {out[:200]}"}
     except (subprocess.SubprocessError, json.JSONDecodeError, OSError) as exc:
         return {"solved": False, "error": str(exc)}
 
@@ -154,6 +165,7 @@ def run(corpus_root: Path, only: Optional[List[str]] = None, live: bool = False,
                         row["attempts"] = last.get("attempts")
                         row["learned_blacklist"] = last.get("learned_blacklist")
                         row["hint"] = last.get("hint")
+                        row["error"] = last.get("error")
         finally:
             tm.teardown(spec)
         results.append(row)
@@ -194,6 +206,8 @@ def main(argv=None) -> int:
         if r.get("status") == "unsolved":
             if r.get("attempts") is not None:
                 print(f"      attempts={r.get('attempts')} learned_blacklist={r.get('learned_blacklist')}")
+            if r.get("error"):
+                print(f"      solver error: {r.get('error')}")
             hint = (r.get("hint") or "").replace("\n", " ")
             if hint:
                 print(f"      checker said: {hint[:240]}")
