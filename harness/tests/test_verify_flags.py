@@ -111,6 +111,39 @@ def test_live_mode_is_authoritative(tmp_path, monkeypatch):
     assert res["live_found"] == [real]
 
 
+def test_setup_brings_up_and_tears_down_around_live_read(tmp_path, monkeypatch):
+    import local_harness.benchmark.verify_flags as vf
+    from local_harness.benchmark.targets import TargetManager
+
+    _mk_challenge(tmp_path, "XBEN-001-24", env_flag="flag{decoy}")
+    real = "FLAG{" + "3" * 64 + "}"
+    monkeypatch.setattr(vf, "live_tokens", lambda compose: [real])
+
+    calls = []
+    tm = TargetManager(command_runner=lambda c, t: (calls.append(c), (0, "ok"))[1],
+                       http_probe=lambda url: True, poll_interval=0)
+    gt = {"XBEN-001-24": {"target": "http://localhost:3000",
+                          "flag": "flag{decoy}",
+                          "setup": {"up": "make run", "down": "make stop",
+                                    "compose_file": "dc.yml"}}}
+    [res] = vf.verify_corpus(gt, tmp_path, live=True, setup=True, target_manager=tm)
+    assert res["status"] == "LIVE_MISMATCH"
+    assert res["live_found"] == [real]
+    assert calls == ["make run", "make stop"]  # up before, down after
+
+
+def test_setup_failure_is_a_gate(tmp_path):
+    import local_harness.benchmark.verify_flags as vf
+    from local_harness.benchmark.targets import TargetManager
+
+    _mk_challenge(tmp_path, "XBEN-001-24")
+    tm = TargetManager(command_runner=lambda c, t: (1, "boom"),
+                       http_probe=lambda url: True, poll_interval=0)
+    gt = {"XBEN-001-24": {"flag": "FLAG{x}", "setup": {"up": "make run"}}}
+    [res] = vf.verify_corpus(gt, tmp_path, live=True, setup=True, target_manager=tm)
+    assert res["status"] == "SETUP_FAILED"
+
+
 def test_main_fix_rewrites_to_resolved(tmp_path):
     _mk_challenge(tmp_path, "XBEN-001-24", env_flag="flag{real-env}")
     gt_path = tmp_path / "gt.json"

@@ -178,16 +178,16 @@ python -m local_harness.benchmark.run \
 > **Decoy-flag warning (real, in this corpus):** every flag in the committed
 > `XBEN.json` is the lowercase `.env` value `flag{uuid}`, while the smoke
 > corpus uses image-verified `FLAG{sha256}`. They disagree, so one is wrong.
-> Settle it definitively with one live check before the full run — bring a
-> challenge up, then:
+> Settle it definitively with one command — `--setup` brings the challenge up,
+> `--live` reads the flag the container actually serves, `--fix` writes it back,
+> and teardown runs automatically:
 > ```bash
 > python -m local_harness.benchmark.verify_flags \
 >     --ground-truth local_harness/benchmark/ground_truth/XBEN.json \
->     --repos XBEN-001-24 --live --fix \
+>     --repos XBEN-001-24 --live --setup --fix \
 >     --out local_harness/benchmark/ground_truth/XBEN.json
 > ```
-> `--live` reads the flag the running container actually serves; `--fix` writes
-> the confirmed value back so the 104-run scores truthfully.
+> Once one challenge confirms the scheme, the full run scores truthfully.
 
 ### CI gates (exit codes)
 

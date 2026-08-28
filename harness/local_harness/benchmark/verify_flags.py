@@ -43,6 +43,7 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from local_harness.benchmark.targets import TargetManager
 from local_harness.benchmark.xben_import import compute_flag
 
 # Matches both XBEN flag styles: FLAG{<64 hex>} and flag{<uuid>}, plus any
@@ -140,8 +141,16 @@ def verify_corpus(
     corpus_root: Optional[Path],
     only: Optional[List[str]] = None,
     live: bool = False,
+    setup: bool = False,
+    target_manager: Optional[TargetManager] = None,
 ) -> List[dict]:
-    """Check each challenge's ground-truth flag against resolvable sources."""
+    """Check each challenge's ground-truth flag against resolvable sources.
+
+    With ``live=True``, read the flag the running container actually serves.
+    With ``setup=True`` as well, bring each challenge up (and tear it down)
+    around the live read, so no manual docker up/down is needed.
+    """
+    tm = target_manager or (TargetManager() if (live and setup) else None)
     results: List[dict] = []
     for name, spec in ground_truth.items():
         if name.startswith("_") or not isinstance(spec, dict):
@@ -173,7 +182,18 @@ def verify_corpus(
         live_found: Optional[List[str]] = None
         if live:
             compose = (spec.get("setup") or {}).get("compose_file", "")
-            live_found = live_tokens(compose)
+            if tm is not None:
+                res = tm.setup(spec)
+                try:
+                    live_found = live_tokens(compose) if res.ok else []
+                finally:
+                    tm.teardown(spec)
+                if not res.ok:
+                    results.append({"name": name, "status": "SETUP_FAILED",
+                                    "gt_flag": gt_flag, "detail": res.detail})
+                    continue
+            else:
+                live_found = live_tokens(compose)
 
         if live and live_found is not None:
             status = "LIVE_OK" if gt_flag in live_found else "LIVE_MISMATCH"
@@ -196,7 +216,7 @@ def verify_corpus(
     return results
 
 
-_BAD = {"MISMATCH", "LIVE_MISMATCH", "NO_SOURCE", "NO_DIR"}
+_BAD = {"MISMATCH", "LIVE_MISMATCH", "NO_SOURCE", "NO_DIR", "SETUP_FAILED"}
 
 
 def _print_report(results: List[dict]) -> None:
@@ -212,7 +232,7 @@ def _print_report(results: List[dict]) -> None:
             line += f"\n      gt={r['gt_flag']} not found in running container"
             if r.get("live_found"):
                 line += f"; container has: {', '.join(r['live_found'][:3])}"
-        elif r["status"] in ("NO_DIR", "NO_SOURCE"):
+        elif r["status"] in ("NO_DIR", "NO_SOURCE", "SETUP_FAILED"):
             line += f"  {r.get('detail', '')}"
         print(line)
 
@@ -227,7 +247,9 @@ def main(argv=None) -> int:
                         help="Local clone of validation-benchmarks (for offline source resolution)")
     parser.add_argument("--repos", help="Comma-separated subset of challenge names")
     parser.add_argument("--live", action="store_true",
-                        help="Confirm against already-running containers (needs Docker)")
+                        help="Confirm against running containers (needs Docker)")
+    parser.add_argument("--setup", action="store_true",
+                        help="With --live, docker up/down each challenge around the read")
     parser.add_argument("--fix", action="store_true",
                         help="Rewrite ground truth to the resolved authoritative flag")
     parser.add_argument("--out", type=Path, default=None, help="Output path for --fix")
@@ -243,13 +265,17 @@ def main(argv=None) -> int:
     only = [s for s in args.repos.split(",") if s] if args.repos else None
     corpus = args.corpus.resolve() if args.corpus else None
 
-    results = verify_corpus(gt, corpus, only=only, live=args.live)
+    if args.setup and not args.live:
+        print("--setup only applies with --live; ignoring.")
+    results = verify_corpus(gt, corpus, only=only, live=args.live,
+                            setup=args.setup and args.live)
     if not results:
         print("no exact-flag challenges to verify (all flag_regex, or empty subset).")
         return 0
 
-    print(f"\nFlag verification — {len(results)} challenge(s), "
-          f"mode={'live' if args.live else 'offline'}:")
+    mode = ("live+setup" if args.setup and args.live
+            else "live" if args.live else "offline")
+    print(f"\nFlag verification — {len(results)} challenge(s), mode={mode}:")
     _print_report(results)
 
     bad = [r for r in results if r["status"] in _BAD]
