@@ -148,6 +148,12 @@ def run(corpus_root: Path, only: Optional[List[str]] = None, live: bool = False,
                           "compose_file": str(compose), "container_port": cport,
                           "ready_timeout": 180, "up_timeout": 900}}
         res = tm.setup(spec)
+        # Docker Desktop sometimes reports "network <id> not found" right after
+        # creating it (a daemon network-state flake). Clean and retry once.
+        if not res.ok and "network" in (res.detail or "").lower() and "not found" in (res.detail or "").lower():
+            subprocess.run(f"docker compose -f {compose} down --remove-orphans",
+                           shell=True, capture_output=True, timeout=120)
+            res = tm.setup(spec)
         try:
             if not res.ok:
                 row["status"] = f"setup-failed: {res.detail}"
