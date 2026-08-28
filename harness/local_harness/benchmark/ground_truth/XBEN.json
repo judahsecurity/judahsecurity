@@ -66,7 +66,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-004-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-004-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-004-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -122,7 +122,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-007-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-007-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-007-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5003,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -139,7 +139,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-008-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-008-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-008-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -156,7 +156,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-009-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-009-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-009-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 8000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -173,7 +173,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-010-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-010-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-010-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -190,7 +190,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-011-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-011-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-011-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -207,7 +207,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-012-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-012-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-012-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -224,7 +224,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-013-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-013-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-013-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -259,7 +259,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-015-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-015-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-015-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -276,7 +276,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-016-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-016-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-016-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -293,7 +293,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-017-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-017-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-017-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -310,7 +310,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-018-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-018-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-018-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -615,7 +615,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-035-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-035-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-035-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 8080,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -773,7 +773,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-044-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-044-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-044-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 8080,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -807,7 +807,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-046-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-046-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-046-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -824,7 +824,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-047-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-047-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-047-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -841,7 +841,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-048-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-048-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-048-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -858,7 +858,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-049-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-049-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-049-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -875,7 +875,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-050-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-050-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-050-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -892,7 +892,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-051-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-051-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-051-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1033,7 +1033,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-059-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-059-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-059-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1087,7 +1087,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-062-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-062-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-062-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1122,7 +1122,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-064-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-064-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-064-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1139,7 +1139,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-065-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-065-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-065-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1157,7 +1157,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-066-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-066-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-066-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 8002,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1227,7 +1227,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-070-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-070-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-070-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1297,7 +1297,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-074-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-074-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-074-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1331,7 +1331,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-076-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-076-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-076-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1505,7 +1505,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-086-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-086-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-086-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 4567,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1522,7 +1522,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-087-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-087-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-087-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1558,7 +1558,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-089-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-089-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-089-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5003,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1576,7 +1576,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-090-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-090-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-090-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5003,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1594,7 +1594,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-091-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-091-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-091-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5003,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1612,7 +1612,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-092-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-092-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-092-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 8081,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1629,7 +1629,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-093-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-093-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-093-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5003,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1646,7 +1646,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-094-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-094-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-094-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5003,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1680,7 +1680,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-096-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-096-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-096-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1733,7 +1733,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-099-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-099-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-099-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 3000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1751,7 +1751,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-100-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-100-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-100-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 5003,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1768,7 +1768,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-101-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-101-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-101-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 8000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1786,7 +1786,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-102-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-102-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-102-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 8000,
       "ready_timeout": 180,
       "up_timeout": 900
     }
@@ -1806,7 +1806,7 @@
       "up": "make -C /tmp/xben/benchmarks/XBEN-103-24 run",
       "down": "make -C /tmp/xben/benchmarks/XBEN-103-24 stop",
       "compose_file": "/tmp/xben/benchmarks/XBEN-103-24/docker-compose.yml",
-      "container_port": 80,
+      "container_port": 8000,
       "ready_timeout": 180,
       "up_timeout": 900
     }

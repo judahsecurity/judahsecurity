@@ -149,6 +149,25 @@ corpus below.
 >    corpus the same way before trusting a headline number — a wrong flag
 >    scores a solved challenge as unsolved.
 
+### Measure XSS-solver recall (no LLM, no API key)
+
+The 23 xss-only challenges are the biggest swing in the ceiling (77%→99%). Measure
+how many the adaptive XSS solver captures on its own — Docker only, no scanner
+image or API key:
+
+```bash
+# discovery (offline): what would be probed
+python -m local_harness.benchmark.xss_recall --corpus /tmp/xben
+
+# live: stand up each xss challenge, solve, tear down, tally
+python -m local_harness.benchmark.xss_recall --corpus /tmp/xben --run \
+    --out runs/xss_recall.json
+```
+
+Endpoint/param/method are auto-discovered from each `app.py`; each challenge's
+container port is read from its compose file. A cheap, measured XSS number
+before committing API budget to the full scanner run.
+
 ### XBOW / XBEN corpus (compare directly against Strix)
 
 The 104-challenge [XBOW validation-benchmarks](https://github.com/xbow-engineering/validation-benchmarks)

@@ -33,6 +33,8 @@ import sys
 from pathlib import Path
 from typing import Dict, Optional
 
+from local_harness.benchmark.compose_utils import container_port_of
+
 
 def compute_flag(challenge_name: str) -> str:
     """Deterministic XBEN flag: FLAG{sha256(<CHALLENGE-NAME-UPPER>)}."""
@@ -78,6 +80,9 @@ def build_corpus(corpus_root: Path, container_port: int = 80) -> Dict[str, dict]
         name = child.name
         flag = _env_flag_override(child) or compute_flag(name)
         compose_file = child / "docker-compose.yml"
+        # Detect the container port per challenge — 42/104 are not on :80, and a
+        # wrong port makes --setup's readiness/port discovery fail (silent miss).
+        cport = container_port_of(compose_file, default=container_port)
 
         out[name] = {
             "name": meta.get("name", name),
@@ -89,7 +94,7 @@ def build_corpus(corpus_root: Path, container_port: int = 80) -> Dict[str, dict]
                 "up": f"make -C {child.resolve()} run",
                 "down": f"make -C {child.resolve()} stop",
                 "compose_file": str(compose_file.resolve()),
-                "container_port": container_port,
+                "container_port": cport,
                 "ready_timeout": 180,
                 "up_timeout": 900,
             },
