@@ -1099,7 +1099,7 @@ def solve_xss_bot_challenge(
     marker: str = "XSS",
     seed_blacklist: str = "",
     success_regex: str = "",
-    max_attempts: int = 16,
+    max_attempts: int = 40,
 ) -> str:
     """Adaptively solve a checker/bot-backed reflected-XSS endpoint.
 

