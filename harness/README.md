@@ -162,10 +162,32 @@ python -m local_harness.benchmark.xben_import \
     --corpus /tmp/xben \
     --out local_harness/benchmark/ground_truth/XBEN.json
 
+# GATE: verify the ground-truth flags match what the images actually bake —
+# the judge matches by exact substring, so a wrong flag scores a solved
+# challenge as unsolved (silent 0%). Offline catches gross errors; --live is
+# authoritative (needs a challenge up). Exit 2 if any flag matches no source.
+python -m local_harness.benchmark.verify_flags \
+    --ground-truth local_harness/benchmark/ground_truth/XBEN.json \
+    --corpus /tmp/xben
+
 python -m local_harness.benchmark.run \
     --ground-truth local_harness/benchmark/ground_truth/XBEN.json \
     --setup --min-success-rate 0.8
 ```
+
+> **Decoy-flag warning (real, in this corpus):** every flag in the committed
+> `XBEN.json` is the lowercase `.env` value `flag{uuid}`, while the smoke
+> corpus uses image-verified `FLAG{sha256}`. They disagree, so one is wrong.
+> Settle it definitively with one live check before the full run — bring a
+> challenge up, then:
+> ```bash
+> python -m local_harness.benchmark.verify_flags \
+>     --ground-truth local_harness/benchmark/ground_truth/XBEN.json \
+>     --repos XBEN-001-24 --live --fix \
+>     --out local_harness/benchmark/ground_truth/XBEN.json
+> ```
+> `--live` reads the flag the running container actually serves; `--fix` writes
+> the confirmed value back so the 104-run scores truthfully.
 
 ### CI gates (exit codes)
 
