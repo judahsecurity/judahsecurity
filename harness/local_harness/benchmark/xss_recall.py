@@ -188,6 +188,7 @@ def main(argv=None) -> int:
         print(f"\n  RECALL: {report['solved']}/{report['total']} = {report['recall']*100:.0f}%")
 
     if a.out:
+        a.out.parent.mkdir(parents=True, exist_ok=True)
         a.out.write_text(json.dumps(report, indent=2), encoding="utf-8")
         print(f"  report → {a.out}")
     return 0
