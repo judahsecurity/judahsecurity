@@ -191,6 +191,12 @@ def main(argv=None) -> int:
         if r.get("flag"):
             line += f"  {r['flag']}"
         print(line)
+        if r.get("status") == "unsolved":
+            if r.get("attempts") is not None:
+                print(f"      attempts={r.get('attempts')} learned_blacklist={r.get('learned_blacklist')}")
+            hint = (r.get("hint") or "").replace("\n", " ")
+            if hint:
+                print(f"      checker said: {hint[:240]}")
     if a.run:
         print(f"\n  RECALL: {report['solved']}/{report['total']} = {report['recall']*100:.0f}%")
 

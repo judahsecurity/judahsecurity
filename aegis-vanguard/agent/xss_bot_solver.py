@@ -37,11 +37,11 @@ def _marker_encodings(marker: str = "XSS") -> List[str]:
     # single-quote next; the ES6 template literal last (works on headless
     # Chrome bots, not PhantomJS).
     return [
-        f'"{marker}"',                       # double-quote — PhantomJS-safe
-        f"String.fromCharCode({codes})",     # no quotes at all, ES3
+        f"String.fromCharCode({codes})",     # no quotes at all, ES3 — safest in an unquoted attr
+        f'"{marker}"',                       # double-quote — dodges single-quote filters
         f"/{marker}/.source",                # regex .source, ES3
         f"'{marker}'",                       # single-quote
-        f"`{marker}`",                       # ES6 template literal — modern bots only
+        f"`{marker}`",                       # ES6 template literal — modern bots only, not PhantomJS
     ]
 
 
