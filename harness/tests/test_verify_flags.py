@@ -41,12 +41,14 @@ def test_candidate_includes_sha256_default(tmp_path):
     assert cands["sha256"] == compute_flag("XBEN-001-24")
 
 
-def test_env_override_wins_resolution(tmp_path):
-    d = _mk_challenge(tmp_path, "XBEN-002-24", env_flag="flag{real-env-value}")
-    assert resolve_flag(d, "XBEN-002-24") == "flag{real-env-value}"
+def test_sha256_is_authoritative_over_env_decoy(tmp_path):
+    # The build bakes common.mk's sha256 flag via --build-arg (overriding the
+    # compose arg that reads .env), so .env is a decoy — resolve to sha256.
+    d = _mk_challenge(tmp_path, "XBEN-002-24", env_flag="flag{decoy-env-value}")
+    assert resolve_flag(d, "XBEN-002-24") == compute_flag("XBEN-002-24")
     cands = candidate_flags(d, "XBEN-002-24")
-    assert cands["env"] == "flag{real-env-value}"
-    assert "sha256" in cands  # still offered as a candidate
+    assert cands["env"] == "flag{decoy-env-value}"   # still reported as a candidate
+    assert cands["sha256"] == compute_flag("XBEN-002-24")
 
 
 def test_flag_literal_in_compose_is_a_candidate(tmp_path):
@@ -76,15 +78,17 @@ def test_verify_mismatch_when_gt_matches_nothing(tmp_path):
     assert res["matched_source"] is None
 
 
-def test_env_flag_is_authoritative_over_sha256(tmp_path):
-    # Regression: a ground-truth flag equal to the sha256 default but NOT the
-    # challenge's real .env value must be MISMATCH — the .env flag is what the
-    # image bakes. (This is the exact bug that would have false-passed the
-    # original XBEN_SMOKE.json sha256 flags.)
-    _mk_challenge(tmp_path, "XBEN-071-24", env_flag="flag{real-uuid-value}")
-    gt = {"XBEN-071-24": {"flag": compute_flag("XBEN-071-24")}}  # sha256, not env
-    [res] = verify_corpus(gt, tmp_path)
-    assert res["status"] == "MISMATCH"
+def test_sha256_gt_is_ok_and_env_decoy_gt_is_mismatch(tmp_path):
+    # The image bakes sha256, so a sha256 ground truth is OK even when a decoy
+    # .env is present; a ground truth equal to the decoy .env is a MISMATCH.
+    _mk_challenge(tmp_path, "XBEN-071-24", env_flag="flag{decoy-uuid}")
+    ok = {"XBEN-071-24": {"flag": compute_flag("XBEN-071-24")}}
+    [r1] = verify_corpus(ok, tmp_path)
+    assert r1["status"] == "OK" and r1["matched_source"] == "sha256"
+
+    decoy = {"XBEN-071-24": {"flag": "flag{decoy-uuid}"}}
+    [r2] = verify_corpus(decoy, tmp_path)
+    assert r2["status"] == "MISMATCH"
 
 
 def test_verify_no_dir_reported(tmp_path):
@@ -156,11 +160,11 @@ def test_setup_failure_is_a_gate(tmp_path):
 
 
 def test_main_fix_rewrites_to_resolved(tmp_path):
-    _mk_challenge(tmp_path, "XBEN-001-24", env_flag="flag{real-env}")
+    _mk_challenge(tmp_path, "XBEN-001-24", env_flag="flag{decoy-env}")
     gt_path = tmp_path / "gt.json"
     gt_path.write_text(json.dumps({"XBEN-001-24": {"flag": "FLAG{wrong}"}}))
     out = tmp_path / "fixed.json"
     main(["--ground-truth", str(gt_path), "--corpus", str(tmp_path),
           "--fix", "--out", str(out)])
     fixed = json.loads(out.read_text())
-    assert fixed["XBEN-001-24"]["flag"] == "flag{real-env}"
+    assert fixed["XBEN-001-24"]["flag"] == compute_flag("XBEN-001-24")  # sha256, not decoy

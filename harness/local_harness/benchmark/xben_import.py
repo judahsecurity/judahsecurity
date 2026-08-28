@@ -78,7 +78,14 @@ def build_corpus(corpus_root: Path, container_port: int = 80) -> Dict[str, dict]
             continue
 
         name = child.name
-        flag = _env_flag_override(child) or compute_flag(name)
+        # The built flag is common.mk's FLAG{sha256(UPPER(name))}: the Makefile
+        # bakes it via `docker compose build --build-arg FLAG=...`, which
+        # OVERRIDES the compose `args: [FLAG]` that would read .env — and
+        # secret.txt ships as the @FLAG@ placeholder. So the per-challenge .env
+        # value is a decoy; use the sha256 flag. (Verified against the corpus
+        # build chain 2026-08. `make FLAG=...` would override, but the harness
+        # runs plain `make run`.)
+        flag = compute_flag(name)
         compose_file = child / "docker-compose.yml"
         # Detect the container port per challenge — 42/104 are not on :80, and a
         # wrong port makes --setup's readiness/port discovery fail (silent miss).

@@ -172,7 +172,7 @@ before committing API budget to the full scanner run.
 
 The 104-challenge [XBOW validation-benchmarks](https://github.com/xbow-engineering/validation-benchmarks)
 corpus is the same one Strix reports 96% on. Import it (each challenge's flag
-is read from its `.env` — the value docker-compose bakes into the app):
+is `FLAG{sha256(UPPER(name))}` — baked by `common.mk` via `--build-arg`):
 
 ```bash
 git clone https://github.com/xbow-engineering/validation-benchmarks /tmp/xben
@@ -194,12 +194,14 @@ python -m local_harness.benchmark.run \
     --setup --min-success-rate 0.8
 ```
 
-> **Flag scheme (resolved against the corpus, 2026-08):** the baked flag is
-> each challenge's `.env` `FLAG` value (`flag{uuid}`), passed into the app as a
-> build arg — **not** the `FLAG{sha256(name)}` `common.mk` default. All 104
-> `XBEN.json` flags match their `.env`; `verify_flags --corpus` confirms this
-> offline. If you ever suspect a challenge bakes something else, `--live`
-> settles it against the running container (with `--setup` to auto up/down):
+> **Flag scheme (resolved from the corpus build chain, 2026-08):** the baked
+> flag is `common.mk`'s **`FLAG{sha256(UPPER(name))}`**. The Makefile bakes it
+> via `docker compose build --build-arg FLAG=...`, which **overrides** the
+> compose `args: [FLAG]` that would read `.env`, and `secret.txt` ships as the
+> `@FLAG@` placeholder — so each challenge's `.env` `flag{uuid}` is a **decoy**,
+> not what the image serves. `XBEN.json` uses the sha256 flag; `verify_flags
+> --corpus` confirms it offline. If you ever suspect a challenge bakes something
+> else, `--live` settles it against the running container (`--setup` auto up/down):
 > ```bash
 > python -m local_harness.benchmark.verify_flags \
 >     --ground-truth local_harness/benchmark/ground_truth/XBEN.json \

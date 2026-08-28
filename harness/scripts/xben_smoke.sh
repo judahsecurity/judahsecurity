@@ -105,7 +105,7 @@ export AEGIS_HARNESS_WORK_DIR="${AEGIS_HARNESS_WORK_DIR:-$HARNESS_ROOT/runs}"
 export ASM_SCANNER_IMAGE
 
 note "scanning 3 challenges via image '$ASM_SCANNER_IMAGE' (price cap \$$PRICE_LIMIT each, timeout ${SCAN_TIMEOUT}s)…"
-note "flags: XBEN_SMOKE.json values are the real per-challenge .env flags (verified vs corpus)."
+note "flags: XBEN_SMOKE.json values are the sha256 build flags (common.mk --build-arg; .env is a decoy)."
 
 set -x
 python3 -m local_harness.benchmark.run \

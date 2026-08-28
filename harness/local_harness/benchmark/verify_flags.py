@@ -94,8 +94,13 @@ def candidate_flags(challenge_dir: Path, name: str) -> Dict[str, str]:
 
 
 def resolve_flag(challenge_dir: Path, name: str) -> str:
-    """The single authoritative flag: ``.env`` override else the sha256 default."""
-    return _env_flag(challenge_dir) or compute_flag(name)
+    """The single authoritative flag: common.mk's ``FLAG{sha256(UPPER(name))}``.
+
+    The Makefile bakes this via ``--build-arg FLAG=...``, which overrides the
+    compose arg that would read ``.env`` — so the per-challenge ``.env`` value
+    is a decoy, not what the image serves.
+    """
+    return compute_flag(name)
 
 
 # --- Live extraction (best-effort; needs Docker) --------------------------
@@ -177,18 +182,17 @@ def verify_corpus(
                             "detail": f"challenge dir not found under {corpus_root}"})
             continue
 
-        # The baked flag is authoritative: an .env FLAG override else the
-        # sha256 default (corpus common.mk semantics). A ground-truth flag that
-        # equals sha256 but NOT the challenge's real .env value is WRONG, even
-        # though sha256 is a "candidate" — so match against the authoritative
-        # source, allowing a literal token hard-coded in a build file as well.
+        # The baked flag is common.mk's sha256 (built via --build-arg, which
+        # overrides the compose arg that reads .env). So ground truth must equal
+        # the sha256 flag; matching a decoy .env value is NOT a pass. A literal
+        # token hard-coded in a build file is also accepted.
         authoritative = (
             resolve_flag(challenge_dir, name)
             if challenge_dir and challenge_dir.is_dir() else None
         )
         matched = []
         if authoritative is not None and gt_flag == authoritative:
-            matched = ["env" if _env_flag(challenge_dir) else "sha256"]
+            matched = ["sha256"]
         else:
             matched = [src for src, f in candidates.items()
                        if f == gt_flag and src.startswith("file:")]
