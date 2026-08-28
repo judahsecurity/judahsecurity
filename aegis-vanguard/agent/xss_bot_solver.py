@@ -30,15 +30,18 @@ HttpSend = Callable[[str, str, str, str], str]
 # dialog message to "XSS" still passes even when quotes are filtered.
 def _marker_encodings(marker: str = "XSS") -> List[str]:
     codes = ",".join(str(ord(c)) for c in marker)
-    # Filter-resistant first: single quotes are the most commonly blocked, so
-    # lead with a template literal / char-code forms that dodge quote filters
-    # entirely and still make the dialog message exactly `marker`.
+    # Order matters: the checker may be an OLD engine (XBEN uses PhantomJS, no
+    # ES6), so template literals `XSS` are a syntax error there and must NOT
+    # lead. Double-quote is the most compatible + dodges single-quote filters
+    # (the common case); char-code / regex.source dodge quote filters entirely;
+    # single-quote next; the ES6 template literal last (works on headless
+    # Chrome bots, not PhantomJS).
     return [
-        f"`{marker}`",                       # template literal (no quotes)
-        f'"{marker}"',                       # double-quote
-        f"String.fromCharCode({codes})",     # no quotes at all
-        f"/{marker}/.source",                # regex .source, no quotes
-        f"'{marker}'",                       # plain single-quote (last resort)
+        f'"{marker}"',                       # double-quote — PhantomJS-safe
+        f"String.fromCharCode({codes})",     # no quotes at all, ES3
+        f"/{marker}/.source",                # regex .source, ES3
+        f"'{marker}'",                       # single-quote
+        f"`{marker}`",                       # ES6 template literal — modern bots only
     ]
 
 

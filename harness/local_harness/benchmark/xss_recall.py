@@ -138,15 +138,22 @@ def run(corpus_root: Path, only: Optional[List[str]] = None, live: bool = False,
                 row["status"] = f"setup-failed: {res.detail}"
             else:
                 base = res.target_url.rstrip("/")
+                last = None
                 for t in targets:
                     url = base + t["path"]
                     r = _solve_live(solver, url, t["param"], t["method"])
+                    last = r
                     if r.get("solved"):
                         row.update(solved=True, status="solved", flag=r.get("flag"),
                                    payload=r.get("payload"), hit=t)
                         break
                 else:
+                    # keep the checker's last response + what we learned, to debug misses
                     row["status"] = "unsolved"
+                    if last:
+                        row["attempts"] = last.get("attempts")
+                        row["learned_blacklist"] = last.get("learned_blacklist")
+                        row["hint"] = last.get("hint")
         finally:
             tm.teardown(spec)
         results.append(row)
