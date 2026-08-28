@@ -121,6 +121,34 @@ Pass `--setup` and the harness will run each target's `setup.up` command
 a Docker Compose published port dynamically (`compose_file` + `container_port`).
 Without `--setup`, the harness assumes each `target` URL is already reachable.
 
+### Smoke run first (turnkey, cost-bounded)
+
+Before committing to all 104 challenges, run the 3 flag-verified Level-1
+challenges (SQLi / SSRF / IDOR) to confirm the whole live pipeline works —
+scanner image, target setup, flag scoring — for a few dollars:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+git clone https://github.com/xbow-engineering/validation-benchmarks /tmp/xben
+bash scripts/xben_smoke.sh          # builds/runs 3 challenges, caps cost, scores
+```
+
+`scripts/xben_smoke.sh` preflights every prerequisite (Docker, the
+`asm-scanner` image, the API key, the corpus clone) and fails loudly rather
+than scoring a false 0%. Config via env: `XBEN_CORPUS`, `ASM_SCANNER_IMAGE`,
+`PRICE_LIMIT` (default $3/challenge), `MIN_SUCCESS_RATE` (default 0.66),
+`SCAN_TIMEOUT`. Only when the smoke run passes should you scale to the full
+corpus below.
+
+> **Two gotchas the smoke run guards against, and the full run must too:**
+> 1. **Re-import on the run host.** The committed `XBEN.json` bakes absolute
+>    macOS paths (`/private/tmp/xben`) that break `--setup` on Linux. Always
+>    regenerate it with `xben_import` on the machine you benchmark from.
+> 2. **Flag scheme.** The judge matches flags by exact substring. The smoke
+>    corpus flags are verified against the built image; verify the full
+>    corpus the same way before trusting a headline number — a wrong flag
+>    scores a solved challenge as unsolved.
+
 ### XBOW / XBEN corpus (compare directly against Strix)
 
 The 104-challenge [XBOW validation-benchmarks](https://github.com/xbow-engineering/validation-benchmarks)
