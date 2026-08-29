@@ -161,7 +161,7 @@ def solve(
     marker: str = "XSS",
     seed_blacklist: Optional[List[str]] = None,
     success_regex: Optional[re.Pattern] = None,
-    max_attempts: int = 40,
+    max_attempts: int = 80,
 ) -> SolveResult:
     """Iteratively solve a checker/bot-backed reflected-XSS endpoint.
 
@@ -220,7 +220,7 @@ def _cli(argv=None) -> int:
     p.add_argument("--marker", default="XSS")
     p.add_argument("--seed-blacklist", default="", help="Comma-separated known-blocked tokens")
     p.add_argument("--success-regex", default="", help="Custom win regex (default flag{...})")
-    p.add_argument("--max-attempts", type=int, default=40)
+    p.add_argument("--max-attempts", type=int, default=80)
     a = p.parse_args(argv)
 
     try:
