@@ -151,7 +151,16 @@ COPY aegis-vanguard/requirements.txt ./
 RUN python3 -m pip install --break-system-packages -r requirements.txt
 
 # ── Playwright + Chromium for browser-based dynamic testing ─────────
-RUN playwright install --with-deps chromium
+# Install the system deps (reliable) then the browser binary. The browser
+# download from Microsoft's CDN is flaky and large; don't hard-fail the whole
+# image on it — DOM/browser-based tools degrade gracefully when it is absent,
+# and server-side hunting (SQLi/IDOR/SSRF/RCE) does not need it. Retry a few
+# times, then continue with a warning.
+RUN playwright install-deps chromium || true; \
+    for i in 1 2 3; do \
+      playwright install chromium && break || { echo "chromium download attempt $i failed; retrying"; sleep 5; }; \
+    done; \
+    playwright install chromium || echo "WARN: Chromium not installed; browser-based tools skipped at runtime"
 
 # ── Agent files ─────────────────────────────────────────────────────
 COPY aegis-vanguard/asm_bridge.py aegis-vanguard/scanners.py aegis-vanguard/healthcheck.py aegis-vanguard/CLAUDE.md \
