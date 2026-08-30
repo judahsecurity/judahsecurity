@@ -1144,6 +1144,80 @@ def test_file_upload(upload_url: str, timeout: int = 120) -> str:
     return json.dumps(result, default=str)
 
 
+@security_tool(category="exploit", risk="medium", name="idor_probe")
+def idor_probe(
+    target: str,
+    owner_headers_json: str,
+    attacker_headers_json: str,
+    method: str = "GET",
+    body: str = "",
+    include_anon: bool = True,
+) -> str:
+    """Prove (or disprove) horizontal IDOR/BOLA by replaying a request as two identities.
+
+    Horizontal IDOR cannot be proven from a single session — you need the object's
+    OWNER and an ATTACKER. This tool replays each URL as the owner (baseline), the
+    attacker, and anonymously, then compares response bodies and returns a verdict:
+      idor | missing_authentication | isolated | inconclusive.
+
+    Obtain the two header sets first: log in as each test account (or use operator-
+    supplied tokens) and pass their Cookie / Authorization headers. `target` is one or
+    more URLs (newline/comma separated) that address objects OWNED BY the owner identity
+    (e.g. the owner's /api/orders/123). Scope is enforced by guardrails.
+
+    Args:
+        target: Owner-owned object URL(s), newline- or comma-separated.
+        owner_headers_json: JSON headers for the resource owner, e.g. '{"Cookie": "session=B..."}'
+        attacker_headers_json: JSON headers for the attacker identity, e.g. '{"Cookie": "session=A..."}'
+        method: HTTP method to replay (default GET; use PUT/PATCH/DELETE to find write IDOR).
+        body: Optional request body for write methods.
+        include_anon: Also test with no auth to distinguish missing-auth from IDOR (default True).
+    """
+    import scanners
+    result = scanners.run_idor_probe(
+        urls=target,
+        owner_headers_json=owner_headers_json,
+        attacker_headers_json=attacker_headers_json,
+        method=method,
+        body=body,
+        include_anon=include_anon,
+        bridge=_get_bridge(),
+    )
+    return json.dumps(result, default=str)
+
+
+@security_tool(category="recon", risk="safe", name="list_external_tools")
+def list_external_tools() -> str:
+    """List the extra CLI security tools available via run_external_tool.
+
+    Returns each tool's name, what it finds, risk level, and whether its binary is
+    installed in this container. Call this before run_external_tool to see the arsenal.
+    """
+    from agent.tool_bridge import list_tools
+    return json.dumps(list_tools(), default=str)
+
+
+@security_tool(category="exploit", risk="high", name="run_external_tool")
+def run_external_tool(tool: str, target: str, extra_args: str = "") -> str:
+    """Run an allowlisted external CLI security tool against an in-scope target.
+
+    Extends the arsenal with tools not hand-wrapped in Python (e.g. dalfox for XSS,
+    sstimap for SSTI, crlfuzz for CRLF, commix for command injection, ffuf for
+    fuzzing). Only tools in data/external_tools.json are runnable; the command is
+    built as an argv list (never a shell string), extra_args tokens are metachar-
+    filtered, and `target` is scope-checked by guardrails. Call list_external_tools
+    first to see names and install status.
+
+    Args:
+        tool: Tool name from list_external_tools (e.g. "dalfox", "sstimap", "crlfuzz").
+        target: In-scope target URL/host (for ffuf, embed the FUZZ keyword).
+        extra_args: Optional extra CLI flags, e.g. "-w /wordlists/params.txt" (safe tokens only).
+    """
+    from agent.tool_bridge import run_tool
+    result = run_tool(tool, target, extra_args=extra_args)
+    return json.dumps(result, default=str)
+
+
 # =========================================================================
 # Brain Tools — persistent cross-run engagement memory
 # =========================================================================
@@ -1456,6 +1530,8 @@ HUNTER_CORE_TOOLS = [
     "brain_mark_exhausted",
     "brain_add_payload",
     "brain_add_note",
+    "list_external_tools",
+    "run_external_tool",
 ]
 
 

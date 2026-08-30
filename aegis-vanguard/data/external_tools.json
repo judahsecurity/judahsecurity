@@ -1,0 +1,67 @@
+{
+  "_meta": {
+    "description": "Declarative allowlist of extra CLI security tools the fireteam can invoke via run_external_tool. Add a tool here (no code change) to widen the arsenal. Only tools listed here are runnable; argv is built as a list (never a shell string) and the target is scope-checked by the guardrail layer.",
+    "placeholders": "{target} is replaced by the validated target; operator-supplied extra_args are shlex-split, metachar-filtered, and appended (or substituted at {extra})."
+  },
+  "dalfox": {
+    "binary": "dalfox",
+    "description": "Advanced XSS scanner — reflected/DOM/stored, parameter mining, WAF-aware payloads. Complements probe_xss_reflection with deeper param analysis.",
+    "category": "vuln_analysis",
+    "risk": "medium",
+    "argv": ["url", "{target}", "--format", "json", "--no-color", "--silence", "{extra}"],
+    "timeout": 600,
+    "parse": "json_lines",
+    "install_hint": "go install github.com/hahwul/dalfox/v2@latest"
+  },
+  "kxss": {
+    "binary": "kxss",
+    "description": "Fast reflected-parameter finder — reports which parameters reflect unfiltered special characters (XSS candidates). Feed URLs on stdin via extra, or a single {target}.",
+    "category": "vuln_analysis",
+    "risk": "low",
+    "argv": ["{extra}"],
+    "stdin_target": true,
+    "timeout": 300,
+    "parse": "lines",
+    "install_hint": "go install github.com/Emoe/kxss@latest"
+  },
+  "crlfuzz": {
+    "binary": "crlfuzz",
+    "description": "CRLF injection scanner (HTTP response splitting / header injection) — a class not covered by the built-in hunters.",
+    "category": "vuln_analysis",
+    "risk": "medium",
+    "argv": ["-u", "{target}", "-s", "{extra}"],
+    "timeout": 400,
+    "parse": "lines",
+    "install_hint": "go install github.com/dwisiswant0/crlfuzz/cmd/crlfuzz@latest"
+  },
+  "ffuf": {
+    "binary": "ffuf",
+    "description": "Fast web fuzzer — content/parameter/vhost discovery. Use FUZZ keyword in {target} and pass -w wordlist via extra_args.",
+    "category": "recon",
+    "risk": "low",
+    "argv": ["-u", "{target}", "-of", "json", "-o", "-", "-s", "{extra}"],
+    "timeout": 600,
+    "parse": "json",
+    "install_hint": "go install github.com/ffuf/ffuf/v2@latest"
+  },
+  "sstimap": {
+    "binary": "sstimap",
+    "description": "Server-Side Template Injection detection and exploitation across many engines (Jinja2, Twig, Freemarker, etc.).",
+    "category": "exploit",
+    "risk": "high",
+    "argv": ["-u", "{target}", "{extra}"],
+    "timeout": 600,
+    "parse": "raw",
+    "install_hint": "pip install sstimap  (or clone vladko312/SSTImap)"
+  },
+  "commix": {
+    "binary": "commix",
+    "description": "Command-injection detection and exploitation. High risk — confirm scope before running.",
+    "category": "exploit",
+    "risk": "high",
+    "argv": ["--url", "{target}", "--batch", "--output-dir", "{outdir}", "{extra}"],
+    "timeout": 900,
+    "parse": "raw",
+    "install_hint": "pip install commix  (or clone commixproject/commix)"
+  }
+}

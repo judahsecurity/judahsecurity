@@ -41,6 +41,7 @@ API_TOOLS = [
     "discover_parameters",
     "fuzz_directories",
     "send_http_request",
+    "idor_probe",
     "confirm_vulnerability_poc",
     *HUNTER_CORE_TOOLS,
 ]

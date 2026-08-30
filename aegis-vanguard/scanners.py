@@ -4447,3 +4447,128 @@ def read_source_file(
         "end_line": end,
         "content": "".join(selected),
     }
+
+
+# ---------------------------------------------------------------------------
+# Multi-identity IDOR / BOLA differential probe
+# ---------------------------------------------------------------------------
+def run_idor_probe(
+    urls,
+    owner_headers_json: str,
+    attacker_headers_json: str,
+    method: str = "GET",
+    body: str = "",
+    include_anon: bool = True,
+    bridge=None,
+    timeout: int = 20,
+) -> dict:
+    """Differential BOLA/IDOR oracle across two identities.
+
+    Each URL is assumed to address an object OWNED by the *owner* identity.
+    The same request is replayed as the owner (baseline), as the attacker, and
+    (optionally) anonymously, then the bodies are compared to decide whether the
+    attacker can read the owner's data — the proof horizontal IDOR needs.
+    """
+    import json as _json
+    import re as _re
+    from difflib import SequenceMatcher
+
+    _private = _re.compile(
+        r"https?://(127\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.|"
+        r"localhost|::1|0\.0\.0\.0|0x7f|0177\.)",
+        _re.IGNORECASE,
+    )
+
+    def _headers(blob: str) -> dict:
+        if not blob or not blob.strip():
+            return {}
+        try:
+            h = _json.loads(blob)
+            return h if isinstance(h, dict) else {}
+        except (_json.JSONDecodeError, ValueError):
+            return {}
+
+    if isinstance(urls, str):
+        url_list = [u.strip() for u in _re.split(r"[\n,]+", urls) if u.strip()]
+    else:
+        url_list = [str(u).strip() for u in (urls or []) if str(u).strip()]
+
+    owner_h = _headers(owner_headers_json)
+    attacker_h = _headers(attacker_headers_json)
+    if not owner_h:
+        return {"error": "owner_headers_json must be a JSON object with the owner's auth (Cookie/Authorization)"}
+    if not attacker_h:
+        return {"error": "attacker_headers_json must be a JSON object with the attacker's auth (Cookie/Authorization)"}
+
+    try:
+        import httpx
+    except ImportError:
+        return {"error": "httpx not available"}
+
+    def _norm(text: str) -> str:
+        # Strip volatile tokens (csrf, timestamps, uuids) so similarity reflects data, not noise.
+        text = _re.sub(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "", text, flags=_re.I)
+        text = _re.sub(r"\b\d{10,}\b", "", text)
+        text = _re.sub(r"csrf[\"'\s:=]+[\w\-\.]+", "", text, flags=_re.I)
+        return text.strip()
+
+    def _fetch(client, url, headers):
+        try:
+            resp = client.request(method.upper(), url, headers=headers,
+                                  content=body.encode() if body else None)
+            return resp.status_code, resp.text[:12000]
+        except Exception as exc:
+            return None, f"__error__:{exc}"
+
+    results = []
+    summary = {"idor": 0, "missing_authentication": 0, "isolated": 0, "inconclusive": 0, "error": 0}
+
+    with httpx.Client(timeout=timeout, follow_redirects=False, max_redirects=3) as client:
+        for url in url_list:
+            if _private.search(url):
+                results.append({"url": url, "verdict": "error", "note": "internal/loopback blocked"})
+                summary["error"] += 1
+                continue
+
+            o_status, o_body = _fetch(client, url, owner_h)
+            a_status, a_body = _fetch(client, url, attacker_h)
+            anon_status, anon_body = (None, "")
+            if include_anon:
+                anon_status, anon_body = _fetch(client, url, {})
+
+            if o_status is None or a_status is None:
+                results.append({"url": url, "verdict": "error",
+                                "owner_status": o_status, "attacker_status": a_status,
+                                "note": "request failed"})
+                summary["error"] += 1
+                continue
+
+            owner_ok = 200 <= o_status < 300 and len(_norm(o_body)) > 20
+            sim = SequenceMatcher(None, _norm(o_body), _norm(a_body)).ratio() if owner_ok else 0.0
+
+            verdict, note = "inconclusive", ""
+            if include_anon and anon_status is not None and 200 <= anon_status < 300 \
+                    and owner_ok and SequenceMatcher(None, _norm(o_body), _norm(anon_body)).ratio() >= 0.9:
+                verdict = "missing_authentication"
+                note = "resource served with NO auth — missing authentication, not IDOR"
+            elif owner_ok and 200 <= a_status < 300 and sim >= 0.9:
+                verdict = "idor"
+                note = f"attacker read owner's object (body similarity {sim:.2f}) — horizontal IDOR/BOLA confirmed"
+            elif a_status in (401, 403, 404):
+                verdict = "isolated"
+                note = f"attacker correctly denied (HTTP {a_status})"
+            else:
+                note = f"owner={o_status} attacker={a_status} similarity={sim:.2f} — inspect manually"
+
+            summary[verdict] = summary.get(verdict, 0) + 1
+            results.append({
+                "url": url,
+                "verdict": verdict,
+                "owner_status": o_status,
+                "attacker_status": a_status,
+                "anon_status": anon_status,
+                "body_similarity": round(sim, 3),
+                "note": note,
+            })
+
+    return {"probed": len(url_list), "summary": summary, "results": results}

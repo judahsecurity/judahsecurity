@@ -153,6 +153,17 @@ CLI: `--enterprise`, `--no-enterprise`, `--all-specialists`, `--no-api-specialis
 | `wordpress_scan` | wpscan vuln scan | medium |
 | `deep_tls_test` | testssl.sh deep test | medium |
 | `confirm_vulnerability_poc` | Attach PoC evidence + auto-escalate severity | high |
+| `idor_probe` | Multi-identity BOLA/IDOR oracle — replays a request as owner / attacker / anonymous and returns a verdict (idor \| missing_authentication \| isolated). Horizontal IDOR needs two identities; this supplies the differential proof | medium |
+
+### Extensible external arsenal (HexStrike-style)
+| Tool | Function | Risk |
+|------|----------|------|
+| `list_external_tools` | Catalogue the extra CLI tools in `data/external_tools.json` (name, what it finds, install status) | safe |
+| `run_external_tool` | Run an allowlisted external CLI scanner (dalfox, sstimap, crlfuzz, commix, ffuf, …) against an in-scope target | high |
+
+Adding a tool is a one-line edit to `data/external_tools.json` — no Python wrapper.
+The command is built as an argv list (never a shell string), `extra_args` tokens are
+metachar-filtered, and `target` is scope-checked by the guardrail layer.
 
 ### Reporting
 | Tool | Function | Risk |

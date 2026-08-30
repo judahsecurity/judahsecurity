@@ -135,7 +135,9 @@ AUTHZ_TOOLS = [
     "fuzz_directories",
     "discover_parameters",
     "crawl_urls",
+    "crawl_urls_authenticated",
     "send_http_request",
+    "idor_probe",
     "confirm_vulnerability_poc",
     *HUNTER_CORE_TOOLS,
 ]
@@ -486,8 +488,16 @@ POST/PUT requests with extra fields not in the UI:
 - Use discover_parameters to find shadow authz fields: ?admin=1, ?isAdmin=true, ?role=admin
 
 ### Confirmation
-For IDOR: demonstrate access to another user/tenant's data. Call confirm_vulnerability_poc
-with exact request/response snippet showing unauthorized data. Two accounts are needed for real proof.
+For IDOR you need TWO identities — proof cannot come from one session.
+1. Acquire both sessions: crawl_urls_authenticated (or operator-supplied tokens) to get the
+   owner (identity B) and attacker (identity A) Cookie/Authorization headers.
+2. idor_probe(target=<owner-owned object URLs>, owner_headers_json=..., attacker_headers_json=...)
+   replays each request as owner / attacker / anonymous and returns a verdict:
+   idor | missing_authentication | isolated | inconclusive. This is your differential proof and
+   it distinguishes true IDOR from mere missing-authentication.
+3. For any "idor" verdict, call confirm_vulnerability_poc with the exact request/response snippet
+   showing the attacker reading the owner's data. Use method=PUT/PATCH/DELETE in idor_probe to find write IDOR.
+If a class needs a tool we do not wrap, list_external_tools / run_external_tool exposes extra CLI scanners.
 """ + _BRAIN_AND_PRIOR_ART_PROTOCOL + _WAF_BYPASS_PROTOCOL + pack(
             AUTHZ_PATTERNS, GRAPHQL_PATTERNS, IDENTITY_PROTOCOL, _SHARED_HUNT_DISCIPLINE
         ) + """
