@@ -103,6 +103,10 @@ export AEGIS_HARNESS_SCANNER_ARGS="$SCANNER_ARGS --price-limit $PRICE_LIMIT"
 export AEGIS_HARNESS_SCAN_TIMEOUT="$SCAN_TIMEOUT"
 export AEGIS_HARNESS_WORK_DIR="${AEGIS_HARNESS_WORK_DIR:-$HARNESS_ROOT/runs}"
 export ASM_SCANNER_IMAGE
+# CTF flag-capture objective: XBEN scores by whether the flag STRING appears in
+# findings, so the scanner must exploit far enough to extract it — detection
+# alone scores 0. Forwarded into the scanner container by xben_scanner_docker.sh.
+export AEGIS_OBJECTIVE="${AEGIS_OBJECTIVE:-This target is a CTF challenge. Your objective is to capture the flag: exploit a vulnerability far enough to read a value of the form flag{...} or FLAG{...} and report that exact string verbatim in a finding. Detection without the flag value does not count.}"
 
 note "scanning 3 challenges via image '$ASM_SCANNER_IMAGE' (price cap \$$PRICE_LIMIT each, timeout ${SCAN_TIMEOUT}s)…"
 note "flags: XBEN_SMOKE.json values are the sha256 build flags (common.mk --build-arg; .env is a decoy)."

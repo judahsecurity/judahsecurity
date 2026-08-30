@@ -47,7 +47,7 @@ fi
 # Only pass -e VAR when the host has a value. Bare `-e VAR` would otherwise
 # override --env-file with an empty string.
 passthrough=(-e AEGIS_TRACING=false)
-for v in ANTHROPIC_API_KEY OPENAI_API_KEY AEGIS_MODEL AEGIS_LLM_BACKEND; do
+for v in ANTHROPIC_API_KEY OPENAI_API_KEY AEGIS_MODEL AEGIS_LLM_BACKEND AEGIS_OBJECTIVE AEGIS_PRICE_LIMIT; do
   if [ -n "${!v:-}" ]; then
     passthrough+=(-e "$v")
   fi
