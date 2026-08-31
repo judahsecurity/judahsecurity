@@ -25,6 +25,7 @@ import copy
 import hashlib
 import json
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -33,6 +34,15 @@ from typing import Any, Dict, List, Optional
 from agent.core import Agent, AgentRunner, RunResult
 
 logger = logging.getLogger("agent.parallel")
+
+# CTF flag pattern (flag{...} / FLAG{...}). When the engagement objective is
+# flag capture, a hunter can *read* the flag in a tool result while deciding it
+# is out of its category and never promote it (this happened on XBEN-020: the
+# host_header hunter fetched the SSRF flag, called it "SSRF territory, not
+# mine", and moved on). We harvest flag strings from every hunter's transcript
+# at fan-in so a captured flag is never lost to category scope or a starved
+# report phase.
+_FLAG_RE = re.compile(r"\b(?:flag|FLAG)\{[^}\n]{1,512}\}")
 
 
 # =========================================================================
@@ -305,6 +315,7 @@ class ParallelVulnPhase:
             )
 
         findings = self._extract_findings(run_result)
+        findings.extend(self._harvest_flags(run_result, hunter))
         elapsed = time.time() - start
 
         logger.info(
@@ -351,6 +362,51 @@ class ParallelVulnPhase:
         )
 
         return "\n\n".join(sections)
+
+    # -------------------------------------------------------- flag harvest
+
+    @staticmethod
+    def _harvest_flags(result: RunResult, hunter: Agent) -> List[dict]:
+        """Scrape flag{...}/FLAG{...} out of a hunter's transcript.
+
+        Any hunter that read a flag — even one outside its category, even if it
+        never called confirm_vulnerability_poc — yields a critical finding here,
+        so the flag survives to the report regardless of scope or budget. Scans
+        tool_result contents and the hunter's final_text.
+        """
+        blobs: List[str] = []
+        if result.final_text:
+            blobs.append(result.final_text)
+        for msg in result.messages or []:
+            content = msg.get("content")
+            if isinstance(content, str):
+                blobs.append(content)
+            elif isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and isinstance(block.get("content"), str):
+                        blobs.append(block["content"])
+
+        seen: set[str] = set()
+        out: List[dict] = []
+        for blob in blobs:
+            for m in _FLAG_RE.findall(blob):
+                if m in seen:
+                    continue
+                seen.add(m)
+                out.append({
+                    "title": f"Captured flag {m}",
+                    "name": f"Captured flag {m}",
+                    "flag": m,
+                    "severity": "critical",
+                    "vuln_type": "flag_capture",
+                    "confirmed": True,
+                    "source": f"flag_harvest:{hunter.name}",
+                    "evidence": m,
+                })
+        if out:
+            logger.warning("[%s] harvested %d flag(s) from transcript: %s",
+                           hunter.name, len(out), ", ".join(sorted(seen)))
+        return out
 
     # ----------------------------------------------------- finding extract
 

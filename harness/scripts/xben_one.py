@@ -68,10 +68,20 @@ def main() -> int:
                                .replace("127.0.0.1", "host.docker.internal")
     host = url.split("://")[-1].split("/")[0].split(":")[0]
 
+    # Local Docker CTF target: the per-org Lictor rate limit (default 30/min)
+    # is shared across the whole parallel fireteam, so ~17 hunters drain it in
+    # seconds and spend the rest of the run throttled — the single biggest
+    # reason nothing gets confirmed. These are our own containers on localhost;
+    # raise the ceiling so hunters can actually probe. Override with the env.
+    rate_cap = os.environ.get("AEGIS_RATE_CAPACITY", "300")
+    rate_per_min = os.environ.get("AEGIS_RATE_PER_MINUTE", "300")
+
     cmd = [
         "docker", "run", "--rm", "--add-host=host.docker.internal:host-gateway",
         "-e", "ANTHROPIC_API_KEY", "-e", f"AEGIS_OBJECTIVE={OBJECTIVE}",
         "-e", "AEGIS_TRACING=false",
+        "-e", f"AEGIS_RATE_CAPACITY={rate_cap}",
+        "-e", f"AEGIS_RATE_PER_MINUTE={rate_per_min}",
         image, "python3", "run_pentest.py",
         "--target", url, "--scope", host,
         *scanner_args, "--price-limit", str(price), "--verbose",

@@ -128,6 +128,36 @@ def test_deadline_abandons_straggler_without_blocking():
     assert by_name["xss_hunter"].error is None
 
 
+def test_harvest_flag_from_out_of_category_hunter():
+    # Reproduces XBEN-020: a hunter READS the flag in a tool result but never
+    # confirms it (wrong category). The fan-in must still capture it.
+    from agent.parallel_subagents import ParallelVulnPhase
+    flag = "FLAG{6e5d772fb6e28ca52985079acf7bfa46d729870e6bae73166208f1fdcd831667}"
+    msgs = [
+        {"role": "assistant", "content": [{"type": "text", "text": "SSRF territory, not mine."}]},
+        {"role": "user", "content": [{
+            "type": "tool_result", "tool_use_id": "t1",
+            "content": '{"status":200,"body":"<h1>Internal Service</h1> FLAG: ' + flag + '"}',
+        }]},
+    ]
+    rr = RunResult(agent_name="host_header_hunter", messages=msgs, final_text="done",
+                   turns_used=5, tool_calls_made=9)
+    harvested = ParallelVulnPhase._harvest_flags(rr, _FakeAgent("host_header_hunter"))
+    assert len(harvested) == 1
+    assert harvested[0]["flag"] == flag
+    assert harvested[0]["severity"] == "critical"
+    assert harvested[0]["vuln_type"] == "flag_capture"
+
+
+def test_harvest_no_flag_is_noop():
+    from agent.parallel_subagents import ParallelVulnPhase
+    rr = RunResult(agent_name="xss_hunter", messages=[
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t",
+                                       "content": '{"status":404,"body":"Not Found"}'}]},
+    ], final_text="nothing found", turns_used=3, tool_calls_made=4)
+    assert ParallelVulnPhase._harvest_flags(rr, _FakeAgent("xss_hunter")) == []
+
+
 def test_no_deadline_waits_for_all():
     hunters = [_FakeAgent("injection_hunter"), _FakeAgent("xss_hunter")]
     phase = ParallelVulnPhase(runner=_FakeRunner(), hunters=hunters, per_hunter_timeout_sec=None)

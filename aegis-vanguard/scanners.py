@@ -894,10 +894,14 @@ def run_ffuf(target_url: str, bridge: ASMBridge, wordlist: str = "/usr/share/wor
     return findings
 
 
-def run_arjun(target_url: str, bridge: ASMBridge, timeout: int = 300) -> List[str]:
+def run_arjun(target_url: str, bridge: ASMBridge, timeout: int = 60) -> List[str]:
     """HTTP parameter discovery via arjun."""
     if not _tool_available("arjun"):
         logger.error("arjun not installed"); return []
+    # arjun --stable is thorough but slow; on a tiny app it hangs the full
+    # wall clock for no result. Hard-cap so one parameter probe can't eat
+    # minutes of the fireteam budget (a real result returns well under 60s).
+    timeout = min(int(timeout or 60), 60)
     cmd = ["arjun", "-u", target_url, "--stable", "-oJ", "-"]
     result = _run(cmd, timeout=timeout)
     params = []

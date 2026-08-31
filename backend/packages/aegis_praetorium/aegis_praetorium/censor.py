@@ -199,6 +199,29 @@ def _build_default_schemas() -> Dict[str, ToolSchema]:
     ]:
         s[name] = cli_only(name)
 
+    # Structured wrappers (scan_nuclei/scan_nikto) build their own argv from
+    # typed kwargs and do NOT take a raw `args` cli-string. They must be keyed
+    # by their EXACT tool name so validate()'s exact-match lookup wins over the
+    # bare `nuclei`/`nikto` cli-only schemas above (which are for the raw-CLI
+    # path). Without this the canonical-name fallback strips `scan_` → `nuclei`
+    # and rejects every call with "missing required field 'args'".
+    s["scan_nuclei"] = ToolSchema(
+        tool_name="scan_nuclei",
+        fields={
+            "target": FieldSchema(type="url", max_length=2048),
+            "templates": FieldSchema(type="cli_string", required=False, max_length=512),
+            "severity": FieldSchema(type="cli_string", required=False, max_length=128),
+            "timeout": FieldSchema(type="integer", required=False),
+        },
+    )
+    s["scan_nikto"] = ToolSchema(
+        tool_name="scan_nikto",
+        fields={
+            "target": FieldSchema(type="url", max_length=2048),
+            "timeout": FieldSchema(type="integer", required=False),
+        },
+    )
+
     s["wappalyzer"] = ToolSchema(
         tool_name="wappalyzer",
         fields={"args": FieldSchema(type="url", max_length=512)},
@@ -399,12 +422,15 @@ class Censor:
         self._schemas[_canonical_tool(schema.tool_name)] = schema
 
     def get(self, tool_name: str) -> Optional[ToolSchema]:
-        return self._schemas.get(_canonical_tool(tool_name))
+        # Exact name wins over the prefix-stripped canonical name, so a
+        # structured wrapper (scan_nuclei) can override the raw-CLI schema
+        # (nuclei) without disturbing the raw path.
+        return self._schemas.get(tool_name) or self._schemas.get(_canonical_tool(tool_name))
 
     def validate(self, tool_name: str, arguments: Dict[str, Any]) -> CensorVerdict:
         """Validate arguments against the registered schema (or permissive default)."""
         arguments = dict(arguments or {})
-        schema = self._schemas.get(_canonical_tool(tool_name))
+        schema = self._schemas.get(tool_name) or self._schemas.get(_canonical_tool(tool_name))
 
         # Permissive default: still defend against the worst.
         if schema is None:

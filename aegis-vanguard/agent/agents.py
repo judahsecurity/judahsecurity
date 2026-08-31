@@ -265,7 +265,7 @@ def fuzz_directories(target_url: str, wordlist: str = "/usr/share/wordlists/dirb
 
 
 @security_tool(category="recon", risk="low")
-def discover_parameters(target_url: str, timeout: int = 300) -> str:
+def discover_parameters(target_url: str, timeout: int = 60) -> str:
     """Discover hidden HTTP parameters on an endpoint using arjun.
 
     Args:
