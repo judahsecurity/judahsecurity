@@ -1,0 +1,69 @@
+# Aegis Vanguard — code-scan gate for CI/CD.
+#
+# ACTIVATE: copy this file to  .github/workflows/aegis-code-scan.yml  in the repo
+# you want to protect, and add an ANTHROPIC_API_KEY secret. It runs on pull
+# requests, produces SARIF for the GitHub "Code scanning" tab + inline PR
+# annotations, and fails the check when findings meet --fail-on (default: high).
+#
+# The scan step is intentionally pluggable — point it at your chosen Aegis entry
+# (the /code-scan skill, or run_pentest.py --source-dir against a staging URL) so
+# it emits findings.json; ci_scan.py turns that into SARIF + a build gate.
+
+name: Aegis Code Scan
+on:
+  pull_request:
+    paths: ["**/*.py", "**/*.js", "**/*.ts", "**/*.java", "**/*.go", "**/*.rb", "**/*.php"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write   # required to upload SARIF
+
+jobs:
+  aegis-code-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # full history so --diff-base can compute the changed set
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Aegis Vanguard
+        run: pip install -r aegis-vanguard/requirements.txt
+
+      # --- Produce findings.json --------------------------------------------
+      # Replace this step with your scan entry point. It must write findings.json.
+      # Example (SAST phase of the pipeline against a staging deploy):
+      #   python3 aegis-vanguard/run_pentest.py --source-dir "$GITHUB_WORKSPACE" \
+      #     --target "$STAGING_URL" --fast
+      #   cp aegis-vanguard/results/*/latest/findings.json findings.json
+      - name: Scan
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "::warning:: ANTHROPIC_API_KEY not set — emitting empty findings"
+            echo "[]" > findings.json
+          else
+            echo "TODO: wire your Aegis scan entry here; must write findings.json"
+            echo "[]" > findings.json
+          fi
+
+      # --- Gate + SARIF ------------------------------------------------------
+      - name: Gate and emit SARIF
+        run: |
+          python3 aegis-vanguard/ci_scan.py \
+            --findings findings.json \
+            --sarif aegis.sarif \
+            --diff-base "origin/${{ github.base_ref }}" \
+            --source-root "$GITHUB_WORKSPACE" \
+            --fail-on high
+
+      - name: Upload SARIF to code scanning
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: aegis.sarif

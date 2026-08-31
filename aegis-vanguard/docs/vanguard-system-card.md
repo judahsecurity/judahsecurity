@@ -171,6 +171,18 @@ metachar-filtered, and `target` is scope-checked by the guardrail layer.
 | `generate_report` | markdown report generation | safe |
 | `submit_findings_to_platform` | flush findings to ASM | safe |
 
+### CI/CD integration (`ci_scan.py`)
+Turns any scan's `findings.json` into CI-native output:
+- **SARIF 2.1** (`agent/sarif.py`) → GitHub code-scanning tab + inline PR annotations.
+- **Severity gate** (`agent/ci_gate.py`) → non-zero exit when findings meet `--fail-on` (default high).
+- **Diff-scoped** (`--diff-base origin/main`) → gate only on files changed in the PR (keeps DAST/URL findings).
+
+```
+python3 ci_scan.py --findings findings.json --sarif aegis.sarif \
+    --diff-base origin/main --source-root "$PWD" --fail-on high
+```
+Ready-to-activate GitHub Action: `ci/aegis-code-scan.yml` (copy to `.github/workflows/`).
+
 ## Guardrails (enforced at execution layer)
 
 The guardrail engine blocks dangerous operations regardless of what the LLM requests:
