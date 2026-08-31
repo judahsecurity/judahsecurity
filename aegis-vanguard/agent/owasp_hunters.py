@@ -1286,6 +1286,170 @@ def _surface_matches(text: str, patterns: Sequence[str]) -> bool:
     return any(re.search(p, text, re.I) for p in patterns)
 
 
+# ---------------------------------------------------------------------------
+# Aim: rank the always-on core categories for THIS page ("curiosity" router)
+# ---------------------------------------------------------------------------
+#
+# The core fireteam is otherwise sprayed blind: all 17 classes run with equal
+# priority on every target, so on a SQLi login page open_redirect / host_header
+# get the same budget and wall-clock as injection. This scorer reads the recon
+# brief + app profile and ranks which classes the page actually invites, so the
+# pipeline can run the top-N instead of all 17. It is a cheap, deterministic
+# threat-model-as-router — no extra LLM call.
+
+# The core hunters, in create_core_hunters() order.
+CORE_CATEGORY_ORDER = [
+    "injection", "xss", "auth", "authz", "ssrf", "csrf", "cors",
+    "file_upload", "open_redirect", "race_condition", "business_logic",
+    "oauth", "llm_ai", "http_smuggling", "cache_poison", "saml_sso",
+    "host_header",
+]
+
+# Base prior: the high-yield classes worth a look on almost any web app, so a
+# silent page still gets injection/auth/authz/xss coverage. Everything else
+# must be invited by a signal on the page.
+_CORE_BASE_PRIOR = {
+    "injection": 2.0,
+    "auth": 2.0,
+    "authz": 1.5,
+    "xss": 1.5,
+    "csrf": 0.3,
+    "cors": 0.3,
+}
+
+# Per-category page signals. Each distinct matched pattern adds to the score,
+# so a page that clearly invites a class outranks a silent base-prior class.
+_CORE_CATEGORY_SIGNALS = {
+    "injection": [
+        r"\bsql\b", r"\bmysql\b", r"\bpostgres", r"\bsqlite\b", r"\bmariadb\b",
+        r"[?&](id|q|query|search|filter|sort|page|category|name|user)=",
+        r"/(login|signin|search|filter|report|api)\b", r"\bquery\s*param",
+        r"\bform\b", r"\bnosql\b", r"\bmongo", r"\borm\b", r"\bwhere\b",
+    ],
+    "xss": [
+        r"\breflect", r"[?&](q|search|query|name|msg|message|callback|comment)=",
+        r"/(search|comment|profile|feedback|contact|preview)\b",
+        r"\bhtml\b", r"\btemplate\b", r"\brender", r"\binnerhtml\b",
+        r"\bsanitiz", r"user.?input", r"\bcanary\b", r"\bxss\b",
+    ],
+    "auth": [
+        r"/(login|signin|sign-in|auth|register|signup|logout|token|session)\b",
+        r"\bjwt\b", r"\bbearer\b", r"\bcookie\b", r"\bsession\b", r"\bpassword\b",
+        r"\bmfa\b", r"\b2fa\b", r"forgot.?password", r"reset.?password",
+        r"set-cookie", r"\boauth\b", r"\bsso\b",
+    ],
+    "authz": [
+        r"/(user|users|account|accounts|orders?|profile|admin|api)/\w",
+        r"[?&](id|user_id|account_id|uid|order_id)=", r"\bidor\b", r"\bbola\b",
+        r"\brole\b", r"\btenant\b", r"\bworkspace\b", r"\borganization\b",
+        r"\buuid\b", r"/api/v\d", r"\bprivilege", r"\brbac\b",
+    ],
+    "ssrf": [
+        r"[?&](url|uri|target|callback|redirect|image|src|avatar|webhook|proxy|fetch|import|xml|feed|dest)=",
+        r"\bwebhook", r"\bssrf\b", r"pdf.?generat", r"url.?preview",
+        r"image.?proxy", r"import.?from.?url", r"\bfetch\b.*http", r"\bproxy\b",
+    ],
+    "csrf": [
+        r"\bcsrf\b", r"\bsamesite\b", r"state.?chang", r"\bform\b.*\bpost\b",
+        r"anti.?forgery", r"xsrf", r"\bcookie\b",
+    ],
+    "cors": [
+        r"\bcors\b", r"access-control-allow", r"cross-origin",
+        r"/api/\w", r"application/json", r"\bpreflight\b", r"\bacao\b",
+    ],
+    "file_upload": [
+        r"\bupload", r"multipart/form-data", r"[?&]file=", r"\battachment",
+        r"\bavatar\b", r"profile.?pic", r"\bresume\b", r"\bcv\b", r"import.?file",
+        r"\bmedia\b", r"\bdocument", r"\bimage\b.*\bupload",
+    ],
+    "open_redirect": [
+        r"[?&](next|redirect|return|returnto|continue|dest|destination|forward|redir|url|goto)=",
+        r"open.?redirect", r"\blocation:\s*http", r"\bredirect_uri\b",
+    ],
+    "race_condition": [
+        r"\bcoupon\b", r"\bpromo\b", r"\bbalance\b", r"\bwallet\b", r"\bcredit",
+        r"\bcart\b", r"\bcheckout\b", r"\bpurchase\b", r"\bvote\b", r"\blike\b",
+        r"\bredeem\b", r"\btransfer\b", r"gift.?card", r"\binventory\b",
+    ],
+    "business_logic": [
+        r"\bcart\b", r"\bcheckout\b", r"\bprice\b", r"\bquantity\b", r"\border\b",
+        r"\bpayment\b", r"\bplan\b", r"\bsubscription\b", r"\binvite\b",
+        r"\bcoupon\b", r"\bdiscount\b", r"\bworkflow\b", r"\bwizard\b", r"e-?commerce",
+    ],
+    "oauth": [
+        r"\boauth\b", r"/authorize\b", r"/callback\b", r"\bopenid\b",
+        r"\.well-known/openid", r"login.?with", r"\bclient_id\b",
+        r"\bredirect_uri\b", r"\bpkce\b", r"code_challenge", r"\boidc\b",
+    ],
+    "llm_ai": [
+        r"/(chat|ask|query|generate|complete|assistant|copilot|ai|llm)\b",
+        r"\bprompt\b", r"\bchatbot\b", r"\bgpt\b", r"\bclaude\b", r"\bopenai\b",
+        r"\banthropic\b", r"\brag\b", r"\bembedding", r"system.?prompt",
+        r"[?&](prompt|message|input|context)=",
+    ],
+    "http_smuggling": [
+        r"\bcloudflare\b", r"\bnginx\b", r"\bhaproxy\b", r"\bvarnish\b",
+        r"\bapache\b", r"reverse.?proxy", r"load.?balancer", r"\bgateway\b",
+        r"\bcdn\b", r"transfer-encoding", r"\baws\s*alb\b", r"front.?end",
+    ],
+    "cache_poison": [
+        r"\bcdn\b", r"cf-cache", r"x-cache", r"\bvarnish\b", r"\bvia:\s",
+        r"\bage:\s", r"cache-control", r"\bcloudfront\b", r"\bfastly\b",
+        r"\bsurrogate", r"cache.?key",
+    ],
+    "saml_sso": [
+        r"\bsaml\b", r"/sso\b", r"/acs\b", r"samlresponse", r"\bfederation\b",
+        r"\bidp\b", r"login/saml", r"federationmetadata", r"\bshibboleth\b",
+    ],
+    "host_header": [
+        r"forgot.?password", r"reset.?password", r"x-forwarded-host",
+        r"password.?reset", r"email.?link", r"host.?header", r"\bx-host\b",
+        r"absolute.?url",
+    ],
+}
+
+
+def rank_core_categories(recon_brief: str = "", app_profile: str = "") -> List[dict]:
+    """Rank the 17 core categories for this page, most-worth-hunting first.
+
+    Returns a list of {category, score, reasons} sorted by score descending.
+    Score = base prior (high-yield classes) + one point per distinct page
+    signal matched. A page that clearly invites a class (e.g. an /oauth flow)
+    outscores a silent base-prior class; a class with neither prior nor signal
+    scores 0 and is the first to be dropped when the fireteam is capped.
+    """
+    blob = "\n".join(t for t in (recon_brief, app_profile) if t)
+    ranked: List[dict] = []
+    for cat in CORE_CATEGORY_ORDER:
+        reasons = [
+            p for p in _CORE_CATEGORY_SIGNALS.get(cat, [])
+            if re.search(p, blob, re.I)
+        ] if blob else []
+        score = _CORE_BASE_PRIOR.get(cat, 0.0) + float(len(reasons))
+        ranked.append({"category": cat, "score": round(score, 2), "reasons": reasons})
+    # Stable sort: score desc, then original core order for ties.
+    ranked.sort(key=lambda r: (-r["score"], CORE_CATEGORY_ORDER.index(r["category"])))
+    return ranked
+
+
+def select_core_categories(
+    recon_brief: str = "",
+    app_profile: str = "",
+    max_core_hunters: Optional[int] = None,
+) -> tuple[list[str], list[dict]]:
+    """Pick which core categories to run given an optional cap.
+
+    Returns (selected_categories, full_ranking). With no cap (or a cap >= the
+    number of core categories) every category is selected — back-compatible
+    with the blind-spray behaviour. With a cap, the top-N by score are kept.
+    """
+    ranking = rank_core_categories(recon_brief, app_profile)
+    if not max_core_hunters or max_core_hunters >= len(CORE_CATEGORY_ORDER):
+        return [r["category"] for r in ranking], ranking
+    selected = [r["category"] for r in ranking[:max_core_hunters]]
+    return selected, ranking
+
+
 def detect_surface_signals(*texts: str) -> dict:
     """Return which specialist packs should activate from recon/app text."""
     blob = "\n".join(t for t in texts if t)
@@ -1309,6 +1473,7 @@ def create_hunters_for_engagement(
     include_api_framework: Optional[bool] = None,
     include_enterprise: Optional[bool] = None,
     force_all_specialists: bool = False,
+    max_core_hunters: Optional[int] = None,
 ) -> List[Agent]:
     """Build core hunters + surface-triggered API/framework/enterprise packs.
 
@@ -1320,6 +1485,11 @@ def create_hunters_for_engagement(
         include_enterprise: True=all enterprise, False=none,
             None=signal-selected (default).
         force_all_specialists: activate every specialist regardless of signals.
+        max_core_hunters: cap the always-on core fireteam to the top-N
+            categories for this page (see rank_core_categories). None or a
+            value >= the core count keeps every core hunter (blind-spray,
+            back-compatible). Surface-triggered specialists are unaffected —
+            they already activate only on real signals.
     """
     from agent.api_framework_hunters import (
         create_aspnet_hunter,
@@ -1343,6 +1513,18 @@ def create_hunters_for_engagement(
     )
 
     hunters = create_core_hunters(max_turns=max_turns)
+
+    # Aim: keep only the top-N core categories for this page when capped.
+    if max_core_hunters and max_core_hunters < len(CORE_CATEGORY_ORDER):
+        selected, _ranking = select_core_categories(
+            recon_brief, app_profile, max_core_hunters=max_core_hunters,
+        )
+        keep = set(selected)
+        hunters = [
+            h for h in hunters
+            if HUNTER_CATEGORIES.get(h.name, h.name) in keep
+        ]
+
     signals = detect_surface_signals(recon_brief, app_profile)
     narrow = max(15, max_turns // 2)
     mid = max(20, max_turns - 10)

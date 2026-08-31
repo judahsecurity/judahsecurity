@@ -128,6 +128,7 @@ class ParallelVulnPhase:
         runner: AgentRunner,
         hunters: List[Agent],
         max_workers: Optional[int] = None,
+        per_hunter_timeout_sec: Optional[float] = None,
     ):
         if not hunters:
             raise ValueError("ParallelVulnPhase requires at least one hunter agent")
@@ -135,6 +136,14 @@ class ParallelVulnPhase:
         self.hunters = hunters
         # Default: one worker per hunter so none queue behind each other.
         self.max_workers = max_workers or len(hunters)
+        # Wall-clock deadline for the whole phase. Because hunters run
+        # concurrently, each should finish within its own budget, so this
+        # doubles as a per-hunter ceiling: once it elapses we stop waiting on
+        # stragglers, take what finished, and move on. Prevents one hung tool
+        # call (nuclei/ffuf/a slow probe) from holding the phase for 30+ min.
+        self.per_hunter_timeout_sec = (
+            float(per_hunter_timeout_sec) if per_hunter_timeout_sec else None
+        )
         self._merge_lock = threading.Lock()
 
     # --------------------------------------------------------------- run()
@@ -165,10 +174,14 @@ class ParallelVulnPhase:
             hunters=[h.name for h in self.hunters],
             max_workers=self.max_workers,
         ):
-            with concurrent.futures.ThreadPoolExecutor(
+            # Not a `with` block: the executor's context-manager exit calls
+            # shutdown(wait=True), which would re-block on abandoned stragglers
+            # and defeat the deadline. We shut down without waiting in finally.
+            pool = concurrent.futures.ThreadPoolExecutor(
                 max_workers=self.max_workers,
                 thread_name_prefix="owasp-hunter",
-            ) as pool:
+            )
+            try:
                 futures = {
                     pool.submit(
                         self._run_one_hunter,
@@ -179,12 +192,41 @@ class ParallelVulnPhase:
                     ): hunter
                     for hunter in self.hunters
                 }
-                for fut in concurrent.futures.as_completed(futures):
-                    hunter = futures[fut]
-                    try:
-                        hunter_results.append(fut.result())
-                    except Exception as e:  # noqa: BLE001
-                        logger.exception("Hunter %s crashed", hunter.name)
+                try:
+                    for fut in concurrent.futures.as_completed(
+                        futures, timeout=self.per_hunter_timeout_sec
+                    ):
+                        hunter = futures[fut]
+                        try:
+                            hunter_results.append(fut.result())
+                        except Exception as e:  # noqa: BLE001
+                            logger.exception("Hunter %s crashed", hunter.name)
+                            hunter_results.append(
+                                HunterResult(
+                                    name=hunter.name,
+                                    category=_category_of(hunter),
+                                    findings=[],
+                                    tool_calls=0,
+                                    turns_used=0,
+                                    elapsed_sec=0.0,
+                                    error=str(e),
+                                )
+                            )
+                except concurrent.futures.TimeoutError:
+                    # Deadline hit: record hunters still running as timed-out and
+                    # stop blocking on them. Their threads can't be force-killed,
+                    # but the pipeline proceeds and their spend is bounded by the
+                    # runner's fireteam budget cap (they trip it at their next
+                    # turn boundary and return). Cancel any not yet started.
+                    done = {f for f in futures if f.done()}
+                    for fut, hunter in futures.items():
+                        if fut in done:
+                            continue
+                        fut.cancel()
+                        logger.warning(
+                            "[%s] timed out after %.0fs — abandoning straggler",
+                            hunter.name, self.per_hunter_timeout_sec or 0.0,
+                        )
                         hunter_results.append(
                             HunterResult(
                                 name=hunter.name,
@@ -192,10 +234,13 @@ class ParallelVulnPhase:
                                 findings=[],
                                 tool_calls=0,
                                 turns_used=0,
-                                elapsed_sec=0.0,
-                                error=str(e),
+                                elapsed_sec=self.per_hunter_timeout_sec or 0.0,
+                                error="timed_out",
                             )
                         )
+            finally:
+                # wait=False so we don't re-block on abandoned stragglers.
+                pool.shutdown(wait=False, cancel_futures=True)
 
         merged = self._merge_findings(hunter_results)
         wall_elapsed = time.time() - wall_start
