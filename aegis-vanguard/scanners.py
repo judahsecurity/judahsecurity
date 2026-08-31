@@ -4181,6 +4181,8 @@ def run_swagger_spec_discovery(
     # Submit findings to ASM bridge
     for spec_info in discovered_specs:
         bridge.submit_finding(Finding(
+            type="vulnerability", source="swagger_spec_discovery",
+            target=spec_info["url"],
             host=parsed_target.netloc,
             title=f"Exposed API Spec: {spec_info.get('title') or spec_info['url']}",
             description=(
@@ -4190,7 +4192,6 @@ def run_swagger_spec_discovery(
                 f"discovered via {spec_info.get('phase', 'unknown')} phase)"
             ),
             severity="info",
-            tool="swagger_spec_discovery",
             url=spec_info["url"],
         ))
     bridge.flush()
@@ -4292,11 +4293,12 @@ def run_autoswagger(
                                 "severity": severity,
                             })
                             bridge.submit_finding(Finding(
+                                type="vulnerability", source="autoswagger",
+                                target=ep.get("url", ""),
                                 host=host,
                                 title=f"API Data Exposure: {ep.get('method','GET')} {ep.get('url','')}",
                                 description=desc,
                                 severity=severity,
-                                tool="autoswagger",
                                 url=ep.get("url", ""),
                             ))
                     bridge.flush()
@@ -4387,11 +4389,12 @@ def run_autoswagger(
                     if is_large:
                         desc_parts.append(f"  Large JSON response ({len(body)} bytes) — potential bulk data exposure")
                     bridge.submit_finding(Finding(
+                        type="vulnerability", source="autoswagger_native",
+                        target=url,
                         host=host,
                         title=f"API Data Exposure: {method} {full_path}",
                         description="\n".join(desc_parts),
                         severity=severity,
-                        tool="autoswagger_native",
                         url=url,
                     ))
             except Exception as exc:
