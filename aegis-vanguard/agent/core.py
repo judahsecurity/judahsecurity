@@ -35,6 +35,7 @@ except Exception:  # pragma: no cover - optional until Phase 2 deps installed
 from agent.tools import ToolDef, ToolRegistry
 from agent.guardrails import GuardrailEngine
 from agent.tracing import Tracer, TokenUsage
+from agent.flag_oracle import get_flag_oracle
 from agent.session_ops import compact_message_tool_results, over_budget
 
 # Cloud billing / quota / auth signals (Anthropic, OpenAI, etc.) that should
@@ -802,6 +803,15 @@ class AgentRunner:
                 span.attributes["duration_sec"] = round(elapsed, 1)
                 span.attributes["result_length"] = len(result)
             logger.info(f"[{agent.name}] {tool_name} completed in {elapsed:.1f}s ({len(result)} chars)")
+
+        # ── Flag oracle: ground-truth capture from the REAL tool response ──
+        # Scan the raw result (before Augur may truncate it) for benchmark/CTF
+        # flags. This is the only place a "flag captured" claim can be earned —
+        # blocked calls returned above, and agent prose never reaches here.
+        try:
+            get_flag_oracle().scan(tool_name, arguments, result)
+        except Exception as e:  # never let verification break the hunt
+            logger.debug("flag oracle scan failed for %s: %s", tool_name, e)
 
         # ── Aegis Praetorium: Lictor post-hooks (audit log, hard-cap clip) ──
         if _AEGIS_AVAILABLE and get_praetorium_config().lictor_enabled:
