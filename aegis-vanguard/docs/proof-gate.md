@@ -39,6 +39,34 @@ run summary with a deterministic `## Proof Gate` table (generated, not LLM
 prose). On the hallucinated-report failure mode — findings with no tool-produced
 evidence — every row is `NEEDS_EVIDENCE`, which is the point.
 
+## Documenting findings
+
+The run writes two documentation artifacts (the names from CLAUDE.md) into the
+output dir, each finding carrying its gate verdict:
+
+- `findings_<session>.json` — structured: every finding + `verification`
+  (status, proof token ids, reason).
+- `VULN-FINDINGS_<session>.md` — human-readable, grouped by severity, with a
+  ✅ CONFIRMED / ⚠️ NEEDS_EVIDENCE badge and the proof tokens per finding.
+
+`build_findings_document(findings, target=...)` and `findings_markdown(doc)`
+build these; both are deterministic (no LLM prose).
+
+## Submission governance
+
+At `ASMBridge.flush()`, every `type == "vulnerability"` finding is stamped with
+its gate verdict before it is sinked or submitted:
+
+- a `proof:confirmed` / `proof:needs_evidence` tag and the verdict in
+  `raw_data.verification`;
+- a finding that *claims* `confidence: "confirmed"` but has no proof token is
+  demoted to `confidence: "needs_evidence"` (tagged `downgraded:no_proof`) —
+  **impact/severity is left intact; only the trust axis is corrected**, so an
+  unproven finding can never leave the harness labelled confirmed.
+
+Inventory findings (subdomain/port/url/…) are untouched. Disable with
+`AEGIS_PROOF_GATE_SUBMISSION=false`.
+
 ## Object-id IDOR caveat
 
 `set_query` object-id swaps are recorded but **not** auto-verified: same-vs-

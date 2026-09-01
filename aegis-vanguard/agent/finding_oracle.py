@@ -249,6 +249,79 @@ def grade_findings(findings: List[dict],
     }
 
 
+_SEVERITY_ORDER = ["critical", "high", "medium", "low", "info", "unknown"]
+
+
+def build_findings_document(findings: List[dict],
+                            target: Optional[str] = None,
+                            proofs: Optional[List[ProofToken]] = None) -> dict:
+    """Grade every finding and produce the documented-findings record.
+
+    This is the content of the `findings.json` artifact: each finding carries
+    its gate verdict (CONFIRMED + proof tokens, or NEEDS_EVIDENCE), so a
+    documented finding cannot claim more certainty than a tool actually earned.
+    """
+    if proofs is None:
+        proofs = get_proof_ledger().verified() + _flag_proofs()
+
+    documented = []
+    for f in findings or []:
+        v = grade_finding(f, proofs)
+        documented.append({
+            "title": f.get("title") or f.get("name") or "(untitled)",
+            "severity": str(f.get("severity", "unknown")).lower(),
+            "vuln_type": f.get("vuln_type") or f.get("type"),
+            "endpoint": f.get("endpoint") or f.get("url") or f.get("location") or "",
+            "description": f.get("description") or f.get("evidence") or "",
+            "claimed_confidence": f.get("confidence")
+            or ("cross_validated" if f.get("cross_validated") else None),
+            "verification": v.to_dict(),
+        })
+    confirmed = sum(1 for d in documented if d["verification"]["confirmed"])
+    return {
+        "target": target,
+        "total": len(documented),
+        "confirmed": confirmed,
+        "needs_evidence": len(documented) - confirmed,
+        "verified_proof_tokens": [t.to_dict() for t in proofs],
+        "findings": documented,
+    }
+
+
+def findings_markdown(doc: dict) -> str:
+    """Render the VULN-FINDINGS.md document, grouped by severity, gate-aware."""
+    lines = [
+        f"# Findings — {doc.get('target') or 'assessment'}",
+        "",
+        f"**{doc['confirmed']} of {doc['total']} findings carry a verified proof "
+        f"token** ({doc['needs_evidence']} NEEDS_EVIDENCE, reported for triage).",
+        "",
+    ]
+    by_sev = {s: [] for s in _SEVERITY_ORDER}
+    for d in doc["findings"]:
+        by_sev.setdefault(d["severity"], by_sev["unknown"]).append(d)
+    for sev in _SEVERITY_ORDER:
+        group = by_sev.get(sev) or []
+        if not group:
+            continue
+        lines.append(f"## {sev.capitalize()} ({len(group)})")
+        lines.append("")
+        for d in group:
+            v = d["verification"]
+            badge = "✅ CONFIRMED" if v["confirmed"] else "⚠️ NEEDS_EVIDENCE"
+            proof = ", ".join(v["proof_token_ids"]) or "none"
+            lines.append(f"### {d['title']}  — {badge}")
+            if d["endpoint"]:
+                lines.append(f"- **Endpoint:** `{d['endpoint']}`")
+            lines.append(f"- **Proof:** {proof}")
+            if not v["confirmed"]:
+                lines.append(f"- **Gate:** {v['reason']}")
+            if d["description"]:
+                lines.append(f"- {str(d['description'])[:500]}")
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
 def proof_gate_markdown(report: dict) -> str:
     """Deterministic report section — generated, not LLM prose."""
     lines = [

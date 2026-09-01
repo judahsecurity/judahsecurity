@@ -359,6 +359,12 @@ class ASMBridge:
         batch = self._buffer[:]
         self._buffer.clear()
 
+        # Governance: stamp each vulnerability finding with the proof gate's
+        # verdict before it is documented or submitted, so an unproven finding
+        # can never leave the harness labelled "confirmed".
+        for f in batch:
+            self._apply_proof_gate(f)
+
         # Optional local sink: append every flushed finding as a JSON line.
         # Enabled by the benchmarking/batch harness via AEGIS_FINDINGS_SINK so a
         # run produces a stable, machine-readable artifact independent of the
@@ -408,6 +414,48 @@ class ASMBridge:
             ],
         }
         return self._post("/api/v1/ingest/heartbeat", payload)
+
+    def _apply_proof_gate(self, finding: Finding) -> None:
+        """Tag a vulnerability finding with its proof-gate verdict.
+
+        Non-destructive by default: adds a `proof:confirmed` / `proof:needs_evidence`
+        tag and stashes the verdict in raw_data. The one governance action is to
+        demote a finding that *claims* confidence "confirmed" but has no proof
+        token down to "needs_evidence" — impact (severity) is left intact; only
+        the trust axis (confidence) is corrected. Disable with
+        AEGIS_PROOF_GATE_SUBMISSION=false.
+        """
+        if os.environ.get("AEGIS_PROOF_GATE_SUBMISSION", "true").lower() == "false":
+            return
+        if getattr(finding, "type", "") != "vulnerability":
+            return
+        try:
+            from agent.finding_oracle import grade_finding
+            verdict = grade_finding(finding.to_dict())
+        except Exception as e:  # never let the gate break submission
+            logger.debug("proof gate skipped: %s", e)
+            return
+
+        tag = "proof:confirmed" if verdict.confirmed else "proof:needs_evidence"
+        try:
+            if hasattr(finding, "tags") and isinstance(finding.tags, list):
+                if tag not in finding.tags:
+                    finding.tags.append(tag)
+            if hasattr(finding, "raw_data"):
+                rd = dict(finding.raw_data or {})
+                rd["verification"] = verdict.to_dict()
+                finding.raw_data = rd
+            claimed = str(getattr(finding, "confidence", "")).lower()
+            if not verdict.confirmed and claimed == "confirmed":
+                finding.confidence = "needs_evidence"
+                if hasattr(finding, "tags") and isinstance(finding.tags, list) \
+                        and "downgraded:no_proof" not in finding.tags:
+                    finding.tags.append("downgraded:no_proof")
+                self._stats["gate_downgraded"] = self._stats.get("gate_downgraded", 0) + 1
+                logger.info("proof gate: '%s' had no proof token → confidence "
+                            "demoted to needs_evidence", getattr(finding, "title", ""))
+        except Exception as e:
+            logger.debug("proof gate tagging failed: %s", e)
 
     def _write_sink(self, batch: List[Finding]) -> None:
         """Append findings to the AEGIS_FINDINGS_SINK JSONL file if configured."""

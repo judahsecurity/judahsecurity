@@ -16,6 +16,8 @@ from agent.finding_oracle import (
     NEEDS_EVIDENCE,
     ProofLedger,
     ProofToken,
+    build_findings_document,
+    findings_markdown,
     grade_finding,
     grade_findings,
     normalize_subject,
@@ -105,6 +107,36 @@ class GradeFindingsTest(unittest.TestCase):
         report = grade_findings(findings, [])
         self.assertEqual(report["confirmed"], 0)
         self.assertEqual(report["needs_evidence"], 7)
+
+
+class DocumentTest(unittest.TestCase):
+    def test_build_and_render(self):
+        proofs = [_tok("http://t/account", tid="proof-1", detail="BAC")]
+        findings = [
+            {"title": "BAC on /account", "endpoint": "/account", "severity": "High",
+             "confidence": "confirmed", "description": "returns other users' data"},
+            {"title": "Missing headers", "endpoint": "/", "severity": "low"},
+        ]
+        doc = build_findings_document(findings, target="app.example.com", proofs=proofs)
+        self.assertEqual((doc["total"], doc["confirmed"], doc["needs_evidence"]), (2, 1, 1))
+        # severity normalized to lowercase for grouping
+        self.assertEqual(doc["findings"][0]["severity"], "high")
+
+        md = findings_markdown(doc)
+        self.assertIn("# Findings — app.example.com", md)
+        self.assertIn("## High (1)", md)
+        self.assertIn("✅ CONFIRMED", md)
+        self.assertIn("## Low (1)", md)
+        self.assertIn("⚠️ NEEDS_EVIDENCE", md)
+        # NEEDS_EVIDENCE finding shows the gate reason
+        self.assertIn("no machine-checkable proof token", md)
+
+    def test_hallucinated_document_marks_all_needs_evidence(self):
+        doc = build_findings_document(
+            [{"title": "SSRF", "endpoint": "/x", "severity": "critical",
+              "confidence": "confirmed"}], proofs=[])
+        self.assertEqual(doc["confirmed"], 0)
+        self.assertFalse(doc["findings"][0]["verification"]["confirmed"])
 
 
 class LedgerTest(unittest.TestCase):
