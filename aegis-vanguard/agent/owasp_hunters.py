@@ -99,6 +99,8 @@ INJECTION_TOOLS = [
     "scan_nuclei",
     "fuzz_directories",
     "send_http_request",
+    "oob_probe",
+    "oob_check",
     "confirm_vulnerability_poc",
     *HUNTER_CORE_TOOLS,
 ]
@@ -150,6 +152,8 @@ SSRF_TOOLS = [
     "crawl_urls",
     "discover_api_surface",
     "send_http_request",
+    "oob_probe",
+    "oob_check",
     "confirm_vulnerability_poc",
     *HUNTER_CORE_TOOLS,
 ]
@@ -562,9 +566,13 @@ When server-side fetch is confirmed (DNS/HTTP OOB callback):
 - **Webhook configs**: point webhook URL to internal service
 - **OAuth callback**: test if callback URL is fetched server-side
 
-### OOB confirmation
-Use send_http_request to send probes with a DNS callback URL (Burp Collaborator, interactsh)
-to confirm blind SSRF before claiming it as a finding.
+### OOB confirmation — earn a proof token
+For blind SSRF (no readable response) prove it with the OOB oracle, do not assert it:
+1. oob_probe(label="ssrf <endpoint>") → returns a unique payload_url.
+2. Inject payload_url into the sink via send_http_request (?url=<payload_url>, etc.).
+3. oob_check(probe_id). `fired: true` registers a verified `oob` proof token and
+   the finding passes the proof gate; no callback → keep it as needs-evidence.
+This beats a bare DNS callback URL because the hit is correlated to your nonce.
 
 ### Confirmation
 call confirm_vulnerability_poc with the SSRF endpoint, payload, and evidence

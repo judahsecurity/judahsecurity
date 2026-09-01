@@ -23,6 +23,7 @@ from agent.http_session import (
     response_from_scanner_dict,
 )
 from agent.finding_oracle import register_proof
+from agent.oob_oracle import get_oob_oracle
 
 logger = logging.getLogger("agent.agents")
 
@@ -1179,6 +1180,34 @@ def session_transactions(limit: int = 20) -> str:
     """List recently recorded HTTP transactions (id, method, url, status) so a
     request can be picked by id for replay_request."""
     return json.dumps(get_session_store().summary(limit=limit), default=str)
+
+
+@security_tool(category="exploit", risk="medium")
+def oob_probe(label: str = "") -> str:
+    """Mint a unique out-of-band callback URL to PROVE a blind vulnerability
+    (blind SSRF / RCE / XXE / SSTI — anything with no readable response).
+
+    Inject the returned `payload_url` into the suspected sink (e.g.
+    ?url=<payload_url>, an XXE SYSTEM entity, `curl <payload_url>`), then call
+    oob_check(probe_id). A recorded callback is machine-checkable proof that
+    server-side code reached a host you control — it registers an `oob` proof
+    token, so the finding can pass the proof gate. `label` should name the
+    target/sink (e.g. "ssrf /redirect.php?url").
+    """
+    probe = get_oob_oracle().register_probe(label=label)
+    return json.dumps({
+        "probe_id": probe.probe_id,
+        "payload_url": probe.payload_url,
+        "next": "inject payload_url into the sink, then call oob_check(probe_id)",
+    })
+
+
+@security_tool(category="exploit", risk="safe")
+def oob_check(probe_id: str) -> str:
+    """Poll for a callback on an oob_probe. `fired: true` means the blind vuln
+    is proven — it registers a verified `oob` proof token. Poll again after a
+    few seconds if not yet fired (some sinks are asynchronous)."""
+    return json.dumps(get_oob_oracle().check(probe_id), default=str)
 
 
 @security_tool(category="exploit", risk="medium")

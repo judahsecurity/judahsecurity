@@ -14,7 +14,7 @@ harness and to a human.
 | `flag` | `agent.flag_oracle` | the expected/benchmark flag appeared in a real tool response |
 | `response_diff` | `replay_request` | an identity change (strip_auth / set_headers) still returned the same 2xx body — the broken-access-control signature |
 | `browser_exec` | `test_dom_xss` | a payload actually executed JS in a real Chromium (dialog fired / `window.__vanguard_xss` set) |
-| `oob` | *(reserved)* | an out-of-band callback fired with a unique nonce — lands with the OOB oracle |
+| `oob` | `oob_probe` + `oob_check` (`agent.oob_oracle`) | a correlated out-of-band callback fired to a host we control — proof for blind SSRF/RCE/XXE/SSTI. See `docs/oob-oracle.md`. |
 
 A token counts only when `verified=True`; producers set that flag only when the
 evidence meets the bar, so registering a token *is* the proof assertion.
