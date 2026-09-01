@@ -14,6 +14,14 @@ from typing import List
 
 from agent.core import Agent
 from agent.tools import security_tool, ToolRegistry
+from agent.http_session import (
+    HttpRequest,
+    apply_mutations,
+    get_backend,
+    get_session_store,
+    response_diff,
+    response_from_scanner_dict,
+)
 
 logger = logging.getLogger("agent.agents")
 
@@ -1053,7 +1061,92 @@ def send_http_request(
         follow_redirects=follow_redirects,
         bridge=_get_bridge(),
     )
+    # Record into the session store so this request can later be replayed under
+    # a mutated identity (see replay_request) — the substrate for authz/IDOR/CSRF
+    # proof. Never let bookkeeping break the tool.
+    try:
+        headers = json.loads(headers_json) if headers_json and headers_json.strip() else {}
+    except (ValueError, TypeError):
+        headers = {}
+    try:
+        txn = get_session_store().record(
+            HttpRequest(method=method, url=url, headers=headers, body=body),
+            response_from_scanner_dict(result),
+        )
+        if isinstance(result, dict):
+            result = {**result, "transaction_id": txn.id}
+    except Exception as e:
+        logger.debug("session record failed for %s %s: %s", method, url, e)
     return json.dumps(result, default=str)
+
+
+@security_tool(category="exploit", risk="medium")
+def replay_request(
+    transaction_id: str = "",
+    method: str = "",
+    url: str = "",
+    headers_json: str = "{}",
+    body: str = "",
+    mutations_json: str = "{}",
+) -> str:
+    """Replay a request under a mutation and diff the response — the proof
+    primitive for broken access control / IDOR / CSRF.
+
+    Give a recorded `transaction_id` (from send_http_request or
+    session_transactions) OR an inline request (method+url+headers_json+body),
+    plus `mutations_json` describing how to change the identity/parameters:
+
+      {"strip_auth": true}                          # replay as nobody
+      {"set_headers": {"Cookie": "session=<victim>"}}  # replay as another user
+      {"set_query": {"id": "1002"}}                 # IDOR: another object id
+
+    Returns the original response, the mutated response, and a structured diff.
+    A near-identical 200 under a changed/absent identity is the signature of
+    broken access control — the two responses are the evidence.
+    """
+    store = get_session_store()
+    backend = get_backend()
+
+    base_txn = store.get(transaction_id) if transaction_id else None
+    if base_txn is not None:
+        base_req = base_txn.request
+        base_resp = base_txn.response
+    else:
+        if not url:
+            return json.dumps({"error": "provide transaction_id or method+url"})
+        try:
+            headers = json.loads(headers_json) if headers_json and headers_json.strip() else {}
+        except (ValueError, TypeError):
+            return json.dumps({"error": f"headers_json is not valid JSON: {headers_json[:120]}"})
+        base_req = HttpRequest(method=method or "GET", url=url, headers=headers, body=body)
+        base_txn = store.exchange(backend, base_req, label="replay:baseline")
+        base_resp = base_txn.response
+
+    try:
+        mutations = json.loads(mutations_json) if mutations_json and mutations_json.strip() else {}
+    except (ValueError, TypeError):
+        return json.dumps({"error": f"mutations_json is not valid JSON: {mutations_json[:120]}"})
+
+    mutated_req = apply_mutations(base_req, mutations)
+    mutated_txn = store.exchange(backend, mutated_req, label="replay:mutated")
+    diff = response_diff(base_resp, mutated_txn.response)
+
+    return json.dumps({
+        "backend": backend.name,
+        "mutation": mutations,
+        "original": {"transaction_id": base_txn.id, "status": base_resp.status,
+                     "url": base_req.url},
+        "mutated": {"transaction_id": mutated_txn.id,
+                    "status": mutated_txn.response.status, "url": mutated_req.url},
+        "diff": diff,
+    }, default=str)
+
+
+@security_tool(category="recon", risk="safe")
+def session_transactions(limit: int = 20) -> str:
+    """List recently recorded HTTP transactions (id, method, url, status) so a
+    request can be picked by id for replay_request."""
+    return json.dumps(get_session_store().summary(limit=limit), default=str)
 
 
 @security_tool(category="exploit", risk="medium")

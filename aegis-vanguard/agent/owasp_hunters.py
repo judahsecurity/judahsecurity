@@ -125,6 +125,8 @@ AUTH_TOOLS = [
     "check_subdomain_takeover",
     "crawl_urls_authenticated",
     "send_http_request",
+    "session_transactions",
+    "replay_request",
     "confirm_vulnerability_poc",
     *HUNTER_CORE_TOOLS,
 ]
@@ -136,6 +138,8 @@ AUTHZ_TOOLS = [
     "discover_parameters",
     "crawl_urls",
     "send_http_request",
+    "session_transactions",
+    "replay_request",
     "confirm_vulnerability_poc",
     *HUNTER_CORE_TOOLS,
 ]
@@ -156,6 +160,8 @@ CSRF_TOOLS = [
     "crawl_urls",
     "discover_api_surface",
     "send_http_request",
+    "session_transactions",
+    "replay_request",
     "confirm_vulnerability_poc",
     *HUNTER_CORE_TOOLS,
 ]
@@ -485,7 +491,15 @@ POST/PUT requests with extra fields not in the UI:
 - Regular user calling admin-only endpoints: /api/admin/users, /api/internal/config
 - Use discover_parameters to find shadow authz fields: ?admin=1, ?isAdmin=true, ?role=admin
 
-### Confirmation
+### Confirmation — replay for machine-checkable proof
+Do not assert IDOR/BAC from a single request. Prove it with a replay diff:
+1. Send the authorized request (send_http_request) — note its transaction_id.
+2. replay_request(transaction_id=..., mutations_json='{"strip_auth": true}') to
+   replay as nobody, or '{"set_headers": {"Cookie": "<other user>"}}' to replay as
+   another user, or '{"set_query": {"id": "<other object>"}}' for object IDOR.
+3. A near-identical 200 under the changed/absent identity (diff.summary flags
+   "POSSIBLE broken access control") is the proof; a 401/403 or diverged body
+   means access control held. Attach both responses.
 For IDOR: demonstrate access to another user/tenant's data. Call confirm_vulnerability_poc
 with exact request/response snippet showing unauthorized data. Two accounts are needed for real proof.
 """ + _BRAIN_AND_PRIOR_ART_PROTOCOL + _WAF_BYPASS_PROTOCOL + pack(
