@@ -22,6 +22,7 @@ from agent.http_session import (
     response_diff,
     response_from_scanner_dict,
 )
+from agent.finding_oracle import register_proof
 
 logger = logging.getLogger("agent.agents")
 
@@ -892,10 +893,18 @@ def test_dom_xss(
     results = scanners.run_dom_xss_test(
         target_url, _get_bridge(), params=params, timeout=timeout
     )
+    confirmed = len(results) > 0
+    # A DOM-XSS hit here means a payload actually executed JS in a real browser
+    # (dialog fired / window.__vanguard_xss set) — a verified browser_exec proof.
+    try:
+        register_proof("browser_exec", verified=confirmed, subject=target_url,
+                       detail=f"DOM XSS: {len(results)} executing payload(s)")
+    except Exception as e:
+        logger.debug("proof registration failed for dom xss: %s", e)
     return json.dumps({
         "findings": results,
         "count": len(results),
-        "confirmed": len(results) > 0,
+        "confirmed": confirmed,
     })
 
 
@@ -1131,8 +1140,31 @@ def replay_request(
     mutated_txn = store.exchange(backend, mutated_req, label="replay:mutated")
     diff = response_diff(base_resp, mutated_txn.response)
 
+    # Register a proof token for the finding gate. The broken-access-control
+    # signature is an identity change (strip_auth / set_headers) that still
+    # returns the same 2xx body — access was NOT re-checked. Object-id swaps
+    # (set_query) are recorded but not auto-verified: same-vs-different body
+    # there needs two-account reasoning, so leave that to the analyst.
+    identity_changed = bool(mutations.get("strip_auth") or mutations.get("set_headers"))
+    bac_signature = (
+        identity_changed
+        and diff.get("identical_body")
+        and mutated_txn.response.status == base_resp.status
+        and 200 <= (base_resp.status or 0) < 300
+    )
+    try:
+        register_proof(
+            "response_diff",
+            verified=bool(bac_signature),
+            subject=mutated_req.url,
+            detail=diff.get("summary", ""),
+        )
+    except Exception as e:
+        logger.debug("proof registration failed for replay: %s", e)
+
     return json.dumps({
         "backend": backend.name,
+        "proof": "response_diff verified" if bac_signature else "recorded (unverified)",
         "mutation": mutations,
         "original": {"transaction_id": base_txn.id, "status": base_resp.status,
                      "url": base_req.url},
