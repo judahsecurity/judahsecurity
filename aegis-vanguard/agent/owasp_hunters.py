@@ -139,9 +139,11 @@ AUTHZ_TOOLS = [
     "fuzz_directories",
     "discover_parameters",
     "crawl_urls",
+    "crawl_urls_authenticated",
     "send_http_request",
     "session_transactions",
     "replay_request",
+    "authz_matrix",
     "confirm_vulnerability_poc",
     *HUNTER_CORE_TOOLS,
 ]
@@ -470,6 +472,17 @@ Hunt: BOLA/IDOR, BFLA, privilege escalation, path traversal via authz boundaries
 2. Call discover_api_surface for a structured API inventory — REST, GraphQL, WebSocket.
 3. Run nuclei: scan_nuclei(templates="tags=bola,idor,authz,misconfig,exposure,privilege")
 4. Fuzz privileged paths: /admin, /api/v1/admin, /internal, /staff, /moderator, /debug
+
+### Phase 1.5 — Authorization matrix (do this FIRST, it is your strongest detector)
+1. If you have credentials, crawl_urls_authenticated to browse the app so
+   authenticated requests are recorded (send_http_request also records).
+2. Call authz_matrix() — it replays every recorded authenticated request with no
+   credentials (missing-authorization) and, if you obtained a second account's
+   session, as user B (horizontal IDOR), diffing each. Pass
+   identity_b_headers_json='{"Cookie": "session=<userB>"}' when you have user B.
+3. Every `broken_access_findings` entry it returns is proof-token-backed BAC —
+   report those. This catches the bulk of real-world access-control bugs
+   automatically; only then hand-test the object-ID cases below for what it missed.
 
 ### Phase 2 — IDOR / BOLA testing
 For each object-ID endpoint:

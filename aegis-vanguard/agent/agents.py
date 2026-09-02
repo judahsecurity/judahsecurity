@@ -1183,6 +1183,52 @@ def session_transactions(limit: int = 20) -> str:
 
 
 @security_tool(category="exploit", risk="medium")
+def authz_matrix(
+    transaction_ids: str = "",
+    identity_b_headers_json: str = "{}",
+    include_unauth: bool = True,
+    max_requests: int = 40,
+) -> str:
+    """Differential authorization test (Autorize-style) — automated broken
+    access control / IDOR detection, the #1 real-world web vuln class.
+
+    Replays recorded AUTHENTICATED requests under other identities and diffs:
+    - unauthenticated (default) → catches missing authorization; and
+    - as user B, if `identity_b_headers_json` gives their creds (e.g.
+      '{"Cookie": "session=<userB>"}') → catches horizontal IDOR.
+
+    A same-2xx-body result under the changed/absent identity is broken access
+    control; each hit registers a verified proof token so it passes the gate.
+    Only requests that originally carried an auth header are tested, so public
+    pages are never flagged. Pass `transaction_ids` (comma-separated, from
+    session_transactions) to target specific requests, or leave empty to test
+    all recorded authenticated requests. Browse/authenticate first so there are
+    requests to replay.
+    """
+    from agent.authz_matrix import run_authorization_matrix
+
+    store = get_session_store()
+    if transaction_ids.strip():
+        ids = [t.strip() for t in transaction_ids.split(",") if t.strip()]
+        txns = [store.get(i) for i in ids]
+        requests = [t.request for t in txns if t is not None]
+    else:
+        requests = [t.request for t in store.all()]
+    requests = requests[:max_requests]
+
+    try:
+        identity_b = json.loads(identity_b_headers_json) if identity_b_headers_json.strip() else None
+    except (ValueError, TypeError):
+        return json.dumps({"error": f"identity_b_headers_json invalid: {identity_b_headers_json[:120]}"})
+    if not isinstance(identity_b, dict):
+        identity_b = None
+
+    report = run_authorization_matrix(
+        requests, get_backend(), identity_b=identity_b, include_unauth=include_unauth)
+    return json.dumps(report.to_dict(), default=str)
+
+
+@security_tool(category="exploit", risk="medium")
 def oob_probe(label: str = "") -> str:
     """Mint a unique out-of-band callback URL to PROVE a blind vulnerability
     (blind SSRF / RCE / XXE / SSTI — anything with no readable response).
