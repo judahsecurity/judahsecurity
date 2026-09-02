@@ -37,6 +37,19 @@ export AEGIS_CAIDO_TOKEN=...                          # if the API needs auth
 See `docs/caido.md`. Without Caido, `browser_crawl` still captures the full
 surface via Playwright into the session store.
 
+## One command (preflight → run → score)
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...            # set in your env, never inline it
+./assess.sh https://app.example.com --scope example.com --login-user tester --login-pass "$PW"
+./assess.sh http://host.docker.internal:PORT/ --no-guardrails --max-risk critical --expected-flag "$FLAG"
+```
+
+`assess.sh` runs `doctor.py` (aborts if not ready), then `run_pentest.py` with
+everything after the URL passed through, then `scorecard.py` — writing artifacts
+to `AEGIS_TRACES_DIR` (default `./results/<timestamp>/`). The manual steps below
+are the same thing broken apart.
+
 ## 4. Run against a target
 
 **Benchmark / lab (internal host, has a known flag):**
