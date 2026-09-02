@@ -109,6 +109,7 @@ XSS_TOOLS = [
     "discover_api_surface",
     "discover_parameters",
     "crawl_urls",
+    "analyze_js",
     "probe_xss_reflection",
     "xss_test",
     "test_dom_xss",
@@ -376,10 +377,16 @@ Read reflections[]:
    → event handlers <img onerror> <svg onload> → constructor chains
 3. WAF present → skip dialogs; use marker property / OOB style payloads.
 
-### Phase 4 — DOM XSS (Playwright)
-When SPA / hash routing / heavy JS / postMessage:
-  test_dom_xss(target_url=..., params="q,search,redirect")
-This catches sinks XSStrike misses.
+### Phase 4 — DOM XSS (aim with JS analysis, prove with Playwright)
+1. analyze_js(urls=<JS bundle URLs from crawl_urls>) — finds files where an
+   attacker-controllable source (location.hash/search, URLSearchParams,
+   postMessage, window.name) reaches a dangerous sink (innerHTML, eval,
+   document.write). Each `dom_xss_candidate` names the source + file.
+2. For each candidate, test_dom_xss(target_url=<page loading that bundle>,
+   params=<the source params>) — a hit sets window.__vanguard_xss / fires a
+   dialog and registers a browser_exec proof token (the finding then CONFIRMS).
+This turns "heavy JS, maybe DOM XSS" into a targeted, proven finding instead of
+a guess. Also run it directly on SPA / hash routing / postMessage apps.
 
 ### Phase 5 — Stored XSS
 Probe comment/profile/filename/label fields with unique canary, re-fetch page,

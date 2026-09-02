@@ -1182,6 +1182,33 @@ def session_transactions(limit: int = 20) -> str:
     return json.dumps(get_session_store().summary(limit=limit), default=str)
 
 
+@security_tool(category="recon", risk="safe")
+def analyze_js(urls: str = "", max_urls: int = 25, with_secrets: bool = True) -> str:
+    """Static DOM XSS sink/source + secret analysis of JavaScript — attack-surface
+    recall that AIMS the provers.
+
+    Fetches each JS URL and finds attacker-controllable sources
+    (location.hash/search, URLSearchParams, postMessage, window.name, cookie)
+    that reach dangerous sinks (innerHTML, eval, document.write, location assign)
+    in the same file — DOM XSS candidates — plus hardcoded secrets (~1600-pattern
+    corpus). Results are LEADS (needs-evidence), not confirmed: for each DOM XSS
+    candidate, run test_dom_xss on a page that loads that bundle, injecting into
+    the named source, to earn a browser_exec proof token; verify secrets live.
+    Pass comma-separated JS URLs (from crawl_urls / scan_js_urls_for_secrets).
+    """
+    from agent.js_recon import analyze_js as _analyze
+    backend = get_backend()
+    js_by_name = {}
+    for u in [x.strip() for x in urls.split(",") if x.strip()][:max_urls]:
+        try:
+            resp = backend.send(HttpRequest("GET", u, {}, ""))
+            if resp.ok and resp.body:
+                js_by_name[u] = resp.body
+        except Exception as e:
+            logger.debug("analyze_js fetch failed for %s: %s", u, e)
+    return json.dumps(_analyze(js_by_name, with_secrets=with_secrets), default=str)
+
+
 @security_tool(category="exploit", risk="medium")
 def authz_matrix(
     transaction_ids: str = "",
