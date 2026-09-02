@@ -114,6 +114,11 @@ interface Asset {
   discovery_source?: string;
   risk_score?: number;
   in_scope?: boolean;
+  // Device classification (populated by device inference, incl. OT/ICS identity)
+  system_type?: string;
+  operating_system?: string;
+  device_class?: string;
+  device_subclass?: string;
   asn?: string;
   country?: string;
   city?: string;
@@ -375,11 +380,17 @@ export default function AssetsPage() {
     let filtered = assets.filter(asset => {
       const matchesType = typeFilter === 'all' || asset.asset_type === typeFilter || asset.type === typeFilter;
       const matchesStatus = statusFilter === 'all' || asset.status === statusFilter;
-      const matchesSearch = search === '' || 
-        asset.name?.toLowerCase().includes(search.toLowerCase()) ||
-        asset.value?.toLowerCase().includes(search.toLowerCase()) ||
-        asset.ip_address?.toLowerCase().includes(search.toLowerCase()) ||
-        asset.tags?.some(tag => tag.toLowerCase().includes(search.toLowerCase()));
+      const s = search.toLowerCase();
+      const matchesSearch = search === '' ||
+        asset.name?.toLowerCase().includes(s) ||
+        asset.value?.toLowerCase().includes(s) ||
+        asset.ip_address?.toLowerCase().includes(s) ||
+        // Device classification so a vendor/model search (e.g. "rockwell", "1769", "PLC") hits.
+        asset.system_type?.toLowerCase().includes(s) ||
+        asset.device_class?.toLowerCase().includes(s) ||
+        asset.device_subclass?.toLowerCase().includes(s) ||
+        asset.operating_system?.toLowerCase().includes(s) ||
+        asset.tags?.some(tag => tag.toLowerCase().includes(s));
       return matchesType && matchesStatus && matchesSearch;
     });
 

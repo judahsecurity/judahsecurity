@@ -27,7 +27,8 @@ class DeviceInference:
     device_subclass: Optional[str] = None
     confidence: int = 0  # 0-100
     evidence: List[str] = None
-    
+    ot_device: Optional[dict] = None  # Full OT/ICS identity record, when available
+
     def __post_init__(self):
         if self.evidence is None:
             self.evidence = []
@@ -201,6 +202,7 @@ class DeviceInferenceService:
         port_evidence = []
         banner_evidence = []
         ot_evidence = []
+        best_ot_device = None  # highest-confidence OT identity record on the asset
 
         for port_service in asset.port_services:
             if port_service.state not in [PortState.OPEN, PortState.OPEN_FILTERED]:
@@ -210,16 +212,26 @@ class DeviceInferenceService:
             # most specific evidence available — it names the exact controller.
             ot_device = (port_service.metadata_ or {}).get("ot_device")
             if isinstance(ot_device, dict):
-                display = ot_device.get("display_name") or ot_device.get("product") or ot_device.get("vendor")
-                if display:
+                # System Type should stay short (asset.system_type is String(100)),
+                # so use "<vendor> <model>" rather than the family-suffixed label.
+                vendor = ot_device.get("vendor")
+                product = ot_device.get("product")
+                system_type = " ".join(p for p in (vendor, product) if p).strip()
+                system_type = system_type or ot_device.get("display_name") or ot_device.get("device_type")
+                if system_type:
+                    confidence = int(ot_device.get("confidence") or 90)
+                    revision = ot_device.get("revision")
                     ot_evidence.append({
                         "port": port_service.port,
-                        "type": display,
+                        "type": system_type[:100],
+                        "os": f"Firmware {revision}" if revision else None,
                         "class": "Industrial/SCADA",
-                        "subclass": ot_device.get("family") or ot_device.get("device_type"),
-                        "confidence": int(ot_device.get("confidence") or 90),
+                        "subclass": (ot_device.get("family") or ot_device.get("device_type") or "")[:200] or None,
+                        "confidence": confidence,
                         "source": f"OT identity ({ot_device.get('source', 'nse')})",
                     })
+                    if best_ot_device is None or confidence > int(best_ot_device.get("confidence") or 0):
+                        best_ot_device = ot_device
 
             # Check port-based indicators
             if port_service.port in PORT_INDICATORS:
@@ -252,6 +264,7 @@ class DeviceInferenceService:
         
         # Aggregate and determine best inference
         result = self._aggregate_evidence(port_evidence, banner_evidence, ot_evidence)
+        result.ot_device = best_ot_device
 
         return result
 
@@ -271,7 +284,7 @@ class DeviceInferenceService:
             all_evidence.append({
                 "source": "ot-identity",
                 "confidence": ev["confidence"],
-                "os": None,
+                "os": ev.get("os"),
                 "type": ev.get("type"),
                 "class": ev.get("class"),
                 "subclass": ev.get("subclass"),
@@ -349,19 +362,29 @@ class DeviceInferenceService:
 
         if inference.confidence > 50:
             if inference.system_type and (not asset.system_type or ot_override):
-                asset.system_type = inference.system_type
+                asset.system_type = inference.system_type[:100]
                 logger.info(f"Set system_type for {asset.value}: {inference.system_type}")
 
-            if inference.operating_system and not asset.operating_system:
-                asset.operating_system = inference.operating_system
+            if inference.operating_system and (not asset.operating_system or ot_override):
+                asset.operating_system = inference.operating_system[:200]
                 logger.info(f"Set operating_system for {asset.value}: {inference.operating_system}")
 
             if inference.device_class and (not asset.device_class or ot_override):
-                asset.device_class = inference.device_class
+                asset.device_class = inference.device_class[:100]
                 logger.info(f"Set device_class for {asset.value}: {inference.device_class}")
 
             if inference.device_subclass and (not asset.device_subclass or ot_override):
-                asset.device_subclass = inference.device_subclass
+                asset.device_subclass = inference.device_subclass[:200]
+
+        # Persist the full OT/ICS identity onto the asset so it is queryable and
+        # available to the UI beyond the truncated classification columns.
+        if inference.ot_device:
+            try:
+                meta = dict(asset.metadata_ or {})
+                meta["ot_device"] = inference.ot_device
+                asset.metadata_ = meta
+            except Exception as e:
+                logger.debug(f"Failed to store ot_device metadata for {asset.value}: {e}")
 
         return inference
 

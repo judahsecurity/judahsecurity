@@ -338,6 +338,7 @@ def list_assets(
     has_open_ports: Optional[bool] = None,
     has_risky_ports: Optional[bool] = None,
     has_geo: Optional[bool] = Query(None, description="Filter for assets with geo data (latitude/longitude)"),
+    device_class: Optional[str] = Query(None, description="Filter by device class (e.g. 'Industrial/SCADA') - case insensitive substring"),
     include_cidr: bool = Query(False, description="Include IP_RANGE/CIDR assets (excluded by default)"),
     skip: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=100000),
@@ -381,11 +382,20 @@ def list_assets(
     if status:
         query = query.filter(Asset.status == status)
     if search:
+        # Also match device classification so an operator can search fleet-wide
+        # for a vendor/model (e.g. "rockwell", "1769", "PLC").
         query = query.filter(
-            (Asset.name.ilike(f"%{search}%")) | 
-            (Asset.value.ilike(f"%{search}%"))
+            (Asset.name.ilike(f"%{search}%")) |
+            (Asset.value.ilike(f"%{search}%")) |
+            (Asset.system_type.ilike(f"%{search}%")) |
+            (Asset.operating_system.ilike(f"%{search}%")) |
+            (Asset.device_subclass.ilike(f"%{search}%"))
         )
-    
+
+    # Filter by device class (OT/ICS fleet triage: device_class="Industrial/SCADA")
+    if device_class:
+        query = query.filter(Asset.device_class.ilike(f"%{device_class}%"))
+
     # Filter by live status
     if is_live is True:
         query = query.filter(Asset.is_live == True)

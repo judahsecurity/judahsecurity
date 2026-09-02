@@ -147,3 +147,40 @@ def test_device_inference_promotes_ot_identity():
     assert "Rockwell Automation" in (inference.system_type or "")
     assert "1769-L36ERM" in (inference.system_type or "")
     assert inference.confidence >= 90
+
+
+def test_update_asset_maps_ot_identity_and_overrides_generic():
+    from app.models.port_service import PortState
+    from app.services.device_inference_service import DeviceInferenceService
+
+    ident = parse_ot_identity(port=44818, scripts={"enip-info": ENIP_INFO})
+    ot_port = SimpleNamespace(
+        state=PortState.OPEN, port=44818, service_name="EtherNet/IP",
+        banner=None, service_product=None, service_extra_info=None,
+        metadata_={"ot_device": ident.to_dict()},
+    )
+    # A generic web UI on the same device must not win over the OT identity.
+    web_port = SimpleNamespace(
+        state=PortState.OPEN, port=80, service_name="http",
+        banner=None, service_product="lighttpd", service_extra_info=None, metadata_={},
+    )
+    asset = SimpleNamespace(
+        port_services=[web_port, ot_port], value="10.88.58.236",
+        system_type="Web Server", operating_system=None,
+        device_class="Server", device_subclass=None, metadata_={},
+    )
+
+    DeviceInferenceService().update_asset_device_info(db=None, asset=asset)
+
+    # Classification columns (rendered on the asset detail page) are populated,
+    # overriding the generic web guess, and stay within their String() limits.
+    assert asset.system_type == "Rockwell Automation 1769-L36ERM/A LOGIX5336ERM"
+    assert len(asset.system_type) <= 100
+    assert asset.operating_system == "Firmware 28.11"
+    assert asset.device_class == "Industrial/SCADA"
+    assert len(asset.device_class) <= 100
+    assert asset.device_subclass == "CompactLogix PLC"
+    assert len(asset.device_subclass) <= 200
+    # Full structured identity is queryable on the asset itself.
+    assert asset.metadata_["ot_device"]["vendor"] == "Rockwell Automation"
+    assert "1769-L36ERM" in asset.metadata_["ot_device"]["product"]
