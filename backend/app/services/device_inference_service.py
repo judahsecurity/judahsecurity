@@ -200,11 +200,27 @@ class DeviceInferenceService:
         # Collect evidence from all ports
         port_evidence = []
         banner_evidence = []
-        
+        ot_evidence = []
+
         for port_service in asset.port_services:
             if port_service.state not in [PortState.OPEN, PortState.OPEN_FILTERED]:
                 continue
-            
+
+            # Structured OT/ICS device identity (from OT NSE scripts) is the
+            # most specific evidence available — it names the exact controller.
+            ot_device = (port_service.metadata_ or {}).get("ot_device")
+            if isinstance(ot_device, dict):
+                display = ot_device.get("display_name") or ot_device.get("product") or ot_device.get("vendor")
+                if display:
+                    ot_evidence.append({
+                        "port": port_service.port,
+                        "type": display,
+                        "class": "Industrial/SCADA",
+                        "subclass": ot_device.get("family") or ot_device.get("device_type"),
+                        "confidence": int(ot_device.get("confidence") or 90),
+                        "source": f"OT identity ({ot_device.get('source', 'nse')})",
+                    })
+
             # Check port-based indicators
             if port_service.port in PORT_INDICATORS:
                 indicator = PORT_INDICATORS[port_service.port]
@@ -235,21 +251,33 @@ class DeviceInferenceService:
                     })
         
         # Aggregate and determine best inference
-        result = self._aggregate_evidence(port_evidence, banner_evidence)
-        
+        result = self._aggregate_evidence(port_evidence, banner_evidence, ot_evidence)
+
         return result
-    
+
     def _aggregate_evidence(
         self,
         port_evidence: List[dict],
-        banner_evidence: List[dict]
+        banner_evidence: List[dict],
+        ot_evidence: Optional[List[dict]] = None,
     ) -> DeviceInference:
         """Aggregate evidence to determine best device inference."""
         result = DeviceInference()
-        
-        # Priority: banner evidence > port evidence (more specific)
+
+        # Priority: OT identity > banner evidence > port evidence (most specific first)
         all_evidence = []
-        
+
+        for ev in (ot_evidence or []):
+            all_evidence.append({
+                "source": "ot-identity",
+                "confidence": ev["confidence"],
+                "os": None,
+                "type": ev.get("type"),
+                "class": ev.get("class"),
+                "subclass": ev.get("subclass"),
+                "description": f"Port {ev['port']}: {ev.get('source', 'OT identity')} -> {ev.get('type')}",
+            })
+
         for ev in banner_evidence:
             all_evidence.append({
                 "source": "banner",
@@ -311,23 +339,30 @@ class DeviceInferenceService:
             DeviceInference results
         """
         inference = self.infer_from_asset(asset)
-        
+
+        # High-confidence OT/ICS identity is specific enough to override an
+        # earlier generic guess (e.g. "Web Server" from an exposed device UI).
+        ot_override = (
+            inference.confidence >= 90
+            and inference.device_class == "Industrial/SCADA"
+        )
+
         if inference.confidence > 50:
-            if inference.system_type and not asset.system_type:
+            if inference.system_type and (not asset.system_type or ot_override):
                 asset.system_type = inference.system_type
                 logger.info(f"Set system_type for {asset.value}: {inference.system_type}")
-            
+
             if inference.operating_system and not asset.operating_system:
                 asset.operating_system = inference.operating_system
                 logger.info(f"Set operating_system for {asset.value}: {inference.operating_system}")
-            
-            if inference.device_class and not asset.device_class:
+
+            if inference.device_class and (not asset.device_class or ot_override):
                 asset.device_class = inference.device_class
                 logger.info(f"Set device_class for {asset.value}: {inference.device_class}")
-            
-            if inference.device_subclass and not asset.device_subclass:
+
+            if inference.device_subclass and (not asset.device_subclass or ot_override):
                 asset.device_subclass = inference.device_subclass
-        
+
         return inference
 
 

@@ -713,11 +713,29 @@ class PortFindingsService:
         scan_id: Optional[int] = None
     ) -> Vulnerability:
         """Create a finding from a port and rule."""
-        # Build title with port info
+        # OT/ICS device identity, when the OT NSE scripts fingerprinted the device.
+        ot_device = (port_service.metadata_ or {}).get("ot_device") if port_service.metadata_ else None
+        ot_name = ot_device.get("display_name") if isinstance(ot_device, dict) else None
+
+        # Build title with port info (and device identity when known)
         title = f"[Port {port_service.port}/{port_service.protocol.value}] {rule.title}"
-        
+        if ot_name:
+            title += f" — {ot_name}"
+
         # Build description with context
         description = rule.description
+        if isinstance(ot_device, dict) and ot_name:
+            description += f"\n\n**Identified device:** {ot_name}"
+            detail_lines = [
+                ("Vendor", ot_device.get("vendor")),
+                ("Model", ot_device.get("product")),
+                ("Device type", ot_device.get("device_type")),
+                ("Firmware/Revision", ot_device.get("revision")),
+                ("Serial", ot_device.get("serial")),
+            ]
+            for label, value in detail_lines:
+                if value:
+                    description += f"\n- {label}: {value}"
         
         # Include IP address where port was found (important for domain assets)
         if port_service.scanned_ip:
@@ -753,7 +771,22 @@ class PortFindingsService:
         }
         if port_service.scanned_ip:
             metadata["scanned_ip"] = port_service.scanned_ip
-        
+
+        # Tags and extra identity metadata for OT devices.
+        tags = rule.tags + [f"port:{port_service.port}"]
+        if isinstance(ot_device, dict):
+            metadata["ot_device"] = ot_device
+            if ot_name:
+                evidence += f". Device: {ot_name}"
+            new_tags = ["ot-device", "ics"]
+            vendor = ot_device.get("vendor")
+            if vendor:
+                import re as _re
+                new_tags.append("vendor:" + _re.sub(r"[^a-z0-9]+", "-", vendor.lower()).strip("-"))
+            for tag in new_tags:
+                if tag not in tags:
+                    tags.append(tag)
+
         # Create finding
         finding = Vulnerability(
             title=title,
@@ -765,7 +798,7 @@ class PortFindingsService:
             status=VulnerabilityStatus.OPEN,
             cwe_id=rule.cwe_id,
             remediation=rule.remediation,
-            tags=rule.tags + [f"port:{port_service.port}"],
+            tags=tags,
             evidence=evidence,
             metadata_=metadata
         )

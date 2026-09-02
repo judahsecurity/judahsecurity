@@ -17,7 +17,7 @@ import tempfile
 import os
 import re
 import xml.etree.ElementTree as ET
-from typing import Optional, List, Callable
+from typing import Optional, List, Callable, Dict
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -56,7 +56,11 @@ class PortResult:
     cpe: Optional[str] = None
     reason: Optional[str] = None
     scanner: str = "unknown"
-    
+    # NSE script output captured for this port (script id -> output text).
+    scripts: Dict[str, str] = field(default_factory=dict)
+    # Parsed OT/ICS device identity (dict form), when an OT NSE script matched.
+    ot_identity: Optional[dict] = None
+
     def to_port_service_dict(self, asset_id: int) -> dict:
         """Convert to PortService creation dict."""
         # Auto-detect service name from port if not provided
@@ -77,14 +81,37 @@ class PortResult:
             "closed|filtered": PortState.CLOSED_FILTERED,
         }
         
+        service_product = self.service_product
+        service_version = self.service_version
+        service_extra_info = self.service_extra_info
+        metadata: dict = {}
+        tags: List[str] = []
+
+        # Surface parsed OT/ICS device identity so an operator can see, e.g.,
+        # that a host is a Rockwell 1769-L36ERM rather than just "port 44818 open".
+        if self.ot_identity:
+            metadata["ot_device"] = self.ot_identity
+            ot_product = self.ot_identity.get("display_name") or None
+            if ot_product:
+                service_product = ot_product
+            if self.ot_identity.get("revision"):
+                service_version = service_version or self.ot_identity["revision"]
+            extra_bits = [b for b in (
+                self.ot_identity.get("device_type"),
+                f"S/N {self.ot_identity['serial']}" if self.ot_identity.get("serial") else None,
+            ) if b]
+            if extra_bits:
+                service_extra_info = "; ".join(extra_bits)[:500]
+            tags = list(self.ot_identity.get("tags") or [])
+
         return {
             "asset_id": asset_id,
             "port": self.port,
             "protocol": Protocol(self.protocol.lower()),
             "service_name": service,
-            "service_product": self.service_product,
-            "service_version": self.service_version,
-            "service_extra_info": self.service_extra_info,
+            "service_product": service_product,
+            "service_version": service_version,
+            "service_extra_info": service_extra_info,
             "banner": self.banner,
             "cpe": self.cpe,
             "state": state_map.get(self.state.lower(), PortState.OPEN),
@@ -92,6 +119,8 @@ class PortResult:
             "discovered_by": self.scanner,
             "is_risky": is_risky,
             "risk_reason": risk_reason,
+            "tags": tags,
+            "metadata_": metadata,
         }
 
 
@@ -1277,6 +1306,36 @@ class PortScannerService:
         logger.info(f"Nmap found {len(result.ports_found)} open ports across {len(result.hosts_found)} hosts")
         return result
     
+    @staticmethod
+    def _extract_port_scripts(port_elem) -> Dict[str, str]:
+        """Collect NSE ``<script id=.. output=..>`` results for a port element."""
+        scripts: Dict[str, str] = {}
+        for script_elem in port_elem.findall("script"):
+            sid = script_elem.get("id")
+            output = script_elem.get("output")
+            if sid and output:
+                scripts[sid] = output
+        return scripts
+
+    @staticmethod
+    def _attach_ot_identity(port_result: "PortResult") -> None:
+        """Parse and attach OT/ICS device identity from a port's NSE scripts."""
+        try:
+            from app.services.ot_device_identity import parse_ot_identity
+            identity = parse_ot_identity(
+                port=port_result.port,
+                scripts=port_result.scripts,
+                service_product=port_result.service_product,
+                service_extra_info=port_result.service_extra_info,
+                banner=port_result.banner,
+            )
+            if identity is not None:
+                data = identity.to_dict()
+                data["tags"] = identity.tags()
+                port_result.ot_identity = data
+        except Exception as e:  # never let identity parsing break a scan
+            logger.debug("OT identity parse failed for port %s: %s", port_result.port, e)
+
     def _parse_nmap_xml(self, xml_path: str) -> List[PortResult]:
         """Parse Nmap XML output."""
         results = []
@@ -1335,8 +1394,8 @@ class PortScannerService:
                         cpe_elem = service_elem.find("cpe")
                         if cpe_elem is not None:
                             cpe = cpe_elem.text
-                    
-                    results.append(PortResult(
+
+                    port_result = PortResult(
                         host=hostname,
                         ip=ip,
                         port=port_id,
@@ -1348,14 +1407,17 @@ class PortScannerService:
                         service_extra_info=service_extra,
                         cpe=cpe,
                         reason=reason,
-                        scanner="nmap"
-                    ))
-        
+                        scanner="nmap",
+                        scripts=self._extract_port_scripts(port),
+                    )
+                    self._attach_ot_identity(port_result)
+                    results.append(port_result)
+
         except ET.ParseError as e:
             logger.error(f"Failed to parse Nmap XML: {e}")
-        
+
         return results
-    
+
     # ==================== UNIFIED SCAN ====================
     
     async def scan(
@@ -1602,6 +1664,24 @@ class PortScannerService:
                                 existing.banner = port_result.banner
                             if port_result.cpe:
                                 existing.cpe = port_result.cpe
+                            # Enrich OT/ICS device identity on rescan.
+                            if port_result.ot_identity:
+                                ot_fields = port_result.to_port_service_dict(asset.id)
+                                existing.service_product = ot_fields["service_product"]
+                                existing.service_version = (
+                                    ot_fields["service_version"] or existing.service_version
+                                )
+                                existing.service_extra_info = (
+                                    ot_fields["service_extra_info"] or existing.service_extra_info
+                                )
+                                meta = dict(existing.metadata_ or {})
+                                meta["ot_device"] = port_result.ot_identity
+                                existing.metadata_ = meta
+                                merged_tags = list(existing.tags or [])
+                                for tag in ot_fields.get("tags", []):
+                                    if tag not in merged_tags:
+                                        merged_tags.append(tag)
+                                existing.tags = merged_tags
                             summary["ports_updated"] += 1
                         else:
                             # Create new
@@ -1817,8 +1897,8 @@ class PortScannerService:
                 for port in ports.findall("port"):
                     state_elem = port.find("state")
                     service_elem = port.find("service")
-                    
-                    results.append(PortResult(
+
+                    port_result = PortResult(
                         host=hostname,
                         ip=ip,
                         port=int(port.get("portid", 0)),
@@ -1827,9 +1907,13 @@ class PortScannerService:
                         service_name=service_elem.get("name") if service_elem is not None else None,
                         service_product=service_elem.get("product") if service_elem is not None else None,
                         service_version=service_elem.get("version") if service_elem is not None else None,
+                        service_extra_info=service_elem.get("extrainfo") if service_elem is not None else None,
                         reason=state_elem.get("reason", "") if state_elem is not None else "",
-                        scanner="nmap"
-                    ))
+                        scanner="nmap",
+                        scripts=self._extract_port_scripts(port),
+                    )
+                    self._attach_ot_identity(port_result)
+                    results.append(port_result)
         except ET.ParseError:
             pass
         return results
