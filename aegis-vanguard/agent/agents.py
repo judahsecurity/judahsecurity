@@ -1183,6 +1183,30 @@ def session_transactions(limit: int = 20) -> str:
 
 
 @security_tool(category="recon", risk="safe")
+def ingest_caido(host: str = "", httpql: str = "", limit: int = 300) -> str:
+    """Ingest Caido-captured browse traffic into the session store, so the whole
+    fireteam (fingerprint_stack, authz_matrix, analyze_js, replay_request) hunts
+    the FULL surface the browser exercised — every XHR/fetch/chunk/API call —
+    not just the requests a tool issued.
+
+    Flow: route the browser through Caido while crawling (set AEGIS_BROWSER_PROXY
+    to Caido's proxy listener before crawl_urls_authenticated / test_dom_xss),
+    then call this to pull Caido's history in. Filter by `host` or a raw `httpql`
+    (e.g. 'req.host.cont:"example.com"'). Requires a running Caido
+    (AEGIS_CAIDO_API/TOKEN, or AEGIS_CAIDO_CLI).
+    """
+    from agent.caido import CaidoClient, httpql_for_host, ingest_caido_traffic
+    q = httpql.strip() or (httpql_for_host(host.strip()) if host.strip() else "")
+    if not q:
+        return json.dumps({"error": "provide host or httpql"})
+    try:
+        res = ingest_caido_traffic(get_session_store(), CaidoClient(), q, limit=limit)
+    except Exception as e:
+        return json.dumps({"error": f"caido ingest failed: {e}"})
+    return json.dumps(res, default=str)
+
+
+@security_tool(category="recon", risk="safe")
 def fingerprint_stack(max_transactions: int = 100) -> str:
     """Passive tech-stack fingerprint over ALREADY-captured traffic → targeting.
 

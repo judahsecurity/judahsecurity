@@ -234,56 +234,67 @@ class ScannersBackend(ProxyBackend):
 
 
 class CaidoBackend(ProxyBackend):
-    """Adapter for a running Caido instance (Strix-style interception/replay).
+    """Replay through a running Caido instance.
 
-    Requires the operator to run Caido and expose its API; configure with
-    AEGIS_CAIDO_API (base URL) and AEGIS_CAIDO_TOKEN. Unconfigured, `send`
-    raises an actionable error rather than silently falling back — you should
-    know which engine produced your evidence. The request shape below is
-    validated against a live Caido instance, not in this repo's tests.
+    Routes the request through Caido's PROXY listener (AEGIS_CAIDO_PROXY, e.g.
+    http://127.0.0.1:8080) so the replay is captured in Caido's history like any
+    browsed request, and the real upstream response comes straight back. Caido
+    re-signs TLS, so set AEGIS_CAIDO_INSECURE=true (default) to skip cert
+    verification against Caido's CA. Unconfigured, `send` raises an actionable
+    error rather than silently bypassing Caido — you should know which engine
+    produced your evidence. Capture (pulling Caido's history) is separate: see
+    agent.caido.ingest_caido_traffic.
+
+    `sender` is injectable for tests: sender(request) -> HttpResponse.
     """
 
     name = "caido"
 
-    def __init__(self, api_url: Optional[str] = None, token: Optional[str] = None):
-        self.api_url = (api_url or os.environ.get("AEGIS_CAIDO_API") or "").rstrip("/")
-        self.token = token or os.environ.get("AEGIS_CAIDO_TOKEN")
+    def __init__(self, proxy_url: Optional[str] = None, sender=None):
+        self.proxy_url = proxy_url or os.environ.get("AEGIS_CAIDO_PROXY")
+        self._sender = sender
 
     def send(self, request: HttpRequest) -> HttpResponse:
-        if not self.api_url:
+        if self._sender is not None:
+            return self._sender(request)
+        if not self.proxy_url:
             raise RuntimeError(
-                "CaidoBackend requires a running Caido instance: set "
-                "AEGIS_CAIDO_API (and AEGIS_CAIDO_TOKEN). Falling back silently "
-                "would hide which engine produced the evidence."
+                "CaidoBackend requires AEGIS_CAIDO_PROXY (Caido's proxy listener, "
+                "e.g. http://127.0.0.1:8080) so replays route through Caido and are "
+                "captured. Unconfigured Caido would silently drop the capture."
             )
+        import ssl
+        import urllib.error
         import urllib.request
 
-        payload = json.dumps({
-            "method": request.method,
-            "url": request.url,
-            "headers": request.headers,
-            "body": request.body,
-        }).encode()
+        insecure = os.environ.get("AEGIS_CAIDO_INSECURE", "true").lower() != "false"
+        handlers = [urllib.request.ProxyHandler({"http": self.proxy_url, "https": self.proxy_url})]
+        if insecure:
+            handlers.append(urllib.request.HTTPSHandler(context=ssl._create_unverified_context()))
+        opener = urllib.request.build_opener(*handlers)
         req = urllib.request.Request(
-            f"{self.api_url}/replay",
-            data=payload,
-            headers={"Content-Type": "application/json",
-                     **({"Authorization": f"Bearer {self.token}"} if self.token else {})},
-            method="POST",
+            request.url,
+            data=request.body.encode() if request.body else None,
+            headers=request.headers,
+            method=request.method,
         )
         t0 = time.time()
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.loads(resp.read().decode("utf-8", "ignore") or "{}")
-        except Exception as e:  # noqa: BLE001 — surface as a response error
+            with opener.open(req, timeout=30) as resp:
+                body = resp.read().decode("utf-8", "ignore")
+                return HttpResponse(
+                    status=resp.status,
+                    headers={k: v for k, v in resp.headers.items()},
+                    body=body,
+                    elapsed_ms=round((time.time() - t0) * 1000),
+                )
+        except urllib.error.HTTPError as e:  # a 4xx/5xx is a real response, not an error
+            return HttpResponse(status=e.code, headers=dict(e.headers or {}),
+                                body=e.read().decode("utf-8", "ignore"),
+                                elapsed_ms=round((time.time() - t0) * 1000))
+        except Exception as e:  # noqa: BLE001
             return HttpResponse(error=f"caido: {e}",
                                 elapsed_ms=round((time.time() - t0) * 1000))
-        return HttpResponse(
-            status=int(data.get("status") or 0),
-            headers={str(k): str(v) for k, v in (data.get("headers") or {}).items()},
-            body=str(data.get("body") or ""),
-            elapsed_ms=round((time.time() - t0) * 1000),
-        )
 
 
 def make_backend(name: Optional[str] = None) -> ProxyBackend:

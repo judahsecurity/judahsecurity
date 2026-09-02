@@ -185,8 +185,8 @@ class BackendTest(unittest.TestCase):
 
     def test_caido_backend_unconfigured_raises_actionable(self):
         with self.assertRaises(RuntimeError) as ctx:
-            CaidoBackend(api_url="").send(HttpRequest("GET", "http://t"))
-        self.assertIn("AEGIS_CAIDO_API", str(ctx.exception))
+            CaidoBackend(proxy_url=None).send(HttpRequest("GET", "http://t"))
+        self.assertIn("AEGIS_CAIDO_PROXY", str(ctx.exception))
 
 
 class SingletonTest(unittest.TestCase):

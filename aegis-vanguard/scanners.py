@@ -2472,6 +2472,15 @@ def _extract_urls_from_text(text: str, base_url: str) -> List[str]:
     return sorted(candidates)
 
 
+def _browser_proxy_kwargs() -> dict:
+    """Route the browser through a proxy (e.g. Caido) when AEGIS_BROWSER_PROXY is
+    set, so every request the page makes is captured by the proxy. No-op
+    otherwise. Pair with Caido's proxy listener + ingest_caido to hunt the full
+    browse surface."""
+    proxy = os.environ.get("AEGIS_BROWSER_PROXY")
+    return {"proxy": {"server": proxy}} if proxy else {}
+
+
 def run_api_surface_discovery(
     target_url: str,
     bridge: ASMBridge,
@@ -2556,6 +2565,7 @@ def run_api_surface_discovery(
         )
         context = browser.new_context(
             ignore_https_errors=True,
+            **_browser_proxy_kwargs(),
             user_agent=(
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 "
@@ -2750,6 +2760,7 @@ def run_playwright_crawl_authenticated(
         )
         context = browser.new_context(
             ignore_https_errors=True,
+            **_browser_proxy_kwargs(),
             user_agent=(
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 "
@@ -2880,7 +2891,7 @@ def run_dom_xss_test(
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
         )
-        context = browser.new_context(ignore_https_errors=True)
+        context = browser.new_context(ignore_https_errors=True, **_browser_proxy_kwargs())
         page = context.new_page()
 
         # Capture alert/confirm/prompt dialogs (classic XSS confirmation vector)
