@@ -155,8 +155,12 @@ RUN playwright install --with-deps chromium
 
 # ── Agent files ─────────────────────────────────────────────────────
 COPY aegis-vanguard/asm_bridge.py aegis-vanguard/scanners.py aegis-vanguard/healthcheck.py aegis-vanguard/CLAUDE.md \
-     aegis-vanguard/run_pentest.py aegis-vanguard/validate_finding.py aegis-vanguard/reporter.py ./
+     aegis-vanguard/run_pentest.py aegis-vanguard/validate_finding.py aegis-vanguard/reporter.py \
+     aegis-vanguard/doctor.py aegis-vanguard/scorecard.py aegis-vanguard/assess.sh ./
+RUN chmod +x /agent/assess.sh
 COPY aegis-vanguard/agent/ ./agent/
+# Vendored data (secrets_patterns.json for analyze_js secret leads, etc.)
+COPY aegis-vanguard/data/ ./data/
 
 # Default env vars (override at runtime)
 ENV ASM_API_URL=""
