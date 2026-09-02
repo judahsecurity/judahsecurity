@@ -1183,6 +1183,22 @@ def session_transactions(limit: int = 20) -> str:
 
 
 @security_tool(category="recon", risk="safe")
+def fingerprint_stack(max_transactions: int = 100) -> str:
+    """Passive tech-stack fingerprint over ALREADY-captured traffic → targeting.
+
+    Reads the session store (responses from send_http_request / crawl / replay),
+    infers the technology stack from headers, cookie names, server banners, and
+    error shapes — no new requests — and returns `recommended_focus`: the vuln
+    classes worth prioritising for the detected stack (PHP→LFI, Spring→actuator
+    SSRF, Express→prototype pollution, API gateway→authz bypass, …). Call it
+    after some traffic is recorded to aim the fireteam instead of spraying.
+    """
+    from agent.fingerprint import fingerprint_transactions
+    txns = get_session_store().all()[:max_transactions]
+    return json.dumps(fingerprint_transactions(txns), default=str)
+
+
+@security_tool(category="recon", risk="safe")
 def analyze_js(urls: str = "", max_urls: int = 25, with_secrets: bool = True) -> str:
     """Static DOM XSS sink/source + secret analysis of JavaScript — attack-surface
     recall that AIMS the provers.

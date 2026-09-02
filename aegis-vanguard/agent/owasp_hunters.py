@@ -92,6 +92,7 @@ A single blocked attempt is not evidence of no vulnerability.
 # =============================================================================
 
 INJECTION_TOOLS = [
+    "fingerprint_stack",
     "discover_api_surface",
     "discover_parameters",
     "probe_sqli_params",
@@ -150,6 +151,7 @@ AUTHZ_TOOLS = [
 ]
 
 SSRF_TOOLS = [
+    "fingerprint_stack",
     "scan_nuclei",
     "discover_parameters",
     "crawl_urls",
