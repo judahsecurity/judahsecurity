@@ -1182,6 +1182,21 @@ def session_transactions(limit: int = 20) -> str:
     return json.dumps(get_session_store().summary(limit=limit), default=str)
 
 
+@security_tool(category="recon", risk="low")
+def browser_crawl(url: str, max_pages: int = 20, max_clicks: int = 40) -> str:
+    """Interaction-first browser crawl (real Chromium) that captures EVERY
+    in-scope request/response into the session store while it scrolls, clicks
+    safe controls, expands menus, and fills inputs — forcing lazy chunks and
+    XHR/API calls to fire that a static fetch never sees. Destructive controls
+    (delete/logout/pay) are filtered. Set AEGIS_BROWSER_PROXY to also route the
+    whole crawl through Caido. After it runs, fingerprint_stack / authz_matrix /
+    analyze_js hunt the full captured surface.
+    """
+    from agent.browser_crawl import run_interactive_crawl
+    return json.dumps(run_interactive_crawl(url, max_pages=max_pages,
+                                            max_clicks=max_clicks), default=str)
+
+
 @security_tool(category="recon", risk="safe")
 def ingest_caido(host: str = "", httpql: str = "", limit: int = 300) -> str:
     """Ingest Caido-captured browse traffic into the session store, so the whole
