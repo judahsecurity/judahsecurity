@@ -46,10 +46,11 @@ import {
   StopCircle,
   Cloud,
 } from 'lucide-react';
-import { api } from '@/lib/api';
+import { api, NmapProfileConfig } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { formatDate } from '@/lib/utils';
 import { ScanNavTabs } from '@/components/scanning/ScanNavTabs';
+import { NmapScanConfigurator, DEFAULT_NMAP_CONFIG } from '@/components/scanning/NmapScanConfigurator';
 
 interface Scan {
   id: number;
@@ -129,6 +130,7 @@ export default function ScansPage() {
     themis_kube_context: '',
     themis_services: '', // comma-separated
   });
+  const [nmapConfig, setNmapConfig] = useState<NmapProfileConfig>(DEFAULT_NMAP_CONFIG);
   const { toast } = useToast();
 
   const fetchData = async () => {
@@ -191,7 +193,17 @@ export default function ScansPage() {
       const config: Record<string, any> = {};
       if (formData.scan_type === 'port_scan') {
         config.scanner = formData.scanner;
-        if (formData.ports) {
+        if (formData.scanner === 'nmap') {
+          // Nmap picker owns the full configuration, including ports.
+          config.nmap_scan_type = nmapConfig.nmap_scan_type;
+          config.timing = nmapConfig.timing;
+          config.service_detection = nmapConfig.service_detection;
+          config.os_detection = nmapConfig.os_detection;
+          config.nse_scripts = nmapConfig.nse_scripts;
+          if (nmapConfig.ports && nmapConfig.ports.trim()) {
+            config.ports = nmapConfig.ports.trim();
+          }
+        } else if (formData.ports) {
           config.ports = formData.ports;
         }
       } else if (formData.scan_type === 'vulnerability') {
@@ -254,6 +266,7 @@ export default function ScansPage() {
         themis_kube_context: '',
         themis_services: '',
       });
+      setNmapConfig(DEFAULT_NMAP_CONFIG);
       fetchData();
     } catch (error: any) {
       toast({
@@ -729,17 +742,21 @@ export default function ScansPage() {
                       </Select>
                     </div>
 
-                    <div className="space-y-2">
-                      <Label>Ports (optional)</Label>
-                      <Input
-                        placeholder="80,443,8080 or 1-1000 or - for all"
-                        value={formData.ports}
-                        onChange={(e) => setFormData({ ...formData, ports: e.target.value })}
-                      />
-                      <p className="text-xs text-muted-foreground">
-                        Leave empty to scan top 100 common ports
-                      </p>
-                    </div>
+                    {formData.scanner === 'nmap' ? (
+                      <NmapScanConfigurator value={nmapConfig} onChange={setNmapConfig} />
+                    ) : (
+                      <div className="space-y-2">
+                        <Label>Ports (optional)</Label>
+                        <Input
+                          placeholder="80,443,8080 or 1-1000 or - for all"
+                          value={formData.ports}
+                          onChange={(e) => setFormData({ ...formData, ports: e.target.value })}
+                        />
+                        <p className="text-xs text-muted-foreground">
+                          Leave empty to scan top 100 common ports
+                        </p>
+                      </div>
+                    )}
                   </>
                 )}
 

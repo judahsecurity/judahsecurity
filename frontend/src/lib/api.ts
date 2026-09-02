@@ -184,6 +184,27 @@ function browserWebSocketOrigin(): string {
   return `${wsProto}//${host}`;
 }
 
+// ── Nmap scan configuration types ─────────────────────────────────────────
+
+export interface NmapProfileConfig {
+  nmap_scan_type: string;
+  timing: number;
+  service_detection: boolean;
+  os_detection: boolean;
+  nse_scripts: string[];
+  ports: string | null;
+}
+
+export interface NmapProfile {
+  id: number;
+  name: string;
+  description?: string;
+  config: NmapProfileConfig;
+  command_preview: string;
+  is_default: boolean;
+  is_active: boolean;
+}
+
 // ── Jira shared types ─────────────────────────────────────────────────────
 
 export interface JiraIntegration {
@@ -1102,6 +1123,50 @@ class ApiClient {
 
   async cancelScan(id: number) {
     const response = await this.client.post(`/scans/${id}/cancel`);
+    return response.data;
+  }
+
+  // ---- Nmap scan configuration picker ----
+  async getNmapOptions() {
+    const response = await this.client.get('/scan-config/nmap/options');
+    return response.data as {
+      scan_techniques: { value: string; label: string; description: string }[];
+      default_scan_technique: string;
+      timing_templates: { value: number; label: string; description: string }[];
+      nse_catalog: { group: string; scripts: { value: string; label: string; description: string }[] }[];
+    };
+  }
+
+  async getPortLists(includeInactive = false) {
+    const response = await this.client.get('/scan-config/port-lists', {
+      params: { include_inactive: includeInactive },
+    });
+    return response.data as {
+      id: number;
+      name: string;
+      description?: string;
+      ports: number[];
+      ports_string: string;
+      port_count: number;
+      is_default: boolean;
+      is_active: boolean;
+    }[];
+  }
+
+  async getNmapProfiles(includeInactive = false) {
+    const response = await this.client.get('/scan-config/nmap/profiles', {
+      params: { include_inactive: includeInactive },
+    });
+    return response.data as NmapProfile[];
+  }
+
+  async saveNmapProfile(data: { name: string; description?: string; config: NmapProfileConfig }) {
+    const response = await this.client.post('/scan-config/nmap/profiles', data);
+    return response.data as NmapProfile;
+  }
+
+  async deleteNmapProfile(name: string) {
+    const response = await this.client.delete(`/scan-config/nmap/profiles/${encodeURIComponent(name)}`);
     return response.data;
   }
 

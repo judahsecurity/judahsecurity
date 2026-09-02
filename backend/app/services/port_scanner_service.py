@@ -139,6 +139,20 @@ class PortScannerService:
         "/usr/local/share/nmap/scripts",
     )
 
+    # Allowlisted nmap scan techniques. Config for a scan is user-supplied and
+    # ends up in the nmap argv, so the requested technique is validated against
+    # this set and never passed through verbatim.
+    NMAP_SCAN_TECHNIQUES = {
+        "-sT": "TCP connect scan (no root required)",
+        "-sS": "TCP SYN / half-open scan (requires root)",
+        "-sU": "UDP scan (requires root, slower)",
+        "-sA": "TCP ACK scan (firewall rule mapping, requires root)",
+        "-sN": "TCP NULL scan (requires root)",
+        "-sF": "TCP FIN scan (requires root)",
+        "-sX": "TCP Xmas scan (requires root)",
+    }
+    DEFAULT_NMAP_SCAN_TECHNIQUE = "-sT"
+
     def __init__(
         self,
         naabu_path: str = "naabu",
@@ -1135,7 +1149,45 @@ class PortScannerService:
                         pass
     
     # ==================== NMAP ====================
-    
+
+    @classmethod
+    def build_nmap_command_preview(
+        cls,
+        ports: Optional[str] = None,
+        scan_type: str = "-sT",
+        service_detection: bool = True,
+        os_detection: bool = False,
+        timing: int = 4,
+        scripts: Optional[List[str]] = None,
+    ) -> str:
+        """
+        Render the nmap command that a given configuration would run.
+
+        Used to show users a human-readable preview of their custom scan
+        configuration. Mirrors the argv assembled in ``scan_with_nmap`` (minus
+        the per-run temp input/output files and target list).
+        """
+        if scan_type not in cls.NMAP_SCAN_TECHNIQUES:
+            scan_type = cls.DEFAULT_NMAP_SCAN_TECHNIQUE
+        try:
+            timing = max(0, min(5, int(timing)))
+        except (TypeError, ValueError):
+            timing = 4
+
+        parts = ["nmap", scan_type, f"-T{timing}", "-Pn"]
+        if ports and ports not in ("-", "all"):
+            parts.extend(["-p", ports])
+        elif ports in ("-", "all"):
+            parts.extend(["-p", "1-65535"])
+        if service_detection:
+            parts.append("-sV")
+        if os_detection:
+            parts.append("-O")
+        if scripts:
+            parts.extend(["--script", ",".join(scripts)])
+        parts.append("<targets>")
+        return " ".join(parts)
+
     async def scan_with_nmap(
         self,
         targets: List[str],
@@ -1166,18 +1218,34 @@ class PortScannerService:
         """
         result = ScanResult(success=False, scanner=ScannerType.NMAP)
         start_time = datetime.utcnow()
-        
+
+        # Validate the requested technique against the allowlist. Anything
+        # unrecognized falls back to the safe default connect scan rather than
+        # being injected into the argv.
+        if scan_type not in self.NMAP_SCAN_TECHNIQUES:
+            logger.warning(
+                "Unsupported nmap scan technique %r; using %s",
+                scan_type, self.DEFAULT_NMAP_SCAN_TECHNIQUE,
+            )
+            scan_type = self.DEFAULT_NMAP_SCAN_TECHNIQUE
+
+        # Clamp timing template to nmap's valid 0-5 range.
+        try:
+            timing = max(0, min(5, int(timing)))
+        except (TypeError, ValueError):
+            timing = 4
+
         # Handle special port notation
         if ports == "-" or ports == "all":
             ports = "1-65535"
-        
+
         with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as targets_file:
             targets_file.write("\n".join(targets))
             targets_path = targets_file.name
-        
+
         with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', delete=False) as output_file:
             output_path = output_file.name
-        
+
         try:
             cmd = [
                 self.nmap_path,

@@ -127,7 +127,7 @@ def seed_default_port_lists(db):
             ScanConfig.config_type == "port_list",
             ScanConfig.name == name
         ).first()
-        
+
         if not existing:
             # Flatten categories into ports list if present
             if "categories" in config:
@@ -135,7 +135,7 @@ def seed_default_port_lists(db):
                 for category_ports in config["categories"].values():
                     ports.extend(category_ports)
                 config["ports"] = sorted(set(ports))
-            
+
             scan_config = ScanConfig(
                 config_type="port_list",
                 name=name,
@@ -146,6 +146,137 @@ def seed_default_port_lists(db):
                 created_by="system"
             )
             db.add(scan_config)
-    
+
+    db.commit()
+
+
+# ==================== NMAP SCAN CONFIGURATION CATALOG ====================
+#
+# Reference data for the custom nmap scan configuration picker. The scan
+# technique allowlist lives with the scanner service (the single source of
+# truth for what is actually safe to run); everything else that the picker
+# needs to render is defined here.
+
+# Timing templates (nmap -T0 .. -T5).
+NMAP_TIMING_TEMPLATES = [
+    {"value": 0, "label": "T0 — Paranoid", "description": "Very slow; evades intrusion detection"},
+    {"value": 1, "label": "T1 — Sneaky", "description": "Slow; light IDS evasion"},
+    {"value": 2, "label": "T2 — Polite", "description": "Slows down to use less bandwidth"},
+    {"value": 3, "label": "T3 — Normal", "description": "Nmap default timing"},
+    {"value": 4, "label": "T4 — Aggressive", "description": "Fast; assumes a reliable network (recommended)"},
+    {"value": 5, "label": "T5 — Insane", "description": "Fastest; may sacrifice accuracy"},
+]
+
+# NSE scripts grouped for the picker. Categories are always safe to request
+# (nmap resolves them itself); individual scripts are filtered against what is
+# installed on the scanner host at run time.
+NMAP_NSE_CATALOG = [
+    {
+        "group": "Categories",
+        "scripts": [
+            {"value": "default", "label": "default", "description": "Nmap's default (-sC) script set"},
+            {"value": "safe", "label": "safe", "description": "Non-intrusive scripts only"},
+            {"value": "discovery", "label": "discovery", "description": "Host/service discovery"},
+            {"value": "version", "label": "version", "description": "Assist version detection"},
+            {"value": "vuln", "label": "vuln", "description": "Known-vulnerability checks"},
+            {"value": "auth", "label": "auth", "description": "Authentication-related checks"},
+        ],
+    },
+    {
+        "group": "Web / TLS",
+        "scripts": [
+            {"value": "http-title", "label": "http-title", "description": "Grab page titles"},
+            {"value": "http-headers", "label": "http-headers", "description": "Dump HTTP response headers"},
+            {"value": "http-methods", "label": "http-methods", "description": "Enumerate allowed HTTP methods"},
+            {"value": "ssl-cert", "label": "ssl-cert", "description": "Retrieve TLS certificate details"},
+            {"value": "ssl-enum-ciphers", "label": "ssl-enum-ciphers", "description": "Enumerate supported TLS ciphers"},
+        ],
+    },
+    {
+        "group": "Infrastructure",
+        "scripts": [
+            {"value": "banner", "label": "banner", "description": "Grab service banners"},
+            {"value": "ssh-auth-methods", "label": "ssh-auth-methods", "description": "SSH authentication methods"},
+            {"value": "smb-os-discovery", "label": "smb-os-discovery", "description": "OS info over SMB"},
+            {"value": "dns-recursion", "label": "dns-recursion", "description": "Check for open DNS recursion"},
+            {"value": "ftp-anon", "label": "ftp-anon", "description": "Check for anonymous FTP"},
+        ],
+    },
+]
+
+# Pre-built nmap scan profiles seeded for every deployment. These give users a
+# working starting point they can clone/tweak in the picker.
+DEFAULT_NMAP_PROFILES = {
+    "nmap-quick-tcp": {
+        "description": "Fast TCP connect scan of common ports with service detection",
+        "config": {
+            "scanner": "nmap",
+            "nmap_scan_type": "-sT",
+            "timing": 4,
+            "service_detection": True,
+            "os_detection": False,
+            "nse_scripts": [],
+            "ports": "21,22,23,25,53,80,110,143,443,445,3306,3389,5432,8080,8443",
+        },
+    },
+    "nmap-service-fingerprint": {
+        "description": "Service/version fingerprint with default NSE scripts",
+        "config": {
+            "scanner": "nmap",
+            "nmap_scan_type": "-sT",
+            "timing": 4,
+            "service_detection": True,
+            "os_detection": False,
+            "nse_scripts": ["default", "banner"],
+            "ports": None,
+        },
+    },
+    "nmap-web-tls": {
+        "description": "Web + TLS inspection on common web ports",
+        "config": {
+            "scanner": "nmap",
+            "nmap_scan_type": "-sT",
+            "timing": 4,
+            "service_detection": True,
+            "os_detection": False,
+            "nse_scripts": ["http-title", "http-headers", "ssl-cert", "ssl-enum-ciphers"],
+            "ports": "80,443,8080,8443,8000,8888,3000",
+        },
+    },
+    "nmap-vuln-sweep": {
+        "description": "Version detection plus the NSE vuln category (intrusive)",
+        "config": {
+            "scanner": "nmap",
+            "nmap_scan_type": "-sT",
+            "timing": 4,
+            "service_detection": True,
+            "os_detection": False,
+            "nse_scripts": ["vuln"],
+            "ports": None,
+        },
+    },
+}
+
+
+def seed_default_nmap_profiles(db):
+    """Seed the database with default nmap scan profiles."""
+    for name, profile in DEFAULT_NMAP_PROFILES.items():
+        existing = db.query(ScanConfig).filter(
+            ScanConfig.config_type == "scan_profile",
+            ScanConfig.name == name
+        ).first()
+
+        if not existing:
+            scan_config = ScanConfig(
+                config_type="scan_profile",
+                name=name,
+                description=profile.get("description", ""),
+                config=profile["config"],
+                is_default=True,
+                is_active=True,
+                created_by="system"
+            )
+            db.add(scan_config)
+
     db.commit()
 

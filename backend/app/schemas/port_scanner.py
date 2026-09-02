@@ -24,8 +24,12 @@ class PortScanRequest(BaseModel):
     chunk_size: int = Field(default=64, ge=8, le=256, description="Max hosts per scan chunk (for large CIDR ranges)")
     
     # Nmap options
-    service_detection: bool = Field(default=True, description="Enable service detection (nmap)")
-    
+    service_detection: bool = Field(default=True, description="Enable service/version detection -sV (nmap)")
+    nmap_scan_type: str = Field(default="-sT", description="Nmap scan technique flag (e.g. -sT, -sS, -sU). Validated against an allowlist.")
+    timing: int = Field(default=4, ge=0, le=5, description="Nmap timing template T0-T5 (higher = faster)")
+    os_detection: bool = Field(default=False, description="Enable OS detection -O (nmap, requires root)")
+    nse_scripts: List[str] = Field(default_factory=list, description="NSE scripts or categories to run (nmap --script)")
+
     # Import options
     create_assets: bool = Field(default=True, description="Create assets for new hosts")
     import_results: bool = Field(default=True, description="Import results to database")

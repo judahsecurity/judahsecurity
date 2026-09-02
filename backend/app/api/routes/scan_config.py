@@ -6,8 +6,17 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel, Field
 
 from app.db.database import get_db
-from app.models.scan_config import ScanConfig, DEFAULT_PORT_LISTS, seed_default_port_lists
+from app.models.scan_config import (
+    ScanConfig,
+    DEFAULT_PORT_LISTS,
+    DEFAULT_NMAP_PROFILES,
+    NMAP_TIMING_TEMPLATES,
+    NMAP_NSE_CATALOG,
+    seed_default_port_lists,
+    seed_default_nmap_profiles,
+)
 from app.models.user import User
+from app.services.port_scanner_service import PortScannerService
 from app.api.deps import get_current_active_user, require_analyst
 
 router = APIRouter(prefix="/scan-config", tags=["Scan Configuration"])
@@ -322,9 +331,10 @@ def seed_default_configs(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_analyst),
 ):
-    """Seed the database with default port lists."""
+    """Seed the database with default port lists and nmap scan profiles."""
     seed_default_port_lists(db)
-    return {"success": True, "message": "Default port lists seeded"}
+    seed_default_nmap_profiles(db)
+    return {"success": True, "message": "Default port lists and nmap profiles seeded"}
 
 
 @router.get("/port-categories")
@@ -358,4 +368,201 @@ def get_port_categories(
 def get_default_port_lists():
     """Get all default port list configurations (no auth required for reference)."""
     return DEFAULT_PORT_LISTS
+
+
+# ==================== NMAP SCAN CONFIGURATION ====================
+
+
+class NmapProfileConfig(BaseModel):
+    """A custom nmap scan configuration."""
+    nmap_scan_type: str = Field(default="-sT", description="Scan technique flag (e.g. -sT, -sS, -sU)")
+    timing: int = Field(default=4, ge=0, le=5, description="Timing template T0-T5")
+    service_detection: bool = Field(default=True, description="Enable -sV service/version detection")
+    os_detection: bool = Field(default=False, description="Enable -O OS detection")
+    nse_scripts: List[str] = Field(default_factory=list, description="NSE scripts/categories to run")
+    ports: Optional[str] = Field(default=None, description="Port specification (e.g. '80,443' or '1-1000'); null = defaults")
+
+
+class NmapProfileCreate(BaseModel):
+    """Create/save a reusable nmap scan profile."""
+    name: str = Field(..., min_length=1, max_length=100, description="Unique profile name")
+    description: Optional[str] = None
+    config: NmapProfileConfig
+
+
+class NmapProfileResponse(BaseModel):
+    """Saved nmap scan profile."""
+    id: int
+    name: str
+    description: Optional[str]
+    config: NmapProfileConfig
+    command_preview: str
+    is_default: bool
+    is_active: bool
+
+    class Config:
+        from_attributes = True
+
+
+def _nmap_profile_response(config: ScanConfig) -> NmapProfileResponse:
+    """Build an nmap profile response, including the equivalent command preview."""
+    cfg = config.config or {}
+    profile_config = NmapProfileConfig(
+        nmap_scan_type=cfg.get("nmap_scan_type", "-sT"),
+        timing=cfg.get("timing", 4),
+        service_detection=cfg.get("service_detection", True),
+        os_detection=cfg.get("os_detection", False),
+        nse_scripts=cfg.get("nse_scripts", []) or [],
+        ports=cfg.get("ports"),
+    )
+    preview = PortScannerService.build_nmap_command_preview(
+        ports=profile_config.ports,
+        scan_type=profile_config.nmap_scan_type,
+        service_detection=profile_config.service_detection,
+        os_detection=profile_config.os_detection,
+        timing=profile_config.timing,
+        scripts=profile_config.nse_scripts or None,
+    )
+    return NmapProfileResponse(
+        id=config.id,
+        name=config.name,
+        description=config.description,
+        config=profile_config,
+        command_preview=preview,
+        is_default=config.is_default,
+        is_active=config.is_active,
+    )
+
+
+@router.get("/nmap/options")
+def get_nmap_options(
+    current_user: User = Depends(get_current_active_user),
+):
+    """
+    Get the catalog of nmap options the scan configuration picker renders:
+    scan techniques (allowlisted), timing templates, and the NSE script catalog.
+    """
+    return {
+        "scan_techniques": [
+            {"value": flag, "label": flag, "description": desc}
+            for flag, desc in PortScannerService.NMAP_SCAN_TECHNIQUES.items()
+        ],
+        "default_scan_technique": PortScannerService.DEFAULT_NMAP_SCAN_TECHNIQUE,
+        "timing_templates": NMAP_TIMING_TEMPLATES,
+        "nse_catalog": NMAP_NSE_CATALOG,
+    }
+
+
+@router.post("/nmap/preview")
+def preview_nmap_command(
+    config: NmapProfileConfig,
+    current_user: User = Depends(get_current_active_user),
+):
+    """Render the nmap command a configuration would run (advisory preview)."""
+    preview = PortScannerService.build_nmap_command_preview(
+        ports=config.ports,
+        scan_type=config.nmap_scan_type,
+        service_detection=config.service_detection,
+        os_detection=config.os_detection,
+        timing=config.timing,
+        scripts=config.nse_scripts or None,
+    )
+    return {"command_preview": preview}
+
+
+@router.get("/nmap/profiles", response_model=List[NmapProfileResponse])
+def list_nmap_profiles(
+    include_inactive: bool = False,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """List saved nmap scan profiles."""
+    query = db.query(ScanConfig).filter(ScanConfig.config_type == "scan_profile")
+    if not include_inactive:
+        query = query.filter(ScanConfig.is_active == True)
+    configs = query.order_by(ScanConfig.name).all()
+    return [_nmap_profile_response(c) for c in configs]
+
+
+@router.post("/nmap/profiles", response_model=NmapProfileResponse, status_code=status.HTTP_201_CREATED)
+def create_nmap_profile(
+    data: NmapProfileCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Save a new reusable nmap scan profile."""
+    existing = db.query(ScanConfig).filter(
+        ScanConfig.config_type == "scan_profile",
+        ScanConfig.name == data.name
+    ).first()
+    if existing:
+        raise HTTPException(status_code=400, detail=f"Scan profile '{data.name}' already exists")
+
+    if data.config.nmap_scan_type not in PortScannerService.NMAP_SCAN_TECHNIQUES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported scan technique '{data.config.nmap_scan_type}'"
+        )
+
+    config = ScanConfig(
+        config_type="scan_profile",
+        name=data.name,
+        description=data.description,
+        config={"scanner": "nmap", **data.config.model_dump()},
+        is_default=False,
+        is_active=True,
+        created_by=current_user.username,
+    )
+    db.add(config)
+    db.commit()
+    db.refresh(config)
+    return _nmap_profile_response(config)
+
+
+@router.put("/nmap/profiles/{name}", response_model=NmapProfileResponse)
+def update_nmap_profile(
+    name: str,
+    data: NmapProfileConfig,
+    description: Optional[str] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Update an existing nmap scan profile."""
+    config = db.query(ScanConfig).filter(
+        ScanConfig.config_type == "scan_profile",
+        ScanConfig.name == name
+    ).first()
+    if not config:
+        raise HTTPException(status_code=404, detail=f"Scan profile '{name}' not found")
+    if config.is_default:
+        raise HTTPException(status_code=400, detail="Cannot modify default scan profiles; save a copy instead")
+
+    if data.nmap_scan_type not in PortScannerService.NMAP_SCAN_TECHNIQUES:
+        raise HTTPException(status_code=400, detail=f"Unsupported scan technique '{data.nmap_scan_type}'")
+
+    config.config = {"scanner": "nmap", **data.model_dump()}
+    if description is not None:
+        config.description = description
+    db.commit()
+    db.refresh(config)
+    return _nmap_profile_response(config)
+
+
+@router.delete("/nmap/profiles/{name}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_nmap_profile(
+    name: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Delete a custom nmap scan profile (cannot delete default profiles)."""
+    config = db.query(ScanConfig).filter(
+        ScanConfig.config_type == "scan_profile",
+        ScanConfig.name == name
+    ).first()
+    if not config:
+        raise HTTPException(status_code=404, detail=f"Scan profile '{name}' not found")
+    if config.is_default:
+        raise HTTPException(status_code=400, detail="Cannot delete default scan profiles")
+    db.delete(config)
+    db.commit()
 
