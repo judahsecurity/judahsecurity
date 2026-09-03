@@ -643,6 +643,52 @@ class ScheduleWorker:
         finally:
             db.close()
 
+    async def run_vm_scanner_syncs(self):
+        """Run continuous VM scanner syncs for connections whose interval is due.
+
+        Covers all vm_scanner_integrations providers (Tenable VM, Qualys VMDR,
+        Rapid7 InsightVM, Nessus). Same cadence model as the Censys sync above.
+        """
+        from app.models.vm_scanner_integration import VmScannerIntegration
+        from app.services import vm_scanner_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(VmScannerIntegration).filter(
+                VmScannerIntegration.is_active == True,
+                VmScannerIntegration.continuous_sync_enabled == True,
+            ).all()
+
+            due = [c for c in candidates if c.is_sync_due(now)]
+            if not due:
+                return
+
+            logger.info(f"VM scanners: {len(due)} connection(s) due for continuous sync")
+            for integration in due:
+                try:
+                    result = await vm_scanner_service.sync_integration(db, integration)
+                    logger.info(
+                        f"VM scanner sync ({integration.provider}, org {integration.organization_id}, "
+                        f"'{integration.connection_name}'): {result.get('message')}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"VM scanner sync failed for connection {integration.id}: {exc}",
+                        exc_info=True,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.error(f"VM scanner continuous sync check failed: {exc}", exc_info=True)
+        finally:
+            db.close()
+
     async def run_hackerone_syncs(self):
         """Run continuous HackerOne syncs for connections whose interval is due."""
         from app.models.hackerone_integration import HackerOneIntegration
@@ -867,6 +913,9 @@ class ScheduleWorker:
 
                 # Continuous Censys ASM syncs — due-check enforces per-connection cadence
                 await self.run_censys_asm_syncs()
+
+                # Continuous VM scanner syncs (Tenable, Qualys, Rapid7, Nessus)
+                await self.run_vm_scanner_syncs()
 
                 # Continuous HackerOne bug bounty syncs
                 await self.run_hackerone_syncs()

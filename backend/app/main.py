@@ -24,6 +24,7 @@ from app.models.panorama_integration import PanoramaIntegration  # noqa: F401 �
 from app.models.f5_integration import F5Integration  # noqa: F401 — ensure table is created
 from app.models.akamai_integration import AkamaiWafIntegration  # noqa: F401 — ensure table is created
 from app.models.cloudflare_integration import CloudflareWafIntegration  # noqa: F401 — ensure table is created
+from app.models.vm_scanner_integration import VmScannerIntegration  # noqa: F401 — ensure table is created
 from app.models.custom_nuclei_template import CustomNucleiTemplate  # noqa: F401 — ensure table is created
 from app.api.routes import auth, users, organizations, assets, vulnerabilities, scans, discovery, nuclei, ports, screenshots, external_discovery, waybackurls, netblocks, labels, scan_schedules, tools, sni_discovery, scan_config, acquisitions, oracle, agent
 from app.api.routes import integrations

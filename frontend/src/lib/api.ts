@@ -344,6 +344,54 @@ export interface CensysSyncResult {
   risks_seen: number;
 }
 
+// ── VM scanner (Tenable/Qualys/Rapid7/Nessus) shared types ─────────────────
+
+export type VmScannerProvider = 'tenable' | 'qualys' | 'rapid7' | 'nessus';
+
+export interface VmScannerProviderInfo {
+  provider: VmScannerProvider;
+  label: string;
+  default_base_url?: string | null;
+  base_url_required: boolean;
+  base_url_hint?: string | null;
+  credential_fields: { key: string; label: string; secret: boolean }[];
+  docs_url?: string | null;
+}
+
+export interface VmScannerIntegration {
+  id: number;
+  organization_id: number;
+  provider: VmScannerProvider;
+  connection_name: string;
+  base_url?: string | null;
+  verify_ssl: boolean;
+  import_vulnerabilities: boolean;
+  import_assets: boolean;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VmScannerSyncResult {
+  ok: boolean;
+  message: string;
+  assets_created: number;
+  assets_updated: number;
+  vulns_created: number;
+  vulns_updated: number;
+  hosts_seen: number;
+  findings_seen: number;
+}
+
 // ── HackerOne shared types ─────────────────────────────────────────────────
 
 export interface HackerOneIntegration {
@@ -2845,6 +2893,62 @@ class ApiClient {
 
   async syncCensysIntegration(id: number): Promise<CensysSyncResult> {
     const response = await this.client.post(`/integrations/censys/${id}/sync`);
+    return response.data;
+  }
+
+  // ── VM Scanner Integrations (Tenable, Qualys, Rapid7, Nessus) ──────────────
+
+  async getVmScannerProviders(): Promise<VmScannerProviderInfo[]> {
+    const response = await this.client.get('/integrations/vm-scanners/providers');
+    return response.data;
+  }
+
+  async getVmScannerIntegrations(): Promise<VmScannerIntegration[]> {
+    const response = await this.client.get('/integrations/vm-scanners');
+    return response.data;
+  }
+
+  async createVmScannerIntegration(payload: {
+    provider: VmScannerProvider;
+    connection_name: string;
+    base_url?: string;
+    credentials: Record<string, string>;
+    verify_ssl?: boolean;
+    import_vulnerabilities?: boolean;
+    import_assets?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<VmScannerIntegration> {
+    const response = await this.client.post('/integrations/vm-scanners', payload);
+    return response.data;
+  }
+
+  async updateVmScannerIntegration(id: number, payload: {
+    connection_name?: string;
+    base_url?: string;
+    credentials?: Record<string, string>;
+    verify_ssl?: boolean;
+    import_vulnerabilities?: boolean;
+    import_assets?: boolean;
+    is_active?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<VmScannerIntegration> {
+    const response = await this.client.put(`/integrations/vm-scanners/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteVmScannerIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/vm-scanners/${id}`);
+  }
+
+  async testVmScannerConnection(id: number): Promise<{ ok: boolean; message: string }> {
+    const response = await this.client.post(`/integrations/vm-scanners/${id}/test`);
+    return response.data;
+  }
+
+  async syncVmScannerIntegration(id: number): Promise<VmScannerSyncResult> {
+    const response = await this.client.post(`/integrations/vm-scanners/${id}/sync`);
     return response.data;
   }
 

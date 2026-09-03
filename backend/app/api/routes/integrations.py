@@ -1,4 +1,4 @@
-"""Integrations router — Jira, ServiceNow, Censys, HackerOne, Akamai, Panorama, F5, Cloudflare."""
+"""Integrations router — Jira, ServiceNow, Censys, HackerOne, Akamai, Panorama, F5, Cloudflare, VM scanners."""
 
 import logging
 from datetime import datetime
@@ -26,6 +26,7 @@ from app.models.panorama_integration import (
 )
 from app.models.f5_integration import F5Integration
 from app.models.cloudflare_integration import CloudflareWafIntegration
+from app.models.vm_scanner_integration import VmScannerIntegration
 from app.models.user import User
 from app.models.vulnerability import Vulnerability
 from app.models.asset import Asset
@@ -97,9 +98,18 @@ from app.schemas.cloudflare_schemas import (
     CloudflareSyncResult,
     CloudflareTestConnectionResponse,
 )
+from app.schemas.vm_scanner_schemas import (
+    VmScannerIntegrationCreate,
+    VmScannerIntegrationResponse,
+    VmScannerIntegrationUpdate,
+    VmScannerProviderInfo,
+    VmScannerSyncResult,
+    VmScannerTestConnectionResponse,
+)
 from app.services import (
     jira_service,
     censys_asm_service,
+    vm_scanner_service,
     hackerone_service,
     akamai_waf_service,
     panorama_service,
@@ -2394,3 +2404,186 @@ def disconnect_servicenow_delivery(
     db.commit()
     label = delivery.snow_number or delivery.snow_sys_id or f"#{delivery.id}"
     return {"ok": True, "message": f"ServiceNow delivery {label} disconnected."}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VM scanners — read-only import of hosts & detections from vulnerability
+# management platforms (Tenable VM, Qualys VMDR, Rapid7 InsightVM, Nessus)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_vm_scanner_integration(db: Session, org_id: int, integration_id: int) -> VmScannerIntegration:
+    integration = (
+        db.query(VmScannerIntegration)
+        .filter(
+            VmScannerIntegration.id == integration_id,
+            VmScannerIntegration.organization_id == org_id,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="VM scanner connection not found.")
+    return integration
+
+
+@router.get("/vm-scanners/providers", response_model=List[VmScannerProviderInfo])
+def list_vm_scanner_providers(
+    current_user: User = Depends(get_current_active_user),
+):
+    """Supported VM vendors and the credential fields each one needs."""
+    return [
+        VmScannerProviderInfo(provider=key, **meta)
+        for key, meta in vm_scanner_service.PROVIDERS.items()
+    ]
+
+
+@router.get("/vm-scanners", response_model=List[VmScannerIntegrationResponse])
+def list_vm_scanner_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    return (
+        db.query(VmScannerIntegration)
+        .filter(VmScannerIntegration.organization_id == org_id)
+        .order_by(VmScannerIntegration.created_at.desc())
+        .all()
+    )
+
+
+@router.post("/vm-scanners", response_model=VmScannerIntegrationResponse, status_code=status.HTTP_201_CREATED)
+async def create_vm_scanner_integration(
+    payload: VmScannerIntegrationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+
+    error = vm_scanner_service.validate_config(payload.provider, payload.base_url, payload.credentials)
+    if error:
+        raise HTTPException(status_code=422, detail=error)
+
+    existing = (
+        db.query(VmScannerIntegration)
+        .filter(
+            VmScannerIntegration.organization_id == org_id,
+            VmScannerIntegration.provider == payload.provider,
+            VmScannerIntegration.connection_name == payload.connection_name,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A {payload.provider} connection named '{payload.connection_name}' already exists.",
+        )
+
+    result = await vm_scanner_service.test_connection(
+        payload.provider, payload.base_url, payload.credentials, payload.verify_ssl
+    )
+
+    integration = VmScannerIntegration(
+        organization_id=org_id,
+        provider=payload.provider,
+        connection_name=payload.connection_name,
+        base_url=(payload.base_url or "").strip() or None,
+        verify_ssl=payload.verify_ssl,
+        import_vulnerabilities=payload.import_vulnerabilities,
+        import_assets=payload.import_assets,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+        last_tested_at=datetime.utcnow(),
+        last_test_ok=result["ok"],
+    )
+    integration.set_credentials(payload.credentials)
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.put("/vm-scanners/{integration_id}", response_model=VmScannerIntegrationResponse)
+async def update_vm_scanner_integration(
+    integration_id: int,
+    payload: VmScannerIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_vm_scanner_integration(db, org_id, integration_id)
+
+    data = payload.model_dump(exclude_unset=True)
+    new_credentials = data.pop("credentials", None)
+    for field, value in data.items():
+        setattr(integration, field, value)
+    if new_credentials:
+        integration.set_credentials(new_credentials)
+
+    error = vm_scanner_service.validate_config(
+        integration.provider, integration.base_url, integration.get_credentials()
+    )
+    if error:
+        raise HTTPException(status_code=422, detail=error)
+
+    # Re-validate whenever credentials change (or on any edit for freshness).
+    result = await vm_scanner_service.test_connection(
+        integration.provider,
+        integration.base_url,
+        integration.get_credentials(),
+        integration.verify_ssl,
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/vm-scanners/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_vm_scanner_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_vm_scanner_integration(db, org_id, integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post("/vm-scanners/{integration_id}/test", response_model=VmScannerTestConnectionResponse)
+async def test_vm_scanner_connection(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_vm_scanner_integration(db, org_id, integration_id)
+    result = await vm_scanner_service.test_connection(
+        integration.provider,
+        integration.base_url,
+        integration.get_credentials(),
+        integration.verify_ssl,
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    db.commit()
+    return VmScannerTestConnectionResponse(**result)
+
+
+@router.post("/vm-scanners/{integration_id}/sync", response_model=VmScannerSyncResult)
+async def sync_vm_scanner_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Pull the latest hosts and/or detections from the VM platform and import them."""
+    org_id = _get_org_id(current_user)
+    integration = _get_vm_scanner_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This VM scanner connection is disabled.")
+
+    result = await vm_scanner_service.sync_integration(db, integration)
+    return VmScannerSyncResult(**result)
