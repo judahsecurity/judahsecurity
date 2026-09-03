@@ -102,5 +102,10 @@ data/sni-downloads/*.txt
 website/.next/
 website/node_modules/
 
+# Frontend build artifacts
+frontend/.next/
+frontend/node_modules/
+frontend/tsconfig.tsbuildinfo
+
 # Materialized custom Nuclei templates (source of truth is the DB)
 backend/nuclei-templates-generated/
