@@ -8,7 +8,9 @@ database access.
 
 from app.models.asset import AssetType
 from app.services import (
+    aws_waf_service,
     checkpoint_service,
+    cisco_asa_service,
     cisco_fmc_service,
     fortigate_service,
     pfsense_service,
@@ -203,3 +205,74 @@ def test_pfsense_alias_addresses_list():
 
 def test_pfsense_alias_addresses_string():
     assert pfsense_service._alias_addresses({"address": "1.1.1.1 2.2.2.2"}) == ["1.1.1.1", "2.2.2.2"]
+
+
+# ── Cisco ASA ────────────────────────────────────────────────────────────────
+
+
+def test_cisco_asa_host():
+    entry = {"name": "h", "host": {"kind": "IPv4Address", "value": "1.2.3.4"}}
+    assert cisco_asa_service.parse_network_object(entry) == ("1.2.3.4", AssetType.IP_ADDRESS, "ip")
+
+
+def test_cisco_asa_network_cidr():
+    entry = {"name": "n", "host": {"kind": "IPv4Network", "value": "10.0.0.0/24"}}
+    assert cisco_asa_service.parse_network_object(entry) == ("10.0.0.0/24", AssetType.IP_RANGE, "cidr")
+
+
+def test_cisco_asa_network_space_mask():
+    entry = {"name": "n", "host": {"kind": "IPv4Network", "value": "10.0.0.0 255.255.255.0"}}
+    assert cisco_asa_service.parse_network_object(entry) == ("10.0.0.0/24", AssetType.IP_RANGE, "cidr")
+
+
+def test_cisco_asa_range_seeds_first_ip():
+    entry = {"name": "r", "host": {"kind": "IPv4Range", "value": "10.0.0.1-10.0.0.9"}}
+    assert cisco_asa_service.parse_network_object(entry) == ("10.0.0.1", AssetType.IP_ADDRESS, "range")
+
+
+def test_cisco_asa_fqdn():
+    entry = {"name": "f", "host": {"kind": "IPv4FQDN", "value": "www.example.com"}}
+    assert cisco_asa_service.parse_network_object(entry) == ("www.example.com", AssetType.SUBDOMAIN, "fqdn")
+
+
+def test_cisco_asa_any_ignored():
+    entry = {"name": "x", "host": {"kind": "AnyIPAddress", "value": "any"}}
+    assert cisco_asa_service.parse_network_object(entry) is None
+
+
+# ── AWS WAF ──────────────────────────────────────────────────────────────────
+
+
+def test_aws_waf_asset_type_apex():
+    assert aws_waf_service._asset_type_for_hostname("example.com") == AssetType.DOMAIN
+
+
+def test_aws_waf_asset_type_subdomain():
+    assert aws_waf_service._asset_type_for_hostname("api.example.com") == AssetType.SUBDOMAIN
+
+
+def test_aws_waf_clean_hostname():
+    assert aws_waf_service._clean_hostname("D123.CloudFront.net") == "d123.cloudfront.net"
+    assert aws_waf_service._clean_hostname("not a host") is None
+
+
+def test_aws_waf_apigw_endpoint_from_arn():
+    arn = "arn:aws:apigateway:us-east-1::/restapis/abc123/stages/prod"
+    assert aws_waf_service.apigw_endpoint_from_arn(arn) == "abc123.execute-api.us-east-1.amazonaws.com"
+
+
+def test_aws_waf_apigw_endpoint_rejects_alb_arn():
+    assert aws_waf_service.apigw_endpoint_from_arn("arn:aws:elasticloadbalancing:us-east-1:1:loadbalancer/app/x/y") is None
+
+
+def test_aws_waf_hostnames_from_distribution():
+    dist = {
+        "DomainName": "d123.cloudfront.net",
+        "Aliases": {"Quantity": 2, "Items": ["www.example.com", "example.com"]},
+        "WebACLId": "arn:aws:wafv2:...",
+    }
+    assert aws_waf_service.hostnames_from_distribution(dist) == [
+        "d123.cloudfront.net",
+        "www.example.com",
+        "example.com",
+    ]

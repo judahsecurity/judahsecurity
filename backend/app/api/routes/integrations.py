@@ -1,5 +1,5 @@
 """Integrations router — Jira, ServiceNow, Censys, HackerOne, Akamai, Panorama, F5,
-FortiGate, Check Point, Cisco FMC, SonicWall, pfSense, Cloudflare."""
+FortiGate, Check Point, Cisco FMC, Cisco ASA, SonicWall, pfSense, AWS WAF, Cloudflare."""
 
 import logging
 from datetime import datetime
@@ -29,8 +29,10 @@ from app.models.f5_integration import F5Integration
 from app.models.fortigate_integration import FortiGateIntegration
 from app.models.checkpoint_integration import CheckPointIntegration
 from app.models.cisco_fmc_integration import CiscoFmcIntegration
+from app.models.cisco_asa_integration import CiscoAsaIntegration
 from app.models.sonicwall_integration import SonicWallIntegration
 from app.models.pfsense_integration import PfSenseIntegration
+from app.models.aws_waf_integration import AwsWafIntegration
 from app.models.cloudflare_integration import CloudflareWafIntegration
 from app.models.user import User
 from app.models.vulnerability import Vulnerability
@@ -131,6 +133,20 @@ from app.schemas.pfsense_schemas import (
     PfSenseSyncResult,
     PfSenseTestConnectionResponse,
 )
+from app.schemas.cisco_asa_schemas import (
+    CiscoAsaIntegrationCreate,
+    CiscoAsaIntegrationResponse,
+    CiscoAsaIntegrationUpdate,
+    CiscoAsaSyncResult,
+    CiscoAsaTestConnectionResponse,
+)
+from app.schemas.aws_waf_schemas import (
+    AwsWafIntegrationCreate,
+    AwsWafIntegrationResponse,
+    AwsWafIntegrationUpdate,
+    AwsWafSyncResult,
+    AwsWafTestConnectionResponse,
+)
 from app.schemas.cloudflare_schemas import (
     CloudflareIntegrationCreate,
     CloudflareIntegrationResponse,
@@ -148,8 +164,10 @@ from app.services import (
     fortigate_service,
     checkpoint_service,
     cisco_fmc_service,
+    cisco_asa_service,
     sonicwall_service,
     pfsense_service,
+    aws_waf_service,
     cloudflare_waf_service,
     servicenow_service,
 )
@@ -2463,6 +2481,352 @@ async def sync_pfsense_integration(
 
     result = await pfsense_service.sync_integration(db, integration)
     return PfSenseSyncResult(**result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Cisco ASA — read-only network-object import
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_cisco_asa_integration(db: Session, org_id: int, integration_id: int) -> CiscoAsaIntegration:
+    integration = (
+        db.query(CiscoAsaIntegration)
+        .filter(
+            CiscoAsaIntegration.id == integration_id,
+            CiscoAsaIntegration.organization_id == org_id,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="Cisco ASA connection not found.")
+    return integration
+
+
+@router.get("/cisco-asa", response_model=List[CiscoAsaIntegrationResponse])
+def list_cisco_asa_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    return (
+        db.query(CiscoAsaIntegration)
+        .filter(CiscoAsaIntegration.organization_id == org_id)
+        .order_by(CiscoAsaIntegration.created_at.desc())
+        .all()
+    )
+
+
+@router.post("/cisco-asa", response_model=CiscoAsaIntegrationResponse, status_code=status.HTTP_201_CREATED)
+async def create_cisco_asa_integration(
+    payload: CiscoAsaIntegrationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+
+    existing = (
+        db.query(CiscoAsaIntegration)
+        .filter(
+            CiscoAsaIntegration.organization_id == org_id,
+            CiscoAsaIntegration.name == payload.name,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A Cisco ASA connection named '{payload.name}' already exists.",
+        )
+
+    result = await cisco_asa_service.test_connection(
+        payload.asa_host,
+        payload.username,
+        payload.password,
+        verify_ssl=payload.verify_ssl,
+    )
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+
+    integration = CiscoAsaIntegration(
+        organization_id=org_id,
+        name=payload.name,
+        asa_host=payload.asa_host,
+        verify_ssl=payload.verify_ssl,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+        last_tested_at=datetime.utcnow(),
+        last_test_ok=True,
+    )
+    integration.set_username(payload.username)
+    integration.set_password(payload.password)
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.put("/cisco-asa/{integration_id}", response_model=CiscoAsaIntegrationResponse)
+async def update_cisco_asa_integration(
+    integration_id: int,
+    payload: CiscoAsaIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_cisco_asa_integration(db, org_id, integration_id)
+
+    data = payload.model_dump(exclude_unset=True)
+    new_username = data.pop("username", None)
+    new_password = data.pop("password", None)
+
+    for field, value in data.items():
+        setattr(integration, field, value)
+    if new_username:
+        integration.set_username(new_username)
+    if new_password:
+        integration.set_password(new_password)
+
+    result = await cisco_asa_service.test_connection(
+        integration.asa_host or "",
+        integration.get_username() or "",
+        integration.get_password() or "",
+        verify_ssl=bool(integration.verify_ssl),
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/cisco-asa/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_cisco_asa_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_cisco_asa_integration(db, org_id, integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post("/cisco-asa/{integration_id}/test", response_model=CiscoAsaTestConnectionResponse)
+async def test_cisco_asa_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_cisco_asa_integration(db, org_id, integration_id)
+    result = await cisco_asa_service.test_connection(
+        integration.asa_host or "",
+        integration.get_username() or "",
+        integration.get_password() or "",
+        verify_ssl=bool(integration.verify_ssl),
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    integration.last_error = None if result["ok"] else result["message"]
+    db.commit()
+    return CiscoAsaTestConnectionResponse(**result)
+
+
+@router.post("/cisco-asa/{integration_id}/sync", response_model=CiscoAsaSyncResult)
+async def sync_cisco_asa_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Import network objects from the Cisco ASA REST API."""
+    org_id = _get_org_id(current_user)
+    integration = _get_cisco_asa_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This Cisco ASA connection is disabled.")
+
+    result = await cisco_asa_service.sync_integration(db, integration)
+    return CiscoAsaSyncResult(**result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AWS WAF — read-only import of Web ACLs & protected hostnames
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_aws_waf_integration(db: Session, org_id: int, integration_id: int) -> AwsWafIntegration:
+    integration = (
+        db.query(AwsWafIntegration)
+        .filter(
+            AwsWafIntegration.id == integration_id,
+            AwsWafIntegration.organization_id == org_id,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="AWS WAF connection not found.")
+    return integration
+
+
+@router.get("/aws-waf", response_model=List[AwsWafIntegrationResponse])
+def list_aws_waf_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    return (
+        db.query(AwsWafIntegration)
+        .filter(AwsWafIntegration.organization_id == org_id)
+        .order_by(AwsWafIntegration.created_at.desc())
+        .all()
+    )
+
+
+@router.post("/aws-waf", response_model=AwsWafIntegrationResponse, status_code=status.HTTP_201_CREATED)
+async def create_aws_waf_integration(
+    payload: AwsWafIntegrationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+
+    existing = (
+        db.query(AwsWafIntegration)
+        .filter(
+            AwsWafIntegration.organization_id == org_id,
+            AwsWafIntegration.name == payload.name,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"An AWS WAF connection named '{payload.name}' already exists.",
+        )
+
+    result = await aws_waf_service.test_connection(
+        payload.access_key_id,
+        payload.secret_access_key,
+        payload.session_token,
+        payload.regions,
+        include_cloudfront=payload.include_cloudfront,
+        include_regional=payload.include_regional,
+    )
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+
+    integration = AwsWafIntegration(
+        organization_id=org_id,
+        name=payload.name,
+        regions=payload.regions,
+        include_cloudfront=payload.include_cloudfront,
+        include_regional=payload.include_regional,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+        last_tested_at=datetime.utcnow(),
+        last_test_ok=True,
+    )
+    integration.set_access_key_id(payload.access_key_id)
+    integration.set_secret_access_key(payload.secret_access_key)
+    integration.set_session_token(payload.session_token)
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.put("/aws-waf/{integration_id}", response_model=AwsWafIntegrationResponse)
+async def update_aws_waf_integration(
+    integration_id: int,
+    payload: AwsWafIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_aws_waf_integration(db, org_id, integration_id)
+
+    data = payload.model_dump(exclude_unset=True)
+    new_key_id = data.pop("access_key_id", None)
+    new_secret = data.pop("secret_access_key", None)
+    session_token_provided = "session_token" in data
+    new_session_token = data.pop("session_token", None)
+
+    for field, value in data.items():
+        setattr(integration, field, value)
+    if new_key_id:
+        integration.set_access_key_id(new_key_id)
+    if new_secret:
+        integration.set_secret_access_key(new_secret)
+    if session_token_provided:
+        integration.set_session_token(new_session_token)
+
+    result = await aws_waf_service.test_connection(
+        integration.get_access_key_id() or "",
+        integration.get_secret_access_key() or "",
+        integration.get_session_token(),
+        list(integration.regions or ["us-east-1"]),
+        include_cloudfront=bool(integration.include_cloudfront),
+        include_regional=bool(integration.include_regional),
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/aws-waf/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_aws_waf_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_aws_waf_integration(db, org_id, integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post("/aws-waf/{integration_id}/test", response_model=AwsWafTestConnectionResponse)
+async def test_aws_waf_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_aws_waf_integration(db, org_id, integration_id)
+    result = await aws_waf_service.test_connection(
+        integration.get_access_key_id() or "",
+        integration.get_secret_access_key() or "",
+        integration.get_session_token(),
+        list(integration.regions or ["us-east-1"]),
+        include_cloudfront=bool(integration.include_cloudfront),
+        include_regional=bool(integration.include_regional),
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    integration.last_error = None if result["ok"] else result["message"]
+    db.commit()
+    return AwsWafTestConnectionResponse(**result)
+
+
+@router.post("/aws-waf/{integration_id}/sync", response_model=AwsWafSyncResult)
+async def sync_aws_waf_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Import Web ACLs and protected hostnames from AWS WAF."""
+    org_id = _get_org_id(current_user)
+    integration = _get_aws_waf_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This AWS WAF connection is disabled.")
+
+    result = await aws_waf_service.sync_integration(db, integration)
+    return AwsWafSyncResult(**result)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

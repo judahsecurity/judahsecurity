@@ -25,8 +25,10 @@ from app.models.f5_integration import F5Integration  # noqa: F401 — ensure tab
 from app.models.fortigate_integration import FortiGateIntegration  # noqa: F401 — ensure table is created
 from app.models.checkpoint_integration import CheckPointIntegration  # noqa: F401 — ensure table is created
 from app.models.cisco_fmc_integration import CiscoFmcIntegration  # noqa: F401 — ensure table is created
+from app.models.cisco_asa_integration import CiscoAsaIntegration  # noqa: F401 — ensure table is created
 from app.models.sonicwall_integration import SonicWallIntegration  # noqa: F401 — ensure table is created
 from app.models.pfsense_integration import PfSenseIntegration  # noqa: F401 — ensure table is created
+from app.models.aws_waf_integration import AwsWafIntegration  # noqa: F401 — ensure table is created
 from app.models.akamai_integration import AkamaiWafIntegration  # noqa: F401 — ensure table is created
 from app.models.cloudflare_integration import CloudflareWafIntegration  # noqa: F401 — ensure table is created
 from app.models.custom_nuclei_template import CustomNucleiTemplate  # noqa: F401 — ensure table is created

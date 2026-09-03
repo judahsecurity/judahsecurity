@@ -699,6 +699,71 @@ export interface PfSenseSyncResult {
   assets_missing_from_source: number;
 }
 
+export interface CiscoAsaIntegration {
+  id: number;
+  organization_id: number;
+  name: string;
+  asa_host: string;
+  verify_ssl: boolean;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CiscoAsaSyncResult {
+  ok: boolean;
+  message: string;
+  assets_created: number;
+  assets_updated: number;
+  objects_seen: number;
+  ips_imported: number;
+  cidrs_imported: number;
+  fqdns_imported: number;
+  ranges_seeded: number;
+  assets_missing_from_source: number;
+}
+
+export interface AwsWafIntegration {
+  id: number;
+  organization_id: number;
+  name: string;
+  regions: string[];
+  include_cloudfront: boolean;
+  include_regional: boolean;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AwsWafSyncResult {
+  ok: boolean;
+  message: string;
+  assets_created: number;
+  assets_updated: number;
+  web_acls_seen: number;
+  hostnames_seen: number;
+  resources_seen: number;
+  assets_missing_from_source: number;
+}
+
 class ApiClient {
   private client: AxiosInstance;
   private token: string | null = null;
@@ -3454,6 +3519,106 @@ class ApiClient {
 
   async syncPfSenseIntegration(id: number): Promise<PfSenseSyncResult> {
     const response = await this.client.post(`/integrations/pfsense/${id}/sync`);
+    return response.data;
+  }
+
+  // ── Cisco ASA Integration ──────────────────────────────────────────────────
+
+  async getCiscoAsaIntegrations(): Promise<CiscoAsaIntegration[]> {
+    const response = await this.client.get('/integrations/cisco-asa');
+    return response.data;
+  }
+
+  async createCiscoAsaIntegration(payload: {
+    name: string;
+    asa_host: string;
+    username: string;
+    password: string;
+    verify_ssl?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<CiscoAsaIntegration> {
+    const response = await this.client.post('/integrations/cisco-asa', payload);
+    return response.data;
+  }
+
+  async updateCiscoAsaIntegration(id: number, payload: {
+    name?: string;
+    asa_host?: string;
+    username?: string;
+    password?: string;
+    verify_ssl?: boolean;
+    is_active?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<CiscoAsaIntegration> {
+    const response = await this.client.put(`/integrations/cisco-asa/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteCiscoAsaIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/cisco-asa/${id}`);
+  }
+
+  async testCiscoAsaConnection(id: number): Promise<{ ok: boolean; message: string; object_count?: number }> {
+    const response = await this.client.post(`/integrations/cisco-asa/${id}/test`);
+    return response.data;
+  }
+
+  async syncCiscoAsaIntegration(id: number): Promise<CiscoAsaSyncResult> {
+    const response = await this.client.post(`/integrations/cisco-asa/${id}/sync`);
+    return response.data;
+  }
+
+  // ── AWS WAF Integration ────────────────────────────────────────────────────
+
+  async getAwsWafIntegrations(): Promise<AwsWafIntegration[]> {
+    const response = await this.client.get('/integrations/aws-waf');
+    return response.data;
+  }
+
+  async createAwsWafIntegration(payload: {
+    name: string;
+    access_key_id: string;
+    secret_access_key: string;
+    session_token?: string | null;
+    regions?: string[];
+    include_cloudfront?: boolean;
+    include_regional?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<AwsWafIntegration> {
+    const response = await this.client.post('/integrations/aws-waf', payload);
+    return response.data;
+  }
+
+  async updateAwsWafIntegration(id: number, payload: {
+    name?: string;
+    access_key_id?: string;
+    secret_access_key?: string;
+    session_token?: string | null;
+    regions?: string[];
+    include_cloudfront?: boolean;
+    include_regional?: boolean;
+    is_active?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<AwsWafIntegration> {
+    const response = await this.client.put(`/integrations/aws-waf/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteAwsWafIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/aws-waf/${id}`);
+  }
+
+  async testAwsWafConnection(id: number): Promise<{ ok: boolean; message: string; web_acls_found?: number }> {
+    const response = await this.client.post(`/integrations/aws-waf/${id}/test`);
+    return response.data;
+  }
+
+  async syncAwsWafIntegration(id: number): Promise<AwsWafSyncResult> {
+    const response = await this.client.post(`/integrations/aws-waf/${id}/sync`);
     return response.data;
   }
 

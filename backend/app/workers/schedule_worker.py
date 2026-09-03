@@ -1021,6 +1021,90 @@ class ScheduleWorker:
         finally:
             db.close()
 
+    async def run_cisco_asa_syncs(self):
+        """Run continuous Cisco ASA network-object inventory syncs when due."""
+        from app.models.cisco_asa_integration import CiscoAsaIntegration
+        from app.services import cisco_asa_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(CiscoAsaIntegration).filter(
+                CiscoAsaIntegration.is_active == True,
+                CiscoAsaIntegration.continuous_sync_enabled == True,
+            ).all()
+
+            due = [c for c in candidates if c.is_sync_due(now)]
+            if not due:
+                return
+
+            logger.info(f"Cisco ASA: {len(due)} connection(s) due for continuous sync")
+            for integration in due:
+                try:
+                    result = await cisco_asa_service.sync_integration(db, integration)
+                    logger.info(
+                        f"Cisco ASA sync (org {integration.organization_id}, "
+                        f"'{integration.name}'): {result.get('message')}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"Cisco ASA sync failed for connection {integration.id}: {exc}",
+                        exc_info=True,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.error(f"Cisco ASA continuous sync check failed: {exc}", exc_info=True)
+        finally:
+            db.close()
+
+    async def run_aws_waf_syncs(self):
+        """Run continuous AWS WAF Web ACL / protected-hostname syncs when due."""
+        from app.models.aws_waf_integration import AwsWafIntegration
+        from app.services import aws_waf_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(AwsWafIntegration).filter(
+                AwsWafIntegration.is_active == True,
+                AwsWafIntegration.continuous_sync_enabled == True,
+            ).all()
+
+            due = [c for c in candidates if c.is_sync_due(now)]
+            if not due:
+                return
+
+            logger.info(f"AWS WAF: {len(due)} connection(s) due for continuous sync")
+            for integration in due:
+                try:
+                    result = await aws_waf_service.sync_integration(db, integration)
+                    logger.info(
+                        f"AWS WAF sync (org {integration.organization_id}, "
+                        f"'{integration.name}'): {result.get('message')}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"AWS WAF sync failed for connection {integration.id}: {exc}",
+                        exc_info=True,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.error(f"AWS WAF continuous sync check failed: {exc}", exc_info=True)
+        finally:
+            db.close()
+
     async def run_cloudflare_waf_syncs(self):
         """Run continuous Cloudflare WAF whitelist syncs when due."""
         from app.models.cloudflare_integration import CloudflareWafIntegration
@@ -1104,6 +1188,12 @@ class ScheduleWorker:
 
                 # Continuous pfSense syncs — firewall-alias inventory
                 await self.run_pfsense_syncs()
+
+                # Continuous Cisco ASA syncs — network-object inventory
+                await self.run_cisco_asa_syncs()
+
+                # Continuous AWS WAF syncs — Web ACL / protected-hostname import
+                await self.run_aws_waf_syncs()
 
                 # Continuous Cloudflare WAF whitelist syncs
                 await self.run_cloudflare_waf_syncs()

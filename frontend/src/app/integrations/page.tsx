@@ -58,6 +58,8 @@ import {
   type CiscoFmcIntegration,
   type SonicWallIntegration,
   type PfSenseIntegration,
+  type CiscoAsaIntegration,
+  type AwsWafIntegration,
   type CloudflareIntegration,
 } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
@@ -4473,6 +4475,784 @@ function PfSenseSection() {
   );
 }
 
+interface CiscoAsaFormState {
+  name: string;
+  asa_host: string;
+  username: string;
+  password: string;
+  verify_ssl: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+}
+
+const defaultCiscoAsaForm: CiscoAsaFormState = {
+  name: '',
+  asa_host: '',
+  username: '',
+  password: '',
+  verify_ssl: true,
+  continuous_sync_enabled: false,
+  sync_interval_minutes: 360,
+};
+
+function CiscoAsaSection() {
+  const { toast } = useToast();
+  const [integrations, setIntegrations] = useState<CiscoAsaIntegration[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [editing, setEditing] = useState<CiscoAsaIntegration | null>(null);
+  const [form, setForm] = useState<CiscoAsaFormState>(defaultCiscoAsaForm);
+  const [saving, setSaving] = useState(false);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<CiscoAsaIntegration | null>(null);
+
+  useEffect(() => { load(); }, []);
+
+  async function load() {
+    setLoading(true);
+    try {
+      setIntegrations(await api.getCiscoAsaIntegrations());
+    } catch {
+      setIntegrations([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function openCreate() {
+    setEditing(null);
+    setForm(defaultCiscoAsaForm);
+    setSetupOpen(true);
+  }
+
+  function openEdit(integration: CiscoAsaIntegration) {
+    setEditing(integration);
+    setForm({
+      name: integration.name,
+      asa_host: integration.asa_host || '',
+      username: '',
+      password: '',
+      verify_ssl: integration.verify_ssl !== false,
+      continuous_sync_enabled: integration.continuous_sync_enabled,
+      sync_interval_minutes: integration.sync_interval_minutes,
+    });
+    setSetupOpen(true);
+  }
+
+  async function handleSave() {
+    if (!form.name.trim()) {
+      toast({ title: 'Connection name is required.', variant: 'destructive' });
+      return;
+    }
+    if (!form.asa_host.trim()) {
+      toast({ title: 'ASA host is required.', variant: 'destructive' });
+      return;
+    }
+    if (!editing && (!form.username.trim() || !form.password.trim())) {
+      toast({ title: 'Username and password are required.', variant: 'destructive' });
+      return;
+    }
+    setSaving(true);
+    try {
+      if (editing) {
+        await api.updateCiscoAsaIntegration(editing.id, {
+          name: form.name.trim(),
+          asa_host: form.asa_host.trim(),
+          ...(form.username ? { username: form.username } : {}),
+          ...(form.password ? { password: form.password } : {}),
+          verify_ssl: form.verify_ssl,
+          continuous_sync_enabled: form.continuous_sync_enabled,
+          sync_interval_minutes: form.sync_interval_minutes,
+        });
+        toast({ title: 'Cisco ASA connection updated.' });
+      } else {
+        await api.createCiscoAsaIntegration({
+          name: form.name.trim(),
+          asa_host: form.asa_host.trim(),
+          username: form.username.trim(),
+          password: form.password,
+          verify_ssl: form.verify_ssl,
+          continuous_sync_enabled: form.continuous_sync_enabled,
+          sync_interval_minutes: form.sync_interval_minutes,
+        });
+        toast({ title: 'Cisco ASA connection added.' });
+      }
+      setSetupOpen(false);
+      await load();
+    } catch (err) {
+      toast({ title: 'Failed to save', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleTest(integration: CiscoAsaIntegration) {
+    setBusyId(integration.id);
+    try {
+      const result = await api.testCiscoAsaConnection(integration.id);
+      toast({
+        title: result.ok ? 'Connection OK' : 'Connection failed',
+        description: result.ok && result.object_count != null
+          ? `${result.message} (${result.object_count} network object(s) in scope)`
+          : result.message,
+        variant: result.ok ? 'default' : 'destructive',
+      });
+      await load();
+    } catch (err) {
+      toast({ title: 'Test failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleSync(integration: CiscoAsaIntegration) {
+    setBusyId(integration.id);
+    try {
+      const result = await api.syncCiscoAsaIntegration(integration.id);
+      toast({
+        title: result.ok ? 'Sync complete' : 'Sync failed',
+        description: result.message,
+        variant: result.ok ? 'default' : 'destructive',
+      });
+      await load();
+    } catch (err) {
+      toast({ title: 'Sync failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleDelete() {
+    if (!deleteTarget) return;
+    setBusyId(deleteTarget.id);
+    try {
+      await api.deleteCiscoAsaIntegration(deleteTarget.id);
+      setDeleteTarget(null);
+      toast({ title: 'Cisco ASA connection removed.' });
+      await load();
+    } catch (err) {
+      toast({ title: 'Failed to remove', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <Card className="border border-border">
+      <CardHeader className="flex flex-row items-center gap-4 space-y-0 pb-3">
+        <div className="w-10 h-10 rounded-lg bg-[#00BCEB] flex items-center justify-center shrink-0">
+          <svg viewBox="0 0 24 24" fill="white" className="w-5 h-5" aria-hidden="true">
+            <path d="M12 2 4 5v6c0 5 3.4 8.6 8 11 4.6-2.4 8-6 8-11V5l-8-3zm0 2.2 6 2.2V11c0 3.9-2.5 6.9-6 8.9-3.5-2-6-5-6-8.9V6.4l6-2.2z" />
+          </svg>
+        </div>
+        <div className="flex-1 min-w-0">
+          <CardTitle className="text-base">Cisco ASA</CardTitle>
+          <CardDescription className="text-sm">
+            Import ASA network objects (hosts, subnets, ranges, FQDNs) as assets. Read-only ASA REST API.
+          </CardDescription>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {loading ? (
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+          ) : integrations.length > 0 ? (
+            <Badge variant="outline" className="bg-green-500/10 text-green-400 border-green-500/30">
+              <CheckCircle2 className="h-3 w-3 mr-1" />
+              {integrations.length} connection{integrations.length > 1 ? 's' : ''}
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="text-muted-foreground">Not configured</Badge>
+          )}
+        </div>
+      </CardHeader>
+
+      <CardContent className="space-y-4">
+        {integrations.length > 0 ? (
+          <div className="space-y-3">
+            {integrations.map((c) => (
+              <div key={c.id} className="rounded-lg border border-border p-3 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="font-medium text-sm truncate">{c.name}</p>
+                      {!c.is_active && <Badge variant="outline" className="text-muted-foreground text-xs">Disabled</Badge>}
+                      {c.last_test_ok === false && (
+                        <Badge variant="outline" className="bg-red-500/10 text-red-400 border-red-500/30 text-xs">
+                          <AlertCircle className="h-3 w-3 mr-1" />Auth issue
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1 text-xs text-muted-foreground">
+                      <span className="font-mono truncate max-w-[260px]">{c.asa_host}</span>
+                      {c.continuous_sync_enabled ? (
+                        <span className="inline-flex items-center gap-1 text-green-400">
+                          <RotateCw className="h-3 w-3" />
+                          Auto-sync {formatFirewallInterval(c.sync_interval_minutes).toLowerCase()}
+                        </span>
+                      ) : (
+                        <span>Auto-sync off</span>
+                      )}
+                      {c.last_sync_at && (
+                        <span>
+                          Last sync: {new Date(c.last_sync_at).toLocaleString()}
+                          {c.last_sync_ok === true && <span className="text-green-400"> — OK</span>}
+                          {c.last_sync_ok === false && <span className="text-red-400"> — Failed</span>}
+                        </span>
+                      )}
+                    </div>
+                    {c.last_sync_ok && c.last_sync_stats && (
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {c.last_sync_stats.ips_imported ?? 0} IP(s), {c.last_sync_stats.cidrs_imported ?? 0} subnet(s), {c.last_sync_stats.fqdns_imported ?? 0} FQDN(s) from {c.last_sync_stats.objects_seen ?? 0} object(s).
+                      </p>
+                    )}
+                    {c.last_sync_ok === false && c.last_error && (
+                      <p className="text-xs text-red-400 mt-1 truncate">{c.last_error}</p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" variant="outline" onClick={() => handleSync(c)} disabled={busyId === c.id || !c.is_active}>
+                    {busyId === c.id ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Download className="h-4 w-4 mr-2" />}
+                    Sync now
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => handleTest(c)} disabled={busyId === c.id}>
+                    <RefreshCw className="h-4 w-4 mr-2" />Test
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => openEdit(c)}>
+                    <Settings2 className="h-4 w-4 mr-2" />Edit
+                  </Button>
+                  <Button size="sm" variant="outline" className="border-red-600/30 hover:bg-red-600/20 text-red-400" onClick={() => setDeleteTarget(c)}>
+                    <Trash2 className="h-4 w-4 mr-2" />Remove
+                  </Button>
+                </div>
+              </div>
+            ))}
+            <Button size="sm" variant="outline" onClick={openCreate}>
+              <Plus className="h-4 w-4 mr-2" />Add another connection
+            </Button>
+          </div>
+        ) : (
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+            <p className="text-sm text-muted-foreground flex-1">
+              Connect Cisco ASA to import network objects and keep external inventory in sync.
+            </p>
+            <Button onClick={openCreate}>
+              <Plug className="h-4 w-4 mr-2" />Connect Cisco ASA
+            </Button>
+          </div>
+        )}
+      </CardContent>
+
+      <Dialog open={setupOpen} onOpenChange={(v) => { if (!saving) setSetupOpen(v); }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {editing ? 'Edit Cisco ASA connection' : 'Connect Cisco ASA'}
+            </DialogTitle>
+            <DialogDescription>
+              Uses the ASA REST API to read network objects. Credentials stay encrypted; ASM never writes configuration back to
+              the appliance. Requires the ASA REST API agent to be enabled.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Connection name</label>
+              <Input placeholder="e.g. Perimeter ASA" value={form.name} onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))} />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">ASA host</label>
+              <Input placeholder="https://asa.example.com" value={form.asa_host} onChange={(e) => setForm(f => ({ ...f, asa_host: e.target.value }))} />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">
+                  Username{editing && <span className="text-muted-foreground font-normal"> (optional)</span>}
+                </label>
+                <Input placeholder={editing ? '••••••••' : 'admin'} value={form.username} onChange={(e) => setForm(f => ({ ...f, username: e.target.value }))} autoComplete="username" />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">
+                  Password{editing && <span className="text-muted-foreground font-normal"> (optional)</span>}
+                </label>
+                <Input type="password" placeholder={editing ? '••••••••••••' : 'Management password'} value={form.password} onChange={(e) => setForm(f => ({ ...f, password: e.target.value }))} autoComplete="current-password" />
+              </div>
+            </div>
+            <div className="flex items-start gap-3 rounded-lg border border-border p-3">
+              <Checkbox id="ciscoasa-verify-ssl" checked={form.verify_ssl} onCheckedChange={(v) => setForm(f => ({ ...f, verify_ssl: !!v }))} className="mt-0.5 shrink-0" />
+              <label htmlFor="ciscoasa-verify-ssl" className="text-sm cursor-pointer">
+                <span className="font-medium">Verify TLS certificate</span>
+                <p className="text-xs text-muted-foreground mt-0.5">Turn off only for lab/self-signed ASA interfaces.</p>
+              </label>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Continuous sync</label>
+              <div className="flex items-start gap-3 rounded-lg border border-border p-3">
+                <Checkbox id="ciscoasa-continuous" checked={form.continuous_sync_enabled} onCheckedChange={(v) => setForm(f => ({ ...f, continuous_sync_enabled: !!v }))} className="mt-0.5 shrink-0" />
+                <label htmlFor="ciscoasa-continuous" className="text-sm cursor-pointer">
+                  <span className="font-medium flex items-center gap-2">
+                    <RotateCw className="h-4 w-4 text-green-400" />
+                    Automatically re-sync on a schedule
+                  </span>
+                  <p className="text-xs text-muted-foreground mt-0.5">Keeps firewall-managed inventory current in the background.</p>
+                </label>
+              </div>
+              {form.continuous_sync_enabled && (
+                <div className="space-y-1.5 pl-1">
+                  <label className="text-sm font-medium">Sync frequency</label>
+                  <Select value={String(form.sync_interval_minutes)} onValueChange={(v) => setForm(f => ({ ...f, sync_interval_minutes: Number(v) }))}>
+                    <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {FIREWALL_SYNC_INTERVALS.map(i => (
+                        <SelectItem key={i.value} value={String(i.value)}>{i.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2 pt-2 border-t border-border">
+            <Button variant="outline" onClick={() => setSetupOpen(false)} disabled={saving}>Cancel</Button>
+            <Button onClick={handleSave} disabled={saving}>
+              {saving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              {editing ? 'Save changes' : 'Connect'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!deleteTarget} onOpenChange={(v) => { if (!v) setDeleteTarget(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-400">
+              <Trash2 className="h-5 w-5" />Remove connection
+            </DialogTitle>
+            <DialogDescription>
+              This removes credentials for <strong>{deleteTarget?.name}</strong>. Assets already imported are kept.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={busyId === deleteTarget?.id}>
+              {busyId === deleteTarget?.id ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              Remove
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
+  );
+}
+
+interface AwsWafFormState {
+  name: string;
+  access_key_id: string;
+  secret_access_key: string;
+  session_token: string;
+  regions_text: string;
+  include_cloudfront: boolean;
+  include_regional: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+}
+
+const defaultAwsWafForm: AwsWafFormState = {
+  name: '',
+  access_key_id: '',
+  secret_access_key: '',
+  session_token: '',
+  regions_text: 'us-east-1',
+  include_cloudfront: true,
+  include_regional: true,
+  continuous_sync_enabled: false,
+  sync_interval_minutes: 360,
+};
+
+function parseRegions(text: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of text.split(/[\s,]+/)) {
+    const r = raw.trim();
+    if (r && !seen.has(r)) { seen.add(r); out.push(r); }
+  }
+  return out;
+}
+
+function AwsWafSection() {
+  const { toast } = useToast();
+  const [integrations, setIntegrations] = useState<AwsWafIntegration[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [editing, setEditing] = useState<AwsWafIntegration | null>(null);
+  const [form, setForm] = useState<AwsWafFormState>(defaultAwsWafForm);
+  const [saving, setSaving] = useState(false);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<AwsWafIntegration | null>(null);
+
+  useEffect(() => { load(); }, []);
+
+  async function load() {
+    setLoading(true);
+    try {
+      setIntegrations(await api.getAwsWafIntegrations());
+    } catch {
+      setIntegrations([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function openCreate() {
+    setEditing(null);
+    setForm(defaultAwsWafForm);
+    setSetupOpen(true);
+  }
+
+  function openEdit(integration: AwsWafIntegration) {
+    setEditing(integration);
+    setForm({
+      name: integration.name,
+      access_key_id: '',
+      secret_access_key: '',
+      session_token: '',
+      regions_text: (integration.regions || []).join(', '),
+      include_cloudfront: integration.include_cloudfront !== false,
+      include_regional: integration.include_regional !== false,
+      continuous_sync_enabled: integration.continuous_sync_enabled,
+      sync_interval_minutes: integration.sync_interval_minutes,
+    });
+    setSetupOpen(true);
+  }
+
+  async function handleSave() {
+    if (!form.name.trim()) {
+      toast({ title: 'Connection name is required.', variant: 'destructive' });
+      return;
+    }
+    if (!editing && (!form.access_key_id.trim() || !form.secret_access_key.trim())) {
+      toast({ title: 'Access key ID and secret access key are required.', variant: 'destructive' });
+      return;
+    }
+    if (!form.include_cloudfront && !form.include_regional) {
+      toast({ title: 'Enable at least one scope (CloudFront or regional).', variant: 'destructive' });
+      return;
+    }
+    const regions = parseRegions(form.regions_text);
+    setSaving(true);
+    try {
+      if (editing) {
+        await api.updateAwsWafIntegration(editing.id, {
+          name: form.name.trim(),
+          ...(form.access_key_id ? { access_key_id: form.access_key_id.trim() } : {}),
+          ...(form.secret_access_key ? { secret_access_key: form.secret_access_key } : {}),
+          session_token: form.session_token.trim() || null,
+          regions: regions.length ? regions : ['us-east-1'],
+          include_cloudfront: form.include_cloudfront,
+          include_regional: form.include_regional,
+          continuous_sync_enabled: form.continuous_sync_enabled,
+          sync_interval_minutes: form.sync_interval_minutes,
+        });
+        toast({ title: 'AWS WAF connection updated.' });
+      } else {
+        await api.createAwsWafIntegration({
+          name: form.name.trim(),
+          access_key_id: form.access_key_id.trim(),
+          secret_access_key: form.secret_access_key,
+          session_token: form.session_token.trim() || null,
+          regions: regions.length ? regions : ['us-east-1'],
+          include_cloudfront: form.include_cloudfront,
+          include_regional: form.include_regional,
+          continuous_sync_enabled: form.continuous_sync_enabled,
+          sync_interval_minutes: form.sync_interval_minutes,
+        });
+        toast({ title: 'AWS WAF connection added.' });
+      }
+      setSetupOpen(false);
+      await load();
+    } catch (err) {
+      toast({ title: 'Failed to save', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleTest(integration: AwsWafIntegration) {
+    setBusyId(integration.id);
+    try {
+      const result = await api.testAwsWafConnection(integration.id);
+      toast({
+        title: result.ok ? 'Connection OK' : 'Connection failed',
+        description: result.ok && result.web_acls_found != null
+          ? `${result.message} (${result.web_acls_found} Web ACL(s) found)`
+          : result.message,
+        variant: result.ok ? 'default' : 'destructive',
+      });
+      await load();
+    } catch (err) {
+      toast({ title: 'Test failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleSync(integration: AwsWafIntegration) {
+    setBusyId(integration.id);
+    try {
+      const result = await api.syncAwsWafIntegration(integration.id);
+      toast({
+        title: result.ok ? 'Sync complete' : 'Sync failed',
+        description: result.message,
+        variant: result.ok ? 'default' : 'destructive',
+      });
+      await load();
+    } catch (err) {
+      toast({ title: 'Sync failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleDelete() {
+    if (!deleteTarget) return;
+    setBusyId(deleteTarget.id);
+    try {
+      await api.deleteAwsWafIntegration(deleteTarget.id);
+      setDeleteTarget(null);
+      toast({ title: 'AWS WAF connection removed.' });
+      await load();
+    } catch (err) {
+      toast({ title: 'Failed to remove', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <Card className="border border-border">
+      <CardHeader className="flex flex-row items-center gap-4 space-y-0 pb-3">
+        <div className="w-10 h-10 rounded-lg bg-[#FF9900] flex items-center justify-center shrink-0">
+          <svg viewBox="0 0 24 24" fill="white" className="w-5 h-5" aria-hidden="true">
+            <path d="M4 7h12v2H4V7zm0 4h9v2H4v-2zm0 4h12v2H4v-2z" />
+            <path d="M18 7h2v10h-2z" />
+          </svg>
+        </div>
+        <div className="flex-1 min-w-0">
+          <CardTitle className="text-base">AWS WAF</CardTitle>
+          <CardDescription className="text-sm">
+            Import WAFv2 Web ACLs and the hostnames they protect (CloudFront, ALB, API Gateway). Read-only.
+          </CardDescription>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {loading ? (
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+          ) : integrations.length > 0 ? (
+            <Badge variant="outline" className="bg-green-500/10 text-green-400 border-green-500/30">
+              <CheckCircle2 className="h-3 w-3 mr-1" />
+              {integrations.length} connection{integrations.length > 1 ? 's' : ''}
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="text-muted-foreground">Not configured</Badge>
+          )}
+        </div>
+      </CardHeader>
+
+      <CardContent className="space-y-4">
+        {integrations.length > 0 ? (
+          <div className="space-y-3">
+            {integrations.map((c) => (
+              <div key={c.id} className="rounded-lg border border-border p-3 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="font-medium text-sm truncate">{c.name}</p>
+                      {!c.is_active && <Badge variant="outline" className="text-muted-foreground text-xs">Disabled</Badge>}
+                      {c.last_test_ok === false && (
+                        <Badge variant="outline" className="bg-red-500/10 text-red-400 border-red-500/30 text-xs">
+                          <AlertCircle className="h-3 w-3 mr-1" />Auth issue
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1 text-xs text-muted-foreground">
+                      <span>Scope: {[c.include_cloudfront ? 'CloudFront' : null, c.include_regional ? 'Regional' : null].filter(Boolean).join(' + ') || 'none'}</span>
+                      {c.include_regional && <span className="font-mono truncate max-w-[220px]">{(c.regions || []).join(', ') || 'us-east-1'}</span>}
+                      {c.continuous_sync_enabled ? (
+                        <span className="inline-flex items-center gap-1 text-green-400">
+                          <RotateCw className="h-3 w-3" />
+                          Auto-sync {formatFirewallInterval(c.sync_interval_minutes).toLowerCase()}
+                        </span>
+                      ) : (
+                        <span>Auto-sync off</span>
+                      )}
+                      {c.last_sync_at && (
+                        <span>
+                          Last sync: {new Date(c.last_sync_at).toLocaleString()}
+                          {c.last_sync_ok === true && <span className="text-green-400"> — OK</span>}
+                          {c.last_sync_ok === false && <span className="text-red-400"> — Failed</span>}
+                        </span>
+                      )}
+                    </div>
+                    {c.last_sync_ok && c.last_sync_stats && (
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {c.last_sync_stats.web_acls_seen ?? 0} Web ACL(s), {c.last_sync_stats.hostnames_seen ?? 0} protected hostname(s) imported.
+                      </p>
+                    )}
+                    {c.last_sync_ok === false && c.last_error && (
+                      <p className="text-xs text-red-400 mt-1 truncate">{c.last_error}</p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" variant="outline" onClick={() => handleSync(c)} disabled={busyId === c.id || !c.is_active}>
+                    {busyId === c.id ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Download className="h-4 w-4 mr-2" />}
+                    Sync now
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => handleTest(c)} disabled={busyId === c.id}>
+                    <RefreshCw className="h-4 w-4 mr-2" />Test
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => openEdit(c)}>
+                    <Settings2 className="h-4 w-4 mr-2" />Edit
+                  </Button>
+                  <Button size="sm" variant="outline" className="border-red-600/30 hover:bg-red-600/20 text-red-400" onClick={() => setDeleteTarget(c)}>
+                    <Trash2 className="h-4 w-4 mr-2" />Remove
+                  </Button>
+                </div>
+              </div>
+            ))}
+            <Button size="sm" variant="outline" onClick={openCreate}>
+              <Plus className="h-4 w-4 mr-2" />Add another connection
+            </Button>
+          </div>
+        ) : (
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+            <p className="text-sm text-muted-foreground flex-1">
+              Connect an AWS account to import WAF Web ACLs and the internet-facing hostnames they protect.
+            </p>
+            <Button onClick={openCreate}>
+              <Plug className="h-4 w-4 mr-2" />Connect AWS WAF
+            </Button>
+          </div>
+        )}
+      </CardContent>
+
+      <Dialog open={setupOpen} onOpenChange={(v) => { if (!saving) setSetupOpen(v); }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {editing ? 'Edit AWS WAF connection' : 'Connect AWS WAF'}
+            </DialogTitle>
+            <DialogDescription>
+              Uses the AWS WAFv2 API to read Web ACLs and their associated resources. Credentials stay encrypted; ASM never modifies
+              WAF rules or associations. Prefer least-privilege read-only keys (wafv2:List*, cloudfront:ListDistributions,
+              elasticloadbalancing:DescribeLoadBalancers).
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Connection name</label>
+              <Input placeholder="e.g. Prod AWS" value={form.name} onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))} />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">
+                  Access key ID{editing && <span className="text-muted-foreground font-normal"> (optional)</span>}
+                </label>
+                <Input placeholder={editing ? '••••••••' : 'AKIA...'} value={form.access_key_id} onChange={(e) => setForm(f => ({ ...f, access_key_id: e.target.value }))} autoComplete="off" />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">
+                  Secret access key{editing && <span className="text-muted-foreground font-normal"> (optional)</span>}
+                </label>
+                <Input type="password" placeholder={editing ? '••••••••••••' : 'Secret access key'} value={form.secret_access_key} onChange={(e) => setForm(f => ({ ...f, secret_access_key: e.target.value }))} autoComplete="off" />
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Session token <span className="text-muted-foreground font-normal">(optional)</span></label>
+              <Input type="password" placeholder="For temporary/STS credentials" value={form.session_token} onChange={(e) => setForm(f => ({ ...f, session_token: e.target.value }))} autoComplete="off" />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Regions</label>
+              <Input placeholder="us-east-1, us-west-2" value={form.regions_text} onChange={(e) => setForm(f => ({ ...f, regions_text: e.target.value }))} />
+              <p className="text-xs text-muted-foreground">Comma-separated. Regional Web ACLs are enumerated per region; CloudFront is global.</p>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="flex items-start gap-3 rounded-lg border border-border p-3">
+                <Checkbox id="awswaf-cloudfront" checked={form.include_cloudfront} onCheckedChange={(v) => setForm(f => ({ ...f, include_cloudfront: !!v }))} className="mt-0.5 shrink-0" />
+                <label htmlFor="awswaf-cloudfront" className="text-sm cursor-pointer">
+                  <span className="font-medium">CloudFront scope</span>
+                  <p className="text-xs text-muted-foreground mt-0.5">Global distributions.</p>
+                </label>
+              </div>
+              <div className="flex items-start gap-3 rounded-lg border border-border p-3">
+                <Checkbox id="awswaf-regional" checked={form.include_regional} onCheckedChange={(v) => setForm(f => ({ ...f, include_regional: !!v }))} className="mt-0.5 shrink-0" />
+                <label htmlFor="awswaf-regional" className="text-sm cursor-pointer">
+                  <span className="font-medium">Regional scope</span>
+                  <p className="text-xs text-muted-foreground mt-0.5">ALB / API Gateway.</p>
+                </label>
+              </div>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Continuous sync</label>
+              <div className="flex items-start gap-3 rounded-lg border border-border p-3">
+                <Checkbox id="awswaf-continuous" checked={form.continuous_sync_enabled} onCheckedChange={(v) => setForm(f => ({ ...f, continuous_sync_enabled: !!v }))} className="mt-0.5 shrink-0" />
+                <label htmlFor="awswaf-continuous" className="text-sm cursor-pointer">
+                  <span className="font-medium flex items-center gap-2">
+                    <RotateCw className="h-4 w-4 text-green-400" />
+                    Automatically re-sync on a schedule
+                  </span>
+                  <p className="text-xs text-muted-foreground mt-0.5">Keeps WAF-protected hostnames current in the background.</p>
+                </label>
+              </div>
+              {form.continuous_sync_enabled && (
+                <div className="space-y-1.5 pl-1">
+                  <label className="text-sm font-medium">Sync frequency</label>
+                  <Select value={String(form.sync_interval_minutes)} onValueChange={(v) => setForm(f => ({ ...f, sync_interval_minutes: Number(v) }))}>
+                    <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {FIREWALL_SYNC_INTERVALS.map(i => (
+                        <SelectItem key={i.value} value={String(i.value)}>{i.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2 pt-2 border-t border-border">
+            <Button variant="outline" onClick={() => setSetupOpen(false)} disabled={saving}>Cancel</Button>
+            <Button onClick={handleSave} disabled={saving}>
+              {saving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              {editing ? 'Save changes' : 'Connect'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!deleteTarget} onOpenChange={(v) => { if (!v) setDeleteTarget(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-400">
+              <Trash2 className="h-5 w-5" />Remove connection
+            </DialogTitle>
+            <DialogDescription>
+              This removes credentials for <strong>{deleteTarget?.name}</strong>. Assets already imported are kept.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={busyId === deleteTarget?.id}>
+              {busyId === deleteTarget?.id ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              Remove
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
+  );
+}
+
 interface CloudflareFormState {
   connection_name: string;
   api_token: string;
@@ -5231,6 +6011,12 @@ export default function IntegrationsPage() {
 
         {/* pfSense Firewall Integration Card */}
         <PfSenseSection />
+
+        {/* Cisco ASA Firewall Integration Card */}
+        <CiscoAsaSection />
+
+        {/* AWS WAF Integration Card */}
+        <AwsWafSection />
 
         {/* Cloudflare WAF Integration Card */}
         <CloudflareSection />
