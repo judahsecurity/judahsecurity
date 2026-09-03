@@ -169,6 +169,43 @@ def _sh(cmd, cwd=None, env=None, timeout=None, check=True):
                           capture_output=True, text=True)
 
 
+def target_host_for(opts) -> str:
+    """127.0.0.1 for a host-run agent; host.docker.internal when the agent runs
+    in a container (a challenge on host docker is reached via that name)."""
+    if opts.target_host:
+        return opts.target_host
+    return "host.docker.internal" if opts.docker_image else "127.0.0.1"
+
+
+def build_agent_invocation(target: str, flag: str, traces, opts):
+    """Return (cmd, cwd, env) for one agent pass — host subprocess or docker run.
+
+    Docker mode runs the agent inside the built image (flag oracle, proof gate,
+    recon CLIs all included) with the traces dir bind-mounted to /agent/results
+    and ANTHROPIC_API_KEY passed through from the caller's environment (never
+    inlined). Host mode runs run_pentest.py directly.
+    """
+    traces = Path(traces)
+    passthrough = ["--expected-flag", flag, *opts.agent_args]
+    if opts.docker_image:
+        cmd = [
+            "docker", "run", "--rm",
+            "-e", "ANTHROPIC_API_KEY",
+            "-e", f"AEGIS_EXPECTED_FLAG={flag}",
+            "-e", "AEGIS_TRACES_DIR=/agent/results",
+            "-v", f"{traces.resolve()}:/agent/results",
+            opts.docker_image,
+            "python3", "run_pentest.py", "--target", target, *passthrough,
+        ]
+        return cmd, None, dict(os.environ)
+    env = dict(os.environ)
+    env["AEGIS_TRACES_DIR"] = str(traces)
+    env["AEGIS_EXPECTED_FLAG"] = flag
+    cmd = [sys.executable, str(HERE / "run_pentest.py"),
+           "--target", target, *passthrough]
+    return cmd, str(HERE), env
+
+
 def run_one(bench: dict, opts) -> dict:
     """Build+launch one challenge, run the agent, grade, tear down."""
     d = Path(bench["dir"])
@@ -187,17 +224,14 @@ def run_one(bench: dict, opts) -> dict:
     try:
         ps = _sh(["docker", "compose", "ps", "--format", "json"], cwd=d).stdout
         port = parse_published_port(ps)
-        target = f"http://{opts.target_host}:{port}/"
+        target = f"http://{target_host_for(opts)}:{port}/"
         result["target"] = target
 
-        env = dict(os.environ)
-        env["AEGIS_TRACES_DIR"] = str(traces)
-        env["AEGIS_EXPECTED_FLAG"] = flag
-        agent_cmd = [sys.executable, str(HERE / "run_pentest.py"),
-                     "--target", target, "--expected-flag", flag,
-                     *opts.agent_args]
+        agent_cmd, agent_cwd, agent_env = build_agent_invocation(
+            target, flag, traces, opts)
         try:
-            _sh(agent_cmd, cwd=HERE, env=env, timeout=opts.run_timeout, check=False)
+            _sh(agent_cmd, cwd=agent_cwd, env=agent_env,
+                timeout=opts.run_timeout, check=False)
         except subprocess.TimeoutExpired:
             result["detail"] = "agent run timed out"
 
@@ -241,9 +275,17 @@ def main(argv=None) -> int:
     p.add_argument("--level", type=int, nargs="*", help="Only these levels (1/2/3).")
     p.add_argument("--limit", type=int, help="Cap how many benchmarks to run.")
     p.add_argument("--out", default="results/bench", help="Where per-benchmark artifacts land.")
-    p.add_argument("--target-host", default="127.0.0.1",
-                   help="Host the agent reaches the challenge on "
-                        "(use host.docker.internal if the agent runs in Docker).")
+    p.add_argument("--target-host", default=None,
+                   help="Host the agent reaches the challenge on. Default: "
+                        "127.0.0.1 for a host-run agent, host.docker.internal "
+                        "with --docker-image.")
+    p.add_argument("--docker-image", default=None,
+                   help="Run each agent pass inside this image "
+                        "(e.g. asm-scanner:latest) instead of host run_pentest.py. "
+                        "Challenges are still launched by host docker; the agent "
+                        "container reaches them via host.docker.internal. "
+                        "Set ANTHROPIC_API_KEY in your environment (passed through, "
+                        "never inlined).")
     p.add_argument("--up-timeout", type=int, default=600, help="Seconds for build+up.")
     p.add_argument("--run-timeout", type=int, default=1800, help="Seconds per agent run.")
     p.add_argument("--baseline", help="Prior suite summary JSON; exit 1 on regression.")

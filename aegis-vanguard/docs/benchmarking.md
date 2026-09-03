@@ -62,8 +62,26 @@ python3 bench_xben.py --bench-root ../validation-benchmarks/benchmarks \
 
 Anything after `--` is passed to `run_pentest.py`; the default is
 `--no-guardrails --max-risk critical` (required for internal/benchmark hosts —
-guardrails reject them, the original all-blocked run). If the agent itself runs
-in Docker, pass `--target-host host.docker.internal`.
+guardrails reject them, the original all-blocked run).
+
+### Running the agent in Docker (no host pip install)
+
+If you'd rather not install the agent's Python deps on your machine, run each
+agent pass inside the built image — challenges are still launched by host
+docker, and the agent container reaches them via `host.docker.internal`:
+
+```bash
+# build the image from the repo ROOT (not from inside aegis-vanguard/):
+docker build -f aegis-vanguard/Dockerfile -t asm-scanner:latest .
+
+export ANTHROPIC_API_KEY=sk-ant-...        # passed through, never inlined
+python3 bench_xben.py --bench-root ~/validation-benchmarks/benchmarks \
+    --only XBEN-020-24 --out results/bench --docker-image asm-scanner:latest
+```
+
+`--docker-image` bind-mounts the per-benchmark traces dir to `/agent/results`
+and passes `ANTHROPIC_API_KEY` through by name. `--target-host` defaults to
+`host.docker.internal` in this mode (127.0.0.1 for a host-run agent).
 
 ## Output
 

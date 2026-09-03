@@ -131,6 +131,43 @@ class SummaryAndRegressionTest(unittest.TestCase):
         self.assertLess(cmp["rate_drop"], 0)
 
 
+class _Opts:
+    def __init__(self, docker_image=None, target_host=None, agent_args=None):
+        self.docker_image = docker_image
+        self.target_host = target_host
+        self.agent_args = agent_args or ["--no-guardrails", "--max-risk", "critical"]
+
+
+class AgentInvocationTest(unittest.TestCase):
+    def test_target_host_defaults(self):
+        self.assertEqual(bench.target_host_for(_Opts()), "127.0.0.1")
+        self.assertEqual(bench.target_host_for(_Opts(docker_image="asm:latest")),
+                         "host.docker.internal")
+        self.assertEqual(bench.target_host_for(_Opts(target_host="10.0.0.5")),
+                         "10.0.0.5")  # explicit override wins in both modes
+
+    def test_host_invocation_runs_run_pentest(self):
+        cmd, cwd, env = bench.build_agent_invocation(
+            "http://127.0.0.1:5000/", "FLAG{x}", "/tmp/out", _Opts())
+        self.assertIn("run_pentest.py", " ".join(cmd))
+        self.assertEqual(env["AEGIS_EXPECTED_FLAG"], "FLAG{x}")
+        self.assertEqual(env["AEGIS_TRACES_DIR"], "/tmp/out")
+        self.assertIn("--no-guardrails", cmd)
+
+    def test_docker_invocation_runs_container(self):
+        cmd, cwd, env = bench.build_agent_invocation(
+            "http://host.docker.internal:5000/", "FLAG{y}", "/tmp/out",
+            _Opts(docker_image="asm-scanner:latest"))
+        self.assertEqual(cmd[0], "docker")
+        self.assertIn("asm-scanner:latest", cmd)
+        # key passed through by name only — never inlined as a value
+        self.assertIn("ANTHROPIC_API_KEY", cmd)
+        self.assertNotIn(True, ["ANTHROPIC_API_KEY=" in c for c in cmd])
+        self.assertIn("-v", cmd)
+        self.assertIn("run_pentest.py", cmd)
+        self.assertIn("FLAG{y}", cmd)
+
+
 if __name__ == "__main__":
     os.chdir(Path(__file__).resolve().parents[1])
     unittest.main()
