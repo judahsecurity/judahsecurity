@@ -526,6 +526,76 @@ export interface F5SyncResult {
   assets_missing_from_source: number;
 }
 
+export interface FortiGateIntegration {
+  id: number;
+  organization_id: number;
+  name: string;
+  fortigate_host: string;
+  vdom?: string | null;
+  verify_ssl: boolean;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FortiGateSyncResult {
+  ok: boolean;
+  message: string;
+  assets_created: number;
+  assets_updated: number;
+  addresses_seen: number;
+  address_groups_seen: number;
+  ips_imported: number;
+  cidrs_imported: number;
+  fqdns_imported: number;
+  ranges_seeded: number;
+  assets_missing_from_source: number;
+}
+
+export interface CheckPointIntegration {
+  id: number;
+  organization_id: number;
+  name: string;
+  management_host: string;
+  domain?: string | null;
+  verify_ssl: boolean;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CheckPointSyncResult {
+  ok: boolean;
+  message: string;
+  assets_created: number;
+  assets_updated: number;
+  hosts_seen: number;
+  networks_seen: number;
+  ranges_seen: number;
+  ips_imported: number;
+  cidrs_imported: number;
+  ranges_seeded: number;
+  assets_missing_from_source: number;
+}
+
 class ApiClient {
   private client: AxiosInstance;
   private token: string | null = null;
@@ -3039,6 +3109,104 @@ class ApiClient {
 
   async syncF5Integration(id: number): Promise<F5SyncResult> {
     const response = await this.client.post(`/integrations/f5/${id}/sync`);
+    return response.data;
+  }
+
+  // ── Fortinet FortiGate Integration ─────────────────────────────────────────
+
+  async getFortiGateIntegrations(): Promise<FortiGateIntegration[]> {
+    const response = await this.client.get('/integrations/fortigate');
+    return response.data;
+  }
+
+  async createFortiGateIntegration(payload: {
+    name: string;
+    fortigate_host: string;
+    api_token: string;
+    vdom?: string | null;
+    verify_ssl?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<FortiGateIntegration> {
+    const response = await this.client.post('/integrations/fortigate', payload);
+    return response.data;
+  }
+
+  async updateFortiGateIntegration(id: number, payload: {
+    name?: string;
+    fortigate_host?: string;
+    api_token?: string;
+    vdom?: string | null;
+    verify_ssl?: boolean;
+    is_active?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<FortiGateIntegration> {
+    const response = await this.client.put(`/integrations/fortigate/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteFortiGateIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/fortigate/${id}`);
+  }
+
+  async testFortiGateConnection(id: number): Promise<{ ok: boolean; message: string; address_count?: number }> {
+    const response = await this.client.post(`/integrations/fortigate/${id}/test`);
+    return response.data;
+  }
+
+  async syncFortiGateIntegration(id: number): Promise<FortiGateSyncResult> {
+    const response = await this.client.post(`/integrations/fortigate/${id}/sync`);
+    return response.data;
+  }
+
+  // ── Check Point Integration ────────────────────────────────────────────────
+
+  async getCheckPointIntegrations(): Promise<CheckPointIntegration[]> {
+    const response = await this.client.get('/integrations/checkpoint');
+    return response.data;
+  }
+
+  async createCheckPointIntegration(payload: {
+    name: string;
+    management_host: string;
+    username: string;
+    password: string;
+    domain?: string | null;
+    verify_ssl?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<CheckPointIntegration> {
+    const response = await this.client.post('/integrations/checkpoint', payload);
+    return response.data;
+  }
+
+  async updateCheckPointIntegration(id: number, payload: {
+    name?: string;
+    management_host?: string;
+    username?: string;
+    password?: string;
+    domain?: string | null;
+    verify_ssl?: boolean;
+    is_active?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<CheckPointIntegration> {
+    const response = await this.client.put(`/integrations/checkpoint/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteCheckPointIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/checkpoint/${id}`);
+  }
+
+  async testCheckPointConnection(id: number): Promise<{ ok: boolean; message: string; object_count?: number }> {
+    const response = await this.client.post(`/integrations/checkpoint/${id}/test`);
+    return response.data;
+  }
+
+  async syncCheckPointIntegration(id: number): Promise<CheckPointSyncResult> {
+    const response = await this.client.post(`/integrations/checkpoint/${id}/sync`);
     return response.data;
   }
 

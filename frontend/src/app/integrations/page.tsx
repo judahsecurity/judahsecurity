@@ -53,6 +53,8 @@ import {
   type AkamaiIntegration,
   type PanoramaIntegration,
   type F5Integration,
+  type FortiGateIntegration,
+  type CheckPointIntegration,
   type CloudflareIntegration,
 } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
@@ -2475,6 +2477,875 @@ function F5Section() {
   );
 }
 
+interface FortiGateFormState {
+  name: string;
+  fortigate_host: string;
+  api_token: string;
+  vdom: string;
+  verify_ssl: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+}
+
+const defaultFortiGateForm: FortiGateFormState = {
+  name: '',
+  fortigate_host: '',
+  api_token: '',
+  vdom: '',
+  verify_ssl: true,
+  continuous_sync_enabled: false,
+  sync_interval_minutes: 360,
+};
+
+const FORTIGATE_SYNC_INTERVALS: { value: number; label: string }[] = [
+  { value: 60, label: 'Every hour' },
+  { value: 360, label: 'Every 6 hours' },
+  { value: 720, label: 'Every 12 hours' },
+  { value: 1440, label: 'Every 24 hours' },
+];
+
+function formatFortiGateInterval(minutes: number): string {
+  const match = FORTIGATE_SYNC_INTERVALS.find(i => i.value === minutes);
+  if (match) return match.label;
+  if (minutes % 1440 === 0) return `Every ${minutes / 1440} day(s)`;
+  if (minutes % 60 === 0) return `Every ${minutes / 60} hour(s)`;
+  return `Every ${minutes} min`;
+}
+
+function FortiGateSection() {
+  const { toast } = useToast();
+  const [integrations, setIntegrations] = useState<FortiGateIntegration[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [editing, setEditing] = useState<FortiGateIntegration | null>(null);
+  const [form, setForm] = useState<FortiGateFormState>(defaultFortiGateForm);
+  const [saving, setSaving] = useState(false);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<FortiGateIntegration | null>(null);
+
+  useEffect(() => { load(); }, []);
+
+  async function load() {
+    setLoading(true);
+    try {
+      setIntegrations(await api.getFortiGateIntegrations());
+    } catch {
+      setIntegrations([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function openCreate() {
+    setEditing(null);
+    setForm(defaultFortiGateForm);
+    setSetupOpen(true);
+  }
+
+  function openEdit(integration: FortiGateIntegration) {
+    setEditing(integration);
+    setForm({
+      name: integration.name,
+      fortigate_host: integration.fortigate_host || '',
+      api_token: '',
+      vdom: integration.vdom || '',
+      verify_ssl: integration.verify_ssl !== false,
+      continuous_sync_enabled: integration.continuous_sync_enabled,
+      sync_interval_minutes: integration.sync_interval_minutes,
+    });
+    setSetupOpen(true);
+  }
+
+  async function handleSave() {
+    if (!form.name.trim()) {
+      toast({ title: 'Connection name is required.', variant: 'destructive' });
+      return;
+    }
+    if (!form.fortigate_host.trim()) {
+      toast({ title: 'FortiGate host is required.', variant: 'destructive' });
+      return;
+    }
+    if (!editing && !form.api_token.trim()) {
+      toast({ title: 'A REST API token is required.', variant: 'destructive' });
+      return;
+    }
+    setSaving(true);
+    try {
+      if (editing) {
+        await api.updateFortiGateIntegration(editing.id, {
+          name: form.name.trim(),
+          fortigate_host: form.fortigate_host.trim(),
+          ...(form.api_token ? { api_token: form.api_token } : {}),
+          vdom: form.vdom.trim() || null,
+          verify_ssl: form.verify_ssl,
+          continuous_sync_enabled: form.continuous_sync_enabled,
+          sync_interval_minutes: form.sync_interval_minutes,
+        });
+        toast({ title: 'FortiGate connection updated.' });
+      } else {
+        await api.createFortiGateIntegration({
+          name: form.name.trim(),
+          fortigate_host: form.fortigate_host.trim(),
+          api_token: form.api_token,
+          vdom: form.vdom.trim() || null,
+          verify_ssl: form.verify_ssl,
+          continuous_sync_enabled: form.continuous_sync_enabled,
+          sync_interval_minutes: form.sync_interval_minutes,
+        });
+        toast({ title: 'FortiGate connection added.' });
+      }
+      setSetupOpen(false);
+      await load();
+    } catch (err) {
+      toast({ title: 'Failed to save', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleTest(integration: FortiGateIntegration) {
+    setBusyId(integration.id);
+    try {
+      const result = await api.testFortiGateConnection(integration.id);
+      toast({
+        title: result.ok ? 'Connection OK' : 'Connection failed',
+        description: result.ok && result.address_count != null
+          ? `${result.message} (${result.address_count} address object(s) in scope)`
+          : result.message,
+        variant: result.ok ? 'default' : 'destructive',
+      });
+      await load();
+    } catch (err) {
+      toast({ title: 'Test failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleSync(integration: FortiGateIntegration) {
+    setBusyId(integration.id);
+    try {
+      const result = await api.syncFortiGateIntegration(integration.id);
+      toast({
+        title: result.ok ? 'Sync complete' : 'Sync failed',
+        description: result.message,
+        variant: result.ok ? 'default' : 'destructive',
+      });
+      await load();
+    } catch (err) {
+      toast({ title: 'Sync failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleDelete() {
+    if (!deleteTarget) return;
+    setBusyId(deleteTarget.id);
+    try {
+      await api.deleteFortiGateIntegration(deleteTarget.id);
+      setDeleteTarget(null);
+      toast({ title: 'FortiGate connection removed.' });
+      await load();
+    } catch (err) {
+      toast({ title: 'Failed to remove', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <Card className="border border-border">
+      <CardHeader className="flex flex-row items-center gap-4 space-y-0 pb-3">
+        <div className="w-10 h-10 rounded-lg bg-[#DA291C] flex items-center justify-center shrink-0">
+          <svg viewBox="0 0 24 24" fill="white" className="w-5 h-5" aria-hidden="true">
+            <path d="M12 2 4 5v6c0 5 3.4 8.6 8 11 4.6-2.4 8-6 8-11V5l-8-3zm0 2.2 6 2.2V11c0 3.9-2.5 6.9-6 8.9-3.5-2-6-5-6-8.9V6.4l6-2.2z" />
+          </svg>
+        </div>
+        <div className="flex-1 min-w-0">
+          <CardTitle className="text-base">Fortinet FortiGate</CardTitle>
+          <CardDescription className="text-sm">
+            Import firewall address objects (subnets, ranges, FQDNs) as assets. Read-only FortiOS REST.
+          </CardDescription>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {loading ? (
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+          ) : integrations.length > 0 ? (
+            <Badge variant="outline" className="bg-green-500/10 text-green-400 border-green-500/30">
+              <CheckCircle2 className="h-3 w-3 mr-1" />
+              {integrations.length} connection{integrations.length > 1 ? 's' : ''}
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="text-muted-foreground">Not configured</Badge>
+          )}
+        </div>
+      </CardHeader>
+
+      <CardContent className="space-y-4">
+        {integrations.length > 0 ? (
+          <div className="space-y-3">
+            {integrations.map((c) => (
+              <div key={c.id} className="rounded-lg border border-border p-3 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="font-medium text-sm truncate">{c.name}</p>
+                      {!c.is_active && <Badge variant="outline" className="text-muted-foreground text-xs">Disabled</Badge>}
+                      {c.last_test_ok === false && (
+                        <Badge variant="outline" className="bg-red-500/10 text-red-400 border-red-500/30 text-xs">
+                          <AlertCircle className="h-3 w-3 mr-1" />Auth issue
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1 text-xs text-muted-foreground">
+                      <span className="font-mono truncate max-w-[260px]">{c.fortigate_host}</span>
+                      <span>VDOM: {c.vdom || 'root'}</span>
+                      {c.continuous_sync_enabled ? (
+                        <span className="inline-flex items-center gap-1 text-green-400">
+                          <RotateCw className="h-3 w-3" />
+                          Auto-sync {formatFortiGateInterval(c.sync_interval_minutes).toLowerCase()}
+                        </span>
+                      ) : (
+                        <span>Auto-sync off</span>
+                      )}
+                      {c.last_sync_at && (
+                        <span>
+                          Last sync: {new Date(c.last_sync_at).toLocaleString()}
+                          {c.last_sync_ok === true && <span className="text-green-400"> — OK</span>}
+                          {c.last_sync_ok === false && <span className="text-red-400"> — Failed</span>}
+                        </span>
+                      )}
+                    </div>
+                    {c.last_sync_ok && c.last_sync_stats && (
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {c.last_sync_stats.ips_imported ?? 0} IP(s), {c.last_sync_stats.cidrs_imported ?? 0} subnet(s), {c.last_sync_stats.fqdns_imported ?? 0} FQDN(s)
+                        {' '}from {c.last_sync_stats.addresses_seen ?? 0} object(s).
+                      </p>
+                    )}
+                    {c.last_sync_ok === false && c.last_error && (
+                      <p className="text-xs text-red-400 mt-1 truncate">{c.last_error}</p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => handleSync(c)}
+                    disabled={busyId === c.id || !c.is_active}
+                  >
+                    {busyId === c.id ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Download className="h-4 w-4 mr-2" />}
+                    Sync now
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => handleTest(c)} disabled={busyId === c.id}>
+                    <RefreshCw className="h-4 w-4 mr-2" />Test
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => openEdit(c)}>
+                    <Settings2 className="h-4 w-4 mr-2" />Edit
+                  </Button>
+                  <Button size="sm" variant="outline" className="border-red-600/30 hover:bg-red-600/20 text-red-400" onClick={() => setDeleteTarget(c)}>
+                    <Trash2 className="h-4 w-4 mr-2" />Remove
+                  </Button>
+                </div>
+              </div>
+            ))}
+            <Button size="sm" variant="outline" onClick={openCreate}>
+              <Plus className="h-4 w-4 mr-2" />Add another connection
+            </Button>
+          </div>
+        ) : (
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+            <p className="text-sm text-muted-foreground flex-1">
+              Connect FortiGate to import firewall-managed address objects and keep external inventory in sync.
+            </p>
+            <Button onClick={openCreate}>
+              <Plug className="h-4 w-4 mr-2" />Connect FortiGate
+            </Button>
+          </div>
+        )}
+      </CardContent>
+
+      <Dialog open={setupOpen} onOpenChange={(v) => { if (!saving) setSetupOpen(v); }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {editing ? 'Edit FortiGate connection' : 'Connect Fortinet FortiGate'}
+            </DialogTitle>
+            <DialogDescription>
+              Uses the FortiOS REST API to pull firewall address objects. The token stays encrypted; ASM never writes back to the FortiGate.
+              Prefer a least-privilege REST API admin with read-only access to the address configuration.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Connection name</label>
+              <Input
+                placeholder="e.g. Perimeter FortiGate"
+                value={form.name}
+                onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">FortiGate host</label>
+              <Input
+                placeholder="https://fortigate.example.com"
+                value={form.fortigate_host}
+                onChange={(e) => setForm(f => ({ ...f, fortigate_host: e.target.value }))}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">
+                REST API token{editing && <span className="text-muted-foreground font-normal"> (optional)</span>}
+              </label>
+              <Input
+                type="password"
+                placeholder={editing ? '••••••••••••' : 'Paste FortiOS REST API token'}
+                value={form.api_token}
+                onChange={(e) => setForm(f => ({ ...f, api_token: e.target.value }))}
+                autoComplete="off"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">VDOM</label>
+              <Input
+                placeholder="Management VDOM (blank) or root"
+                value={form.vdom}
+                onChange={(e) => setForm(f => ({ ...f, vdom: e.target.value }))}
+              />
+              <p className="text-xs text-muted-foreground">
+                Optional. Leave blank to use the management VDOM.
+              </p>
+            </div>
+            <div className="flex items-start gap-3 rounded-lg border border-border p-3">
+              <Checkbox
+                id="fortigate-verify-ssl"
+                checked={form.verify_ssl}
+                onCheckedChange={(v) => setForm(f => ({ ...f, verify_ssl: !!v }))}
+                className="mt-0.5 shrink-0"
+              />
+              <label htmlFor="fortigate-verify-ssl" className="text-sm cursor-pointer">
+                <span className="font-medium">Verify TLS certificate</span>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Turn off only for lab/self-signed FortiGate management interfaces.
+                </p>
+              </label>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Continuous sync</label>
+              <div className="flex items-start gap-3 rounded-lg border border-border p-3">
+                <Checkbox
+                  id="fortigate-continuous"
+                  checked={form.continuous_sync_enabled}
+                  onCheckedChange={(v) => setForm(f => ({ ...f, continuous_sync_enabled: !!v }))}
+                  className="mt-0.5 shrink-0"
+                />
+                <label htmlFor="fortigate-continuous" className="text-sm cursor-pointer">
+                  <span className="font-medium flex items-center gap-2">
+                    <RotateCw className="h-4 w-4 text-green-400" />
+                    Automatically re-sync on a schedule
+                  </span>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Keeps firewall-managed inventory current in the background.
+                  </p>
+                </label>
+              </div>
+              {form.continuous_sync_enabled && (
+                <div className="space-y-1.5 pl-1">
+                  <label className="text-sm font-medium">Sync frequency</label>
+                  <Select
+                    value={String(form.sync_interval_minutes)}
+                    onValueChange={(v) => setForm(f => ({ ...f, sync_interval_minutes: Number(v) }))}
+                  >
+                    <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {FORTIGATE_SYNC_INTERVALS.map(i => (
+                        <SelectItem key={i.value} value={String(i.value)}>{i.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2 pt-2 border-t border-border">
+            <Button variant="outline" onClick={() => setSetupOpen(false)} disabled={saving}>Cancel</Button>
+            <Button onClick={handleSave} disabled={saving}>
+              {saving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              {editing ? 'Save changes' : 'Connect'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!deleteTarget} onOpenChange={(v) => { if (!v) setDeleteTarget(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-400">
+              <Trash2 className="h-5 w-5" />Remove connection
+            </DialogTitle>
+            <DialogDescription>
+              This removes credentials for <strong>{deleteTarget?.name}</strong>. Assets already imported are kept.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={busyId === deleteTarget?.id}>
+              {busyId === deleteTarget?.id ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              Remove
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
+  );
+}
+
+interface CheckPointFormState {
+  name: string;
+  management_host: string;
+  username: string;
+  password: string;
+  domain: string;
+  verify_ssl: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+}
+
+const defaultCheckPointForm: CheckPointFormState = {
+  name: '',
+  management_host: '',
+  username: '',
+  password: '',
+  domain: '',
+  verify_ssl: true,
+  continuous_sync_enabled: false,
+  sync_interval_minutes: 360,
+};
+
+const CHECKPOINT_SYNC_INTERVALS: { value: number; label: string }[] = [
+  { value: 60, label: 'Every hour' },
+  { value: 360, label: 'Every 6 hours' },
+  { value: 720, label: 'Every 12 hours' },
+  { value: 1440, label: 'Every 24 hours' },
+];
+
+function formatCheckPointInterval(minutes: number): string {
+  const match = CHECKPOINT_SYNC_INTERVALS.find(i => i.value === minutes);
+  if (match) return match.label;
+  if (minutes % 1440 === 0) return `Every ${minutes / 1440} day(s)`;
+  if (minutes % 60 === 0) return `Every ${minutes / 60} hour(s)`;
+  return `Every ${minutes} min`;
+}
+
+function CheckPointSection() {
+  const { toast } = useToast();
+  const [integrations, setIntegrations] = useState<CheckPointIntegration[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [editing, setEditing] = useState<CheckPointIntegration | null>(null);
+  const [form, setForm] = useState<CheckPointFormState>(defaultCheckPointForm);
+  const [saving, setSaving] = useState(false);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<CheckPointIntegration | null>(null);
+
+  useEffect(() => { load(); }, []);
+
+  async function load() {
+    setLoading(true);
+    try {
+      setIntegrations(await api.getCheckPointIntegrations());
+    } catch {
+      setIntegrations([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function openCreate() {
+    setEditing(null);
+    setForm(defaultCheckPointForm);
+    setSetupOpen(true);
+  }
+
+  function openEdit(integration: CheckPointIntegration) {
+    setEditing(integration);
+    setForm({
+      name: integration.name,
+      management_host: integration.management_host || '',
+      username: '',
+      password: '',
+      domain: integration.domain || '',
+      verify_ssl: integration.verify_ssl !== false,
+      continuous_sync_enabled: integration.continuous_sync_enabled,
+      sync_interval_minutes: integration.sync_interval_minutes,
+    });
+    setSetupOpen(true);
+  }
+
+  async function handleSave() {
+    if (!form.name.trim()) {
+      toast({ title: 'Connection name is required.', variant: 'destructive' });
+      return;
+    }
+    if (!form.management_host.trim()) {
+      toast({ title: 'Management host is required.', variant: 'destructive' });
+      return;
+    }
+    if (!editing && (!form.username.trim() || !form.password.trim())) {
+      toast({ title: 'Username and password are required.', variant: 'destructive' });
+      return;
+    }
+    setSaving(true);
+    try {
+      if (editing) {
+        await api.updateCheckPointIntegration(editing.id, {
+          name: form.name.trim(),
+          management_host: form.management_host.trim(),
+          ...(form.username ? { username: form.username } : {}),
+          ...(form.password ? { password: form.password } : {}),
+          domain: form.domain.trim() || null,
+          verify_ssl: form.verify_ssl,
+          continuous_sync_enabled: form.continuous_sync_enabled,
+          sync_interval_minutes: form.sync_interval_minutes,
+        });
+        toast({ title: 'Check Point connection updated.' });
+      } else {
+        await api.createCheckPointIntegration({
+          name: form.name.trim(),
+          management_host: form.management_host.trim(),
+          username: form.username.trim(),
+          password: form.password,
+          domain: form.domain.trim() || null,
+          verify_ssl: form.verify_ssl,
+          continuous_sync_enabled: form.continuous_sync_enabled,
+          sync_interval_minutes: form.sync_interval_minutes,
+        });
+        toast({ title: 'Check Point connection added.' });
+      }
+      setSetupOpen(false);
+      await load();
+    } catch (err) {
+      toast({ title: 'Failed to save', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleTest(integration: CheckPointIntegration) {
+    setBusyId(integration.id);
+    try {
+      const result = await api.testCheckPointConnection(integration.id);
+      toast({
+        title: result.ok ? 'Connection OK' : 'Connection failed',
+        description: result.ok && result.object_count != null
+          ? `${result.message} (${result.object_count} host object(s) in scope)`
+          : result.message,
+        variant: result.ok ? 'default' : 'destructive',
+      });
+      await load();
+    } catch (err) {
+      toast({ title: 'Test failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleSync(integration: CheckPointIntegration) {
+    setBusyId(integration.id);
+    try {
+      const result = await api.syncCheckPointIntegration(integration.id);
+      toast({
+        title: result.ok ? 'Sync complete' : 'Sync failed',
+        description: result.message,
+        variant: result.ok ? 'default' : 'destructive',
+      });
+      await load();
+    } catch (err) {
+      toast({ title: 'Sync failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleDelete() {
+    if (!deleteTarget) return;
+    setBusyId(deleteTarget.id);
+    try {
+      await api.deleteCheckPointIntegration(deleteTarget.id);
+      setDeleteTarget(null);
+      toast({ title: 'Check Point connection removed.' });
+      await load();
+    } catch (err) {
+      toast({ title: 'Failed to remove', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <Card className="border border-border">
+      <CardHeader className="flex flex-row items-center gap-4 space-y-0 pb-3">
+        <div className="w-10 h-10 rounded-lg bg-[#E6017C] flex items-center justify-center shrink-0">
+          <svg viewBox="0 0 24 24" fill="white" className="w-5 h-5" aria-hidden="true">
+            <path d="M12 2 4 5v6c0 5 3.4 8.6 8 11 4.6-2.4 8-6 8-11V5l-8-3zm0 2.2 6 2.2V11c0 3.9-2.5 6.9-6 8.9-3.5-2-6-5-6-8.9V6.4l6-2.2z" />
+          </svg>
+        </div>
+        <div className="flex-1 min-w-0">
+          <CardTitle className="text-base">Check Point</CardTitle>
+          <CardDescription className="text-sm">
+            Import host, network, and address-range objects as assets. Read-only Management Web API.
+          </CardDescription>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {loading ? (
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+          ) : integrations.length > 0 ? (
+            <Badge variant="outline" className="bg-green-500/10 text-green-400 border-green-500/30">
+              <CheckCircle2 className="h-3 w-3 mr-1" />
+              {integrations.length} connection{integrations.length > 1 ? 's' : ''}
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="text-muted-foreground">Not configured</Badge>
+          )}
+        </div>
+      </CardHeader>
+
+      <CardContent className="space-y-4">
+        {integrations.length > 0 ? (
+          <div className="space-y-3">
+            {integrations.map((c) => (
+              <div key={c.id} className="rounded-lg border border-border p-3 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="font-medium text-sm truncate">{c.name}</p>
+                      {!c.is_active && <Badge variant="outline" className="text-muted-foreground text-xs">Disabled</Badge>}
+                      {c.last_test_ok === false && (
+                        <Badge variant="outline" className="bg-red-500/10 text-red-400 border-red-500/30 text-xs">
+                          <AlertCircle className="h-3 w-3 mr-1" />Auth issue
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1 text-xs text-muted-foreground">
+                      <span className="font-mono truncate max-w-[260px]">{c.management_host}</span>
+                      <span>Domain: {c.domain || 'SMS'}</span>
+                      {c.continuous_sync_enabled ? (
+                        <span className="inline-flex items-center gap-1 text-green-400">
+                          <RotateCw className="h-3 w-3" />
+                          Auto-sync {formatCheckPointInterval(c.sync_interval_minutes).toLowerCase()}
+                        </span>
+                      ) : (
+                        <span>Auto-sync off</span>
+                      )}
+                      {c.last_sync_at && (
+                        <span>
+                          Last sync: {new Date(c.last_sync_at).toLocaleString()}
+                          {c.last_sync_ok === true && <span className="text-green-400"> — OK</span>}
+                          {c.last_sync_ok === false && <span className="text-red-400"> — Failed</span>}
+                        </span>
+                      )}
+                    </div>
+                    {c.last_sync_ok && c.last_sync_stats && (
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {c.last_sync_stats.hosts_seen ?? 0} host(s), {c.last_sync_stats.networks_seen ?? 0} network(s), {c.last_sync_stats.ranges_seen ?? 0} range(s) imported.
+                      </p>
+                    )}
+                    {c.last_sync_ok === false && c.last_error && (
+                      <p className="text-xs text-red-400 mt-1 truncate">{c.last_error}</p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => handleSync(c)}
+                    disabled={busyId === c.id || !c.is_active}
+                  >
+                    {busyId === c.id ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Download className="h-4 w-4 mr-2" />}
+                    Sync now
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => handleTest(c)} disabled={busyId === c.id}>
+                    <RefreshCw className="h-4 w-4 mr-2" />Test
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => openEdit(c)}>
+                    <Settings2 className="h-4 w-4 mr-2" />Edit
+                  </Button>
+                  <Button size="sm" variant="outline" className="border-red-600/30 hover:bg-red-600/20 text-red-400" onClick={() => setDeleteTarget(c)}>
+                    <Trash2 className="h-4 w-4 mr-2" />Remove
+                  </Button>
+                </div>
+              </div>
+            ))}
+            <Button size="sm" variant="outline" onClick={openCreate}>
+              <Plus className="h-4 w-4 mr-2" />Add another connection
+            </Button>
+          </div>
+        ) : (
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+            <p className="text-sm text-muted-foreground flex-1">
+              Connect a Security Management Server to import managed network objects and keep external inventory in sync.
+            </p>
+            <Button onClick={openCreate}>
+              <Plug className="h-4 w-4 mr-2" />Connect Check Point
+            </Button>
+          </div>
+        )}
+      </CardContent>
+
+      <Dialog open={setupOpen} onOpenChange={(v) => { if (!saving) setSetupOpen(v); }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {editing ? 'Edit Check Point connection' : 'Connect Check Point'}
+            </DialogTitle>
+            <DialogDescription>
+              Uses the Management Web API to read host, network, and address-range objects. Credentials stay encrypted and sessions are
+              opened read-only; ASM never publishes changes to the management server.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Connection name</label>
+              <Input
+                placeholder="e.g. HQ Management"
+                value={form.name}
+                onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Management host</label>
+              <Input
+                placeholder="https://mgmt.example.com"
+                value={form.management_host}
+                onChange={(e) => setForm(f => ({ ...f, management_host: e.target.value }))}
+              />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">
+                  Username{editing && <span className="text-muted-foreground font-normal"> (optional)</span>}
+                </label>
+                <Input
+                  placeholder={editing ? '••••••••' : 'api-reader'}
+                  value={form.username}
+                  onChange={(e) => setForm(f => ({ ...f, username: e.target.value }))}
+                  autoComplete="username"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">
+                  Password{editing && <span className="text-muted-foreground font-normal"> (optional)</span>}
+                </label>
+                <Input
+                  type="password"
+                  placeholder={editing ? '••••••••••••' : 'Management password'}
+                  value={form.password}
+                  onChange={(e) => setForm(f => ({ ...f, password: e.target.value }))}
+                  autoComplete="current-password"
+                />
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Domain</label>
+              <Input
+                placeholder="Single-domain SMS (blank) or MDS domain name"
+                value={form.domain}
+                onChange={(e) => setForm(f => ({ ...f, domain: e.target.value }))}
+              />
+              <p className="text-xs text-muted-foreground">
+                Optional. Set only for a Multi-Domain Server (MDS).
+              </p>
+            </div>
+            <div className="flex items-start gap-3 rounded-lg border border-border p-3">
+              <Checkbox
+                id="checkpoint-verify-ssl"
+                checked={form.verify_ssl}
+                onCheckedChange={(v) => setForm(f => ({ ...f, verify_ssl: !!v }))}
+                className="mt-0.5 shrink-0"
+              />
+              <label htmlFor="checkpoint-verify-ssl" className="text-sm cursor-pointer">
+                <span className="font-medium">Verify TLS certificate</span>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  Turn off only for lab/self-signed management interfaces.
+                </p>
+              </label>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Continuous sync</label>
+              <div className="flex items-start gap-3 rounded-lg border border-border p-3">
+                <Checkbox
+                  id="checkpoint-continuous"
+                  checked={form.continuous_sync_enabled}
+                  onCheckedChange={(v) => setForm(f => ({ ...f, continuous_sync_enabled: !!v }))}
+                  className="mt-0.5 shrink-0"
+                />
+                <label htmlFor="checkpoint-continuous" className="text-sm cursor-pointer">
+                  <span className="font-medium flex items-center gap-2">
+                    <RotateCw className="h-4 w-4 text-green-400" />
+                    Automatically re-sync on a schedule
+                  </span>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Keeps firewall-managed inventory current in the background.
+                  </p>
+                </label>
+              </div>
+              {form.continuous_sync_enabled && (
+                <div className="space-y-1.5 pl-1">
+                  <label className="text-sm font-medium">Sync frequency</label>
+                  <Select
+                    value={String(form.sync_interval_minutes)}
+                    onValueChange={(v) => setForm(f => ({ ...f, sync_interval_minutes: Number(v) }))}
+                  >
+                    <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {CHECKPOINT_SYNC_INTERVALS.map(i => (
+                        <SelectItem key={i.value} value={String(i.value)}>{i.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2 pt-2 border-t border-border">
+            <Button variant="outline" onClick={() => setSetupOpen(false)} disabled={saving}>Cancel</Button>
+            <Button onClick={handleSave} disabled={saving}>
+              {saving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              {editing ? 'Save changes' : 'Connect'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!deleteTarget} onOpenChange={(v) => { if (!v) setDeleteTarget(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-400">
+              <Trash2 className="h-5 w-5" />Remove connection
+            </DialogTitle>
+            <DialogDescription>
+              This removes credentials for <strong>{deleteTarget?.name}</strong>. Assets already imported are kept.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={busyId === deleteTarget?.id}>
+              {busyId === deleteTarget?.id ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              Remove
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
+  );
+}
+
 interface CloudflareFormState {
   connection_name: string;
   api_token: string;
@@ -3218,6 +4089,12 @@ export default function IntegrationsPage() {
 
         {/* F5 BIG-IP Reachability Integration Card */}
         <F5Section />
+
+        {/* Fortinet FortiGate Firewall Integration Card */}
+        <FortiGateSection />
+
+        {/* Check Point Firewall Integration Card */}
+        <CheckPointSection />
 
         {/* Cloudflare WAF Integration Card */}
         <CloudflareSection />

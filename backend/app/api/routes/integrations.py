@@ -1,4 +1,5 @@
-"""Integrations router — Jira, ServiceNow, Censys, HackerOne, Akamai, Panorama, F5, Cloudflare."""
+"""Integrations router — Jira, ServiceNow, Censys, HackerOne, Akamai, Panorama, F5,
+FortiGate, Check Point, Cloudflare."""
 
 import logging
 from datetime import datetime
@@ -25,6 +26,8 @@ from app.models.panorama_integration import (
     PanoramaIntegration,
 )
 from app.models.f5_integration import F5Integration
+from app.models.fortigate_integration import FortiGateIntegration
+from app.models.checkpoint_integration import CheckPointIntegration
 from app.models.cloudflare_integration import CloudflareWafIntegration
 from app.models.user import User
 from app.models.vulnerability import Vulnerability
@@ -90,6 +93,20 @@ from app.schemas.f5_schemas import (
     F5SyncResult,
     F5TestConnectionResponse,
 )
+from app.schemas.fortigate_schemas import (
+    FortiGateIntegrationCreate,
+    FortiGateIntegrationResponse,
+    FortiGateIntegrationUpdate,
+    FortiGateSyncResult,
+    FortiGateTestConnectionResponse,
+)
+from app.schemas.checkpoint_schemas import (
+    CheckPointIntegrationCreate,
+    CheckPointIntegrationResponse,
+    CheckPointIntegrationUpdate,
+    CheckPointSyncResult,
+    CheckPointTestConnectionResponse,
+)
 from app.schemas.cloudflare_schemas import (
     CloudflareIntegrationCreate,
     CloudflareIntegrationResponse,
@@ -104,6 +121,8 @@ from app.services import (
     akamai_waf_service,
     panorama_service,
     f5_service,
+    fortigate_service,
+    checkpoint_service,
     cloudflare_waf_service,
     servicenow_service,
 )
@@ -1572,6 +1591,349 @@ async def sync_f5_integration(
 
     result = await f5_service.sync_integration(db, integration)
     return F5SyncResult(**result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Fortinet FortiGate — read-only firewall address-object inventory import
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_fortigate_integration(db: Session, org_id: int, integration_id: int) -> FortiGateIntegration:
+    integration = (
+        db.query(FortiGateIntegration)
+        .filter(
+            FortiGateIntegration.id == integration_id,
+            FortiGateIntegration.organization_id == org_id,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="FortiGate connection not found.")
+    return integration
+
+
+@router.get("/fortigate", response_model=List[FortiGateIntegrationResponse])
+def list_fortigate_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    return (
+        db.query(FortiGateIntegration)
+        .filter(FortiGateIntegration.organization_id == org_id)
+        .order_by(FortiGateIntegration.created_at.desc())
+        .all()
+    )
+
+
+@router.post("/fortigate", response_model=FortiGateIntegrationResponse, status_code=status.HTTP_201_CREATED)
+async def create_fortigate_integration(
+    payload: FortiGateIntegrationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+
+    existing = (
+        db.query(FortiGateIntegration)
+        .filter(
+            FortiGateIntegration.organization_id == org_id,
+            FortiGateIntegration.name == payload.name,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A FortiGate connection named '{payload.name}' already exists.",
+        )
+
+    result = await fortigate_service.test_connection(
+        payload.fortigate_host,
+        payload.api_token,
+        vdom=payload.vdom,
+        verify_ssl=payload.verify_ssl,
+    )
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+
+    integration = FortiGateIntegration(
+        organization_id=org_id,
+        name=payload.name,
+        fortigate_host=payload.fortigate_host,
+        vdom=payload.vdom,
+        verify_ssl=payload.verify_ssl,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+        last_tested_at=datetime.utcnow(),
+        last_test_ok=True,
+    )
+    integration.set_api_token(payload.api_token)
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.put("/fortigate/{integration_id}", response_model=FortiGateIntegrationResponse)
+async def update_fortigate_integration(
+    integration_id: int,
+    payload: FortiGateIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_fortigate_integration(db, org_id, integration_id)
+
+    data = payload.model_dump(exclude_unset=True)
+    new_token = data.pop("api_token", None)
+
+    if "vdom" in data:
+        vdom = data["vdom"]
+        data["vdom"] = vdom.strip() if isinstance(vdom, str) and vdom.strip() else None
+
+    for field, value in data.items():
+        setattr(integration, field, value)
+    if new_token:
+        integration.set_api_token(new_token)
+
+    result = await fortigate_service.test_connection(
+        integration.fortigate_host or "",
+        integration.get_api_token() or "",
+        vdom=integration.vdom,
+        verify_ssl=bool(integration.verify_ssl),
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/fortigate/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_fortigate_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_fortigate_integration(db, org_id, integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post("/fortigate/{integration_id}/test", response_model=FortiGateTestConnectionResponse)
+async def test_fortigate_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_fortigate_integration(db, org_id, integration_id)
+    result = await fortigate_service.test_connection(
+        integration.fortigate_host or "",
+        integration.get_api_token() or "",
+        vdom=integration.vdom,
+        verify_ssl=bool(integration.verify_ssl),
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    integration.last_error = None if result["ok"] else result["message"]
+    db.commit()
+    return FortiGateTestConnectionResponse(**result)
+
+
+@router.post("/fortigate/{integration_id}/sync", response_model=FortiGateSyncResult)
+async def sync_fortigate_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Import firewall address objects from the FortiGate REST API."""
+    org_id = _get_org_id(current_user)
+    integration = _get_fortigate_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This FortiGate connection is disabled.")
+
+    result = await fortigate_service.sync_integration(db, integration)
+    return FortiGateSyncResult(**result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Check Point — read-only import of host / network / address-range objects
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_checkpoint_integration(db: Session, org_id: int, integration_id: int) -> CheckPointIntegration:
+    integration = (
+        db.query(CheckPointIntegration)
+        .filter(
+            CheckPointIntegration.id == integration_id,
+            CheckPointIntegration.organization_id == org_id,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="Check Point connection not found.")
+    return integration
+
+
+@router.get("/checkpoint", response_model=List[CheckPointIntegrationResponse])
+def list_checkpoint_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    return (
+        db.query(CheckPointIntegration)
+        .filter(CheckPointIntegration.organization_id == org_id)
+        .order_by(CheckPointIntegration.created_at.desc())
+        .all()
+    )
+
+
+@router.post("/checkpoint", response_model=CheckPointIntegrationResponse, status_code=status.HTTP_201_CREATED)
+async def create_checkpoint_integration(
+    payload: CheckPointIntegrationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+
+    existing = (
+        db.query(CheckPointIntegration)
+        .filter(
+            CheckPointIntegration.organization_id == org_id,
+            CheckPointIntegration.name == payload.name,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A Check Point connection named '{payload.name}' already exists.",
+        )
+
+    result = await checkpoint_service.test_connection(
+        payload.management_host,
+        payload.username,
+        payload.password,
+        domain=payload.domain,
+        verify_ssl=payload.verify_ssl,
+    )
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+
+    integration = CheckPointIntegration(
+        organization_id=org_id,
+        name=payload.name,
+        management_host=payload.management_host,
+        domain=payload.domain,
+        verify_ssl=payload.verify_ssl,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+        last_tested_at=datetime.utcnow(),
+        last_test_ok=True,
+    )
+    integration.set_username(payload.username)
+    integration.set_password(payload.password)
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.put("/checkpoint/{integration_id}", response_model=CheckPointIntegrationResponse)
+async def update_checkpoint_integration(
+    integration_id: int,
+    payload: CheckPointIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_checkpoint_integration(db, org_id, integration_id)
+
+    data = payload.model_dump(exclude_unset=True)
+    new_username = data.pop("username", None)
+    new_password = data.pop("password", None)
+
+    if "domain" in data:
+        dom = data["domain"]
+        data["domain"] = dom.strip() if isinstance(dom, str) and dom.strip() else None
+
+    for field, value in data.items():
+        setattr(integration, field, value)
+    if new_username:
+        integration.set_username(new_username)
+    if new_password:
+        integration.set_password(new_password)
+
+    result = await checkpoint_service.test_connection(
+        integration.management_host or "",
+        integration.get_username() or "",
+        integration.get_password() or "",
+        domain=integration.domain,
+        verify_ssl=bool(integration.verify_ssl),
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/checkpoint/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_checkpoint_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_checkpoint_integration(db, org_id, integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post("/checkpoint/{integration_id}/test", response_model=CheckPointTestConnectionResponse)
+async def test_checkpoint_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_checkpoint_integration(db, org_id, integration_id)
+    result = await checkpoint_service.test_connection(
+        integration.management_host or "",
+        integration.get_username() or "",
+        integration.get_password() or "",
+        domain=integration.domain,
+        verify_ssl=bool(integration.verify_ssl),
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    integration.last_error = None if result["ok"] else result["message"]
+    db.commit()
+    return CheckPointTestConnectionResponse(**result)
+
+
+@router.post("/checkpoint/{integration_id}/sync", response_model=CheckPointSyncResult)
+async def sync_checkpoint_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Import host / network / address-range objects from Check Point."""
+    org_id = _get_org_id(current_user)
+    integration = _get_checkpoint_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This Check Point connection is disabled.")
+
+    result = await checkpoint_service.sync_integration(db, integration)
+    return CheckPointSyncResult(**result)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

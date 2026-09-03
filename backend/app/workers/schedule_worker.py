@@ -811,6 +811,90 @@ class ScheduleWorker:
         finally:
             db.close()
 
+    async def run_fortigate_syncs(self):
+        """Run continuous FortiGate address-object inventory syncs when due."""
+        from app.models.fortigate_integration import FortiGateIntegration
+        from app.services import fortigate_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(FortiGateIntegration).filter(
+                FortiGateIntegration.is_active == True,
+                FortiGateIntegration.continuous_sync_enabled == True,
+            ).all()
+
+            due = [c for c in candidates if c.is_sync_due(now)]
+            if not due:
+                return
+
+            logger.info(f"FortiGate: {len(due)} connection(s) due for continuous sync")
+            for integration in due:
+                try:
+                    result = await fortigate_service.sync_integration(db, integration)
+                    logger.info(
+                        f"FortiGate sync (org {integration.organization_id}, "
+                        f"'{integration.name}'): {result.get('message')}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"FortiGate sync failed for connection {integration.id}: {exc}",
+                        exc_info=True,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.error(f"FortiGate continuous sync check failed: {exc}", exc_info=True)
+        finally:
+            db.close()
+
+    async def run_checkpoint_syncs(self):
+        """Run continuous Check Point network-object inventory syncs when due."""
+        from app.models.checkpoint_integration import CheckPointIntegration
+        from app.services import checkpoint_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(CheckPointIntegration).filter(
+                CheckPointIntegration.is_active == True,
+                CheckPointIntegration.continuous_sync_enabled == True,
+            ).all()
+
+            due = [c for c in candidates if c.is_sync_due(now)]
+            if not due:
+                return
+
+            logger.info(f"Check Point: {len(due)} connection(s) due for continuous sync")
+            for integration in due:
+                try:
+                    result = await checkpoint_service.sync_integration(db, integration)
+                    logger.info(
+                        f"Check Point sync (org {integration.organization_id}, "
+                        f"'{integration.name}'): {result.get('message')}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"Check Point sync failed for connection {integration.id}: {exc}",
+                        exc_info=True,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.error(f"Check Point continuous sync check failed: {exc}", exc_info=True)
+        finally:
+            db.close()
+
     async def run_cloudflare_waf_syncs(self):
         """Run continuous Cloudflare WAF whitelist syncs when due."""
         from app.models.cloudflare_integration import CloudflareWafIntegration
@@ -879,6 +963,12 @@ class ScheduleWorker:
 
                 # Continuous F5 syncs — VIP → pool-member reachability
                 await self.run_f5_syncs()
+
+                # Continuous FortiGate syncs — firewall address-object inventory
+                await self.run_fortigate_syncs()
+
+                # Continuous Check Point syncs — host/network object inventory
+                await self.run_checkpoint_syncs()
 
                 # Continuous Cloudflare WAF whitelist syncs
                 await self.run_cloudflare_waf_syncs()
