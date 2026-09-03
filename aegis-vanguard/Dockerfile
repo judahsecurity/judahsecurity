@@ -161,6 +161,9 @@ RUN chmod +x /agent/assess.sh
 COPY aegis-vanguard/agent/ ./agent/
 # Vendored data (secrets_patterns.json for analyze_js secret leads, etc.)
 COPY aegis-vanguard/data/ ./data/
+# Unit tests, so `doctor.py --selftest` can behavior-smoke-test the new logic
+# inside the real image (where httpx/playwright/anthropic are present).
+COPY aegis-vanguard/tests/ ./tests/
 
 # Default env vars (override at runtime)
 ENV ASM_API_URL=""

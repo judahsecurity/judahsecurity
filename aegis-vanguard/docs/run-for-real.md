@@ -14,6 +14,16 @@ python3 doctor.py          # tells you exactly what's missing on this box
 
 Fix every ❌ (required). `doctor.py --json` for CI.
 
+To behavior-smoke-test the new capture→prove→gate→score logic in the actual
+runtime (not just confirm imports), add `--selftest` — it runs the unit suite
+in-process and makes a failure a required blocker:
+
+```bash
+python3 doctor.py --selftest    # inside the Docker image this exercises the
+                                # new logic where httpx/playwright/anthropic
+                                # are present (the dev sandbox lacks them)
+```
+
 ## 2. Install the runtime
 
 ```bash

@@ -119,15 +119,46 @@ def check_guardrail_posture():
              "engagements. Set AEGIS_EXPECTED_FLAG to grade benchmark runs.")]
 
 
+def check_selftest():
+    """Behavioral smoke test: run the unit suite against the *real* runtime.
+
+    Unlike check_capability_modules (import-only), this exercises each new
+    module's logic. In the Docker image httpx/playwright/anthropic are present,
+    so tests that degrade gracefully in the dev sandbox run for real here. A
+    failure is a required blocker — the box has the code but it does not behave.
+    """
+    import io
+    import unittest
+
+    tests_dir = Path(__file__).parent / "tests"
+    if not tests_dir.exists():
+        return [("selftest", REQUIRED, "fail",
+                 f"{tests_dir} missing — tests/ not shipped into this image")]
+    try:
+        suite = unittest.TestLoader().discover(str(tests_dir), pattern="test_*.py")
+        buf = io.StringIO()
+        result = unittest.TextTestRunner(stream=buf, verbosity=0).run(suite)
+    except Exception as e:  # discovery/import blew up
+        return [("selftest", REQUIRED, "fail", f"suite failed to run: {e}")]
+    ran = result.testsRun
+    bad = len(result.failures) + len(result.errors)
+    if result.wasSuccessful():
+        return [("selftest", REQUIRED, "ok", f"{ran} unit tests passed")]
+    return [("selftest", REQUIRED, "fail",
+             f"{bad}/{ran} unit tests failed — new logic is broken in this runtime")]
+
+
 ALL_CHECKS = [check_python_deps, check_browser, check_llm,
               check_capability_modules, check_secrets_db, check_caido,
               check_guardrail_posture]
 
 
-def run_checks():
+def run_checks(selftest=False):
     rows = []
     for fn in ALL_CHECKS:
         rows.extend(fn())
+    if selftest:
+        rows.extend(check_selftest())
     return rows
 
 
@@ -145,9 +176,12 @@ _ICON = {"ok": "✅", "warn": "⚠️ ", "fail": "❌", "optional": "•"}
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="doctor", description="Aegis Vanguard preflight.")
     p.add_argument("--json", action="store_true", help="Machine-readable output.")
+    p.add_argument("--selftest", action="store_true",
+                   help="Also run the unit suite to behavior-smoke-test the new "
+                        "logic in this runtime (a failure blocks readiness).")
     args = p.parse_args(argv)
 
-    rows = run_checks()
+    rows = run_checks(selftest=args.selftest)
     summary = summarize(rows)
     if args.json:
         print(json.dumps({"checks": [dict(zip(("name", "tier", "status", "detail"), r))
