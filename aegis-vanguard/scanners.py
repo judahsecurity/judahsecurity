@@ -894,11 +894,16 @@ def run_ffuf(target_url: str, bridge: ASMBridge, wordlist: str = "/usr/share/wor
     return findings
 
 
-def run_arjun(target_url: str, bridge: ASMBridge, timeout: int = 300) -> List[str]:
+def run_arjun(target_url: str, bridge: ASMBridge, timeout: int = 60) -> List[str]:
     """HTTP parameter discovery via arjun."""
     if not _tool_available("arjun"):
         logger.error("arjun not installed"); return []
-    cmd = ["arjun", "-u", target_url, "--stable", "-oJ", "-"]
+    # Cap wall time: arjun --stable can hang 300s+ on unresponsive endpoints and
+    # was the dominant tail latency in fireteam runs (a single call stretched a
+    # hunter to ~900s). Bound the subprocess and give arjun its own per-request
+    # timeout so it fails fast instead of starving the phase budget.
+    timeout = min(timeout, 60)
+    cmd = ["arjun", "-u", target_url, "--stable", "-T", "5", "-oJ", "-"]
     result = _run(cmd, timeout=timeout)
     params = []
     try:
