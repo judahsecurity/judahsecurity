@@ -100,6 +100,13 @@ Commit the baseline `scorecard.json`. Wire the `--baseline` form into CI so a
 change that drops the confirmed rate, misses flags, or raises the
 needs-evidence share fails the build. Flag-only grading: `grade_xben.py`.
 
+**Benchmarking across the XBOW suite** (the "is the agent getting better?"
+loop): `bench_xben.py` launches each XBOW challenge, runs the agent, grades the
+real flag capture, and reports a suite pass-rate you track over time. Start with
+`python3 bench_xben.py --bench-root ../validation-benchmarks/benchmarks --dry-run`
+(no docker needed) to confirm discovery + computed flags. Full guide:
+`docs/benchmarking.md`.
+
 ## 6. What runs where
 
 | Capability | Env / prerequisite |

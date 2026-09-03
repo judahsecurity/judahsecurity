@@ -156,7 +156,8 @@ RUN playwright install --with-deps chromium
 # ── Agent files ─────────────────────────────────────────────────────
 COPY aegis-vanguard/asm_bridge.py aegis-vanguard/scanners.py aegis-vanguard/healthcheck.py aegis-vanguard/CLAUDE.md \
      aegis-vanguard/run_pentest.py aegis-vanguard/validate_finding.py aegis-vanguard/reporter.py \
-     aegis-vanguard/doctor.py aegis-vanguard/scorecard.py aegis-vanguard/assess.sh ./
+     aegis-vanguard/doctor.py aegis-vanguard/scorecard.py aegis-vanguard/assess.sh \
+     aegis-vanguard/grade_xben.py aegis-vanguard/bench_xben.py ./
 RUN chmod +x /agent/assess.sh
 COPY aegis-vanguard/agent/ ./agent/
 # Vendored data (secrets_patterns.json for analyze_js secret leads, etc.)
