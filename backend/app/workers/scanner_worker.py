@@ -1979,13 +1979,18 @@ class ScannerWorker:
                 scan_kwargs["banner_grab"] = banner_grab
                 scan_kwargs["one_port_at_a_time"] = one_port_at_a_time
             elif selected_scanner == ScannerType.NMAP:
-                # Nmap doesn't use rate/timeout in the same way
+                # Nmap doesn't use rate/timeout in the same way. The service
+                # validates the technique/timing, so pass the requested custom
+                # config straight through.
                 scan_kwargs["service_detection"] = service_detection
-                # Pass NSE scripts for ICS/OT protocol detection
+                scan_kwargs["scan_type"] = config.get('nmap_scan_type', '-sT')
+                scan_kwargs["timing"] = config.get('timing', 4)
+                scan_kwargs["os_detection"] = config.get('os_detection', False)
+                # Pass NSE scripts (custom picker selections or ICS/OT protocol detection)
                 nse_scripts = config.get('nse_scripts', [])
                 if nse_scripts:
                     scan_kwargs["scripts"] = nse_scripts
-                    logger.info(f"Using NSE scripts for ICS detection: {nse_scripts}")
+                    logger.info(f"Using NSE scripts: {nse_scripts}")
             
             logger.info(f"Starting port scan with rate={rate}, timeout={timeout}, retries={retries}")
             

@@ -965,7 +965,14 @@ async def run_port_scan(
         config={
             "scanner": request.scanner.value,
             "ports": request.ports,
-            "rate": request.rate
+            "rate": request.rate,
+            **({
+                "nmap_scan_type": request.nmap_scan_type,
+                "timing": request.timing,
+                "service_detection": request.service_detection,
+                "os_detection": request.os_detection,
+                "nse_scripts": request.nse_scripts,
+            } if request.scanner == ScannerType.NMAP else {}),
         },
         started_by=current_user.username,
         status=ScanStatus.RUNNING,
@@ -974,7 +981,7 @@ async def run_port_scan(
     db.add(scan)
     db.commit()
     db.refresh(scan)
-    
+
     try:
         # Run scan based on scanner type
         if request.scanner == ScannerType.NAABU:
@@ -995,11 +1002,15 @@ async def run_port_scan(
             result = await scanner_service.scan_with_nmap(
                 targets=request.targets,
                 ports=request.ports,
-                service_detection=request.service_detection
+                scan_type=request.nmap_scan_type,
+                service_detection=request.service_detection,
+                os_detection=request.os_detection,
+                timing=request.timing,
+                scripts=request.nse_scripts or None,
             )
         else:
             raise HTTPException(status_code=400, detail=f"Unknown scanner: {request.scanner}")
-        
+
         # Import results if requested
         import_summary = {"ports_imported": 0, "ports_updated": 0, "assets_created": 0}
         if request.import_results:
@@ -1455,11 +1466,15 @@ async def scan_and_generate_findings(
             result = await scanner_service.scan_with_nmap(
                 targets=request.targets,
                 ports=request.ports,
-                service_detection=request.service_detection
+                scan_type=request.nmap_scan_type,
+                service_detection=request.service_detection,
+                os_detection=request.os_detection,
+                timing=request.timing,
+                scripts=request.nse_scripts or None,
             )
         else:
             raise HTTPException(status_code=400, detail=f"Unknown scanner: {request.scanner}")
-        
+
         # Import results
         import_summary = scanner_service.import_results_to_assets(
             db=db,

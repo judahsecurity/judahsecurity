@@ -19,7 +19,13 @@ from app.models.screenshot import Screenshot, ScreenshotStatus, ScreenshotSchedu
 from app.models.api_config import APIConfig, ExternalService, DEFAULT_RATE_LIMITS
 from app.models.label import Label, asset_labels
 from app.models.scan_schedule import ScanSchedule, ScheduleFrequency, CONTINUOUS_SCAN_TYPES
-from app.models.scan_config import ScanConfig, DEFAULT_PORT_LISTS, seed_default_port_lists
+from app.models.scan_config import (
+    ScanConfig,
+    DEFAULT_PORT_LISTS,
+    DEFAULT_NMAP_PROFILES,
+    seed_default_port_lists,
+    seed_default_nmap_profiles,
+)
 from app.models.acquisition import Acquisition, AcquisitionStatus, AcquisitionType
 from app.models.agent_note import AgentNote
 from app.models.agent_knowledge import AgentKnowledge
@@ -100,7 +106,9 @@ __all__ = [
     "CONTINUOUS_SCAN_TYPES",
     "ScanConfig",
     "DEFAULT_PORT_LISTS",
+    "DEFAULT_NMAP_PROFILES",
     "seed_default_port_lists",
+    "seed_default_nmap_profiles",
     "Acquisition",
     "AcquisitionStatus",
     "AcquisitionType",
