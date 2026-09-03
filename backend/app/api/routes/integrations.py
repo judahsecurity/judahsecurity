@@ -1,5 +1,5 @@
 """Integrations router — Jira, ServiceNow, Censys, HackerOne, Akamai, Panorama, F5,
-FortiGate, Check Point, Cloudflare."""
+FortiGate, Check Point, Cisco FMC, SonicWall, pfSense, Cloudflare."""
 
 import logging
 from datetime import datetime
@@ -28,6 +28,9 @@ from app.models.panorama_integration import (
 from app.models.f5_integration import F5Integration
 from app.models.fortigate_integration import FortiGateIntegration
 from app.models.checkpoint_integration import CheckPointIntegration
+from app.models.cisco_fmc_integration import CiscoFmcIntegration
+from app.models.sonicwall_integration import SonicWallIntegration
+from app.models.pfsense_integration import PfSenseIntegration
 from app.models.cloudflare_integration import CloudflareWafIntegration
 from app.models.user import User
 from app.models.vulnerability import Vulnerability
@@ -107,6 +110,27 @@ from app.schemas.checkpoint_schemas import (
     CheckPointSyncResult,
     CheckPointTestConnectionResponse,
 )
+from app.schemas.cisco_fmc_schemas import (
+    CiscoFmcIntegrationCreate,
+    CiscoFmcIntegrationResponse,
+    CiscoFmcIntegrationUpdate,
+    CiscoFmcSyncResult,
+    CiscoFmcTestConnectionResponse,
+)
+from app.schemas.sonicwall_schemas import (
+    SonicWallIntegrationCreate,
+    SonicWallIntegrationResponse,
+    SonicWallIntegrationUpdate,
+    SonicWallSyncResult,
+    SonicWallTestConnectionResponse,
+)
+from app.schemas.pfsense_schemas import (
+    PfSenseIntegrationCreate,
+    PfSenseIntegrationResponse,
+    PfSenseIntegrationUpdate,
+    PfSenseSyncResult,
+    PfSenseTestConnectionResponse,
+)
 from app.schemas.cloudflare_schemas import (
     CloudflareIntegrationCreate,
     CloudflareIntegrationResponse,
@@ -123,6 +147,9 @@ from app.services import (
     f5_service,
     fortigate_service,
     checkpoint_service,
+    cisco_fmc_service,
+    sonicwall_service,
+    pfsense_service,
     cloudflare_waf_service,
     servicenow_service,
 )
@@ -1934,6 +1961,508 @@ async def sync_checkpoint_integration(
 
     result = await checkpoint_service.sync_integration(db, integration)
     return CheckPointSyncResult(**result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Cisco Firepower Management Center — read-only network-object import
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_cisco_fmc_integration(db: Session, org_id: int, integration_id: int) -> CiscoFmcIntegration:
+    integration = (
+        db.query(CiscoFmcIntegration)
+        .filter(
+            CiscoFmcIntegration.id == integration_id,
+            CiscoFmcIntegration.organization_id == org_id,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="Cisco FMC connection not found.")
+    return integration
+
+
+@router.get("/cisco-fmc", response_model=List[CiscoFmcIntegrationResponse])
+def list_cisco_fmc_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    return (
+        db.query(CiscoFmcIntegration)
+        .filter(CiscoFmcIntegration.organization_id == org_id)
+        .order_by(CiscoFmcIntegration.created_at.desc())
+        .all()
+    )
+
+
+@router.post("/cisco-fmc", response_model=CiscoFmcIntegrationResponse, status_code=status.HTTP_201_CREATED)
+async def create_cisco_fmc_integration(
+    payload: CiscoFmcIntegrationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+
+    existing = (
+        db.query(CiscoFmcIntegration)
+        .filter(
+            CiscoFmcIntegration.organization_id == org_id,
+            CiscoFmcIntegration.name == payload.name,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A Cisco FMC connection named '{payload.name}' already exists.",
+        )
+
+    result = await cisco_fmc_service.test_connection(
+        payload.fmc_host,
+        payload.username,
+        payload.password,
+        domain_uuid=payload.domain_uuid,
+        verify_ssl=payload.verify_ssl,
+    )
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+
+    integration = CiscoFmcIntegration(
+        organization_id=org_id,
+        name=payload.name,
+        fmc_host=payload.fmc_host,
+        domain_uuid=payload.domain_uuid,
+        verify_ssl=payload.verify_ssl,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+        last_tested_at=datetime.utcnow(),
+        last_test_ok=True,
+    )
+    integration.set_username(payload.username)
+    integration.set_password(payload.password)
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.put("/cisco-fmc/{integration_id}", response_model=CiscoFmcIntegrationResponse)
+async def update_cisco_fmc_integration(
+    integration_id: int,
+    payload: CiscoFmcIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_cisco_fmc_integration(db, org_id, integration_id)
+
+    data = payload.model_dump(exclude_unset=True)
+    new_username = data.pop("username", None)
+    new_password = data.pop("password", None)
+
+    if "domain_uuid" in data:
+        dom = data["domain_uuid"]
+        data["domain_uuid"] = dom.strip() if isinstance(dom, str) and dom.strip() else None
+
+    for field, value in data.items():
+        setattr(integration, field, value)
+    if new_username:
+        integration.set_username(new_username)
+    if new_password:
+        integration.set_password(new_password)
+
+    result = await cisco_fmc_service.test_connection(
+        integration.fmc_host or "",
+        integration.get_username() or "",
+        integration.get_password() or "",
+        domain_uuid=integration.domain_uuid,
+        verify_ssl=bool(integration.verify_ssl),
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/cisco-fmc/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_cisco_fmc_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_cisco_fmc_integration(db, org_id, integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post("/cisco-fmc/{integration_id}/test", response_model=CiscoFmcTestConnectionResponse)
+async def test_cisco_fmc_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_cisco_fmc_integration(db, org_id, integration_id)
+    result = await cisco_fmc_service.test_connection(
+        integration.fmc_host or "",
+        integration.get_username() or "",
+        integration.get_password() or "",
+        domain_uuid=integration.domain_uuid,
+        verify_ssl=bool(integration.verify_ssl),
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    integration.last_error = None if result["ok"] else result["message"]
+    db.commit()
+    return CiscoFmcTestConnectionResponse(**result)
+
+
+@router.post("/cisco-fmc/{integration_id}/sync", response_model=CiscoFmcSyncResult)
+async def sync_cisco_fmc_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Import host / network / range / FQDN objects from Cisco FMC."""
+    org_id = _get_org_id(current_user)
+    integration = _get_cisco_fmc_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This Cisco FMC connection is disabled.")
+
+    result = await cisco_fmc_service.sync_integration(db, integration)
+    return CiscoFmcSyncResult(**result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SonicWall — read-only import of SonicOS address objects
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_sonicwall_integration(db: Session, org_id: int, integration_id: int) -> SonicWallIntegration:
+    integration = (
+        db.query(SonicWallIntegration)
+        .filter(
+            SonicWallIntegration.id == integration_id,
+            SonicWallIntegration.organization_id == org_id,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="SonicWall connection not found.")
+    return integration
+
+
+@router.get("/sonicwall", response_model=List[SonicWallIntegrationResponse])
+def list_sonicwall_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    return (
+        db.query(SonicWallIntegration)
+        .filter(SonicWallIntegration.organization_id == org_id)
+        .order_by(SonicWallIntegration.created_at.desc())
+        .all()
+    )
+
+
+@router.post("/sonicwall", response_model=SonicWallIntegrationResponse, status_code=status.HTTP_201_CREATED)
+async def create_sonicwall_integration(
+    payload: SonicWallIntegrationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+
+    existing = (
+        db.query(SonicWallIntegration)
+        .filter(
+            SonicWallIntegration.organization_id == org_id,
+            SonicWallIntegration.name == payload.name,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A SonicWall connection named '{payload.name}' already exists.",
+        )
+
+    result = await sonicwall_service.test_connection(
+        payload.sonicwall_host,
+        payload.username,
+        payload.password,
+        verify_ssl=payload.verify_ssl,
+    )
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+
+    integration = SonicWallIntegration(
+        organization_id=org_id,
+        name=payload.name,
+        sonicwall_host=payload.sonicwall_host,
+        verify_ssl=payload.verify_ssl,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+        last_tested_at=datetime.utcnow(),
+        last_test_ok=True,
+    )
+    integration.set_username(payload.username)
+    integration.set_password(payload.password)
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.put("/sonicwall/{integration_id}", response_model=SonicWallIntegrationResponse)
+async def update_sonicwall_integration(
+    integration_id: int,
+    payload: SonicWallIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_sonicwall_integration(db, org_id, integration_id)
+
+    data = payload.model_dump(exclude_unset=True)
+    new_username = data.pop("username", None)
+    new_password = data.pop("password", None)
+
+    for field, value in data.items():
+        setattr(integration, field, value)
+    if new_username:
+        integration.set_username(new_username)
+    if new_password:
+        integration.set_password(new_password)
+
+    result = await sonicwall_service.test_connection(
+        integration.sonicwall_host or "",
+        integration.get_username() or "",
+        integration.get_password() or "",
+        verify_ssl=bool(integration.verify_ssl),
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/sonicwall/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_sonicwall_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_sonicwall_integration(db, org_id, integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post("/sonicwall/{integration_id}/test", response_model=SonicWallTestConnectionResponse)
+async def test_sonicwall_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_sonicwall_integration(db, org_id, integration_id)
+    result = await sonicwall_service.test_connection(
+        integration.sonicwall_host or "",
+        integration.get_username() or "",
+        integration.get_password() or "",
+        verify_ssl=bool(integration.verify_ssl),
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    integration.last_error = None if result["ok"] else result["message"]
+    db.commit()
+    return SonicWallTestConnectionResponse(**result)
+
+
+@router.post("/sonicwall/{integration_id}/sync", response_model=SonicWallSyncResult)
+async def sync_sonicwall_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Import address objects from the SonicWall SonicOS API."""
+    org_id = _get_org_id(current_user)
+    integration = _get_sonicwall_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This SonicWall connection is disabled.")
+
+    result = await sonicwall_service.sync_integration(db, integration)
+    return SonicWallSyncResult(**result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# pfSense — read-only import of firewall alias entries
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_pfsense_integration(db: Session, org_id: int, integration_id: int) -> PfSenseIntegration:
+    integration = (
+        db.query(PfSenseIntegration)
+        .filter(
+            PfSenseIntegration.id == integration_id,
+            PfSenseIntegration.organization_id == org_id,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="pfSense connection not found.")
+    return integration
+
+
+@router.get("/pfsense", response_model=List[PfSenseIntegrationResponse])
+def list_pfsense_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    return (
+        db.query(PfSenseIntegration)
+        .filter(PfSenseIntegration.organization_id == org_id)
+        .order_by(PfSenseIntegration.created_at.desc())
+        .all()
+    )
+
+
+@router.post("/pfsense", response_model=PfSenseIntegrationResponse, status_code=status.HTTP_201_CREATED)
+async def create_pfsense_integration(
+    payload: PfSenseIntegrationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+
+    existing = (
+        db.query(PfSenseIntegration)
+        .filter(
+            PfSenseIntegration.organization_id == org_id,
+            PfSenseIntegration.name == payload.name,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A pfSense connection named '{payload.name}' already exists.",
+        )
+
+    result = await pfsense_service.test_connection(
+        payload.pfsense_host,
+        payload.api_key,
+        verify_ssl=payload.verify_ssl,
+    )
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+
+    integration = PfSenseIntegration(
+        organization_id=org_id,
+        name=payload.name,
+        pfsense_host=payload.pfsense_host,
+        verify_ssl=payload.verify_ssl,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+        last_tested_at=datetime.utcnow(),
+        last_test_ok=True,
+    )
+    integration.set_api_key(payload.api_key)
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.put("/pfsense/{integration_id}", response_model=PfSenseIntegrationResponse)
+async def update_pfsense_integration(
+    integration_id: int,
+    payload: PfSenseIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_pfsense_integration(db, org_id, integration_id)
+
+    data = payload.model_dump(exclude_unset=True)
+    new_key = data.pop("api_key", None)
+
+    for field, value in data.items():
+        setattr(integration, field, value)
+    if new_key:
+        integration.set_api_key(new_key)
+
+    result = await pfsense_service.test_connection(
+        integration.pfsense_host or "",
+        integration.get_api_key() or "",
+        verify_ssl=bool(integration.verify_ssl),
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/pfsense/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_pfsense_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_pfsense_integration(db, org_id, integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post("/pfsense/{integration_id}/test", response_model=PfSenseTestConnectionResponse)
+async def test_pfsense_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_pfsense_integration(db, org_id, integration_id)
+    result = await pfsense_service.test_connection(
+        integration.pfsense_host or "",
+        integration.get_api_key() or "",
+        verify_ssl=bool(integration.verify_ssl),
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    integration.last_error = None if result["ok"] else result["message"]
+    db.commit()
+    return PfSenseTestConnectionResponse(**result)
+
+
+@router.post("/pfsense/{integration_id}/sync", response_model=PfSenseSyncResult)
+async def sync_pfsense_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Import firewall alias entries from the pfSense REST API."""
+    org_id = _get_org_id(current_user)
+    integration = _get_pfsense_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This pfSense connection is disabled.")
+
+    result = await pfsense_service.sync_integration(db, integration)
+    return PfSenseSyncResult(**result)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

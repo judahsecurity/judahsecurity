@@ -1,12 +1,19 @@
 """Unit tests for the firewall integration address-object parsers.
 
-Covers the pure parsing logic of the Fortinet FortiGate and Check Point
-integrations — the mapping from vendor network objects to ASM asset
-(value, type, kind) tuples — without any network or database access.
+Covers the pure parsing logic of the firewall integrations (FortiGate,
+Check Point, Cisco FMC, SonicWall, pfSense) — the mapping from vendor network
+objects to ASM asset (value, type, kind) tuples — without any network or
+database access.
 """
 
 from app.models.asset import AssetType
-from app.services import checkpoint_service, fortigate_service
+from app.services import (
+    checkpoint_service,
+    cisco_fmc_service,
+    fortigate_service,
+    pfsense_service,
+    sonicwall_service,
+)
 
 
 # ── FortiGate ────────────────────────────────────────────────────────────────
@@ -102,3 +109,97 @@ def test_checkpoint_network_invalid_mask():
 def test_checkpoint_address_range_seeds_first_ip():
     entry = {"name": "r", "ipv4-address-first": "10.0.0.1", "ipv4-address-last": "10.0.0.9"}
     assert checkpoint_service.parse_address_range(entry) == ("10.0.0.1", AssetType.IP_ADDRESS, "range")
+
+
+# ── Cisco FMC ────────────────────────────────────────────────────────────────
+
+
+def test_cisco_fmc_host():
+    assert cisco_fmc_service.parse_host({"name": "h", "value": "1.2.3.4"}) == ("1.2.3.4", AssetType.IP_ADDRESS, "ip")
+
+
+def test_cisco_fmc_host_invalid():
+    assert cisco_fmc_service.parse_host({"name": "h", "value": "nope"}) is None
+
+
+def test_cisco_fmc_network_cidr():
+    assert cisco_fmc_service.parse_network({"name": "n", "value": "10.0.0.0/24"}) == ("10.0.0.0/24", AssetType.IP_RANGE, "cidr")
+
+
+def test_cisco_fmc_network_host_mask():
+    assert cisco_fmc_service.parse_network({"name": "n", "value": "10.0.0.5/32"}) == ("10.0.0.5", AssetType.IP_ADDRESS, "ip")
+
+
+def test_cisco_fmc_range_seeds_first_ip():
+    assert cisco_fmc_service.parse_range({"name": "r", "value": "10.0.0.1-10.0.0.9"}) == ("10.0.0.1", AssetType.IP_ADDRESS, "range")
+
+
+def test_cisco_fmc_fqdn_subdomain():
+    assert cisco_fmc_service.parse_fqdn({"name": "f", "value": "www.example.com"}) == ("www.example.com", AssetType.SUBDOMAIN, "fqdn")
+
+
+def test_cisco_fmc_fqdn_apex():
+    assert cisco_fmc_service.parse_fqdn({"name": "f", "value": "example.com"}) == ("example.com", AssetType.DOMAIN, "fqdn")
+
+
+# ── SonicWall ────────────────────────────────────────────────────────────────
+
+
+def test_sonicwall_host():
+    entry = {"ipv4": {"name": "h", "host": {"ip": "1.2.3.4"}}}
+    assert sonicwall_service.parse_ipv4_object(entry) == ("1.2.3.4", AssetType.IP_ADDRESS, "ip")
+
+
+def test_sonicwall_network():
+    entry = {"ipv4": {"name": "n", "network": {"subnet": "10.0.0.0", "mask": "255.255.255.0"}}}
+    assert sonicwall_service.parse_ipv4_object(entry) == ("10.0.0.0/24", AssetType.IP_RANGE, "cidr")
+
+
+def test_sonicwall_range_seeds_first_ip():
+    entry = {"ipv4": {"name": "r", "range": {"begin": "10.0.0.1", "end": "10.0.0.9"}}}
+    assert sonicwall_service.parse_ipv4_object(entry) == ("10.0.0.1", AssetType.IP_ADDRESS, "range")
+
+
+def test_sonicwall_empty_object():
+    assert sonicwall_service.parse_ipv4_object({"ipv4": {"name": "x"}}) is None
+
+
+def test_sonicwall_fqdn():
+    entry = {"fqdn": {"name": "f", "domain": "api.example.com"}}
+    assert sonicwall_service.parse_fqdn_object(entry) == ("api.example.com", AssetType.SUBDOMAIN, "fqdn")
+
+
+# ── pfSense ──────────────────────────────────────────────────────────────────
+
+
+def test_pfsense_entry_ip():
+    assert pfsense_service.classify_alias_entry("1.2.3.4") == ("1.2.3.4", AssetType.IP_ADDRESS, "ip")
+
+
+def test_pfsense_entry_cidr():
+    assert pfsense_service.classify_alias_entry("10.0.0.0/24") == ("10.0.0.0/24", AssetType.IP_RANGE, "cidr")
+
+
+def test_pfsense_entry_host_cidr():
+    assert pfsense_service.classify_alias_entry("10.0.0.5/32") == ("10.0.0.5", AssetType.IP_ADDRESS, "ip")
+
+
+def test_pfsense_entry_fqdn():
+    assert pfsense_service.classify_alias_entry("www.example.com") == ("www.example.com", AssetType.SUBDOMAIN, "fqdn")
+
+
+def test_pfsense_entry_apex_fqdn():
+    assert pfsense_service.classify_alias_entry("example.com") == ("example.com", AssetType.DOMAIN, "fqdn")
+
+
+def test_pfsense_entry_port_ignored():
+    assert pfsense_service.classify_alias_entry("443") is None
+    assert pfsense_service.classify_alias_entry("80:443") is None
+
+
+def test_pfsense_alias_addresses_list():
+    assert pfsense_service._alias_addresses({"address": ["1.1.1.1", "2.2.2.2"]}) == ["1.1.1.1", "2.2.2.2"]
+
+
+def test_pfsense_alias_addresses_string():
+    assert pfsense_service._alias_addresses({"address": "1.1.1.1 2.2.2.2"}) == ["1.1.1.1", "2.2.2.2"]

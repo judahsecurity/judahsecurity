@@ -55,6 +55,9 @@ import {
   type F5Integration,
   type FortiGateIntegration,
   type CheckPointIntegration,
+  type CiscoFmcIntegration,
+  type SonicWallIntegration,
+  type PfSenseIntegration,
   type CloudflareIntegration,
 } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
@@ -3346,6 +3349,1130 @@ function CheckPointSection() {
   );
 }
 
+const FIREWALL_SYNC_INTERVALS: { value: number; label: string }[] = [
+  { value: 60, label: 'Every hour' },
+  { value: 360, label: 'Every 6 hours' },
+  { value: 720, label: 'Every 12 hours' },
+  { value: 1440, label: 'Every 24 hours' },
+];
+
+function formatFirewallInterval(minutes: number): string {
+  const match = FIREWALL_SYNC_INTERVALS.find(i => i.value === minutes);
+  if (match) return match.label;
+  if (minutes % 1440 === 0) return `Every ${minutes / 1440} day(s)`;
+  if (minutes % 60 === 0) return `Every ${minutes / 60} hour(s)`;
+  return `Every ${minutes} min`;
+}
+
+interface CiscoFmcFormState {
+  name: string;
+  fmc_host: string;
+  username: string;
+  password: string;
+  domain_uuid: string;
+  verify_ssl: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+}
+
+const defaultCiscoFmcForm: CiscoFmcFormState = {
+  name: '',
+  fmc_host: '',
+  username: '',
+  password: '',
+  domain_uuid: '',
+  verify_ssl: true,
+  continuous_sync_enabled: false,
+  sync_interval_minutes: 360,
+};
+
+function CiscoFmcSection() {
+  const { toast } = useToast();
+  const [integrations, setIntegrations] = useState<CiscoFmcIntegration[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [editing, setEditing] = useState<CiscoFmcIntegration | null>(null);
+  const [form, setForm] = useState<CiscoFmcFormState>(defaultCiscoFmcForm);
+  const [saving, setSaving] = useState(false);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<CiscoFmcIntegration | null>(null);
+
+  useEffect(() => { load(); }, []);
+
+  async function load() {
+    setLoading(true);
+    try {
+      setIntegrations(await api.getCiscoFmcIntegrations());
+    } catch {
+      setIntegrations([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function openCreate() {
+    setEditing(null);
+    setForm(defaultCiscoFmcForm);
+    setSetupOpen(true);
+  }
+
+  function openEdit(integration: CiscoFmcIntegration) {
+    setEditing(integration);
+    setForm({
+      name: integration.name,
+      fmc_host: integration.fmc_host || '',
+      username: '',
+      password: '',
+      domain_uuid: integration.domain_uuid || '',
+      verify_ssl: integration.verify_ssl !== false,
+      continuous_sync_enabled: integration.continuous_sync_enabled,
+      sync_interval_minutes: integration.sync_interval_minutes,
+    });
+    setSetupOpen(true);
+  }
+
+  async function handleSave() {
+    if (!form.name.trim()) {
+      toast({ title: 'Connection name is required.', variant: 'destructive' });
+      return;
+    }
+    if (!form.fmc_host.trim()) {
+      toast({ title: 'FMC host is required.', variant: 'destructive' });
+      return;
+    }
+    if (!editing && (!form.username.trim() || !form.password.trim())) {
+      toast({ title: 'Username and password are required.', variant: 'destructive' });
+      return;
+    }
+    setSaving(true);
+    try {
+      if (editing) {
+        await api.updateCiscoFmcIntegration(editing.id, {
+          name: form.name.trim(),
+          fmc_host: form.fmc_host.trim(),
+          ...(form.username ? { username: form.username } : {}),
+          ...(form.password ? { password: form.password } : {}),
+          domain_uuid: form.domain_uuid.trim() || null,
+          verify_ssl: form.verify_ssl,
+          continuous_sync_enabled: form.continuous_sync_enabled,
+          sync_interval_minutes: form.sync_interval_minutes,
+        });
+        toast({ title: 'Cisco FMC connection updated.' });
+      } else {
+        await api.createCiscoFmcIntegration({
+          name: form.name.trim(),
+          fmc_host: form.fmc_host.trim(),
+          username: form.username.trim(),
+          password: form.password,
+          domain_uuid: form.domain_uuid.trim() || null,
+          verify_ssl: form.verify_ssl,
+          continuous_sync_enabled: form.continuous_sync_enabled,
+          sync_interval_minutes: form.sync_interval_minutes,
+        });
+        toast({ title: 'Cisco FMC connection added.' });
+      }
+      setSetupOpen(false);
+      await load();
+    } catch (err) {
+      toast({ title: 'Failed to save', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleTest(integration: CiscoFmcIntegration) {
+    setBusyId(integration.id);
+    try {
+      const result = await api.testCiscoFmcConnection(integration.id);
+      toast({
+        title: result.ok ? 'Connection OK' : 'Connection failed',
+        description: result.ok && result.object_count != null
+          ? `${result.message} (${result.object_count} host object(s) in scope)`
+          : result.message,
+        variant: result.ok ? 'default' : 'destructive',
+      });
+      await load();
+    } catch (err) {
+      toast({ title: 'Test failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleSync(integration: CiscoFmcIntegration) {
+    setBusyId(integration.id);
+    try {
+      const result = await api.syncCiscoFmcIntegration(integration.id);
+      toast({
+        title: result.ok ? 'Sync complete' : 'Sync failed',
+        description: result.message,
+        variant: result.ok ? 'default' : 'destructive',
+      });
+      await load();
+    } catch (err) {
+      toast({ title: 'Sync failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleDelete() {
+    if (!deleteTarget) return;
+    setBusyId(deleteTarget.id);
+    try {
+      await api.deleteCiscoFmcIntegration(deleteTarget.id);
+      setDeleteTarget(null);
+      toast({ title: 'Cisco FMC connection removed.' });
+      await load();
+    } catch (err) {
+      toast({ title: 'Failed to remove', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <Card className="border border-border">
+      <CardHeader className="flex flex-row items-center gap-4 space-y-0 pb-3">
+        <div className="w-10 h-10 rounded-lg bg-[#00BCEB] flex items-center justify-center shrink-0">
+          <svg viewBox="0 0 24 24" fill="white" className="w-5 h-5" aria-hidden="true">
+            <path d="M12 2 4 5v6c0 5 3.4 8.6 8 11 4.6-2.4 8-6 8-11V5l-8-3zm0 2.2 6 2.2V11c0 3.9-2.5 6.9-6 8.9-3.5-2-6-5-6-8.9V6.4l6-2.2z" />
+          </svg>
+        </div>
+        <div className="flex-1 min-w-0">
+          <CardTitle className="text-base">Cisco Firepower (FMC)</CardTitle>
+          <CardDescription className="text-sm">
+            Import host, network, range, and FQDN objects as assets. Read-only FMC REST API.
+          </CardDescription>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {loading ? (
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+          ) : integrations.length > 0 ? (
+            <Badge variant="outline" className="bg-green-500/10 text-green-400 border-green-500/30">
+              <CheckCircle2 className="h-3 w-3 mr-1" />
+              {integrations.length} connection{integrations.length > 1 ? 's' : ''}
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="text-muted-foreground">Not configured</Badge>
+          )}
+        </div>
+      </CardHeader>
+
+      <CardContent className="space-y-4">
+        {integrations.length > 0 ? (
+          <div className="space-y-3">
+            {integrations.map((c) => (
+              <div key={c.id} className="rounded-lg border border-border p-3 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="font-medium text-sm truncate">{c.name}</p>
+                      {!c.is_active && <Badge variant="outline" className="text-muted-foreground text-xs">Disabled</Badge>}
+                      {c.last_test_ok === false && (
+                        <Badge variant="outline" className="bg-red-500/10 text-red-400 border-red-500/30 text-xs">
+                          <AlertCircle className="h-3 w-3 mr-1" />Auth issue
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1 text-xs text-muted-foreground">
+                      <span className="font-mono truncate max-w-[260px]">{c.fmc_host}</span>
+                      <span>Domain: {c.domain_uuid || 'default'}</span>
+                      {c.continuous_sync_enabled ? (
+                        <span className="inline-flex items-center gap-1 text-green-400">
+                          <RotateCw className="h-3 w-3" />
+                          Auto-sync {formatFirewallInterval(c.sync_interval_minutes).toLowerCase()}
+                        </span>
+                      ) : (
+                        <span>Auto-sync off</span>
+                      )}
+                      {c.last_sync_at && (
+                        <span>
+                          Last sync: {new Date(c.last_sync_at).toLocaleString()}
+                          {c.last_sync_ok === true && <span className="text-green-400"> — OK</span>}
+                          {c.last_sync_ok === false && <span className="text-red-400"> — Failed</span>}
+                        </span>
+                      )}
+                    </div>
+                    {c.last_sync_ok && c.last_sync_stats && (
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {c.last_sync_stats.hosts_seen ?? 0} host(s), {c.last_sync_stats.networks_seen ?? 0} network(s), {c.last_sync_stats.ranges_seen ?? 0} range(s), {c.last_sync_stats.fqdns_seen ?? 0} FQDN(s) imported.
+                      </p>
+                    )}
+                    {c.last_sync_ok === false && c.last_error && (
+                      <p className="text-xs text-red-400 mt-1 truncate">{c.last_error}</p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" variant="outline" onClick={() => handleSync(c)} disabled={busyId === c.id || !c.is_active}>
+                    {busyId === c.id ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Download className="h-4 w-4 mr-2" />}
+                    Sync now
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => handleTest(c)} disabled={busyId === c.id}>
+                    <RefreshCw className="h-4 w-4 mr-2" />Test
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => openEdit(c)}>
+                    <Settings2 className="h-4 w-4 mr-2" />Edit
+                  </Button>
+                  <Button size="sm" variant="outline" className="border-red-600/30 hover:bg-red-600/20 text-red-400" onClick={() => setDeleteTarget(c)}>
+                    <Trash2 className="h-4 w-4 mr-2" />Remove
+                  </Button>
+                </div>
+              </div>
+            ))}
+            <Button size="sm" variant="outline" onClick={openCreate}>
+              <Plus className="h-4 w-4 mr-2" />Add another connection
+            </Button>
+          </div>
+        ) : (
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+            <p className="text-sm text-muted-foreground flex-1">
+              Connect Firepower Management Center to import managed network objects and keep external inventory in sync.
+            </p>
+            <Button onClick={openCreate}>
+              <Plug className="h-4 w-4 mr-2" />Connect Cisco FMC
+            </Button>
+          </div>
+        )}
+      </CardContent>
+
+      <Dialog open={setupOpen} onOpenChange={(v) => { if (!saving) setSetupOpen(v); }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {editing ? 'Edit Cisco FMC connection' : 'Connect Cisco Firepower (FMC)'}
+            </DialogTitle>
+            <DialogDescription>
+              Uses the FMC REST API to read host, network, range, and FQDN objects. Credentials stay encrypted; ASM never writes
+              configuration back to FMC. Prefer a least-privilege read-only API user.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Connection name</label>
+              <Input placeholder="e.g. HQ FMC" value={form.name} onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))} />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">FMC host</label>
+              <Input placeholder="https://fmc.example.com" value={form.fmc_host} onChange={(e) => setForm(f => ({ ...f, fmc_host: e.target.value }))} />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">
+                  Username{editing && <span className="text-muted-foreground font-normal"> (optional)</span>}
+                </label>
+                <Input placeholder={editing ? '••••••••' : 'api-reader'} value={form.username} onChange={(e) => setForm(f => ({ ...f, username: e.target.value }))} autoComplete="username" />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">
+                  Password{editing && <span className="text-muted-foreground font-normal"> (optional)</span>}
+                </label>
+                <Input type="password" placeholder={editing ? '••••••••••••' : 'Management password'} value={form.password} onChange={(e) => setForm(f => ({ ...f, password: e.target.value }))} autoComplete="current-password" />
+              </div>
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Domain UUID</label>
+              <Input placeholder="Default (Global) domain if blank" value={form.domain_uuid} onChange={(e) => setForm(f => ({ ...f, domain_uuid: e.target.value }))} />
+              <p className="text-xs text-muted-foreground">Optional. Leave blank to use the default domain returned at login.</p>
+            </div>
+            <div className="flex items-start gap-3 rounded-lg border border-border p-3">
+              <Checkbox id="ciscofmc-verify-ssl" checked={form.verify_ssl} onCheckedChange={(v) => setForm(f => ({ ...f, verify_ssl: !!v }))} className="mt-0.5 shrink-0" />
+              <label htmlFor="ciscofmc-verify-ssl" className="text-sm cursor-pointer">
+                <span className="font-medium">Verify TLS certificate</span>
+                <p className="text-xs text-muted-foreground mt-0.5">Turn off only for lab/self-signed FMC interfaces.</p>
+              </label>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Continuous sync</label>
+              <div className="flex items-start gap-3 rounded-lg border border-border p-3">
+                <Checkbox id="ciscofmc-continuous" checked={form.continuous_sync_enabled} onCheckedChange={(v) => setForm(f => ({ ...f, continuous_sync_enabled: !!v }))} className="mt-0.5 shrink-0" />
+                <label htmlFor="ciscofmc-continuous" className="text-sm cursor-pointer">
+                  <span className="font-medium flex items-center gap-2">
+                    <RotateCw className="h-4 w-4 text-green-400" />
+                    Automatically re-sync on a schedule
+                  </span>
+                  <p className="text-xs text-muted-foreground mt-0.5">Keeps firewall-managed inventory current in the background.</p>
+                </label>
+              </div>
+              {form.continuous_sync_enabled && (
+                <div className="space-y-1.5 pl-1">
+                  <label className="text-sm font-medium">Sync frequency</label>
+                  <Select value={String(form.sync_interval_minutes)} onValueChange={(v) => setForm(f => ({ ...f, sync_interval_minutes: Number(v) }))}>
+                    <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {FIREWALL_SYNC_INTERVALS.map(i => (
+                        <SelectItem key={i.value} value={String(i.value)}>{i.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2 pt-2 border-t border-border">
+            <Button variant="outline" onClick={() => setSetupOpen(false)} disabled={saving}>Cancel</Button>
+            <Button onClick={handleSave} disabled={saving}>
+              {saving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              {editing ? 'Save changes' : 'Connect'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!deleteTarget} onOpenChange={(v) => { if (!v) setDeleteTarget(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-400">
+              <Trash2 className="h-5 w-5" />Remove connection
+            </DialogTitle>
+            <DialogDescription>
+              This removes credentials for <strong>{deleteTarget?.name}</strong>. Assets already imported are kept.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={busyId === deleteTarget?.id}>
+              {busyId === deleteTarget?.id ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              Remove
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
+  );
+}
+
+interface SonicWallFormState {
+  name: string;
+  sonicwall_host: string;
+  username: string;
+  password: string;
+  verify_ssl: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+}
+
+const defaultSonicWallForm: SonicWallFormState = {
+  name: '',
+  sonicwall_host: '',
+  username: '',
+  password: '',
+  verify_ssl: true,
+  continuous_sync_enabled: false,
+  sync_interval_minutes: 360,
+};
+
+function SonicWallSection() {
+  const { toast } = useToast();
+  const [integrations, setIntegrations] = useState<SonicWallIntegration[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [editing, setEditing] = useState<SonicWallIntegration | null>(null);
+  const [form, setForm] = useState<SonicWallFormState>(defaultSonicWallForm);
+  const [saving, setSaving] = useState(false);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<SonicWallIntegration | null>(null);
+
+  useEffect(() => { load(); }, []);
+
+  async function load() {
+    setLoading(true);
+    try {
+      setIntegrations(await api.getSonicWallIntegrations());
+    } catch {
+      setIntegrations([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function openCreate() {
+    setEditing(null);
+    setForm(defaultSonicWallForm);
+    setSetupOpen(true);
+  }
+
+  function openEdit(integration: SonicWallIntegration) {
+    setEditing(integration);
+    setForm({
+      name: integration.name,
+      sonicwall_host: integration.sonicwall_host || '',
+      username: '',
+      password: '',
+      verify_ssl: integration.verify_ssl !== false,
+      continuous_sync_enabled: integration.continuous_sync_enabled,
+      sync_interval_minutes: integration.sync_interval_minutes,
+    });
+    setSetupOpen(true);
+  }
+
+  async function handleSave() {
+    if (!form.name.trim()) {
+      toast({ title: 'Connection name is required.', variant: 'destructive' });
+      return;
+    }
+    if (!form.sonicwall_host.trim()) {
+      toast({ title: 'SonicWall host is required.', variant: 'destructive' });
+      return;
+    }
+    if (!editing && (!form.username.trim() || !form.password.trim())) {
+      toast({ title: 'Username and password are required.', variant: 'destructive' });
+      return;
+    }
+    setSaving(true);
+    try {
+      if (editing) {
+        await api.updateSonicWallIntegration(editing.id, {
+          name: form.name.trim(),
+          sonicwall_host: form.sonicwall_host.trim(),
+          ...(form.username ? { username: form.username } : {}),
+          ...(form.password ? { password: form.password } : {}),
+          verify_ssl: form.verify_ssl,
+          continuous_sync_enabled: form.continuous_sync_enabled,
+          sync_interval_minutes: form.sync_interval_minutes,
+        });
+        toast({ title: 'SonicWall connection updated.' });
+      } else {
+        await api.createSonicWallIntegration({
+          name: form.name.trim(),
+          sonicwall_host: form.sonicwall_host.trim(),
+          username: form.username.trim(),
+          password: form.password,
+          verify_ssl: form.verify_ssl,
+          continuous_sync_enabled: form.continuous_sync_enabled,
+          sync_interval_minutes: form.sync_interval_minutes,
+        });
+        toast({ title: 'SonicWall connection added.' });
+      }
+      setSetupOpen(false);
+      await load();
+    } catch (err) {
+      toast({ title: 'Failed to save', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleTest(integration: SonicWallIntegration) {
+    setBusyId(integration.id);
+    try {
+      const result = await api.testSonicWallConnection(integration.id);
+      toast({
+        title: result.ok ? 'Connection OK' : 'Connection failed',
+        description: result.ok && result.address_count != null
+          ? `${result.message} (${result.address_count} address object(s) in scope)`
+          : result.message,
+        variant: result.ok ? 'default' : 'destructive',
+      });
+      await load();
+    } catch (err) {
+      toast({ title: 'Test failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleSync(integration: SonicWallIntegration) {
+    setBusyId(integration.id);
+    try {
+      const result = await api.syncSonicWallIntegration(integration.id);
+      toast({
+        title: result.ok ? 'Sync complete' : 'Sync failed',
+        description: result.message,
+        variant: result.ok ? 'default' : 'destructive',
+      });
+      await load();
+    } catch (err) {
+      toast({ title: 'Sync failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleDelete() {
+    if (!deleteTarget) return;
+    setBusyId(deleteTarget.id);
+    try {
+      await api.deleteSonicWallIntegration(deleteTarget.id);
+      setDeleteTarget(null);
+      toast({ title: 'SonicWall connection removed.' });
+      await load();
+    } catch (err) {
+      toast({ title: 'Failed to remove', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <Card className="border border-border">
+      <CardHeader className="flex flex-row items-center gap-4 space-y-0 pb-3">
+        <div className="w-10 h-10 rounded-lg bg-[#FF791A] flex items-center justify-center shrink-0">
+          <svg viewBox="0 0 24 24" fill="white" className="w-5 h-5" aria-hidden="true">
+            <path d="M12 2 4 5v6c0 5 3.4 8.6 8 11 4.6-2.4 8-6 8-11V5l-8-3zm0 2.2 6 2.2V11c0 3.9-2.5 6.9-6 8.9-3.5-2-6-5-6-8.9V6.4l6-2.2z" />
+          </svg>
+        </div>
+        <div className="flex-1 min-w-0">
+          <CardTitle className="text-base">SonicWall</CardTitle>
+          <CardDescription className="text-sm">
+            Import SonicOS address objects (hosts, networks, ranges, FQDNs) as assets. Read-only SonicOS API.
+          </CardDescription>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {loading ? (
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+          ) : integrations.length > 0 ? (
+            <Badge variant="outline" className="bg-green-500/10 text-green-400 border-green-500/30">
+              <CheckCircle2 className="h-3 w-3 mr-1" />
+              {integrations.length} connection{integrations.length > 1 ? 's' : ''}
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="text-muted-foreground">Not configured</Badge>
+          )}
+        </div>
+      </CardHeader>
+
+      <CardContent className="space-y-4">
+        {integrations.length > 0 ? (
+          <div className="space-y-3">
+            {integrations.map((c) => (
+              <div key={c.id} className="rounded-lg border border-border p-3 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="font-medium text-sm truncate">{c.name}</p>
+                      {!c.is_active && <Badge variant="outline" className="text-muted-foreground text-xs">Disabled</Badge>}
+                      {c.last_test_ok === false && (
+                        <Badge variant="outline" className="bg-red-500/10 text-red-400 border-red-500/30 text-xs">
+                          <AlertCircle className="h-3 w-3 mr-1" />Auth issue
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1 text-xs text-muted-foreground">
+                      <span className="font-mono truncate max-w-[260px]">{c.sonicwall_host}</span>
+                      {c.continuous_sync_enabled ? (
+                        <span className="inline-flex items-center gap-1 text-green-400">
+                          <RotateCw className="h-3 w-3" />
+                          Auto-sync {formatFirewallInterval(c.sync_interval_minutes).toLowerCase()}
+                        </span>
+                      ) : (
+                        <span>Auto-sync off</span>
+                      )}
+                      {c.last_sync_at && (
+                        <span>
+                          Last sync: {new Date(c.last_sync_at).toLocaleString()}
+                          {c.last_sync_ok === true && <span className="text-green-400"> — OK</span>}
+                          {c.last_sync_ok === false && <span className="text-red-400"> — Failed</span>}
+                        </span>
+                      )}
+                    </div>
+                    {c.last_sync_ok && c.last_sync_stats && (
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {c.last_sync_stats.ips_imported ?? 0} IP(s), {c.last_sync_stats.cidrs_imported ?? 0} subnet(s), {c.last_sync_stats.fqdns_imported ?? 0} FQDN(s) from {c.last_sync_stats.addresses_seen ?? 0} object(s).
+                      </p>
+                    )}
+                    {c.last_sync_ok === false && c.last_error && (
+                      <p className="text-xs text-red-400 mt-1 truncate">{c.last_error}</p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" variant="outline" onClick={() => handleSync(c)} disabled={busyId === c.id || !c.is_active}>
+                    {busyId === c.id ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Download className="h-4 w-4 mr-2" />}
+                    Sync now
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => handleTest(c)} disabled={busyId === c.id}>
+                    <RefreshCw className="h-4 w-4 mr-2" />Test
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => openEdit(c)}>
+                    <Settings2 className="h-4 w-4 mr-2" />Edit
+                  </Button>
+                  <Button size="sm" variant="outline" className="border-red-600/30 hover:bg-red-600/20 text-red-400" onClick={() => setDeleteTarget(c)}>
+                    <Trash2 className="h-4 w-4 mr-2" />Remove
+                  </Button>
+                </div>
+              </div>
+            ))}
+            <Button size="sm" variant="outline" onClick={openCreate}>
+              <Plus className="h-4 w-4 mr-2" />Add another connection
+            </Button>
+          </div>
+        ) : (
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+            <p className="text-sm text-muted-foreground flex-1">
+              Connect SonicWall to import SonicOS address objects and keep external inventory in sync.
+            </p>
+            <Button onClick={openCreate}>
+              <Plug className="h-4 w-4 mr-2" />Connect SonicWall
+            </Button>
+          </div>
+        )}
+      </CardContent>
+
+      <Dialog open={setupOpen} onOpenChange={(v) => { if (!saving) setSetupOpen(v); }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {editing ? 'Edit SonicWall connection' : 'Connect SonicWall'}
+            </DialogTitle>
+            <DialogDescription>
+              Uses the SonicOS API to read address objects. Credentials stay encrypted; ASM never writes configuration back to the
+              firewall. Prefer a least-privilege read-only administrator.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Connection name</label>
+              <Input placeholder="e.g. Branch SonicWall" value={form.name} onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))} />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">SonicWall host</label>
+              <Input placeholder="https://sonicwall.example.com" value={form.sonicwall_host} onChange={(e) => setForm(f => ({ ...f, sonicwall_host: e.target.value }))} />
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">
+                  Username{editing && <span className="text-muted-foreground font-normal"> (optional)</span>}
+                </label>
+                <Input placeholder={editing ? '••••••••' : 'admin'} value={form.username} onChange={(e) => setForm(f => ({ ...f, username: e.target.value }))} autoComplete="username" />
+              </div>
+              <div className="space-y-1.5">
+                <label className="text-sm font-medium">
+                  Password{editing && <span className="text-muted-foreground font-normal"> (optional)</span>}
+                </label>
+                <Input type="password" placeholder={editing ? '••••••••••••' : 'Management password'} value={form.password} onChange={(e) => setForm(f => ({ ...f, password: e.target.value }))} autoComplete="current-password" />
+              </div>
+            </div>
+            <div className="flex items-start gap-3 rounded-lg border border-border p-3">
+              <Checkbox id="sonicwall-verify-ssl" checked={form.verify_ssl} onCheckedChange={(v) => setForm(f => ({ ...f, verify_ssl: !!v }))} className="mt-0.5 shrink-0" />
+              <label htmlFor="sonicwall-verify-ssl" className="text-sm cursor-pointer">
+                <span className="font-medium">Verify TLS certificate</span>
+                <p className="text-xs text-muted-foreground mt-0.5">Turn off only for lab/self-signed SonicWall interfaces.</p>
+              </label>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Continuous sync</label>
+              <div className="flex items-start gap-3 rounded-lg border border-border p-3">
+                <Checkbox id="sonicwall-continuous" checked={form.continuous_sync_enabled} onCheckedChange={(v) => setForm(f => ({ ...f, continuous_sync_enabled: !!v }))} className="mt-0.5 shrink-0" />
+                <label htmlFor="sonicwall-continuous" className="text-sm cursor-pointer">
+                  <span className="font-medium flex items-center gap-2">
+                    <RotateCw className="h-4 w-4 text-green-400" />
+                    Automatically re-sync on a schedule
+                  </span>
+                  <p className="text-xs text-muted-foreground mt-0.5">Keeps firewall-managed inventory current in the background.</p>
+                </label>
+              </div>
+              {form.continuous_sync_enabled && (
+                <div className="space-y-1.5 pl-1">
+                  <label className="text-sm font-medium">Sync frequency</label>
+                  <Select value={String(form.sync_interval_minutes)} onValueChange={(v) => setForm(f => ({ ...f, sync_interval_minutes: Number(v) }))}>
+                    <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {FIREWALL_SYNC_INTERVALS.map(i => (
+                        <SelectItem key={i.value} value={String(i.value)}>{i.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2 pt-2 border-t border-border">
+            <Button variant="outline" onClick={() => setSetupOpen(false)} disabled={saving}>Cancel</Button>
+            <Button onClick={handleSave} disabled={saving}>
+              {saving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              {editing ? 'Save changes' : 'Connect'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!deleteTarget} onOpenChange={(v) => { if (!v) setDeleteTarget(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-400">
+              <Trash2 className="h-5 w-5" />Remove connection
+            </DialogTitle>
+            <DialogDescription>
+              This removes credentials for <strong>{deleteTarget?.name}</strong>. Assets already imported are kept.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={busyId === deleteTarget?.id}>
+              {busyId === deleteTarget?.id ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              Remove
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
+  );
+}
+
+interface PfSenseFormState {
+  name: string;
+  pfsense_host: string;
+  api_key: string;
+  verify_ssl: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+}
+
+const defaultPfSenseForm: PfSenseFormState = {
+  name: '',
+  pfsense_host: '',
+  api_key: '',
+  verify_ssl: true,
+  continuous_sync_enabled: false,
+  sync_interval_minutes: 360,
+};
+
+function PfSenseSection() {
+  const { toast } = useToast();
+  const [integrations, setIntegrations] = useState<PfSenseIntegration[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [setupOpen, setSetupOpen] = useState(false);
+  const [editing, setEditing] = useState<PfSenseIntegration | null>(null);
+  const [form, setForm] = useState<PfSenseFormState>(defaultPfSenseForm);
+  const [saving, setSaving] = useState(false);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<PfSenseIntegration | null>(null);
+
+  useEffect(() => { load(); }, []);
+
+  async function load() {
+    setLoading(true);
+    try {
+      setIntegrations(await api.getPfSenseIntegrations());
+    } catch {
+      setIntegrations([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function openCreate() {
+    setEditing(null);
+    setForm(defaultPfSenseForm);
+    setSetupOpen(true);
+  }
+
+  function openEdit(integration: PfSenseIntegration) {
+    setEditing(integration);
+    setForm({
+      name: integration.name,
+      pfsense_host: integration.pfsense_host || '',
+      api_key: '',
+      verify_ssl: integration.verify_ssl !== false,
+      continuous_sync_enabled: integration.continuous_sync_enabled,
+      sync_interval_minutes: integration.sync_interval_minutes,
+    });
+    setSetupOpen(true);
+  }
+
+  async function handleSave() {
+    if (!form.name.trim()) {
+      toast({ title: 'Connection name is required.', variant: 'destructive' });
+      return;
+    }
+    if (!form.pfsense_host.trim()) {
+      toast({ title: 'pfSense host is required.', variant: 'destructive' });
+      return;
+    }
+    if (!editing && !form.api_key.trim()) {
+      toast({ title: 'An API key is required.', variant: 'destructive' });
+      return;
+    }
+    setSaving(true);
+    try {
+      if (editing) {
+        await api.updatePfSenseIntegration(editing.id, {
+          name: form.name.trim(),
+          pfsense_host: form.pfsense_host.trim(),
+          ...(form.api_key ? { api_key: form.api_key } : {}),
+          verify_ssl: form.verify_ssl,
+          continuous_sync_enabled: form.continuous_sync_enabled,
+          sync_interval_minutes: form.sync_interval_minutes,
+        });
+        toast({ title: 'pfSense connection updated.' });
+      } else {
+        await api.createPfSenseIntegration({
+          name: form.name.trim(),
+          pfsense_host: form.pfsense_host.trim(),
+          api_key: form.api_key,
+          verify_ssl: form.verify_ssl,
+          continuous_sync_enabled: form.continuous_sync_enabled,
+          sync_interval_minutes: form.sync_interval_minutes,
+        });
+        toast({ title: 'pfSense connection added.' });
+      }
+      setSetupOpen(false);
+      await load();
+    } catch (err) {
+      toast({ title: 'Failed to save', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function handleTest(integration: PfSenseIntegration) {
+    setBusyId(integration.id);
+    try {
+      const result = await api.testPfSenseConnection(integration.id);
+      toast({
+        title: result.ok ? 'Connection OK' : 'Connection failed',
+        description: result.ok && result.alias_count != null
+          ? `${result.message} (${result.alias_count} alias(es) in scope)`
+          : result.message,
+        variant: result.ok ? 'default' : 'destructive',
+      });
+      await load();
+    } catch (err) {
+      toast({ title: 'Test failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleSync(integration: PfSenseIntegration) {
+    setBusyId(integration.id);
+    try {
+      const result = await api.syncPfSenseIntegration(integration.id);
+      toast({
+        title: result.ok ? 'Sync complete' : 'Sync failed',
+        description: result.message,
+        variant: result.ok ? 'default' : 'destructive',
+      });
+      await load();
+    } catch (err) {
+      toast({ title: 'Sync failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function handleDelete() {
+    if (!deleteTarget) return;
+    setBusyId(deleteTarget.id);
+    try {
+      await api.deletePfSenseIntegration(deleteTarget.id);
+      setDeleteTarget(null);
+      toast({ title: 'pfSense connection removed.' });
+      await load();
+    } catch (err) {
+      toast({ title: 'Failed to remove', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  return (
+    <Card className="border border-border">
+      <CardHeader className="flex flex-row items-center gap-4 space-y-0 pb-3">
+        <div className="w-10 h-10 rounded-lg bg-[#C4373B] flex items-center justify-center shrink-0">
+          <svg viewBox="0 0 24 24" fill="white" className="w-5 h-5" aria-hidden="true">
+            <path d="M12 2 4 5v6c0 5 3.4 8.6 8 11 4.6-2.4 8-6 8-11V5l-8-3zm0 2.2 6 2.2V11c0 3.9-2.5 6.9-6 8.9-3.5-2-6-5-6-8.9V6.4l6-2.2z" />
+          </svg>
+        </div>
+        <div className="flex-1 min-w-0">
+          <CardTitle className="text-base">pfSense</CardTitle>
+          <CardDescription className="text-sm">
+            Import firewall alias entries (hosts, networks, FQDNs) as assets. Read-only pfSense REST API.
+          </CardDescription>
+        </div>
+        <div className="flex items-center gap-2 shrink-0">
+          {loading ? (
+            <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+          ) : integrations.length > 0 ? (
+            <Badge variant="outline" className="bg-green-500/10 text-green-400 border-green-500/30">
+              <CheckCircle2 className="h-3 w-3 mr-1" />
+              {integrations.length} connection{integrations.length > 1 ? 's' : ''}
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="text-muted-foreground">Not configured</Badge>
+          )}
+        </div>
+      </CardHeader>
+
+      <CardContent className="space-y-4">
+        {integrations.length > 0 ? (
+          <div className="space-y-3">
+            {integrations.map((c) => (
+              <div key={c.id} className="rounded-lg border border-border p-3 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <p className="font-medium text-sm truncate">{c.name}</p>
+                      {!c.is_active && <Badge variant="outline" className="text-muted-foreground text-xs">Disabled</Badge>}
+                      {c.last_test_ok === false && (
+                        <Badge variant="outline" className="bg-red-500/10 text-red-400 border-red-500/30 text-xs">
+                          <AlertCircle className="h-3 w-3 mr-1" />Auth issue
+                        </Badge>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-1 text-xs text-muted-foreground">
+                      <span className="font-mono truncate max-w-[260px]">{c.pfsense_host}</span>
+                      {c.continuous_sync_enabled ? (
+                        <span className="inline-flex items-center gap-1 text-green-400">
+                          <RotateCw className="h-3 w-3" />
+                          Auto-sync {formatFirewallInterval(c.sync_interval_minutes).toLowerCase()}
+                        </span>
+                      ) : (
+                        <span>Auto-sync off</span>
+                      )}
+                      {c.last_sync_at && (
+                        <span>
+                          Last sync: {new Date(c.last_sync_at).toLocaleString()}
+                          {c.last_sync_ok === true && <span className="text-green-400"> — OK</span>}
+                          {c.last_sync_ok === false && <span className="text-red-400"> — Failed</span>}
+                        </span>
+                      )}
+                    </div>
+                    {c.last_sync_ok && c.last_sync_stats && (
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {c.last_sync_stats.ips_imported ?? 0} IP(s), {c.last_sync_stats.cidrs_imported ?? 0} subnet(s), {c.last_sync_stats.fqdns_imported ?? 0} FQDN(s) from {c.last_sync_stats.aliases_seen ?? 0} alias(es).
+                      </p>
+                    )}
+                    {c.last_sync_ok === false && c.last_error && (
+                      <p className="text-xs text-red-400 mt-1 truncate">{c.last_error}</p>
+                    )}
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" variant="outline" onClick={() => handleSync(c)} disabled={busyId === c.id || !c.is_active}>
+                    {busyId === c.id ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Download className="h-4 w-4 mr-2" />}
+                    Sync now
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => handleTest(c)} disabled={busyId === c.id}>
+                    <RefreshCw className="h-4 w-4 mr-2" />Test
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => openEdit(c)}>
+                    <Settings2 className="h-4 w-4 mr-2" />Edit
+                  </Button>
+                  <Button size="sm" variant="outline" className="border-red-600/30 hover:bg-red-600/20 text-red-400" onClick={() => setDeleteTarget(c)}>
+                    <Trash2 className="h-4 w-4 mr-2" />Remove
+                  </Button>
+                </div>
+              </div>
+            ))}
+            <Button size="sm" variant="outline" onClick={openCreate}>
+              <Plus className="h-4 w-4 mr-2" />Add another connection
+            </Button>
+          </div>
+        ) : (
+          <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+            <p className="text-sm text-muted-foreground flex-1">
+              Connect pfSense (with the REST API package) to import firewall alias entries and keep external inventory in sync.
+            </p>
+            <Button onClick={openCreate}>
+              <Plug className="h-4 w-4 mr-2" />Connect pfSense
+            </Button>
+          </div>
+        )}
+      </CardContent>
+
+      <Dialog open={setupOpen} onOpenChange={(v) => { if (!saving) setSetupOpen(v); }}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {editing ? 'Edit pfSense connection' : 'Connect pfSense'}
+            </DialogTitle>
+            <DialogDescription>
+              Uses the pfSense REST API (v2 package) to read firewall aliases. The API key stays encrypted; ASM never writes
+              configuration back to pfSense.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Connection name</label>
+              <Input placeholder="e.g. Edge pfSense" value={form.name} onChange={(e) => setForm(f => ({ ...f, name: e.target.value }))} />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">pfSense host</label>
+              <Input placeholder="https://pfsense.example.com" value={form.pfsense_host} onChange={(e) => setForm(f => ({ ...f, pfsense_host: e.target.value }))} />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">
+                API key{editing && <span className="text-muted-foreground font-normal"> (optional)</span>}
+              </label>
+              <Input type="password" placeholder={editing ? '••••••••••••' : 'Paste pfSense REST API key'} value={form.api_key} onChange={(e) => setForm(f => ({ ...f, api_key: e.target.value }))} autoComplete="off" />
+              <p className="text-xs text-muted-foreground">Requires the pfSense REST API package. Sent as the X-API-Key header.</p>
+            </div>
+            <div className="flex items-start gap-3 rounded-lg border border-border p-3">
+              <Checkbox id="pfsense-verify-ssl" checked={form.verify_ssl} onCheckedChange={(v) => setForm(f => ({ ...f, verify_ssl: !!v }))} className="mt-0.5 shrink-0" />
+              <label htmlFor="pfsense-verify-ssl" className="text-sm cursor-pointer">
+                <span className="font-medium">Verify TLS certificate</span>
+                <p className="text-xs text-muted-foreground mt-0.5">Turn off only for lab/self-signed pfSense interfaces.</p>
+              </label>
+            </div>
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Continuous sync</label>
+              <div className="flex items-start gap-3 rounded-lg border border-border p-3">
+                <Checkbox id="pfsense-continuous" checked={form.continuous_sync_enabled} onCheckedChange={(v) => setForm(f => ({ ...f, continuous_sync_enabled: !!v }))} className="mt-0.5 shrink-0" />
+                <label htmlFor="pfsense-continuous" className="text-sm cursor-pointer">
+                  <span className="font-medium flex items-center gap-2">
+                    <RotateCw className="h-4 w-4 text-green-400" />
+                    Automatically re-sync on a schedule
+                  </span>
+                  <p className="text-xs text-muted-foreground mt-0.5">Keeps firewall-managed inventory current in the background.</p>
+                </label>
+              </div>
+              {form.continuous_sync_enabled && (
+                <div className="space-y-1.5 pl-1">
+                  <label className="text-sm font-medium">Sync frequency</label>
+                  <Select value={String(form.sync_interval_minutes)} onValueChange={(v) => setForm(f => ({ ...f, sync_interval_minutes: Number(v) }))}>
+                    <SelectTrigger className="w-56"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {FIREWALL_SYNC_INTERVALS.map(i => (
+                        <SelectItem key={i.value} value={String(i.value)}>{i.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2 pt-2 border-t border-border">
+            <Button variant="outline" onClick={() => setSetupOpen(false)} disabled={saving}>Cancel</Button>
+            <Button onClick={handleSave} disabled={saving}>
+              {saving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              {editing ? 'Save changes' : 'Connect'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={!!deleteTarget} onOpenChange={(v) => { if (!v) setDeleteTarget(null); }}>
+        <DialogContent className="max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-red-400">
+              <Trash2 className="h-5 w-5" />Remove connection
+            </DialogTitle>
+            <DialogDescription>
+              This removes credentials for <strong>{deleteTarget?.name}</strong>. Assets already imported are kept.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button>
+            <Button variant="destructive" onClick={handleDelete} disabled={busyId === deleteTarget?.id}>
+              {busyId === deleteTarget?.id ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
+              Remove
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </Card>
+  );
+}
+
 interface CloudflareFormState {
   connection_name: string;
   api_token: string;
@@ -4095,6 +5222,15 @@ export default function IntegrationsPage() {
 
         {/* Check Point Firewall Integration Card */}
         <CheckPointSection />
+
+        {/* Cisco Firepower (FMC) Firewall Integration Card */}
+        <CiscoFmcSection />
+
+        {/* SonicWall Firewall Integration Card */}
+        <SonicWallSection />
+
+        {/* pfSense Firewall Integration Card */}
+        <PfSenseSection />
 
         {/* Cloudflare WAF Integration Card */}
         <CloudflareSection />

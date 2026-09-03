@@ -895,6 +895,132 @@ class ScheduleWorker:
         finally:
             db.close()
 
+    async def run_cisco_fmc_syncs(self):
+        """Run continuous Cisco FMC network-object inventory syncs when due."""
+        from app.models.cisco_fmc_integration import CiscoFmcIntegration
+        from app.services import cisco_fmc_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(CiscoFmcIntegration).filter(
+                CiscoFmcIntegration.is_active == True,
+                CiscoFmcIntegration.continuous_sync_enabled == True,
+            ).all()
+
+            due = [c for c in candidates if c.is_sync_due(now)]
+            if not due:
+                return
+
+            logger.info(f"Cisco FMC: {len(due)} connection(s) due for continuous sync")
+            for integration in due:
+                try:
+                    result = await cisco_fmc_service.sync_integration(db, integration)
+                    logger.info(
+                        f"Cisco FMC sync (org {integration.organization_id}, "
+                        f"'{integration.name}'): {result.get('message')}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"Cisco FMC sync failed for connection {integration.id}: {exc}",
+                        exc_info=True,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.error(f"Cisco FMC continuous sync check failed: {exc}", exc_info=True)
+        finally:
+            db.close()
+
+    async def run_sonicwall_syncs(self):
+        """Run continuous SonicWall address-object inventory syncs when due."""
+        from app.models.sonicwall_integration import SonicWallIntegration
+        from app.services import sonicwall_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(SonicWallIntegration).filter(
+                SonicWallIntegration.is_active == True,
+                SonicWallIntegration.continuous_sync_enabled == True,
+            ).all()
+
+            due = [c for c in candidates if c.is_sync_due(now)]
+            if not due:
+                return
+
+            logger.info(f"SonicWall: {len(due)} connection(s) due for continuous sync")
+            for integration in due:
+                try:
+                    result = await sonicwall_service.sync_integration(db, integration)
+                    logger.info(
+                        f"SonicWall sync (org {integration.organization_id}, "
+                        f"'{integration.name}'): {result.get('message')}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"SonicWall sync failed for connection {integration.id}: {exc}",
+                        exc_info=True,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.error(f"SonicWall continuous sync check failed: {exc}", exc_info=True)
+        finally:
+            db.close()
+
+    async def run_pfsense_syncs(self):
+        """Run continuous pfSense firewall-alias inventory syncs when due."""
+        from app.models.pfsense_integration import PfSenseIntegration
+        from app.services import pfsense_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(PfSenseIntegration).filter(
+                PfSenseIntegration.is_active == True,
+                PfSenseIntegration.continuous_sync_enabled == True,
+            ).all()
+
+            due = [c for c in candidates if c.is_sync_due(now)]
+            if not due:
+                return
+
+            logger.info(f"pfSense: {len(due)} connection(s) due for continuous sync")
+            for integration in due:
+                try:
+                    result = await pfsense_service.sync_integration(db, integration)
+                    logger.info(
+                        f"pfSense sync (org {integration.organization_id}, "
+                        f"'{integration.name}'): {result.get('message')}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"pfSense sync failed for connection {integration.id}: {exc}",
+                        exc_info=True,
+                    )
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.error(f"pfSense continuous sync check failed: {exc}", exc_info=True)
+        finally:
+            db.close()
+
     async def run_cloudflare_waf_syncs(self):
         """Run continuous Cloudflare WAF whitelist syncs when due."""
         from app.models.cloudflare_integration import CloudflareWafIntegration
@@ -969,6 +1095,15 @@ class ScheduleWorker:
 
                 # Continuous Check Point syncs — host/network object inventory
                 await self.run_checkpoint_syncs()
+
+                # Continuous Cisco FMC syncs — network-object inventory
+                await self.run_cisco_fmc_syncs()
+
+                # Continuous SonicWall syncs — address-object inventory
+                await self.run_sonicwall_syncs()
+
+                # Continuous pfSense syncs — firewall-alias inventory
+                await self.run_pfsense_syncs()
 
                 # Continuous Cloudflare WAF whitelist syncs
                 await self.run_cloudflare_waf_syncs()

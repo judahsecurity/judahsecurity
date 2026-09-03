@@ -596,6 +596,109 @@ export interface CheckPointSyncResult {
   assets_missing_from_source: number;
 }
 
+export interface CiscoFmcIntegration {
+  id: number;
+  organization_id: number;
+  name: string;
+  fmc_host: string;
+  domain_uuid?: string | null;
+  verify_ssl: boolean;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CiscoFmcSyncResult {
+  ok: boolean;
+  message: string;
+  assets_created: number;
+  assets_updated: number;
+  hosts_seen: number;
+  networks_seen: number;
+  ranges_seen: number;
+  fqdns_seen: number;
+  ips_imported: number;
+  cidrs_imported: number;
+  fqdns_imported: number;
+  ranges_seeded: number;
+  assets_missing_from_source: number;
+}
+
+export interface SonicWallIntegration {
+  id: number;
+  organization_id: number;
+  name: string;
+  sonicwall_host: string;
+  verify_ssl: boolean;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SonicWallSyncResult {
+  ok: boolean;
+  message: string;
+  assets_created: number;
+  assets_updated: number;
+  addresses_seen: number;
+  ips_imported: number;
+  cidrs_imported: number;
+  fqdns_imported: number;
+  ranges_seeded: number;
+  assets_missing_from_source: number;
+}
+
+export interface PfSenseIntegration {
+  id: number;
+  organization_id: number;
+  name: string;
+  pfsense_host: string;
+  verify_ssl: boolean;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PfSenseSyncResult {
+  ok: boolean;
+  message: string;
+  assets_created: number;
+  assets_updated: number;
+  aliases_seen: number;
+  entries_seen: number;
+  ips_imported: number;
+  cidrs_imported: number;
+  fqdns_imported: number;
+  assets_missing_from_source: number;
+}
+
 class ApiClient {
   private client: AxiosInstance;
   private token: string | null = null;
@@ -3207,6 +3310,150 @@ class ApiClient {
 
   async syncCheckPointIntegration(id: number): Promise<CheckPointSyncResult> {
     const response = await this.client.post(`/integrations/checkpoint/${id}/sync`);
+    return response.data;
+  }
+
+  // ── Cisco Firepower Management Center Integration ──────────────────────────
+
+  async getCiscoFmcIntegrations(): Promise<CiscoFmcIntegration[]> {
+    const response = await this.client.get('/integrations/cisco-fmc');
+    return response.data;
+  }
+
+  async createCiscoFmcIntegration(payload: {
+    name: string;
+    fmc_host: string;
+    username: string;
+    password: string;
+    domain_uuid?: string | null;
+    verify_ssl?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<CiscoFmcIntegration> {
+    const response = await this.client.post('/integrations/cisco-fmc', payload);
+    return response.data;
+  }
+
+  async updateCiscoFmcIntegration(id: number, payload: {
+    name?: string;
+    fmc_host?: string;
+    username?: string;
+    password?: string;
+    domain_uuid?: string | null;
+    verify_ssl?: boolean;
+    is_active?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<CiscoFmcIntegration> {
+    const response = await this.client.put(`/integrations/cisco-fmc/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteCiscoFmcIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/cisco-fmc/${id}`);
+  }
+
+  async testCiscoFmcConnection(id: number): Promise<{ ok: boolean; message: string; object_count?: number }> {
+    const response = await this.client.post(`/integrations/cisco-fmc/${id}/test`);
+    return response.data;
+  }
+
+  async syncCiscoFmcIntegration(id: number): Promise<CiscoFmcSyncResult> {
+    const response = await this.client.post(`/integrations/cisco-fmc/${id}/sync`);
+    return response.data;
+  }
+
+  // ── SonicWall Integration ──────────────────────────────────────────────────
+
+  async getSonicWallIntegrations(): Promise<SonicWallIntegration[]> {
+    const response = await this.client.get('/integrations/sonicwall');
+    return response.data;
+  }
+
+  async createSonicWallIntegration(payload: {
+    name: string;
+    sonicwall_host: string;
+    username: string;
+    password: string;
+    verify_ssl?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<SonicWallIntegration> {
+    const response = await this.client.post('/integrations/sonicwall', payload);
+    return response.data;
+  }
+
+  async updateSonicWallIntegration(id: number, payload: {
+    name?: string;
+    sonicwall_host?: string;
+    username?: string;
+    password?: string;
+    verify_ssl?: boolean;
+    is_active?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<SonicWallIntegration> {
+    const response = await this.client.put(`/integrations/sonicwall/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteSonicWallIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/sonicwall/${id}`);
+  }
+
+  async testSonicWallConnection(id: number): Promise<{ ok: boolean; message: string; address_count?: number }> {
+    const response = await this.client.post(`/integrations/sonicwall/${id}/test`);
+    return response.data;
+  }
+
+  async syncSonicWallIntegration(id: number): Promise<SonicWallSyncResult> {
+    const response = await this.client.post(`/integrations/sonicwall/${id}/sync`);
+    return response.data;
+  }
+
+  // ── pfSense Integration ────────────────────────────────────────────────────
+
+  async getPfSenseIntegrations(): Promise<PfSenseIntegration[]> {
+    const response = await this.client.get('/integrations/pfsense');
+    return response.data;
+  }
+
+  async createPfSenseIntegration(payload: {
+    name: string;
+    pfsense_host: string;
+    api_key: string;
+    verify_ssl?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<PfSenseIntegration> {
+    const response = await this.client.post('/integrations/pfsense', payload);
+    return response.data;
+  }
+
+  async updatePfSenseIntegration(id: number, payload: {
+    name?: string;
+    pfsense_host?: string;
+    api_key?: string;
+    verify_ssl?: boolean;
+    is_active?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<PfSenseIntegration> {
+    const response = await this.client.put(`/integrations/pfsense/${id}`, payload);
+    return response.data;
+  }
+
+  async deletePfSenseIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/pfsense/${id}`);
+  }
+
+  async testPfSenseConnection(id: number): Promise<{ ok: boolean; message: string; alias_count?: number }> {
+    const response = await this.client.post(`/integrations/pfsense/${id}/test`);
+    return response.data;
+  }
+
+  async syncPfSenseIntegration(id: number): Promise<PfSenseSyncResult> {
+    const response = await this.client.post(`/integrations/pfsense/${id}/sync`);
     return response.data;
   }
 
