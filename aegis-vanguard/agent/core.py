@@ -36,6 +36,7 @@ from agent.tools import ToolDef, ToolRegistry
 from agent.guardrails import GuardrailEngine
 from agent.tracing import Tracer, TokenUsage
 from agent.session_ops import compact_message_tool_results, over_budget
+from agent.distiller import get_distiller
 
 # Cloud billing / quota / auth signals (Anthropic, OpenAI, etc.) that should
 # trigger a local Ollama retry when OLLAMA_FALLBACK_ENABLED is on.
@@ -846,11 +847,42 @@ class AgentRunner:
                 # AND the structured next_steps it can choose to follow up on.
                 return json.dumps({"output": reading.to_text(), "augur": augur_payload})
 
+        # ── Native distiller: standalone signal extraction ────────────────
+        # Runs only when Aegis Praetorium/Augur isn't on the path (standalone
+        # run_pentest.py / harness). Mirrors the Augur envelope so the fireteam
+        # unwraps it identically, and — unlike a blind head-truncation — keeps
+        # finding-bearing JSON valid so no findings are lost at fan-in.
+        augur_active = _AEGIS_AVAILABLE and get_praetorium_config().augur_enabled
+        if not augur_active and result:
+            try:
+                reading = get_distiller().interpret(tool_name, result, max_chars=50_000)
+            except Exception as e:  # never let distillation break a tool call
+                logger.warning("distiller failed for %s: %s", tool_name, e)
+                reading = None
+            if reading is not None:
+                if reading.next_steps:
+                    logger.info(
+                        "distiller produced %d next-step pivot(s) for %s: %s",
+                        len(reading.next_steps), tool_name,
+                        ", ".join(ns.tool_name for ns in reading.next_steps),
+                    )
+                self._register_block_signal(
+                    self._is_blocked_response(result) or reading.defense_detected
+                )
+                return json.dumps({
+                    "output": reading.to_text(),
+                    "augur": reading.to_payload(),
+                })
+
         if len(result) > 50_000:
             result = result[:50_000] + "\n...[truncated]"
 
-        # ── Circuit breaker: back off after 5 consecutive WAF/rate-limit blocks ─
-        if self._is_blocked_response(result):
+        self._register_block_signal(self._is_blocked_response(result))
+        return result
+
+    def _register_block_signal(self, blocked: bool) -> None:
+        """Circuit breaker: back off after 5 consecutive WAF/rate-limit blocks."""
+        if blocked:
             self._consecutive_blocks += 1
             if self._consecutive_blocks >= 5:
                 logger.warning(
@@ -863,8 +895,6 @@ class AgentRunner:
                 self._consecutive_blocks = 0
         else:
             self._consecutive_blocks = 0
-
-        return result
 
     @staticmethod
     def _is_blocked_response(result: str) -> bool:

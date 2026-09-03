@@ -194,6 +194,32 @@ Every agent decision, tool call, and token usage is traced:
 Traces are saved to `/agent/traces/` and exported as JSON.
 Configure via `AEGIS_TRACING=true/false`.
 
+## Tool-output distillation (`agent/distiller.py`)
+
+Raw scanner output is interpreted before it re-enters the reasoner's context,
+rather than dumped in whole or head-truncated. This re-implements, in our own
+idiom, three things the open-source AI-pentest frameworks do well:
+
+- **Parsing stage (PentestGPT):** turn noisy scan output into high-signal
+  findings. Oversized results are trimmed **severity-first** (criticals are the
+  last to go) while the JSON stays valid and the true `count` is preserved — a
+  blind head-cut corrupts the array mid-structure and silently loses every
+  finding at fan-in.
+- **Chained pivots (HexStrike / Strix):** a result hands the agent concrete
+  follow-ups — WordPress → `wordpress_scan`, Swagger → `discover_swagger_spec`,
+  `/.git` or `/.env` → `send_http_request` to confirm the leak.
+- **Self-correction when blocked (Deadend CLI):** a `403`/`429`/WAF response is
+  read, the vendor fingerprinted, and an escalation ladder proposed
+  (`brain_update_waf` to record the failed tier, `search_prior_art` for known
+  bypasses, one-variable mutation) instead of a blind replay.
+
+On the in-product platform path this role is filled by
+`aegis_praetorium.augur`; the distiller is the standalone/harness counterpart
+that runs when `aegis_praetorium` isn't importable. Both emit the same
+`{"output", "augur"}` envelope, so `parallel_subagents._extract_findings`
+unwraps either identically. Never on: the distiller passes results through
+untouched when they already fit and carry no pivot or defense signal.
+
 ## Environment Variables
 
 | Variable | Description |
