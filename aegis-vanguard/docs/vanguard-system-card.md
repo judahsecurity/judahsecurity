@@ -146,6 +146,11 @@ CLI: `--enterprise`, `--no-enterprise`, `--all-specialists`, `--no-api-specialis
 ### Exploit Validation
 | Tool | Function | Risk |
 |------|----------|------|
+| `register_oob_probe` / `check_oob_interactions` | Out-of-band callback to confirm BLIND SSRF/XXE/RCE/OOB-SQLi | low/safe |
+| `probe_ssti` | Differential SSTI canary (`{{a*b}}`→product) | high |
+| `probe_path_traversal` | `/etc/passwd` · `win.ini` traversal signature probe | high |
+| `probe_open_redirect` | Redirect-to-canary-host probe (Location + client-side) | medium |
+| `probe_crlf` | CRLF / response-header injection probe | medium |
 | `probe_sqli_params` | Differential SQLi canary (error/boolean/time) before sqlmap | high |
 | `sql_injection_test` | sqlmap confirmation (param/data/cookie aware) | high |
 | `probe_xss_reflection` | Canary reflection + context map before XSS confirm | high |
@@ -227,6 +232,35 @@ echo "focus on the /admin API, skip subdomain enum" >> "$AEGIS_HITL_FILE"
 Enabled via `AEGIS_HITL=1` or by setting `AEGIS_HITL_FILE`. Directives are
 attached to the tool-result turn (preserving role alternation) and polling never
 blocks or raises.
+
+## Out-of-band detection (`agent/oob.py`)
+
+Blind vulnerabilities — blind SSRF, blind XXE, blind/OAST RCE, Log4Shell, OOB
+SQLi — have no direct response signal; you confirm them with an external
+callback. The hunters were already told to "use a Burp Collaborator / interactsh
+callback", but no tool handed one out or checked it, so the whole category was
+un-provable. Now `register_oob_probe(label)` mints a unique callback token +
+URL/host with ready payload hints, and `check_oob_interactions(token)` polls the
+collector — a DNS/HTTP hit proves a server-side request. Both are in
+`HUNTER_CORE_TOOLS`, so every hunter can confirm blind bugs.
+
+Provider abstraction (an offensive agent runs in varied networks): a
+**webhook/self-hosted** backend (default, air-gap-friendly) via
+`AEGIS_OOB_DOMAIN` + `AEGIS_OOB_POLL_URL` (works with a self-hosted interactsh,
+a DNS logger + HTTP poll, or a webhook bin); interactsh is an optional documented
+provider. Unconfigured → the tool returns a structured "how to enable" result,
+never a silent no-op. Polling fetch is injectable and unit-tested.
+
+## Differential probes (`agent/probes.py`)
+
+We had sharp canary probes for SQLi and XSS; these bring **SSTI, path traversal,
+open redirect, and CRLF** up to the same low-false-positive standard, instead of
+leaning on nuclei + freeform LLM testing. Each injects a unique canary and
+reports structured `candidates` the fireteam picks up: SSTI evaluates
+`{{1009*1013}}`→`1022117`; traversal matches `root:…:0:0:` / `win.ini`; open
+redirect lands a canary host in `Location` or a client-side redirect; CRLF
+reflects an injected header. Wired into the injection, open-redirect, and
+smuggling hunter packs; verdict logic is pure and unit-tested.
 
 ## Injection shield (`agent/injection_shield.py`)
 
@@ -349,6 +383,7 @@ fallback, never a blank.
 | `ASM_API_KEY` | Agent API key (starts with tfasm_) |
 | `ASM_AGENT_ID` | Unique agent identifier |
 | `WHOISXML_API_KEY` | Optional. Enables reverse_whois_search for WhoisXML reverse WHOIS pivots |
+| `AEGIS_OOB_DOMAIN` / `AEGIS_OOB_POLL_URL` | Optional. Enable out-of-band blind-vuln detection: callback base domain + collector poll API (`AEGIS_OOB_POLL_KEY` for auth) |
 | `AEGIS_OFFLINE` | Optional. `1`/`true` (or `--offline`) forces local-model routing and skips network tools (air-gapped mode) |
 | `AEGIS_HITL` | Optional. `1`/`true` enables human-in-the-loop operator steering |
 | `AEGIS_HITL_FILE` | Optional. Path to the HITL control file; write a directive to steer a running assessment (also enables HITL) |

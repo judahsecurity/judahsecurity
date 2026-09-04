@@ -96,6 +96,8 @@ INJECTION_TOOLS = [
     "discover_parameters",
     "probe_sqli_params",
     "sql_injection_test",
+    "probe_ssti",
+    "probe_path_traversal",
     "scan_nuclei",
     "fuzz_directories",
     "send_http_request",
@@ -184,6 +186,7 @@ OPEN_REDIRECT_TOOLS = [
     "scan_nuclei",
     "discover_parameters",
     "crawl_urls",
+    "probe_open_redirect",
     "send_http_request",
     "confirm_vulnerability_poc",
     *HUNTER_CORE_TOOLS,
@@ -231,6 +234,7 @@ LLM_AI_TOOLS = [
 
 HTTP_SMUGGLING_TOOLS = [
     "scan_nuclei",
+    "probe_crlf",
     "send_http_request",
     "confirm_vulnerability_poc",
     *HUNTER_CORE_TOOLS,
