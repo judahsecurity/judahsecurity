@@ -479,6 +479,11 @@ class AgentRunner:
         routing: e.g. cheap model for recon/report, Opus/GPT-5.5 for exploit
         validation or the OWASP hunters.
         """
+        # Air-gapped/offline mode: route every agent to the local model.
+        from agent.netmode import is_offline
+        if is_offline():
+            return _ollama_litellm_model()
+
         exact = os.environ.get(f"AEGIS_MODEL_{self._env_key(agent.name)}")
         if exact:
             return exact

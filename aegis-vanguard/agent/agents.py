@@ -1313,6 +1313,10 @@ def lookup_cves(product: str, version: str = "") -> str:
         product: Product/technology name (e.g. "grafana", "wordpress", "nginx")
         version: Optional version to narrow results (e.g. "9.5.1")
     """
+    from agent.netmode import require_online
+    offline = require_online("lookup_cves")
+    if offline:
+        return offline
     from agent.cve_intel import lookup_json
     return lookup_json(product, version)
 

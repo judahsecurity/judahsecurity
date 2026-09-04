@@ -196,6 +196,20 @@ Every agent decision, tool call, and token usage is traced:
 Traces are saved to `/agent/traces/` and exported as JSON.
 Configure via `AEGIS_TRACING=true/false`.
 
+## Offline / air-gapped mode (`agent/netmode.py`)
+
+CAI can run fully offline, which makes it viable for air-gapped labs. We had a
+local-model *fallback* (Ollama, only on a cloud quota error); this makes offline
+a deliberate, first-class mode via `AEGIS_OFFLINE=1` (or `--offline`):
+
+- **Model routing:** every agent turn is routed to the local Ollama model (not
+  just on error) — `AgentRunner._resolve_model` short-circuits to it.
+- **Network-tool guard:** internet-dependent tools call
+  `netmode.require_online(tool_name)` and return a structured `offline: true`
+  result instead of attempting egress (wired into `lookup_cves`).
+
+Configure the local model with `OLLAMA_MODEL` / `OLLAMA_API_BASE`.
+
 ## Human-in-the-loop steering (`agent/hitl.py`)
 
 CAI lets an operator interrupt a running agent, inject guidance, and let it
@@ -335,6 +349,7 @@ fallback, never a blank.
 | `ASM_API_KEY` | Agent API key (starts with tfasm_) |
 | `ASM_AGENT_ID` | Unique agent identifier |
 | `WHOISXML_API_KEY` | Optional. Enables reverse_whois_search for WhoisXML reverse WHOIS pivots |
+| `AEGIS_OFFLINE` | Optional. `1`/`true` (or `--offline`) forces local-model routing and skips network tools (air-gapped mode) |
 | `AEGIS_HITL` | Optional. `1`/`true` enables human-in-the-loop operator steering |
 | `AEGIS_HITL_FILE` | Optional. Path to the HITL control file; write a directive to steer a running assessment (also enables HITL) |
 | `VULNCHECK_API_KEY` | Optional. Preferred CVE source for `lookup_cves` — VulnCheck NVD++ data + KEV known-exploited catalog (exploitability-first ranking) |
