@@ -107,6 +107,7 @@ python3 run_pentest.py --target https://example.com --no-guardrails
 | `reverse_whois_search` | WhoisXML reverse WHOIS OSINT pivot for related domains (preview by default) | low |
 | `fuzz_directories` | ffuf directory fuzzing | low |
 | `discover_parameters` | arjun parameter discovery | low |
+| `lookup_cves` | NVD CVE lookup for a fingerprinted product/version → engagement brain | safe |
 
 ### Vulnerability Analysis
 | Tool | Function | Risk |
@@ -221,6 +222,17 @@ that runs when `aegis_praetorium` isn't importable. Both emit the same
 unwraps either identically. Never on: the distiller passes results through
 untouched when they already fit and carry no pivot or defense signal.
 
+## CVE intel (`agent/cve_intel.py`)
+
+Borrowed from PentAGI's live-CVE enrichment. When recon fingerprints a product
+and version, `lookup_cves(product, version)` queries the NVD 2.0 API, ranks
+results by CVSS, and stashes the highest-signal CVEs in the engagement brain as
+notes — so hunters start from "this build has CVE-… (CVSS 9.8), test that path"
+and the knowledge persists across runs. Built for an ephemeral-network agent:
+the HTTP fetch is injectable (deterministic tests), and any blocked egress or
+rate-limit degrades to `available: false` with a reason rather than crashing a
+tool call. Set `NVD_API_KEY` to lift the rate limit.
+
 ## Remediation advisor (`agent/remediation.py`)
 
 The finding→fix half of Raptor, re-implemented in our idiom. We already own the
@@ -254,6 +266,7 @@ fallback, never a blank.
 | `ASM_API_KEY` | Agent API key (starts with tfasm_) |
 | `ASM_AGENT_ID` | Unique agent identifier |
 | `WHOISXML_API_KEY` | Optional. Enables reverse_whois_search for WhoisXML reverse WHOIS pivots |
+| `NVD_API_KEY` | Optional. Lifts the NVD rate limit for `lookup_cves` CVE enrichment |
 | `GITLAB_HASH_DB_PATH` | Optional. JSON database mapping GitLab stylesheet SHA-256 hashes to versions |
 
 ## How the Agent Should Reason

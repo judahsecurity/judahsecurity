@@ -1297,6 +1297,24 @@ def suggest_remediation(finding_json: str) -> str:
     return advise_json(finding_json)
 
 
+@security_tool(category="recon", risk="safe")
+def lookup_cves(product: str, version: str = "") -> str:
+    """Look up known CVEs for a fingerprinted technology and stash them in the brain.
+
+    Call this right after recon identifies a product + version (e.g. from
+    fingerprint_tech, detect_cms, scan_nuclei tech-detect). Returns the
+    highest-CVSS CVEs from the NVD database and records them as engagement-brain
+    notes so hunters start from known-vulnerable paths. Degrades gracefully
+    (available=false) when outbound access to NVD is blocked.
+
+    Args:
+        product: Product/technology name (e.g. "grafana", "wordpress", "nginx")
+        version: Optional version to narrow results (e.g. "9.5.1")
+    """
+    from agent.cve_intel import lookup_json
+    return lookup_json(product, version)
+
+
 # =========================================================================
 # SAST Tools — static source code analysis
 # =========================================================================
