@@ -248,13 +248,24 @@ module imports fine without the SDK.
 ## CVE intel (`agent/cve_intel.py`)
 
 Borrowed from PentAGI's live-CVE enrichment. When recon fingerprints a product
-and version, `lookup_cves(product, version)` queries the NVD 2.0 API, ranks
-results by CVSS, and stashes the highest-signal CVEs in the engagement brain as
-notes — so hunters start from "this build has CVE-… (CVSS 9.8), test that path"
-and the knowledge persists across runs. Built for an ephemeral-network agent:
-the HTTP fetch is injectable (deterministic tests), and any blocked egress or
-rate-limit degrades to `available: false` with a reason rather than crashing a
-tool call. Set `NVD_API_KEY` to lift the rate limit.
+and version, `lookup_cves(product, version)` looks up known CVEs and stashes the
+high-signal ones in the engagement brain as notes — so hunters start from the
+paths most likely to be exploitable, and the knowledge persists across runs.
+
+Provider abstraction (VulnCheck preferred; NVD.gov is rate-limited and has had
+long enrichment backlogs):
+
+- **VulnCheck** — used when `VULNCHECK_API_KEY` is set. Pulls reliable NVD data
+  from VulnCheck's **NVD++** mirror *and* the **VulnCheck KEV** known-exploited
+  catalog, so results are ranked **exploitability-first** (known-exploited
+  before high CVSS) — the signal a pentester actually acts on. Allowlist
+  `api.vulncheck.com` for egress.
+- **NVD (fallback)** — the zero-config NVD 2.0 API, used when no VulnCheck token
+  is present or a VulnCheck call fails. `NVD_API_KEY` lifts its rate limit.
+
+Built for an ephemeral-network agent: the HTTP fetch is injectable
+(deterministic tests), and any blocked egress or rate-limit degrades to
+`available: false` with a reason rather than crashing a tool call.
 
 ## Remediation advisor (`agent/remediation.py`)
 
@@ -289,7 +300,8 @@ fallback, never a blank.
 | `ASM_API_KEY` | Agent API key (starts with tfasm_) |
 | `ASM_AGENT_ID` | Unique agent identifier |
 | `WHOISXML_API_KEY` | Optional. Enables reverse_whois_search for WhoisXML reverse WHOIS pivots |
-| `NVD_API_KEY` | Optional. Lifts the NVD rate limit for `lookup_cves` CVE enrichment |
+| `VULNCHECK_API_KEY` | Optional. Preferred CVE source for `lookup_cves` — VulnCheck NVD++ data + KEV known-exploited catalog (exploitability-first ranking) |
+| `NVD_API_KEY` | Optional. Lifts the NVD rate limit for the `lookup_cves` NVD fallback |
 | `GITLAB_HASH_DB_PATH` | Optional. JSON database mapping GitLab stylesheet SHA-256 hashes to versions |
 
 ## How the Agent Should Reason

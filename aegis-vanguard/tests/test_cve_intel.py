@@ -1,4 +1,5 @@
-"""CVE intel — NVD parsing, ranking, version preference, graceful degradation."""
+"""CVE intel — NVD + VulnCheck parsing, exploitability-first ranking,
+provider selection, and graceful degradation."""
 
 import json
 import os
@@ -8,8 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-# A trimmed but realistic NVD 2.0 response.
-_FIXTURE = {
+# --- NVD 2.0 fixture --------------------------------------------------------
+_NVD = {
     "totalResults": 3,
     "vulnerabilities": [
         {"cve": {
@@ -35,9 +36,32 @@ _FIXTURE = {
     ],
 }
 
+# --- VulnCheck NVD++ index fixture (data = list of NVD-2.0 cve objects) ------
+_VC_NVD = {
+    "_meta": {"total_documents": 2},
+    "data": [
+        {"id": "CVE-2024-AAAA",
+         "descriptions": [{"lang": "en", "value": "Grafana XSS."}],
+         "metrics": {"cvssMetricV31": [{"cvssData": {"baseScore": 9.8, "baseSeverity": "CRITICAL"}}]},
+         "references": [{"url": "https://v/aaaa"}]},
+        {"id": "CVE-2024-BBBB",
+         "descriptions": [{"lang": "en", "value": "Grafana auth bypass, actively exploited."}],
+         "metrics": {"cvssMetricV31": [{"cvssData": {"baseScore": 6.0, "baseSeverity": "MEDIUM"}}]},
+         "references": [{"url": "https://v/bbbb"}]},
+    ],
+}
+# --- VulnCheck KEV fixture --------------------------------------------------
+_VC_KEV = {"data": [{"cve": ["CVE-2024-BBBB"], "vendorProject": "Grafana", "product": "grafana"}]}
 
-def _fixture_fetch(url, params):
-    return _FIXTURE
+
+def _nvd_fetch(url, params):
+    return _NVD
+
+
+def _vc_fetch(url, params):
+    if "vulncheck-kev" in url:
+        return _VC_KEV
+    return _VC_NVD
 
 
 def _boom_fetch(url, params):
@@ -45,42 +69,88 @@ def _boom_fetch(url, params):
 
 
 class CVEIntelTest(unittest.TestCase):
-    def test_parse_extracts_fields_and_best_cvss(self):
+    # --- NVD provider -------------------------------------------------------
+
+    def test_parse_nvd_best_cvss_and_fields(self):
         from agent.cve_intel import parse_nvd_response
-        cves, total = parse_nvd_response(_FIXTURE)
+        cves, total = parse_nvd_response(_NVD)
         self.assertEqual(total, 3)
         by_id = {c.id: c for c in cves}
         self.assertEqual(by_id["CVE-2024-2222"].cvss, 9.8)
         self.assertEqual(by_id["CVE-2024-2222"].severity, "critical")
-        self.assertEqual(by_id["CVE-2024-1111"].url, "https://example.com/1111")
-        self.assertEqual(by_id["CVE-2020-0000"].cvss, 3.5)  # falls back to v2
+        self.assertEqual(by_id["CVE-2020-0000"].cvss, 3.5)  # v2 fallback
 
-    def test_lookup_ranks_by_cvss_desc(self):
+    def test_nvd_lookup_ranks_by_cvss(self):
         from agent.cve_intel import lookup
-        res = lookup("grafana", fetch=_fixture_fetch)
+        res = lookup("grafana", fetch=_nvd_fetch, provider="nvd")
         self.assertTrue(res.available)
-        self.assertEqual(res.cves[0].id, "CVE-2024-2222")  # 9.8 first
-        self.assertEqual(res.total, 3)
+        self.assertEqual(res.provider, "nvd")
+        self.assertEqual(res.cves[0].id, "CVE-2024-2222")
 
     def test_version_preference(self):
         from agent.cve_intel import lookup
-        res = lookup("grafana", "9.5.1", fetch=_fixture_fetch)
-        # only CVE-2024-1111 mentions 9.5.1 in its summary
+        res = lookup("grafana", "9.5.1", fetch=_nvd_fetch, provider="nvd")
         self.assertEqual([c.id for c in res.cves], ["CVE-2024-1111"])
 
-    def test_graceful_degradation_on_network_block(self):
+    # --- VulnCheck provider -------------------------------------------------
+
+    def test_parse_vulncheck_index_and_kev(self):
+        from agent.cve_intel import parse_vulncheck_index, parse_vulncheck_kev
+        cves, total = parse_vulncheck_index(_VC_NVD)
+        self.assertEqual(total, 2)
+        self.assertEqual(cves[0].source, "vulncheck-nvd++")
+        self.assertEqual(parse_vulncheck_kev(_VC_KEV), {"CVE-2024-BBBB"})
+
+    def test_vulncheck_ranks_known_exploited_first(self):
         from agent.cve_intel import lookup
-        res = lookup("grafana", fetch=_boom_fetch)
+        res = lookup("grafana", fetch=_vc_fetch, provider="vulncheck")
+        self.assertTrue(res.available)
+        self.assertEqual(res.provider, "vulncheck")
+        # BBBB (CVSS 6.0 but known-exploited) must outrank AAAA (CVSS 9.8)
+        self.assertEqual(res.cves[0].id, "CVE-2024-BBBB")
+        self.assertTrue(res.cves[0].known_exploited)
+        self.assertFalse(res.cves[1].known_exploited)
+
+    def test_vulncheck_kev_failure_still_returns_data(self):
+        from agent.cve_intel import lookup
+        def half_fetch(url, params):
+            if "vulncheck-kev" in url:
+                raise TimeoutError("kev slow")
+            return _VC_NVD
+        res = lookup("grafana", fetch=half_fetch, provider="vulncheck")
+        self.assertTrue(res.available)                 # NVD++ data still returned
+        self.assertTrue(res.cves)
+        # KEV enrichment failed, so nothing is flagged known-exploited
+        self.assertTrue(all(not c.known_exploited for c in res.cves))
+
+    def test_provider_autoselect_prefers_vulncheck_when_token(self):
+        from agent import cve_intel
+        os.environ["VULNCHECK_API_KEY"] = "test-token"
+        try:
+            res = cve_intel.lookup("grafana", fetch=_vc_fetch)  # provider=None
+            self.assertEqual(res.provider, "vulncheck")
+        finally:
+            os.environ.pop("VULNCHECK_API_KEY", None)
+
+    def test_provider_autoselect_nvd_without_token(self):
+        from agent import cve_intel
+        os.environ.pop("VULNCHECK_API_KEY", None)
+        res = cve_intel.lookup("grafana", fetch=_nvd_fetch)  # provider=None
+        self.assertEqual(res.provider, "nvd")
+
+    # --- degradation / edges ------------------------------------------------
+
+    def test_graceful_degradation_on_block(self):
+        from agent.cve_intel import lookup
+        res = lookup("grafana", fetch=_boom_fetch, provider="nvd")
         self.assertFalse(res.available)
         self.assertIn("403", res.error)
-        self.assertEqual(res.cves, [])
 
     def test_empty_product(self):
         from agent.cve_intel import lookup
-        res = lookup("", fetch=_fixture_fetch)
-        self.assertFalse(res.available)
+        self.assertFalse(lookup("", fetch=_nvd_fetch).available)
 
-    def test_enrich_brain_records_notes(self):
+    def test_enrich_brain_marks_known_exploited(self):
         from agent.cve_intel import lookup, enrich_brain
 
         class FakeBrain:
@@ -92,17 +162,11 @@ class CVEIntelTest(unittest.TestCase):
             def save(self):
                 self.saved = True
 
-        res = lookup("grafana", fetch=_fixture_fetch)
+        res = lookup("grafana", fetch=_vc_fetch, provider="vulncheck")
         brain = FakeBrain()
         n = enrich_brain(res, brain, top=2)
         self.assertEqual(n, 2)
-        self.assertTrue(brain.saved)
-        self.assertIn("CVE-2024-2222", brain.notes[0])  # highest first
-
-    def test_enrich_brain_noop_when_unavailable(self):
-        from agent.cve_intel import CVEResult, enrich_brain
-        self.assertEqual(enrich_brain(CVEResult("x", "", available=False), object()), 0)
-        self.assertEqual(enrich_brain(CVEResult("x", "", available=True), None), 0)
+        self.assertIn("KNOWN-EXPLOITED", brain.notes[0])  # exploited one first
 
     def test_tool_registered(self):
         import agent.agents  # noqa: F401

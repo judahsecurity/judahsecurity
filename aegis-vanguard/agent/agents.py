@@ -1302,10 +1302,12 @@ def lookup_cves(product: str, version: str = "") -> str:
     """Look up known CVEs for a fingerprinted technology and stash them in the brain.
 
     Call this right after recon identifies a product + version (e.g. from
-    fingerprint_tech, detect_cms, scan_nuclei tech-detect). Returns the
-    highest-CVSS CVEs from the NVD database and records them as engagement-brain
-    notes so hunters start from known-vulnerable paths. Degrades gracefully
-    (available=false) when outbound access to NVD is blocked.
+    fingerprint_tech, detect_cms, scan_nuclei tech-detect). Returns CVEs ranked
+    exploitability-first (known-exploited before high CVSS) and records them as
+    engagement-brain notes so hunters start from the paths most likely to be
+    exploitable. Prefers VulnCheck (NVD++ data + KEV known-exploited catalog)
+    when VULNCHECK_API_KEY is set, else falls back to the NVD API. Degrades
+    gracefully (available=false) when outbound access is blocked.
 
     Args:
         product: Product/technology name (e.g. "grafana", "wordpress", "nginx")
