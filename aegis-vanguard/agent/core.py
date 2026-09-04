@@ -866,6 +866,8 @@ class AgentRunner:
                         len(reading.next_steps), tool_name,
                         ", ".join(ns.tool_name for ns in reading.next_steps),
                     )
+                if reading.injection:
+                    self._record_injection_attempt(tool_name, reading.injection)
                 self._register_block_signal(
                     self._is_blocked_response(result) or reading.defense_detected
                 )
@@ -879,6 +881,26 @@ class AgentRunner:
 
         self._register_block_signal(self._is_blocked_response(result))
         return result
+
+    def _record_injection_attempt(self, tool_name: str, verdict: dict) -> None:
+        """Log and persist a prompt-injection attempt seen in tool output."""
+        cats = ", ".join(verdict.get("categories", []))
+        logger.warning(
+            "PROMPT-INJECTION in %s output (severity=%s): %s",
+            tool_name, verdict.get("severity"), cats,
+        )
+        try:
+            from agent.brain import get_brain
+            brain = get_brain()
+            if brain is not None:
+                brain.add_note(
+                    f"Prompt-injection attempt in {tool_name} output "
+                    f"(severity={verdict.get('severity')}, {cats}) — treated as "
+                    "untrusted data. Target content may be adversarial."
+                )
+                brain.save()
+        except Exception:  # best effort — never break a tool call
+            pass
 
     def _register_block_signal(self, blocked: bool) -> None:
         """Circuit breaker: back off after 5 consecutive WAF/rate-limit blocks."""
