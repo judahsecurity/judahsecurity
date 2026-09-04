@@ -40,6 +40,8 @@ API_TOOLS = [
     "crawl_urls",
     "discover_parameters",
     "fuzz_directories",
+    "probe_graphql",
+    "probe_jwt",
     "send_http_request",
     "confirm_vulnerability_poc",
     *HUNTER_CORE_TOOLS,

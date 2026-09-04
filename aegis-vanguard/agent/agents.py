@@ -1416,6 +1416,118 @@ def probe_crlf(target_url: str, params: str = "") -> str:
     return json.dumps(run_probe_crlf(target_url, params), default=str)
 
 
+@security_tool(category="exploit", risk="high")
+def probe_nosql(target_url: str, params: str = "") -> str:
+    """Boolean-differential NoSQL (MongoDB-style operator) injection probe.
+
+    Injects true/false operator payloads ([$ne]/[$regex] and string boolean) and
+    flags a param when the true payload behaves like the baseline and the false
+    payload diverges.
+
+    Args:
+        target_url: URL with query string to test.
+        params: Optional comma-separated params (default: all query params).
+    """
+    from agent.probes import run_probe_nosql
+    return json.dumps(run_probe_nosql(target_url, params), default=str)
+
+
+@security_tool(category="exploit", risk="medium")
+def probe_prototype_pollution(target_url: str, params: str = "") -> str:
+    """Server-side prototype-pollution probe (query + JSON body vectors).
+
+    Pollutes a marker via `__proto__[..]` / `constructor.prototype` and flags a
+    reflected marker or a pollution-induced server error.
+
+    Args:
+        target_url: URL to test.
+        params: Optional comma-separated params (unused for JSON-body vectors).
+    """
+    from agent.probes import run_probe_prototype_pollution
+    return json.dumps(run_probe_prototype_pollution(target_url, params), default=str)
+
+
+@security_tool(category="exploit", risk="high")
+def probe_stored_xss(inject_url: str, observe_urls: str, params: str = "",
+                     method: str = "GET", body: str = "") -> str:
+    """Two-phase stored / second-order XSS probe.
+
+    Injects a unique canary payload at inject_url, then checks whether it
+    reflects unescaped (script context) at the observe_urls — catching stored
+    XSS that reflected/DOM probes miss.
+
+    Args:
+        inject_url: endpoint that stores input.
+        observe_urls: comma-separated URLs to re-fetch and inspect for the canary.
+        params: params on inject_url to seed (GET; default: all query params).
+        method: inject method GET or POST.
+        body: POST body; the literal AEGMARK is replaced with the canary.
+    """
+    from agent.probes import run_probe_stored_xss
+    return json.dumps(
+        run_probe_stored_xss(inject_url, observe_urls, params, method, body), default=str)
+
+
+@security_tool(category="exploit", risk="high")
+def probe_jwt(target_url: str, token: str, header_name: str = "Authorization",
+              scheme: str = "Bearer") -> str:
+    """Test whether a protected endpoint properly verifies its JWT.
+
+    Crafts alg:none, tampered-signature, and weak-HS256-secret forgeries from a
+    valid token and flags any the endpoint still accepts (HTTP 200).
+
+    Args:
+        target_url: a protected endpoint the token authorizes.
+        token: a currently-valid JWT captured from the session.
+        header_name: header carrying the token (default Authorization).
+        scheme: scheme prefix (default "Bearer"; pass "" for a raw token/cookie value).
+    """
+    from agent.api_probes import run_probe_jwt
+    return json.dumps(run_probe_jwt(target_url, token, header_name, scheme), default=str)
+
+
+@security_tool(category="vuln_analysis", risk="low")
+def probe_graphql(endpoint_url: str) -> str:
+    """Probe a GraphQL endpoint for introspection, query batching, and
+    field-suggestion leakage.
+
+    Args:
+        endpoint_url: the GraphQL endpoint (e.g. https://host/graphql).
+    """
+    from agent.api_probes import run_probe_graphql
+    return json.dumps(run_probe_graphql(endpoint_url), default=str)
+
+
+@security_tool(category="exploit", risk="medium")
+def probe_smuggling(target_url: str) -> str:
+    """Timing-based HTTP request-smuggling (CL.TE / TE.CL) detection.
+
+    Sends a control plus CL.TE and TE.CL test requests over a raw socket and
+    flags a desync when an attack request stalls far longer than the control.
+    Detection only — confirm manually under authorization before exploiting.
+
+    Args:
+        target_url: the URL to test (front-end that may sit before a back-end).
+    """
+    from agent.smuggling_probe import run_probe_smuggling
+    return json.dumps(run_probe_smuggling(target_url), default=str)
+
+
+@security_tool(category="recon", risk="low")
+def dump_exposed_vcs(base_url: str) -> str:
+    """Confirm an exposed .git/.svn directory and extract high-value artifacts.
+
+    Checks the key VCS paths, and on a hit extracts the remote URL(s) (flagging
+    embedded credentials), branch refs, and commit metadata — escalating an
+    exposure candidate into a confirmed source/secret-disclosure finding.
+
+    Args:
+        base_url: site root to test (e.g. https://host).
+    """
+    from agent.vcs_dump import run_vcs_dump
+    return json.dumps(run_vcs_dump(base_url), default=str)
+
+
 @security_tool(category="exploit", risk="low")
 def register_oob_probe(label: str = "") -> str:
     """Mint a unique out-of-band callback URL/host to confirm BLIND vulnerabilities.
