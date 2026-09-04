@@ -146,6 +146,8 @@ CLI: `--enterprise`, `--no-enterprise`, `--all-specialists`, `--no-api-specialis
 ### Exploit Validation
 | Tool | Function | Risk |
 |------|----------|------|
+| `authz_diff` | Multi-identity IDOR/BOLA harness (owner vs other vs unauth) | high |
+| `compare_requests` | Baseline-vs-mutation differential (identity/tenant/role swap) | medium |
 | `register_oob_probe` / `check_oob_interactions` | Out-of-band callback to confirm BLIND SSRF/XXE/RCE/OOB-SQLi | low/safe |
 | `probe_ssti` | Differential SSTI canary (`{{a*b}}`→product) | high |
 | `probe_path_traversal` | `/etc/passwd` · `win.ini` traversal signature probe | high |
@@ -232,6 +234,26 @@ echo "focus on the /admin API, skip subdomain enum" >> "$AEGIS_HITL_FILE"
 Enabled via `AEGIS_HITL=1` or by setting `AEGIS_HITL_FILE`. Directives are
 attached to the tool-result turn (preserving role alternation) and polling never
 blocks or raises.
+
+## Multi-identity authorization testing (`agent/authz_probe.py`)
+
+IDOR / broken object-level authorization is the class scanners miss because
+proving it needs *two identities and a diff*. The authz_hunter was told to
+"compare_requests baseline vs one mutation" and that "two accounts are needed
+for real proof", but that primitive was platform-only — Vanguard couldn't run
+the diff. Now it can:
+
+- `authz_diff(target_url, owner_headers_json, other_headers_json, test_unauth)`
+  requests the same object as its **owner**, a **second user**, and
+  **unauthenticated**. A near-identical object returned to the other principal
+  (or unauthenticated) is broken authorization → an IDOR/BOLA finding.
+- `compare_requests(url, headers_a_json, headers_b_json)` is the general
+  baseline-vs-mutation primitive (identity/tenant/role swap) the hunters
+  reference for authz and business-logic tests.
+
+Detection is conservative — the owner must return a real 200 object and the
+other principal a ≥0.90-similar body — to keep false positives low. Wired into
+the authz and business-logic hunter packs; verdict logic is pure and unit-tested.
 
 ## Out-of-band detection (`agent/oob.py`)
 

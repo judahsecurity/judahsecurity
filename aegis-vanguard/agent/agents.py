@@ -1297,6 +1297,68 @@ def suggest_remediation(finding_json: str) -> str:
     return advise_json(finding_json)
 
 
+@security_tool(category="exploit", risk="medium")
+def compare_requests(
+    url: str,
+    method: str = "GET",
+    body: str = "",
+    headers_a_json: str = "{}",
+    headers_b_json: str = "{}",
+) -> str:
+    """Baseline-vs-mutation differential: same request under two header sets.
+
+    The primitive for authz/tenant/role testing — swap Cookie/Authorization or a
+    tenant header (X-Tenant-Id, X-Org-Id) between A and B and compare status +
+    body similarity. Use it to see whether a mutation actually changed the
+    server's decision.
+
+    Args:
+        url: Target URL.
+        method: HTTP method.
+        body: Request body (optional).
+        headers_a_json: JSON headers for request A (e.g. identity/tenant A).
+        headers_b_json: JSON headers for request B (the mutation).
+    """
+    from agent.authz_probe import run_compare_requests
+    return json.dumps(
+        run_compare_requests(url, method, body, headers_a_json, headers_b_json),
+        default=str,
+    )
+
+
+@security_tool(category="exploit", risk="high")
+def authz_diff(
+    target_url: str,
+    method: str = "GET",
+    body: str = "",
+    owner_headers_json: str = "{}",
+    other_headers_json: str = "{}",
+    test_unauth: bool = True,
+) -> str:
+    """Multi-identity IDOR/BOLA harness: owner vs other-identity vs unauthenticated.
+
+    Provide the object owner's session in owner_headers_json (Cookie/Authorization)
+    and a SECOND user's session in other_headers_json. Requests the same object as
+    each; if the other identity (or an unauthenticated request) gets a
+    near-identical object back, that is broken object-level authorization. This is
+    the "two accounts for real proof" test scanners can't do alone.
+
+    Args:
+        target_url: URL of the object to test (include the object id).
+        method: HTTP method.
+        body: Request body (optional).
+        owner_headers_json: JSON headers carrying the OWNER's session.
+        other_headers_json: JSON headers carrying a DIFFERENT user's session.
+        test_unauth: Also try the request with no credentials (default True).
+    """
+    from agent.authz_probe import run_authz_diff
+    return json.dumps(
+        run_authz_diff(target_url, method, body, owner_headers_json,
+                       other_headers_json, test_unauth),
+        default=str,
+    )
+
+
 @security_tool(category="exploit", risk="high")
 def probe_ssti(target_url: str, params: str = "") -> str:
     """Differential SSTI probe: inject an arithmetic canary and detect evaluation.
