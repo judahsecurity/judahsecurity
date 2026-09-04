@@ -44,6 +44,7 @@ class PentestReporter:
             self._exploit_validation_results(),
             self._security_posture(),
             self._recommendations(),
+            self._remediation_playbook(),
             self._methodology(),
             self._appendix(),
         ]
@@ -385,6 +386,71 @@ across the target's attack surface, with **{validated_total} confirmed through e
             recs.append("No critical recommendations at this time. Continue monitoring.")
 
         return "## Recommendations\n\n" + "\n\n".join(recs)
+
+    def _remediation_playbook(self) -> str:
+        """Per-finding, methodology-grounded fixes (agent/remediation.py).
+
+        Collects the highest-value findings across nuclei + validated exploits,
+        dedupes by CWE class, and renders one authoritative remediation per
+        class present — deeper than the generic per-category recommendations."""
+        try:
+            from agent.remediation import advise
+        except Exception:
+            return "## Remediation Playbook\n\n_Remediation advisor unavailable._"
+
+        candidates: list = []
+
+        for v in self.vuln.get("nuclei_vulns", []):
+            info = v.get("info", {})
+            if info.get("severity") in ("critical", "high", "medium"):
+                candidates.append({
+                    "title": info.get("name") or v.get("template-id", "Finding"),
+                    "vuln_type": info.get("name") or v.get("template-id", ""),
+                    "template_id": v.get("template-id", ""),
+                    "severity": info.get("severity", ""),
+                    "matched_at": v.get("matched-at", ""),
+                })
+        for s in self.exploits.get("injection_validated", []):
+            candidates.append({"title": "Confirmed SQL Injection", "vuln_type": "sqli",
+                               "severity": "critical", "url": s.get("url", "")})
+        for x in self.exploits.get("xss_validated", []):
+            candidates.append({"title": "Confirmed Cross-Site Scripting", "vuln_type": "xss",
+                               "severity": "high", "url": x.get("url", "")})
+        for t in self.exploits.get("tls_issues", []) + self.vuln.get("tls_analysis", []):
+            if t.get("grade") in ("D", "F"):
+                candidates.append({"title": "Weak TLS Configuration", "vuln_type": "tls",
+                                   "severity": "high", "endpoint": t.get("host", "")})
+        for t in self.vuln.get("takeover", []) + self.exploits.get("confirmed_takeovers", []):
+            if t.get("status") in ("confirmed", "potential"):
+                candidates.append({"title": "Subdomain Takeover", "vuln_type": "subdomain takeover",
+                                   "severity": "high", "endpoint": t.get("host", "")})
+
+        if not candidates:
+            return ("## Remediation Playbook\n\n_No confirmed or high-severity "
+                    "findings to remediate._")
+
+        # One authoritative remediation per CWE class; keep the first (highest
+        # placed) example endpoint and count how many findings it covers.
+        seen: dict = {}
+        for f in candidates:
+            rem = advise(f)
+            key = rem.cwe_id
+            if key not in seen:
+                seen[key] = [rem, 1]
+            else:
+                seen[key][1] += 1
+
+        sections = [
+            "## Remediation Playbook",
+            "_Actionable, CWE-mapped fixes for the findings above. Each covers "
+            "every finding of its class; re-test with the stated verification._",
+        ]
+        for rem, count in seen.values():
+            block = rem.to_markdown()
+            if count > 1:
+                block += f"\n\n_Applies to {count} findings of this class._"
+            sections.append(block)
+        return "\n\n".join(sections)
 
     def _methodology(self) -> str:
         return """## Methodology

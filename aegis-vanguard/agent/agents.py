@@ -1279,6 +1279,24 @@ def search_prior_art(query: str, category: str = "", top_k: int = 6) -> str:
     return format_results(results)
 
 
+@security_tool(category="report", risk="safe")
+def suggest_remediation(finding_json: str) -> str:
+    """Produce a structured, methodology-grounded remediation for a finding.
+
+    Call this on a *confirmed* finding to turn it into an actionable fix: the
+    root-cause CWE, concrete fix steps, a secure code pattern, a verification
+    step, and references. Use it when writing up findings or when the operator
+    asks "how do we fix this?".
+
+    Args:
+        finding_json: A finding as a JSON object string. Recognized keys:
+            title/name, vuln_type/type/category, severity,
+            url/endpoint/matched_at.
+    """
+    from agent.remediation import advise_json
+    return advise_json(finding_json)
+
+
 # =========================================================================
 # SAST Tools — static source code analysis
 # =========================================================================

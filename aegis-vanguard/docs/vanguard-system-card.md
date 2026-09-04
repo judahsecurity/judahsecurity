@@ -158,6 +158,7 @@ CLI: `--enterprise`, `--no-enterprise`, `--all-specialists`, `--no-api-specialis
 | Tool | Function | Risk |
 |------|----------|------|
 | `generate_report` | markdown report generation | safe |
+| `suggest_remediation` | structured CWE-mapped fix for a confirmed finding | safe |
 | `submit_findings_to_platform` | flush findings to ASM | safe |
 
 ## Guardrails (enforced at execution layer)
@@ -219,6 +220,27 @@ that runs when `aegis_praetorium` isn't importable. Both emit the same
 `{"output", "augur"}` envelope, so `parallel_subagents._extract_findings`
 unwraps either identically. Never on: the distiller passes results through
 untouched when they already fit and carry no pivot or defense signal.
+
+## Remediation advisor (`agent/remediation.py`)
+
+The finding→fix half of Raptor, re-implemented in our idiom. We already own the
+"is it real" half (`validate_finding.py`, `/triage`, `confirm_vulnerability_poc`);
+this turns a confirmed finding into an actionable, CWE-mapped remediation instead
+of the reporter's generic per-category boilerplate.
+
+Deep, not broad: a curated knowledge base of ~20 web vulnerability classes
+(SQLi, XSS, SSRF, IDOR/BOLA, CSRF, RCE, SSTI, XXE, deserialization, CORS, TLS,
+takeover, secret exposure, default creds, broken auth, JWT, file upload, host
+header, business logic). Each entry carries the root-cause CWE, concrete fix
+steps, a correct-by-construction secure pattern, a verification step, and
+references. A classifier maps a finding onto a class (most specific wins — "SQL
+injection" beats a bare "injection"); unknown findings get an actionable generic
+fallback, never a blank.
+
+- **Tool:** `suggest_remediation(finding_json)` — the ReAct/report agent can
+  request a fix for any confirmed finding.
+- **Reporter:** the `## Remediation Playbook` section renders one authoritative
+  remediation per CWE class present, covering every finding of that class.
 
 ## Environment Variables
 
