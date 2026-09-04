@@ -149,6 +149,13 @@ CLI: `--enterprise`, `--no-enterprise`, `--all-specialists`, `--no-api-specialis
 | `authz_diff` | Multi-identity IDOR/BOLA harness (owner vs other vs unauth) | high |
 | `compare_requests` | Baseline-vs-mutation differential (identity/tenant/role swap) | medium |
 | `register_oob_probe` / `check_oob_interactions` | Out-of-band callback to confirm BLIND SSRF/XXE/RCE/OOB-SQLi | low/safe |
+| `probe_nosql` | Boolean-differential NoSQL (Mongo operator) injection | high |
+| `probe_jwt` | JWT verification attacks (alg:none, tampered sig, weak secret) | high |
+| `probe_stored_xss` | Two-phase stored / second-order XSS | high |
+| `probe_prototype_pollution` | Server-side prototype pollution (query + JSON) | medium |
+| `probe_graphql` | GraphQL introspection / batching / suggestion leakage | low |
+| `probe_smuggling` | Timing-based HTTP request-smuggling (CL.TE/TE.CL) | medium |
+| `dump_exposed_vcs` | Confirm exposed `.git`/`.svn` + extract remote/creds | low |
 | `probe_ssti` | Differential SSTI canary (`{{a*b}}`→product) | high |
 | `probe_path_traversal` | `/etc/passwd` · `win.ini` traversal signature probe | high |
 | `probe_open_redirect` | Redirect-to-canary-host probe (Location + client-side) | medium |
@@ -272,6 +279,34 @@ Provider abstraction (an offensive agent runs in varied networks): a
 a DNS logger + HTTP poll, or a webhook bin); interactsh is an optional documented
 provider. Unconfigured → the tool returns a structured "how to enable" result,
 never a silent no-op. Polling fetch is injectable and unit-tested.
+
+## Extended detectors (probes.py · api_probes.py · smuggling_probe.py · vcs_dump.py)
+
+A second wave of dedicated detectors covering classes scanners+prompts handle
+poorly:
+
+- **NoSQL injection** (`probe_nosql`) — boolean-differential Mongo-style operator
+  injection (`[$ne]`/`[$regex]`), same signal shape as the SQLi probe.
+- **JWT verification attacks** (`probe_jwt`) — crafts `alg:none`, tampered-
+  signature, and weak-HS256-secret forgeries from a captured token and flags any
+  the protected endpoint still accepts (dependency-free JWT crafting).
+- **Stored / second-order XSS** (`probe_stored_xss`) — two-phase: inject a canary
+  at one endpoint, then confirm it reflects unescaped at other endpoints —
+  catching what reflected/DOM probes miss.
+- **Prototype pollution** (`probe_prototype_pollution`) — server-side, via
+  `__proto__`/`constructor.prototype` in query and JSON body.
+- **GraphQL deep testing** (`probe_graphql`) — introspection enabled, query
+  batching accepted, and field-suggestion leakage.
+- **Request smuggling** (`probe_smuggling`) — timing-based CL.TE/TE.CL desync
+  **detection only** (a stalled self-request; never a victim-facing second
+  request), consistent with the "validate, don't exploit" ROE.
+- **Exposed VCS dump** (`dump_exposed_vcs`) — confirms an exposed `.git`/`.svn`
+  and extracts the remote URL(s) (flagging embedded credentials) and refs,
+  escalating an exposure candidate to a confirmed source-disclosure finding.
+
+All use an injectable HTTP/transport layer with pure, unit-tested verdict logic,
+and are wired into the injection, xss, auth, api/graphql, and smuggling hunter
+packs.
 
 ## Differential probes (`agent/probes.py`)
 
