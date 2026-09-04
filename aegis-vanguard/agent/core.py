@@ -36,6 +36,7 @@ from agent.tools import ToolDef, ToolRegistry
 from agent.guardrails import GuardrailEngine
 from agent.tracing import Tracer, TokenUsage
 from agent.session_ops import compact_message_tool_results, over_budget
+from agent.distiller import get_distiller
 
 # Cloud billing / quota / auth signals (Anthropic, OpenAI, etc.) that should
 # trigger a local Ollama retry when OLLAMA_FALLBACK_ENABLED is on.
@@ -184,10 +185,13 @@ class AgentRunner:
         default_model: str = "",
         price_limit_usd: float = 0.0,
         compact_keep_recent: int = 6,
+        hitl: Optional[Any] = None,
     ):
         self.registry = ToolRegistry()
         self.guardrails = guardrails or GuardrailEngine()
         self.tracer = tracer or Tracer(enabled=False)
+        # Human-in-the-loop steering (CAI-style). None disables it.
+        self.hitl = hitl
         self.default_model = default_model or os.environ.get("AEGIS_MODEL", "claude-sonnet-4-6")
         self.llm_backend = os.environ.get("AEGIS_LLM_BACKEND", "auto").lower()
         self.price_limit_usd = float(price_limit_usd or 0)
@@ -328,6 +332,7 @@ class AgentRunner:
                             context=ctx,
                         )
 
+                self._inject_operator_directives(tool_results, agent)
                 messages.append({"role": "user", "content": tool_results})
 
                 if response.stop_reason == "end_turn":
@@ -474,6 +479,11 @@ class AgentRunner:
         routing: e.g. cheap model for recon/report, Opus/GPT-5.5 for exploit
         validation or the OWASP hunters.
         """
+        # Air-gapped/offline mode: route every agent to the local model.
+        from agent.netmode import is_offline
+        if is_offline():
+            return _ollama_litellm_model()
+
         exact = os.environ.get(f"AEGIS_MODEL_{self._env_key(agent.name)}")
         if exact:
             return exact
@@ -846,11 +856,89 @@ class AgentRunner:
                 # AND the structured next_steps it can choose to follow up on.
                 return json.dumps({"output": reading.to_text(), "augur": augur_payload})
 
+        # ── Native distiller: standalone signal extraction ────────────────
+        # Runs only when Aegis Praetorium/Augur isn't on the path (standalone
+        # run_pentest.py / harness). Mirrors the Augur envelope so the fireteam
+        # unwraps it identically, and — unlike a blind head-truncation — keeps
+        # finding-bearing JSON valid so no findings are lost at fan-in.
+        augur_active = _AEGIS_AVAILABLE and get_praetorium_config().augur_enabled
+        if not augur_active and result:
+            try:
+                reading = get_distiller().interpret(tool_name, result, max_chars=50_000)
+            except Exception as e:  # never let distillation break a tool call
+                logger.warning("distiller failed for %s: %s", tool_name, e)
+                reading = None
+            if reading is not None:
+                if reading.next_steps:
+                    logger.info(
+                        "distiller produced %d next-step pivot(s) for %s: %s",
+                        len(reading.next_steps), tool_name,
+                        ", ".join(ns.tool_name for ns in reading.next_steps),
+                    )
+                if reading.injection:
+                    self._record_injection_attempt(tool_name, reading.injection)
+                self._register_block_signal(
+                    self._is_blocked_response(result) or reading.defense_detected
+                )
+                return json.dumps({
+                    "output": reading.to_text(),
+                    "augur": reading.to_payload(),
+                })
+
         if len(result) > 50_000:
             result = result[:50_000] + "\n...[truncated]"
 
-        # ── Circuit breaker: back off after 5 consecutive WAF/rate-limit blocks ─
-        if self._is_blocked_response(result):
+        self._register_block_signal(self._is_blocked_response(result))
+        return result
+
+    def _inject_operator_directives(self, tool_results: list, agent: Agent) -> None:
+        """Append any pending HITL operator directives to the tool-result user
+        turn (keeps role alternation) so the agent adapts mid-run."""
+        if self.hitl is None:
+            return
+        try:
+            directives = self.hitl.poll_all()
+        except Exception as e:  # steering must never break the loop
+            logger.warning("hitl poll failed: %s", e)
+            return
+        if not directives:
+            return
+        from agent.hitl import format_directive
+        for d in directives:
+            logger.info("[%s] operator directive injected: %s", agent.name, d[:200])
+            tool_results.append({"type": "text", "text": format_directive(d)})
+            try:
+                from agent.brain import get_brain
+                brain = get_brain()
+                if brain is not None:
+                    brain.add_note(f"Operator steering: {d[:400]}")
+                    brain.save()
+            except Exception:
+                pass
+
+    def _record_injection_attempt(self, tool_name: str, verdict: dict) -> None:
+        """Log and persist a prompt-injection attempt seen in tool output."""
+        cats = ", ".join(verdict.get("categories", []))
+        logger.warning(
+            "PROMPT-INJECTION in %s output (severity=%s): %s",
+            tool_name, verdict.get("severity"), cats,
+        )
+        try:
+            from agent.brain import get_brain
+            brain = get_brain()
+            if brain is not None:
+                brain.add_note(
+                    f"Prompt-injection attempt in {tool_name} output "
+                    f"(severity={verdict.get('severity')}, {cats}) — treated as "
+                    "untrusted data. Target content may be adversarial."
+                )
+                brain.save()
+        except Exception:  # best effort — never break a tool call
+            pass
+
+    def _register_block_signal(self, blocked: bool) -> None:
+        """Circuit breaker: back off after 5 consecutive WAF/rate-limit blocks."""
+        if blocked:
             self._consecutive_blocks += 1
             if self._consecutive_blocks >= 5:
                 logger.warning(
@@ -863,8 +951,6 @@ class AgentRunner:
                 self._consecutive_blocks = 0
         else:
             self._consecutive_blocks = 0
-
-        return result
 
     @staticmethod
     def _is_blocked_response(result: str) -> bool:

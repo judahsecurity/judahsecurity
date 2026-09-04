@@ -1279,6 +1279,212 @@ def search_prior_art(query: str, category: str = "", top_k: int = 6) -> str:
     return format_results(results)
 
 
+@security_tool(category="report", risk="safe")
+def suggest_remediation(finding_json: str) -> str:
+    """Produce a structured, methodology-grounded remediation for a finding.
+
+    Call this on a *confirmed* finding to turn it into an actionable fix: the
+    root-cause CWE, concrete fix steps, a secure code pattern, a verification
+    step, and references. Use it when writing up findings or when the operator
+    asks "how do we fix this?".
+
+    Args:
+        finding_json: A finding as a JSON object string. Recognized keys:
+            title/name, vuln_type/type/category, severity,
+            url/endpoint/matched_at.
+    """
+    from agent.remediation import advise_json
+    return advise_json(finding_json)
+
+
+@security_tool(category="exploit", risk="medium")
+def compare_requests(
+    url: str,
+    method: str = "GET",
+    body: str = "",
+    headers_a_json: str = "{}",
+    headers_b_json: str = "{}",
+) -> str:
+    """Baseline-vs-mutation differential: same request under two header sets.
+
+    The primitive for authz/tenant/role testing — swap Cookie/Authorization or a
+    tenant header (X-Tenant-Id, X-Org-Id) between A and B and compare status +
+    body similarity. Use it to see whether a mutation actually changed the
+    server's decision.
+
+    Args:
+        url: Target URL.
+        method: HTTP method.
+        body: Request body (optional).
+        headers_a_json: JSON headers for request A (e.g. identity/tenant A).
+        headers_b_json: JSON headers for request B (the mutation).
+    """
+    from agent.authz_probe import run_compare_requests
+    return json.dumps(
+        run_compare_requests(url, method, body, headers_a_json, headers_b_json),
+        default=str,
+    )
+
+
+@security_tool(category="exploit", risk="high")
+def authz_diff(
+    target_url: str,
+    method: str = "GET",
+    body: str = "",
+    owner_headers_json: str = "{}",
+    other_headers_json: str = "{}",
+    test_unauth: bool = True,
+) -> str:
+    """Multi-identity IDOR/BOLA harness: owner vs other-identity vs unauthenticated.
+
+    Provide the object owner's session in owner_headers_json (Cookie/Authorization)
+    and a SECOND user's session in other_headers_json. Requests the same object as
+    each; if the other identity (or an unauthenticated request) gets a
+    near-identical object back, that is broken object-level authorization. This is
+    the "two accounts for real proof" test scanners can't do alone.
+
+    Args:
+        target_url: URL of the object to test (include the object id).
+        method: HTTP method.
+        body: Request body (optional).
+        owner_headers_json: JSON headers carrying the OWNER's session.
+        other_headers_json: JSON headers carrying a DIFFERENT user's session.
+        test_unauth: Also try the request with no credentials (default True).
+    """
+    from agent.authz_probe import run_authz_diff
+    return json.dumps(
+        run_authz_diff(target_url, method, body, owner_headers_json,
+                       other_headers_json, test_unauth),
+        default=str,
+    )
+
+
+@security_tool(category="exploit", risk="high")
+def probe_ssti(target_url: str, params: str = "") -> str:
+    """Differential SSTI probe: inject an arithmetic canary and detect evaluation.
+
+    Injects `{{a*b}}`/`${a*b}`/`#{a*b}`/`<%= a*b %>` style payloads with unique
+    large operands; a response containing the computed product proves the
+    template engine evaluated the expression (Jinja2, Twig, Freemarker, ERB, …).
+
+    Args:
+        target_url: URL with query string to test.
+        params: Optional comma-separated params (default: all query params).
+    """
+    from agent.probes import run_probe_ssti
+    return json.dumps(run_probe_ssti(target_url, params), default=str)
+
+
+@security_tool(category="exploit", risk="high")
+def probe_path_traversal(target_url: str, params: str = "") -> str:
+    """Differential path-traversal probe: request /etc/passwd or win.ini via
+    ../ and encoded/`....//` variants and detect the leaked file signature.
+
+    Args:
+        target_url: URL with query string to test.
+        params: Optional comma-separated params (default: all query params;
+                good candidates: file, path, template, page, doc, download).
+    """
+    from agent.probes import run_probe_path_traversal
+    return json.dumps(run_probe_path_traversal(target_url, params), default=str)
+
+
+@security_tool(category="exploit", risk="medium")
+def probe_open_redirect(target_url: str, params: str = "") -> str:
+    """Differential open-redirect probe: point a redirect param at a canary host
+    and detect an off-origin Location / client-side redirect to it.
+
+    Args:
+        target_url: URL to test (query string optional).
+        params: Optional comma-separated params (default: common redirect params
+                like next, url, redirect, return, dest).
+    """
+    from agent.probes import run_probe_open_redirect
+    return json.dumps(run_probe_open_redirect(target_url, params), default=str)
+
+
+@security_tool(category="exploit", risk="medium")
+def probe_crlf(target_url: str, params: str = "") -> str:
+    """Differential CRLF / HTTP response-header injection probe: inject an
+    encoded CRLF + marker header and detect it reflected in the response headers.
+
+    Args:
+        target_url: URL with query string to test.
+        params: Optional comma-separated params (default: all query params).
+    """
+    from agent.probes import run_probe_crlf
+    return json.dumps(run_probe_crlf(target_url, params), default=str)
+
+
+@security_tool(category="exploit", risk="low")
+def register_oob_probe(label: str = "") -> str:
+    """Mint a unique out-of-band callback URL/host to confirm BLIND vulnerabilities.
+
+    Use for blind SSRF, blind XXE, blind/OAST RCE, Log4Shell, and OOB SQLi — any
+    bug with no direct response signal. Returns a token plus dns_host / http_url
+    and ready-to-embed payload_hints. Embed the URL/host in your payload, fire
+    it, then call check_oob_interactions(token): a DNS/HTTP hit proves the target
+    made a server-side request. Returns enabled=false with setup instructions if
+    no OOB collector is configured (AEGIS_OOB_DOMAIN + AEGIS_OOB_POLL_URL).
+
+    Args:
+        label: Short note tying the probe to what you're testing (e.g. "ssrf /avatar url").
+    """
+    from agent.oob import get_oob_client
+    client = get_oob_client()
+    if not client.enabled:
+        return json.dumps(client.help())
+    probe = client.new_probe(label)
+    return json.dumps(probe.to_dict(), default=str)
+
+
+@security_tool(category="exploit", risk="safe")
+def check_oob_interactions(token: str) -> str:
+    """Check for out-of-band callbacks recorded for an OOB probe token.
+
+    Call after firing a payload that embedded a register_oob_probe URL/host. Any
+    interaction returned (DNS or HTTP) on this token is proof the target made a
+    server-side request to your callback — i.e. the blind vulnerability is
+    confirmed. No interactions means not yet triggered (allow a few seconds and
+    retry, or the payload didn't reach a fetch).
+
+    Args:
+        token: The token returned by register_oob_probe.
+    """
+    from agent.oob import get_oob_client
+    hits = get_oob_client().poll(token)
+    return json.dumps({
+        "token": token,
+        "count": len(hits),
+        "confirmed": len(hits) > 0,
+        "interactions": [h.to_dict() for h in hits],
+    }, default=str)
+
+
+@security_tool(category="recon", risk="safe")
+def lookup_cves(product: str, version: str = "") -> str:
+    """Look up known CVEs for a fingerprinted technology and stash them in the brain.
+
+    Call this right after recon identifies a product + version (e.g. from
+    fingerprint_tech, detect_cms, scan_nuclei tech-detect). Returns CVEs ranked
+    exploitability-first (known-exploited before high CVSS) and records them as
+    engagement-brain notes so hunters start from the paths most likely to be
+    exploitable. Prefers VulnCheck (NVD++ data + KEV known-exploited catalog)
+    when VULNCHECK_API_KEY is set, else falls back to the NVD API. Degrades
+    gracefully (available=false) when outbound access is blocked.
+
+    Args:
+        product: Product/technology name (e.g. "grafana", "wordpress", "nginx")
+        version: Optional version to narrow results (e.g. "9.5.1")
+    """
+    from agent.netmode import require_online
+    offline = require_online("lookup_cves")
+    if offline:
+        return offline
+    from agent.cve_intel import lookup_json
+    return lookup_json(product, version)
+
+
 # =========================================================================
 # SAST Tools — static source code analysis
 # =========================================================================
@@ -1456,6 +1662,9 @@ HUNTER_CORE_TOOLS = [
     "brain_mark_exhausted",
     "brain_add_payload",
     "brain_add_note",
+    # Out-of-band callback confirmation for blind SSRF/XXE/RCE/OOB-SQLi.
+    "register_oob_probe",
+    "check_oob_interactions",
 ]
 
 
