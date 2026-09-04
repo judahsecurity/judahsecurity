@@ -185,10 +185,13 @@ class AgentRunner:
         default_model: str = "",
         price_limit_usd: float = 0.0,
         compact_keep_recent: int = 6,
+        hitl: Optional[Any] = None,
     ):
         self.registry = ToolRegistry()
         self.guardrails = guardrails or GuardrailEngine()
         self.tracer = tracer or Tracer(enabled=False)
+        # Human-in-the-loop steering (CAI-style). None disables it.
+        self.hitl = hitl
         self.default_model = default_model or os.environ.get("AEGIS_MODEL", "claude-sonnet-4-6")
         self.llm_backend = os.environ.get("AEGIS_LLM_BACKEND", "auto").lower()
         self.price_limit_usd = float(price_limit_usd or 0)
@@ -329,6 +332,7 @@ class AgentRunner:
                             context=ctx,
                         )
 
+                self._inject_operator_directives(tool_results, agent)
                 messages.append({"role": "user", "content": tool_results})
 
                 if response.stop_reason == "end_turn":
@@ -881,6 +885,31 @@ class AgentRunner:
 
         self._register_block_signal(self._is_blocked_response(result))
         return result
+
+    def _inject_operator_directives(self, tool_results: list, agent: Agent) -> None:
+        """Append any pending HITL operator directives to the tool-result user
+        turn (keeps role alternation) so the agent adapts mid-run."""
+        if self.hitl is None:
+            return
+        try:
+            directives = self.hitl.poll_all()
+        except Exception as e:  # steering must never break the loop
+            logger.warning("hitl poll failed: %s", e)
+            return
+        if not directives:
+            return
+        from agent.hitl import format_directive
+        for d in directives:
+            logger.info("[%s] operator directive injected: %s", agent.name, d[:200])
+            tool_results.append({"type": "text", "text": format_directive(d)})
+            try:
+                from agent.brain import get_brain
+                brain = get_brain()
+                if brain is not None:
+                    brain.add_note(f"Operator steering: {d[:400]}")
+                    brain.save()
+            except Exception:
+                pass
 
     def _record_injection_attempt(self, tool_name: str, verdict: dict) -> None:
         """Log and persist a prompt-injection attempt seen in tool output."""

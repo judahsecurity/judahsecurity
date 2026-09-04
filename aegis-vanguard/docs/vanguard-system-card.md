@@ -196,6 +196,24 @@ Every agent decision, tool call, and token usage is traced:
 Traces are saved to `/agent/traces/` and exported as JSON.
 Configure via `AEGIS_TRACING=true/false`.
 
+## Human-in-the-loop steering (`agent/hitl.py`)
+
+CAI lets an operator interrupt a running agent, inject guidance, and let it
+continue; ours only had `KeyboardInterrupt` → abort. Now the runner polls a
+non-blocking control channel between ReAct turns and injects any pending
+operator directive into the live conversation as an `OPERATOR DIRECTIVE`, so the
+agent re-plans mid-run without losing context (and the directive is recorded to
+the brain). Two headless-friendly sources: an in-memory queue (programmatic) and
+a file channel — an operator steers a container run with:
+
+```bash
+echo "focus on the /admin API, skip subdomain enum" >> "$AEGIS_HITL_FILE"
+```
+
+Enabled via `AEGIS_HITL=1` or by setting `AEGIS_HITL_FILE`. Directives are
+attached to the tool-result turn (preserving role alternation) and polling never
+blocks or raises.
+
 ## Injection shield (`agent/injection_shield.py`)
 
 Our guardrails only checked tool *inputs* (the command about to run). But an
@@ -317,6 +335,8 @@ fallback, never a blank.
 | `ASM_API_KEY` | Agent API key (starts with tfasm_) |
 | `ASM_AGENT_ID` | Unique agent identifier |
 | `WHOISXML_API_KEY` | Optional. Enables reverse_whois_search for WhoisXML reverse WHOIS pivots |
+| `AEGIS_HITL` | Optional. `1`/`true` enables human-in-the-loop operator steering |
+| `AEGIS_HITL_FILE` | Optional. Path to the HITL control file; write a directive to steer a running assessment (also enables HITL) |
 | `VULNCHECK_API_KEY` | Optional. Preferred CVE source for `lookup_cves` — VulnCheck NVD++ data + KEV known-exploited catalog (exploitability-first ranking) |
 | `NVD_API_KEY` | Optional. Lifts the NVD rate limit for the `lookup_cves` NVD fallback |
 | `GITLAB_HASH_DB_PATH` | Optional. JSON database mapping GitLab stylesheet SHA-256 hashes to versions |
