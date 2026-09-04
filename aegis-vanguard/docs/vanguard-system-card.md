@@ -222,6 +222,29 @@ that runs when `aegis_praetorium` isn't importable. Both emit the same
 unwraps either identically. Never on: the distiller passes results through
 untouched when they already fit and carry no pivot or defense signal.
 
+## MCP server (`agent/mcp_server.py`)
+
+HexStrike exposes 150+ tools over the Model Context Protocol so any MCP client
+(Claude Desktop, a coding copilot) can drive them. The course's critique of that
+family is that they "expose every tool at once with no methodology guiding the
+model." Ours is the opposite — a curated, guardrailed surface that leads with
+our sharp process:
+
+- **Process/knowledge tools first, always on:** `search_prior_art`,
+  `suggest_remediation`, `lookup_cves`, `brain_query`. An external agent driving
+  Vanguard inherits our methodology, not just our scanners.
+- **Risk-gated scanners:** only `safe`/`low` recon by default; active-exploit
+  tools (sqlmap, XSStrike, DOM-XSS, PoC confirmation) stay off unless
+  `AEGIS_MCP_ALLOW_EXPLOIT=true` — same authorize-before-you-attack posture as
+  the CLI.
+- **Same guardrails:** every MCP call is routed through the `GuardrailEngine`
+  the ReAct loop uses, and any tool outside the exposed manifest is refused, so
+  an external client cannot reach a hidden or dangerous tool.
+
+Run it with `python3 -m agent.mcp_server` (optional `mcp` SDK — see
+`requirements.txt`). The manifest/dispatch logic is pure and unit-tested; the
+module imports fine without the SDK.
+
 ## CVE intel (`agent/cve_intel.py`)
 
 Borrowed from PentAGI's live-CVE enrichment. When recon fingerprints a product

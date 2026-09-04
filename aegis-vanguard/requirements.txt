@@ -8,3 +8,6 @@ subcat
 # pip install presidio-analyzer presidio-anonymizer  # for PII detection
 # git clone https://github.com/intruder-io/autoswagger /opt/autoswagger
 requests>=2.31.0
+# Optional: expose Vanguard's arsenal over the Model Context Protocol
+# (agent/mcp_server.py). Only needed to run `python3 -m agent.mcp_server`.
+# mcp>=1.0.0
