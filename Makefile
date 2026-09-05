@@ -197,6 +197,21 @@ deploy:
 	  docker exec asm_backend python scripts/migrate_add_oracle_columns.py --backfill 2>/dev/null || true && \
 	  echo "" && echo "✓ Done." && docker compose ps'
 
+# Deploy Vanguard agent changes to EC2: make deploy-vanguard EC2=1.2.3.4 KEY=~/.ssh/mykey.pem
+# The scanner worker runs `docker run aegis-vanguard:latest` (Dockerfile.scanner),
+# and `make deploy` does NOT rebuild that image — so Vanguard code changes only go
+# live after this target rebuilds aegis-vanguard:latest on the host.
+deploy-vanguard:
+	@[ -n "$(EC2)" ] || (echo "Usage: make deploy-vanguard EC2=<ip> KEY=<path/to/key.pem>" && exit 1)
+	@SSH_OPTS="-o StrictHostKeyChecking=no -i $(KEY)"; \
+	echo "→ Rebuilding aegis-vanguard:latest on ubuntu@$(EC2):/opt/asm"; \
+	ssh $$SSH_OPTS ubuntu@$(EC2) '\
+	  cd /opt/asm && \
+	  git pull && \
+	  docker build -t aegis-vanguard:latest -f aegis-vanguard/Dockerfile . && \
+	  echo "" && echo "✓ aegis-vanguard:latest rebuilt — the scanner worker will use it on the next run." && \
+	  docker image inspect aegis-vanguard:latest --format "  built: {{.Created}}  id: {{.Id}}"'
+
 
 
 
