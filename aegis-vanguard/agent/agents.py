@@ -1658,12 +1658,19 @@ RECON_TOOLS = [
     "scan_subdomains", "resolve_dns", "probe_http", "scan_ports",
     "scan_ports_nmap", "fingerprint_tech", "detect_waf", "detect_cms",
     "fingerprint_gitlab", "crawl_urls", "crawl_urls_authenticated",
+    # Interaction-first crawl (scroll/click/fill + full response capture into the
+    # session store) — richer surface than crawl_urls_authenticated, and it feeds
+    # authz_matrix / fingerprint_stack / analyze_js / replay_request downstream.
+    "browser_crawl",
     "discover_historical_urls", "discover_api_surface", "scan_js_urls_for_secrets",
     "analyze_js_with_jsluice",
     "fuzz_directories", "discover_parameters", "reverse_whois_search",
     "atlas_map_attack_surface",
     # Swagger/OpenAPI discovery
     "discover_swagger_spec",
+    # Caido history ingestion into the session store (no-ops safely when Caido
+    # isn't configured via AEGIS_CAIDO_API).
+    "ingest_caido",
 ]
 
 VULN_TOOLS = [
