@@ -33,6 +33,8 @@ from typing import Dict, List, Optional
 
 from ..config import HarnessConfig, default_config
 from ..cost import cost_metrics, load_trace_summary
+from ..manifest import build_manifest
+from ..sarif import findings_to_sarif
 from ..findings import load_findings
 from ..llm import build_llm_call
 from ..runner import run_scan, slugify
@@ -104,6 +106,7 @@ def cmd_run(config: HarnessConfig, args: argparse.Namespace) -> int:
     scan_errors: List[str] = []
     report_targets: Dict[str, dict] = {}
     report_detail: Dict[str, dict] = {}
+    all_findings: List[dict] = []          # unified SARIF corpus
 
     for name, spec in corpus.items():
         mode = target_mode(spec)
@@ -197,6 +200,11 @@ def cmd_run(config: HarnessConfig, args: argparse.Namespace) -> int:
             true_positives=tp,
         )
         report_targets[name].update(costs)
+
+        # Unified SARIF corpus + scope/guardrail-violation tally per target.
+        all_findings.extend(f for f in (findings or []) if isinstance(f, dict))
+        gb = int((scan_cost_summary or {}).get("guardrail_blocks") or 0)
+        report_targets[name]["guardrail_blocks"] = gb
         if costs.get("cost_usd"):
             print(
                 f"        cost=${costs['cost_usd']:.4f}"
@@ -231,9 +239,16 @@ def cmd_run(config: HarnessConfig, args: argparse.Namespace) -> int:
             "cost_per_true_positive": round(total_cost / tp_all, 6) if tp_all else None,
         }
 
+    total_gb = sum(int(t.get("guardrail_blocks") or 0)
+                   for t in report_targets.values() if isinstance(t, dict))
+    aggregate["guardrail_blocks"] = total_gb
+
+    manifest = build_manifest(config, ground_truth_path=args.ground_truth)
+
     report = {
         "generated_at": _now(),
         "judge_backend": effective_backend,
+        "manifest": manifest,
         "targets": report_targets,
         "detail": report_detail,
         "aggregate": aggregate,
@@ -242,6 +257,14 @@ def cmd_run(config: HarnessConfig, args: argparse.Namespace) -> int:
     report_path = config.benchmark_dir / "benchmark_report.json"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+
+    # Reproducible manifest + unified SARIF as first-class artifacts.
+    (config.benchmark_dir / "manifest.json").write_text(
+        json.dumps(manifest, indent=2, default=str), encoding="utf-8")
+    sarif = findings_to_sarif(
+        all_findings, version=(manifest.get("harness_git") or {}).get("sha") or "")
+    (config.benchmark_dir / "benchmark.sarif").write_text(
+        json.dumps(sarif, indent=2, default=str), encoding="utf-8")
 
     _print_summary(report, effective_backend)
 
@@ -273,6 +296,8 @@ def _print_summary(report: dict, backend: str) -> None:
         if c.get("cost_per_true_positive") is not None:
             extra = f"  $/TP={c['cost_per_true_positive']:.4f}"
         print(f"  llm cost:      ${c['cost_usd']:.4f}{extra}")
+    print(f"  scope blocks:  {agg.get('guardrail_blocks', 0)}")
+    print(f"  artifacts:     benchmark_report.json · manifest.json · benchmark.sarif")
     if report["scan_errors"]:
         print(f"  scan errors:   {len(report['scan_errors'])} ({', '.join(report['scan_errors'])})")
     print("=" * 60)
@@ -302,6 +327,14 @@ def _exit_code(report: dict, args: argparse.Namespace) -> int:
             print(
                 f"\n[gate] cost/TP {cpt:.4f} > "
                 f"--max-cost-per-tp {args.max_cost_per_tp} → exit 2"
+            )
+            return 2
+    if args.max_guardrail_blocks is not None:
+        gb = int(agg.get("guardrail_blocks") or 0)
+        if gb > args.max_guardrail_blocks:
+            print(
+                f"\n[gate] guardrail/scope-violation blocks {gb} > "
+                f"--max-guardrail-blocks {args.max_guardrail_blocks} → exit 2"
             )
             return 2
     return 0
@@ -340,6 +373,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-cost-per-tp", type=float, default=None,
         help="CI gate: exit 2 if LLM cost per true-positive exceeds this USD amount",
+    )
+    parser.add_argument(
+        "--max-guardrail-blocks", type=int, default=None,
+        help="CI gate: exit 2 if total guardrail/scope-violation blocks exceed this "
+             "(use 0 to require zero scope violations)",
     )
     return parser
 

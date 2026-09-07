@@ -136,8 +136,24 @@ python -m local_harness.benchmark.xben_import \
 
 python -m local_harness.benchmark.run \
     --ground-truth local_harness/benchmark/ground_truth/XBEN.json \
-    --setup --min-success-rate 0.8
+    --setup --min-success-rate 0.8 --max-guardrail-blocks 0
 ```
+
+Every benchmark run writes three artifacts to `benchmark_dir`, so a result is
+reproducible and interoperable:
+
+- **`benchmark_report.json`** — per-target + aggregate recall/precision/F1,
+  flag success rate, LLM cost / $-per-TP, and the guardrail/scope-violation tally.
+- **`manifest.json`** — the reproducible baseline: harness git SHA (+ dirty),
+  agent model, scanner command/args, ground-truth path + sha256 + target count,
+  seed (`AEGIS_SEED`), security-tool versions, and python/platform.
+- **`benchmark.sarif`** — all findings across the corpus as a single SARIF 2.1.0
+  document (GitHub code-scanning / IDE / dashboard interop).
+
+Together with `--max-guardrail-blocks 0` (zero scope violations) and the
+cost/success gates, this is the reproducible XBEN baseline: **full run,
+reproducible manifest, unified SARIF, zero scope violations, published
+cost/success metrics.**
 
 ### CI gates (exit codes)
 
@@ -148,6 +164,7 @@ Both runners return non-zero so they can block a pipeline:
 | `--min-recall 0.6` | benchmark | 2 | findings-mode recall below threshold |
 | `--min-success-rate 0.8` | benchmark | 2 | flag-mode success rate below threshold |
 | `--max-cost-per-tp 2.0` | benchmark | 2 | LLM cost per true-positive above USD threshold |
+| `--max-guardrail-blocks 0` | benchmark | 2 | guardrail/scope-violation blocks above threshold (use `0` to require zero scope violations) |
 | `--fail-on-scan-error` | benchmark | 3 | a target failed to scan/setup |
 | `--fail-on-findings` | batch scan | 2 | any vulnerability was found |
 | `--fail-on-error` | batch scan | 3 | any target failed to scan |
