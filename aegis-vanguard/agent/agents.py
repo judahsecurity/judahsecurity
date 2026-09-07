@@ -2069,6 +2069,14 @@ Strategy (adapt based on what you find):
     the highest-signal API surface artifact available.
 11. If the target appears to be a SPA (React/Angular/Vue), also run crawl_urls_authenticated
     to capture routes that only render after JS execution
+11b. Run browser_crawl on the primary app URL for an interaction-first crawl:
+    it drives real Chromium (scroll/click/fill of safe controls) and captures the
+    full request/response of every XHR/fetch/API call into the session store —
+    surface that static crawlers miss. This is the highest-recall capture step and
+    it populates the store that authz_matrix, fingerprint_stack, analyze_js, and
+    replay_request consume downstream, so run it whenever the app has any
+    interactive UI. If Caido is configured (AEGIS_CAIDO_API is set), also run
+    ingest_caido to fold Caido's captured history into the same store.
 12. Discover historical URLs
 13. For discovered JavaScript bundles (e.g. .js under /static, /clientlibs), run scan_js_urls_for_secrets with those URLs to detect hardcoded keys/tokens
 14. Fuzz for hidden directories/API paths
