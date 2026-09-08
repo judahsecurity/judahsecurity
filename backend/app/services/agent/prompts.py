@@ -413,7 +413,13 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 
 - **independent_verify**: Spawn a fresh verifier agent (Deborah) per pending candidate. No hunter transcript. Optional candidate_id to verify one. Returns verdicts.
 
-- **record_verify_verdict**: Verifier-only. Args: candidate_id, verdict (confirmed|refuted|inconclusive), evidence, summary. Issues the receipt create_finding consumes.
+- **record_verify_verdict**: Verifier-only. Args: candidate_id, verdict, evidence, evidence_ids, proof. Requires fresh execution records from this verifier and a supported proof rule.
+- **run_assessment_workflow**: Run captured request steps with explicit identities, JSON field extraction, {{variable}} references, expected statuses, cleanup steps, and resumable workflow_id. Does not itself confirm findings.
+- **read_evidence**: Read full redacted artifacts by evidence_id, offset, limit.
+- **register_test_identity**: Register a named operator-provided test session (name, target, cookies/headers/storage_state, role, tenant).
+- **list_test_identities**: List configured identities without secrets.
+- **check_test_identity**: Check identity against its known endpoint (identity, url, field, expected).
+- **test_authorization_boundary**: Replay a known private test object as owner and second identity (url, owner_identity, other_identity, object_field, hypothesis_id).
 
 - **record_surface_coverage**: Mark an inventory row. Args: path (required), status (untested|in_focus|finding|tested_clean|skipped), method (default GET), reason (required when skipped), hypothesis_id, finding_title, host.
 
@@ -652,6 +658,12 @@ TOOL_PHASE_MAP = {
     "assess_finding_risk": ["informational", "exploitation", "post_exploitation"],
     "submit_finding_candidate": ["informational", "exploitation", "post_exploitation"],
     "independent_verify": ["informational", "exploitation", "post_exploitation"],
+    "run_assessment_workflow": ["exploitation", "post_exploitation"],
+    "read_evidence": ["informational", "exploitation", "post_exploitation"],
+    "register_test_identity": ["informational", "exploitation", "post_exploitation"],
+    "list_test_identities": ["informational", "exploitation", "post_exploitation"],
+    "check_test_identity": ["informational", "exploitation", "post_exploitation"],
+    "test_authorization_boundary": ["exploitation", "post_exploitation"],
     "record_verify_verdict": ["informational", "exploitation", "post_exploitation"],
     "record_surface_coverage": ["informational", "exploitation", "post_exploitation"],
     "get_coverage": ["informational", "exploitation", "post_exploitation"],
@@ -829,3 +841,7 @@ def is_tool_allowed_in_phase(tool_name: str, phase: str) -> bool:
     """Check if a tool is allowed in the given phase."""
     allowed_phases = TOOL_PHASE_MAP.get(tool_name, [])
     return phase in allowed_phases
+
+
+from app.services.agent.proof_policy import PROOF_GUIDANCE
+REACT_SYSTEM_PROMPT += "\n\n" + PROOF_GUIDANCE

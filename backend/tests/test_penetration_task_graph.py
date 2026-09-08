@@ -126,7 +126,7 @@ def test_executor_summary_soliloquy_is_not_proven():
     assert summary.verdict == "retry"
 
 
-def test_apply_summary_proves_matching_cards():
+def test_lane_summary_cannot_prove_matching_cards():
     brain = _seeded_brain()
     graph = sync_graph_from_brain(brain)
     specialist = ready_wave(graph)[0]
@@ -141,8 +141,8 @@ def test_apply_summary_proves_matching_cards():
     )
     apply_executor_summary(graph, brain, summary)
     hyp = next(h for h in brain.hypotheses if h.id == node.id)
-    assert hyp.status == "proven"
-    assert graph.nodes[node.id].status == "proven"
+    assert hyp.status != "proven"
+    assert graph.nodes[node.id].status != "proven"
 
 
 def test_compact_mission_strips_scan_dumps():

@@ -1,13 +1,14 @@
 """Unauth OpenAPI account lookup (CWE-204 / CWE-200 / CWE-862).
 
-Gold bar: schema ``security: {}`` plus ``is_staff``/``role``, and/or sibling
-401 vs lookup 200 / 404 / 500. File Critical. One canary email. Do not invent
+Schema and status differences are discovery leads; execution-backed impact
+is required before confirmation. One canary email. Do not invent
 a 200 UserAccount body. ACAO ``*`` is extra, not cors_credentials.
 """
 
 from __future__ import annotations
 
 import re
+from app.services.agent.proof_policy import PROOF_GUIDANCE
 from typing import Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
@@ -27,62 +28,13 @@ _FINDING_HINTS = (
     "unauth_account_lookup",
 )
 
-WRITEUP_RULES = (
-    "Unauth OpenAPI account lookup (CWE-204 / CWE-200 / CWE-862): GET "
-    "/api/auth/account/?email= documented with security: {} ('without "
-    "authentication') returning email, is_active, valid_through, is_staff, role. "
-    "Schema-unauth + privilege fields is SUBMIT Critical. Unauth lookup that is "
-    "200, 404 ('User does not exist!'), or 500 while /api/auth/profile/ and "
-    "/users/me/ are 401 also SUBMIT — a down database is not an auth rejection; "
-    "404 is an existence oracle, not a kill. One canary email "
-    f"({CANARY_EMAIL}); do not spray employee inboxes; do not dump ICS users. "
-    "Do not claim a 200 UserAccount payload (is_staff/role bytes) unless that "
-    "body is in demonstrated_chain stdout — schema + 401-vs-404/500 is enough. "
-    "Detection step claims must match tool stdout. ACAO * is extra, not the "
-    "CORS-credentials finding. File Critical (not Open High). Kill only if the "
-    "lookup 401/403 like siblings, the schema requires JWT, or the body is a "
-    "non-enumerating boolean. Remediation: require JWT; if a pre-login check is "
-    "needed, boolean is_active only + rate limit; do not confirm account existence."
-)
+WRITEUP_RULES = PROOF_GUIDANCE + "\nAccount lookup: schema hints and 401-vs-404/500 are candidates only. Use controlled test accounts; do not spray real user emails. Do not infer role bytes or Critical severity."
 
-REVIEW_RULES = (
-    "Unauth /api/auth/account/ (Ask Marcus): keep Demonstrated. Raise High→Critical "
-    "when schema security: {} quotes is_staff/role OR sibling 401 vs lookup "
-    "200/404/500 is in the packet. Do not drop because the 200 UserAccount body "
-    "was not captured. Do not treat 404 'User does not exist!' as a kill — that "
-    "is the existence oracle. Do not mix ACAO * into cors_credentials (ACAC is "
-    "absent). why_not_higher: no RCE, no ATO, no sprayed ICS users, no inferred "
-    "role bytes. Retest bar: unauth lookup returns 401 like /api/auth/profile/. "
-    "Do not re-query live emails; do not spray."
-)
+REVIEW_RULES = PROOF_GUIDANCE + "\nAccount lookup: schema hints and 401-vs-404/500 are candidates only. Use controlled test accounts; do not spray real user emails. Do not infer role bytes or Critical severity."
 
-VERIFIER_ADDENDUM = (
-    "This is an unauth account-lookup candidate. Re-derive ONLY:\n"
-    "1) GET /api/schema/ (or swagger) and quote security: {} / 'without "
-    "authentication' plus UserAccount is_staff/role/valid_through if present.\n"
-    "2) compare_requests unauth GET /api/auth/profile/ (expect 401) vs GET "
-    f"/api/auth/account/?email={CANARY_EMAIL} (use_auth_session=false).\n"
-    "confirmed if lookup is 200 with those fields, OR 404 'User does not exist!' "
-    "/ existence oracle, OR 500/OperationalError — while the sibling is 401. "
-    "A down database is confirmed, not refuted. An unregistered canary is "
-    "confirmed, not refuted. refuted only if the lookup 401/403s like siblings "
-    "or the schema requires JWT and the body is a non-enumerating boolean.\n"
-    f"Use ONLY {CANARY_EMAIL}. Do not spray admin@ / employee inboxes. Do not "
-    "hunt a registered email to capture is_staff/role. Do not claim a 200 "
-    "UserAccount payload unless YOUR stdout contains those bytes. ACAO * is extra."
-)
+VERIFIER_ADDENDUM = f"Use the controlled canary {CANARY_EMAIL}. A single response is not an existence oracle. " + PROOF_GUIDANCE + "\nAccount lookup: schema hints and 401-vs-404/500 are candidates only. Use controlled test accounts; do not spray real user emails. Do not infer role bytes or Critical severity."
 
-HUNTER_RULES = (
-    "Unauth account/email lookup: hunt schema security: {} on /api/auth/account/ "
-    "(or similar). Quote UserAccount fields is_staff/role/valid_through. "
-    "compare_requests unauth GET /api/auth/profile/ (401) vs "
-    f"/api/auth/account/?email={CANARY_EMAIL} (200 with those fields OR 404 "
-    "existence oracle OR 500). One canary only — do not spray employee inboxes; "
-    "do not dump ICS users. 404/500 vs sibling 401 is SUBMIT Critical. Do not "
-    "claim a 200 role body unless stdout has it. ACAO * is extra. "
-    "queue_finding_followups(vuln_type='unauth_account_lookup'). Kill only lookup "
-    "401/403 or JWT-required generic boolean."
-)
+HUNTER_RULES = PROOF_GUIDANCE + "\nAccount lookup: schema hints and 401-vs-404/500 are candidates only. Use controlled test accounts; do not spray real user emails. Do not infer role bytes or Critical severity."
 
 
 def is_account_lookup_path(url: str) -> bool:
@@ -159,41 +111,16 @@ def is_account_lookup_finding(text: str) -> bool:
 
 
 def has_account_lookup_proof(text: str) -> bool:
-    blob = (text or "").lower()
-    schema_proof = any(
-        token in blob
-        for token in (
-            "security: {}",
-            "security:{}",
-            "without authentication",
-            "is_staff",
-            "valid_through",
-        )
-    )
-    jwt_skip = "401" in blob and any(
-        token in blob
-        for token in (
-            "500",
-            "404",
-            "200",
-            "user does not exist",
-            "operationalerror",
-            "bypasses jwt",
-            "bypasses the jwt",
-            "jwt authentication middleware",
-            "vs 401",
-            "versus 401",
-            "401 vs",
-        )
-    )
-    return schema_proof or jwt_skip
+    """Narrative/schema matching cannot establish a live account lookup proof.
+
+    Confirmation uses execution artifacts and proof_policy instead.
+    """
+    return False
 
 
 def allows_critical_ra(text: str) -> bool:
-    """Schema-unauth + privilege fields, or sibling 401 vs 200/404/500, is Critical."""
-    if not is_account_lookup_finding(text):
-        return False
-    return has_account_lookup_proof(text)
+    """Account-lookup keywords do not override the standard impact assessment."""
+    return False
 
 
 def inferred_role_payload(text: str) -> bool:

@@ -79,11 +79,11 @@ def rewrite_note(failure: str, summary: ExecutorSummary, directive: Any = None) 
             "AUTO-PROMPTER: previous turn invented output (no tool calls). "
             "You MUST call an allowlisted tool before any claim. "
             "status 200 is not a finding. If the first tool fails, finish with "
-            "verdict=killed and evidence=the tool error — do not narrate success."
+            "verdict=inconclusive and evidence=the tool error — do not narrate success."
         ),
         TOOLS_FAILED: (
             "AUTO-PROMPTER: every tool call failed. Change approach: smaller args, "
-            "different path from the executor slice, or kill the card with the error. "
+            "different path from the executor slice, or mark the card inconclusive with the error. "
             "Do not repeat the identical tool+args. If the target blocked you (WAF, 403, "
             "timeout), read the defense body and call compare_requests or run_custom_probe "
             "with one mutation that avoids the blocked pattern — then prove or kill. "

@@ -4,6 +4,7 @@ Agent Tools
 Tools for the AI agent to interact with the ASM platform.
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -164,6 +165,7 @@ def _default_args_for_tool(tool_name: str, target: str) -> str:
             "--random-user-agent --disable-tls-checks"
         )
     if name in ("subfinder", "subfaster", "dnsx", "tldfinder"):
+        host = host[4:] if host.lower().startswith("www.") else host
         return f"-d {host}"
     if name in ("naabu", "nmap", "masscan"):
         return f"-host {host}" if name == "naabu" else host
@@ -333,9 +335,24 @@ def _format_vulnx_search_output(raw_json: str, query: str) -> str:
         return raw_json
 
 
+from app.services.agent.session_runtime import SessionValue
+
+
 class ASMToolsManager:
     """Manager for ASM platform tools accessible by the AI agent."""
     
+    _identity_captures = SessionValue(dict)
+    _assessment_workflows = SessionValue(dict)
+    _evidence_store = SessionValue(lambda: None)
+    _identity_registry = SessionValue(lambda: None)
+    _verify_receipts = SessionValue(dict)
+    _finding_receipts = SessionValue(dict)
+    _recent_invocations = SessionValue(lambda: deque(maxlen=48))
+    _auth_session = SessionValue(lambda: None)
+    _engagement_brain = SessionValue(dict)
+    _capability_map = SessionValue(lambda: None)
+    _require_independent_verify = SessionValue(lambda: True)
+
     def __init__(self):
         self.tools = self._register_tools()
         self._mcp_server = None
@@ -524,6 +541,12 @@ class ASMToolsManager:
             "submit_finding_candidate": self.submit_finding_candidate,
             "independent_verify": self.independent_verify,
             "record_verify_verdict": self.record_verify_verdict,
+            "read_evidence": self.read_evidence,
+            "run_assessment_workflow": self.run_assessment_workflow,
+            "register_test_identity": self.register_test_identity,
+            "list_test_identities": self.list_test_identities,
+            "check_test_identity": self.check_test_identity,
+            "test_authorization_boundary": self.test_authorization_boundary,
             "record_surface_coverage": self.record_surface_coverage,
             "get_coverage": self.get_coverage,
             "mcp_connect": self.mcp_connect,
@@ -592,6 +615,10 @@ class ASMToolsManager:
     async def execute(self, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool with the given arguments."""
         result = await self._execute_impl(tool_name, tool_args)
+        from app.services.agent.evidence_store import evidence_store
+        if tool_name != "read_evidence":
+            artifact_id = evidence_store(self).record("tool_output", result, success=result.get("success", False))
+            result.setdefault("artifact_id", artifact_id)
         self.record_invocation(tool_name, tool_args, result)
         try:
             from app.services.agent.palace_memory import remember_tool_result
@@ -603,6 +630,34 @@ class ASMToolsManager:
     async def _execute_impl(self, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool with the given arguments."""
         tool_args = dict(tool_args or {}) if isinstance(tool_args, dict) else {}
+
+        browser_identity = None
+        if tool_name in ("execute_browser", "execute_deep_crawl"):
+            raw = tool_args.get("args")
+            try:
+                spec = json.loads(raw) if isinstance(raw, str) and raw.lstrip().startswith("{") else None
+                browser_identity = tool_args.pop("identity", None)
+                if isinstance(spec, dict):
+                    browser_identity = spec.pop("identity", browser_identity)
+                if browser_identity is not None:
+                    if not isinstance(spec, dict):
+                        return {"success": False, "output": "Named browser identities require JSON args", "error": "invalid_identity_args"}
+                    from app.services.agent.assessment_sessions import identity_registry
+                    registry = identity_registry(self)
+                    urls = [spec.get("url") or spec.get("target")] + [a.get("url") for a in spec.get("actions", []) if isinstance(a, dict)]
+                    urls = [url for url in urls if url]
+                    if not urls:
+                        raise ValueError("Provide an explicit browser/crawl URL")
+                    session = registry.resolve(browser_identity, urls[0])
+                    for url in urls[1:]:
+                        registry.resolve(browser_identity, url)
+                    if any(k in spec for k in ("login", "cookies", "storage_state", "headers", "basic_auth")):
+                        raise ValueError("Do not mix named browser identity with other credential inputs")
+                    spec["cookies"] = session.get("cookies") or []
+                    spec["storage_state"] = session.get("storage_state") or {"cookies": session.get("cookies") or [], "origins": []}
+                    tool_args["args"] = json.dumps(spec)
+            except (ValueError, TypeError) as exc:
+                return {"success": False, "output": str(exc), "error": "invalid_identity_args"}
 
         # Normalize execute_* BEFORE the confirmation gate so approvals show
         # real CLI args and empty-{} LLM calls never reach MCP.
@@ -687,16 +742,48 @@ class ASMToolsManager:
                 from app.services.mcp.cli_results import normalize_cli_result
                 result = normalize_cli_result(tool_name, result)
 
+                from app.services.agent.evidence_store import evidence_store
+                evidence_ids = []
+                if tool_name == "execute_interactsh" and result.get("success"):
+                    try:
+                        observation = json.loads(result.get("output") or "{}")
+                        subcommand = str(tool_args.get("args") or "").split()[0]
+                        if subcommand in ("register", "poll"):
+                            evidence_ids.append(evidence_store(self).record(
+                                "oob_register" if subcommand == "register" else "oob_poll", observation))
+                    except (ValueError, IndexError):
+                        pass
+                browser_proof_allowed = True
+                if tool_name == "execute_browser":
+                    try:
+                        browser_spec = json.loads(tool_args.get("args") or "{}")
+                        actions = browser_spec if isinstance(browser_spec, list) else browser_spec.get("actions", [])
+                        browser_proof_allowed = not any(a.get("action") == "execute_js" for a in actions)
+                    except (ValueError, AttributeError):
+                        browser_proof_allowed = False
+                for observation in (result.get("browser_evidence") or []) if browser_proof_allowed else []:
+                    evidence_ids.append(evidence_store(self).record("browser_xss", observation,
+                        target=observation.get("url", ""), success=bool(observation.get("dialog_triggered"))))
                 max_chars = _tool_output_max_chars()
                 augur_block = result.get("augur")  # Augur reading: kept/dropped/next_steps/signals
                 capability_map = result.get("capability_map")  # deep_crawl / interceptor map
                 auth_session = result.get("auth_session")
+                if browser_identity is not None:
+                    if capability_map:
+                        self._identity_captures[browser_identity] = capability_map
+                    if auth_session and browser_identity != "anonymous":
+                        current = registry.identities[browser_identity]
+                        current["cookies"] = auth_session.get("cookies") or []
+                        current["storage_state"] = auth_session.get("storage_state") or {}
+                        current["authenticated"] = False  # Recheck the principal after browser changes.
+                    auth_session = None  # Named sessions never overwrite the legacy handoff.
                 if result.get("success"):
                     output = result.get("output", "")
                     payload = {
                         "success": True,
                         "output": output or "Command completed.",
                         "error": None,
+                        "evidence_ids": evidence_ids,
                     }
                     if result.get("exit_code") is not None:
                         payload["exit_code"] = result.get("exit_code")
@@ -707,9 +794,11 @@ class ASMToolsManager:
                     if auth_session:
                         payload["auth_session"] = auth_session
                     if len(output) > max_chars and not augur_block:
+                        from app.services.agent.evidence_store import evidence_store
+                        payload["artifact_id"] = evidence_store(self).record("tool_output", {"output": output})
                         payload["output"] = (
                             output[:max_chars]
-                            + f"\n\n... (truncated, total {len(result.get('output', ''))} chars)"
+                            + f"\n\n... (truncated; read_evidence({payload['artifact_id']}) for remaining output)"
                         )
                     return payload
                 else:
@@ -2101,10 +2190,18 @@ class ASMToolsManager:
             title=title or "",
             target=target or "",
             severity=severity or "info",
-            skip=bool(kwargs.get("skip_judge_gate")),
+            skip=False,
         )
         if not ok:
             return gate_msg
+
+        if str(gate_msg).startswith("verify_ok"):
+            from app.services.agent.independent_verify import _brain, _candidate, verify_receipt_key
+            receipt = self._verify_receipts[verify_receipt_key(title, target)]
+            verified = _candidate(_brain(self), receipt["candidate_id"])
+            if (verified.target != target or verified.description != description
+                    or verified.severity.lower() != severity.lower()):
+                return "Verified claim changed; resubmit the candidate and reverify before publication"
 
         # Normalize target for asset lookup: strip scheme and path
         target_clean = (target or "").strip()
@@ -2116,14 +2213,6 @@ class ASMToolsManager:
             except Exception:
                 pass
         target_clean = target_clean.rstrip("/").split("/")[0].split(":")[0] or target
-        from app.services.js_client_signing_secrets import coerce_js_secret_severity
-
-        severity = coerce_js_secret_severity(
-            title or "",
-            description or "",
-            evidence or "",
-            severity or "info",
-        )
         sev_map = {"critical": Severity.CRITICAL, "high": Severity.HIGH, "medium": Severity.MEDIUM, "low": Severity.LOW, "info": Severity.INFO}
         severity_enum = sev_map.get((severity or "info").strip().lower(), Severity.INFO)
         db = SessionLocal()
@@ -2170,7 +2259,8 @@ class ASMToolsManager:
                 affected_component=(str(component)[:1000] if component else None),
                 impact=(str(impact_text)[:5000] if impact_text else None),
                 references=parsed_refs or None,
-                metadata_={"agent_detection": agent_detection},
+                metadata_={"agent_detection": agent_detection,
+                           "verification": self._verify_receipts.get(verify_receipt_key(title, target)) if str(gate_msg).startswith("verify_ok") else None},
             )
             db.add(vuln)
             db.commit()
@@ -3236,11 +3326,11 @@ class ASMToolsManager:
         )
         return json.dumps(result, default=str)[: int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)]
 
-    async def list_captured_requests(self, limit: int = 40, **kwargs: Any) -> str:
+    async def list_captured_requests(self, limit: int = 40, identity: Optional[str] = None, **kwargs: Any) -> str:
         """Index captured XHR/API samples from the capability map for mutate_captured_request."""
         from app.services.agent.request_mutate import samples_from_map, summarize_samples
 
-        cmap = getattr(self, "_capability_map", None) or {}
+        cmap = self._identity_captures.get(identity, {}) if identity is not None else (getattr(self, "_capability_map", None) or {})
         origin = ""
         if isinstance(cmap, dict):
             origin = str(cmap.get("target") or "")
@@ -3251,6 +3341,7 @@ class ASMToolsManager:
             "ok": True,
             "count": len(rows),
             "origin": origin,
+            "identity": identity,
             "samples": rows,
             "next": (
                 "mutate_captured_request(sample_index=N, location='query|header|body_json|body_form|path|method', "
@@ -3267,6 +3358,8 @@ class ASMToolsManager:
         compare: bool = True,
         use_auth_session: bool = True,
         timeout: int = 25,
+        identity: Optional[str] = None,
+        hypothesis_id: str = "",
         **kwargs: Any,
     ) -> str:
         """Change one field on a captured request and send it (Repeater + one mutation)."""
@@ -3276,7 +3369,7 @@ class ASMToolsManager:
             samples_from_map,
         )
 
-        cmap = getattr(self, "_capability_map", None) or {}
+        cmap = self._identity_captures.get(identity, {}) if identity is not None else (getattr(self, "_capability_map", None) or {})
         origin = ""
         if isinstance(cmap, dict):
             origin = str(cmap.get("target") or "")
@@ -3302,12 +3395,20 @@ class ASMToolsManager:
         except ValueError as exc:
             return json.dumps({"ok": False, "error": str(exc)})
 
+        if identity is not None and location == "header" and field.lower() in ("cookie", "authorization"):
+            return json.dumps({"error": "Use explicit unauthenticated requests for credential-header mutations"})
+        if identity is not None:
+            for request in (baseline, mutant):
+                request["identity"] = identity
+                request["headers"] = {k: v for k, v in (request.get("headers") or {}).items()
+                                      if k.lower() not in ("cookie", "authorization")}
         if compare:
             return await self.compare_requests(
                 baseline=baseline,
                 mutant=mutant,
                 use_auth_session=use_auth_session,
                 timeout=timeout,
+                hypothesis_id=hypothesis_id,
             )
         try:
             exchange = await self._http_exchange(
@@ -3318,6 +3419,8 @@ class ASMToolsManager:
                 use_auth_session=use_auth_session,
                 timeout=timeout,
                 follow_redirects=False,
+                identity=identity,
+                hypothesis_id=hypothesis_id,
             )
             exchange.pop("_body_text", None)
             return json.dumps({
@@ -4429,42 +4532,11 @@ class ASMToolsManager:
             ),
         })
 
-        # Q15: Unauth OpenAPI account lookup — schema unauth + privilege fields
-        # and/or 401 siblings vs 200/404/500 lookup. DB down / 404 is not a fail.
-        acct_finding = any(w in text for w in [
-            "/api/auth/account", "account lookup", "user enumeration",
-            "user account statistics", "account statistics without",
-            "cwe-204", "cwe 204",
-        ])
-        acct_proof = any(w in text for w in [
-            "security: {}", "security:{}", "without authentication",
-            "is_staff", "valid_through",
-            "401 vs 500", "401 vs 200", "401 vs 404", "vs 401", "versus 401",
-            "user does not exist",
-            "bypasses the jwt", "bypasses jwt", "jwt authentication middleware",
-        ]) or ("401" in text and (
-            "500" in text or "404" in text or "is_staff" in text or "role" in text
-        ))
-        q15 = (not acct_finding) or acct_proof
-        questions.append({
-            "question": (
-                "For unauth account lookup: is security: {} / 'without authentication' "
-                "quoted with privilege fields (is_staff/role), OR is JWT skip proven by "
-                "sibling 401 vs lookup 200/404/500 — not merely 'swagger found'? A down "
-                "database or 404 'User does not exist!' is not a fail. One canary email; "
-                "do not spray. Do not claim a 200 UserAccount body unless stdout has it."
-            ),
-            "pass": q15,
-            "feedback": (
-                "PASS — schema-unauth + privilege fields or 401-vs-200/404/500 proven, "
-                "or not an account-lookup finding." if q15 else
-                "FAIL — OpenAPI without security: {} / privilege fields / 401-vs-500 "
-                "is a foothold. Quote the public operation and UserAccount fields, or "
-                "compare_requests a 401 sibling vs the lookup. Do not kill because the "
-                "DB is down, the canary is unregistered, or the lookup is 404. Do not "
-                "spray inboxes. Do not claim a 200 role body unless stdout has it."
-            ),
-        })
+        # Account lookup schema/status signals are leads, never proof or severity overrides.
+        acct_finding = any(w in text for w in ("/api/auth/account", "account lookup", "user enumeration"))
+        questions.append({"question": "Does account-lookup impact have independent execution proof?",
+                          "pass": not acct_finding,
+                          "feedback": "Schema fields and HTTP errors remain candidates; use independent verification."})
 
         # Q16: Unauth ASP.NET / API settings write — paired 401 vs 200 void.
         # GET 500 / missing read-back is not a fail. Do not require destructive overwrite.
@@ -4704,15 +4776,12 @@ class ASMToolsManager:
                 "<=8 failures have no 429/lockout. Do not hydra. Do not kill because a "
                 "valid password was not guessed."
             )
-        elif acct_finding and not acct_proof:
+        elif acct_finding:
             verdict = "IMPROVE"
             verdict_detail = (
-                "OpenAPI/Swagger without a public account operation is a foothold. "
-                "Quote security: {} / 'without authentication' and is_staff/role, or "
-                "prove JWT skip (sibling 401 vs lookup 200/404/500). A down database or "
-                "404 existence oracle is not a kill. File Critical. One canary email; "
-                "do not spray employee inboxes. Do not claim a 200 UserAccount body "
-                "unless demonstrated_chain stdout contains those bytes."
+                "Schema hints and error status differences are candidates only. "
+                "Use controlled accounts and independent execution proof. "
+                "Do not infer data access or Critical severity from 404/500 responses."
             )
         elif settings_write_finding and not settings_write_proof:
             verdict = "IMPROVE"
@@ -5618,80 +5687,152 @@ class ASMToolsManager:
             "verdict": f"CREDENTIALS FOUND: {len(hits)} valid login(s)" if hits else ("LOCKOUT DETECTED — spray aborted" if lockout_detected else "No valid credentials found"),
         }, indent=2)[:_tool_output_max_chars()]
 
-    def _resolve_request_cookies(
-        self,
-        headers: Dict[str, str],
-        cookies: Optional[Any],
-        use_auth_session: bool,
-    ) -> Dict[str, str]:
-        hdrs = dict(headers)
-        cookie_header = hdrs.get("Cookie") or hdrs.get("cookie")
-        if use_auth_session and not cookie_header:
-            sess = getattr(self, "_auth_session", None) or {}
-            jar = sess.get("cookies") or []
-            parts = []
-            for c in jar:
-                if isinstance(c, dict) and c.get("name"):
-                    parts.append(f"{c['name']}={c.get('value', '')}")
-            if isinstance(cookies, list):
-                for c in cookies:
-                    if isinstance(c, dict) and c.get("name"):
-                        parts.append(f"{c['name']}={c.get('value', '')}")
-            elif isinstance(cookies, dict):
-                for k, v in cookies.items():
-                    parts.append(f"{k}={v}")
-            if parts:
-                hdrs["Cookie"] = "; ".join(parts[:40])
-        return hdrs
+    async def run_assessment_workflow(self, steps=None, workflow_id: str = "", max_steps: int = 6) -> str:
+        """Run/resume a captured HTTP workflow with explicit identities, extraction and cleanup."""
+        from app.services.agent.assessment_workflow import run_workflow
+        return json.dumps(await run_workflow(self, steps=steps, workflow_id=workflow_id,
+                                           max_steps=max(1, min(int(max_steps), 10))))
 
-    async def _http_exchange(
-        self,
-        method: str,
-        url: str,
-        headers: Optional[Dict[str, str]] = None,
-        body: Optional[Any] = None,
-        cookies: Optional[Any] = None,
-        use_auth_session: bool = True,
-        timeout: int = 25,
-        follow_redirects: bool = True,
-    ) -> Dict[str, Any]:
-        import time as _time
-        import httpx
+    async def read_evidence(self, evidence_id: str, offset: int = 0, limit: int = 6000) -> str:
+        """Read a redacted execution artifact without losing text beyond the preview."""
+        from app.services.agent.evidence_store import evidence_store
+        return json.dumps(evidence_store(self).read(evidence_id, offset, limit))
 
-        method = (method or "GET").upper().strip()
-        from app.services.agent.request_mutate import coerce_request_body
+    async def register_test_identity(self, name: str, target: str, cookies=None, headers=None,
+                                     storage_state=None, role: str = "", tenant: str = "") -> str:
+        """Register an operator-provided test account session. Secrets are not returned."""
+        from app.services.agent.assessment_sessions import identity_registry
+        return json.dumps(identity_registry(self).register(name, target, cookies=cookies, headers=headers,
+                         storage_state=storage_state, role=role, tenant=tenant))
 
-        raw_body, hdrs = coerce_request_body(
-            {"body": body, "headers": headers or {}},
-            headers or {},
+    async def list_test_identities(self) -> str:
+        """List test identities and their verified login state without credentials."""
+        from app.services.agent.assessment_sessions import identity_registry
+        registry = identity_registry(self)
+        return json.dumps([registry.describe(name) for name in registry.identities])
+
+    async def check_test_identity(self, identity: str, url: str, field: str, expected: Any) -> str:
+        """Verify an account using a known identity endpoint and exact JSON principal field."""
+        from app.services.agent.assessment_sessions import identity_registry
+        registry = identity_registry(self)
+        session = registry.resolve(identity, url)
+        session["authenticated"] = False
+        exchange = await self._http_exchange("GET", url, identity=identity, follow_redirects=False)
+        try:
+            data = json.loads(exchange["_body_text"])
+            ok = (exchange["response"]["status"] == 200 and isinstance(data, dict)
+                  and field in data and expected not in (None, "") and data[field] == expected)
+        except (ValueError, TypeError):
+            ok = False
+        session["authenticated"] = bool(ok)
+        if ok:
+            session["identity_check"] = {"url": url, "field": field, "expected": expected}
+        return json.dumps({"identity": identity, "authenticated": bool(ok), "evidence_id": exchange["evidence_id"]})
+
+    async def test_authorization_boundary(self, url: str, owner_identity: str, other_identity: str,
+                                           object_field: str, hypothesis_id: str = "") -> str:
+        """Replay a known protected test object with its owner and a different test identity.
+
+        The operator must establish that this object is private. A match is a candidate,
+        not automatic proof that a deliberately public object violates policy.
+        """
+        from app.services.agent.assessment_sessions import identity_registry
+        registry = identity_registry(self)
+        if owner_identity == other_identity or owner_identity == "anonymous":
+            raise ValueError("Use an owner and a distinct second identity")
+        for name in (owner_identity, other_identity):
+            session = registry.resolve(name, url)
+            if name != "anonymous":
+                check = session.get("identity_check")
+                if not check:
+                    raise ValueError(f"Verify {name} with check_test_identity first")
+                result = json.loads(await self.check_test_identity(name, **check))
+                if not result["authenticated"]:
+                    return json.dumps({"verdict": "blocked", "reason": f"Session expired for {name}"})
+        return await self.compare_requests(
+            {"method": "GET", "url": url, "identity": owner_identity},
+            {"method": "GET", "url": url, "identity": other_identity},
+            interest_fields=[object_field], use_auth_session=False, hypothesis_id=hypothesis_id,
         )
-        hdrs = self._resolve_request_cookies(hdrs, cookies, use_auth_session)
+
+    def _resolve_request_cookies(self, headers, cookies, use_auth_session, url: str = ""):
+        # Compatibility helper; the live transport uses the jar itself for redirects.
+        from app.services.agent.assessment_sessions import cookie_jar
+        stored = (getattr(self, "_auth_session", None) or {}).get("cookies", []) if use_auth_session else []
+        request = httpx.Request("GET", url, headers=headers)
+        if "cookie" not in request.headers:
+            cookie_jar(url, stored, cookies).set_cookie_header(request)
+        return dict(request.headers)
+
+    async def _http_exchange(self, method: str, url: str, headers=None, body=None, cookies=None,
+                             use_auth_session: bool = True, timeout: int = 25,
+                             follow_redirects: bool = True, identity: Optional[str] = None,
+                             hypothesis_id: str = "") -> Dict[str, Any]:
+        import time as _time
+        from app.services.agent.assessment_sessions import cookie_jar, identity_registry
+        from app.services.agent.evidence_store import evidence_store, verification_run, origin
+        from app.services.agent.request_mutate import coerce_request_body
+        origin(url)
+        method = (method or "GET").upper().strip()
+        raw_body, hdrs = coerce_request_body({"body": body, "headers": headers or {}}, headers or {})
+        session = {}
+        if identity is not None:
+            session = identity_registry(self).resolve(identity, url)
+            if cookies or any(k.lower() in ("cookie", "authorization") for k in hdrs):
+                raise ValueError("Named identities cannot be combined with credential overrides")
+            hdrs = {**session.get("headers", {}), **hdrs}
+        elif use_auth_session:
+            session = getattr(self, "_auth_session", None) or {}
+        label = identity or ("legacy" if session else "anonymous")
+        stored = session.get("cookies", [])
+        if identity is None and session:
+            stored = [c for c in stored if isinstance(c, dict) and c.get("domain")]
+        jar = cookie_jar(url, stored, cookies)
+        run = verification_run.get()
+        if run:
+            hdrs["X-Aegis-Verify"] = run.nonce
         start = _time.monotonic()
-        async with httpx.AsyncClient(
-            follow_redirects=follow_redirects, verify=False, timeout=timeout
-        ) as client:
-            resp = await client.request(method, url, headers=hdrs, content=raw_body)
-        elapsed_s = round(_time.monotonic() - start, 3)
+        # Follow redirects manually: retain RFC cookie scope and never forward an
+        # explicit Cookie/Authorization header to a different origin.
+        async with httpx.AsyncClient(cookies=jar, follow_redirects=False, verify=False, timeout=timeout) as client:
+            req = client.build_request(method, url, headers=hdrs, content=raw_body)
+            if not any(k.lower() == "cookie" for k in hdrs):
+                req.headers.pop("cookie", None)
+                jar.set_cookie_header(req)
+            for hop in range(11):
+                resp = await client.send(req)
+                jar.extract_cookies(resp)
+                if not follow_redirects or not resp.next_request:
+                    break
+                if hop == 10:
+                    raise ValueError("Too many redirects")
+                nxt = resp.next_request
+                if origin(str(nxt.url)) != origin(str(req.url)):
+                    nxt.headers.pop("authorization", None)
+                    if identity not in (None, "anonymous"):
+                        raise ValueError("Named identity redirect left its registered origin")
+                nxt.headers.pop("cookie", None)
+                jar.set_cookie_header(nxt)
+                req = nxt
         body_text = resp.text or ""
-        return {
-            "request": {
-                "method": method,
-                "url": url,
-                "headers": {
-                    k: ("***" if k.lower() in ("authorization", "cookie") else v)
-                    for k, v in hdrs.items()
-                },
-                "body_len": len(raw_body or ""),
-            },
-            "response": {
-                "status": resp.status_code,
-                "headers": dict(list(resp.headers.items())[:40]),
-                "body_preview": body_text[:4000],
-                "length": len(resp.content or b""),
-                "elapsed_s": elapsed_s,
-            },
-            "_body_text": body_text,
+        if resp.status_code == 401:
+            session["authenticated"] = False
+        exchange = {
+            "request": {"method": method, "url": url, "identity": label,
+                        "identity_verified": bool(session.get("authenticated")),
+                        "principal_id": session.get("identity_check", {}).get("expected"),
+                        "headers": dict(req.headers), "body": raw_body or "", "body_len": len(raw_body or "")},
+            "response": {"status": resp.status_code, "url": str(resp.url), "headers": dict(resp.headers),
+                         "body": body_text, "body_preview": body_text[:4000], "length": len(resp.content),
+                         "elapsed_s": round(_time.monotonic() - start, 3)},
         }
+        artifact_id = evidence_store(self).record("http_exchange", exchange, target=url, identity=label,
+                                                  hypothesis_id=hypothesis_id, success=resp.status_code < 400)
+        from app.services.agent.evidence_store import redact_artifact
+        public = redact_artifact(exchange)
+        public["response"].pop("body", None)
+        public["request"].pop("body", None)
+        return {**public, "evidence_id": artifact_id, "_body_text": body_text}
 
     async def replay_http_request(
         self,
@@ -5702,6 +5843,8 @@ class ASMToolsManager:
         cookies: Optional[Any] = None,
         use_auth_session: bool = True,
         timeout: int = 25,
+        identity: Optional[str] = None,
+        hypothesis_id: str = "",
     ) -> str:
         """Replay a captured HTTP request (tester-style request tampering).
 
@@ -5743,6 +5886,8 @@ class ASMToolsManager:
                 cookies=cookies,
                 use_auth_session=use_auth_session,
                 timeout=timeout,
+                identity=identity,
+                hypothesis_id=hypothesis_id,
             )
             note = (
                 "Use this to tamper method/headers/body on captured APIs. "
@@ -5754,6 +5899,7 @@ class ASMToolsManager:
             if not use_auth_session:
                 note = "use_auth_session=false (unauth gold-bar pair). " + note
             out = {
+                "evidence_id": exchange["evidence_id"],
                 "request": exchange["request"],
                 "response": exchange["response"],
                 "note": note,
@@ -5821,6 +5967,7 @@ class ASMToolsManager:
                 "headers": hdrs,
                 "body": raw_body,
                 "cookies": spec.get("cookies"),
+                "identity": spec.get("identity"),
             }
 
         try:
@@ -5846,6 +5993,8 @@ class ASMToolsManager:
                 headers=b["headers"],
                 body=b["body"],
                 cookies=b["cookies"],
+                identity=b.get("identity"),
+                hypothesis_id=hypothesis_id or "",
                 use_auth_session=use_auth_session,
                 timeout=timeout,
                 follow_redirects=False,
@@ -5856,6 +6005,8 @@ class ASMToolsManager:
                 headers=m["headers"],
                 body=m["body"],
                 cookies=m["cookies"],
+                identity=m.get("identity"),
+                hypothesis_id=hypothesis_id or "",
                 use_auth_session=use_auth_session,
                 timeout=timeout,
                 follow_redirects=False,
@@ -5984,23 +6135,10 @@ class ASMToolsManager:
             "notes": rewrite_notes or None,
             "proof": proof,
             "guidance": (
-                "TIME_BASED_INJECTION_CANDIDATE → mutant took ≥1.5s longer (SLEEP/WAIT). "
-                "Confirm with a second delay (SLEEP(0) vs SLEEP(2) vs SLEEP(4)); "
-                "then execute_sqlmap --technique=BT and create_finding with the timing table. "
-                "LIKELY_IMPACT / MUTANT_BYPASS_CANDIDATE → update_hypothesis(status='proven') "
-                "with evidence, validate_finding, create_finding, then queue_finding_followups. "
-                "aspnet_void_unauth_write (sibling 401 vs SaveSettings 200 Content-Length: 0) "
-                "is SUBMIT High — GET GetSettings 500 is not a kill; one canary key; "
-                "use_auth_session=false. "
-                "email_change_unauth (set_password 401 vs reset_email 204 canary) is SUBMIT "
-                "High — one aegis-ato-canary; do not complete ATO. "
-                "auth_header_skip (no-header 200/400 vs Bearer aegis-invalid 401) is SUBMIT High. "
-                "socketio_url_key (anonymous get_stream url_key) is SUBMIT High — no video dump, "
-                "no null crash loops. "
-                "ml_rbac_bypass (low-priv POST /api/v1/train 200/202) is SUBMIT High — do not "
-                "DELETE production models. "
-                "NO_MATERIAL_DIFF / MUTANT_DENIED → update_hypothesis(status='killed') unless "
-                "another mutation remains. Never report on status-200 alone."
+                "All comparison verdicts are candidate signals. Status differences, empty writes, "
+                "errors, and matching public bodies do not prove impact. Cite evidence_id from "
+                "each exchange, verify the intended boundary, and submit_finding_candidate. "
+                "Only independent verification can confirm a finding. Untested mutations stay open."
             ),
         }
 
@@ -6012,19 +6150,7 @@ class ASMToolsManager:
                     update_hypothesis,
                 )
                 brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
-                status = (
-                    "proven"
-                    if verdict in (
-                        "LIKELY_IMPACT",
-                        "MUTANT_BYPASS_CANDIDATE",
-                        "TIME_BASED_INJECTION_CANDIDATE",
-                    )
-                    else (
-                        "killed"
-                        if verdict in ("NO_MATERIAL_DIFF", "MUTANT_DENIED")
-                        else "in_progress"
-                    )
-                )
+                status = "in_progress"  # A heuristic comparison cannot close the hypothesis.
                 evidence = (
                     f"compare_requests verdict={verdict}; signals={signals}; "
                     f"status {base_ex['response']['status']}→{mut_ex['response']['status']}; "
@@ -6097,6 +6223,7 @@ class ASMToolsManager:
         hypothesis_id: str,
         status: str,
         evidence: str = "",
+        evidence_ids: Optional[List[str]] = None,
     ) -> str:
         """Mark a hypothesis open|in_progress|proven|killed with evidence."""
         from app.services.agent.engagement_brain import (
@@ -6110,6 +6237,15 @@ class ASMToolsManager:
                 {"error": "status must be one of open|in_progress|proven|killed"},
                 indent=2,
             )
+        if status == "proven":
+            return json.dumps({"error": "Independent verification alone marks a hypothesis proven"})
+        if status == "killed":
+            from app.services.agent.evidence_store import evidence_store
+            rows = [evidence_store(self).records.get(i) for i in (evidence_ids or [])]
+            if not rows or not evidence or any(not r or r["kind"] != "http_exchange"
+                    or r["hypothesis_id"] != hypothesis_id
+                    or r["payload"].get("response", {}).get("status", 500) >= 500 for r in rows):
+                return json.dumps({"error": "Killing a hypothesis requires its own HTTP evidence IDs"})
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         hyp = _update(brain, hypothesis_id, status=status, evidence=evidence)
         if not hyp:
@@ -6623,6 +6759,8 @@ class ASMToolsManager:
         evidence: str = "",
         summary: str = "",
         nonce_observed: bool = False,
+        evidence_ids: Optional[List[str]] = None,
+        proof: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Independent verifier issues confirmed|refuted|inconclusive for a candidate."""
         from app.services.agent.independent_verify import apply_verdict
@@ -6634,12 +6772,14 @@ class ASMToolsManager:
             evidence=evidence or "",
             summary=summary or "",
             nonce_observed=bool(nonce_observed),
+            evidence_ids=evidence_ids,
+            proof=proof,
         )
         if not cand:
             return json.dumps(
                 {
                     "error": (
-                        "unknown candidate or invalid verdict "
+                        "active verifier context, current candidate, and valid verdict required "
                         "(need confirmed|refuted|inconclusive)"
                     ),
                     "candidate_id": candidate_id,

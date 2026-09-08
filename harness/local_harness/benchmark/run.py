@@ -74,6 +74,11 @@ def _aggregate_findings_metrics(results: Dict[str, JudgeResult]) -> Dict[str, fl
         "precision": round(precision, 4),
         "recall": round(recall, 4),
         "f1": round(f1, 4),
+        "verified_true_positives": sum(r.verified_true_positive_count for r in results.values()),
+        "verified_false_positives": sum(r.verified_false_positive_count for r in results.values()),
+        "verified_recall": round(sum(r.verified_true_positive_count for r in results.values()) / max(1, tp + fn), 4),
+        "verified_precision": round(sum(r.verified_true_positive_count for r in results.values()) /
+            max(1, sum(r.verified_true_positive_count + r.verified_false_positive_count for r in results.values())), 4),
     }
 
 
@@ -308,6 +313,10 @@ def _exit_code(report: dict, args: argparse.Namespace) -> int:
     if args.fail_on_scan_error and report["scan_errors"]:
         print(f"\n[gate] scan errors present → exit 3")
         return 3
+    threshold = getattr(args, "min_verified_recall", None)
+    if threshold is not None and "findings" in agg and agg["findings"]["verified_recall"] < threshold:
+        print("\n[gate] verified recall below --min-verified-recall → exit 2")
+        return 2
     if args.min_recall is not None and "findings" in agg:
         recall = agg["findings"]["recall"]
         if recall < args.min_recall:
@@ -358,6 +367,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--setup", action="store_true",
         help="Stand each target up (docker) before scanning and tear it down after",
     )
+    parser.add_argument("--min-verified-recall", type=float, default=None, help="CI gate on verified findings recall")
     parser.add_argument(
         "--min-recall", type=float, default=None,
         help="CI gate: exit 2 if findings-mode recall is below this (0-1)",

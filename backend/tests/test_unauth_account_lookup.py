@@ -96,19 +96,19 @@ def test_spray_blocks_admin_probe_allows_canary():
     assert note and "rewrote" in note
 
 
-def test_404_oracle_and_schema_are_proof():
+def test_schema_and_error_statuses_are_not_execution_proof():
     schema = (
         "GET /api/auth/account/ security: {} without authentication "
         "UserAccount is_staff role valid_through"
     )
     assert is_account_lookup_finding(schema)
-    assert has_account_lookup_proof(schema)
+    assert not has_account_lookup_proof(schema)
     jwt_skip = (
         "Unauthenticated user enumeration via /api/auth/account/ "
         "profile 401 vs lookup 404 User does not exist"
     )
-    assert has_account_lookup_proof(jwt_skip)
-    assert allows_critical_ra(jwt_skip)
+    assert not has_account_lookup_proof(jwt_skip)
+    assert not allows_critical_ra(jwt_skip)
     assert not has_account_lookup_proof("swagger.json found on the host")
 
 
@@ -131,10 +131,9 @@ def test_do_not_infer_200_useraccount_body():
     assert not inferred_role_payload(oracle)
 
 
-def test_marcus_allows_critical_for_account_lookup_not_generic_ssrf():
+def test_marcus_requires_actual_critical_impact_for_account_lookup():
     parsed, gaps = validate_risk_assessment(_ra())
-    assert gaps == []
-    assert parsed["confirmed_severity"] == "critical"
+    assert any("Critical requires" in g for g in gaps)
 
     signup = _ra(
         ticket_title="Open self-registration on marketing wiki",

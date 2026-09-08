@@ -339,7 +339,7 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
     }
 
 
-def format_tester_loop_for_prompt(progress: Dict[str, Any]) -> str:
+def format_tester_loop_for_prompt(progress: Dict[str, Any], state: Optional[Dict[str, Any]] = None) -> str:
     if not progress or not progress.get("is_web"):
         return ""
     if progress.get("cve_applicability_only"):

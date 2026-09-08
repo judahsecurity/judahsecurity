@@ -56,52 +56,11 @@ def test_info_skips_gate():
     assert msg == "gate_skipped"
 
 
-def test_writeup_guidance_requires_privileged_impact():
+def test_writeup_guidance_uses_shared_proof_policy():
+    from app.services.agent.proof_policy import PROOF_GUIDANCE
     g = _load()
-    text = g.FINDING_WRITEUP_GUIDANCE.lower()
-    assert "demonstrated-compromise" in text
-    assert "assess_finding_risk" in text or "marcus" in text
-    assert "why_not_higher" in text or "risk assessment" in text
-    assert "login" in text
-    assert "impact" in text
-    assert "remediation" in text
-    assert "elasticsearch" in text
-    assert "aegis_test_index" in text
-    assert "painless" in text
-    assert "9264" in text
-    assert "duckdb" in text
-    assert "no such file" in text
-    assert "mass assignment" in text or "readonly" in text
-    assert "cwe-915" in text or "api/schema" in text
-    assert "cors" in text
-    assert "weborigins" in text or "keycloak" in text
-    assert "credentials" in text
-    assert "admin-cli" in text or "cwe-307" in text
-    assert "password grant" in text or "invalid_grant" in text
-    assert "cwe-204" in text or "/api/auth/account" in text
-    assert "is_staff" in text or "user account" in text
-    assert "404" in text or "existence oracle" in text
-    assert "do not claim" in text or "stdout" in text
-    assert "critical" in text
-    assert "savesettings" in text or "missing [authorize]" in text or "cwe-306" in text
-    assert "void" in text or "content-length" in text
-    assert "arangodb" in text
-    assert "wiki" in text
-    assert "binary" in text
-    assert "azurecr" in text or "anonymous pull" in text
-    assert "anonymouspullenabled" in text or "oauth2" in text
-    assert "package-lock" in text or "ghp_" in text
-    assert "cwe-321" in text
-    assert "interactsh" in text or "payload_url" in text
-    review = g.FINDING_REVIEW_GUIDANCE.lower()
-    assert "verdict" in review
-    assert "retest" in review
-    assert "do not re-probe" in review or "deny-check" in review
-    assert "savesettings" in review or "void 200" in review
-    assert "account" in review or "is_staff" in review
-    assert "404" in review or "existence oracle" in review
-    assert "cwe-321" in review or "hmac" in review
-    assert "interactsh" in review or "payload_url" in review
+    assert g.FINDING_WRITEUP_GUIDANCE.startswith(PROOF_GUIDANCE)
+    assert g.FINDING_REVIEW_GUIDANCE.startswith(PROOF_GUIDANCE)
 
 
 def test_acr_anonymous_pull_signals():

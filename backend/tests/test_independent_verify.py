@@ -138,8 +138,8 @@ def test_medium_plus_requires_verify_receipt_when_flag_set():
     ok, msg = finding_publish_allowed(
         tm, title="IDOR /api/users", target="https://app.example.com", severity="high"
     )
-    assert ok is True
-    assert msg.startswith("verify_ok:")
+    assert ok is False
+    assert "Candidate changed" in msg
 
 
 def test_legacy_judge_gate_when_no_fireteam():
@@ -153,7 +153,7 @@ def test_legacy_judge_gate_when_no_fireteam():
         tm, title="IDOR /api/users", target="https://app.example.com", severity="high"
     )
     assert ok is False
-    assert "JUDGE GATE" in msg
+    assert "INDEPENDENT VERIFY GATE" in msg
 
 
 def test_info_findings_skip_gate():
@@ -169,7 +169,7 @@ def test_info_findings_skip_gate():
     assert ok is True
 
 
-def test_apply_verdict_issues_receipt():
+def test_apply_verdict_requires_active_verifier_execution():
     brain = EngagementBrain(target="https://app.example.com")
     cand = submit_candidate(
         brain,
@@ -188,14 +188,13 @@ def test_apply_verdict_issues_receipt():
         verdict="confirmed",
         evidence="reproduced other-tenant fields",
     )
-    assert updated is not None
-    assert updated.status == "confirmed"
+    assert updated is None
     ok, _ = check_verify_receipt(
         tm._verify_receipts,
         title="Host header bypass",
         target="https://app.example.com",
     )
-    assert ok is True
+    assert ok is False
 
 
 def test_ingest_lifts_hunter_key_findings():

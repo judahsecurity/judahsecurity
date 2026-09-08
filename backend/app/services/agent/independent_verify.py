@@ -35,6 +35,7 @@ class FindingCandidate:
     claimed_request: str = ""
     specialist: str = ""
     nonce: str = ""
+    revision: int = 1
     status: str = "pending"  # pending | confirmed | refuted | inconclusive
     verifier_evidence: str = ""
     verifier_summary: str = ""
@@ -53,7 +54,7 @@ def candidate_from_dict(raw: Optional[Dict[str, Any]]) -> Optional[FindingCandid
 
 
 def candidate_id(title: str, target: str = "") -> str:
-    blob = f"{(title or '').strip().lower()}|{(target or '').strip().lower()}"
+    blob = f"{(title or '').strip().lower()}|{(target or '').strip()}"
     return hashlib.sha1(blob.encode()).hexdigest()[:12]
 
 
@@ -62,9 +63,8 @@ def new_nonce() -> str:
 
 
 def verify_receipt_key(title: str, target: str = "") -> str:
-    from app.services.agent.finding_gate import receipt_key
-
-    return "iv:" + receipt_key(title, target)
+    blob = f"{(title or '').strip().lower()}|{(target or '').strip()}"
+    return "iv:" + hashlib.sha256(blob.encode()).hexdigest()[:24]
 
 
 def record_verify_receipt(
@@ -77,6 +77,9 @@ def record_verify_receipt(
     evidence: str = "",
     nonce: str = "",
     nonce_observed: bool = False,
+    evidence_ids: Optional[List[str]] = None,
+    run_id: str = "",
+    revision: int = 0,
 ) -> str:
     key = verify_receipt_key(title, target)
     store[key] = {
@@ -86,6 +89,9 @@ def record_verify_receipt(
         "candidate_id": candidate_id,
         "nonce": nonce,
         "nonce_observed": bool(nonce_observed),
+        "evidence_ids": list(evidence_ids or []),
+        "run_id": run_id,
+        "revision": revision,
         "evidence": (evidence or "")[:2000],
         "ts": time.time(),
     }
@@ -101,31 +107,13 @@ def finding_publish_allowed(
     skip: bool = False,
 ) -> tuple[bool, str]:
     """Gate create_finding. Independent verify wins once fireteam/candidates are in play."""
-    if skip:
-        return True, "gate_skipped"
-    # Benchmark baseline: allow disabling the verify/coverage discipline so the
-    # harness can measure the agent WITH vs WITHOUT the Glasswing contract.
-    if os.environ.get("AEGIS_DISABLE_VERIFY_GATE", "").strip().lower() in ("1", "true", "yes"):
-        return True, "gate_disabled_env"
-    from app.services.agent.finding_gate import consume_or_check_receipt, severity_requires_gate
-
+    from app.services.agent.finding_gate import severity_requires_gate
     if not severity_requires_gate(severity):
         return True, "info_ok"
-    brain_raw = getattr(tools_manager, "_engagement_brain", None) or {}
-    has_candidates = bool(isinstance(brain_raw, dict) and brain_raw.get("candidates"))
-    require_iv = bool(getattr(tools_manager, "_require_independent_verify", False)) or has_candidates
-    if require_iv:
-        return check_verify_receipt(
-            getattr(tools_manager, "_verify_receipts", None),
-            title=title or "",
-            target=target or "",
-        )
-    return consume_or_check_receipt(
-        getattr(tools_manager, "_finding_receipts", {}) or {},
-        title=title or "",
-        target=target,
-        severity=severity or "info",
-        require=True,
+    # Tool arguments and benchmark flags must not bypass production publication.
+    return check_verify_receipt(
+        getattr(tools_manager, "_verify_receipts", None), title=title or "",
+        target=target or "", tools_manager=tools_manager,
     )
 
 
@@ -134,6 +122,7 @@ def check_verify_receipt(
     *,
     title: str,
     target: str,
+    tools_manager: Any = None,
 ) -> tuple[bool, str]:
     store = store or {}
     key = verify_receipt_key(title, target)
@@ -150,7 +139,17 @@ def check_verify_receipt(
             f"INDEPENDENT VERIFY GATE: candidate verdict={receipt.get('verdict')} "
             "(need confirmed). Do not create_finding."
         )
-    return True, f"verify_ok:{key}"
+    if tools_manager is None:
+        return False, "Execution evidence store required"
+    candidate = _candidate(_brain(tools_manager), receipt.get("candidate_id", ""))
+    if not candidate or candidate.status != "confirmed" or candidate.revision != receipt.get("revision"):
+        return False, "Candidate changed or was refuted; reverify before publication"
+    from app.services.agent.evidence_store import evidence_store
+    ok, why = evidence_store(tools_manager).validate(
+        receipt.get("evidence_ids") or [], candidate_id=candidate.id,
+        revision=candidate.revision, run_id=receipt.get("run_id", ""), target=candidate.target,
+    )
+    return (True, f"verify_ok:{key}") if ok else (False, why)
 
 
 def parse_verdict_from_text(text: str) -> str:
@@ -237,7 +236,19 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         f"Description (untrusted):\n{(candidate.description or '')[:1500]}\n\n"
         f"{threat_slice}\n"
         f"{class_addendum}\n"
-        "When done, call record_verify_verdict(candidate_id, verdict, evidence) "
+        f"For XSS use execute_browser check_xss with alert('aegis-verify-{candidate.nonce}'); "
+        "proof {kind: browser_xss, artifact_id} requires the fresh canary dialog, not reflection. "
+        "For blind sinks use fresh execute_interactsh register, replay_http_request to plant, then poll; "
+        "proof {kind: oob_callback, register_id, plant_id, poll_id} ties the callback to the sink. "
+        "For HTTP evidence use replay_http_request or compare_requests; each response includes evidence_id. "
+        "Other scanner output is a lead and cannot issue a confirmation receipt. "
+        "Read complete observations with read_evidence(evidence_id, offset). "
+        "When done, call record_verify_verdict(candidate_id, verdict, evidence, evidence_ids, proof) "
+        "with IDs from YOUR HTTP exchanges and a structured proof: "
+        "response_match {kind, artifact_id, contains} for exposure; "
+        "authorization {kind, baseline_id, mutant_id, field} for cross-identity JSON object access; "
+        "state_change {kind, write_id, read_id, field, value} for persisted canary changes. "
+        "field is a top-level JSON field. No body/schema/version alone proves authorization or mass assignment. "
         "with verdict confirmed|refuted|inconclusive, then done=true. "
         "confirmed = you reproduced impact with your own request/response. "
         "Version-in-range CVE applicability: confirmed if your GET still shows the "
@@ -274,28 +285,21 @@ async def run_independent_verifiers(
     async def _one(cand: FindingCandidate) -> Dict[str, Any]:
         async with sem:
             mission = verifier_mission(cand, threat_slice=threat_slice)
-            report = await _run_specialist(
-                profile,
-                mission,
-                target_list or ([cand.target] if cand.target else []),
-                llm,
-                tools_manager,
-            )
-            # If the agent forgot record_verify_verdict, parse the report.
-            brain = _brain(tools_manager)
-            live = _candidate(brain, cand.id)
-            if live and live.status == "pending":
-                verdict = parse_verdict_from_text(
-                    " ".join([report.summary or ""] + list(report.key_findings or []))
-                )
-                apply_verdict(
-                    tools_manager,
-                    candidate_id=cand.id,
-                    verdict=verdict,
-                    evidence=(report.summary or "")[:2000],
-                    summary=report.summary or "",
+            from app.services.agent.evidence_store import VerificationRun, verification_run
+            run = VerificationRun(uuid.uuid4().hex, cand.id, cand.revision, cand.nonce)
+            token = verification_run.set(run)
+            try:
+                report = await _run_specialist(
+                    profile, mission, [cand.target], llm, tools_manager,
                 )
                 live = _candidate(_brain(tools_manager), cand.id)
+                if live and live.status == "pending":
+                    # Narrative text cannot promote a candidate to confirmed.
+                    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                                  evidence="Verifier did not record a supported verdict")
+                    live = _candidate(_brain(tools_manager), cand.id)
+            finally:
+                verification_run.reset(token)
             return {
                 "candidate_id": cand.id,
                 "title": cand.title,
@@ -331,6 +335,8 @@ def apply_verdict(
     evidence: str = "",
     summary: str = "",
     nonce_observed: bool = False,
+    evidence_ids: Optional[List[str]] = None,
+    proof: Optional[Dict[str, Any]] = None,
 ) -> Optional[FindingCandidate]:
     from app.services.agent.engagement_brain import engagement_brain_from_dict
 
@@ -338,13 +344,30 @@ def apply_verdict(
     if verdict not in ("confirmed", "refuted", "inconclusive"):
         return None
     brain = engagement_brain_from_dict(getattr(tools_manager, "_engagement_brain", None))
+    from app.services.agent.evidence_store import evidence_store, verification_run
+    run = verification_run.get()
+    if run is None or run.candidate_id != candidate_id:
+        return None
     cand = None
     updated: List[Dict[str, Any]] = []
     for raw in brain.candidates or []:
         c = raw if isinstance(raw, FindingCandidate) else candidate_from_dict(raw)
         if not c:
             continue
-        if c.id == candidate_id or c.title == candidate_id:
+        if c.id == candidate_id:
+            if c.revision != run.revision:
+                return None
+            if verdict == "confirmed":
+                ok, why = evidence_store(tools_manager).validate(
+                    evidence_ids or [], candidate_id=c.id, revision=c.revision,
+                    run_id=run.id, target=c.target,
+                )
+                from app.services.agent.proof_policy import validate_proof
+                if ok:
+                    ok, why = validate_proof(evidence_store(tools_manager), c, proof or {}, evidence_ids or [])
+                if not ok or not evidence.strip():
+                    verdict = "inconclusive"
+                    summary = why or "A supported impact explanation is required"
             c.status = verdict
             c.verifier_evidence = (evidence or "")[:2000]
             c.verifier_summary = (summary or evidence or "")[:2000]
@@ -354,10 +377,14 @@ def apply_verdict(
     if not cand:
         return None
     brain.candidates = updated
+    if cand.hypothesis_id and verdict == "confirmed":
+        from app.services.agent.engagement_brain import update_hypothesis
+        update_hypothesis(brain, cand.hypothesis_id, status="proven", evidence=evidence)
     tools_manager._engagement_brain = brain.to_dict()
 
     if not hasattr(tools_manager, "_verify_receipts") or tools_manager._verify_receipts is None:
         tools_manager._verify_receipts = {}
+    tools_manager._verify_receipts.pop(verify_receipt_key(cand.title, cand.target), None)
     if verdict == "confirmed":
         record_verify_receipt(
             tools_manager._verify_receipts,
@@ -367,7 +394,10 @@ def apply_verdict(
             candidate_id=cand.id,
             evidence=evidence,
             nonce=cand.nonce,
-            nonce_observed=nonce_observed,
+            nonce_observed=True,
+            evidence_ids=evidence_ids,
+            run_id=run.id,
+            revision=cand.revision,
         )
     return cand
 
@@ -392,8 +422,21 @@ def submit_candidate(
         if c:
             existing.append(c)
             if c.id == cid:
-                if evidence and evidence not in (c.evidence or ""):
-                    c.evidence = ((c.evidence or "") + "\n" + evidence)[:4000]
+                changed = any(value and value != getattr(c, name) for name, value in (
+                    ("evidence", evidence), ("description", description), ("severity", severity),
+                    ("claimed_request", claimed_request),
+                ))
+                if changed:
+                    c.evidence = evidence[:4000] if evidence else c.evidence
+                    c.description = description or c.description
+                    c.severity = severity or c.severity
+                    c.claimed_request = claimed_request[:2000] or c.claimed_request
+                    c.revision += 1
+                    c.status = "pending"
+                    c.nonce = new_nonce()
+                    c.verifier_evidence = c.verifier_summary = c.verified_at = ""
+                brain.candidates = [c.to_dict() if (r.get("id") if isinstance(r, dict) else r.id) == cid
+                                    else (r if isinstance(r, dict) else r.to_dict()) for r in brain.candidates]
                 return c
     cand = FindingCandidate(
         id=cid,

@@ -875,6 +875,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         allowed_tools=[
             "compare_requests",
             "execute_curl",
+            "execute_browser",
+            "execute_interactsh",
             "execute_httpx",
             "scan_js_urls_for_secrets",
             "replay_http_request",
@@ -885,15 +887,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ],
         max_iterations=6,
         system_prompt_suffix=(
-            "You did not see the hunter's chain. Re-derive with your own requests. "
-            "CWE-321 HMAC/ICS in JS: re-run scan_js_urls_for_secrets on the cited bundle; "
-            "confirmed if client_signing_findings reconstructs the signing key or MQTT/RFID "
-            "creds. Do not require JWT mint or broker login. "
-            "Unauth account lookup: confirmed on schema security: {} + is_staff/role OR "
-            "sibling 401 vs lookup 200/404/500 with aegis-enum-canary@example.invalid. "
-            "404/500 is confirmed, not refuted. Do not spray emails. "
-            "Call record_verify_verdict only. Never create_finding or "
-            "submit_finding_candidate. Never call get_engagement_brain."
+            "Re-derive with your own recorded requests. Schema hints and errors are candidates only. "
+            "Use fresh evidence_ids and structured proof; do not trust scanner labels. "
+            "Call record_verify_verdict only; never create_finding or submit_finding_candidate."
         ),
     ),
 ]
@@ -917,6 +913,7 @@ class ToolInvocation:
     success: bool
     summary: str
     error: Optional[str] = None
+    evidence_ids: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -934,6 +931,7 @@ class SpecialistReport:
     evidence: str = ""
     spawn: list[str] = field(default_factory=list)
     rewrite_hint: str = ""
+    hypothesis_results: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -948,6 +946,7 @@ class FireteamResult:
 
 def _fill_summary_contract(report: SpecialistReport, payload: dict) -> None:
     """Copy executor summary-contract fields off a done JSON payload."""
+    report.hypothesis_results = [r for r in payload.get("hypothesis_results", []) if isinstance(r, dict)][:24]
     verdict = str(payload.get("verdict") or "").strip().lower()
     if verdict:
         report.verdict = verdict
@@ -1020,6 +1019,7 @@ INSTRUCTIONS:
      "key_findings": ["bullet", "bullet", "bullet"],
      "verdict": "proven|killed|blocked|retry|inconclusive",
      "hypothesis_ids": ["id from the directive"],
+     "hypothesis_results": [{{"hypothesis_id": "one id", "verdict": "killed|blocked|inconclusive|retry", "evidence_ids": ["HTTP evidence_id"], "evidence": "what this specific test established"}}],
      "evidence": "tool-backed proof only — quote tool output, never imagined",
      "spawn": ["optional specialist names to enqueue, e.g. graphql_api"],
      "rewrite_hint": "if retry: what to try differently"
@@ -1029,7 +1029,8 @@ INSTRUCTIONS:
    Write demonstrated-compromise reports (description + impact + assets + remediation),
    not 'login worked' or template-match-only.
 7. Do not exceed {max_iter} iterations. If unsure, finish with done=true.
-8. Imagining tool output is a failure (soliloquy). If you did not call a tool, verdict=retry.
+8. Return a separate hypothesis_results entry per test; omitted tests stay open. Pass hypothesis_id to replay_http_request/compare_requests. Only independent verification marks proven.
+9. Imagining tool output is a failure (soliloquy). If you did not call a tool, verdict=retry.
 9. save_note(category='hunt') with URL/param/hypothesis/next mutation — not raw httpx.
 
 {suffix}
@@ -1063,6 +1064,8 @@ async def _run_specialist(
     suffix_parts = [profile.system_prompt_suffix.strip()] if profile.system_prompt_suffix else []
     if skill_pack:
         suffix_parts.append(skill_pack)
+    from app.services.agent.proof_policy import PROOF_GUIDANCE
+    suffix_parts.append(PROOF_GUIDANCE)
     suffix = "\n\n".join(suffix_parts)
 
     if isinstance(directive, OperationDirective):
@@ -1081,6 +1084,9 @@ async def _run_specialist(
         max_iter = profile.max_iterations
 
     allowed_tools = list(profile.allowed_tools)
+    allowed_tools.extend(t for t in ("read_evidence", "list_test_identities") if t not in allowed_tools)
+    if "compare_requests" in allowed_tools:
+        allowed_tools.extend(t for t in ("check_test_identity", "test_authorization_boundary", "run_assessment_workflow") if t not in allowed_tools)
     if "search_memory" not in allowed_tools:
         allowed_tools.append("search_memory")
 
@@ -1129,7 +1135,7 @@ async def _run_specialist(
     messages.append(HumanMessage(content="Begin."))
 
     iteration = 0
-    while iteration < profile.max_iterations:
+    while iteration < max_iter:
         iteration += 1
         try:
             response = await llm.ainvoke(messages)
@@ -1182,7 +1188,8 @@ async def _run_specialist(
                 {
                     "tool": tr.tool,
                     "success": tr.success,
-                    "summary": tr.summary[:1500],
+                    "summary": tr.summary[:6000],
+                    "evidence_ids": tr.evidence_ids,
                     "error": tr.error,
                 }
                 for tr in tool_results
@@ -1193,7 +1200,7 @@ async def _run_specialist(
     report.duration_seconds = (datetime.utcnow() - start).total_seconds()
     if not report.summary and not report.error:
         report.summary = (
-            f"{profile.name} exhausted {profile.max_iterations} iterations without "
+            f"{profile.name} exhausted {max_iter} iterations without "
             f"concluding. Last tool calls: "
             f"{[t.tool for t in report.tool_calls[-3:]]}"
         )
@@ -1220,12 +1227,25 @@ async def _safe_invoke(tools_manager: Any, tool_name: str, args: dict) -> ToolIn
         result = await tools_manager.execute(tool_name, args or {})
         success = bool(result.get("success"))
         summary = _stringify_tool_result(result)
+        if result.get("evidence_ids"):
+            summary = json.dumps({"evidence_ids": result["evidence_ids"]}) + "\n" + summary
+        from app.services.agent.evidence_store import evidence_store
+        import re
+        # Only transport-owned records for this invocation's explicit hypothesis.
+        ids = re.findall(r'"evidence_id"\s*:\s*"([a-f0-9]+)"', summary)
+        store = evidence_store(tools_manager)
+        ids = [i for i in ids if i in store.records and store.records[i]["kind"] == "http_exchange"
+               and store.records[i]["hypothesis_id"] == (args or {}).get("hypothesis_id", "")
+               and store.records[i]["payload"].get("response", {}).get("status", 500) < 500]
+        if result.get("artifact_id"):
+            summary = f"artifact_id={result['artifact_id']} (read_evidence for full output)\n" + summary
         return ToolInvocation(
             tool=tool_name,
             args=args or {},
             success=success,
             summary=summary,
             error=result.get("error") if not success else None,
+            evidence_ids=ids,
         )
     except Exception as exc:
         return ToolInvocation(

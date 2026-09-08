@@ -1362,7 +1362,7 @@ class AgentOrchestrator:
                     format_tester_loop_for_prompt,
                     tester_loop_progress,
                 )
-                loop_txt = format_tester_loop_for_prompt(tester_loop_progress(state))
+                loop_txt = format_tester_loop_for_prompt(tester_loop_progress(state), state)
                 if loop_txt:
                     tool_recommendations = loop_txt + "\n\n" + tool_recommendations
             except Exception:
@@ -2494,6 +2494,14 @@ class AgentOrchestrator:
         """Merge stored storage_state/cookies into browser/crawl tool args."""
         if not auth_sess:
             return tool_args
+        if tool_args.get("identity") is not None:
+            return tool_args
+        try:
+            spec = json.loads(tool_args.get("args") or "{}")
+            if isinstance(spec, dict) and spec.get("identity") is not None:
+                return tool_args
+        except (TypeError, ValueError):
+            pass
         args = dict(tool_args or {})
         storage = auth_sess.get("storage_state")
         cookies = auth_sess.get("cookies")

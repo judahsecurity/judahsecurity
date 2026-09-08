@@ -52,8 +52,9 @@ def test_judge_llm_with_fake_call():
         })
 
     r = judge_llm(_findings(), EXPECTED, fake_llm)
-    assert set(r.detected) == {"E-SQLI", "E-XSS", "E-IDOR"}
-    assert r.metrics()["recall"] == 1.0
+    assert set(r.detected) == {"E-SQLI", "E-XSS"}
+    assert r.missed == ["E-IDOR"]
+    assert r.false_positive_count == 1
 
 
 def test_judge_llm_tolerates_fenced_json():

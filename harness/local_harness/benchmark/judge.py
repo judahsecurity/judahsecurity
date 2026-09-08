@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from urllib.parse import urlsplit, unquote
 from typing import Any, Callable, Dict, List, Optional
 
 from ..findings import NormalizedFinding, categorize, vulnerabilities
@@ -35,6 +36,9 @@ class JudgeResult:
     missed: List[str] = field(default_factory=list)            # expected ids not found
     matches: List[Dict[str, Any]] = field(default_factory=list)  # expected_id -> finding
     false_positives: List[Dict[str, Any]] = field(default_factory=list)
+    verified_true_positive_count: int = 0
+    verified_false_positive_count: int = 0
+    verified_false_negative_count: int = 0
     true_positive_count: int = 0
     false_positive_count: int = 0
     false_negative_count: int = 0
@@ -53,6 +57,11 @@ class JudgeResult:
             else 0.0
         )
         return {
+            "verified_true_positives": self.verified_true_positive_count,
+            "verified_false_positives": self.verified_false_positive_count,
+            "verified_false_negatives": self.verified_false_negative_count,
+            "verified_recall": round(self.verified_true_positive_count / (tp + fn), 4) if tp + fn else 0.0,
+            "verified_precision": round(self.verified_true_positive_count / max(1, self.verified_true_positive_count + self.verified_false_positive_count), 4),
             "true_positives": tp,
             "false_positives": fp,
             "false_negatives": fn,
@@ -64,55 +73,75 @@ class JudgeResult:
 
 def _endpoint_overlap(expected_endpoint: str, finding: NormalizedFinding) -> bool:
     if not expected_endpoint:
-        return True  # no endpoint constraint → category match is enough
-    hay = " ".join(
-        str(x) for x in [finding.endpoint or "", finding.url or "", finding.title]
-    ).lower()
-    needle = expected_endpoint.lower().strip("/")
-    # Match on the last path segment or the full path fragment.
-    tail = needle.split("/")[-1]
-    return needle in hay or (len(tail) >= 3 and tail in hay)
+        return True
+    observed = finding.endpoint or finding.url
+    if not observed:
+        return False
+    expected_url, observed_url = urlsplit(expected_endpoint), urlsplit(observed)
+    if expected_url.netloc and expected_url.netloc.lower() != observed_url.netloc.lower():
+        return False
+    expected_path = unquote(expected_url.path).rstrip("/") or "/"
+    observed_path = unquote(observed_url.path).rstrip("/") or "/"
+    # Explicit placeholders match one path segment, never an arbitrary suffix.
+    pattern = re.escape(expected_path)
+    pattern = re.sub(r"\\\{[^}]+\\\}", "[^/]+", pattern)
+    return bool(re.fullmatch(pattern, observed_path))
 
 
-def judge_heuristic(
-    findings: List[NormalizedFinding], expected: List[Dict[str, Any]]
-) -> JudgeResult:
-    vulns = vulnerabilities(findings)
+def _compatible(exp: dict, finding: NormalizedFinding) -> bool:
+    category = (exp.get("category") or categorize(exp.get("description", ""))).lower()
+    if finding.category != category or not _endpoint_overlap(exp.get("endpoint", ""), finding):
+        return False
+    return all(not exp.get(k) or exp[k] == finding.raw.get(k) for k in ("identity", "tenant", "method"))
+
+
+def _result(vulns, expected, pairs):
     result = JudgeResult()
-    matched_finding_idx = set()
-
-    for exp in expected:
-        exp_id = exp.get("id", "")
-        exp_cat = (exp.get("category") or categorize(exp.get("description", ""))).lower()
-        exp_endpoint = exp.get("endpoint", "")
-
-        hit = None
-        for i, f in enumerate(vulns):
-            if f.category == exp_cat and _endpoint_overlap(exp_endpoint, f):
-                hit = (i, f)
-                break
-
-        if hit is not None:
-            i, f = hit
-            matched_finding_idx.add(i)
-            result.detected.append(exp_id)
-            result.matches.append(
-                {"expected_id": exp_id, "finding_title": f.title, "category": f.category}
-            )
-        else:
-            result.missed.append(exp_id)
-
-    # Findings that mapped to no expected defect are candidate false positives.
-    for i, f in enumerate(vulns):
-        if i not in matched_finding_idx:
-            result.false_positives.append(
-                {"title": f.title, "category": f.category, "severity": f.severity}
-            )
-
-    result.true_positive_count = len(result.detected)
-    result.false_negative_count = len(result.missed)
+    matched = {idx for _, idx in pairs}
+    detected = {eid for eid, _ in pairs}
+    result.detected = [e["id"] for e in expected if e["id"] in detected]
+    result.missed = [e["id"] for e in expected if e["id"] not in detected]
+    for eid, idx in pairs:
+        f = vulns[idx]
+        result.matches.append({"expected_id": eid, "finding_title": f.title,
+                               "category": f.category, "confirmed": f.is_confirmed})
+        result.verified_true_positive_count += int(f.is_confirmed)
+    for idx, f in enumerate(vulns):
+        if idx not in matched:
+            result.false_positives.append({"title": f.title, "category": f.category, "severity": f.severity})
+            result.verified_false_positive_count += int(f.is_confirmed)
+    result.true_positive_count = len(pairs)
     result.false_positive_count = len(result.false_positives)
+    result.false_negative_count = len(result.missed)
+    result.verified_false_negative_count = len(expected) - result.verified_true_positive_count
     return result
+
+
+def _validate_expected(expected):
+    ids = [e.get("id") for e in expected]
+    if any(not i for i in ids) or len(ids) != len(set(ids)):
+        raise ValueError("Ground-truth defect IDs must be present and unique")
+
+
+def judge_heuristic(findings: List[NormalizedFinding], expected: List[Dict[str, Any]]) -> JudgeResult:
+    _validate_expected(expected)
+    vulns = vulnerabilities(findings)
+    # Maximum one-to-one matching. One broad finding never counts as several bugs.
+    matching = {}
+    order = sorted(range(len(vulns)), key=lambda i: not vulns[i].is_confirmed)
+    def assign(eidx, visited):
+        for idx in order:
+            if idx in visited or not _compatible(expected[eidx], vulns[idx]):
+                continue
+            visited.add(idx)
+            if idx not in matching or assign(matching[idx], visited):
+                matching[idx] = eidx
+                return True
+        return False
+    for eidx in sorted(range(len(expected)), key=lambda i: not bool(expected[i].get("endpoint"))):
+        assign(eidx, set())
+    pairs = [(expected[eidx]["id"], idx) for idx, eidx in matching.items()]
+    return _result(vulns, expected, pairs)
 
 
 _JUDGE_SYSTEM = (
@@ -186,32 +215,24 @@ def judge_llm(
     raw = llm_call(_JUDGE_SYSTEM, _build_judge_prompt(findings, expected))
     parsed = _parse_judge_json(raw)
 
-    result = JudgeResult()
-    matched_idx = set()
-    for m in parsed.get("matches", []):
-        exp_id = m.get("expected_id")
-        idx = m.get("finding_index")
-        result.detected.append(exp_id)
-        if isinstance(idx, int) and 0 <= idx < len(vulns):
-            matched_idx.add(idx)
-            result.matches.append(
-                {"expected_id": exp_id, "finding_title": vulns[idx].title}
-            )
-        else:
-            result.matches.append({"expected_id": exp_id, "finding_title": None})
-
-    result.missed = list(parsed.get("missed", []))
-    for idx in parsed.get("false_positives", []):
-        if isinstance(idx, int) and 0 <= idx < len(vulns):
-            f = vulns[idx]
-            result.false_positives.append(
-                {"title": f.title, "category": f.category, "severity": f.severity}
-            )
-
-    result.true_positive_count = len(result.detected)
-    result.false_negative_count = len(result.missed)
-    result.false_positive_count = len(result.false_positives)
-    return result
+    _validate_expected(expected)
+    expected_by_id = {e["id"]: e for e in expected}
+    used_ids, used_indices, pairs = set(), set(), []
+    for match in parsed.get("matches", []):
+        if not isinstance(match, dict):
+            continue
+        eid, idx = match.get("expected_id"), match.get("finding_index")
+        if not isinstance(eid, str) or type(idx) is not int:
+            continue
+        if eid not in expected_by_id or eid in used_ids or idx in used_indices or not 0 <= idx < len(vulns):
+            continue
+        if not _compatible(expected_by_id[eid], vulns[idx]):
+            continue
+        used_ids.add(eid)
+        used_indices.add(idx)
+        pairs.append((eid, idx))
+    # Derive misses and false positives from validated pairs, never model totals.
+    return _result(vulns, expected, pairs)
 
 
 # =========================================================================

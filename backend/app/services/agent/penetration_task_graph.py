@@ -74,6 +74,7 @@ class ExecutorSummary:
     key_findings: List[str] = field(default_factory=list)
     summary: str = ""
     soliloquy: bool = False
+    hypothesis_results: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -331,6 +332,12 @@ def parse_executor_summary(report: Any) -> ExecutorSummary:
         key_findings=findings,
         summary=summary,
         soliloquy=soliloquy,
+        hypothesis_results=[r for r in (getattr(report, "hypothesis_results", None) or [])
+                            if isinstance(r, dict) and r.get("evidence_ids")
+                            and set(r["evidence_ids"]).issubset({i for t in tool_calls
+                                if getattr(t, "success", False)
+                                and getattr(t, "args", {}).get("hypothesis_id") == r.get("hypothesis_id")
+                                for i in getattr(t, "evidence_ids", [])})],
     )
 
 
@@ -342,51 +349,29 @@ def apply_executor_summary(
     """Fold a specialist contract into the graph + hypothesis cards. Returns spawn names."""
     from app.services.agent.engagement_brain import update_hypothesis
 
-    matched = []
-    if summary.hypothesis_ids:
-        id_set = set(summary.hypothesis_ids)
-        matched = [graph.nodes[i] for i in id_set if i in graph.nodes]
-    if not matched:
-        matched = [
-            n
-            for n in graph.nodes.values()
-            if n.specialist == summary.specialist
-            and n.status in (NODE_RUNNING, NODE_READY, NODE_RETRY)
-        ]
-    if not matched:
-        matched = [
-            n for n in graph.nodes.values()
-            if n.specialist == summary.specialist and n.status not in _TERMINAL
-        ]
-
-    node_verdict = summary.verdict
-    if node_verdict == "proven":
-        node_status = NODE_PROVEN
-        hyp_status = "proven"
-    elif node_verdict == "killed":
-        node_status = NODE_KILLED
-        hyp_status = "killed"
-    elif node_verdict == "retry":
-        node_status = NODE_RETRY
-        hyp_status = "open"
-    elif node_verdict == "blocked":
-        node_status = NODE_BLOCKED
-        hyp_status = "open"
-    else:
-        node_status = NODE_RETRY
-        hyp_status = "open"
-
-    for n in matched:
-        n.status = node_status
-        n.evidence = (summary.evidence or n.evidence)[:2000]
-        if summary.rewrite_hint:
-            n.last_failure = summary.rewrite_hint[:500]
-        update_hypothesis(
-            brain,
-            n.id,
-            status=hyp_status,
-            evidence=summary.evidence or None,
-        )
+    # A lane-level summary cannot prove or kill multiple unrelated tests.
+    rows = {r.get("hypothesis_id"): r for r in summary.hypothesis_results
+            if isinstance(r, dict) and r.get("hypothesis_id")}
+    for node in graph.nodes.values():
+        if node.specialist != summary.specialist or node.status in _TERMINAL:
+            continue
+        result = rows.get(node.id)
+        if not result:
+            if node.status == NODE_RUNNING:
+                node.status = NODE_RETRY
+                node.last_failure = "No evidence-backed result for this hypothesis"
+            continue
+        verdict = result.get("verdict")
+        evidence = str(result.get("evidence") or "")[:2000]
+        if verdict == "killed" and result.get("evidence_ids") and evidence:
+            node.status, hyp_status = NODE_KILLED, "killed"
+        elif verdict == "blocked":
+            node.status, hyp_status = NODE_BLOCKED, "open"
+        else:
+            # Discovery/proven claims wait for independent verification.
+            node.status, hyp_status = NODE_RETRY, "in_progress"
+        node.evidence = evidence
+        update_hypothesis(brain, node.id, status=hyp_status, evidence=evidence)
 
     _recompute_readiness(graph)
     brain.task_graph = graph.to_dict()

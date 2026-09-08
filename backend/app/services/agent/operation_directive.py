@@ -124,8 +124,8 @@ def directives_from_hypotheses(
             if len(matched) > 1:
                 goal = f"{h0.title} (+{len(matched) - 1} more methodologies)"
                 test = " | ".join(
-                    f"{getattr(h, 'methodology_id', None) or h.id}: {h.test}"
-                    for h in matched[:4]
+                    f"{h.id}: {h.test}; PASS: {h.pass_criteria}; KILL: {h.kill_criteria}"
+                    for h in matched
                 )
                 assumption = " | ".join(
                     (h.assumption or "")[:120] for h in matched[:3] if h.assumption
@@ -134,8 +134,8 @@ def directives_from_hypotheses(
                 goal = h0.title
                 assumption = h0.assumption
                 test = h0.test
-            pass_c = h0.pass_criteria
-            kill_c = h0.kill_criteria
+            pass_c = "Evaluate each card independently; cite its own HTTP evidence IDs"
+            kill_c = "Apply the individual card criteria; omitted tests remain open"
             hyp_ids = [h.id for h in matched]
             method_ids = [
                 getattr(h, "methodology_id", "") for h in matched if getattr(h, "methodology_id", "")

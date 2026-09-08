@@ -127,6 +127,7 @@ async def execute_browser_actions(actions_json: str) -> Dict[str, Any]:
 
     session = BrowserSessionResult(success=True, actions_executed=0)
     exported_storage_state = None
+    login_authenticated = False
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
@@ -164,6 +165,7 @@ async def execute_browser_actions(actions_json: str) -> Dict[str, Any]:
                     from app.services.deep_crawl_service import _perform_login
                     login_result = type("R", (), {"errors": []})()
                     ok = await _perform_login(page, login_spec, 25000, login_result)
+                    login_authenticated = bool(ok)
                     session.results.append(asdict(ActionResult(
                         action="login",
                         success=bool(ok),
@@ -223,7 +225,7 @@ async def execute_browser_actions(actions_json: str) -> Dict[str, Any]:
     if isinstance(exported_storage_state, dict) and exported_storage_state:
         auth_session = {
             "target": session.final_url,
-            "authenticated": True,
+            "authenticated": login_authenticated,
             "storage_state": exported_storage_state,
             "cookies": exported_storage_state.get("cookies") or [],
         }
@@ -233,6 +235,8 @@ async def execute_browser_actions(actions_json: str) -> Dict[str, Any]:
         "error": "; ".join(session.errors) if session.errors else None,
         "exit_code": 0 if not session.errors else 1,
         "auth_session": auth_session,
+        "browser_evidence": [r["data"] for r in session.results
+                             if r.get("action") == "check_xss" and r.get("success") and r.get("data")],
     }
 
 
@@ -358,7 +362,7 @@ async def _execute_action(
                         reflected = True
                         break
 
-        xss_detected = bool(dialog_triggered) or reflected
+        xss_detected = bool(dialog_triggered)  # Reflection alone does not demonstrate execution.
         alert_text = dialog_triggered[0] if dialog_triggered else None
 
         return ActionResult(action="check_xss", success=True, data={
