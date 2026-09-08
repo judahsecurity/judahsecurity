@@ -66,6 +66,7 @@ def autonomous_mode_enabled() -> bool:
 
 
 READONLY_TOOLS = {
+    "get_assessment_coverage", "map_application_traffic", "generate_authorization_matrix",
     "query_assets",
     "query_vulnerabilities",
     "query_ports",

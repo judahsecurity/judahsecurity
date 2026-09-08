@@ -1919,6 +1919,14 @@ class AgentOrchestrator:
                         tool_args["_waf_detected"] = output[:200]
                     break
 
+        # Restore persisted application state before discovery/proof adapters run.
+        from app.services.agent.assessment_capabilities import CAPABILITY_TOOLS
+        if tool_name in CAPABILITY_TOOLS or tool_name in (
+            "replay_http_request", "execute_browser", "execute_deep_crawl", "execute_interceptor"
+        ):
+            self.tool_manager._engagement_brain = state.get("engagement_brain") or {}
+            self.tool_manager._capability_map = state.get("capability_map")
+
         # Inject session capability map + engagement brain into fireteam / brain tools
         if tool_name in (
             "fireteam_dispatch",

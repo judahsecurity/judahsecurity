@@ -51,6 +51,9 @@ def redact_string(value: str) -> str:
         return value
     value = _BEARER.sub(r"\1" + _REDACTED, value)
     value = _COOKIE_PAIR.sub(r"\1" + _REDACTED, value)
+    value = re.sub(r"\bgh[pousr]_[A-Za-z0-9]{36,255}\b|\bsk_live_[A-Za-z0-9]{16,128}\b|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b", _REDACTED, value)
+    value = re.sub(r'''(?i)((?:api[_-]?key|client[_-]?secret|access[_-]?token|password)\s*["']?\s*[:=]\s*["'])([^"']+)(["'])''', r"\1[redacted]\3", value)
+    value = re.sub(r"(?i)([?&](?:token|api[_-]?key|secret|password|access_token)=)[^&#\s]+", r"\1[redacted]", value)
     return value
 
 

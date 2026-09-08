@@ -12,6 +12,8 @@ import os
 import time
 import uuid
 from collections import OrderedDict
+from collections.abc import Mapping
+from copy import deepcopy
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +43,20 @@ def origin(url: str) -> tuple[str, str, int]:
     return p.scheme, p.hostname.lower(), p.port or (443 if p.scheme == "https" else 80)
 
 
+class _RecordsView(Mapping):
+    """Read-only snapshots; consumers cannot mutate the execution-owned ledger."""
+    def __init__(self, records):
+        self._records = records
+
+    def __getitem__(self, key):
+        return deepcopy(self._records[key])
+
+    def __iter__(self):
+        return iter(self._records)
+
+    def __len__(self):
+        return len(self._records)
+
 def redact_artifact(value):
     from app.services.agent.observability import redact_value
 
@@ -62,7 +78,8 @@ def redact_artifact(value):
 
 class EvidenceStore:
     def __init__(self, max_records: int = 512):
-        self.records: OrderedDict[str, dict] = OrderedDict()
+        self._records: OrderedDict[str, dict] = OrderedDict()
+        self.records = _RecordsView(self._records)
         self.max_records = max_records
         self.id = uuid.uuid4().hex
         self.total_bytes = 0
@@ -105,10 +122,10 @@ class EvidenceStore:
             "truncated": truncated,
             "size_bytes": len(json.dumps(clean, default=str).encode()),
         }
-        self.records[artifact_id] = record
+        self._records[artifact_id] = deepcopy(record)
         self.total_bytes += record["size_bytes"]
         while len(self.records) > self.max_records or self.total_bytes > self.max_bytes:
-            _, removed = self.records.popitem(last=False)
+            _, removed = self._records.popitem(last=False)
             self.total_bytes -= removed["size_bytes"]
         directory = os.environ.get("AEGIS_EVIDENCE_DIR")
         if directory:

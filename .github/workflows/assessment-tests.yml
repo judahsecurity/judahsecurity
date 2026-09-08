@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       SECRET_KEY: assessment-ci-only-secret-with-at-least-32-characters
-      PYTHONPATH: backend:harness:backend/packages/aegis_praetorium
+      PYTHONPATH: backend:harness:backend/packages/aegis_praetorium:backend/packages/asm_scanner_core
       AEGIS_EVIDENCE_DIR: ${{ runner.temp }}/assessment-evidence
     steps:
       - uses: actions/checkout@v4
@@ -36,3 +36,21 @@ jobs:
         run: ruff check --select F821,F822,F823 backend/app/services/agent harness/local_harness
       - name: Run backend and harness regression suites
         run: python -m pytest backend/tests harness/tests -o addopts= -q
+
+  browser-capture:
+    runs-on: ubuntu-latest
+    env:
+      SECRET_KEY: assessment-ci-only-secret-with-at-least-32-characters
+      PYTHONPATH: backend:backend/packages/aegis_praetorium:backend/packages/asm_scanner_core
+      RUN_ASSESSMENT_BROWSER_TESTS: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: backend/requirements-assessment-tests.txt
+      - run: python -m pip install -r backend/requirements-assessment-tests.txt 'playwright>=1.48'
+      - run: python -m playwright install --with-deps chromium
+      - name: Exercise actual browser capture and identity isolation
+        run: python -m pytest backend/tests/test_assessment_browser_capture.py -q

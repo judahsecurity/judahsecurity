@@ -145,9 +145,18 @@ def check_verify_receipt(
     if not candidate or candidate.status != "confirmed" or candidate.revision != receipt.get("revision"):
         return False, "Candidate changed or was refuted; reverify before publication"
     from app.services.agent.evidence_store import evidence_store
+    evidence_target = candidate.target
+    if receipt.get('workflow_run_id'):
+        engine = getattr(tools_manager, '_proof_engine', None)
+        if engine is None:
+            return False, 'Workflow execution authority is unavailable; reverify'
+        ok, why = engine.validate_receipt(receipt['workflow_run_id'], candidate, receipt.get('evidence_ids') or [], fresh=False)
+        if not ok:
+            return False, why
+        evidence_target = engine.receipts[receipt['workflow_run_id']].attack_url
     ok, why = evidence_store(tools_manager).validate(
         receipt.get("evidence_ids") or [], candidate_id=candidate.id,
-        revision=candidate.revision, run_id=receipt.get("run_id", ""), target=candidate.target,
+        revision=candidate.revision, run_id=receipt.get("run_id", ""), target=evidence_target,
     )
     return (True, f"verify_ok:{key}") if ok else (False, why)
 
@@ -285,6 +294,11 @@ async def run_independent_verifiers(
     async def _one(cand: FindingCandidate) -> Dict[str, Any]:
         async with sem:
             mission = verifier_mission(cand, threat_slice=threat_slice)
+            if cand.hypothesis_id in (getattr(tools_manager, '_proof_plans', {}) or {}):
+                mission += (f"\nA controlled workflow is registered for hypothesis {cand.hypothesis_id}. "
+                            "Call run_authorization_proof with this hypothesis_id and no plan to reproduce it. "
+                            "Use the returned receipt's evidence_ids and proof={kind: workflow, run_id: receipt.run_id} "
+                            "in record_verify_verdict. A prior hunter receipt is not valid in this verifier run.")
             from app.services.agent.evidence_store import VerificationRun, verification_run
             run = VerificationRun(uuid.uuid4().hex, cand.id, cand.revision, cand.nonce)
             token = verification_run.set(run)
@@ -358,12 +372,26 @@ def apply_verdict(
             if c.revision != run.revision:
                 return None
             if verdict == "confirmed":
-                ok, why = evidence_store(tools_manager).validate(
-                    evidence_ids or [], candidate_id=c.id, revision=c.revision,
-                    run_id=run.id, target=c.target,
-                )
-                from app.services.agent.proof_policy import validate_proof
+                matrix_candidate = any(row.get('hypothesis_id') == c.hypothesis_id for row in brain.authorization_matrix)
+                is_workflow = matrix_candidate or (proof or {}).get('kind') == 'workflow'
+                evidence_target = c.target
+                if is_workflow:
+                    engine = getattr(tools_manager, '_proof_engine', None)
+                    if engine and (proof or {}).get('kind') == 'workflow':
+                        ok, why = engine.validate_receipt(proof.get('run_id'), c, evidence_ids or [])
+                        if ok:
+                            evidence_target = engine.receipts[proof['run_id']].attack_url
+                    else:
+                        ok, why = False, 'Authorization matrix candidates require a fresh workflow receipt'
+                else:
+                    ok, why = True, ''
                 if ok:
+                    ok, why = evidence_store(tools_manager).validate(
+                        evidence_ids or [], candidate_id=c.id, revision=c.revision,
+                        run_id=run.id, target=evidence_target,
+                    )
+                if ok and not is_workflow:
+                    from app.services.agent.proof_policy import validate_proof
                     ok, why = validate_proof(evidence_store(tools_manager), c, proof or {}, evidence_ids or [])
                 if not ok or not evidence.strip():
                     verdict = "inconclusive"
@@ -380,6 +408,18 @@ def apply_verdict(
     if cand.hypothesis_id and verdict == "confirmed":
         from app.services.agent.engagement_brain import update_hypothesis
         update_hypothesis(brain, cand.hypothesis_id, status="proven", evidence=evidence)
+    for cell in brain.authorization_matrix:
+        if cell.get('hypothesis_id') != cand.hypothesis_id:
+            continue
+        cell['verifier_verdict'] = verdict
+        if verdict != 'confirmed':
+            cell.update(status='inconclusive', reason='Independent verification: ' + verdict)
+            for hyp in brain.hypotheses:
+                if hyp.id == cand.hypothesis_id:
+                    hyp.status = 'open'
+            node = brain.task_graph.get('nodes', {}).get(cand.hypothesis_id)
+            if node:
+                node['status'] = 'retry'
     tools_manager._engagement_brain = brain.to_dict()
 
     if not hasattr(tools_manager, "_verify_receipts") or tools_manager._verify_receipts is None:
@@ -399,6 +439,8 @@ def apply_verdict(
             run_id=run.id,
             revision=cand.revision,
         )
+        if (proof or {}).get("kind") == "workflow":
+            tools_manager._verify_receipts[verify_receipt_key(cand.title, cand.target)]["workflow_run_id"] = proof["run_id"]
     return cand
 
 

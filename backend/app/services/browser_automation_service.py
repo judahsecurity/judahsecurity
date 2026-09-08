@@ -48,6 +48,7 @@ class BrowserSessionResult:
     results: List[Dict[str, Any]] = field(default_factory=list)
     console_logs: List[str] = field(default_factory=list)
     network_requests: List[Dict[str, str]] = field(default_factory=list)
+    application_operations: List[Dict[str, Any]] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     final_url: Optional[str] = None
     final_cookies: List[Dict[str, str]] = field(default_factory=list)
@@ -151,13 +152,41 @@ async def execute_browser_actions(actions_json: str) -> Dict[str, Any]:
             }
             if isinstance(storage_state, dict) and storage_state:
                 ctx_kwargs["storage_state"] = storage_state
+            allowed_origin = None if isinstance(spec, list) else spec.get("allowed_origin")
+            if not isinstance(spec, list) and spec.get("extra_headers"):
+                ctx_kwargs["extra_http_headers"] = spec["extra_headers"]
+            if allowed_origin:
+                ctx_kwargs["service_workers"] = "block"
             context = await browser.new_context(**ctx_kwargs)
+            if allowed_origin:
+                from app.services.agent.assessment_sessions import configure_browser_origin
+                await configure_browser_origin(context, allowed_origin)
             if isinstance(seed_cookies, list) and seed_cookies and not storage_state:
                 try:
                     await context.add_cookies(seed_cookies)
                 except Exception as e:
                     session.errors.append(f"cookies: {str(e)[:120]}")
             page = await context.new_page()
+
+            from app.services.agent.runtime_mapper import normalize_request, merge_operations
+            def capture_request(req):
+                if len(session.network_requests) >= 200:
+                    return
+                try:
+                    request = dict(method=req.method, url=req.url, headers=req.headers, body=req.post_data)
+                    identity = "anonymous" if isinstance(spec, list) else spec.get("identity", "anonymous")
+                    operations = normalize_request(request, identity=identity, source="browser")
+                    session.application_operations = merge_operations(session.application_operations, operations)
+                    session.network_requests.append(dict(method=req.method, url=req.url.split("?", 1)[0]))
+                except Exception:
+                    session.errors.append("Request metadata capture failed")
+            page.on("request", capture_request)
+            def capture_socket(socket):
+                operations = normalize_request(dict(url=socket.url),
+                    identity="anonymous" if isinstance(spec, list) else spec.get("identity", "anonymous"), source="browser")
+                session.application_operations = merge_operations(session.application_operations, operations)
+            page.on("websocket", capture_socket)
+
 
             # Optional self-service login before the action chain
             if isinstance(login_spec, dict) and login_spec:
@@ -180,10 +209,6 @@ async def execute_browser_actions(actions_json: str) -> Dict[str, Any]:
                 f"[{msg.type}] {msg.text}"
             ))
 
-            page.on("request", lambda req: session.network_requests.append({
-                "method": req.method,
-                "url": req.url,
-            }) if len(session.network_requests) < 200 else None)
 
             for action_spec in actions:
                 if not isinstance(action_spec, dict):
@@ -235,6 +260,8 @@ async def execute_browser_actions(actions_json: str) -> Dict[str, Any]:
         "error": "; ".join(session.errors) if session.errors else None,
         "exit_code": 0 if not session.errors else 1,
         "auth_session": auth_session,
+        "network_requests": session.network_requests,
+        "application_operations": session.application_operations,
         "browser_evidence": [r["data"] for r in session.results
                              if r.get("action") == "check_xss" and r.get("success") and r.get("data")],
     }

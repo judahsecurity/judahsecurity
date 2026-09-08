@@ -40,6 +40,10 @@ class Hypothesis:
     source: str = "map"  # map | chain | manual | finding | methodology | threat_model
     parent_finding: str = ""
     methodology_id: str = ""
+    identity: str = ""
+    tenant: str = ""
+    parameter: str = ""
+    operation_id: str = ""
     cwe_ids: List[str] = field(default_factory=list)
     capec_ids: List[str] = field(default_factory=list)
     owasp: str = ""
@@ -90,6 +94,10 @@ class ApproachRecord:
 class EngagementBrain:
     """Session-scoped tester process memory."""
 
+    application_operations: List[Dict[str, Any]] = field(default_factory=list)
+    authorization_matrix: List[Dict[str, Any]] = field(default_factory=list)
+    proof_receipts: List[Dict[str, Any]] = field(default_factory=list)
+    js_intelligence: Dict[str, Any] = field(default_factory=dict)
     phase: str = "recon"  # recon | map | attack | coverage | report
     target: str = ""
     identities: List[str] = field(default_factory=lambda: ["anonymous"])
@@ -109,6 +117,10 @@ class EngagementBrain:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "application_operations": list(self.application_operations),
+            "authorization_matrix": list(self.authorization_matrix),
+            "proof_receipts": list(self.proof_receipts),
+            "js_intelligence": dict(self.js_intelligence),
             "phase": self.phase,
             "target": self.target,
             "identities": list(self.identities),

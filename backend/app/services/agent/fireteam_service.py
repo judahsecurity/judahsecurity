@@ -1066,6 +1066,8 @@ async def _run_specialist(
         suffix_parts.append(skill_pack)
     from app.services.agent.proof_policy import PROOF_GUIDANCE
     suffix_parts.append(PROOF_GUIDANCE)
+    from app.services.agent.prompts import APPLICATION_ASSESSMENT_GUIDANCE
+    suffix_parts.append(APPLICATION_ASSESSMENT_GUIDANCE)
     suffix = "\n\n".join(suffix_parts)
 
     if isinstance(directive, OperationDirective):
@@ -1085,6 +1087,8 @@ async def _run_specialist(
 
     allowed_tools = list(profile.allowed_tools)
     allowed_tools.extend(t for t in ("read_evidence", "list_test_identities") if t not in allowed_tools)
+    if profile.name in ("auth_logic", "independent_verifier", "api_logic", "coverage"):
+        allowed_tools.extend(t for t in ("generate_authorization_matrix", "run_authorization_proof", "get_assessment_coverage", "map_application_traffic") if t not in allowed_tools)
     if "compare_requests" in allowed_tools:
         allowed_tools.extend(t for t in ("check_test_identity", "test_authorization_boundary", "run_assessment_workflow") if t not in allowed_tools)
     if "search_memory" not in allowed_tools:

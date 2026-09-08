@@ -667,3 +667,7 @@ MIT License - See LICENSE file for details.
 <p align="center">
   <strong>Made with ❤️ by Judah Security</strong>
 </p>
+
+### Application assessment engines
+
+See [Application assessment capabilities](docs/ASSESSMENT_CAPABILITIES.md) for identity/tenant matrices, runtime operation discovery, JS intelligence, controlled proof workflows and hypothesis coverage.

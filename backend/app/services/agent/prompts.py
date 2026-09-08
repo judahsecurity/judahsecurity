@@ -385,6 +385,10 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **spawn_recon_workers**: Launch Copilot-style background recon streams (non-blocking). Packs: `early` (httpx/waf/whatweb/nuclei_recon — auto on URL paste), `enrich` (ferox_dirs+katana_urls), `nuclei_recon` (informational Nuclei only), `full`. Or pass kinds=[...]. Results inject into the next think automatically. Example: spawn_recon_workers(pack="enrich", target="https://target.com")
 - **wait_recon_workers**: Soft-join parallel streams and return briefs. Args: timeout_sec (default 45), optional worker_ids.
 - **list_recon_workers**: Status of session recon streams.
+- **map_application_traffic**, **collect_js_intelligence**: Build runtime/JS operation inventories (discovery only).
+- **generate_authorization_matrix**, **run_authorization_proof**, **get_assessment_coverage**: Plan and execute identity-specific controlled setup/attack/verify workflows and track all matrix cells.
+- **browse_as_identity**: Browser capture in a fresh origin-bound registered identity context.
+- **validate_js_secret_candidate**: Operator-enabled provider hook; candidates never auto-publish.
 - **replay_http_request**: Replay/tamper a captured XHR/API request from the capability map (like Burp Repeater-lite). Args: method, url, headers (dict), body (optional), sample_index (optional int into capability_map.api_samples), use_auth_session (default true — attaches cookies from deep_crawl login). Example: replay_http_request(sample_index=0) or replay_http_request(method="GET", url="https://target.com/api/users?id=1")
 - **mcp_connect**: Attach an external MCP server the operator already runs (Burp/Caido). Args: **url** (e.g. http://127.0.0.1:9876/sse), **name** (default burp). Then mcp_call.
 - **mcp_list** / **mcp_disconnect**: List or detach attached MCP servers.
@@ -815,6 +819,13 @@ TOOL_PHASE_MAP = {
     "test_saml_sso": ["exploitation", "post_exploitation"],
     "test_credential_spray": ["exploitation", "post_exploitation"],
 
+    "map_application_traffic": ["informational", "exploitation", "post_exploitation"],
+    "generate_authorization_matrix": ["informational", "exploitation", "post_exploitation"],
+    "run_authorization_proof": ["exploitation", "post_exploitation"],
+    "get_assessment_coverage": ["informational", "exploitation", "post_exploitation"],
+    "collect_js_intelligence": ["informational", "exploitation", "post_exploitation"],
+    "validate_js_secret_candidate": ["exploitation", "post_exploitation"],
+    "browse_as_identity": ["informational", "exploitation", "post_exploitation"],
     # Tester-process control plane
     "compare_requests": ["exploitation", "post_exploitation"],
     "sync_engagement_brain": ["informational", "exploitation", "post_exploitation"],
@@ -845,3 +856,23 @@ def is_tool_allowed_in_phase(tool_name: str, phase: str) -> bool:
 
 from app.services.agent.proof_policy import PROOF_GUIDANCE
 REACT_SYSTEM_PROMPT += "\n\n" + PROOF_GUIDANCE
+
+
+# Application assessment engines use existing tools, identities and evidence receipts.
+APPLICATION_ASSESSMENT_GUIDANCE = """
+Use map_application_traffic for captured request inventories and collect_js_intelligence
+for bounded bundle/source-map leads. Discovery hints never prove vulnerability.
+Register user A/user B/admin/tenant sessions with register_test_identity, verify each
+using check_test_identity, then generate_authorization_matrix with explicit expected
+allow/deny policy per operation_id, identity and parameter. Unknown policies stay blocked.
+run_authorization_proof takes hypothesis_id and a controlled_resource plan containing
+strategy authorization_read or authorization_mutation, target, owner_identity, setup,
+attack, verify, value_path and object_path JSON pointers. Use {{nonce}} and {{object_id}}
+bindings; read proofs also need a distinct attacker-owned control. GET owner readback
+is mandatory. Consult get_assessment_coverage for omitted, blocked and inconclusive cells.
+A proof receipt is not a publication receipt. Independent verifiers rerun the workflow
+and record_verify_verdict with proof={"kind":"workflow","run_id":"<fresh proof run>"}
+and that receipt's evidence_ids. Never substitute a status, schema or regex secret match.
+"""
+
+REACT_SYSTEM_PROMPT += "\n\n" + APPLICATION_ASSESSMENT_GUIDANCE

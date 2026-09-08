@@ -50,6 +50,7 @@ class TaskNode:
     depends_on: List[str] = field(default_factory=list)
     attempts: int = 0
     max_attempts: int = 2
+    blocked_reason: str = ""
     last_failure: str = ""
     rewritten_test: str = ""
     parent_finding: str = ""
@@ -190,6 +191,11 @@ def sync_graph_from_brain(brain: Any) -> PenetrationTaskGraph:
         if nid not in live:
             del existing.nodes[nid]
 
+    matrix = {row['hypothesis_id']: row for row in getattr(brain, 'authorization_matrix', [])}
+    for node in existing.nodes.values():
+        cell = matrix.get(node.id)
+        if cell:
+            node.blocked_reason = cell.get('reason', '') if cell.get('status') == 'blocked' else ''
     _apply_default_dependencies(existing, hyps)
     _recompute_readiness(existing)
     brain.task_graph = existing.to_dict()
@@ -250,6 +256,9 @@ def _deps_satisfied(graph: PenetrationTaskGraph, node: TaskNode) -> bool:
 
 def _recompute_readiness(graph: PenetrationTaskGraph) -> None:
     for node in graph.nodes.values():
+        if node.blocked_reason:
+            node.status = NODE_BLOCKED
+            continue
         if node.status in _TERMINAL | {NODE_RUNNING}:
             continue
         if node.status == NODE_RETRY and node.attempts < node.max_attempts:

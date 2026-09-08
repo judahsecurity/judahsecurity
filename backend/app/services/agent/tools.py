@@ -338,9 +338,16 @@ def _format_vulnx_search_output(raw_json: str, query: str) -> str:
 from app.services.agent.session_runtime import SessionValue
 
 
-class ASMToolsManager:
+from app.services.agent.assessment_capabilities import AssessmentCapabilities, CAPABILITY_TOOLS
+
+
+class ASMToolsManager(AssessmentCapabilities):
     """Manager for ASM platform tools accessible by the AI agent."""
     
+    _proof_plans = SessionValue(dict)
+    _proof_engine = SessionValue(lambda: None)
+    _js_intelligence = SessionValue(lambda: None)
+    _secret_validation_policy = SessionValue(dict)
     _identity_captures = SessionValue(dict)
     _assessment_workflows = SessionValue(dict)
     _evidence_store = SessionValue(lambda: None)
@@ -575,6 +582,7 @@ class ASMToolsManager:
         # Available with or without PDCP_API_KEY (unauthenticated has rate limits)
         tools["search_vulnx"] = self.search_vulnx       # single CVE deep-dive by ID
         tools["vulnx_query"] = self.vulnx_query         # search CVEs by technology/query
+        tools.update({name: getattr(self, name) for name in CAPABILITY_TOOLS})
         return tools
 
     def get_tool(self, name: str) -> Optional[callable]:
@@ -649,12 +657,19 @@ class ASMToolsManager:
                     if not urls:
                         raise ValueError("Provide an explicit browser/crawl URL")
                     session = registry.resolve(browser_identity, urls[0])
+                    from app.services.agent.evidence_store import origin
                     for url in urls[1:]:
+                        if origin(url) != origin(urls[0]):
+                            raise ValueError("Named browser actions must stay on one origin")
                         registry.resolve(browser_identity, url)
                     if any(k in spec for k in ("login", "cookies", "storage_state", "headers", "basic_auth")):
                         raise ValueError("Do not mix named browser identity with other credential inputs")
-                    spec["cookies"] = session.get("cookies") or []
-                    spec["storage_state"] = session.get("storage_state") or {"cookies": session.get("cookies") or [], "origins": []}
+                    from app.services.agent.assessment_sessions import browser_storage_state
+                    spec["storage_state"] = browser_storage_state(session, urls[0])
+                    spec["cookies"] = spec["storage_state"]["cookies"]
+                    spec["allowed_origin"] = urls[0]
+                    spec["identity"] = browser_identity
+                    spec["extra_headers" if tool_name == "execute_browser" else "headers"] = session.get("headers", {})
                     tool_args["args"] = json.dumps(spec)
             except (ValueError, TypeError) as exc:
                 return {"success": False, "output": str(exc), "error": "invalid_identity_args"}
@@ -772,7 +787,7 @@ class ASMToolsManager:
                     if capability_map:
                         self._identity_captures[browser_identity] = capability_map
                     if auth_session and browser_identity != "anonymous":
-                        current = registry.identities[browser_identity]
+                        current = registry.resolve(browser_identity, urls[0])
                         current["cookies"] = auth_session.get("cookies") or []
                         current["storage_state"] = auth_session.get("storage_state") or {}
                         current["authenticated"] = False  # Recheck the principal after browser changes.
@@ -791,6 +806,10 @@ class ASMToolsManager:
                         payload["augur"] = augur_block
                     if capability_map:
                         payload["capability_map"] = capability_map
+                    if result.get("application_operations"):
+                        self._ingest_observed_operations(result["application_operations"])
+                    if capability_map and capability_map.get("api_samples"):
+                        await self.map_application_traffic(capability_map["api_samples"], identity=browser_identity or "legacy", source="crawl")
                     if auth_session:
                         payload["auth_session"] = auth_session
                     if len(output) > max_chars and not augur_block:
@@ -5709,7 +5728,7 @@ class ASMToolsManager:
         """List test identities and their verified login state without credentials."""
         from app.services.agent.assessment_sessions import identity_registry
         registry = identity_registry(self)
-        return json.dumps([registry.describe(name) for name in registry.identities])
+        return json.dumps(registry.describe_all())
 
     async def check_test_identity(self, identity: str, url: str, field: str, expected: Any) -> str:
         """Verify an account using a known identity endpoint and exact JSON principal field."""
@@ -5767,7 +5786,7 @@ class ASMToolsManager:
     async def _http_exchange(self, method: str, url: str, headers=None, body=None, cookies=None,
                              use_auth_session: bool = True, timeout: int = 25,
                              follow_redirects: bool = True, identity: Optional[str] = None,
-                             hypothesis_id: str = "") -> Dict[str, Any]:
+                             hypothesis_id: str = "", max_response_bytes: Optional[int] = None) -> Dict[str, Any]:
         import time as _time
         from app.services.agent.assessment_sessions import cookie_jar, identity_registry
         from app.services.agent.evidence_store import evidence_store, verification_run, origin
@@ -5778,7 +5797,8 @@ class ASMToolsManager:
         session = {}
         if identity is not None:
             session = identity_registry(self).resolve(identity, url)
-            if cookies or any(k.lower() in ("cookie", "authorization") for k in hdrs):
+            protected_headers = {k.lower() for k in session.get("headers", {})} | {"host", "cookie", "authorization", "proxy-authorization"}
+            if cookies or any(k.lower() in protected_headers for k in hdrs):
                 raise ValueError("Named identities cannot be combined with credential overrides")
             hdrs = {**session.get("headers", {}), **hdrs}
         elif use_auth_session:
@@ -5800,7 +5820,18 @@ class ASMToolsManager:
                 req.headers.pop("cookie", None)
                 jar.set_cookie_header(req)
             for hop in range(11):
-                resp = await client.send(req)
+                resp = await client.send(req, stream=max_response_bytes is not None)
+                if max_response_bytes is not None:
+                    chunks, size = [], 0
+                    try:
+                        async for chunk in resp.aiter_bytes():
+                            size += len(chunk)
+                            if size > max_response_bytes:
+                                raise ValueError("Response exceeds configured collection byte budget")
+                            chunks.append(chunk)
+                        resp._content = b"".join(chunks)
+                    finally:
+                        await resp.aclose()
                 jar.extract_cookies(resp)
                 if not follow_redirects or not resp.next_request:
                     break
@@ -5814,6 +5845,9 @@ class ASMToolsManager:
                 nxt.headers.pop("cookie", None)
                 jar.set_cookie_header(nxt)
                 req = nxt
+        if identity not in (None, "anonymous"):
+            session["cookies"] = [dict(name=c.name, value=c.value, domain=c.domain, path=c.path,
+                                       secure=c.secure, expires=c.expires) for c in client.cookies.jar]
         body_text = resp.text or ""
         if resp.status_code == 401:
             session["authenticated"] = False
@@ -5826,6 +5860,8 @@ class ASMToolsManager:
                          "body": body_text, "body_preview": body_text[:4000], "length": len(resp.content),
                          "elapsed_s": round(_time.monotonic() - start, 3)},
         }
+        await self.map_application_traffic([dict(method=method, url=url, headers=hdrs, body=raw_body)],
+                                           identity=label, source="http_exchange")
         artifact_id = evidence_store(self).record("http_exchange", exchange, target=url, identity=label,
                                                   hypothesis_id=hypothesis_id, success=resp.status_code < 400)
         from app.services.agent.evidence_store import redact_artifact
@@ -6897,6 +6933,7 @@ class ASMToolsManager:
         return json.dumps(
             {
                 "coverage": cov,
+                "assessment_coverage": json.loads(await self.get_assessment_coverage()),
                 "methodology": methodology_progress(
                     brain, cmap=cmap if isinstance(cmap, dict) else {}
                 ),

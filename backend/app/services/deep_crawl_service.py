@@ -707,7 +707,13 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
             # back to the system Chromium when the managed browser is missing.
             browser = await _launch_chromium(pw)
             try:
-                context = await browser.new_context(**_build_context_kwargs(opts))
+                context_options = _build_context_kwargs(opts)
+                if opts.get("allowed_origin"):
+                    context_options["service_workers"] = "block"
+                context = await browser.new_context(**context_options)
+                if opts.get("allowed_origin"):
+                    from app.services.agent.assessment_sessions import configure_browser_origin
+                    await configure_browser_origin(context, opts["allowed_origin"])
 
                 # Seed authenticated cookies, if provided.
                 cookies = opts.get("cookies")
@@ -897,7 +903,7 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
 
                 # Mine collected JS bundles for endpoints/source maps.
                 if capture_js and result.js_files and time.monotonic() < crawl_deadline:
-                    await _mine_js(context, result, deadline=crawl_deadline)
+                    await _mine_js(context, result, deadline=crawl_deadline, allowed_origin=opts.get("allowed_origin"))
                 elif capture_js and result.js_files:
                     result.errors.append("skipped JS mining — crawl budget exhausted")
 
@@ -1247,7 +1253,7 @@ async def _harvest(page):
     return data.get("links", []), data.get("forms", [])
 
 
-async def _mine_js(context, result: CrawlResult, deadline: Optional[float] = None) -> None:
+async def _mine_js(context, result: CrawlResult, deadline: Optional[float] = None, allowed_origin: Optional[str] = None) -> None:
     """Fetch discovered JS bundles with the browser context and extract endpoints."""
     js_urls = sorted(result.js_files)[:MAX_JS_FETCH]
     for url in js_urls:
@@ -1255,7 +1261,11 @@ async def _mine_js(context, result: CrawlResult, deadline: Optional[float] = Non
             result.errors.append("js_mine_budget_exhausted")
             break
         try:
-            resp = await context.request.get(url, timeout=10000)
+            if allowed_origin:
+                from app.services.agent.evidence_store import origin
+                if origin(url) != origin(allowed_origin):
+                    continue
+            resp = await context.request.get(url, timeout=10000, **({"max_redirects": 0} if allowed_origin else {}))
             if not resp.ok:
                 continue
             body = await resp.text()
