@@ -17,14 +17,16 @@ from app.services.agent.engagement_brain import (
     ensure_spawned_hypotheses,
     seed_hypotheses_from_capability_map,
 )
+from app.services.agent.operation_directive import directives_from_hypotheses
 from app.services.agent.penetration_task_graph import (
-    ExecutorSummary,
     NODE_BLOCKED,
-    NODE_READY,
+    ExecutorSummary,
     apply_executor_summary,
+    claim_task_leases,
     compact_scheduler_mission,
     parse_executor_summary,
     ready_wave,
+    recover_interrupted_leases,
     sync_graph_from_brain,
 )
 
@@ -106,6 +108,145 @@ def test_ready_wave_is_specialists_not_every_card():
     wave = ready_wave(graph, max_specialists=6)
     assert len(wave) <= 6
     assert len(wave) == len(set(wave))
+
+
+def test_task_lease_binds_one_hypothesis_per_specialist():
+    brain = _seeded_brain()
+    graph = sync_graph_from_brain(brain)
+    specialist = ready_wave(graph)[0]
+    siblings = [n for n in graph.nodes.values() if n.specialist == specialist]
+    leases = claim_task_leases(graph, [specialist], now=100)
+    lease = leases[specialist]
+
+    assert lease.hypothesis_id in graph.nodes
+    assert graph.nodes[lease.hypothesis_id].status == "running"
+    assert sum(n.status == "running" for n in siblings) == 1
+    assert all(
+        not n.lease_id for n in siblings if n.id != lease.hypothesis_id
+    )
+
+    profile = SimpleNamespace(
+        role="test role.",
+        allowed_tools=["compare_requests"],
+        max_iterations=4,
+        epithet="Tester",
+    )
+    directive = directives_from_hypotheses(
+        brain=brain,
+        profiles_by_name={specialist: profile},
+        specialists=[specialist],
+        default_target="https://tenant-a.app.example.com",
+        task_leases=leases,
+    )[specialist]
+    assert directive.hypothesis_ids == [lease.hypothesis_id]
+    assert directive.lease_id == lease.id
+    assert "+" not in directive.goal
+
+
+def test_leased_summary_cannot_close_sibling_hypothesis():
+    brain = _seeded_brain()
+    graph = sync_graph_from_brain(brain)
+    specialist = next(
+        name
+        for name in ready_wave(graph)
+        if sum(n.specialist == name for n in graph.nodes.values()) > 1
+    )
+    lease = claim_task_leases(graph, [specialist], now=100)[specialist]
+    sibling = next(
+        n for n in graph.nodes.values()
+        if n.specialist == specialist and n.id != lease.hypothesis_id
+    )
+    sibling_before = sibling.status
+    apply_executor_summary(
+        graph,
+        brain,
+        ExecutorSummary(
+            specialist=specialist,
+            assigned_hypothesis_id=lease.hypothesis_id,
+            lease_id=lease.id,
+            hypothesis_results=[
+                {
+                    "hypothesis_id": sibling.id,
+                    "verdict": "killed",
+                    "evidence_ids": ["wrong-card"],
+                    "evidence": "attempted to close sibling",
+                }
+            ],
+        ),
+    )
+    assert graph.nodes[sibling.id].status == sibling_before
+    assert graph.nodes[lease.hypothesis_id].status == "ready"
+
+
+def test_expired_lease_requires_reconciliation_before_retry():
+    brain = _seeded_brain()
+    graph = sync_graph_from_brain(brain)
+    specialist = ready_wave(graph)[0]
+    lease = claim_task_leases(
+        graph, [specialist], lease_seconds=60, now=100
+    )[specialist]
+
+    assert recover_interrupted_leases(graph, now=161) == [lease.hypothesis_id]
+    node = graph.nodes[lease.hypothesis_id]
+    assert node.status == NODE_BLOCKED
+    assert node.recovery_required is True
+    assert specialist not in claim_task_leases(graph, [specialist], now=200)
+    blocked = {
+        row["id"]: row for row in graph.snapshot()["blocked"]
+    }
+    assert blocked[lease.hypothesis_id]["recovery_required"] is True
+
+    apply_executor_summary(
+        graph,
+        brain,
+        ExecutorSummary(
+            specialist=specialist,
+            assigned_hypothesis_id=lease.hypothesis_id,
+            lease_id=lease.id,
+            hypothesis_results=[
+                {
+                    "hypothesis_id": lease.hypothesis_id,
+                    "verdict": "killed",
+                    "evidence_ids": ["late-result"],
+                    "evidence": "late stale executor result",
+                }
+            ],
+        ),
+    )
+    assert graph.nodes[lease.hypothesis_id].status == NODE_BLOCKED
+
+    brain.task_graph = graph.to_dict()
+    restored = sync_graph_from_brain(brain)
+    assert restored.nodes[lease.hypothesis_id].status == NODE_BLOCKED
+    assert restored.nodes[lease.hypothesis_id].recovery_required is True
+
+
+def test_lease_records_structured_evidence_ids():
+    brain = _seeded_brain()
+    graph = sync_graph_from_brain(brain)
+    specialist = ready_wave(graph)[0]
+    lease = claim_task_leases(graph, [specialist], now=100)[specialist]
+    apply_executor_summary(
+        graph,
+        brain,
+        ExecutorSummary(
+            specialist=specialist,
+            assigned_hypothesis_id=lease.hypothesis_id,
+            lease_id=lease.id,
+            hypothesis_results=[
+                {
+                    "hypothesis_id": lease.hypothesis_id,
+                    "verdict": "killed",
+                    "evidence_ids": ["http-1", "http-2"],
+                    "evidence": "two denied comparisons",
+                }
+            ],
+        ),
+    )
+    node = graph.nodes[lease.hypothesis_id]
+    assert node.status == "killed"
+    assert node.evidence_ids == ["http-1", "http-2"]
+    assert node.lease_id == ""
 
 
 def test_executor_summary_soliloquy_is_not_proven():

@@ -38,8 +38,9 @@ page assessment (app kind + how a human would start)
 sync_engagement_brain          ← seeds CWE/CAPEC cards + Penetration Task Graph
         │
         ▼
-fireteam_dispatch(auto)        ← Joshua schedules *ready* graph nodes only
-        │                         executors get a fresh context + summary contract
+fireteam_dispatch(auto)        ← Joshua leases one ready hypothesis per specialist
+        │                         directive, result and evidence bind to that lease
+        │                         sibling hypotheses remain untouched
         │                         auto-prompter rewrites a failed hunter once
         ▼
 compare_requests               ← baseline vs one mutation (logic/authz/tenant)
@@ -62,6 +63,19 @@ Joshua only schedules; specialists are short-lived executors; imagined tool outp
 (soliloquy) is a retry, not a finding. **Rule:** scanners find candidates; specialists
 prove impact. Status `200` alone is never a finding.
 **Gates:** Nuclei/sqlmap/etc. require a capability map + seeded methodologies; `complete` requires high-priority methodology cards proven/killed (or `completion_reason` includes `defer methodologies`).
+
+Each scheduled node gets an execution-owned lease with an attempt number and
+deadline. The executor receives exactly one hypothesis card. Only a summary carrying
+the matching lease can update that node, and its structured evidence IDs are retained
+on the graph. If the process restarts after a lease expires, Judah quarantines the
+node for evidence reconciliation because an external side effect may already have
+happened; it does not automatically repeat the action.
+
+Run snapshots are atomically replaced with owner-only permissions. They preserve the
+capability map, graph, lease state, and redacted planning context. Credentials and the
+active authentication session are deliberately omitted, so resumed runs must register
+their test identities again. Historical evidence references remain context only and
+cannot authorize a finding after restart.
 
 ---
 
@@ -173,8 +187,10 @@ Attack profiles in `fireteam_service.py` (allowlisted tools + short ReAct loops)
 3. Else capability-map hunt queue
 4. Else recon triad
 
-Prefer **3–6** specialists per wave — not every hunter every time.
-Each executor returns a summary contract (`verdict`, `evidence`, `spawn`).
+Prefer **3–6** specialists per wave — not every hunter every time. Each specialist
+leases one highest-priority ready hypothesis, even when several cards share its lane.
+Each executor returns a summary contract (`verdict`, `evidence`, `spawn`) for that
+single leased card.
 A soliloquy (summary with no tool calls) is rewritten once by the auto-prompter.
 
 ---

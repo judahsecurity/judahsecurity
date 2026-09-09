@@ -6307,6 +6307,7 @@ class ASMToolsManager(AssessmentCapabilities):
         brain = seed_hypotheses_from_capability_map(brain, cmap if isinstance(cmap, dict) else {})
         graph = sync_graph_from_brain(brain)
         self._engagement_brain = brain.to_dict()
+
         return json.dumps(
             {
                 "phase": brain.phase,
@@ -7235,9 +7236,9 @@ class ASMToolsManager(AssessmentCapabilities):
         from app.services.agent.fireteam_service import run_fireteam
         from app.services.agent.penetration_task_graph import (
             apply_executor_summary,
+            claim_task_leases,
             compact_scheduler_mission,
             format_graph_for_scheduler,
-            mark_running,
             parse_executor_summary,
             persist_graph,
             ready_wave,
@@ -7271,6 +7272,24 @@ class ASMToolsManager(AssessmentCapabilities):
 
         graph = sync_graph_from_brain(brain)
         self._engagement_brain = brain.to_dict()
+
+        def _checkpoint_task_graph() -> None:
+            """Persist leases before execution so interrupted actions stay visible."""
+            try:
+                from app.services.agent.run_snapshot import save_run_snapshot
+
+                _user_id, organization_id = get_tenant_context()
+                save_run_snapshot(
+                    organization_id,
+                    current_session_id.get() or None,
+                    {
+                        "engagement_brain": self._engagement_brain,
+                        "capability_map": getattr(self, "_capability_map", None),
+                        "current_phase": brain.phase,
+                    },
+                )
+            except Exception:
+                logger.debug("task graph checkpoint skipped", exc_info=True)
 
         selection_source = "explicit"
         if auto:
@@ -7369,16 +7388,49 @@ class ASMToolsManager(AssessmentCapabilities):
 
         profiles = {n: get_specialist(n) for n in chosen if get_specialist(n)}
         default_target = target_list[0] if target_list else (cmap.target if cmap else "")
+        task_leases = claim_task_leases(graph, chosen)
+        represented_specialists = {
+            node.specialist for node in graph.nodes.values() if node.specialist
+        }
+        judge_roles = {"finding_judge", "independent_verifier", "risk_assessor"}
+        chosen = [
+            name
+            for name in chosen
+            if name in task_leases
+            or name not in represented_specialists
+            or name in judge_roles
+        ]
+        profiles = {name: profiles[name] for name in chosen if name in profiles}
+        if not chosen:
+            persist_graph(brain, graph)
+            self._engagement_brain = brain.to_dict()
+            _checkpoint_task_graph()
+            return json.dumps(
+                {
+                    "specialists_requested": [],
+                    "specialists_run": [],
+                    "selection_mode": "auto" if auto else "explicit",
+                    "selection_source": "no_ready_hypothesis",
+                    "task_graph": graph.snapshot(),
+                    "task_graph_prompt": format_graph_for_scheduler(graph),
+                    "message": (
+                        "No hypothesis can be leased. Resolve dependencies or "
+                        "reconcile interrupted execution before dispatch."
+                    ),
+                },
+                indent=2,
+            )
         directives = directives_from_hypotheses(
             brain=brain,
             profiles_by_name=profiles,
             specialists=chosen,
             default_target=default_target or "",
+            task_leases=task_leases,
         )
 
-        mark_running(graph, chosen)
         persist_graph(brain, graph)
         self._engagement_brain = brain.to_dict()
+        _checkpoint_task_graph()
 
         result = await run_fireteam(
             mission=mission,
@@ -7415,6 +7467,16 @@ class ASMToolsManager(AssessmentCapabilities):
 
         retry_names = []
         if rewrites:
+            retry_leases = claim_task_leases(
+                graph, [rewrite.specialist for rewrite in rewrites]
+            )
+            retry_directive_bases = directives_from_hypotheses(
+                brain=brain,
+                profiles_by_name=profiles,
+                specialists=retry_leases,
+                default_target=default_target or "",
+                task_leases=retry_leases,
+            )
             retry_profiles = []
             retry_directives = {}
             for rewrite in rewrites:
@@ -7424,14 +7486,14 @@ class ASMToolsManager(AssessmentCapabilities):
                 retry_profiles.append(
                     apply_rewrite_to_profile(_dc_replace(base), rewrite)
                 )
-                d = directives.get(rewrite.specialist)
+                d = retry_directive_bases.get(rewrite.specialist)
                 if d is not None:
                     retry_directives[rewrite.specialist] = apply_rewrite_to_directive(d, rewrite)
                 retry_names.append(rewrite.specialist)
             if retry_profiles:
-                mark_running(graph, retry_names)
                 persist_graph(brain, graph)
                 self._engagement_brain = brain.to_dict()
+                _checkpoint_task_graph()
                 retry_result = await run_fireteam(
                     mission=mission,
                     targets=target_list,
@@ -7463,6 +7525,7 @@ class ASMToolsManager(AssessmentCapabilities):
 
         persist_graph(brain, graph)
         self._engagement_brain = brain.to_dict()
+        _checkpoint_task_graph()
 
         self._require_independent_verify = True
         from app.services.agent.independent_verify import (
@@ -7506,6 +7569,9 @@ class ASMToolsManager(AssessmentCapabilities):
             },
             "operation_directives": {
                 n: d.to_dict() for n, d in directives.items()
+            },
+            "task_leases": {
+                name: lease.to_dict() for name, lease in task_leases.items()
             },
             "specialists_run": result.specialists_run,
             "selection_mode": "auto" if auto else "explicit",

@@ -35,6 +35,7 @@ class OperationDirective:
     priority: str = "medium"
     rewrite_note: str = ""
     brain_slice: str = ""
+    lease_id: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -61,6 +62,7 @@ class OperationDirective:
             f"- CAPEC: {capecs}\n"
             f"- OWASP: {owasp}\n"
             f"- Hypothesis IDs: {hyps}\n"
+            f"- Execution lease: {self.lease_id or 'unleased'}\n"
             f"- Max iterations: {self.max_iterations}\n"
             f"- Priority: {self.priority}\n"
             f"- Allowed tools: {tools}\n"
@@ -75,7 +77,9 @@ class OperationDirective:
             block = f"{block}\n\n{self.brain_slice}"
         # Inject short Burp-style procedure packs for open methodology cards
         try:
-            from app.services.agent.methodology_procedures import format_procedures_for_prompt
+            from app.services.agent.methodology_procedures import (
+                format_procedures_for_prompt,
+            )
 
             procs = format_procedures_for_prompt(self.methodology_ids, limit=3)
             if procs:
@@ -91,6 +95,7 @@ def directives_from_hypotheses(
     profiles_by_name: Dict[str, Any],
     specialists: Iterable[str],
     default_target: str = "",
+    task_leases: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, OperationDirective]:
     """Build per-specialist directives from open/in_progress hypotheses."""
     open_hyps = [
@@ -102,9 +107,20 @@ def directives_from_hypotheses(
         profile = profiles_by_name.get(name)
         if not profile:
             continue
+        lease = (task_leases or {}).get(name)
+        leased_hypothesis_id = str(
+            getattr(lease, "hypothesis_id", "")
+            or (lease.get("hypothesis_id", "") if isinstance(lease, dict) else "")
+        )
+        lease_id = str(
+            getattr(lease, "id", "")
+            or (lease.get("id", "") if isinstance(lease, dict) else "")
+        )
         matched = [h for h in open_hyps if getattr(h, "specialist", None) == name]
+        if leased_hypothesis_id:
+            matched = [h for h in open_hyps if h.id == leased_hypothesis_id]
         # Combined injection lane still inherits XSS/SQLi/SSRF methodology cards.
-        if name == "injection":
+        if name == "injection" and not leased_hypothesis_id:
             related = [
                 h
                 for h in open_hyps
@@ -112,7 +128,7 @@ def directives_from_hypotheses(
             ]
             seen = {id(h) for h in related}
             matched = related + [h for h in matched if id(h) not in seen]
-        elif name in ("xss", "sqli", "ssrf") and not any(
+        elif not leased_hypothesis_id and name in ("xss", "sqli", "ssrf") and not any(
             getattr(h, "cwe_ids", None) or getattr(h, "methodology_id", None) for h in matched
         ):
             matched = matched + [
@@ -185,11 +201,14 @@ def directives_from_hypotheses(
             owasp=owasps,
             max_iterations=int(getattr(profile, "max_iterations", 6) or 6),
             priority=priority,
+            lease_id=lease_id,
         )
         try:
             from app.services.agent.penetration_task_graph import format_executor_slice
 
-            out[name].brain_slice = format_executor_slice(brain, name)
+            out[name].brain_slice = format_executor_slice(
+                brain, name, hypothesis_id=leased_hypothesis_id
+            )
         except Exception:
             pass
     return out

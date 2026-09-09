@@ -12,9 +12,10 @@ The engagement brain remains shared memory. This graph is the planner.
 
 from __future__ import annotations
 
+import time
+import uuid
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, Iterable, List, Optional, Sequence
-
 
 # Graph node status. Hypothesis.status stays open|in_progress|proven|killed;
 # these are scheduler states layered on top.
@@ -55,7 +56,13 @@ class TaskNode:
     rewritten_test: str = ""
     parent_finding: str = ""
     evidence: str = ""
+    evidence_ids: List[str] = field(default_factory=list)
     source: str = "methodology"  # methodology | map | chain | spawn
+    lease_id: str = ""
+    lease_owner: str = ""
+    lease_started_at: float = 0.0
+    lease_deadline: float = 0.0
+    recovery_required: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -76,6 +83,8 @@ class ExecutorSummary:
     summary: str = ""
     soliloquy: bool = False
     hypothesis_results: List[Dict[str, Any]] = field(default_factory=list)
+    assigned_hypothesis_id: str = ""
+    lease_id: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -107,9 +116,29 @@ class PenetrationTaskGraph:
                 "priority": n.priority,
                 "depends_on": list(n.depends_on),
                 "attempts": n.attempts,
+                "evidence_ids": list(n.evidence_ids),
+                "lease_id": n.lease_id,
+                "lease_deadline": n.lease_deadline,
+                "recovery_required": n.recovery_required,
+                "blocked_reason": n.blocked_reason,
             }
             buckets.setdefault(n.status, []).append(row)
         return buckets
+
+
+@dataclass(frozen=True)
+class TaskLease:
+    """Execution-owned assignment for one bounded hypothesis test."""
+
+    id: str
+    hypothesis_id: str
+    specialist: str
+    attempt: int
+    started_at: float
+    deadline: float
+
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
 def graph_from_dict(data: Optional[Dict[str, Any]]) -> PenetrationTaskGraph:
@@ -196,6 +225,7 @@ def sync_graph_from_brain(brain: Any) -> PenetrationTaskGraph:
         cell = matrix.get(node.id)
         if cell:
             node.blocked_reason = cell.get('reason', '') if cell.get('status') == 'blocked' else ''
+    recover_interrupted_leases(existing)
     _apply_default_dependencies(existing, hyps)
     _recompute_readiness(existing)
     brain.task_graph = existing.to_dict()
@@ -256,6 +286,12 @@ def _deps_satisfied(graph: PenetrationTaskGraph, node: TaskNode) -> bool:
 
 def _recompute_readiness(graph: PenetrationTaskGraph) -> None:
     for node in graph.nodes.values():
+        if node.recovery_required:
+            node.status = NODE_BLOCKED
+            node.blocked_reason = node.blocked_reason or (
+                "Interrupted execution requires evidence reconciliation"
+            )
+            continue
         if node.blocked_reason:
             node.status = NODE_BLOCKED
             continue
@@ -294,6 +330,89 @@ def ready_wave(
         if len(selected) >= max_specialists:
             break
     return selected[:max_specialists]
+
+
+def claim_task_leases(
+    graph: PenetrationTaskGraph,
+    specialists: Iterable[str],
+    *,
+    lease_seconds: int = 3600,
+    now: Optional[float] = None,
+) -> Dict[str, TaskLease]:
+    """Lease one ready hypothesis per specialist for the next executor wave."""
+    current = time.time() if now is None else float(now)
+    wanted = list(dict.fromkeys(str(name) for name in specialists if name))
+    pri = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    leases: Dict[str, TaskLease] = {}
+    for specialist in wanted:
+        candidates = [
+            node
+            for node in graph.nodes.values()
+            if node.specialist == specialist
+            and node.status == NODE_READY
+            and not node.recovery_required
+            and not node.lease_id
+        ]
+        candidates.sort(
+            key=lambda node: (
+                pri.get(node.priority, 9),
+                node.attempts,
+                node.title,
+                node.id,
+            )
+        )
+        if not candidates:
+            continue
+        node = candidates[0]
+        node.status = NODE_RUNNING
+        node.attempts += 1
+        node.lease_id = uuid.uuid4().hex
+        node.lease_owner = specialist
+        node.lease_started_at = current
+        node.lease_deadline = current + max(60, int(lease_seconds))
+        lease = TaskLease(
+            id=node.lease_id,
+            hypothesis_id=node.id,
+            specialist=specialist,
+            attempt=node.attempts,
+            started_at=node.lease_started_at,
+            deadline=node.lease_deadline,
+        )
+        leases[specialist] = lease
+    return leases
+
+
+def recover_interrupted_leases(
+    graph: PenetrationTaskGraph,
+    *,
+    now: Optional[float] = None,
+) -> List[str]:
+    """Quarantine expired work; an unknown side effect must not be replayed."""
+    current = time.time() if now is None else float(now)
+    recovered: List[str] = []
+    for node in graph.nodes.values():
+        if (
+            node.status == NODE_RUNNING
+            and node.lease_id
+            and node.lease_deadline
+            and node.lease_deadline <= current
+        ):
+            node.status = NODE_BLOCKED
+            node.recovery_required = True
+            node.blocked_reason = (
+                "Interrupted execution may have produced a side effect; "
+                "reconcile its evidence before retrying"
+            )
+            node.last_failure = "execution lease expired before a receipt was recorded"
+            recovered.append(node.id)
+    return recovered
+
+
+def _release_lease(node: TaskNode) -> None:
+    node.lease_id = ""
+    node.lease_owner = ""
+    node.lease_started_at = 0.0
+    node.lease_deadline = 0.0
 
 
 def mark_running(graph: PenetrationTaskGraph, specialists: Iterable[str]) -> None:
@@ -347,6 +466,10 @@ def parse_executor_summary(report: Any) -> ExecutorSummary:
                                 if getattr(t, "success", False)
                                 and getattr(t, "args", {}).get("hypothesis_id") == r.get("hypothesis_id")
                                 for i in getattr(t, "evidence_ids", [])})],
+        assigned_hypothesis_id=str(
+            getattr(report, "assigned_hypothesis_id", "") or ""
+        ),
+        lease_id=str(getattr(report, "lease_id", "") or ""),
     )
 
 
@@ -364,14 +487,21 @@ def apply_executor_summary(
     for node in graph.nodes.values():
         if node.specialist != summary.specialist or node.status in _TERMINAL:
             continue
+        if summary.assigned_hypothesis_id and node.id != summary.assigned_hypothesis_id:
+            continue
+        if summary.lease_id:
+            if node.lease_id != summary.lease_id or node.status != NODE_RUNNING:
+                continue
         result = rows.get(node.id)
         if not result:
             if node.status == NODE_RUNNING:
                 node.status = NODE_RETRY
                 node.last_failure = "No evidence-backed result for this hypothesis"
+                _release_lease(node)
             continue
         verdict = result.get("verdict")
         evidence = str(result.get("evidence") or "")[:2000]
+        node.evidence_ids = [str(item) for item in result.get("evidence_ids", [])][:50]
         if verdict == "killed" and result.get("evidence_ids") and evidence:
             node.status, hyp_status = NODE_KILLED, "killed"
         elif verdict == "blocked":
@@ -380,6 +510,7 @@ def apply_executor_summary(
             # Discovery/proven claims wait for independent verification.
             node.status, hyp_status = NODE_RETRY, "in_progress"
         node.evidence = evidence
+        _release_lease(node)
         update_hypothesis(brain, node.id, status=hyp_status, evidence=evidence)
 
     _recompute_readiness(graph)
@@ -407,6 +538,8 @@ def format_graph_for_scheduler(graph: PenetrationTaskGraph, *, limit: int = 8) -
                 f"    - [{row['priority']}] {row['specialist']} id={row['id']} "
                 f"attempts={row.get('attempts', 0)} deps={deps} | {row['title']}"
             )
+            if row.get("recovery_required"):
+                lines.append(f"      recovery: {row.get('blocked_reason')}")
     proven = snap.get("proven") or []
     killed = snap.get("killed") or []
     if proven:
@@ -433,12 +566,16 @@ def compact_scheduler_mission(mission: str, *, ready_count: int, target: str = "
     )
 
 
-def format_executor_slice(brain: Any, specialist: str) -> str:
+def format_executor_slice(
+    brain: Any, specialist: str, *, hypothesis_id: str = ""
+) -> str:
     """Specialist-scoped brain slice — matching cards, creds, failed approaches."""
     hyps = [
         h
         for h in (getattr(brain, "hypotheses", None) or [])
-        if getattr(h, "specialist", None) == specialist and h.status in _OPEN_HYP
+        if getattr(h, "specialist", None) == specialist
+        and h.status in _OPEN_HYP
+        and (not hypothesis_id or h.id == hypothesis_id)
     ]
     lines = [f"EXECUTOR SLICE — {specialist} ({len(hyps)} open cards)"]
     for h in hyps[:4]:

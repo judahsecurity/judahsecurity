@@ -932,6 +932,8 @@ class SpecialistReport:
     spawn: list[str] = field(default_factory=list)
     rewrite_hint: str = ""
     hypothesis_results: list[dict] = field(default_factory=list)
+    assigned_hypothesis_id: str = ""
+    lease_id: str = ""
 
 
 @dataclass
@@ -1029,7 +1031,7 @@ INSTRUCTIONS:
    Write demonstrated-compromise reports (description + impact + assets + remediation),
    not 'login worked' or template-match-only.
 7. Do not exceed {max_iter} iterations. If unsure, finish with done=true.
-8. Return a separate hypothesis_results entry per test; omitted tests stay open. Pass hypothesis_id to replay_http_request/compare_requests. Only independent verification marks proven.
+8. Work only on the single leased hypothesis in the directive. Return one hypothesis_results entry for that ID; sibling tests stay open. Pass hypothesis_id to replay_http_request/compare_requests. Only independent verification marks proven.
 9. Imagining tool output is a failure (soliloquy). If you did not call a tool, verdict=retry.
 9. save_note(category='hunt') with URL/param/hypothesis/next mutation — not raw httpx.
 
@@ -1076,6 +1078,9 @@ async def _run_specialist(
         max_iter = directive.max_iterations or profile.max_iterations
         if directive.hypothesis_ids and not report.hypothesis_ids:
             report.hypothesis_ids = list(directive.hypothesis_ids)
+        if len(directive.hypothesis_ids) == 1:
+            report.assigned_hypothesis_id = directive.hypothesis_ids[0]
+        report.lease_id = directive.lease_id
     else:
         directive_block = (
             f"Goal: execute your role ({profile.epithet}) against the shared mission.\n"
@@ -1111,9 +1116,9 @@ async def _run_specialist(
     org_id = None
     session_id = None
     try:
-        from app.services.agent.tools import current_session_id, get_tenant_context
-        from app.services.agent.palace_memory import wake_up as palace_wake_up
         from app.services.agent.hunter_brief import OOB_SPECIALISTS, format_hunter_brief
+        from app.services.agent.palace_memory import wake_up as palace_wake_up
+        from app.services.agent.tools import current_session_id, get_tenant_context
 
         _uid, org_id = get_tenant_context()
         session_id = current_session_id.get() or None
@@ -1246,8 +1251,9 @@ async def _safe_invoke(tools_manager: Any, tool_name: str, args: dict) -> ToolIn
         summary = _stringify_tool_result(result)
         if result.get("evidence_ids"):
             summary = json.dumps({"evidence_ids": result["evidence_ids"]}) + "\n" + summary
-        from app.services.agent.evidence_store import evidence_store
         import re
+
+        from app.services.agent.evidence_store import evidence_store
         # Only transport-owned records for this invocation's explicit hypothesis.
         ids = re.findall(r'"evidence_id"\s*:\s*"([a-f0-9]+)"', summary)
         store = evidence_store(tools_manager)

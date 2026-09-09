@@ -454,6 +454,160 @@ async def test_parallel_sessions_do_not_share_identities_or_artifacts(manager):
 
 
 @pytest.mark.asyncio
+async def test_fireteam_dispatch_executes_only_its_leased_hypothesis(
+    manager, monkeypatch
+):
+    from app.services.agent.fireteam_service import (
+        FireteamResult,
+        SpecialistReport,
+        ToolInvocation,
+    )
+
+    brain = EngagementBrain(
+        target="https://app.test",
+        hypotheses=[
+            Hypothesis(
+                id=hypothesis_id,
+                title=f"Authorization test {hypothesis_id}",
+                assumption="Object access may cross users",
+                test=f"Test object {hypothesis_id}",
+                pass_criteria="Another user reads it",
+                kill_criteria="Another user is denied",
+                specialist="api_authz",
+            )
+            for hypothesis_id in ("authz-a", "authz-b")
+        ],
+    )
+    manager._engagement_brain = brain.to_dict()
+    monkeypatch.setattr(manager, "_cheap_llm", lambda: object())
+    checkpoints = []
+
+    def record_checkpoint(_organization_id, _session_id, state):
+        checkpoints.append(state)
+
+    monkeypatch.setattr(
+        "app.services.agent.run_snapshot.save_run_snapshot", record_checkpoint
+    )
+
+    async def fake_fireteam(*, mission, directives, **kwargs):
+        directive = directives["api_authz"]
+        assert len(directive.hypothesis_ids) == 1
+        hypothesis_id = directive.hypothesis_ids[0]
+        return FireteamResult(
+            mission=mission,
+            specialists_run=["api_authz"],
+            reports=[
+                SpecialistReport(
+                    specialist="api_authz",
+                    role="authorization",
+                    mission=mission,
+                    summary="The leased object was denied.",
+                    verdict="killed",
+                    hypothesis_ids=[hypothesis_id],
+                    assigned_hypothesis_id=hypothesis_id,
+                    lease_id=directive.lease_id,
+                    hypothesis_results=[
+                        {
+                            "hypothesis_id": hypothesis_id,
+                            "verdict": "killed",
+                            "evidence_ids": ["http-denied"],
+                            "evidence": "Attacker received a denial",
+                        }
+                    ],
+                    tool_calls=[
+                        ToolInvocation(
+                            tool="compare_requests",
+                            args={"hypothesis_id": hypothesis_id},
+                            success=True,
+                            summary="denied",
+                            evidence_ids=["http-denied"],
+                        )
+                    ],
+                )
+            ],
+        )
+
+    monkeypatch.setattr(
+        "app.services.agent.fireteam_service.run_fireteam", fake_fireteam
+    )
+    result = json.loads(
+        await manager.fireteam_dispatch(
+            mission="Test authorization cards",
+            targets=["https://app.test"],
+            specialists=["api_authz"],
+        )
+    )
+
+    leased_id = result["task_leases"]["api_authz"]["hypothesis_id"]
+    rows = manager._engagement_brain["task_graph"]["nodes"]
+    sibling_id = ({"authz-a", "authz-b"} - {leased_id}).pop()
+    assert rows[leased_id]["status"] == "killed"
+    assert rows[leased_id]["evidence_ids"] == ["http-denied"]
+    assert rows[sibling_id]["status"] == "ready"
+    assert any(
+        checkpoint["engagement_brain"]["task_graph"]["nodes"][leased_id]["lease_id"]
+        for checkpoint in checkpoints
+    )
+    assert checkpoints[-1]["engagement_brain"]["task_graph"]["nodes"][leased_id]["lease_id"] == ""
+
+
+@pytest.mark.asyncio
+async def test_fireteam_dispatch_does_not_bypass_interrupted_lease(
+    manager, monkeypatch
+):
+    hypothesis = Hypothesis(
+        id="uncertain-action",
+        title="Uncertain state change",
+        assumption="A write may cross users",
+        test="Attempt one bounded write",
+        pass_criteria="Owner observes the write",
+        kill_criteria="Attacker is denied",
+        specialist="api_authz",
+    )
+    brain = EngagementBrain(target="https://app.test", hypotheses=[hypothesis])
+    brain.task_graph = {
+        "nodes": {
+            hypothesis.id: TaskNode(
+                id=hypothesis.id,
+                title=hypothesis.title,
+                specialist=hypothesis.specialist,
+                status="running",
+                lease_id="expired-lease",
+                lease_owner="api_authz",
+                lease_started_at=1,
+                lease_deadline=2,
+            ).to_dict()
+        }
+    }
+    manager._engagement_brain = brain.to_dict()
+    monkeypatch.setattr(manager, "_cheap_llm", lambda: object())
+    monkeypatch.setattr(
+        "app.services.agent.run_snapshot.save_run_snapshot",
+        lambda *_args, **_kwargs: None,
+    )
+
+    async def should_not_run(**_kwargs):
+        raise AssertionError("interrupted hypothesis was dispatched without reconciliation")
+
+    monkeypatch.setattr(
+        "app.services.agent.fireteam_service.run_fireteam", should_not_run
+    )
+    result = json.loads(
+        await manager.fireteam_dispatch(
+            mission="Resume authorization testing",
+            targets=["https://app.test"],
+            specialists=["api_authz"],
+        )
+    )
+
+    assert result["specialists_run"] == []
+    assert result["selection_source"] == "no_ready_hypothesis"
+    node = result["task_graph"]["blocked"][0]
+    assert node["id"] == hypothesis.id
+    assert node["recovery_required"] is True
+
+
+@pytest.mark.asyncio
 async def test_workflow_resumes_and_cleans_up_after_prerequisite_failure(
     manager, transport
 ):

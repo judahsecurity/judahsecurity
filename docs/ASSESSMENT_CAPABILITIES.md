@@ -176,12 +176,13 @@ pytest harness/tests
 
 Remaining work is explicit: AST-based and computed webpack-chunk discovery;
 GraphQL authorization proofs and schema-aware parameter mutation; gRPC descriptors
-and frame decoding; WebSocket message semantics; SOAP mutation proofs; numeric and
-boolean property changes, deletion and business-workflow strategies; preconfigured
-provider validation adapters; durable secret/receipt restoration and a frontend
-matrix view. Persistent brain snapshots retain inventories and historical receipts,
-but in-memory credentials, plans and executable receipt authority are not restored
-after process restart. Old receipts therefore cannot authorize publication.
+and frame decoding; WebSocket message semantics; SOAP mutation proofs;
+business-workflow strategies; preconfigured provider validation adapters; durable
+workflow-plan restoration and a frontend matrix view. REST JSON now supports captured
+read, string, numeric, boolean and deletion proofs. Persistent snapshots retain the
+task graph, bounded hypothesis leases and historical evidence references, but omit
+credentials and executable receipt authority. Old receipts therefore cannot authorize
+publication, and expired leases require reconciliation before another action.
 
 The recommended next slice is a held-out two-tenant CRUD fixture pack with read,
 update, delete and property-authorization variants, plus patched counterparts.
