@@ -10,6 +10,7 @@ from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
+from app.services.agent.assessment_scope import register_scope
 from app.services.agent.engagement_brain import engagement_brain_from_dict
 from app.services.agent.evidence_store import VerificationRun, verification_run
 from app.services.agent.independent_verify import (
@@ -158,6 +159,7 @@ async def prepare(
     capture=None,
 ):
     m = m or ASMToolsManager()
+    register_scope(m, base)
     for name in ("a", "b", "c"):
         await m.register_test_identity(
             name,
