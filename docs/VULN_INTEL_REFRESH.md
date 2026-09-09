@@ -4,7 +4,9 @@ This document records the current state of vulnerability-intelligence ingestion,
 the gaps that keep it from being continuously updated, and the concrete changes
 needed to close them.
 
-**Status:** analysis complete, implementation pending.
+**Status:** Phase 1 implemented (§4). Phase 2 (delta-driven rescore) and
+phase 3 still pending — **G4 remains open**, so displayed priorities do not yet
+move on their own.
 **Scope:** `backend/app/services/delphi_enrichment_service.py`,
 `backend/app/services/vuln_intel_feeds.py`,
 `backend/app/workers/schedule_worker.py`,
@@ -156,16 +158,21 @@ Its 24h cache TTL matches ours, so it offers no freshness advantage.
 Ordered by dependency. Phase 1 and 2 are the committed scope; phase 3 is
 follow-on.
 
-### Phase 1 — Continuous refresh
+### Phase 1 — Continuous refresh ✅ *implemented*
 
-1. **Mount the cache on the scheduler.** Add `delphi_cache:/app/data/delphi_cache`
-   and `DELPHI_CACHE_DIR` to the `scheduler` service in `docker-compose.yml`, so
-   worker and backend share one directory. *(G2 — blocks everything else.)*
-2. **Add `run_vuln_intel_refresh()` to `schedule_worker.run()`**, following the
-   existing `last_daily_cc_run` interval-guard pattern at
-   `schedule_worker.py:886`, calling the `fetch_*` helpers with `force=True`.
-   *(G1)*
-3. **Per-feed cadences**, with `DELPHI_REFRESH_HOURS` demoted to a default:
+1. **Mount the cache on the scheduler.** `delphi_cache:/app/data/delphi_cache`
+   plus `DELPHI_CACHE_DIR`, `VULN_INTEL_REFRESH_ENABLED` and
+   `VULNCHECK_API_TOKEN` added to the `scheduler` service in
+   `docker-compose.yml`, so worker and backend share one directory.
+   *(G2 — blocked everything else.)*
+2. **`run_vuln_intel_refresh()` added to `schedule_worker.run()`**, gated by
+   `VULN_INTEL_REFRESH_ENABLED`. Blocking `urllib` fetchers run via
+   `asyncio.to_thread` so the 60s loop stays responsive; each feed's timestamp
+   is recorded *before* the await so a slow or failing feed is not retried every
+   tick. *(G1)*
+3. **Per-feed cadences** in `DEFAULT_FEED_INTERVAL_MINUTES`
+   (`vuln_intel_feeds.py`), each overridable via `VULN_INTEL_INTERVAL_<FEED>`
+   in minutes, with `DELPHI_REFRESH_HOURS` demoted to a fallback default:
 
    | Feed | Proposed interval | Rationale |
    |------|------------------|-----------|
@@ -176,6 +183,16 @@ follow-on.
    | ENISA EUKEV | 6h | Low churn |
 
    *(G3)*
+
+4. **Cross-process cache reload.** `ensure_loaded()` now compares the on-disk
+   KEV/EPSS mtimes against its last in-memory load and re-reads from disk when
+   the worker has refreshed them. Without this the API process would keep
+   serving its in-memory copy for up to `DELPHI_REFRESH_HOURS`, making the whole
+   of phase 1 invisible. Reloading is network-free, and if the worker stops
+   touching files the service falls back to its own timer-driven network fetch.
+
+**Not yet closed by phase 1:** G4 below. Feeds are now fresh, but no displayed
+priority changes until something re-scores existing findings.
 
 ### Phase 2 — Delta-driven rescore
 

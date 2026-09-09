@@ -12,7 +12,7 @@ import os
 import signal
 import sys
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Dict, Optional
 
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
@@ -107,6 +107,12 @@ logger = logging.getLogger(__name__)
 DATABASE_URL = os.getenv("DATABASE_URL")
 CHECK_INTERVAL = int(os.getenv("SCHEDULE_CHECK_INTERVAL", "60"))  # Check every minute
 
+# Vulnerability-intel feed refresh. Set false to leave the caches to the
+# backend's lazy refresh and the manual refresh_vuln_intel CLI.
+VULN_INTEL_REFRESH_ENABLED = os.getenv("VULN_INTEL_REFRESH_ENABLED", "true").lower() not in (
+    "false", "0", "no"
+)
+
 # Global shutdown flag
 shutdown_requested = False
 
@@ -142,7 +148,11 @@ class ScheduleWorker:
             logger.warning("DATABASE_URL not set")
             self.engine = None
             self.SessionLocal = None
-        
+
+        # Per-feed timestamps for the vulnerability-intel refresh. Empty at
+        # startup so every feed refreshes once on the first loop tick.
+        self._vuln_intel_last_run: Dict[str, datetime] = {}
+
         logger.info("Schedule worker initialized")
     
     def get_db_session(self) -> Optional[Session]:
@@ -596,6 +606,75 @@ class ScheduleWorker:
         finally:
             db.close()
 
+    async def run_vuln_intel_refresh(self):
+        """
+        Refresh the vulnerability-intelligence disk caches on a per-feed cadence.
+
+        Each feed keeps its own interval (see DEFAULT_FEED_INTERVAL_MINUTES in
+        vuln_intel_feeds) because upstreams publish at very different rates —
+        CIRCL honeypot sightings move continuously while EPSS drops once a day.
+
+        Writes land on the shared delphi_cache volume; the API process notices
+        the newer mtime and reloads without a restart. Fetchers are blocking
+        urllib calls, so each runs in a thread to keep the worker loop responsive.
+        """
+        from app.services.vuln_intel_feeds import (
+            DEFAULT_FEED_INTERVAL_MINUTES,
+            TOKEN_GATED_FEEDS,
+            feed_interval_minutes,
+            refresh_feed,
+        )
+
+        now = datetime.now(timezone.utc)
+        due = [
+            feed
+            for feed in DEFAULT_FEED_INTERVAL_MINUTES
+            if (last := self._vuln_intel_last_run.get(feed)) is None
+            or (now - last) >= timedelta(minutes=feed_interval_minutes(feed))
+        ]
+        if not due:
+            return
+
+        # Resolving the token can hit the api_configs table, so only do it when
+        # a feed that needs one is actually due — this runs on every 60s tick.
+        token = self._resolve_vulncheck_token() if any(f in TOKEN_GATED_FEEDS for f in due) else ""
+
+        for feed in due:
+            # Record before awaiting so a slow or failing feed cannot be
+            # retried every tick of the 60s loop.
+            self._vuln_intel_last_run[feed] = now
+            try:
+                count = await asyncio.to_thread(refresh_feed, feed, vulncheck_token=token)
+                logger.info(f"Vuln intel refresh: {feed} → {count} row(s)")
+            except Exception as exc:
+                logger.error(f"Vuln intel refresh failed for {feed}: {exc}", exc_info=True)
+
+    def _resolve_vulncheck_token(self) -> str:
+        """VulnCheck token from env, then settings, then the api_configs table."""
+        token = (os.getenv("VULNCHECK_API_TOKEN") or "").strip()
+        if token:
+            return token
+
+        try:
+            from app.core.config import settings
+            token = (getattr(settings, "VULNCHECK_API_TOKEN", None) or "").strip()
+            if token:
+                return token
+        except Exception:
+            pass
+
+        db = self.get_db_session()
+        if not db:
+            return ""
+        try:
+            from app.models.api_config import ExternalService, resolve_api_key
+            return (resolve_api_key(db, ExternalService.VULNCHECK) or "").strip()
+        except Exception as exc:
+            logger.debug(f"Could not resolve VulnCheck token from api_configs: {exc}")
+            return ""
+        finally:
+            db.close()
+
     async def run_censys_asm_syncs(self):
         """Run continuous Censys ASM syncs for connections whose interval is due.
 
@@ -882,6 +961,10 @@ class ScheduleWorker:
 
                 # Continuous Cloudflare WAF whitelist syncs
                 await self.run_cloudflare_waf_syncs()
+
+                # Vulnerability intel caches — each feed on its own cadence
+                if VULN_INTEL_REFRESH_ENABLED:
+                    await self.run_vuln_intel_refresh()
 
                 # Daily CommonCrawl refresh — fire once per 24-hour window
                 now = datetime.now(timezone.utc)

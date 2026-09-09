@@ -15,6 +15,7 @@ over empty when a live fetch fails.
 
 from __future__ import annotations
 
+import gzip
 import io
 import json
 import logging
@@ -162,6 +163,39 @@ ENISA_EUKEV_URLS = (
     "https://raw.githubusercontent.com/enisaeu/CNW/refs/heads/main/advisories/eukev/eukev.json",
     "https://raw.githubusercontent.com/enisaeu/CNW/main/advisories/eukev/eukev.json",
 )
+
+# EPSS ships as gzipped CSV. Delphi owns parsing (see _load_epss); this module
+# only fetches and caches the decompressed file so the scheduler can refresh it
+# without importing the enrichment service.
+EPSS_URL = "https://epss.cyentia.com/epss_scores-current.csv.gz"
+EPSS_CACHE_FILENAME = "epss_scores_current.csv"
+
+
+def fetch_epss_scores(*, force: bool = False, refresh_hours: int = 24) -> int:
+    """
+    Refresh the EPSS CSV disk cache. Returns the cached file size in bytes
+    (0 when no cache exists). Never raises — a stale cache beats an empty one.
+    """
+    path = os.path.join(_cache_dir(), EPSS_CACHE_FILENAME)
+    if not force and _cache_fresh(path, refresh_hours):
+        return os.path.getsize(path) if os.path.exists(path) else 0
+
+    try:
+        raw = _http_get_bytes(EPSS_URL, timeout=120)
+        try:
+            decompressed = gzip.decompress(raw)
+        except OSError:
+            # Occasionally served as plain CSV.
+            decompressed = raw
+        tmp = f"{path}.tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(decompressed)
+        os.replace(tmp, path)
+        logger.info("Vuln intel: cached EPSS scores (%d bytes)", len(decompressed))
+        return len(decompressed)
+    except Exception as exc:
+        logger.warning("Vuln intel: EPSS fetch failed (%s); keeping stale cache", exc)
+        return os.path.getsize(path) if os.path.exists(path) else 0
 
 
 def fetch_enisa_eukev_catalog(*, force: bool = False, refresh_hours: int = 24) -> List[Dict[str, Any]]:
@@ -880,3 +914,85 @@ def load_extended_feeds(
     kevintel = fetch_kevintel_attestations(force=force, refresh_hours=refresh_hours)
     fire = load_fire_cves()
     return vkev, shadow, kevintel, fire
+
+
+# ── Scheduled refresh ─────────────────────────────────────────────────────────
+#
+# Upstream feeds publish at very different rates, so a single global cadence is
+# either too slow for the fast ones or wasteful for the slow ones. These are the
+# defaults the schedule worker uses; each is overridable via
+# VULN_INTEL_INTERVAL_<FEED> (minutes).
+#
+# Note on the ceiling: CISA KEV is a weekday-ish JSON drop and EPSS a single
+# daily CSV, so no polling interval makes those stream. The genuinely
+# fast-moving feeds are the CIRCL honeypot sightings and VulnCheck.
+
+DEFAULT_FEED_INTERVAL_MINUTES: Dict[str, int] = {
+    "circl_shadowserver": 30,   # continuous honeypot sightings
+    "kevintel": 30,             # continuous early-warning attestations
+    "cisa_kev": 60,             # weekday publication, no fixed hour
+    "enisa_eukev": 360,         # low churn
+    "epss": 360,                # single daily drop ~00:00 UTC
+    "vulncheck_kev": 1440,      # large download, token-gated
+}
+
+# Feeds that cannot do anything without a VulnCheck token.
+TOKEN_GATED_FEEDS = frozenset({"vulncheck_kev"})
+
+
+def feed_interval_minutes(feed: str) -> int:
+    """Refresh interval for one feed, honouring VULN_INTEL_INTERVAL_<FEED>."""
+    default = DEFAULT_FEED_INTERVAL_MINUTES.get(feed, 1440)
+    raw = os.environ.get(f"VULN_INTEL_INTERVAL_{feed.upper()}")
+    if not raw:
+        return default
+    try:
+        parsed = int(raw)
+    except ValueError:
+        logger.warning(
+            "Vuln intel: VULN_INTEL_INTERVAL_%s=%r is not an integer; using %d",
+            feed.upper(), raw, default,
+        )
+        return default
+    if parsed < 1:
+        logger.warning(
+            "Vuln intel: VULN_INTEL_INTERVAL_%s=%d is below the 1-minute floor; using %d",
+            feed.upper(), parsed, default,
+        )
+        return default
+    return parsed
+
+
+def refresh_feed(feed: str, *, vulncheck_token: str = "") -> int:
+    """
+    Force-refresh a single feed and return the number of rows cached.
+
+    Never raises: every fetcher already falls back to its stale cache, and a
+    scheduled refresh must not take down the worker loop.
+    """
+    if feed in TOKEN_GATED_FEEDS and not vulncheck_token:
+        logger.debug("Vuln intel: skipping %s (no VulnCheck token)", feed)
+        return 0
+
+    try:
+        if feed == "cisa_kev":
+            return len(fetch_cisa_kev_catalog(force=True))
+        if feed == "enisa_eukev":
+            return len(fetch_enisa_eukev_catalog(force=True))
+        if feed == "epss":
+            return fetch_epss_scores(force=True)
+        if feed == "vulncheck_kev":
+            # force=False on purpose: a warm cache is incrementally merged and an
+            # empty one still bootstraps. force=True would re-download the full
+            # backup on every scheduled run.
+            return len(fetch_vulncheck_kev(vulncheck_token, force=False, request_timeout=120))
+        if feed == "circl_shadowserver":
+            return len(fetch_shadowserver_exploited(force=True))
+        if feed == "kevintel":
+            return len(fetch_kevintel_attestations(force=True))
+    except Exception as exc:
+        logger.warning("Vuln intel: scheduled refresh of %s failed: %s", feed, exc)
+        return 0
+
+    logger.warning("Vuln intel: unknown feed %r requested for refresh", feed)
+    return 0

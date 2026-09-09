@@ -353,6 +353,11 @@ services:
       - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-change-in-production}
       - REDIS_URL=redis://redis:6379/0
       - SCHEDULE_CHECK_INTERVAL=${SCHEDULE_CHECK_INTERVAL:-60}
+      # Vulnerability intel refresh — must match the backend's cache dir so
+      # both containers share the delphi_cache volume.
+      - DELPHI_CACHE_DIR=${DELPHI_CACHE_DIR:-/app/data/delphi_cache}
+      - VULN_INTEL_REFRESH_ENABLED=${VULN_INTEL_REFRESH_ENABLED:-true}
+      - VULNCHECK_API_TOKEN=${VULNCHECK_API_TOKEN:-}
     depends_on:
       db:
         condition: service_healthy
@@ -363,6 +368,7 @@ services:
     command: ["python", "-m", "app.workers.schedule_worker"]
     volumes:
       - panorama_data:/app/data/panorama
+      - delphi_cache:/app/data/delphi_cache
     networks:
       - asm_network
 

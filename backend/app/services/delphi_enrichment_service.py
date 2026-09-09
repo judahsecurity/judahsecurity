@@ -411,6 +411,16 @@ class DelphiEnrichmentService:
         except Exception as exc:
             logger.error("Delphi: EPSS parse failed: %s", exc)
 
+    def _disk_cache_mtime(self) -> float:
+        """Newest mtime across the caches we parse. 0.0 when none exist yet."""
+        newest = 0.0
+        for path in (self._kev_cache_path(), self._epss_cache_path()):
+            try:
+                newest = max(newest, os.path.getmtime(path))
+            except OSError:
+                continue
+        return newest
+
     def ensure_loaded(self, force_refresh: bool = False) -> None:
         """Lazy-load or refresh feeds. KEV is required; EPSS is best-effort (display only)."""
         with self._lock:
@@ -421,6 +431,22 @@ class DelphiEnrichmentService:
             if already_loaded and not force_refresh:
                 age = time.time() - self._last_load_ts
                 if age < self.refresh_hours * 3600:
+                    # The schedule worker refreshes these caches in its own
+                    # container on the shared delphi_cache volume. Without this
+                    # check the API process would keep serving its in-memory
+                    # copy until its own timer expired, so a worker refresh
+                    # would stay invisible for up to refresh_hours.
+                    #
+                    # Only KEV and EPSS reload here — they are the caches this
+                    # service parses itself, and re-reading them costs no
+                    # network. The extended feeds still follow the timer below.
+                    # If the worker stops touching files, mtime stops advancing
+                    # and this service falls back to its own network refresh.
+                    if self._disk_cache_mtime() > self._last_load_ts:
+                        logger.info("Delphi: on-disk caches are newer than the in-memory load; reloading")
+                        self._load_kev()
+                        self._load_epss()
+                        self._last_load_ts = time.time()
                     return
             self._fetch_kev(force=force_refresh)
             self._fetch_epss(force=force_refresh)
