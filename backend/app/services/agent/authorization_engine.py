@@ -140,6 +140,9 @@ def apply_proof_result(brain, result: dict) -> dict:
         reason=result["reason"],
         evidence_ids=list(result["evidence_ids"]),
         proof_run_id=result["run_id"],
+        capture_id=result.get("capture_id", ""),
+        cleanup_status=result.get("cleanup_status", ""),
+        cleanup_evidence_ids=list(result.get("cleanup_evidence_ids", [])),
     )
     # A deterministic proof is evidence for the independent verifier, not publication authority.
     for hyp in brain.hypotheses:

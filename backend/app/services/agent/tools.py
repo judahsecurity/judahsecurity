@@ -345,6 +345,8 @@ class ASMToolsManager(AssessmentCapabilities):
     """Manager for ASM platform tools accessible by the AI agent."""
     
     _proof_plans = SessionValue(dict)
+    _captured_proof_plans = SessionValue(dict)
+    _request_capture_store = SessionValue(lambda: None)
     _proof_engine = SessionValue(lambda: None)
     _js_intelligence = SessionValue(lambda: None)
     _secret_validation_policy = SessionValue(dict)
@@ -5929,11 +5931,18 @@ class ASMToolsManager(AssessmentCapabilities):
                                            identity=label, source="http_exchange")
         artifact_id = evidence_store(self).record("http_exchange", exchange, target=url, identity=label,
                                                   hypothesis_id=hypothesis_id, success=resp.status_code < 400)
+        capture = None
+        if (identity not in (None, "anonymous") and not hypothesis_id and not run
+                and 200 <= resp.status_code < 300 and req.method == method
+                and str(req.url) == str(httpx.URL(url))):
+            capture = self._capture_requests().record(
+                dict(method=method, url=str(req.url), headers=dict(req.headers), body=raw_body),
+                identity=label, source="http_exchange", evidence_id=artifact_id)
         from app.services.agent.evidence_store import redact_artifact
         public = redact_artifact(exchange)
         public["response"].pop("body", None)
         public["request"].pop("body", None)
-        return {**public, "evidence_id": artifact_id, "_body_text": body_text}
+        return {**public, "evidence_id": artifact_id, "capture": capture, "_body_text": body_text}
 
     async def replay_http_request(
         self,
@@ -6001,6 +6010,7 @@ class ASMToolsManager(AssessmentCapabilities):
                 note = "use_auth_session=false (unauth gold-bar pair). " + note
             out = {
                 "evidence_id": exchange["evidence_id"],
+                "capture": exchange.get("capture"),
                 "request": exchange["request"],
                 "response": exchange["response"],
                 "note": note,

@@ -62,7 +62,7 @@ def _check_playwright() -> bool:
         return False
 
 
-async def execute_browser_actions(actions_json: str) -> Dict[str, Any]:
+async def execute_browser_actions(actions_json: str, *, capture_callback=None) -> Dict[str, Any]:
     """
     Execute a sequence of browser actions for security testing.
 
@@ -179,6 +179,16 @@ async def execute_browser_actions(actions_json: str) -> Dict[str, Any]:
                 except Exception:
                     session.errors.append("Request metadata capture failed")
             page.on("request", capture_request)
+            def capture_response(response):
+                if capture_callback is None or not 200 <= response.status < 300:
+                    return
+                try:
+                    req = response.request
+                    capture_callback(dict(method=req.method, url=req.url,
+                                          headers=req.headers, body=req.post_data))
+                except Exception:
+                    session.errors.append("Replay template capture failed")
+            page.on("response", capture_response)
             def capture_socket(socket):
                 operations = normalize_request(dict(url=socket.url),
                     identity="anonymous" if isinstance(spec, list) else spec.get("identity", "anonymous"), source="browser")

@@ -671,3 +671,5 @@ MIT License - See LICENSE file for details.
 ### Application assessment engines
 
 See [Application assessment capabilities](docs/ASSESSMENT_CAPABILITIES.md) for identity/tenant matrices, runtime operation discovery, JS intelligence, controlled proof workflows and hypothesis coverage.
+
+See [Capture-to-proof testing](docs/CAPTURE_TO_PROOF.md) for execution-owned REST replay, typed property/delete proofs, cleanup tracking, and vulnerable/patched regression fixtures.

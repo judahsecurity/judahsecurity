@@ -33,6 +33,9 @@ class ProofReceipt:
     candidate_id: str
     candidate_revision: int
     created_at: float
+    capture_id: str = ""
+    cleanup_status: str = ""
+    cleanup_evidence_ids: tuple[str, ...] = ()
 
     def to_dict(self):
         return asdict(self)
@@ -168,6 +171,12 @@ class ProofEngine:
         registry,
     ) -> ProofReceipt:
         strategy = plan.get("strategy")
+        if strategy and strategy.startswith("captured_"):
+            from app.services.agent.captured_proof import run_captured
+
+            return await run_captured(
+                self, plan, cell, execute=execute, registry=registry
+            )
         recipe = PROOF_STRATEGIES.get(strategy)
         if recipe is None:
             raise ValueError("Unsupported proof strategy")
@@ -320,7 +329,16 @@ class ProofEngine:
         )
 
     def _receipt(
-        self, cell, strategy, verdict, reason, ids, run_id, target="", attack_url=""
+        self,
+        cell,
+        strategy,
+        verdict,
+        reason,
+        ids,
+        run_id,
+        target="",
+        attack_url="",
+        **metadata,
     ):
         context = verification_run.get()
         receipt = ProofReceipt(
@@ -339,6 +357,7 @@ class ProofEngine:
             context.candidate_id if context else "",
             context.revision if context else 0,
             time.time(),
+            **metadata,
         )
         self.receipts[receipt.run_id] = receipt
         while len(self.receipts) > 500:

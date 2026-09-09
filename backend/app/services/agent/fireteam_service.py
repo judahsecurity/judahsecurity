@@ -1088,7 +1088,18 @@ async def _run_specialist(
     allowed_tools = list(profile.allowed_tools)
     allowed_tools.extend(t for t in ("read_evidence", "list_test_identities") if t not in allowed_tools)
     if profile.name in ("auth_logic", "independent_verifier", "api_logic", "coverage"):
-        allowed_tools.extend(t for t in ("generate_authorization_matrix", "run_authorization_proof", "get_assessment_coverage", "map_application_traffic") if t not in allowed_tools)
+        allowed_tools.extend(
+            t
+            for t in (
+                "generate_authorization_matrix",
+                "run_authorization_proof",
+                "get_assessment_coverage",
+                "map_application_traffic",
+                "list_proof_captures",
+                "prepare_captured_authorization_proof",
+            )
+            if t not in allowed_tools
+        )
     if "execute_interactsh" in allowed_tools and "run_oob_callback_workflow" not in allowed_tools:
         allowed_tools.append("run_oob_callback_workflow")
     if "compare_requests" in allowed_tools:

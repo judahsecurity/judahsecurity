@@ -1,5 +1,8 @@
 # Application assessment capabilities
 
+For execution-owned REST capture, typed mutation/delete recipes, and their
+vulnerable/patched fixtures, see [Capture-to-proof testing](CAPTURE_TO_PROOF.md).
+
 This phase extends Judah's in-product tool manager, engagement brain, task graph,
 identity registry and execution evidence store. It does not launch Hadrian,
 Vespasian or Titus as external scanners. Their design concepts informed the

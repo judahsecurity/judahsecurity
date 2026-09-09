@@ -824,6 +824,8 @@ TOOL_PHASE_MAP = {
     "map_application_traffic": ["informational", "exploitation", "post_exploitation"],
     "generate_authorization_matrix": ["informational", "exploitation", "post_exploitation"],
     "run_authorization_proof": ["exploitation", "post_exploitation"],
+    "list_proof_captures": ["informational", "exploitation", "post_exploitation"],
+    "prepare_captured_authorization_proof": ["informational", "exploitation", "post_exploitation"],
     "get_assessment_coverage": ["informational", "exploitation", "post_exploitation"],
     "collect_js_intelligence": ["informational", "exploitation", "post_exploitation"],
     "validate_js_secret_candidate": ["exploitation", "post_exploitation"],
@@ -862,6 +864,22 @@ REACT_SYSTEM_PROMPT += "\n\n" + PROOF_GUIDANCE
 
 # Application assessment engines use existing tools, identities and evidence receipts.
 APPLICATION_ASSESSMENT_GUIDANCE = """
+For capture-to-proof testing, browse_as_identity or replay_http_request with a named
+owner records supported successful REST requests. list_proof_captures exposes
+their capture IDs and operation IDs without credentials or body values. Imported
+map_application_traffic hints cannot be used as execution-owned captures.
+After defining explicit deny policy, prepare_captured_authorization_proof takes
+hypothesis_id, capture_id, owner_identity, captured object_id and configuration:
+strategy captured_read/captured_mutation/captured_property/captured_delete; setup
+POST JSON for a disposable object; verify GET; cleanup DELETE of the same object.
+Use {{object_id}} in object URLs. canary_path defaults /marker, object_path /id;
+value_path selects the property; captured_property requires numeric/boolean
+attack_value; captured_delete requires an owner inventory with inventory_path /items.
+Then run_authorization_proof(hypothesis_id) runs the registered recipe. Readback,
+identity checks, fresh objects and cleanup are execution-owned. Refuted means this
+exact test did not demonstrate impact, never that the application is secure.
+Keep cleanup needs_follow_up visible. Unsupported protocols, query credentials,
+multipart/binary bodies and missing controlled fixtures remain untested/blocked.
 Use map_application_traffic for captured request inventories and collect_js_intelligence
 for bounded bundle/source-map leads. Discovery hints never prove vulnerability.
 Register user A/user B/admin/tenant sessions with register_test_identity, verify each

@@ -25,10 +25,89 @@ CAPABILITY_TOOLS = (
     "collect_js_intelligence",
     "validate_js_secret_candidate",
     "browse_as_identity",
+    "list_proof_captures",
+    "prepare_captured_authorization_proof",
 )
 
 
 class AssessmentCapabilities:
+    def _capture_requests(self):
+        from app.services.agent.request_capture import RequestCaptureStore
+
+        if self._request_capture_store is None:
+            self._request_capture_store = RequestCaptureStore()
+        return self._request_capture_store
+
+    async def list_proof_captures(self, operation_id: str | None = None) -> str:
+        """List execution-owned REST replay templates, without body values or credentials."""
+        return json.dumps(dict(captures=self._capture_requests().list(operation_id)))
+
+    async def prepare_captured_authorization_proof(
+        self,
+        hypothesis_id: str,
+        capture_id: str,
+        owner_identity: str,
+        object_id: str,
+        configuration: dict,
+    ) -> str:
+        """Prepare (do not execute) a controlled captured_read/mutation/property/delete recipe.
+
+        configuration requires strategy, setup POST JSON, verify GET and cleanup
+        DELETE URLs. Object URLs use {{object_id}}. Optional top-level JSON
+        pointers: canary_path (/marker), value_path, object_path (/id), and
+        inventory_path (/items) for delete. captured_property needs attack_value.
+        The owner must have captured the selected operation; policy must deny
+        the other identity. Only disposable fixtures with explicit cleanup work.
+        """
+        from copy import deepcopy
+        from app.services.agent.captured_proof import build_plan, field_name
+
+        capture = self._capture_requests().get(capture_id)
+        brain = engagement_brain_from_dict(self._engagement_brain)
+        cell = next(
+            (
+                r
+                for r in brain.authorization_matrix
+                if r["hypothesis_id"] == hypothesis_id
+            ),
+            None,
+        )
+        if (
+            not cell
+            or cell["operation_id"] != capture["operation_id"]
+            or cell["expected"] != "deny"
+        ):
+            raise ValueError(
+                "Capture must match a matrix cell with explicit deny policy"
+            )
+        plan = build_plan(
+            capture,
+            owner_identity=owner_identity,
+            object_id=object_id,
+            configuration=configuration,
+        )
+        if cell["parameter"] and (
+            plan["strategy"] not in ("captured_mutation", "captured_property")
+            or cell["parameter"] != "body:" + field_name(plan["value_path"])
+        ):
+            raise ValueError("Recipe does not test the selected parameter")
+        existing = self._captured_proof_plans.get(hypothesis_id)
+        if existing is not None and existing != plan:
+            raise ValueError(
+                "Use a new assessment to change a registered capture proof"
+            )
+        self._captured_proof_plans[hypothesis_id] = deepcopy(plan)
+        self._proof_plans[hypothesis_id] = deepcopy(plan)
+        return json.dumps(
+            dict(
+                hypothesis_id=hypothesis_id,
+                capture_id=capture_id,
+                strategy=plan["strategy"],
+                ready=True,
+                next_tool="run_authorization_proof",
+            )
+        )
+
     def _assessment_engines(self):
         if getattr(self, "_proof_engine", None) is None:
             self._proof_engine = ProofEngine(evidence_store(self))
@@ -150,7 +229,17 @@ class AssessmentCapabilities:
             raise ValueError(
                 "Current proof recipes support REST JSON operations; protocol-specific verification is required"
             )
-        if cell["parameter"]:
+        captured = plan["strategy"].startswith("captured_")
+        registered_capture = self._captured_proof_plans.get(hypothesis_id)
+        if registered_capture is not None and registered_capture != plan:
+            raise ValueError(
+                "Execution-owned registered plans cannot be edited or downgraded"
+            )
+        if captured and self._captured_proof_plans.get(hypothesis_id) != plan:
+            raise ValueError(
+                "Prepare this execution-owned capture proof first; registered plans cannot be edited"
+            )
+        if cell["parameter"] and not captured:
             location, _, field = cell["parameter"].partition(":")
             if (
                 location != "body"
@@ -275,7 +364,23 @@ class AssessmentCapabilities:
             cookies=session.get("cookies") or [],
             extra_headers=session.get("headers") or {},
         )
-        result = await execute_browser_actions(json.dumps(spec))
+        captures = []
+        store = self._capture_requests()
+
+        def capture_request(request):
+            if (
+                len(captures) >= 200
+                or identity == "anonymous"
+                or origin(request["url"]) != origin(url)
+            ):
+                return
+            captured = store.record(request, identity=identity, source="browser")
+            if captured:
+                captures.append(captured)
+
+        result = await execute_browser_actions(
+            json.dumps(spec), capture_callback=capture_request
+        )
         self._ingest_observed_operations(result.get("application_operations", []))
         artifact = evidence_store(self).record(
             "browser_capture",
@@ -295,6 +400,7 @@ class AssessmentCapabilities:
                 success=result.get("success"),
                 evidence_id=artifact,
                 operations=result.get("application_operations", []),
+                captures=captures,
                 errors=result.get("error"),
                 engagement_brain=self._engagement_brain,
             )
