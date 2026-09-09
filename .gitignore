@@ -80,6 +80,7 @@ credentials/
 tmp/
 temp/
 *.tmp
+.tools/
 
 # Alembic
 alembic/versions/*.pyc

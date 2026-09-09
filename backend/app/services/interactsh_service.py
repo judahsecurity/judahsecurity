@@ -26,6 +26,7 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -58,7 +59,56 @@ _LOCK = threading.Lock()
 
 
 def _binary() -> Optional[str]:
-    return shutil.which("interactsh-client")
+    configured = (os.environ.get("AEGIS_INTERACTSH_CLIENT_BIN") or "").strip()
+    candidates = [
+        configured,
+        str(Path(__file__).resolve().parents[3] / ".tools" / "bin" / "interactsh-client"),
+        shutil.which("interactsh-client") or "",
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return os.path.abspath(candidate)
+    return None
+
+
+def health() -> Dict[str, Any]:
+    """Report whether the standalone callback client is executable."""
+    exe = _binary()
+    if not exe:
+        return {
+            "success": False,
+            "installed": False,
+            "error": (
+                "interactsh-client not found in PATH, AEGIS_INTERACTSH_CLIENT_BIN, "
+                "or the project .tools/bin directory"
+            ),
+        }
+    try:
+        result = subprocess.run(
+            [exe, "-version"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {
+            "success": False,
+            "installed": True,
+            "binary": exe,
+            "error": str(exc),
+        }
+    output = "\n".join(
+        part.strip() for part in (result.stdout, result.stderr) if part.strip()
+    )
+    return {
+        "success": result.returncode == 0,
+        "installed": True,
+        "binary": exe,
+        "version_output": output[:1000],
+        "active_sessions": len(_SESSIONS),
+        "error": None if result.returncode == 0 else output[:1000],
+    }
 
 
 def _drain(session: _Session) -> None:
@@ -119,7 +169,8 @@ def register(server: Optional[str] = None, token: Optional[str] = None) -> Dict[
             "success": False,
             "error": (
                 "interactsh-client not installed. Install with "
-                "`go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest`."
+                "`go install github.com/projectdiscovery/interactsh/cmd/"
+                "interactsh-client@v1.3.1`."
             ),
         }
 

@@ -91,7 +91,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends golang \
     && go install github.com/tomnomnom/waybackurls@latest \
     && go install github.com/tomnomnom/assetfinder@latest \
     && go install github.com/lc/gau/v2/cmd/gau@latest \
-    && (go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest || echo "interactsh-client build skipped") \
+    && go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@v1.3.1 \
     && (GOTOOLCHAIN=go1.25.1 go install -v github.com/melvinsh/subfaster/v2/cmd/subfaster@latest || echo "subfaster build skipped") \
     && (go install github.com/hahwul/dalfox/v2@latest || echo "dalfox build skipped") \
     && cp /root/go/bin/* /tools/
