@@ -465,6 +465,7 @@ class ASMToolsManager(AssessmentCapabilities):
             "execute_retirejs": self.scan_js_urls_for_vulns,
             "execute_jwt": self.execute_mcp_tool,
             "execute_interactsh": self.execute_mcp_tool,
+            "run_oob_callback_workflow": self.run_oob_callback_workflow,
             "execute_semgrep": self.execute_mcp_tool,
             "execute_trivy": self.execute_mcp_tool,
             "execute_cmseek": self.execute_mcp_tool,
@@ -5724,6 +5725,51 @@ class ASMToolsManager(AssessmentCapabilities):
         from app.services.agent.assessment_workflow import run_workflow
         return json.dumps(await run_workflow(self, steps=steps, workflow_id=workflow_id,
                                            max_steps=max(1, min(int(max_steps), 10))))
+
+    async def run_oob_callback_workflow(
+        self,
+        url: str,
+        method: str = "GET",
+        location: str = "query",
+        field: str = "url",
+        headers: Optional[Dict[str, str]] = None,
+        body: Optional[Any] = None,
+        identity: Optional[str] = None,
+        use_auth_session: bool = True,
+        hypothesis_id: str = "",
+        poll_attempts: int = 4,
+        poll_interval_seconds: float = 2.0,
+        server: Optional[str] = None,
+        token: Optional[str] = None,
+        keep_session: bool = False,
+    ) -> str:
+        """Run a correlated custom OAST probe using a fresh Interactsh session.
+
+        The target request remains subject to assessment scope and identity
+        controls. ``location`` may be query, header, body_json, body_form, or
+        raw; raw bodies must contain ``{{callback_url}}``. A callback returns a
+        proof object ready for ``record_verify_verdict``.
+        """
+        from app.services.agent.oob_callback_workflow import run_callback_workflow
+
+        result = await run_callback_workflow(
+            self,
+            url=url,
+            method=method,
+            location=location,
+            field=field,
+            headers=headers,
+            body=body,
+            identity=identity,
+            use_auth_session=use_auth_session,
+            hypothesis_id=hypothesis_id,
+            poll_attempts=poll_attempts,
+            poll_interval_seconds=poll_interval_seconds,
+            server=server,
+            token=token,
+            keep_session=keep_session,
+        )
+        return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
 
     async def read_evidence(self, evidence_id: str, offset: int = 0, limit: int = 6000) -> str:
         """Read a redacted execution artifact without losing text beyond the preview."""

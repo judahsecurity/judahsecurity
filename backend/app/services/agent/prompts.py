@@ -389,6 +389,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **generate_authorization_matrix**, **run_authorization_proof**, **get_assessment_coverage**: Plan and execute identity-specific controlled setup/attack/verify workflows and track all matrix cells.
 - **browse_as_identity**: Browser capture in a fresh origin-bound registered identity context.
 - **validate_js_secret_candidate**: Operator-enabled provider hook; candidates never auto-publish.
+- **run_oob_callback_workflow**: Nuclei-style correlated OAST for one custom in-scope HTTP probe. It creates a fresh Interactsh session, injects the callback into one query/header/JSON/form/raw field, polls with a bounded cooldown, and returns execution-owned `evidence_ids` plus an `oob_callback` proof object for `record_verify_verdict`. Prefer this during independent verification. Raw bodies use `{{callback_url}}`.
 - **replay_http_request**: Replay/tamper a captured XHR/API request from the capability map (like Burp Repeater-lite). Args: method, url, headers (dict), body (optional), sample_index (optional int into capability_map.api_samples), use_auth_session (default true — attaches cookies from deep_crawl login). Example: replay_http_request(sample_index=0) or replay_http_request(method="GET", url="https://target.com/api/users?id=1")
 - **mcp_connect**: Attach an external MCP server the operator already runs (Burp/Caido). Args: **url** (e.g. http://127.0.0.1:9876/sse), **name** (default burp). Then mcp_call.
 - **mcp_list** / **mcp_disconnect**: List or detach attached MCP servers.
@@ -735,6 +736,7 @@ TOOL_PHASE_MAP = {
     "wait_recon_workers": ["informational", "exploitation", "post_exploitation"],
     "list_recon_workers": ["informational", "exploitation", "post_exploitation"],
     "replay_http_request": ["informational", "exploitation", "post_exploitation"],
+    "run_oob_callback_workflow": ["informational", "exploitation", "post_exploitation"],
     "mcp_connect": ["informational", "exploitation", "post_exploitation"],
     "mcp_list": ["informational", "exploitation", "post_exploitation"],
     "mcp_call": ["informational", "exploitation", "post_exploitation"],
