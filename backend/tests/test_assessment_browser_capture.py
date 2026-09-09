@@ -6,6 +6,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
+from app.services.agent.assessment_scope import register_scope
 from test_capture_to_proof import crud_app as crud_app, prepare
 
 pytestmark = pytest.mark.skipif(
@@ -26,6 +27,7 @@ async def test_browser_capture_flows_into_controlled_authorization_proof(crud_ap
         monkeypatch.setattr(BrowserType, "launch", launch)
     base, state = crud_app
     manager = ASMToolsManager()
+    register_scope(manager, base)
     await manager.register_test_identity("a", base, cookies={"sid": "a"})
     await manager._http_exchange("POST", base + "/objects", identity="a", body={"marker": "browser-seed"})
     result = json.loads(await manager.browse_as_identity("a", base, [dict(action="wait", ms=600)]))
@@ -89,6 +91,7 @@ async def test_real_browser_identity_capture_and_origin_block(monkeypatch):
     try:
         base = f"http://127.0.0.1:{server.server_port}"
         manager = ASMToolsManager()
+        register_scope(manager, base)
         for identity in ("a", "b"):
             await manager.register_test_identity(
                 identity, base, cookies=[dict(name="sid", value=identity)]
