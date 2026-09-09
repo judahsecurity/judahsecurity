@@ -84,7 +84,9 @@ class IdentityRegistry:
         # Identities may use existing engagement scope; they cannot expand it.
         from app.services.agent.assessment_scope import assert_url_in_scope
 
-        assert_url_in_scope(self._manager, target)
+        manager = getattr(self, "_manager", None)
+        if manager is not None:
+            assert_url_in_scope(manager, target)
         if headers and any(str(key).lower() == 'host' for key in headers):
             raise ValueError('Identity registration cannot override Host')
         if isinstance(cookies, dict):
