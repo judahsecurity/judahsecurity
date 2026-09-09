@@ -116,7 +116,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends git ca-certific
 ENV GOBIN=/praetorian-bin
 RUN mkdir -p /praetorian-bin && \
     go install github.com/praetorian-inc/pius/cmd/pius@latest && \
-    go install github.com/praetorian-inc/titus/cmd/titus@latest
+    go install github.com/praetorian-inc/titus/cmd/titus@v1.2.7
 
 # =============================================================================
 # Aegis Vanguard - Hermes + Janus fetch stage
@@ -347,7 +347,6 @@ USER scanner
 
 # Start the scanner worker
 CMD ["python", "-m", "app.workers.scanner_worker"]
-
 
 
 
