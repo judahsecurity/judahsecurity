@@ -149,29 +149,59 @@ def validate_proof(
             return False, "Both sessions represent the same principal"
         return True, ""
     if kind == "state_change":
-        write, read = row("write_id"), row("read_id")
+        write, read, cleanup = row("write_id"), row("read_id"), row("cleanup_id")
         field, value = proof.get("field"), proof.get("value")
         if not successful(write) or not successful(read):
             return False, "A successful canary write and readback are required"
+        if not successful(cleanup):
+            return False, "A successful cleanup request is required for state-change proof"
         wreq, rreq = write["payload"]["request"], read["payload"]["request"]
+        creq = cleanup["payload"]["request"]
         if (
             wreq.get("method") not in ("POST", "PUT", "PATCH")
             or rreq.get("method") != "GET"
+            or creq.get("method") not in ("DELETE", "PUT", "PATCH")
         ):
-            return False, "Expected a mutation followed by a read"
-        if read["created_at"] <= write["created_at"]:
-            return False, "Readback must follow the write"
+            return False, "Expected a mutation, readback, and cleanup"
+        if not write["created_at"] < read["created_at"] < cleanup["created_at"]:
+            return False, "Readback and cleanup must follow the write in order"
         if (
             not isinstance(value, str)
-            or not value.startswith("aegis-verify-")
-            or len(value) < 20
+            or value != "aegis-verify-" + candidate.nonce
         ):
-            return False, "Use a unique aegis-verify- canary value"
+            return False, "Use this candidate's fresh aegis-verify canary value"
         if (
             value not in str(wreq.get("body", ""))
             or not field
             or _json(read).get(field) != value
         ):
             return False, "The written canary must round-trip in the readback field"
+        from app.services.agent.evidence_store import origin
+
+        try:
+            if len({origin(wreq["url"]), origin(rreq["url"]), origin(creq["url"])}) != 1:
+                return False, "Write, readback, and cleanup must remain on one origin"
+        except (KeyError, ValueError):
+            return False, "State-change proof contains an invalid request URL"
+        claim = f"{candidate.title} {candidate.description}".lower()
+        actor = write.get("identity")
+        if actor == "legacy":
+            return False, "State-change proof requires an explicit identity"
+        if actor == "anonymous":
+            if not re.search(r"unauthenticated|without auth|anonymous|public write", claim):
+                return False, "Anonymous state change must match an unauthenticated-write claim"
+        else:
+            owner = proof.get("owner_identity")
+            if not owner or owner == actor or read.get("identity") != owner:
+                return False, "Cross-identity state change requires a distinct owner readback"
+            if not wreq.get("identity_verified") or not rreq.get("identity_verified"):
+                return False, "Verify both state-change identities first"
+            if wreq.get("principal_id") == rreq.get("principal_id"):
+                return False, "Actor and owner sessions represent the same principal"
+            if not re.search(
+                r"cross.?user|cross.?tenant|idor|bola|authorization|mass.?assignment|other user",
+                claim,
+            ):
+                return False, "Cross-identity proof must match an authorization-boundary claim"
         return True, ""
     return False, "Unsupported proof kind; keep this candidate inconclusive"

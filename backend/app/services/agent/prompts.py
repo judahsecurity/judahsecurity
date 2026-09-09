@@ -389,6 +389,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **generate_authorization_matrix**, **run_authorization_proof**, **get_assessment_coverage**: Plan and execute identity-specific controlled setup/attack/verify workflows and track all matrix cells.
 - **browse_as_identity**: Browser capture in a fresh origin-bound registered identity context.
 - **validate_js_secret_candidate**: Operator-enabled provider hook; candidates never auto-publish.
+- **run_oob_callback_workflow**: Nuclei-style correlated OAST for one custom in-scope HTTP probe. It creates a fresh Interactsh session, injects the callback into one query/header/JSON/form/raw field, polls with a bounded cooldown, and returns execution-owned `evidence_ids` plus an `oob_callback` proof object for `record_verify_verdict`. Prefer this during independent verification. Raw bodies use `{{callback_url}}`.
 - **replay_http_request**: Replay/tamper a captured XHR/API request from the capability map (like Burp Repeater-lite). Args: method, url, headers (dict), body (optional), sample_index (optional int into capability_map.api_samples), use_auth_session (default true — attaches cookies from deep_crawl login). Example: replay_http_request(sample_index=0) or replay_http_request(method="GET", url="https://target.com/api/users?id=1")
 - **mcp_connect**: Attach an external MCP server the operator already runs (Burp/Caido). Args: **url** (e.g. http://127.0.0.1:9876/sse), **name** (default burp). Then mcp_call.
 - **mcp_list** / **mcp_disconnect**: List or detach attached MCP servers.
@@ -425,7 +426,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **check_test_identity**: Check identity against its known endpoint (identity, url, field, expected).
 - **test_authorization_boundary**: Replay a known private test object as owner and second identity (url, owner_identity, other_identity, object_field, hypothesis_id).
 
-- **record_surface_coverage**: Mark an inventory row. Args: path (required), status (untested|in_focus|finding|tested_clean|skipped), method (default GET), reason (required when skipped), hypothesis_id, finding_title, host.
+- **record_surface_coverage**: Mark an inventory row. Args: path, status, method, reason, hypothesis_id, finding_title, host, identity, test_type, parameter, evidence_id. `tested_clean` requires a named test_type and live HTTP/browser evidence_id. Record separate checks for each identity, parameter, and methodology exercised.
 
 - **get_coverage**: Return the focus-area + takes_input coverage denominator and untested rows. Complete is blocked while untested remain or candidates are pending.
 - **execute_llm_red_team**: Run AI/LLM red team security scan against chatbot/agent endpoints. Tests prompt injection, jailbreak, data exfiltration, SSRF, system prompt leakage, excessive agency, tool_enumeration (tools = attack surface; params = injection points), hallucination, harmful content. Auto-discovers chatbot API endpoints. Args: **target_url** (required), categories (optional comma-separated: prompt_injection,jailbreak,data_exfiltration,ssrf_tool_abuse,system_prompt_leakage,excessive_agency,tool_enumeration,hallucination,harmful_content), endpoint_url (optional — direct chatbot API URL if known), message_field (optional — JSON field name, default "message"), max_payloads (optional int). Example: execute_llm_red_team(target_url="https://example.com"), execute_llm_red_team(target_url="https://example.com", endpoint_url="https://example.com/api/chat", categories="tool_enumeration,excessive_agency"). Findings are auto-created in the platform.
@@ -735,6 +736,7 @@ TOOL_PHASE_MAP = {
     "wait_recon_workers": ["informational", "exploitation", "post_exploitation"],
     "list_recon_workers": ["informational", "exploitation", "post_exploitation"],
     "replay_http_request": ["informational", "exploitation", "post_exploitation"],
+    "run_oob_callback_workflow": ["informational", "exploitation", "post_exploitation"],
     "mcp_connect": ["informational", "exploitation", "post_exploitation"],
     "mcp_list": ["informational", "exploitation", "post_exploitation"],
     "mcp_call": ["informational", "exploitation", "post_exploitation"],

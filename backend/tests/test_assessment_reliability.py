@@ -38,7 +38,9 @@ from app.services.agent.tools import (
 def manager():
     org = current_organization_id.set(98765)
     session = current_session_id.set("assessment-reliability-test")
-    yield ASMToolsManager()
+    instance = ASMToolsManager()
+    instance._assessment_scope.update({"a.test", "b.test", "app.test", "other.test"})
+    yield instance
     current_session_id.reset(session)
     current_organization_id.reset(org)
 
@@ -143,6 +145,69 @@ async def test_explicit_cookies_work_without_legacy_session(manager, transport):
         "GET", "https://a.test/", cookies={"test": "yes"}, use_auth_session=False
     )
     assert json.loads(result["_body_text"])["cookie"] == "test=yes"
+
+
+@pytest.mark.asyncio
+async def test_http_transport_verifies_tls_by_default(manager, monkeypatch):
+    original = httpx.AsyncClient
+    options = {}
+
+    def client(**kwargs):
+        options.update(kwargs)
+        return original(
+            transport=httpx.MockTransport(lambda req: httpx.Response(200, text="ok")),
+            **kwargs,
+        )
+
+    monkeypatch.delenv("AEGIS_ALLOW_INSECURE_TLS", raising=False)
+    monkeypatch.delenv("AEGIS_ASSESSMENT_CA_BUNDLE", raising=False)
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    await manager._http_exchange("GET", "https://a.test/")
+    assert options["verify"] is True
+
+
+@pytest.mark.asyncio
+async def test_http_transport_blocks_unregistered_scope_before_network(manager, transport):
+    called = False
+
+    def handler(req):
+        nonlocal called
+        called = True
+        return httpx.Response(200, text="should not run")
+
+    transport(handler)
+    with pytest.raises(ValueError, match="Out-of-scope"):
+        await manager._http_exchange("GET", "https://unrelated.test/")
+    assert not called
+
+
+@pytest.mark.asyncio
+async def test_identity_registration_cannot_expand_assessment_scope(manager):
+    with pytest.raises(ValueError, match="Out-of-scope"):
+        await manager.register_test_identity("foreign", "https://unrelated.test/")
+
+
+def test_explicit_wildcard_scope_matches_subdomains_without_suffix_tricks(manager):
+    from app.services.agent.assessment_scope import assert_url_in_scope
+
+    manager._assessment_scope.add("*.example.test")
+    assert assert_url_in_scope(manager, "https://api.example.test/") == "api.example.test"
+    with pytest.raises(ValueError, match="Out-of-scope"):
+        assert_url_in_scope(manager, "https://api.example.test.attacker.test/")
+
+
+@pytest.mark.asyncio
+async def test_confirmation_policy_failure_blocks_active_tool(manager, monkeypatch):
+    import app.services.agent.confirmation_service as confirmation
+
+    async def broken(*args, **kwargs):
+        raise RuntimeError("policy database unavailable")
+
+    monkeypatch.setattr(confirmation, "gate", broken)
+    result = await manager._execute_impl(
+        "record_surface_coverage", {"path": "/", "status": "tested_clean"}
+    )
+    assert result["error"] == "confirmation_policy_unavailable"
 
 
 def test_prose_and_bypass_flags_cannot_publish(manager):
@@ -368,6 +433,7 @@ async def test_parallel_sessions_do_not_share_identities_or_artifacts(manager):
     async def one(session):
         token = current_session_id.set(session)
         try:
+            manager._assessment_scope.add("app.test")
             await manager.register_test_identity(
                 "user", "https://app.test/", headers={"x-test-user": session}
             )
@@ -618,6 +684,130 @@ def test_browser_reflection_does_not_satisfy_xss_proof(manager):
 
 
 @pytest.mark.asyncio
+async def test_state_change_rejects_authorized_self_write_and_requires_cleanup(
+    manager, transport
+):
+    from app.services.agent.proof_policy import validate_proof
+
+    canary = ""
+
+    def handler(req):
+        nonlocal canary
+        if req.method in ("PUT", "PATCH"):
+            canary = json.loads(req.content)["display_name"]
+            return httpx.Response(200, json={"display_name": canary})
+        if req.method == "DELETE":
+            canary = ""
+            return httpx.Response(204)
+        return httpx.Response(200, json={"display_name": canary})
+
+    transport(handler)
+    cand = candidate(manager, "Profile display-name update")
+    await manager.register_test_identity("A", "https://app.test/")
+    identity_registry(manager).identities["A"].update(
+        authenticated=True, identity_check={"expected": "A"}
+    )
+    token = verification_run.set(VerificationRun("v", cand.id, 1, cand.nonce))
+    try:
+        value = "aegis-verify-" + cand.nonce
+        write = await manager._http_exchange(
+            "PATCH", cand.target, identity="A", body={"display_name": value}
+        )
+        read = await manager._http_exchange("GET", cand.target, identity="A")
+        cleanup = await manager._http_exchange("DELETE", cand.target, identity="A")
+        ids = [write["evidence_id"], read["evidence_id"], cleanup["evidence_id"]]
+        proof = {
+            "kind": "state_change",
+            "write_id": ids[0],
+            "read_id": ids[1],
+            "cleanup_id": ids[2],
+            "field": "display_name",
+            "value": value,
+            "owner_identity": "A",
+        }
+        assert not validate_proof(evidence_store(manager), cand, proof, ids)[0]
+        proof.pop("cleanup_id")
+        assert not validate_proof(evidence_store(manager), cand, proof, ids)[0]
+    finally:
+        verification_run.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_anonymous_state_change_with_readback_and_cleanup_can_confirm(
+    manager, transport
+):
+    from app.services.agent.proof_policy import validate_proof
+
+    value = ""
+
+    def handler(req):
+        nonlocal value
+        if req.method == "PUT":
+            value = json.loads(req.content)["canary"]
+            return httpx.Response(200, json={"canary": value})
+        if req.method == "DELETE":
+            value = ""
+            return httpx.Response(204)
+        return httpx.Response(200, json={"canary": value})
+
+    transport(handler)
+    cand = candidate(manager, "Unauthenticated public settings write")
+    token = verification_run.set(VerificationRun("v", cand.id, 1, cand.nonce))
+    try:
+        canary = "aegis-verify-" + cand.nonce
+        write = await manager._http_exchange(
+            "PUT", cand.target, identity="anonymous", body={"canary": canary}
+        )
+        read = await manager._http_exchange("GET", cand.target, identity="anonymous")
+        cleanup = await manager._http_exchange("DELETE", cand.target, identity="anonymous")
+        ids = [write["evidence_id"], read["evidence_id"], cleanup["evidence_id"]]
+        assert validate_proof(
+            evidence_store(manager),
+            cand,
+            {
+                "kind": "state_change",
+                "write_id": ids[0],
+                "read_id": ids[1],
+                "cleanup_id": ids[2],
+                "field": "canary",
+                "value": canary,
+            },
+            ids,
+        )[0]
+    finally:
+        verification_run.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_clean_coverage_requires_dimensioned_execution_evidence(manager):
+    from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+    manager._engagement_brain = EngagementBrain(
+        target="https://app.test", surfaces=[{
+            "method": "GET", "path": "/search", "host": "app.test", "takes_input": True
+        }]
+    ).to_dict()
+    rejected = json.loads(await manager.record_surface_coverage(
+        path="/search", host="app.test", status="tested_clean", reason="no reflection"
+    ))
+    assert "test_type" in rejected["error"]
+    eid = evidence_store(manager).record(
+        "http_exchange",
+        {"request": {"method": "GET", "url": "https://app.test/search"},
+         "response": {"status": 200, "body": "clean"}},
+        target="https://app.test/search",
+        identity="anonymous",
+    )
+    accepted = json.loads(await manager.record_surface_coverage(
+        path="/search", host="app.test", status="tested_clean", reason="encoded canary",
+        identity="anonymous", test_type="reflected_xss", parameter="q", evidence_id=eid,
+    ))
+    assert accepted["coverage"]["verified_checks"] == 1
+    row = engagement_brain_from_dict(manager._engagement_brain).coverage[0]
+    assert row["checks"][0]["test_type"] == "reflected_xss"
+
+
+@pytest.mark.asyncio
 async def test_oob_proof_requires_fresh_registration_plant_and_matching_callback(
     manager, transport
 ):
@@ -725,6 +915,33 @@ def test_oversized_evidence_is_bounded_and_cannot_confirm(manager):
         )[0]
     finally:
         verification_run.reset(token)
+
+
+def test_evidence_eviction_removes_persisted_artifact(manager, tmp_path, monkeypatch):
+    from app.services.agent.evidence_store import EvidenceStore
+
+    monkeypatch.setenv("AEGIS_EVIDENCE_DIR", str(tmp_path))
+    store = EvidenceStore(max_records=1)
+    first = store.record("tool_output", {"message": "first"})
+    first_path = tmp_path / store.id / f"{first}.json"
+    assert first_path.exists()
+    second = store.record("tool_output", {"message": "second"})
+    assert not first_path.exists()
+    assert (tmp_path / store.id / f"{second}.json").exists()
+    store.clear()
+    assert not (tmp_path / store.id).exists()
+
+
+def test_session_runtime_is_lru_bounded(manager):
+    from app.services.agent.session_runtime import MAX_MANAGER_SESSIONS
+
+    for index in range(MAX_MANAGER_SESSIONS + 3):
+        token = current_session_id.set(f"bounded-{index}")
+        try:
+            manager._verify_receipts["index"] = index
+        finally:
+            current_session_id.reset(token)
+    assert len(manager.__dict__["_session_runtime"]) <= MAX_MANAGER_SESSIONS
 
 
 def test_tester_prompt_formats_web_progress_without_undefined_state():

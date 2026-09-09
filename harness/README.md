@@ -155,6 +155,23 @@ cost/success gates, this is the reproducible XBEN baseline: **full run,
 reproducible manifest, unified SARIF, zero scope violations, published
 cost/success metrics.**
 
+### Product-agent OAST readiness
+
+Nuclei automatically manages Interactsh registration and polling for OAST
+templates. The product agent also has a standalone callback workflow for custom
+probes and independent verification. Install its pinned client into the local,
+git-ignored tools directory and run an end-to-end readiness check:
+
+```bash
+harness/scripts/install_interactsh_client.sh
+PYTHONPATH=backend python backend/scripts/check_interactsh.py --live
+```
+
+For product-agent benchmark runs, add `--require-oast` to
+`AEGIS_HARNESS_SCANNER_ARGS`. The adapter then fails before spending model
+tokens when the callback client is missing or unhealthy. The client can also be
+supplied with `AEGIS_INTERACTSH_CLIENT_BIN=/absolute/path/interactsh-client`.
+
 ### CI gates (exit codes)
 
 Both runners return non-zero so they can block a pipeline:

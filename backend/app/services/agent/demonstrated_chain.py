@@ -39,6 +39,7 @@ PROOF_TOOLS = frozenset({
     "test_credential_spray",
     "test_saml_sso",
     "execute_interactsh",
+    "run_oob_callback_workflow",
     "execute_interceptor",
 })
 

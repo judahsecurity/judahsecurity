@@ -1476,7 +1476,7 @@ class MCPServer:
                 "(3) 'poll <session_id>' -> returns any DNS/HTTP/SMTP callbacks the target made "
                 "(a callback = confirmed OOB interaction, i.e. a real finding). "
                 "'ensure' reuses a live session instead of minting a new payload domain. "
-                "Also: 'list' (active sessions), 'stop <session_id>'. Optional flags on register: "
+                "Also: 'health', 'list' (active sessions), 'stop <session_id>'. Optional flags on register: "
                 "'register --server <self-hosted> --token <t>'. Sessions persist across tool calls "
                 "and auto-expire after ~1h. Do not use Canarytokens — plant payload_url or "
                 "payload_email (aegis@payload_domain) then poll."
@@ -1488,7 +1488,7 @@ class MCPServer:
                     "description": (
                         "Subcommand: 'register' [--server HOST --token TOKEN], "
                         "'ensure' (reuse live session), 'poll <session_id>', "
-                        "'list', or 'stop <session_id>'."
+                        "'health', 'list', or 'stop <session_id>'."
                     )
                 }
             },
@@ -2446,7 +2446,7 @@ class MCPServer:
         }
 
     async def _execute_interactsh(self, args: str) -> Dict[str, Any]:
-        """OOB collaborator: register/poll/list/stop interactsh-client sessions."""
+        """OOB collaborator: health/register/ensure/poll/list/stop sessions."""
         from app.services import interactsh_service as ish
 
         parts = self._parse_args(args)
@@ -2462,7 +2462,9 @@ class MCPServer:
             return server, token
 
         try:
-            if sub == "register":
+            if sub == "health":
+                result = await asyncio.to_thread(ish.health)
+            elif sub == "register":
                 server, token = _server_token(parts[1:])
                 result = await asyncio.to_thread(ish.register, server, token)
             elif sub in ("ensure", "session"):
@@ -2481,7 +2483,7 @@ class MCPServer:
             else:
                 return {
                     "success": False, "output": "",
-                    "error": f"Unknown subcommand '{sub}'. Use register|ensure|poll|list|stop.",
+                    "error": f"Unknown subcommand '{sub}'. Use health|register|ensure|poll|list|stop.",
                     "exit_code": -1,
                 }
         except Exception as e:  # noqa: BLE001
@@ -2622,6 +2624,10 @@ class MCPServer:
             ok = bool(shutil.which(bin_)) or (
                 os.path.isfile(bin_) and os.access(bin_, os.X_OK)
             )
+        elif name == "execute_interactsh":
+            from app.services import interactsh_service
+
+            ok = interactsh_service._binary() is not None
         elif name in self._HANDLER_BINARY:
             ok = bool(shutil.which(self._HANDLER_BINARY[name]))
         else:

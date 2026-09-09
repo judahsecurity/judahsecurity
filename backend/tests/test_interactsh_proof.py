@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from app.services.agent.independent_verify import FindingCandidate, verifier_mission
 from app.services.agent.interactsh_proof import (
     has_interactsh_proof,
@@ -105,6 +107,43 @@ def test_ensure_session_reuses_live_payload_domain():
         assert second["session_id"] == sid
     finally:
         ish._SESSIONS.pop(sid, None)
+
+
+def test_health_reports_configured_binary(monkeypatch, tmp_path):
+    from app.services import interactsh_service as ish
+
+    binary = tmp_path / "interactsh-client"
+    binary.write_text("placeholder")
+    binary.chmod(0o755)
+    monkeypatch.setenv("AEGIS_INTERACTSH_CLIENT_BIN", str(binary))
+
+    class _Result:
+        returncode = 0
+        stdout = "interactsh-client v1.3.1"
+        stderr = ""
+
+    monkeypatch.setattr(ish.subprocess, "run", lambda *args, **kwargs: _Result())
+    result = ish.health()
+    assert result["success"] is True
+    assert result["binary"] == str(binary)
+    assert "v1.3.1" in result["version_output"]
+
+
+def test_mcp_health_passes_availability_and_censor_gates(monkeypatch):
+    from app.services import interactsh_service as ish
+    from app.services.mcp.server import MCPServer
+
+    monkeypatch.setattr(ish, "_binary", lambda: "/project/.tools/bin/interactsh-client")
+    monkeypatch.setattr(
+        ish,
+        "health",
+        lambda: {"success": True, "installed": True, "version_output": "v1.3.1"},
+    )
+    server = MCPServer()
+    assert server.tool_binary_available("execute_interactsh") is True
+    result = asyncio.run(server.call_tool("execute_interactsh", {"args": "health"}))
+    assert result["success"] is True
+    assert '"installed": true' in result["output"]
 
 
 def test_ensure_session_registers_when_empty(monkeypatch):

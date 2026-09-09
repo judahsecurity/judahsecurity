@@ -328,7 +328,15 @@ def _build_default_schemas() -> Dict[str, ToolSchema]:
             "args": FieldSchema(
                 type="cli_string",
                 max_length=512,
-                allowed_subcommands=["register", "poll", "list", "stop"],
+                allowed_subcommands=[
+                    "health",
+                    "register",
+                    "ensure",
+                    "session",
+                    "poll",
+                    "list",
+                    "stop",
+                ],
             ),
         },
     )

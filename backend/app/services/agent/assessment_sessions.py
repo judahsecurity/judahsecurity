@@ -81,6 +81,12 @@ class IdentityRegistry:
                 "Use a unique identity name other than anonymous or legacy"
             )
         origin(target)
+        # Identities may use existing engagement scope; they cannot expand it.
+        from app.services.agent.assessment_scope import assert_url_in_scope
+
+        manager = getattr(self, "_manager", None)
+        if manager is not None:
+            assert_url_in_scope(manager, target)
         if headers and any(str(key).lower() == 'host' for key in headers):
             raise ValueError('Identity registration cannot override Host')
         if isinstance(cookies, dict):
@@ -121,6 +127,7 @@ class IdentityRegistry:
 def identity_registry(manager) -> IdentityRegistry:
     if getattr(manager, "_identity_registry", None) is None:
         manager._identity_registry = IdentityRegistry()
+        manager._identity_registry._manager = manager
     return manager._identity_registry
 
 

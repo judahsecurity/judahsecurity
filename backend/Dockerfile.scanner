@@ -86,7 +86,7 @@ RUN go install github.com/lc/gau/v2/cmd/gau@latest && \
     go install github.com/haccer/subjack@latest && \
     go install github.com/BishopFox/jsluice/cmd/jsluice@latest && \
     go install github.com/projectdiscovery/uncover/cmd/uncover@latest && \
-    go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest && \
+    go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@v1.3.1 && \
     go install -v github.com/melvinsh/subfaster/v2/cmd/subfaster@latest && \
     cp /root/go/bin/gau /tools/ && \
     cp /root/go/bin/puredns /tools/ && \
@@ -347,7 +347,6 @@ USER scanner
 
 # Start the scanner worker
 CMD ["python", "-m", "app.workers.scanner_worker"]
-
 
 
 

@@ -3814,6 +3814,10 @@ def record_surface_coverage(
     hypothesis_id: str = "",
     finding_title: str = "",
     host: str = "",
+    identity: str = "",
+    test_type: str = "",
+    parameter: str = "",
+    evidence_id: str = "",
 ) -> Dict[str, Any]:
     status = (status or "tested_clean").strip().lower()
     if status not in _COVERAGE_STATUSES:
@@ -3833,6 +3837,29 @@ def record_surface_coverage(
     now = datetime.now(timezone.utc).isoformat()
     rows = list(brain.coverage or [])
     rec_host = (host or "").strip().lower()
+    check = {
+        "identity": (identity or "").strip(),
+        "test_type": (test_type or "").strip().lower(),
+        "parameter": (parameter or "").strip(),
+        "evidence_id": (evidence_id or "").strip(),
+        "hypothesis_id": (hypothesis_id or "").strip(),
+        "status": status,
+        "updated_at": now,
+    }
+    has_check = any(check[k] for k in ("identity", "test_type", "parameter", "evidence_id"))
+
+    def add_check(row):
+        if not has_check:
+            return
+        checks = list(row.get("checks") or [])
+        fingerprint = tuple(check[k] for k in ("identity", "test_type", "parameter", "hypothesis_id"))
+        checks = [
+            item for item in checks
+            if tuple(item.get(k, "") for k in ("identity", "test_type", "parameter", "hypothesis_id")) != fingerprint
+        ]
+        checks.append(check)
+        row["checks"] = checks[-50:]
+
     for row in rows:
         row_host = (row.get("host") or "").strip().lower()
         if row.get("key") == key or (
@@ -3845,6 +3872,7 @@ def record_surface_coverage(
             row["hypothesis_id"] = hypothesis_id or row.get("hypothesis_id") or ""
             row["finding_title"] = finding_title or row.get("finding_title") or ""
             row["updated_at"] = now
+            add_check(row)
             brain.coverage = rows
             return row
     rec = {
@@ -3857,6 +3885,7 @@ def record_surface_coverage(
         "hypothesis_id": hypothesis_id,
         "finding_title": finding_title,
         "updated_at": now,
+        "checks": [check] if has_check else [],
     }
     rows.append(rec)
     brain.coverage = rows
@@ -3899,6 +3928,10 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
         "skipped": len(buckets["skipped"]),
         "untested_count": len(untested),
         "untested": untested[:20],
+        "verified_checks": sum(
+            len(row.get("checks") or []) for row in (brain.coverage or [])
+            if isinstance(row, dict)
+        ),
         "tested_clean_rows": buckets["tested_clean"][:20],
         "skipped_rows": buckets["skipped"][:20],
         "finding_rows": buckets["finding"][:20],

@@ -10,9 +10,9 @@ import argparse
 import asyncio
 import json
 import os
-from pathlib import Path
 import sys
 import uuid
+from pathlib import Path
 
 
 async def assess(args, orchestrator=None):
@@ -37,7 +37,24 @@ async def assess(args, orchestrator=None):
         from app.services.agent.tools import set_tenant_context
 
         set_tenant_context(args.user_id, args.organization_id, session_id)
+    from app.services import interactsh_service
+
+    oast_status = interactsh_service.health()
+    if getattr(args, "require_oast", False) and not oast_status.get("success"):
+        raise ValueError(
+            "Custom OAST is required but unavailable: "
+            + str(oast_status.get("error") or "interactsh-client health check failed")
+        )
     manager = orchestrator.tool_manager
+    from app.services.agent.assessment_scope import register_scope
+
+    if hasattr(manager, "_assessment_scope"):
+        scope_entries = [
+            item.strip()
+            for item in str(args.scope or "").replace("\n", ",").split(",")
+            if item.strip()
+        ]
+        register_scope(manager, args.target, *scope_entries)
     identities = (
         json.loads(Path(args.identities).read_text()) if args.identities else []
     )
@@ -79,6 +96,7 @@ async def assess(args, orchestrator=None):
         "turns": turn + 1,
         "cost_usd": getattr(response, "cost_usd", None),
         "token_usage": getattr(response, "token_usage", None),
+        "oast": oast_status,
     }
     output = (
         Path(os.environ.get("AEGIS_FINDINGS_SINK", "findings.jsonl")).resolve().parent
@@ -105,6 +123,11 @@ def main(argv=None):
     parser.add_argument("--max-turns", type=int, default=4)
     parser.add_argument("--max-iterations", type=int, default=30)
     parser.add_argument("--price-limit-usd", type=float, default=5.0)
+    parser.add_argument(
+        "--require-oast",
+        action="store_true",
+        help="Fail preflight unless the standalone Interactsh callback client is healthy.",
+    )
     args = parser.parse_args(argv)
     return asyncio.run(assess(args))
 

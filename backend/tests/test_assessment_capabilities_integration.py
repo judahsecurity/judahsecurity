@@ -25,6 +25,7 @@ from app.services.agent.independent_verify import (
     check_verify_receipt,
 )
 from app.services.agent.prompts import is_tool_allowed_in_phase
+from app.services.agent.assessment_scope import register_scope
 
 
 @pytest.fixture
@@ -59,7 +60,9 @@ def manager(monkeypatch):
         "AsyncClient",
         lambda **kw: original(transport=httpx.MockTransport(handle), **kw),
     )
-    return ASMToolsManager(), state
+    manager = ASMToolsManager()
+    register_scope(manager, "app.test", "other.test")
+    return manager, state
 
 
 async def prepare(m):

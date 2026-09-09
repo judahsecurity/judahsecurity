@@ -545,6 +545,14 @@ class AgentOrchestrator:
         user_id = state.get("user_id", "unknown")
         org_id = state.get("organization_id")
         session_id = state.get("session_id", "unknown")
+
+        # Establish tenant/session context before touching singleton manager state.
+        if org_id:
+            set_tenant_context(
+                int(user_id) if str(user_id).isdigit() else 0,
+                int(org_id),
+                session_id=str(session_id),
+            )
         
         logger.info(f"[{user_id}/{session_id}] Initializing state...")
         
@@ -587,6 +595,8 @@ class AgentOrchestrator:
                 set_seed_target(seed)
                 try:
                     self.tool_manager._fallback_target = seed
+                    from app.services.agent.assessment_scope import register_scope
+                    register_scope(self.tool_manager, seed)
                 except Exception:
                     pass
         except Exception:
