@@ -359,6 +359,8 @@ class ASMToolsManager(AssessmentCapabilities):
     _engagement_brain = SessionValue(dict)
     _capability_map = SessionValue(lambda: None)
     _require_independent_verify = SessionValue(lambda: True)
+    _assessment_scope = SessionValue(set)
+    _fallback_target = SessionValue(lambda: "")
 
     def __init__(self):
         self.tools = self._register_tools()
@@ -746,8 +748,19 @@ class ASMToolsManager(AssessmentCapabilities):
                         "confirmation": {**gate_result, "status": "denied"},
                     }
                 # Approved — fall through and execute the tool.
-        except Exception as _gate_err:  # fail-open on gate internal error
-            logger.warning(f"Confirmation gate error (fail-open): {_gate_err}")
+        except Exception as _gate_err:
+            logger.exception("Confirmation policy evaluation failed")
+            try:
+                from app.services.agent.confirmation_service import READONLY_TOOLS
+                policy_safe = tool_name in READONLY_TOOLS or tool_name.endswith("_help")
+            except Exception:
+                policy_safe = False
+            if not policy_safe:
+                return {
+                    "success": False,
+                    "output": "Tool execution blocked because confirmation policy could not be evaluated.",
+                    "error": "confirmation_policy_unavailable",
+                }
 
         # Route MCP tools: execute_* and *_help (dynamic CLI + help)
         if tool_name.startswith("execute_") or tool_name.endswith("_help"):
@@ -5792,6 +5805,8 @@ class ASMToolsManager(AssessmentCapabilities):
         from app.services.agent.evidence_store import evidence_store, verification_run, origin
         from app.services.agent.request_mutate import coerce_request_body
         origin(url)
+        from app.services.agent.assessment_scope import assert_url_in_scope
+        assert_url_in_scope(self, url)
         method = (method or "GET").upper().strip()
         raw_body, hdrs = coerce_request_body({"body": body, "headers": headers or {}}, headers or {})
         session = {}
@@ -5814,7 +5829,10 @@ class ASMToolsManager(AssessmentCapabilities):
         start = _time.monotonic()
         # Follow redirects manually: retain RFC cookie scope and never forward an
         # explicit Cookie/Authorization header to a different origin.
-        async with httpx.AsyncClient(cookies=jar, follow_redirects=False, verify=False, timeout=timeout) as client:
+        ca_bundle = os.environ.get("AEGIS_ASSESSMENT_CA_BUNDLE")
+        allow_insecure = os.environ.get("AEGIS_ALLOW_INSECURE_TLS", "").lower() in ("1", "true", "yes")
+        tls_verify = False if allow_insecure else (ca_bundle or True)
+        async with httpx.AsyncClient(cookies=jar, follow_redirects=False, verify=tls_verify, timeout=timeout) as client:
             req = client.build_request(method, url, headers=hdrs, content=raw_body)
             if not any(k.lower() == "cookie" for k in hdrs):
                 req.headers.pop("cookie", None)
@@ -5838,6 +5856,7 @@ class ASMToolsManager(AssessmentCapabilities):
                 if hop == 10:
                     raise ValueError("Too many redirects")
                 nxt = resp.next_request
+                assert_url_in_scope(self, str(nxt.url))
                 if origin(str(nxt.url)) != origin(str(req.url)):
                     nxt.headers.pop("authorization", None)
                     if identity not in (None, "anonymous"):
@@ -6886,8 +6905,12 @@ class ASMToolsManager(AssessmentCapabilities):
         hypothesis_id: str = "",
         finding_title: str = "",
         host: str = "",
+        identity: str = "",
+        test_type: str = "",
+        parameter: str = "",
+        evidence_id: str = "",
     ) -> str:
-        """Mark an inventory surface finding | tested_clean | skipped (skip needs a reason)."""
+        """Record evidence-backed coverage for one surface/test/identity dimension."""
         from app.services.agent.engagement_brain import (
             coverage_progress,
             engagement_brain_from_dict,
@@ -6896,6 +6919,18 @@ class ASMToolsManager(AssessmentCapabilities):
 
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         try:
+            if (status or "").strip().lower() == "tested_clean":
+                if not evidence_id or not test_type:
+                    raise ValueError(
+                        "tested_clean requires test_type and execution evidence_id"
+                    )
+                from app.services.agent.evidence_store import evidence_store
+
+                evidence = evidence_store(self).records.get(evidence_id)
+                if not evidence or evidence.get("kind") not in ("http_exchange", "browser_xss"):
+                    raise ValueError("tested_clean evidence_id must reference live transport evidence")
+                if identity and evidence.get("identity") != identity:
+                    raise ValueError("coverage identity does not match the cited evidence")
             row = record_surface_coverage(
                 brain,
                 method=method or "GET",
@@ -6905,6 +6940,10 @@ class ASMToolsManager(AssessmentCapabilities):
                 hypothesis_id=hypothesis_id or "",
                 finding_title=finding_title or "",
                 host=host or "",
+                identity=identity or "",
+                test_type=test_type or "",
+                parameter=parameter or "",
+                evidence_id=evidence_id or "",
             )
         except ValueError as exc:
             return json.dumps({"error": str(exc)}, indent=2)

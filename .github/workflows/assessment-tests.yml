@@ -2,7 +2,7 @@ name: assessment reliability
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'codex/**']
     paths:
       - 'backend/**'
       - 'harness/**'

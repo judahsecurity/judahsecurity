@@ -85,6 +85,26 @@ class EvidenceStore:
         self.total_bytes = 0
         self.max_bytes = 64 * 1024 * 1024
 
+    def _persisted_path(self, artifact_id: str) -> Path | None:
+        directory = os.environ.get("AEGIS_EVIDENCE_DIR")
+        return Path(directory) / self.id / f"{artifact_id}.json" if directory else None
+
+    def _delete_persisted(self, artifact_id: str) -> None:
+        path = self._persisted_path(artifact_id)
+        if path is not None:
+            try:
+                path.unlink(missing_ok=True)
+                path.parent.rmdir()
+            except OSError:
+                pass
+
+    def clear(self) -> None:
+        """Erase session evidence from memory and configured private persistence."""
+        for artifact_id in list(self.records):
+            self._delete_persisted(artifact_id)
+        self._records.clear()
+        self.total_bytes = 0
+
     def record(
         self,
         kind: str,
@@ -125,8 +145,9 @@ class EvidenceStore:
         self._records[artifact_id] = deepcopy(record)
         self.total_bytes += record["size_bytes"]
         while len(self.records) > self.max_records or self.total_bytes > self.max_bytes:
-            _, removed = self._records.popitem(last=False)
+            removed_id, removed = self._records.popitem(last=False)
             self.total_bytes -= removed["size_bytes"]
+            self._delete_persisted(removed_id)
         directory = os.environ.get("AEGIS_EVIDENCE_DIR")
         if directory:
             root = Path(directory) / self.id

@@ -159,6 +159,8 @@ def test_merge_and_format():
     text = format_capability_map_for_prompt(merged)
     assert "Suggested fireteam" in text
     assert "Capabilities:" in text
+    assert "<UNTRUSTED_APPLICATION_DATA>" in text
+    assert text.index("</UNTRUSTED_APPLICATION_DATA>") < text.index("Suggested fireteam")
 
 
 def test_openapi_schema_surfaces_unauth_account_lookup_hunt():

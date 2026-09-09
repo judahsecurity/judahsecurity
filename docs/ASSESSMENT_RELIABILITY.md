@@ -8,6 +8,8 @@ The product agent now requires execution-owned evidence before publishing medium
 
 Evidence is isolated by organization and assessment session. Records include verifier run, candidate revision, identity, target, time, and a digest. Secret header values and structured JSON secret fields are redacted. Avoid putting real secrets in free-form explanatory text: arbitrary prose is not guaranteed to be fully scrubbed.
 
+HTTP replay is restricted to hosts registered by the assessment target or explicit scope configuration. Redirect destinations are checked again before the next request. Test identities cannot expand scope. Product-harness scope accepts comma-separated exact hosts and explicit `*.example.test` wildcards. TLS certificates are verified by default; use `AEGIS_ASSESSMENT_CA_BUNDLE` for a private CA. `AEGIS_ALLOW_INSECURE_TLS=true` is an explicit lab-only exception and is also honored by the browser worker.
+
 Set `AEGIS_EVIDENCE_DIR` to persist redacted artifacts in a private directory. The in-memory window retains up to 512 records or 64 MiB per session. Artifacts larger than 2 MiB retain a preview and cannot confirm a finding; use a bounded follow-up. Receipts expire after one hour and fail closed if their evidence is unavailable. Restarting a worker requires fresh verification. The files support audit/retrieval outside the agent; they are not automatically trusted as restored publication receipts.
 
 The verifier must execute its own requests and call `record_verify_verdict` with the candidate ID, explanation, evidence IDs, and a supported structured proof:
@@ -16,7 +18,7 @@ The verifier must execute its own requests and call `record_verify_verdict` with
 |---|---|
 | `response_match` | A substantial literal response observation for an exposure; unavailable for authorization, mass assignment, XSS, and blind SSRF claims |
 | `authorization` | Same private object/action, distinct verified principals, and the owner's principal ID in the same response field |
-| `state_change` | A unique `aegis-verify-` value written and subsequently returned by a readback |
+| `state_change` | The candidate-specific `aegis-verify-` value written, returned by a readback under the required identity boundary, and then cleaned up |
 | `browser_xss` | Browser dialog executing the fresh verifier canary; source reflection alone is insufficient |
 | `oob_callback` | Fresh collaborator registration, an observed request planting that payload, and a matching subsequent callback |
 
@@ -94,6 +96,10 @@ Use captured requests from an authorized normal-user walkthrough, not invented e
 An unexpected response remains evidence and makes the workflow inconclusive; it does not itself confirm a vulnerability. Cleanup steps run after failed prerequisites, and failed cleanup stays visible. Resume a returned `workflow_id` without repeating completed mutations. Workflow checkpoints currently live within the worker's assessment session, not across worker restarts.
 
 Specialists return `hypothesis_results`, one entry per hypothesis, citing HTTP evidence IDs captured with that hypothesis ID. A lane summary cannot close all its cards. Missing results remain open; tool errors do not kill a hypothesis. Only independent verification marks a discovery proven.
+
+Clean coverage records now cite live HTTP/browser evidence and name the test type. Identity, parameter, methodology, and evidence are retained as separate checks on the surface. Browser-derived capability maps and retrieved memories are delimited as untrusted data. Tool output containing indirect prompt-injection patterns is not promoted into durable memory.
+
+Chromium runs with its sandbox enabled by default. Containers that cannot support it must opt in with `AEGIS_BROWSER_DISABLE_SANDBOX=true`; prefer fixing the container runtime and seccomp/user-namespace configuration instead.
 
 ## Evaluate the in-product execution path
 

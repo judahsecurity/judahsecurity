@@ -38,6 +38,15 @@ async def assess(args, orchestrator=None):
 
         set_tenant_context(args.user_id, args.organization_id, session_id)
     manager = orchestrator.tool_manager
+    from app.services.agent.assessment_scope import register_scope
+
+    if hasattr(manager, "_assessment_scope"):
+        scope_entries = [
+            item.strip()
+            for item in str(args.scope or "").replace("\n", ",").split(",")
+            if item.strip()
+        ]
+        register_scope(manager, args.target, *scope_entries)
     identities = (
         json.loads(Path(args.identities).read_text()) if args.identities else []
     )

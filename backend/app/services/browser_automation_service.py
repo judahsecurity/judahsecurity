@@ -131,19 +131,17 @@ async def execute_browser_actions(actions_json: str) -> Dict[str, Any]:
     login_authenticated = False
 
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-            ],
-        )
+        browser_args = ["--disable-dev-shm-usage", "--disable-gpu"]
+        if os.environ.get("AEGIS_BROWSER_DISABLE_SANDBOX", "").lower() in ("1", "true", "yes"):
+            logger.warning("Chromium sandbox disabled by explicit assessment configuration")
+            browser_args.extend(["--no-sandbox", "--disable-setuid-sandbox"])
+        browser = await pw.chromium.launch(headless=True, args=browser_args)
         try:
             ctx_kwargs: Dict[str, Any] = {
                 "viewport": {"width": 1280, "height": 720},
-                "ignore_https_errors": True,
+                "ignore_https_errors": os.environ.get(
+                    "AEGIS_ALLOW_INSECURE_TLS", ""
+                ).lower() in ("1", "true", "yes"),
                 "user_agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
