@@ -281,6 +281,7 @@ export default function AssetDetailPage() {
   const [copied, setCopied] = useState(false);
   const [capturingScreenshot, setCapturingScreenshot] = useState(false);
   const [lookingUpVT, setLookingUpVT] = useState(false);
+  const [enrichingIp, setEnrichingIp] = useState(false);
   const [acsDialogOpen, setAcsDialogOpen] = useState(false);
   const [editingAcs, setEditingAcs] = useState(5);
   const [savingAcs, setSavingAcs] = useState(false);
@@ -424,6 +425,34 @@ export default function AssetDetailPage() {
       });
     } finally {
       setLookingUpVT(false);
+    }
+  };
+
+  const handleIpIntelligenceLookup = async () => {
+    if (!asset) return;
+
+    setEnrichingIp(true);
+    try {
+      const enriched = await api.enrichAssetGeolocation(asset.id, {
+        provider: 'ipinfo',
+        includeHostedDomains: true,
+      });
+      setAsset(enriched);
+      const hostedCount = enriched.metadata_?.ip_intelligence?.hosted_domain_count || 0;
+      toast({
+        title: 'IP intelligence updated',
+        description: hostedCount
+          ? `Network and location enriched; ${hostedCount} co-hosted domain candidate${hostedCount === 1 ? '' : 's'} found.`
+          : 'Network and location enrichment completed.',
+      });
+    } catch (error: any) {
+      toast({
+        title: 'IP intelligence lookup failed',
+        description: error?.response?.data?.detail || 'Could not enrich this asset with IPinfo.',
+        variant: 'destructive',
+      });
+    } finally {
+      setEnrichingIp(false);
     }
   };
 
@@ -688,6 +717,7 @@ export default function AssetDetailPage() {
   const acsScore = asset.acs_score || 5;
   const arsScore = asset.ars_score || asset.risk_score || 0;
   const vulnCount = asset.vulnerability_count || vulnerabilities.length;
+  const ipIntelligence = asset.metadata_?.ip_intelligence || {};
 
   return (
     <MainLayout>
@@ -1089,9 +1119,24 @@ export default function AssetDetailPage() {
             {/* Network & Location */}
           <Card>
             <CardHeader>
-                <div className="flex items-center gap-2">
-                <MapPin className="h-5 w-5" />
-                  <CardTitle>Network & Location</CardTitle>
+                <div className="flex items-center justify-between gap-4">
+                  <div className="flex items-center gap-2">
+                    <MapPin className="h-5 w-5" />
+                    <CardTitle>Network & Location</CardTitle>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={handleIpIntelligenceLookup}
+                    disabled={enrichingIp}
+                  >
+                    {enrichingIp ? (
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                      <RefreshCw className="h-4 w-4 mr-2" />
+                    )}
+                    Enrich with IPinfo
+                  </Button>
                 </div>
             </CardHeader>
               <CardContent>
@@ -1142,6 +1187,18 @@ export default function AssetDetailPage() {
                       <span className="font-medium">{asset.isp}</span>
                 </div>
               )}
+                  {ipIntelligence.as_type && (
+                    <div className="flex justify-between py-2 border-b">
+                      <span className="text-muted-foreground">Network Type</span>
+                      <span className="font-medium capitalize">{ipIntelligence.as_type}</span>
+                    </div>
+                  )}
+                  {ipIntelligence.accuracy_radius && (
+                    <div className="flex justify-between py-2 border-b">
+                      <span className="text-muted-foreground">Geo Accuracy Radius</span>
+                      <span className="font-medium">{ipIntelligence.accuracy_radius} km</span>
+                    </div>
+                  )}
                   {asset.city && (
                     <div className="flex justify-between py-2 border-b">
                       <span className="text-muted-foreground">City</span>
@@ -1158,6 +1215,43 @@ export default function AssetDetailPage() {
                     <div className="flex justify-between py-2 border-b">
                       <span className="text-muted-foreground">Region</span>
                       <span className="font-medium">{asset.region}</span>
+                    </div>
+                  )}
+                  {ipIntelligence.provider && (
+                    <div className="flex justify-between py-2 border-b">
+                      <span className="text-muted-foreground">Intelligence Source</span>
+                      <span className="font-medium capitalize">{ipIntelligence.provider}</span>
+                    </div>
+                  )}
+                  {(['is_anonymous', 'is_hosting', 'is_anycast', 'is_mobile', 'is_satellite'] as const)
+                    .some((flag) => ipIntelligence[flag]) && (
+                    <div className="col-span-2 py-2 border-b">
+                      <span className="text-muted-foreground block mb-2">Network Signals</span>
+                      <div className="flex flex-wrap gap-2">
+                        {ipIntelligence.is_anonymous && <Badge variant="destructive">Anonymous</Badge>}
+                        {ipIntelligence.is_hosting && <Badge variant="secondary">Hosting</Badge>}
+                        {ipIntelligence.is_anycast && <Badge variant="secondary">Anycast</Badge>}
+                        {ipIntelligence.is_mobile && <Badge variant="secondary">Mobile</Badge>}
+                        {ipIntelligence.is_satellite && <Badge variant="secondary">Satellite</Badge>}
+                      </div>
+                    </div>
+                  )}
+                  {ipIntelligence.hosted_domains?.length > 0 && (
+                    <div className="col-span-2 py-3 border-b">
+                      <div className="flex items-center justify-between mb-2">
+                        <span className="text-muted-foreground">Co-hosted Domain Candidates</span>
+                        <Badge variant="outline">{ipIntelligence.hosted_domain_count || ipIntelligence.hosted_domains.length}</Badge>
+                      </div>
+                      <div className="flex flex-wrap gap-2">
+                        {ipIntelligence.hosted_domains.map((domain: string) => (
+                          <Badge key={domain} variant="secondary" className="font-mono text-xs">
+                            {domain}
+                          </Badge>
+                        ))}
+                      </div>
+                      <p className="text-xs text-muted-foreground mt-2">
+                        Domains sharing this IP are discovery candidates only; shared hosting does not prove company ownership.
+                      </p>
                     </div>
                   )}
                   

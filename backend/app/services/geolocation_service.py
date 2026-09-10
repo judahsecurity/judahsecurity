@@ -1,16 +1,17 @@
-"""Geo-location service for IP address lookups.
+"""Geo-location and network-intelligence service for IP address lookups.
 
 Supports multiple providers:
 - ip-api.com (free, 45 requests/minute, no API key)
-- ipinfo.io (free tier: 50k/month, optional API key)
+- ipinfo.io (country/ASN, detailed geo, network flags, and optional hosted domains)
 - WhoisXML API (paid, requires API key)
 """
 
+import ipaddress
 import logging
 import os
 import socket
 import asyncio
-from typing import Optional, Dict, Any, Literal
+from typing import Optional, Dict, Any
 from enum import Enum
 import httpx
 
@@ -32,14 +33,17 @@ class GeoLocationService:
     
     # Provider API URLs
     IP_API_URL = "http://ip-api.com/json/{ip}?fields=status,message,country,countryCode,city,lat,lon,isp,as,query"
-    IPINFO_URL = "https://ipinfo.io/{ip}"
+    IPINFO_LOOKUP_URL = "https://api.ipinfo.io/lookup/{ip}"
+    IPINFO_LITE_URL = "https://api.ipinfo.io/lite/{ip}"
+    IPINFO_LEGACY_URL = "https://ipinfo.io/{ip}/json"
+    IPINFO_DOMAINS_URL = "https://ipinfo.io/domains/{ip}"
     WHOISXML_URL = "https://ip-geolocation.whoisxmlapi.com/api/v1"
     
     def __init__(
         self,
         ipinfo_token: Optional[str] = None,
         whoisxml_api_key: Optional[str] = None,
-        preferred_provider: GeoProvider = GeoProvider.IP_API
+        preferred_provider: Optional[GeoProvider] = None
     ):
         """Initialize the geolocation service.
         
@@ -48,10 +52,23 @@ class GeoLocationService:
             whoisxml_api_key: Optional API key for WhoisXML API
             preferred_provider: Which provider to try first
         """
-        self._cache: Dict[str, Dict[str, Any]] = {}
+        self._cache: Dict[tuple[str, str], Dict[str, Any]] = {}
+        self._hosted_domains_cache: Dict[str, Dict[str, Any]] = {}
         self.ipinfo_token = ipinfo_token or os.getenv("IPINFO_TOKEN")
         self.whoisxml_api_key = whoisxml_api_key or os.getenv("WHOISXML_API_KEY")
-        self.preferred_provider = preferred_provider
+        configured_provider = os.getenv("GEOLOCATION_PROVIDER", "").strip().lower()
+        try:
+            env_provider = GeoProvider(configured_provider) if configured_provider else None
+        except ValueError:
+            logger.warning("Ignoring unsupported GEOLOCATION_PROVIDER=%s", configured_provider)
+            env_provider = None
+        # Prefer IPinfo automatically when a token is configured; otherwise retain
+        # the existing no-key provider as the default.
+        self.preferred_provider = (
+            preferred_provider
+            or env_provider
+            or (GeoProvider.IPINFO if self.ipinfo_token else GeoProvider.IP_API)
+        )
     
     def set_api_keys(
         self,
@@ -84,7 +101,8 @@ class GeoLocationService:
     async def lookup_ip(
         self,
         ip_address: str,
-        provider: Optional[GeoProvider] = None
+        provider: Optional[GeoProvider] = None,
+        include_hosted_domains: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Look up geo-location data for an IP address.
         
@@ -92,13 +110,19 @@ class GeoLocationService:
             ip_address: The IP to look up
             provider: Specific provider to use, or None for preferred with fallback
         """
-        # Check cache first
-        if ip_address in self._cache:
-            return self._cache[ip_address]
-        
-        # Skip private/local IPs
-        if self._is_private_ip(ip_address):
+        normalized_ip = self._normalize_public_ip(ip_address)
+        if not normalized_ip:
             return None
+
+        cache_key = (normalized_ip, provider.value if provider else "auto")
+        if cache_key in self._cache:
+            result = dict(self._cache[cache_key])
+            if include_hosted_domains:
+                self._attach_hosted_domains(
+                    result,
+                    await self.lookup_hosted_domains(normalized_ip),
+                )
+            return result
         
         # Determine which providers to try
         providers_to_try = []
@@ -116,15 +140,20 @@ class GeoLocationService:
             try:
                 result = None
                 if prov == GeoProvider.IP_API:
-                    result = await self._lookup_ip_api(ip_address)
+                    result = await self._lookup_ip_api(normalized_ip)
                 elif prov == GeoProvider.IPINFO:
-                    result = await self._lookup_ipinfo(ip_address)
+                    result = await self._lookup_ipinfo(normalized_ip)
                 elif prov == GeoProvider.WHOISXML:
-                    result = await self._lookup_whoisxml(ip_address)
+                    result = await self._lookup_whoisxml(normalized_ip)
                 
                 if result:
                     result["provider"] = prov.value
-                    self._cache[ip_address] = result
+                    self._cache[cache_key] = dict(result)
+                    if include_hosted_domains:
+                        self._attach_hosted_domains(
+                            result,
+                            await self.lookup_hosted_domains(normalized_ip),
+                        )
                     return result
                     
             except Exception as e:
@@ -158,44 +187,150 @@ class GeoLocationService:
         return None
     
     async def _lookup_ipinfo(self, ip_address: str) -> Optional[Dict[str, Any]]:
-        """Look up using ipinfo.io."""
+        """Look up an IP using IPinfo's current API (or legacy no-token API)."""
         try:
             headers = {}
             if self.ipinfo_token:
                 headers["Authorization"] = f"Bearer {self.ipinfo_token}"
-            
+
+            url = (
+                self.IPINFO_LOOKUP_URL.format(ip=ip_address)
+                if self.ipinfo_token
+                else self.IPINFO_LEGACY_URL.format(ip=ip_address)
+            )
             async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.get(
-                    f"{self.IPINFO_URL}/{ip_address}",
-                    headers=headers
-                )
-                
+                response = await client.get(url, headers=headers)
+                if self.ipinfo_token and response.status_code in (401, 403):
+                    # Lite tokens do not have access to /lookup, but can still
+                    # contribute country and ASN intelligence.
+                    response = await client.get(
+                        self.IPINFO_LITE_URL.format(ip=ip_address),
+                        headers=headers,
+                    )
+
                 if response.status_code == 200:
                     data = response.json()
-                    
-                    # Parse location from "lat,lon" format
-                    lat, lon = "", ""
-                    if data.get("loc"):
-                        parts = data["loc"].split(",")
-                        if len(parts) == 2:
-                            lat, lon = parts[0], parts[1]
-                    
-                    return {
-                        "ip_address": data.get("ip", ip_address),
-                        "latitude": lat,
-                        "longitude": lon,
-                        "city": data.get("city", ""),
-                        "country": data.get("country", ""),  # Country code only
-                        "country_code": data.get("country", ""),
-                        "region": data.get("region", ""),
-                        "isp": data.get("org", ""),
-                        "asn": data.get("org", "").split(" ")[0] if data.get("org") else "",
-                        "timezone": data.get("timezone", ""),
-                        "postal": data.get("postal", ""),
-                    }
+                    return self._normalize_ipinfo_response(ip_address, data)
+                if response.status_code == 429:
+                    logger.warning("IPinfo rate limit reached")
         except Exception as e:
             logger.debug(f"ipinfo.io lookup failed for {ip_address}: {e}")
         return None
+
+    @staticmethod
+    def _normalize_ipinfo_response(ip_address: str, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize current nested and legacy flat IPinfo responses."""
+        if isinstance(data.get("geo"), dict) or isinstance(data.get("as"), dict):
+            geo = data.get("geo") or {}
+            as_info = data.get("as") or {}
+            return {
+                "ip_address": data.get("ip", ip_address),
+                "latitude": str(geo.get("latitude", "")),
+                "longitude": str(geo.get("longitude", "")),
+                "city": geo.get("city", ""),
+                "country": geo.get("country", ""),
+                "country_code": geo.get("country_code", ""),
+                "geo_region": geo.get("region", ""),
+                "region_code": geo.get("region_code", ""),
+                "timezone": geo.get("timezone", ""),
+                "postal": geo.get("postal_code", ""),
+                "accuracy_radius": geo.get("radius"),
+                "isp": as_info.get("name", ""),
+                "asn": as_info.get("asn", ""),
+                "as_name": as_info.get("name", ""),
+                "as_domain": as_info.get("domain", ""),
+                "as_type": as_info.get("type", ""),
+                "is_anonymous": bool(data.get("is_anonymous", False)),
+                "is_anycast": bool(data.get("is_anycast", False)),
+                "is_hosting": bool(data.get("is_hosting", False)),
+                "is_mobile": bool(data.get("is_mobile", False)),
+                "is_satellite": bool(data.get("is_satellite", False)),
+            }
+
+        if data.get("asn") or data.get("as_name"):
+            return {
+                "ip_address": data.get("ip", ip_address),
+                "country": data.get("country", ""),
+                "country_code": data.get("country_code", ""),
+                "continent": data.get("continent", ""),
+                "continent_code": data.get("continent_code", ""),
+                "isp": data.get("as_name", ""),
+                "asn": data.get("asn", ""),
+                "as_name": data.get("as_name", ""),
+                "as_domain": data.get("as_domain", ""),
+            }
+
+        lat, lon = "", ""
+        if data.get("loc"):
+            parts = str(data["loc"]).split(",", 1)
+            if len(parts) == 2:
+                lat, lon = parts
+        org = str(data.get("org", ""))
+        return {
+            "ip_address": data.get("ip", ip_address),
+            "latitude": lat,
+            "longitude": lon,
+            "city": data.get("city", ""),
+            "country": data.get("country_name", data.get("country", "")),
+            "country_code": data.get("country", ""),
+            "geo_region": data.get("region", ""),
+            "timezone": data.get("timezone", ""),
+            "postal": data.get("postal", ""),
+            "isp": org.partition(" ")[2] or org,
+            "asn": org.split(" ")[0] if org else "",
+        }
+
+    async def lookup_hosted_domains(
+        self,
+        ip_address: str,
+        limit: int = 50,
+    ) -> Optional[Dict[str, Any]]:
+        """Return domains observed on an IP when the IPinfo plan permits it.
+
+        These are co-hosted domain candidates, not proof of organizational
+        ownership. IPinfo exposes this dataset only on eligible paid plans.
+        """
+        normalized_ip = self._normalize_public_ip(ip_address)
+        if not normalized_ip or not self.ipinfo_token:
+            return None
+        if normalized_ip in self._hosted_domains_cache:
+            return dict(self._hosted_domains_cache[normalized_ip])
+
+        try:
+            headers = {"Authorization": f"Bearer {self.ipinfo_token}"}
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(
+                    self.IPINFO_DOMAINS_URL.format(ip=normalized_ip),
+                    headers=headers,
+                )
+            if response.status_code != 200:
+                return None
+            data = response.json()
+            domains = [
+                domain.strip().lower()
+                for domain in data.get("domains", [])
+                if isinstance(domain, str) and domain.strip()
+            ]
+            result = {
+                "domains": domains[: max(0, min(limit, 500))],
+                "total": int(data.get("total", len(domains)) or 0),
+                "attribution": "co-hosted_only",
+            }
+            self._hosted_domains_cache[normalized_ip] = dict(result)
+            return result
+        except Exception as e:
+            logger.debug("IPinfo hosted-domain lookup failed for %s: %s", normalized_ip, e)
+            return None
+
+    @staticmethod
+    def _attach_hosted_domains(
+        result: Dict[str, Any],
+        hosted_domains: Optional[Dict[str, Any]],
+    ) -> None:
+        if hosted_domains:
+            result["hosted_domains"] = hosted_domains.get("domains", [])
+            result["hosted_domain_count"] = hosted_domains.get("total", 0)
+            result["hosted_domains_attribution"] = hosted_domains.get("attribution")
     
     async def _lookup_whoisxml(self, ip_address: str) -> Optional[Dict[str, Any]]:
         """Look up using WhoisXML API."""
@@ -239,7 +374,12 @@ class GeoLocationService:
             logger.debug(f"WhoisXML API lookup failed for {ip_address}: {e}")
         return None
     
-    async def lookup_hostname(self, hostname: str, provider: Optional[GeoProvider] = None) -> Optional[Dict[str, Any]]:
+    async def lookup_hostname(
+        self,
+        hostname: str,
+        provider: Optional[GeoProvider] = None,
+        include_hosted_domains: bool = False,
+    ) -> Optional[Dict[str, Any]]:
         """Resolve hostname and look up geo-location."""
         # First resolve the hostname to an IP
         ip_address = await self.resolve_hostname(hostname)
@@ -248,48 +388,32 @@ class GeoLocationService:
             return None
         
         # Then look up the IP
-        result = await self.lookup_ip(ip_address, provider)
+        result = await self.lookup_ip(
+            ip_address,
+            provider,
+            include_hosted_domains=include_hosted_domains,
+        )
         
         if result:
             result["ip_address"] = ip_address
             
         return result
     
-    def _is_private_ip(self, ip: str) -> bool:
-        """Check if an IP address is private/local."""
+    @staticmethod
+    def _normalize_public_ip(value: str) -> Optional[str]:
+        """Return a canonical public IPv4/IPv6 address, or None."""
         try:
-            parts = ip.split(".")
-            if len(parts) != 4:
-                return True
-            
-            first = int(parts[0])
-            second = int(parts[1])
-            
-            # 10.x.x.x
-            if first == 10:
-                return True
-            # 172.16.x.x - 172.31.x.x
-            if first == 172 and 16 <= second <= 31:
-                return True
-            # 192.168.x.x
-            if first == 192 and second == 168:
-                return True
-            # 127.x.x.x (localhost)
-            if first == 127:
-                return True
-            # 0.x.x.x
-            if first == 0:
-                return True
-                
-            return False
-        except:
-            return True
+            parsed = ipaddress.ip_address(value.strip())
+            return str(parsed) if parsed.is_global else None
+        except (AttributeError, ValueError):
+            return None
     
     async def batch_lookup(
         self,
         hostnames: list[str],
         max_concurrent: int = 10,
-        provider: Optional[GeoProvider] = None
+        provider: Optional[GeoProvider] = None,
+        include_hosted_domains: bool = False,
     ) -> Dict[str, Dict[str, Any]]:
         """Look up geo-location for multiple hostnames concurrently."""
         results = {}
@@ -301,7 +425,11 @@ class GeoLocationService:
             async with semaphore:
                 # Add small delay to respect rate limits
                 await asyncio.sleep(0.1)
-                result = await self.lookup_hostname(hostname, provider)
+                result = await self.lookup_hostname(
+                    hostname,
+                    provider,
+                    include_hosted_domains=include_hosted_domains,
+                )
                 if result:
                     results[hostname] = result
         
@@ -337,7 +465,7 @@ def get_geolocation_service() -> GeoLocationService:
 def configure_geolocation_service(
     ipinfo_token: Optional[str] = None,
     whoisxml_api_key: Optional[str] = None,
-    preferred_provider: GeoProvider = GeoProvider.IP_API
+    preferred_provider: Optional[GeoProvider] = None,
 ) -> GeoLocationService:
     """Configure and return the geolocation service."""
     global _geo_service
@@ -472,4 +600,3 @@ def get_emea_region(country_code: Optional[str]) -> Optional[str]:
 def get_all_regions() -> list[str]:
     """Get list of all available regions."""
     return sorted(list(set(COUNTRY_TO_REGION.values())))
-

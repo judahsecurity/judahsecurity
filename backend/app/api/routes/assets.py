@@ -42,6 +42,56 @@ def check_org_access(user: User, org_id: int) -> bool:
     return user.organization_id == org_id
 
 
+def _apply_ip_enrichment(asset: Asset, geo_data: Dict[str, Any]) -> None:
+    """Apply normalized geo/network intelligence and preserve provider details."""
+    if geo_data.get("ip_address"):
+        asset.add_ip_address(geo_data["ip_address"])
+
+    for field in ("latitude", "longitude", "city", "country", "country_code", "isp", "asn"):
+        value = geo_data.get(field)
+        if value not in (None, ""):
+            setattr(asset, field, value)
+
+    country_code = geo_data.get("country_code") or geo_data.get("country")
+    if country_code:
+        from app.services.geolocation_service import get_region_from_country
+        asset.region = get_region_from_country(country_code)
+
+    detail_keys = (
+        "provider",
+        "ip_address",
+        "geo_region",
+        "region_code",
+        "timezone",
+        "postal",
+        "accuracy_radius",
+        "continent",
+        "continent_code",
+        "as_name",
+        "as_domain",
+        "as_type",
+        "connection_type",
+        "is_anonymous",
+        "is_anycast",
+        "is_hosting",
+        "is_mobile",
+        "is_satellite",
+        "hosted_domains",
+        "hosted_domain_count",
+        "hosted_domains_attribution",
+    )
+    intelligence = {
+        key: geo_data[key]
+        for key in detail_keys
+        if key in geo_data and geo_data[key] not in (None, "", [])
+    }
+    intelligence["fetched_at"] = datetime.utcnow().isoformat() + "Z"
+
+    metadata = dict(asset.metadata_ or {})
+    metadata["ip_intelligence"] = intelligence
+    asset.metadata_ = metadata
+
+
 def _empty_vuln_counts() -> Dict[str, int]:
     return {
         "vulnerability_count": 0,
@@ -1289,9 +1339,12 @@ async def enrich_assets_geolocation(
     force: bool = Query(False, description="Re-enrich assets that already have geo data"),
     limit: int = Query(50, ge=1, le=200, description="Maximum assets to enrich"),
     provider: Optional[str] = Query(None, description="Geo provider: ip-api, ipinfo, whoisxml"),
-    ipinfo_token: Optional[str] = Query(None, description="IPInfo.io API token"),
     whoisxml_api_key: Optional[str] = Query(None, description="WhoisXML API key"),
     include_ips: bool = Query(True, description="Also enrich IP address assets"),
+    include_hosted_domains: bool = Query(
+        False,
+        description="Include co-hosted domain candidates when the IPinfo plan permits it",
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_analyst)
 ):
@@ -1303,6 +1356,9 @@ async def enrich_assets_geolocation(
     - ipinfo: Free tier 50k/month, optional token for higher limits
     - whoisxml: Requires API key (https://ip-geolocation.whoisxmlapi.com)
     
+    Configure IPINFO_TOKEN on the backend; credentials are never accepted from
+    browser query parameters.
+
     Example with WhoisXML:
     POST /api/assets/enrich-geolocation?whoisxml_api_key=at_xxx&provider=whoisxml
     """
@@ -1311,9 +1367,8 @@ async def enrich_assets_geolocation(
     geo_service = get_geolocation_service()
     
     # Configure API keys if provided
-    if ipinfo_token or whoisxml_api_key:
+    if whoisxml_api_key:
         geo_service.set_api_keys(
-            ipinfo_token=ipinfo_token,
             whoisxml_api_key=whoisxml_api_key
         )
     
@@ -1362,28 +1417,20 @@ async def enrich_assets_geolocation(
         try:
             # For IP addresses, look up directly; for hostnames, resolve first
             if asset.asset_type == AssetType.IP_ADDRESS:
-                geo_data = await geo_service.lookup_ip(asset.value, geo_provider)
+                geo_data = await geo_service.lookup_ip(
+                    asset.value,
+                    geo_provider,
+                    include_hosted_domains=include_hosted_domains,
+                )
             else:
-                geo_data = await geo_service.lookup_hostname(asset.value, geo_provider)
+                geo_data = await geo_service.lookup_hostname(
+                    asset.value,
+                    geo_provider,
+                    include_hosted_domains=include_hosted_domains,
+                )
             
             if geo_data:
-                from app.services.geolocation_service import get_region_from_country
-                
-                # Update IP using multi-value method
-                if geo_data.get("ip_address"):
-                    asset.add_ip_address(geo_data.get("ip_address"))
-                asset.latitude = geo_data.get("latitude")
-                asset.longitude = geo_data.get("longitude")
-                asset.city = geo_data.get("city")
-                asset.country = geo_data.get("country")
-                asset.country_code = geo_data.get("country_code")
-                asset.isp = geo_data.get("isp")
-                asset.asn = geo_data.get("asn")
-                
-                # Auto-assign region from country code
-                country_code = geo_data.get("country_code") or geo_data.get("country")
-                if country_code:
-                    asset.region = get_region_from_country(country_code)
+                _apply_ip_enrichment(asset, geo_data)
                 
                 enriched_count += 1
                 
@@ -1609,8 +1656,11 @@ def get_available_regions(
 async def enrich_single_asset_geolocation(
     asset_id: int,
     provider: Optional[str] = Query(None, description="Geo provider: ip-api, ipinfo, whoisxml"),
-    ipinfo_token: Optional[str] = Query(None, description="IPInfo.io API token"),
     whoisxml_api_key: Optional[str] = Query(None, description="WhoisXML API key"),
+    include_hosted_domains: bool = Query(
+        False,
+        description="Include co-hosted domain candidates when the IPinfo plan permits it",
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_analyst)
 ):
@@ -1634,9 +1684,8 @@ async def enrich_single_asset_geolocation(
     geo_service = get_geolocation_service()
     
     # Configure API keys if provided
-    if ipinfo_token or whoisxml_api_key:
+    if whoisxml_api_key:
         geo_service.set_api_keys(
-            ipinfo_token=ipinfo_token,
             whoisxml_api_key=whoisxml_api_key
         )
     
@@ -1652,21 +1701,20 @@ async def enrich_single_asset_geolocation(
     
     # For IP addresses, look up directly; for hostnames, resolve first
     if asset.asset_type == AssetType.IP_ADDRESS:
-        geo_data = await geo_service.lookup_ip(asset.value, geo_provider)
+        geo_data = await geo_service.lookup_ip(
+            asset.value,
+            geo_provider,
+            include_hosted_domains=include_hosted_domains,
+        )
     else:
-        geo_data = await geo_service.lookup_hostname(asset.value, geo_provider)
+        geo_data = await geo_service.lookup_hostname(
+            asset.value,
+            geo_provider,
+            include_hosted_domains=include_hosted_domains,
+        )
     
     if geo_data:
-        # Update IP using multi-value method
-        if geo_data.get("ip_address"):
-            asset.add_ip_address(geo_data.get("ip_address"))
-        asset.latitude = geo_data.get("latitude")
-        asset.longitude = geo_data.get("longitude")
-        asset.city = geo_data.get("city")
-        asset.country = geo_data.get("country")
-        asset.country_code = geo_data.get("country_code")
-        asset.isp = geo_data.get("isp")
-        asset.asn = geo_data.get("asn")
+        _apply_ip_enrichment(asset, geo_data)
         db.commit()
         db.refresh(asset)
     else:

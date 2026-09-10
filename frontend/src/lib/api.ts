@@ -1283,29 +1283,29 @@ class ApiClient {
     organizationId?: number;
     limit?: number;
     provider?: 'ip-api' | 'ipinfo' | 'whoisxml';
-    ipinfoToken?: string;
     whoisxmlApiKey?: string;
     force?: boolean;
+    includeHostedDomains?: boolean;
   }) {
     const params: any = { limit: options?.limit || 50 };
     if (options?.organizationId) params.organization_id = options.organizationId;
     if (options?.provider) params.provider = options.provider;
-    if (options?.ipinfoToken) params.ipinfo_token = options.ipinfoToken;
     if (options?.whoisxmlApiKey) params.whoisxml_api_key = options.whoisxmlApiKey;
     if (options?.force) params.force = true;
+    if (options?.includeHostedDomains) params.include_hosted_domains = true;
     const response = await this.client.post('/assets/enrich-geolocation', null, { params });
     return response.data;
   }
 
   async enrichAssetGeolocation(assetId: number, options?: {
     provider?: 'ip-api' | 'ipinfo' | 'whoisxml';
-    ipinfoToken?: string;
     whoisxmlApiKey?: string;
+    includeHostedDomains?: boolean;
   }) {
     const params: any = {};
     if (options?.provider) params.provider = options.provider;
-    if (options?.ipinfoToken) params.ipinfo_token = options.ipinfoToken;
     if (options?.whoisxmlApiKey) params.whoisxml_api_key = options.whoisxmlApiKey;
+    if (options?.includeHostedDomains) params.include_hosted_domains = true;
     const response = await this.client.post(`/assets/${assetId}/enrich-geolocation`, null, { params });
     return response.data;
   }
@@ -3269,4 +3269,3 @@ class ApiClient {
 
 export const api = new ApiClient();
 export default api;
-

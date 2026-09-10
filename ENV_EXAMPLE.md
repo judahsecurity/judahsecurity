@@ -93,6 +93,15 @@ SQS_QUEUE_URL=
 # Get API key at: https://cloud.projectdiscovery.io
 PDCP_API_KEY=
 
+# IPinfo network intelligence (optional)
+# When configured, IPinfo becomes the preferred IP geolocation/ASN source.
+# Keep this token server-side; never expose it through NEXT_PUBLIC_* variables.
+IPINFO_TOKEN=
+# Optional override: ipinfo, ip-api, or whoisxml
+# GEOLOCATION_PROVIDER=ipinfo
+# Hosted-domain enrichment additionally requires an eligible IPinfo plan and
+# is requested explicitly by the asset enrichment API.
+
 # WPScan API token (optional but required for vulnerable plugin/theme CVE mapping).
 # Free tier (25 req/day): https://wpscan.com/register
 # Without this, `wpscan --enumerate vp` aborts instead of scanning.

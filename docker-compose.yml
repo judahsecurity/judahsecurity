@@ -63,6 +63,9 @@ services:
       - SNI_S3_BUCKET=${SNI_S3_BUCKET:-}
       # ProjectDiscovery Cloud API Key (optional - for Chaos subdomain dataset)
       - PDCP_API_KEY=${PDCP_API_KEY:-}
+      # IP geolocation / ASN enrichment (optional; server-side only)
+      - IPINFO_TOKEN=${IPINFO_TOKEN:-}
+      - GEOLOCATION_PROVIDER=${GEOLOCATION_PROVIDER:-}
       # VulnCheck Exploit Intelligence token — powers the Vulnerability Intelligence feed
       # and Delphi VulnCheck KEV scoring floors.
       - VULNCHECK_API_TOKEN=${VULNCHECK_API_TOKEN:-}
@@ -254,6 +257,9 @@ services:
       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
       # ProjectDiscovery Cloud API Key (optional - for Chaos subdomain dataset)
       - PDCP_API_KEY=${PDCP_API_KEY:-}
+      # IP geolocation / ASN enrichment performed after discovery
+      - IPINFO_TOKEN=${IPINFO_TOKEN:-}
+      - GEOLOCATION_PROVIDER=${GEOLOCATION_PROVIDER:-}
       # Scanner performance tuning
       - MAX_CONCURRENT_SCANS=${MAX_CONCURRENT_SCANS:-5}
       - POLL_INTERVAL=${POLL_INTERVAL:-10}
