@@ -555,6 +555,24 @@ CONTINUOUS_SCAN_TYPES = {
         "recommended_frequency": "weekly",
         "tags": ["ics", "bacnet", "building-automation", "hvac"],
     },
+    "ics_hmi_screenshot": {
+        "name": "ICS/OT Web Interface Screenshots",
+        "description": (
+            "Capture recurring screenshots of in-scope web-based HMI and SCADA "
+            "interfaces selected from existing OT asset and service evidence. "
+            "Does not authenticate, submit forms, or probe native control protocols."
+        ),
+        "default_config": {
+            "ics_only": True,
+            "capture_category": "ICS/OT",
+            "require_owned": False,
+            "max_hosts": 100,
+            "timeout": 30,
+            "web_ports": [80, 443, 8000, 8080, 8088, 8443, 8888, 10000],
+        },
+        "recommended_frequency": "daily",
+        "tags": ["ics", "ot", "scada", "hmi", "screenshot"],
+    },
     "nuclei_ics": {
         "name": "Nuclei ICS/SCADA Vulnerabilities",
         "description": "Scan for ICS/SCADA specific vulnerabilities using Nuclei ICS templates. Detects vulnerable HMIs, exposed historians, default credentials on industrial devices, and known CVEs.",
@@ -590,7 +608,6 @@ CONTINUOUS_SCAN_TYPES = {
         "tags": ["ics", "ot", "scada", "full-discovery", "assessment"],
     },
 }
-
 
 
 

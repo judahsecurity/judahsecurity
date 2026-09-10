@@ -56,6 +56,7 @@ class PortResult:
     cpe: Optional[str] = None
     reason: Optional[str] = None
     scanner: str = "unknown"
+    script_results: dict[str, str] = field(default_factory=dict)
     
     def to_port_service_dict(self, asset_id: int) -> dict:
         """Convert to PortService creation dict."""
@@ -77,6 +78,10 @@ class PortResult:
             "closed|filtered": PortState.CLOSED_FILTERED,
         }
         
+        metadata = {}
+        if self.script_results:
+            metadata["scanner_scripts"] = self.script_results
+
         return {
             "asset_id": asset_id,
             "port": self.port,
@@ -92,6 +97,7 @@ class PortResult:
             "discovered_by": self.scanner,
             "is_risky": is_risky,
             "risk_reason": risk_reason,
+            "metadata_": metadata,
         }
 
 
@@ -1403,6 +1409,17 @@ class PortScannerService:
                         cpe_elem = service_elem.find("cpe")
                         if cpe_elem is not None:
                             cpe = cpe_elem.text
+
+                    # Preserve protocol-specific NSE evidence (for example
+                    # modbus-discover, s7-info, enip-info, bacnet-info).  The
+                    # scanner previously executed these scripts but discarded
+                    # their output while parsing Nmap XML.
+                    script_results = {}
+                    for script_elem in port.findall("script"):
+                        script_id = script_elem.get("id")
+                        script_output = script_elem.get("output")
+                        if script_id and script_output:
+                            script_results[script_id] = script_output[:16384]
                     
                     results.append(PortResult(
                         host=hostname,
@@ -1416,7 +1433,8 @@ class PortScannerService:
                         service_extra_info=service_extra,
                         cpe=cpe,
                         reason=reason,
-                        scanner="nmap"
+                        scanner="nmap",
+                        script_results=script_results,
                     ))
         
         except ET.ParseError as e:
@@ -1670,6 +1688,13 @@ class PortScannerService:
                                 existing.banner = port_result.banner
                             if port_result.cpe:
                                 existing.cpe = port_result.cpe
+                            if port_result.script_results:
+                                metadata = dict(existing.metadata_ or {})
+                                scripts = dict(metadata.get("scanner_scripts") or {})
+                                scripts.update(port_result.script_results)
+                                metadata["scanner_scripts"] = scripts
+                                metadata["scanner_scripts_updated_at"] = datetime.utcnow().isoformat()
+                                existing.metadata_ = metadata
                             summary["ports_updated"] += 1
                         else:
                             # Create new
@@ -1907,7 +1932,6 @@ class PortScannerService:
     def scan_sync(self, targets: List[str], scanner: ScannerType = ScannerType.NAABU, **kwargs) -> ScanResult:
         """Synchronous wrapper for scan."""
         return asyncio.run(self.scan(targets, scanner, **kwargs))
-
 
 
 

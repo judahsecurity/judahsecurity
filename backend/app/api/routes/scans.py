@@ -585,6 +585,7 @@ def create_adhoc_scan(
         "ics_scada_scan": ScanType.PORT_SCAN,
         "ics_building_automation": ScanType.PORT_SCAN,
         "ics_full_discovery": ScanType.PORT_SCAN,
+        "ics_hmi_screenshot": ScanType.SCREENSHOT,
         "discovery": ScanType.DISCOVERY,
         "full_discovery": ScanType.DISCOVERY,
         "full": ScanType.FULL,  # Full scan (discovery + all scans)
@@ -635,6 +636,10 @@ def create_adhoc_scan(
             config["run_nuclei"] = config.get("run_nuclei", True)
             if not config.get("nuclei_tags") and not config.get("tags"):
                 config["nuclei_tags"] = ["ics", "scada"]
+
+    if request.scan_type == "ics_hmi_screenshot":
+        config["ics_only"] = True
+        config["capture_category"] = "ICS/OT"
     
     # Create the scan
     new_scan = Scan(
@@ -2108,7 +2113,6 @@ def create_service_detection_scan(
         "unknown_count": unknown_count,
         "ports_to_scan": min(unknown_count, max_ports)
     }
-
 
 
 

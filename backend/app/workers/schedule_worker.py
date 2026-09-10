@@ -336,6 +336,7 @@ class ScheduleWorker:
             "ics_scada_scan": ScanType.PORT_SCAN,
             "ics_building_automation": ScanType.PORT_SCAN,
             "ics_full_discovery": ScanType.PORT_SCAN,
+            "ics_hmi_screenshot": ScanType.SCREENSHOT,
             "discovery": ScanType.DISCOVERY,
             "full_discovery": ScanType.DISCOVERY,  # Alias for discovery
             "full": ScanType.FULL,
@@ -909,4 +910,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

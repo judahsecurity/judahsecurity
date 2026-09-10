@@ -461,6 +461,13 @@ export default function ScansPage() {
                       <SelectItem value="subdomain_enum">Subdomain Enumeration</SelectItem>
                       <SelectItem value="port_scan">Port Scan</SelectItem>
                       <SelectItem value="critical_ports">Critical Port Monitoring</SelectItem>
+                      <SelectItem value="ics_ot_ports">ICS/OT Port Monitoring</SelectItem>
+                      <SelectItem value="ics_plc_scan">PLC Protocol Detection</SelectItem>
+                      <SelectItem value="ics_scada_scan">SCADA/Utility Protocol Scan</SelectItem>
+                      <SelectItem value="ics_building_automation">Building Automation Scan</SelectItem>
+                      <SelectItem value="ics_hmi_screenshot">ICS/OT Web Interface Screenshots</SelectItem>
+                      <SelectItem value="nuclei_ics">ICS/SCADA Vulnerability Scan</SelectItem>
+                      <SelectItem value="ics_full_discovery">Full ICS/OT Discovery</SelectItem>
                       <SelectItem value="technology">Technology Detection</SelectItem>
                       <SelectItem value="http_probe">HTTP Probe</SelectItem>
                       <SelectItem value="screenshot">Screenshot Capture</SelectItem>
@@ -970,7 +977,6 @@ export default function ScansPage() {
     </MainLayout>
   );
 }
-
 
 
 

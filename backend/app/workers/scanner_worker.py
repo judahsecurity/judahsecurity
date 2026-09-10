@@ -2058,7 +2058,17 @@ class ScannerWorker:
                 
                 # Convert PortResult objects to dicts for JSON serialization
                 ports_data = [
-                    {"host": p.host, "ip": p.ip, "port": p.port, "protocol": p.protocol, "state": p.state}
+                    {
+                        "host": p.host,
+                        "ip": p.ip,
+                        "port": p.port,
+                        "protocol": p.protocol,
+                        "state": p.state,
+                        "service_name": p.service_name,
+                        "service_product": p.service_product,
+                        "service_version": p.service_version,
+                        "script_results": p.script_results,
+                    }
                     for p in result.ports_found
                 ]
                 
@@ -3820,11 +3830,27 @@ class ScannerWorker:
                 db.commit()
             
             from app.services.screenshot_service import _capture_screenshots_async
+
+            if config.get('ics_only'):
+                from app.services.ics_screenshot_service import select_ics_web_screenshot_targets
+
+                targets = select_ics_web_screenshot_targets(
+                    db,
+                    organization_id=organization_id,
+                    max_hosts=config.get('max_hosts', 100),
+                    require_owned=config.get('require_owned', False),
+                    requested_targets=targets or None,
+                    web_ports=config.get('web_ports'),
+                )
+                logger.info(
+                    "Selected %s in-scope ICS/OT web interfaces for screenshot capture",
+                    len(targets),
+                )
             
             # If no specific targets, get live assets from the organization (include non-live if no live assets)
             # Use live_url when available for better screenshot accuracy
             # Include domains, subdomains, AND IP addresses
-            if not targets:
+            if not targets and not config.get('ics_only'):
                 # Prefer live assets; if none, include all web assets so we still have targets
                 live_assets = db.query(Asset).filter(
                     Asset.organization_id == organization_id,
@@ -3854,7 +3880,9 @@ class ScannerWorker:
                 organization_id=organization_id,
                 hosts=targets,
                 max_hosts=config.get('max_hosts', 200),
-                timeout=config.get('timeout', 30)
+                timeout=config.get('timeout', 30),
+                category_override=config.get('capture_category'),
+                scan_id=scan_id,
             )
             
             screenshots_captured = result.get('screenshots_captured', 0)
@@ -7332,9 +7360,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
 
 
 

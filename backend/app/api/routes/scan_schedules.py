@@ -538,6 +538,7 @@ def trigger_scheduled_scan(
         "ics_scada_scan": ScanType.PORT_SCAN,
         "ics_building_automation": ScanType.PORT_SCAN,
         "ics_full_discovery": ScanType.PORT_SCAN,
+        "ics_hmi_screenshot": ScanType.SCREENSHOT,
         "discovery": ScanType.DISCOVERY,
         "full_discovery": ScanType.DISCOVERY,
         "screenshot": ScanType.SCREENSHOT,
@@ -686,7 +687,6 @@ def get_schedule_history(
             for s in scans
         ]
     }
-
 
 
 

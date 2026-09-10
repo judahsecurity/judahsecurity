@@ -28,6 +28,7 @@ venv/
 ENV/
 env/
 .venv/
+.venv*/
 
 # IDE
 .idea/
@@ -102,6 +103,8 @@ data/sni-downloads/*.txt
 # Website build artifacts
 website/.next/
 website/node_modules/
+frontend/.next/
+frontend/node_modules/
 
 # Materialized custom Nuclei templates (source of truth is the DB)
 backend/nuclei-templates-generated/

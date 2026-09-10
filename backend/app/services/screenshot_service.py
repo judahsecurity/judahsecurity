@@ -78,6 +78,9 @@ def _process_capture_results(
     results: List[ScreenshotResult],
     organization_id: int,
     url_to_original: dict,
+    *,
+    category_override: Optional[str] = None,
+    scan_id: Optional[int] = None,
 ) -> tuple:
     """Process capture results into DB; returns (total_captured, total_failed, assets_updated)."""
     total_captured = 0
@@ -125,7 +128,7 @@ def _process_capture_results(
             page_title=result.page_title,
             server_header=result.server_header,
             response_headers=result.response_headers,
-            category=result.category,
+            category=category_override or result.category,
             default_creds_detected=bool(result.default_creds),
             default_creds_info=result.default_creds,
             width=result.width,
@@ -134,6 +137,7 @@ def _process_capture_results(
             image_hash=result.image_hash,
             error_message=result.error_message,
             captured_at=datetime.utcnow(),
+            scan_id=scan_id,
         )
         if previous and result.image_hash and previous.image_hash != result.image_hash:
             screenshot.has_changed = True
@@ -169,6 +173,8 @@ async def _capture_screenshots_async(
     hosts: List[str],
     max_hosts: int = 200,
     timeout: int = 30,
+    category_override: Optional[str] = None,
+    scan_id: Optional[int] = None,
 ) -> dict:
     """
     Capture screenshots for hosts. Uses Playwright when available (Docker-friendly),
@@ -207,7 +213,12 @@ async def _capture_screenshots_async(
             )
             try:
                 total_captured, total_failed, assets_updated = _process_capture_results(
-                    db, results, organization_id, url_to_original
+                    db,
+                    results,
+                    organization_id,
+                    url_to_original,
+                    category_override=category_override,
+                    scan_id=scan_id,
                 )
                 db.commit()
             except Exception as e:
@@ -245,7 +256,14 @@ async def _capture_screenshots_async(
         logger.info(f"Capturing screenshots batch {i // BATCH_SIZE + 1} ({len(batch_urls)} URLs)")
         try:
             results = await service.capture_screenshots(batch_urls, organization_id, config)
-            tc, tf, au = _process_capture_results(db, results, organization_id, url_to_original)
+            tc, tf, au = _process_capture_results(
+                db,
+                results,
+                organization_id,
+                url_to_original,
+                category_override=category_override,
+                scan_id=scan_id,
+            )
             total_captured += tc
             total_failed += tf
             assets_updated += au
@@ -376,4 +394,3 @@ async def capture_all_org_screenshots(
         )
     finally:
         db.close()
-
