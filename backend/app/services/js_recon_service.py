@@ -88,7 +88,7 @@ ENDPOINT_PATTERN = re.compile(
     r"""(?xi)
     (?:["'`])
     (
-        (?:https?://[^\s"'`<>]+)
+        (?:(?:https?|wss?)://[^\s"'`<>]+)
         |
         (?:/[A-Za-z0-9_\-/.?=&%#]{3,200})
     )
@@ -104,9 +104,24 @@ DOM_SINK_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("Function_ctor", re.compile(r"\bnew\s+Function\s*\(")),
     ("innerHTML", re.compile(r"\.innerHTML\s*=")),
     ("outerHTML", re.compile(r"\.outerHTML\s*=")),
+    ("insertAdjacentHTML", re.compile(r"\.insertAdjacentHTML\s*\(")),
+    ("srcdoc", re.compile(r"\.srcdoc\s*=")),
+    ("jquery_html", re.compile(r"\.html\s*\(")),
+    ("react_dangerous_html", re.compile(r"dangerouslySetInnerHTML")),
+    ("vue_v_html", re.compile(r"\bv-html\s*=")),
     ("document_write", re.compile(r"document\.write(?:ln)?\s*\(")),
     ("setTimeout_string", re.compile(r"setTimeout\s*\(\s*['\"]")),
+    ("setInterval_string", re.compile(r"setInterval\s*\(\s*['\"]")),
+    ("javascript_url", re.compile(r"(?:href|src)\s*=\s*['\"]javascript:", re.I)),
     ("postMessage_wildcard", re.compile(r"postMessage\s*\([^,]+,\s*['\"]\*['\"]\s*\)")),
+    ("message_event_listener", re.compile(r"addEventListener\s*\(\s*['\"]message['\"]")),
+    ("document_domain", re.compile(r"document\.domain\s*=")),
+    ("document_cookie_write", re.compile(r"document\.cookie\s*=")),
+    ("client_storage_sensitive", re.compile(
+        r"(?:localStorage|sessionStorage)\.setItem\s*\(\s*['\"][^'\"]*(?:token|secret|password|auth)",
+        re.I,
+    )),
+    ("prototype_pollution", re.compile(r"(?:__proto__|constructor\.prototype)")),
 ]
 
 
@@ -400,6 +415,7 @@ async def _analyze_script(
     url: str,
     include_source_maps: bool,
     verify_secrets: bool,
+    include_jsluice: bool,
 ) -> list[JSFinding]:
     findings: list[JSFinding] = []
     fetched = await _fetch(client, url)
@@ -476,7 +492,8 @@ async def _analyze_script(
             evidence="",
         ))
 
-    findings.extend(await _run_jsluice(final_url, body))
+    if include_jsluice:
+        findings.extend(await _run_jsluice(final_url, body))
     return findings
 
 
@@ -517,16 +534,19 @@ async def _verify_dep_confusion(
 
 async def run_js_recon(
     targets: Iterable[str],
+    js_urls: Optional[Iterable[str]] = None,
     max_scripts: int = 200,
     timeout: int = 300,
     include_source_maps: bool = True,
-    verify_secrets: bool = True,
+    verify_secrets: bool = False,
+    include_jsluice: bool = True,
     progress_callback: Optional[Callable[[int, str], Awaitable[None]]] = None,
 ) -> JSReconResult:
     start = datetime.utcnow()
     result = JSReconResult()
     targets = [t for t in targets if t]
-    if not targets:
+    supplied_js = [u for u in (js_urls or []) if u]
+    if not targets and not supplied_js:
         return result
 
     async def _progress(pct: int, step: str) -> None:
@@ -545,7 +565,7 @@ async def run_js_recon(
         timeout=httpx.Timeout(30.0),
         limits=httpx.Limits(max_connections=50, max_keepalive_connections=20),
     ) as client:
-        all_scripts: list[str] = []
+        all_scripts: list[str] = list(supplied_js)
         for t in targets:
             try:
                 scripts = await _discover_scripts(client, t, max_scripts)
@@ -563,7 +583,7 @@ async def run_js_recon(
             async with sem:
                 try:
                     return await _analyze_script(
-                        client, url, include_source_maps, verify_secrets
+                        client, url, include_source_maps, verify_secrets, include_jsluice
                     )
                 except Exception as exc:
                     result.errors.append(f"analyze {url}: {exc}")
@@ -748,21 +768,39 @@ def persist_js_findings(
         )
         description = _describe(f)
 
-        meta = {
-            "kind": f.kind,
-            "pattern": f.pattern_name,
-            "match": f.match,
-            "source_url": f.source_url,
-            "hostname": f.hostname,
-            "verified": f.verified,
-            **(f.extras or {}),
-        }
+        if f.kind == "secret":
+            from app.services.secret_safety import (
+                redact_secret_context,
+                safe_source_url,
+                secret_descriptor,
+            )
+
+            meta = {
+                "kind": f.kind,
+                "pattern": f.pattern_name,
+                **secret_descriptor(f.match),
+                "source_url": safe_source_url(f.source_url),
+                "hostname": f.hostname,
+                "verified": f.verified,
+            }
+            safe_evidence = redact_secret_context(f.evidence, f.match)
+        else:
+            meta = {
+                "kind": f.kind,
+                "pattern": f.pattern_name,
+                "match": f.match,
+                "source_url": f.source_url,
+                "hostname": f.hostname,
+                "verified": f.verified,
+                **(f.extras or {}),
+            }
+            safe_evidence = f.evidence
 
         if existing:
             existing.severity = severity
             existing.last_detected = datetime.utcnow()
             existing.metadata_ = meta
-            existing.evidence = f.evidence
+            existing.evidence = safe_evidence
             existing.status = VulnerabilityStatus.OPEN
             continue
 
@@ -775,7 +813,7 @@ def persist_js_findings(
             detected_by="js_recon",
             template_id=template_id,
             status=VulnerabilityStatus.OPEN,
-            evidence=(f.evidence or "")[:5000],
+            evidence=(safe_evidence or "")[:5000],
             tags=["js-recon", f.kind] + (["verified"] if f.verified else []),
             metadata_=meta,
             remediation=_remediation(f),
@@ -788,8 +826,6 @@ def persist_js_findings(
         if f.kind == "secret":
             if f.source_url:
                 secret_urls.append(f.source_url)
-            if f.match and str(f.match).startswith("http"):
-                secret_urls.append(f.match)
     if secret_urls:
         try:
             from app.services.sitemap_service import mark_secrets_on_urls
@@ -812,10 +848,12 @@ def _hash(text: str) -> str:
 
 def _describe(f: JSFinding) -> str:
     if f.kind == "secret":
+        from app.services.secret_safety import safe_source_url
+
         v = " (verified against live provider API)" if f.verified else ""
         return (
             f"A potential **{f.pattern_name}** credential was found embedded in "
-            f"`{f.source_url}`{v}. Secrets shipped to browsers are retrievable by "
+            f"`{safe_source_url(f.source_url)}`{v}. Secrets shipped to browsers are retrievable by "
             f"any visitor and should be considered public."
         )
     if f.kind == "sourcemap":

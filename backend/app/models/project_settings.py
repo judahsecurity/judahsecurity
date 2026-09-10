@@ -302,6 +302,7 @@ def default_agent_config():
             "execute_llm_red_team": "confirm",
             "execute_metasploit*": "deny",
             "execute_sqlmap*": "confirm",
+            "run_intruder_batch": "confirm",
             "create_scan": "confirm",
             "add_asset": "auto",
         },
@@ -320,6 +321,9 @@ def default_scan_toggles_config():
         "port_scan": True,
         "http_probe": True,
         "resource_enum": True,  # Katana, ParamSpider, Wayback
+        "js_analysis": True,
+        "js_secret_scan": True,
+        "js_intruder_planning": True,
         "vuln_scan": True,
     }
 

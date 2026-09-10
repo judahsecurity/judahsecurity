@@ -244,7 +244,7 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "SKILL PACK — IDOR / BOLA proof:\n"
         "- Pick mapped object APIs with IDs (users, orgs, files, invoices).\n"
         "- compare_requests across anonymous / user A / user B (or adjacent IDs).\n"
-        "- Prefer mutate_captured_request on list_captured_requests indexes (one field).\n"
+        "- Prefer plan_intruder_mutations after list_captured_requests; review the bounded queue, then run_intruder_batch or mutate_captured_request (one field).\n"
         "- PASS only if other-user fields appear; status 200 alone is not a finding.\n"
         "- Client-supplied userType/userId/Admin in publicPortal: compare_requests empty vs Admin; "
         "bounded sample; queue_finding_followups(vuln_type='client_role_param').\n"
@@ -317,7 +317,7 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
     "injection": (
         "SKILL PACK — injection / unknown inputs (legacy combined lane):\n"
         "- Prefer the xss / sqli / ssrf specialists when the map already split those signals.\n"
-        "- If params are unknown: mutate_list(kind='params') then discover_parameters + arjun.\n"
+        "- If params are unknown: mutate_list(kind='params') then discover_parameters + arjun. For captured APIs, plan_intruder_mutations first and run_intruder_batch only after queue review/approval.\n"
         "- WordPress fingerprinted: check_cve_applicability (generator / Yoast "
         "HTML comment / ?ver=) THEN REST GET /wp-json/wp/v2/users THEN compare_requests "
         "admin-ajax tax_query SLEEP(0) vs SLEEP(2). WPScan is optional and must not block.\n"

@@ -568,6 +568,8 @@ class ASMToolsManager(AssessmentCapabilities):
             "run_custom_probe": self.run_custom_probe,
             "run_poc_python": self.run_custom_probe,
             "list_captured_requests": self.list_captured_requests,
+            "plan_intruder_mutations": self.plan_intruder_mutations,
+            "run_intruder_batch": self.run_intruder_batch,
             "mutate_captured_request": self.mutate_captured_request,
             "mutate_list": self.mutate_list,
             "fetch_lazy_chunks": self.fetch_lazy_chunks,
@@ -3383,6 +3385,102 @@ class ASMToolsManager(AssessmentCapabilities):
                 "field='url', value='https://<interactsh>') — one field only."
             ),
         }, indent=2)[:_tool_output_max_chars()]
+
+    async def plan_intruder_mutations(
+        self,
+        max_mutations: int = 12,
+        allow_state_change: bool = False,
+        categories: Optional[List[str]] = None,
+        identity: Optional[str] = None,
+        **kwargs: Any,
+    ) -> str:
+        """Create a bounded Intruder-style queue from captured API requests."""
+        from app.services.agent.intruder_automation import plan_intruder_mutations
+        from app.services.agent.request_mutate import samples_from_map
+
+        cmap = self._identity_captures.get(identity, {}) if identity is not None else (
+            getattr(self, "_capability_map", None) or {}
+        )
+        origin = str(cmap.get("target") or "") if isinstance(cmap, dict) else ""
+        origin = origin or (getattr(self, "_fallback_target", None) or "") or (
+            current_seed_target.get() or ""
+        )
+        samples = samples_from_map(cmap if isinstance(cmap, dict) else {})
+        plan = plan_intruder_mutations(
+            samples,
+            fallback_origin=origin,
+            max_mutations=max_mutations,
+            allow_state_change=allow_state_change,
+            categories=categories,
+        )
+        plan["identity"] = identity
+        plan["next"] = (
+            "Review the queue, then call run_intruder_batch with the same filters. "
+            "Execution requires operator confirmation."
+        )
+        return json.dumps(plan, indent=2)[:_tool_output_max_chars()]
+
+    async def run_intruder_batch(
+        self,
+        max_mutations: int = 6,
+        allow_state_change: bool = False,
+        categories: Optional[List[str]] = None,
+        identity: Optional[str] = None,
+        use_auth_session: bool = True,
+        timeout: int = 25,
+        hypothesis_id: str = "",
+        **kwargs: Any,
+    ) -> str:
+        """Execute a confirmation-gated queue of one-field differential tests."""
+        from app.services.agent.intruder_automation import plan_intruder_mutations
+        from app.services.agent.request_mutate import samples_from_map
+
+        cap = max(1, min(int(max_mutations or 6), 12))
+        cmap = self._identity_captures.get(identity, {}) if identity is not None else (
+            getattr(self, "_capability_map", None) or {}
+        )
+        origin = str(cmap.get("target") or "") if isinstance(cmap, dict) else ""
+        origin = origin or (getattr(self, "_fallback_target", None) or "") or (
+            current_seed_target.get() or ""
+        )
+        samples = samples_from_map(cmap if isinstance(cmap, dict) else {})
+        plan = plan_intruder_mutations(
+            samples,
+            fallback_origin=origin,
+            max_mutations=cap,
+            allow_state_change=allow_state_change,
+            categories=categories,
+        )
+        results: List[Dict[str, Any]] = []
+        for mutation in plan["mutations"]:
+            raw = await self.mutate_captured_request(
+                sample_index=mutation["sample_index"],
+                location=mutation["location"],
+                field=mutation["field"],
+                value=mutation["value"],
+                compare=True,
+                use_auth_session=use_auth_session,
+                timeout=max(5, min(int(timeout or 25), 60)),
+                identity=identity,
+                hypothesis_id=hypothesis_id,
+            )
+            try:
+                observation: Any = json.loads(raw)
+            except Exception:
+                observation = {"output": str(raw)[:2000]}
+            results.append({"mutation": mutation, "observation": observation})
+            # At most two comparisons per second; scope checks still run per request.
+            await asyncio.sleep(0.5)
+
+        return json.dumps({
+            "ok": True,
+            "dry_run": False,
+            "executed": len(results),
+            "skipped_state_changing": plan["skipped_state_changing"],
+            "allow_state_change": bool(allow_state_change),
+            "results": results,
+            "note": "A response difference is a lead, not a confirmed finding.",
+        }, indent=2, default=str)[:_tool_output_max_chars()]
 
     async def mutate_captured_request(
         self,

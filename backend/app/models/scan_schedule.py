@@ -463,6 +463,33 @@ CONTINUOUS_SCAN_TYPES = {
         },
         "recommended_frequency": "weekly",
     },
+    "js_recon": {
+        "name": "JavaScript & Secret Assessment",
+        "description": (
+            "Analyze public JavaScript for credentials, reconstructed signing keys, "
+            "hidden APIs, source maps, dependency-confusion candidates, and DOM sinks."
+        ),
+        "default_config": {
+            "max_scripts": 500,
+            "include_source_maps": True,
+            "verify_secrets": False,
+        },
+        "recommended_frequency": "weekly",
+    },
+    "trufflehog_scan": {
+        "name": "Repository Secrets (TruffleHog)",
+        "description": (
+            "Scan authorized Git repository history for verified credentials with "
+            "redacted evidence. Targets may be Git URLs or GitHub owner/repository slugs."
+        ),
+        "default_config": {
+            "only_verified": True,
+            "include_unverified": False,
+            "concurrency": 4,
+            "timeout": 900,
+        },
+        "recommended_frequency": "weekly",
+    },
     "cleanup": {
         "name": "System Cleanup",
         "description": "Clean up old scan files, temporary files, and orphaned data. Frees disk space and maintains system health.",
@@ -623,6 +650,5 @@ CONTINUOUS_SCAN_TYPES = {
         "tags": ["ics", "ot", "scada", "full-discovery", "assessment"],
     },
 }
-
 
 
