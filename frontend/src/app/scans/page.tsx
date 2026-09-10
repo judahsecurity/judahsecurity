@@ -46,7 +46,7 @@ import {
   StopCircle,
   Cloud,
 } from 'lucide-react';
-import { api, NmapProfileConfig } from '@/lib/api';
+import { api, NmapProfileConfig, ScanProfile, ScanTypeCatalogItem } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { formatDate } from '@/lib/utils';
 import { ScanNavTabs } from '@/components/scanning/ScanNavTabs';
@@ -107,13 +107,16 @@ export default function ScansPage() {
   const [scans, setScans] = useState<Scan[]>([]);
   const [loading, setLoading] = useState(true);
   const [organizations, setOrganizations] = useState<any[]>([]);
+  const [profiles, setProfiles] = useState<ScanProfile[]>([]);
+  const [scanTypes, setScanTypes] = useState<Record<string, ScanTypeCatalogItem>>({});
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null);
   const [formData, setFormData] = useState({
     name: '',
     organization_id: '',
-    scan_type: 'vulnerability',
+    scan_type: 'nuclei',
+    profile_id: '',
     targets: '',
     scanner: 'naabu',  // Port scanner: naabu, masscan, nmap
     ports: '',         // Port specification for port scans
@@ -133,18 +136,34 @@ export default function ScansPage() {
   const [nmapConfig, setNmapConfig] = useState<NmapProfileConfig>(DEFAULT_NMAP_CONFIG);
   const { toast } = useToast();
 
+  const compatibleProfiles = profiles.filter((profile) => {
+    if (profile.profile_type === 'custom') return true;
+    if (profile.profile_type === 'full') return formData.scan_type === 'full';
+    if (profile.profile_type === 'discovery') {
+      return ['discovery', 'full_discovery', 'subdomain_enum'].includes(formData.scan_type);
+    }
+    return formData.scan_type.startsWith('nuclei') || formData.scan_type === 'web_scan';
+  });
+
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [scansData, orgsData, queueData] = await Promise.all([
+      const [scansData, orgsData, queueData, scanTypesData] = await Promise.all([
         api.getScans({ limit: 50 }),
         api.getOrganizations(),
         api.getScanQueueStatus().catch(() => null),
+        api.getScanTypes(),
       ]);
 
       setScans(scansData.items || scansData || []);
       setOrganizations(orgsData);
       setQueueStatus(queueData);
+      setScanTypes(scanTypesData);
+      if (orgsData.length > 0) {
+        setFormData((current) => current.organization_id
+          ? current
+          : { ...current, organization_id: orgsData[0].id.toString() });
+      }
     } catch (error) {
       toast({
         title: 'Error',
@@ -162,6 +181,15 @@ export default function ScansPage() {
     const interval = setInterval(fetchData, 10000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    const organizationId = formData.organization_id
+      ? parseInt(formData.organization_id, 10)
+      : undefined;
+    api.getScanProfiles(organizationId ? { organization_id: organizationId } : undefined)
+      .then(setProfiles)
+      .catch(() => setProfiles([]));
+  }, [formData.organization_id]);
 
   const handleCreateScan = async () => {
     if (!formData.organization_id) {
@@ -206,7 +234,7 @@ export default function ScansPage() {
         } else if (formData.ports) {
           config.ports = formData.ports;
         }
-      } else if (formData.scan_type === 'vulnerability') {
+      } else if (formData.scan_type === 'nuclei') {
         config.severity = formData.severity;
       } else if (formData.scan_type === 'katana') {
         config.depth = 5;
@@ -233,13 +261,27 @@ export default function ScansPage() {
         }
       }
 
-      await api.createScan({
+      const selectedScanType = scanTypes[formData.scan_type];
+      if (selectedScanType?.requires_targets && targets.length === 0) {
+        throw new Error(`${selectedScanType.name} requires at least one target.`);
+      }
+      const requestData = {
         name: formData.name.trim(),
         organization_id: parseInt(formData.organization_id),
         scan_type: formData.scan_type,
+        profile_id: formData.profile_id ? parseInt(formData.profile_id) : undefined,
         targets: targets.length > 0 ? targets : undefined,
         config: Object.keys(config).length > 0 ? config : undefined,
-      });
+      };
+      if (selectedScanType?.launch_endpoint === 'direct') {
+        await api.createScan(requestData);
+      } else {
+        await api.createAdhocScan({
+          ...requestData,
+          use_all_in_scope: targets.length === 0,
+          include_netblocks: true,
+        });
+      }
 
       toast({
         title: 'Scan Started',
@@ -250,7 +292,8 @@ export default function ScansPage() {
       setFormData({
         name: '',
         organization_id: '',
-        scan_type: 'vulnerability',
+        scan_type: 'nuclei',
+        profile_id: '',
         targets: '',
         scanner: 'naabu',
         ports: '',
@@ -269,9 +312,12 @@ export default function ScansPage() {
       setNmapConfig(DEFAULT_NMAP_CONFIG);
       fetchData();
     } catch (error: any) {
+      const detail = error.response?.data?.detail;
       toast({
         title: 'Error',
-        description: error.response?.data?.detail || 'Failed to start scan',
+        description: typeof detail === 'string'
+          ? detail
+          : detail?.reason || error.message || 'Failed to start scan',
         variant: 'destructive',
       });
     } finally {
@@ -284,8 +330,8 @@ export default function ScansPage() {
     try {
       await api.cancelScan(scanId);
       toast({
-        title: 'Scan Cancelled',
-        description: 'The scan has been stopped.',
+        title: 'Cancellation Requested',
+        description: 'The worker is stopping this scan and its active scanner processes.',
       });
       fetchData();
     } catch (error: any) {
@@ -447,48 +493,48 @@ export default function ScansPage() {
                   <Label>Scan Type</Label>
                   <Select
                     value={formData.scan_type}
-                    onValueChange={(value) => setFormData({ ...formData, scan_type: value })}
+                    onValueChange={(value) => setFormData({ ...formData, scan_type: value, profile_id: '' })}
                   >
                     <SelectTrigger>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="vulnerability">Vulnerability Scan (Nuclei)</SelectItem>
-                      <SelectItem value="nuclei_critical">Nuclei - Critical Only</SelectItem>
-                      <SelectItem value="nuclei_critical_high">Nuclei - Critical & High</SelectItem>
-                      <SelectItem value="web_scan">Web Application Scan</SelectItem>
-                      <SelectItem value="discovery">Asset Discovery</SelectItem>
-                      <SelectItem value="subdomain_enum">Subdomain Enumeration</SelectItem>
-                      <SelectItem value="port_scan">Port Scan</SelectItem>
-                      <SelectItem value="critical_ports">Critical Port Monitoring</SelectItem>
-                      <SelectItem value="ics_ot_ports">ICS/OT Port Monitoring</SelectItem>
-                      <SelectItem value="ics_plc_scan">PLC Protocol Detection</SelectItem>
-                      <SelectItem value="ics_scada_scan">SCADA/Utility Protocol Scan</SelectItem>
-                      <SelectItem value="ics_building_automation">Building Automation Scan</SelectItem>
-                      <SelectItem value="ics_hmi_screenshot">ICS/OT Web Interface Screenshots</SelectItem>
-                      <SelectItem value="nuclei_ics">ICS/SCADA Vulnerability Scan</SelectItem>
-                      <SelectItem value="ics_full_discovery">Full ICS/OT Discovery</SelectItem>
-                      <SelectItem value="technology">Technology Detection</SelectItem>
-                      <SelectItem value="http_probe">HTTP Probe</SelectItem>
-                      <SelectItem value="screenshot">Screenshot Capture</SelectItem>
-                      <SelectItem value="katana">Deep Web Crawl (Katana)</SelectItem>
-                      <SelectItem value="paramspider">Parameter Discovery</SelectItem>
-                      <SelectItem value="waybackurls">Historical URLs (Wayback)</SelectItem>
-                      <SelectItem value="tldfinder">TLD/Domain Discovery (tldfinder)</SelectItem>
-                      <SelectItem value="login_portal">Login Portal Detection</SelectItem>
-                      <SelectItem value="dns_resolution">DNS Resolution</SelectItem>
-                      <SelectItem value="geo_enrich">Geolocation Enrichment</SelectItem>
-                      <SelectItem value="full">Full Scan (All)</SelectItem>
-                      <SelectItem value="llm_red_team">AI/LLM Red Team (Chatbot Testing)</SelectItem>
-                      <SelectItem value="themis_cspm">
-                        <span className="flex items-center gap-2">
-                          <Cloud className="h-3.5 w-3.5 text-cyan-400" />
-                          Themis — Cloud CSPM (Prowler)
-                        </span>
-                      </SelectItem>
+                      {Object.entries(scanTypes).map(([value, scanType]) => (
+                        <SelectItem key={value} value={value}>{scanType.name}</SelectItem>
+                      ))}
                     </SelectContent>
                   </Select>
+                  {scanTypes[formData.scan_type]?.description && (
+                    <p className="text-xs text-muted-foreground">
+                      {scanTypes[formData.scan_type].description}
+                    </p>
+                  )}
                 </div>
+
+                {compatibleProfiles.length > 0 && formData.scan_type !== 'themis_cspm' && (
+                  <div className="space-y-2">
+                    <Label>Scan Profile</Label>
+                    <Select
+                      value={formData.profile_id || '__none__'}
+                      onValueChange={(value) => setFormData({ ...formData, profile_id: value === '__none__' ? '' : value })}
+                    >
+                      <SelectTrigger><SelectValue placeholder="Use scan-type defaults" /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="__none__">Scan-type defaults</SelectItem>
+                        {compatibleProfiles.map((profile) => (
+                          <SelectItem key={profile.id} value={profile.id.toString()}>
+                            {profile.name}{profile.is_default ? ' (Default)' : ''}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {formData.profile_id && (
+                      <p className="text-xs text-muted-foreground">
+                        {profiles.find((profile) => profile.id.toString() === formData.profile_id)?.description}
+                      </p>
+                    )}
+                  </div>
+                )}
 
                 {/* Themis (Prowler) Cloud CSPM Options */}
                 {formData.scan_type === 'themis_cspm' && (
@@ -631,7 +677,7 @@ export default function ScansPage() {
                 )}
 
                 {/* Vulnerability Scan - Severity Selection */}
-                {formData.scan_type === 'vulnerability' && (
+                {formData.scan_type === 'nuclei' && (
                   <div className="space-y-3">
                     <Label>Severity Levels</Label>
                     <div className="grid grid-cols-3 gap-3">
@@ -954,7 +1000,7 @@ export default function ScansPage() {
                             <StopCircle className="h-4 w-4" />
                           </Button>
                         )}
-                        {(scan.status?.toLowerCase() === 'running' || scan.status?.toLowerCase() === 'failed' || scan.status?.toLowerCase() === 'cancelled') && (
+                        {(scan.status?.toLowerCase() === 'failed' || scan.status?.toLowerCase() === 'cancelled') && (
                           <Button
                             variant="ghost"
                             size="sm"
@@ -977,7 +1023,6 @@ export default function ScansPage() {
     </MainLayout>
   );
 }
-
 
 
 

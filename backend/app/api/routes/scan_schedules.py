@@ -20,6 +20,8 @@ from app.schemas.scan_schedule import (
     ManualTriggerRequest,
 )
 from app.api.deps import get_current_active_user, require_analyst
+from app.services.scan_guardrails import RulesOfEngagementViolation, validate_rules_of_engagement
+from app.services.scan_registry import resolve_scan_type
 import ipaddress
 import re
 
@@ -81,6 +83,22 @@ def check_org_access(user: User, org_id: int) -> bool:
     """Check if user has access to organization."""
     if user.is_superuser:
         return True
+    return user.organization_id == org_id
+
+
+def enforce_rules_of_engagement(db: Session, organization_id: int, targets: List[str], scan_type: str) -> None:
+    try:
+        validate_rules_of_engagement(db, organization_id, targets, scan_type)
+    except RulesOfEngagementViolation as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": "Rules of Engagement violation", "reason": exc.reason, "rejected_targets": exc.rejected_targets},
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to validate Rules of Engagement; schedule was not changed",
+        ) from exc
 
 
 def calculate_target_stats(targets: List[str]) -> dict:
@@ -127,13 +145,6 @@ def calculate_target_stats(targets: List[str]) -> dict:
         "cidr_count": cidr_count,
         "host_count": host_count
     }
-
-
-def check_org_access_complete(user: User, org_id: int) -> bool:
-    """Check if user has access to organization (complete version)."""
-    if user.is_superuser:
-        return True
-    return user.organization_id == org_id
 
 
 @router.get("/scan-types")
@@ -288,6 +299,8 @@ def create_scan_schedule(
             status_code=400,
             detail=f"Invalid scan type. Valid types: {valid_types}"
         )
+
+    enforce_rules_of_engagement(db, schedule_data.organization_id, schedule_data.targets or [], schedule_data.scan_type)
     
     schedule = ScanSchedule(
         name=schedule_data.name,
@@ -311,7 +324,10 @@ def create_scan_schedule(
     )
     
     # Calculate next run time
-    schedule.next_run_at = schedule.calculate_next_run()
+    try:
+        schedule.next_run_at = schedule.calculate_next_run()
+    except (ValueError, ImportError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     
     db.add(schedule)
     db.commit()
@@ -356,12 +372,29 @@ def update_scan_schedule(
     
     # Update fields
     update_data = schedule_data.model_dump(exclude_unset=True)
+    effective_scan_type = update_data.get("scan_type", schedule.scan_type)
+    if effective_scan_type not in CONTINUOUS_SCAN_TYPES:
+        raise HTTPException(status_code=400, detail=f"Invalid scan type '{effective_scan_type}'")
+    effective_targets = update_data.get("targets", schedule.targets) or []
+    enforce_rules_of_engagement(db, schedule.organization_id, effective_targets, effective_scan_type)
+    effective_frequency = update_data.get("frequency", schedule.frequency)
+    effective_day = update_data.get("run_on_day", schedule.run_on_day)
+    effective_cron = update_data.get("cron_expression", schedule.cron_expression)
+    if effective_frequency == ScheduleFrequency.WEEKLY and effective_day is not None and effective_day > 6:
+        raise HTTPException(status_code=400, detail="Weekly run_on_day must be between 0 and 6")
+    if effective_frequency == ScheduleFrequency.MONTHLY and effective_day == 0:
+        raise HTTPException(status_code=400, detail="Monthly run_on_day must be between 1 and 31")
+    if effective_frequency == ScheduleFrequency.CUSTOM and not effective_cron:
+        raise HTTPException(status_code=400, detail="Custom schedules require a cron_expression")
     for field, value in update_data.items():
         setattr(schedule, field, value)
     
     # Recalculate next run if frequency changed
-    if any(f in update_data for f in ['frequency', 'run_at_hour', 'run_on_day']):
-        schedule.next_run_at = schedule.calculate_next_run()
+    if any(f in update_data for f in ['frequency', 'run_at_hour', 'run_on_day', 'timezone', 'cron_expression']):
+        try:
+            schedule.next_run_at = schedule.calculate_next_run()
+        except (ValueError, ImportError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
     
     db.commit()
     db.refresh(schedule)
@@ -521,45 +554,12 @@ def trigger_scheduled_scan(
             detail="No targets found for this schedule. Run discovery first to populate assets and netblocks."
         )
     
-    # Map schedule scan_type to ScanType enum
-    scan_type_map = {
-        "nuclei": ScanType.VULNERABILITY,
-        "nuclei_critical": ScanType.VULNERABILITY,
-        "nuclei_high": ScanType.VULNERABILITY,
-        "nuclei_critical_high": ScanType.VULNERABILITY,
-        "nuclei_medium": ScanType.VULNERABILITY,
-        "nuclei_low_info": ScanType.VULNERABILITY,
-        "nuclei_ics": ScanType.VULNERABILITY,
-        "port_scan": ScanType.PORT_SCAN,
-        "masscan": ScanType.PORT_SCAN,
-        "critical_ports": ScanType.PORT_SCAN,
-        "ics_ot_ports": ScanType.PORT_SCAN,
-        "ics_plc_scan": ScanType.PORT_SCAN,
-        "ics_scada_scan": ScanType.PORT_SCAN,
-        "ics_building_automation": ScanType.PORT_SCAN,
-        "ics_full_discovery": ScanType.PORT_SCAN,
-        "ics_hmi_screenshot": ScanType.SCREENSHOT,
-        "discovery": ScanType.DISCOVERY,
-        "full_discovery": ScanType.DISCOVERY,
-        "screenshot": ScanType.SCREENSHOT,
-        "technology": ScanType.TECHNOLOGY,
-        "whatweb": ScanType.WHATWEB,
-        "http_probe": ScanType.HTTP_PROBE,
-        "dns_resolution": ScanType.DNS_RESOLUTION,
-        "subdomain_enum": ScanType.SUBDOMAIN_ENUM,
-        "login_portal": ScanType.LOGIN_PORTAL,
-        "paramspider": ScanType.PARAMSPIDER,
-        "waybackurls": ScanType.WAYBACKURLS,
-        "katana": ScanType.KATANA,
-        "cleanup": ScanType.CLEANUP,
-    }
-    
-    if schedule.scan_type not in scan_type_map:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unknown schedule scan_type '{schedule.scan_type}'",
-        )
-    scan_type = scan_type_map[schedule.scan_type]
+    try:
+        scan_type = resolve_scan_type(schedule.scan_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    enforce_rules_of_engagement(db, schedule.organization_id, targets, scan_type.value)
     
     # Build config — merge profile defaults so ICS NSE/ports survive thin configs
     profile_defaults = CONTINUOUS_SCAN_TYPES.get(schedule.scan_type, {}).get("default_config", {})
@@ -687,6 +687,3 @@ def get_schedule_history(
             for s in scans
         ]
     }
-
-
-

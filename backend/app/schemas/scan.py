@@ -20,6 +20,7 @@ class ScanCreate(ScanBase):
     label_ids: List[int] = []  # Optional: scan assets with these labels
     match_all_labels: bool = False  # If true, assets must have ALL specified labels
     config: dict[str, Any] = {}
+    profile_id: Optional[int] = None
 
 
 class ScanByLabelRequest(BaseModel):
@@ -103,7 +104,7 @@ class AdhocScanRequest(BaseModel):
     use_all_in_scope: bool = Field(default=False, description="If no targets/labels, use all in-scope assets")
     include_netblocks: bool = Field(default=True, description="Include in-scope netblocks as targets")
     config: dict[str, Any] = Field(default={}, description="Override default scan config")
-
+    profile_id: Optional[int] = Field(default=None, description="Reusable scan profile ID")
 
 
 

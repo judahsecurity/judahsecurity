@@ -205,6 +205,56 @@ export interface NmapProfile {
   is_active: boolean;
 }
 
+export type ScanProfileType = 'nuclei' | 'discovery' | 'full' | 'custom';
+
+export interface ScanProfile {
+  id: number;
+  organization_id?: number | null;
+  created_by?: string | null;
+  name: string;
+  description?: string | null;
+  profile_type: ScanProfileType;
+  nuclei_severity: string[];
+  nuclei_tags: string[];
+  nuclei_exclude_tags: string[];
+  nuclei_templates: string[];
+  nuclei_rate_limit: number;
+  nuclei_bulk_size: number;
+  nuclei_concurrency: number;
+  nuclei_timeout: number;
+  enable_subdomain_enum: boolean;
+  enable_port_scan: boolean;
+  enable_http_probe: boolean;
+  enable_technology_detection: boolean;
+  enable_vulnerability_scan: boolean;
+  port_scan_top: number;
+  port_scan_custom: number[];
+  max_concurrent_hosts: number;
+  requests_per_second: number;
+  is_default: boolean;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export type ScanProfileInput = Omit<
+  ScanProfile,
+  'id' | 'created_by' | 'created_at' | 'updated_at' | 'is_active'
+>;
+
+export type ScanProfileCreateInput = Pick<ScanProfileInput, 'name' | 'profile_type'> &
+  Partial<Omit<ScanProfileInput, 'name' | 'profile_type'>>;
+
+export interface ScanTypeCatalogItem {
+  name: string;
+  description: string;
+  default_config: Record<string, any>;
+  recommended_frequency?: string;
+  tags?: string[];
+  launch_endpoint: 'adhoc' | 'direct';
+  requires_targets?: boolean;
+}
+
 // ── Jira shared types ─────────────────────────────────────────────────────
 
 export interface JiraIntegration {
@@ -1090,6 +1140,30 @@ class ApiClient {
     return response.data;
   }
 
+  async getScanProfiles(params?: { organization_id?: number; include_inactive?: boolean }) {
+    const response = await this.client.get('/scan-profiles/', { params });
+    return response.data as ScanProfile[];
+  }
+
+  async createScanProfile(data: ScanProfileCreateInput) {
+    const response = await this.client.post('/scan-profiles/', data);
+    return response.data as ScanProfile;
+  }
+
+  async updateScanProfile(id: number, data: Partial<ScanProfileInput> & { is_active?: boolean }) {
+    const response = await this.client.put(`/scan-profiles/${id}`, data);
+    return response.data as ScanProfile;
+  }
+
+  async deleteScanProfile(id: number) {
+    await this.client.delete(`/scan-profiles/${id}`);
+  }
+
+  async getScanTypes() {
+    const response = await this.client.get('/scans/scan-types');
+    return response.data as Record<string, ScanTypeCatalogItem>;
+  }
+
   async getScan(id: number) {
     const response = await this.client.get(`/scans/${id}`);
     return response.data;
@@ -1106,6 +1180,22 @@ class ApiClient {
     config?: Record<string, any>;
   }) {
     const response = await this.client.post('/scans/', data);
+    return response.data;
+  }
+
+  async createAdhocScan(data: {
+    name: string;
+    organization_id: number;
+    scan_type: string;
+    targets?: string[];
+    label_ids?: number[];
+    match_all_labels?: boolean;
+    use_all_in_scope?: boolean;
+    include_netblocks?: boolean;
+    profile_id?: number;
+    config?: Record<string, any>;
+  }) {
+    const response = await this.client.post('/scans/adhoc', data);
     return response.data;
   }
 

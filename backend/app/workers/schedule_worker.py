@@ -14,7 +14,7 @@ import sys
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker, Session
 
 # Add app to path
@@ -32,6 +32,8 @@ from app.models.asset import Asset, AssetType
 from app.models.label import Label
 from app.models.netblock import Netblock
 from app.api.routes.scans import send_scan_to_sqs
+from app.services.scan_guardrails import validate_rules_of_engagement
+from app.services.scan_registry import resolve_scan_type
 
 # Scan types that require IPv4 only (don't support IPv6)
 IPV4_ONLY_SCAN_TYPES = [
@@ -52,6 +54,21 @@ ICS_PORT_SCAN_TYPES = {
     "ics_building_automation",
     "ics_full_discovery",
 }
+
+
+def due_schedule_claim_statement(schedule_id: int, now: datetime):
+    """Build the atomic PostgreSQL claim used by competing schedule workers."""
+    return (
+        select(ScanSchedule)
+        .where(
+            ScanSchedule.id == schedule_id,
+            ScanSchedule.is_enabled == True,
+            ScanSchedule.next_run_at <= now,
+            ScanSchedule.consecutive_failures < 5,
+        )
+        .with_for_update(skip_locked=True)
+        .execution_options(populate_existing=True)
+    )
 
 
 def filter_ipv6_targets(targets: list, scan_type: str) -> tuple:
@@ -167,19 +184,29 @@ class ScheduleWorker:
             now = datetime.now(timezone.utc)
             
             # Find schedules that are due
-            due_schedules = db.query(ScanSchedule).filter(
+            due_schedule_ids = db.query(ScanSchedule.id).filter(
                 ScanSchedule.is_enabled == True,
                 ScanSchedule.next_run_at <= now,
                 ScanSchedule.consecutive_failures < 5  # Skip schedules with too many failures
             ).all()
             
-            for schedule in due_schedules:
+            for (schedule_id,) in due_schedule_ids:
+                schedule = db.execute(
+                    due_schedule_claim_statement(schedule_id, now)
+                ).scalar_one_or_none()
+                if schedule is None:
+                    logger.debug("Schedule %s was claimed by another worker", schedule_id)
+                    continue
                 try:
                     await self.run_schedule(db, schedule)
                 except Exception as e:
                     logger.error(f"Error running schedule {schedule.id}: {e}")
                     schedule.consecutive_failures += 1
                     schedule.last_error = str(e)
+                    try:
+                        schedule.next_run_at = schedule.calculate_next_run()
+                    except Exception:
+                        schedule.next_run_at = datetime.now(timezone.utc) + timedelta(hours=1)
                     db.commit()
             
         except Exception as e:
@@ -281,10 +308,6 @@ class ScheduleWorker:
         if ipv6_skipped > 0:
             logger.info(f"Filtered out {ipv6_skipped} IPv6 targets for {schedule.scan_type} scan (IPv6 not supported)")
 
-        if schedule.scan_type == "tester_process":
-            await self._run_tester_process_schedule(db, schedule, targets)
-            return
-        
         if not targets:
             # Check what's missing to give a better error message
             all_assets_count = db.query(Asset).filter(
@@ -315,56 +338,19 @@ class ScheduleWorker:
             db.commit()
             return
         
-        # Map schedule scan_type to ScanType enum.
-        # ICS profiles are PORT_SCAN (nmap/masscan + NSE). Only nuclei_ics is Nuclei.
-        # Unknown types must NOT default to VULNERABILITY — that misrouted ICS
-        # full discovery into Nuclei sharding (timeouts, 0 findings).
-        scan_type_map = {
-            "nuclei": ScanType.VULNERABILITY,
-            "nuclei_critical": ScanType.VULNERABILITY,
-            "nuclei_high": ScanType.VULNERABILITY,
-            "nuclei_critical_high": ScanType.VULNERABILITY,
-            "nuclei_medium": ScanType.VULNERABILITY,
-            "nuclei_low_info": ScanType.VULNERABILITY,
-            "nuclei_ics": ScanType.VULNERABILITY,
-            "vulnerability": ScanType.VULNERABILITY,
-            "port_scan": ScanType.PORT_SCAN,
-            "masscan": ScanType.PORT_SCAN,
-            "critical_ports": ScanType.PORT_SCAN,
-            "ics_ot_ports": ScanType.PORT_SCAN,
-            "ics_plc_scan": ScanType.PORT_SCAN,
-            "ics_scada_scan": ScanType.PORT_SCAN,
-            "ics_building_automation": ScanType.PORT_SCAN,
-            "ics_full_discovery": ScanType.PORT_SCAN,
-            "ics_hmi_screenshot": ScanType.SCREENSHOT,
-            "discovery": ScanType.DISCOVERY,
-            "full_discovery": ScanType.DISCOVERY,  # Alias for discovery
-            "full": ScanType.FULL,
-            "technology": ScanType.TECHNOLOGY,
-            "http_probe": ScanType.HTTP_PROBE,
-            "dns_resolution": ScanType.DNS_RESOLUTION,
-            "subdomain_enum": ScanType.SUBDOMAIN_ENUM,
-            "login_portal": ScanType.LOGIN_PORTAL,
-            "screenshot": ScanType.SCREENSHOT,
-            "paramspider": ScanType.PARAMSPIDER,
-            "waybackurls": ScanType.WAYBACKURLS,
-            "katana": ScanType.KATANA,
-            "tldfinder": ScanType.TLDFINDER,
-            "commoncrawl_enum": ScanType.COMMONCRAWL_ENUM,
-            "cleanup": ScanType.CLEANUP,
-        }
+        validate_rules_of_engagement(db, schedule.organization_id, targets, schedule.scan_type)
 
-        if schedule.scan_type not in scan_type_map:
-            logger.error(
-                f"Unknown schedule scan_type '{schedule.scan_type}' for schedule "
-                f"{schedule.id} ({schedule.name}); skipping (refusing Nuclei default)"
-            )
-            schedule.last_error = f"Unknown scan_type: {schedule.scan_type}"
+        if schedule.scan_type == "tester_process":
+            await self._run_tester_process_schedule(db, schedule, targets)
+            return
+
+        try:
+            scan_type = resolve_scan_type(schedule.scan_type)
+        except ValueError as exc:
+            schedule.last_error = str(exc)
             schedule.next_run_at = schedule.calculate_next_run()
             db.commit()
             return
-
-        scan_type = scan_type_map[schedule.scan_type]
         
         # Build config — merge profile defaults so ICS NSE/ports survive thin schedule configs
         profile_defaults = CONTINUOUS_SCAN_TYPES.get(schedule.scan_type, {}).get("default_config", {})
@@ -450,6 +436,7 @@ class ScheduleWorker:
         )
         
         db.add(scan)
+        db.flush()
         
         # Update schedule
         schedule.last_run_at = datetime.now(timezone.utc)

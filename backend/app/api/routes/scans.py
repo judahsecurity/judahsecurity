@@ -18,6 +18,9 @@ from app.models.scan_schedule import CONTINUOUS_SCAN_TYPES, ALL_CRITICAL_PORTS, 
 from app.schemas.scan import ScanCreate, ScanUpdate, ScanResponse, ScanByLabelRequest, BulkDomainScanRequest, AdhocScanRequest
 from app.api.deps import get_current_active_user, require_analyst
 from app.services.nuclei_service import count_cidr_targets
+from app.services.scan_registry import job_type_for_scan_type, resolve_scan_type
+from app.services.scan_guardrails import RulesOfEngagementViolation, validate_rules_of_engagement
+from app.services.scan_profiles import get_visible_scan_profile, profile_config
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/scans", tags=["Scans"])
@@ -192,42 +195,11 @@ def send_scan_to_sqs(scan: Scan) -> bool:
     if not sqs:
         return False
     
-    # Build job message - map ScanType to worker job_type
-    # IMPORTANT: Keep this in sync with scanner_worker.py job_type_map
-    job_type_map = {
-        ScanType.VULNERABILITY: 'NUCLEI_SCAN',
-        ScanType.PORT_SCAN: 'PORT_SCAN',
-        ScanType.PORT_VERIFY: 'PORT_VERIFY',
-        ScanType.SERVICE_DETECT: 'SERVICE_DETECT',
-        ScanType.DISCOVERY: 'DISCOVERY',
-        ScanType.FULL: 'DISCOVERY',
-        ScanType.SUBDOMAIN_ENUM: 'SUBDOMAIN_ENUM',
-        ScanType.DNS_RESOLUTION: 'DNS_RESOLUTION',
-        ScanType.HTTP_PROBE: 'HTTP_PROBE',
-        ScanType.DNS_ENUM: 'DNS_RESOLUTION',
-        ScanType.LOGIN_PORTAL: 'LOGIN_PORTAL',
-        ScanType.SCREENSHOT: 'SCREENSHOT',
-        ScanType.TECHNOLOGY: 'TECHNOLOGY_SCAN',
-        ScanType.WHATWEB: 'WHATWEB_SCAN',
-        ScanType.PARAMSPIDER: 'PARAMSPIDER',
-        ScanType.WAYBACKURLS: 'WAYBACKURLS',
-        ScanType.KATANA: 'KATANA',
-        ScanType.TLDFINDER: 'TLDFINDER',
-        ScanType.CLEANUP: 'CLEANUP',
-        ScanType.LLM_RED_TEAM: 'LLM_RED_TEAM',
-        ScanType.ATLAS_DISCOVERY: 'ATLAS_DISCOVERY',
-        ScanType.ARGUS_SECRETS: 'ARGUS_SECRETS',
-        ScanType.HERMES_SECRETS: 'HERMES_SECRETS',
-        ScanType.JANUS_DAST: 'JANUS_DAST',
-        ScanType.THEMIS_CSPM: 'THEMIS_CSPM',
-        ScanType.SUBDOMAIN_TAKEOVER: 'SUBDOMAIN_TAKEOVER',
-        ScanType.GRAPHQL_SCAN: 'GRAPHQL_SCAN',
-        ScanType.JS_RECON: 'JS_RECON',
-        ScanType.JSLUICE_SCAN: 'JSLUICE_SCAN',
-        ScanType.TRUFFLEHOG_SCAN: 'TRUFFLEHOG_SCAN',
-    }
-    
-    job_type = job_type_map.get(scan.scan_type, 'NUCLEI_SCAN')
+    try:
+        job_type = job_type_for_scan_type(scan.scan_type)
+    except ValueError as exc:
+        logger.error("Refusing to queue scan %s: %s", scan.id, exc)
+        return False
     config = scan.config or {}
     
     message_body = {
@@ -268,6 +240,22 @@ def check_org_access(user: User, org_id: int) -> bool:
     if user.is_superuser:
         return True
     return user.organization_id == org_id
+
+
+def enforce_rules_of_engagement(db: Session, organization_id: int, targets: List[str], scan_type: str) -> None:
+    try:
+        validate_rules_of_engagement(db, organization_id, targets, scan_type)
+    except RulesOfEngagementViolation as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"error": "Rules of Engagement violation", "reason": exc.reason, "rejected_targets": exc.rejected_targets},
+        )
+    except Exception as exc:
+        logger.exception("Rules of Engagement validation failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Unable to validate Rules of Engagement; scan was not created",
+        ) from exc
 
 
 @router.get("/", response_model=List[ScanResponse])
@@ -324,11 +312,16 @@ def get_queue_status(
     max_concurrent = int(os.getenv("MAX_CONCURRENT_SCANS", "3"))
     
     # Count scans by status
-    pending_count = db.query(Scan).filter(Scan.status == ScanStatus.PENDING).count()
+    visible_query = db.query(Scan)
+    if not current_user.is_superuser:
+        if not current_user.organization_id:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No organization access")
+        visible_query = visible_query.filter(Scan.organization_id == current_user.organization_id)
+    pending_count = visible_query.filter(Scan.status == ScanStatus.PENDING).count()
     running_count = db.query(Scan).filter(Scan.status == ScanStatus.RUNNING).count()
     
     # Get running scans details
-    running_scans = db.query(Scan).filter(
+    running_scans = visible_query.filter(
         Scan.status == ScanStatus.RUNNING
     ).order_by(Scan.started_at.asc()).all()
     
@@ -345,7 +338,7 @@ def get_queue_status(
         })
     
     # Get next pending scans
-    pending_scans = db.query(Scan).filter(
+    pending_scans = visible_query.filter(
         Scan.status == ScanStatus.PENDING
     ).order_by(Scan.created_at.asc()).limit(5).all()
     
@@ -386,11 +379,22 @@ def create_scan(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied to this organization"
         )
+
+    try:
+        job_type_for_scan_type(scan_data.scan_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     
     # If label_ids are provided, get assets with those labels
     scan_dict = scan_data.model_dump()
     label_ids = scan_dict.pop('label_ids', [])
     match_all_labels = scan_dict.pop('match_all_labels', False)
+    profile_id = scan_dict.pop("profile_id", None)
+    if profile_id is not None:
+        profile = get_visible_scan_profile(db, profile_id, scan_data.organization_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail="Scan profile not found")
+        scan_dict["config"] = {**profile_config(profile), **(scan_dict.get("config") or {})}
     
     if label_ids:
         # Get assets with the specified labels
@@ -416,37 +420,7 @@ def create_scan(
         scan_dict['config']['match_all_labels'] = match_all_labels
         scan_dict['config']['assets_from_labels'] = len(assets)
     
-    # -- Rules of Engagement guardrail ---------------------------------------
-    # If the org has RoE enabled, reject the whole scan when any target or the
-    # scan type itself violates the accepted document. This is the hard gate
-    # that prevents the platform (or the agent) from ever touching out-of-scope
-    # hosts.
-    try:
-        from app.services import roe_service
-        scan_type_value = (
-            scan_dict.get('scan_type').value
-            if hasattr(scan_dict.get('scan_type'), 'value')
-            else scan_dict.get('scan_type')
-        )
-        ok, reason, rejected = roe_service.check_targets(
-            db,
-            scan_data.organization_id,
-            scan_dict.get('targets') or [],
-            scan_type=scan_type_value,
-        )
-        if not ok:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={
-                    "error": "Rules of Engagement violation",
-                    "reason": reason,
-                    "rejected_targets": rejected,
-                },
-            )
-    except HTTPException:
-        raise
-    except Exception as exc:  # don't block if RoE module itself is misconfigured
-        logger.warning(f"RoE check skipped due to error: {exc}")
+    enforce_rules_of_engagement(db, scan_data.organization_id, scan_dict.get("targets") or [], scan_data.scan_type.value)
 
     new_scan = Scan(
         **scan_dict,
@@ -464,13 +438,30 @@ def create_scan(
 
 @router.get("/scan-types")
 def get_available_scan_types():
-    """
-    Get all available scan types for adhoc scans.
-    
-    Returns all scan types from CONTINUOUS_SCAN_TYPES that can be used
-    for both scheduled and adhoc scans.
-    """
-    return CONTINUOUS_SCAN_TYPES
+    """Return the single catalog used to build the manual scan launcher."""
+    schedule_only = {"cleanup", "tester_process"}
+    catalog = {
+        scan_type: {**definition, "launch_endpoint": "adhoc"}
+        for scan_type, definition in CONTINUOUS_SCAN_TYPES.items()
+        if scan_type not in schedule_only
+    }
+    catalog.update({
+        "llm_red_team": {
+            "name": "AI/LLM Red Team (Chatbot Testing)",
+            "description": "Exercise an authorized chatbot target and grade its responses for security weaknesses.",
+            "default_config": {"auto_discover": True, "use_llm_grading": True},
+            "launch_endpoint": "direct",
+            "requires_targets": True,
+        },
+        "themis_cspm": {
+            "name": "Themis — Cloud CSPM (Prowler)",
+            "description": "Assess an authorized cloud account for configuration and compliance findings.",
+            "default_config": {},
+            "launch_endpoint": "direct",
+            "requires_targets": False,
+        },
+    })
+    return catalog
 
 
 @router.post("/adhoc", status_code=status.HTTP_201_CREATED)
@@ -568,49 +559,24 @@ def create_adhoc_scan(
             detail="No targets specified. Provide targets, label_ids, or set use_all_in_scope=true"
         )
     
-    # Map scan type string to ScanType enum
-    scan_type_map = {
-        "nuclei": ScanType.VULNERABILITY,
-        "nuclei_critical": ScanType.VULNERABILITY,
-        "nuclei_high": ScanType.VULNERABILITY,
-        "nuclei_critical_high": ScanType.VULNERABILITY,
-        "nuclei_medium": ScanType.VULNERABILITY,
-        "nuclei_low_info": ScanType.VULNERABILITY,
-        "nuclei_ics": ScanType.VULNERABILITY,
-        "port_scan": ScanType.PORT_SCAN,
-        "masscan": ScanType.PORT_SCAN,
-        "critical_ports": ScanType.PORT_SCAN,
-        "ics_ot_ports": ScanType.PORT_SCAN,
-        "ics_plc_scan": ScanType.PORT_SCAN,
-        "ics_scada_scan": ScanType.PORT_SCAN,
-        "ics_building_automation": ScanType.PORT_SCAN,
-        "ics_full_discovery": ScanType.PORT_SCAN,
-        "ics_hmi_screenshot": ScanType.SCREENSHOT,
-        "discovery": ScanType.DISCOVERY,
-        "full_discovery": ScanType.DISCOVERY,
-        "full": ScanType.FULL,  # Full scan (discovery + all scans)
-        "web_scan": ScanType.VULNERABILITY,  # Web scan uses Nuclei vulnerability scanner
-        "screenshot": ScanType.SCREENSHOT,
-        "technology": ScanType.TECHNOLOGY,
-        "whatweb": ScanType.WHATWEB,
-        "http_probe": ScanType.HTTP_PROBE,
-        "dns_resolution": ScanType.DNS_RESOLUTION,
-        "subdomain_enum": ScanType.SUBDOMAIN_ENUM,
-        "login_portal": ScanType.LOGIN_PORTAL,
-        "paramspider": ScanType.PARAMSPIDER,
-        "waybackurls": ScanType.WAYBACKURLS,
-        "katana": ScanType.KATANA,
-        "cleanup": ScanType.CLEANUP,
-        "geo_enrich": ScanType.GEO_ENRICH,
-        "tldfinder": ScanType.TLDFINDER,
-    }
-    
-    scan_type_enum = scan_type_map.get(request.scan_type, ScanType.VULNERABILITY)
+    try:
+        scan_type_enum = resolve_scan_type(request.scan_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    enforce_rules_of_engagement(db, request.organization_id, targets, scan_type_enum.value)
     
     # Build config with defaults from CONTINUOUS_SCAN_TYPES
     default_config = CONTINUOUS_SCAN_TYPES[request.scan_type].get("default_config", {})
+    selected_profile_config = {}
+    if request.profile_id is not None:
+        profile = get_visible_scan_profile(db, request.profile_id, request.organization_id)
+        if not profile:
+            raise HTTPException(status_code=404, detail="Scan profile not found")
+        selected_profile_config = profile_config(profile)
     config = {
         **default_config,
+        **selected_profile_config,
         **request.config,
         "adhoc_scan_type": request.scan_type,
     }
@@ -724,6 +690,12 @@ def create_scan_by_label(
     
     # Create targets from asset values
     targets = [a.value for a in assets]
+
+    try:
+        job_type_for_scan_type(request.scan_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    enforce_rules_of_engagement(db, request.organization_id, targets, request.scan_type.value)
     
     # Create the scan
     new_scan = Scan(
@@ -813,6 +785,8 @@ def bulk_domain_port_scan(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No valid domains provided. Domains should be in format: example.com, sub.example.com"
         )
+
+    enforce_rules_of_engagement(db, request.organization_id, valid_domains, ScanType.PORT_SCAN.value)
     
     # Optionally resolve domains to IPs
     resolved_ips = None
@@ -1086,8 +1060,20 @@ def cancel_scan(
             detail=f"Cannot cancel scan with status {scan.status.value}"
         )
     
+    cancelled_at = datetime.utcnow()
+    was_pending = scan.status == ScanStatus.PENDING
+    cancellation_config = {
+        **(scan.config or {}),
+        "cancel_requested": True,
+        "cancel_requested_at": cancelled_at.isoformat(),
+        "cancel_requested_by": current_user.username,
+    }
+    if was_pending:
+        cancellation_config["cancel_acknowledged_at"] = cancelled_at.isoformat()
+    scan.config = cancellation_config
     scan.status = ScanStatus.CANCELLED
-    scan.completed_at = datetime.utcnow()
+    scan.current_step = None
+    scan.completed_at = cancelled_at
     
     db.commit()
     db.refresh(scan)
@@ -1108,7 +1094,8 @@ def retry_scan(
     worker crashes or other issues. Unlike rescan, this does not create
     a new scan - it resets the existing one.
     
-    Can only be called on scans with status: RUNNING, FAILED, or CANCELLED.
+    Running scans must be cancelled first so two workers never execute the same
+    scan concurrently. Retries are allowed after failure or cancellation.
     """
     scan = db.query(Scan).filter(Scan.id == scan_id).first()
     
@@ -1124,11 +1111,21 @@ def retry_scan(
             detail="Access denied"
         )
     
-    # Only allow retry for stuck/failed scans, not pending or completed
-    if scan.status not in [ScanStatus.RUNNING, ScanStatus.FAILED, ScanStatus.CANCELLED]:
+    if scan.status not in [ScanStatus.FAILED, ScanStatus.CANCELLED]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot retry scan with status {scan.status.value}. Only RUNNING, FAILED, or CANCELLED scans can be retried."
+            detail=f"Cannot retry scan with status {scan.status.value}. Cancel running scans before retrying."
+        )
+
+    existing_config = dict(scan.config or {})
+    if (
+        scan.status == ScanStatus.CANCELLED
+        and existing_config.get("cancel_requested")
+        and not existing_config.get("cancel_acknowledged_at")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cancellation is still in progress; retry after the worker acknowledges it",
         )
     
     # Reset scan to pending
@@ -1139,8 +1136,12 @@ def retry_scan(
     scan.current_step = None
     scan.progress = 0
     
-    # Track manual retry in config
-    config = scan.config or {}
+    # Track manual retry in config without carrying cancellation state forward.
+    config = existing_config
+    config.pop("cancel_requested", None)
+    config.pop("cancel_requested_at", None)
+    config.pop("cancel_requested_by", None)
+    config.pop("cancel_acknowledged_at", None)
     manual_retries = config.get('_manual_retries', 0) + 1
     config['_manual_retries'] = manual_retries
     config['_last_manual_retry'] = datetime.utcnow().isoformat()
@@ -1184,14 +1185,19 @@ def rescan(
             detail="Access denied"
         )
     
-    # Clone the scan configuration
+    # Clone the scan configuration without carrying cancellation state forward.
+    rescan_config = dict(original_scan.config or {})
+    rescan_config.pop("cancel_requested", None)
+    rescan_config.pop("cancel_requested_at", None)
+    rescan_config.pop("cancel_requested_by", None)
+    rescan_config.pop("cancel_acknowledged_at", None)
     new_scan = Scan(
         name=f"{original_scan.name} (Rescan)",
         scan_type=original_scan.scan_type,
         organization_id=original_scan.organization_id,
         targets=original_scan.targets,
         config={
-            **(original_scan.config or {}),
+            **rescan_config,
             "rescan_of": original_scan.id,
             "original_scan_name": original_scan.name,
         },
@@ -1270,11 +1276,13 @@ def quick_dns_resolution_scan(
     
     # Count unresolved assets
     from app.models.asset import AssetType
-    unresolved_count = db.query(Asset).filter(
+    unresolved_assets = db.query(Asset).filter(
         Asset.organization_id == organization_id,
+        Asset.in_scope == True,
         Asset.asset_type.in_([AssetType.DOMAIN, AssetType.SUBDOMAIN]),
         (Asset.ip_address.is_(None) | (Asset.ip_address == ''))
-    ).count()
+    ).limit(limit).all()
+    unresolved_count = len(unresolved_assets)
     
     if unresolved_count == 0:
         raise HTTPException(
@@ -1282,12 +1290,15 @@ def quick_dns_resolution_scan(
             detail="No assets need DNS resolution. All domains already have IP addresses."
         )
     
+    targets = [asset.value for asset in unresolved_assets]
+    enforce_rules_of_engagement(db, organization_id, targets, ScanType.DNS_RESOLUTION.value)
+
     # Create scan
     scan = Scan(
         name=f"DNS Resolution - {min(unresolved_count, limit)} assets",
         scan_type=ScanType.DNS_RESOLUTION,
         organization_id=organization_id,
-        targets=[],  # Will resolve all unresolved assets
+        targets=targets,
         config={
             "include_geo": include_geo,
             "limit": limit,
@@ -1352,10 +1363,12 @@ def quick_http_probe_scan(
     
     # Count assets to probe
     from app.models.asset import AssetType
-    asset_count = db.query(Asset).filter(
+    assets = db.query(Asset).filter(
         Asset.organization_id == organization_id,
+        Asset.in_scope == True,
         Asset.asset_type.in_([AssetType.DOMAIN, AssetType.SUBDOMAIN])
-    ).count()
+    ).limit(limit).all()
+    asset_count = len(assets)
     
     if asset_count == 0:
         raise HTTPException(
@@ -1363,12 +1376,15 @@ def quick_http_probe_scan(
             detail="No domain/subdomain assets found to probe."
         )
     
+    targets = [asset.value for asset in assets]
+    enforce_rules_of_engagement(db, organization_id, targets, ScanType.HTTP_PROBE.value)
+
     # Create scan
     scan = Scan(
         name=f"HTTP Probe - {min(asset_count, limit)} assets",
         scan_type=ScanType.HTTP_PROBE,
         organization_id=organization_id,
-        targets=[],  # Will probe all assets
+        targets=targets,
         config={
             "limit": limit,
             "timeout": timeout,
@@ -2113,7 +2129,6 @@ def create_service_detection_scan(
         "unknown_count": unknown_count,
         "ports_to_scan": min(unknown_count, max_ports)
     }
-
 
 
 

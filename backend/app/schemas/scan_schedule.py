@@ -2,7 +2,8 @@
 
 from datetime import datetime
 from typing import Optional, List, Any
-from pydantic import BaseModel, Field
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.models.scan_schedule import ScheduleFrequency
 
@@ -33,6 +34,25 @@ class ScanScheduleCreate(ScanScheduleBase):
     notify_on_findings: bool = True
     notification_emails: List[str] = []
 
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"Unknown timezone '{value}'") from exc
+        return value
+
+    @model_validator(mode="after")
+    def validate_frequency_fields(self):
+        if self.frequency == ScheduleFrequency.WEEKLY and self.run_on_day is not None and self.run_on_day > 6:
+            raise ValueError("Weekly run_on_day must be between 0 and 6")
+        if self.frequency == ScheduleFrequency.MONTHLY and self.run_on_day == 0:
+            raise ValueError("Monthly run_on_day must be between 1 and 31")
+        if self.frequency == ScheduleFrequency.CUSTOM and not self.cron_expression:
+            raise ValueError("Custom schedules require a cron_expression")
+        return self
+
 
 class ScanScheduleUpdate(BaseModel):
     """Schema for updating a scan schedule."""
@@ -54,6 +74,17 @@ class ScanScheduleUpdate(BaseModel):
     notify_on_completion: Optional[bool] = None
     notify_on_findings: Optional[bool] = None
     notification_emails: Optional[List[str]] = None
+
+    @field_validator("timezone")
+    @classmethod
+    def validate_timezone(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"Unknown timezone '{value}'") from exc
+        return value
 
 
 class ScanScheduleResponse(ScanScheduleBase):
@@ -105,6 +136,5 @@ class ManualTriggerRequest(BaseModel):
     """Request to manually trigger a scheduled scan."""
     override_targets: Optional[List[str]] = None
     override_config: Optional[dict[str, Any]] = None
-
 
 

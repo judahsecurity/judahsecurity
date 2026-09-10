@@ -16,11 +16,12 @@ class ScanProfileBase(BaseModel):
 
 class ScanProfileCreate(ScanProfileBase):
     """Schema for creating a new scan profile."""
+    organization_id: Optional[int] = None
     # Nuclei settings
-    nuclei_severity: List[str] = ["critical", "high"]
-    nuclei_tags: List[str] = []
-    nuclei_exclude_tags: List[str] = []
-    nuclei_templates: List[str] = []
+    nuclei_severity: List[str] = Field(default_factory=lambda: ["critical", "high"])
+    nuclei_tags: List[str] = Field(default_factory=list)
+    nuclei_exclude_tags: List[str] = Field(default_factory=list)
+    nuclei_templates: List[str] = Field(default_factory=list)
     nuclei_rate_limit: int = Field(default=150, ge=1, le=1000)
     nuclei_bulk_size: int = Field(default=25, ge=1, le=100)
     nuclei_concurrency: int = Field(default=25, ge=1, le=100)
@@ -35,11 +36,12 @@ class ScanProfileCreate(ScanProfileBase):
     
     # Port scanning settings
     port_scan_top: int = Field(default=1000, ge=1, le=65535)
-    port_scan_custom: List[int] = []
+    port_scan_custom: List[int] = Field(default_factory=list)
     
     # Rate limiting
     max_concurrent_hosts: int = Field(default=50, ge=1, le=200)
     requests_per_second: int = Field(default=100, ge=1, le=1000)
+    is_default: bool = False
 
 
 class ScanProfileUpdate(BaseModel):
@@ -69,12 +71,15 @@ class ScanProfileUpdate(BaseModel):
     max_concurrent_hosts: Optional[int] = Field(None, ge=1, le=200)
     requests_per_second: Optional[int] = Field(None, ge=1, le=1000)
     
+    is_default: Optional[bool] = None
     is_active: Optional[bool] = None
 
 
 class ScanProfileResponse(ScanProfileBase):
     """Schema for scan profile response."""
     id: int
+    organization_id: Optional[int] = None
+    created_by: Optional[str] = None
     
     nuclei_severity: List[str]
     nuclei_tags: List[str]
@@ -160,7 +165,6 @@ class ToolStatusResponse(BaseModel):
     dnsx: bool
     naabu: bool
     katana: bool
-
 
 
 

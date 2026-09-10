@@ -187,13 +187,39 @@ def check_scan_type(
 def check_targets(
     db, organization_id: int, targets: Iterable[str], scan_type: Optional[str] = None
 ) -> tuple[bool, Optional[str], list[str]]:
-    """Bulk check. Returns (all_allowed, first_reason, rejected_targets)."""
+    """Bulk check with one RoE load. Returns (allowed, reason, rejected)."""
+    target_list = list(targets)
+    roe = load_roe(db, organization_id)
+    if not is_enabled(roe):
+        return True, None, []
+
+    if not roe.get("document_text") and not roe.get("document_hash"):
+        return (
+            False,
+            "Rules of Engagement are enabled but no document has been accepted.",
+            target_list,
+        )
+
+    if scan_type is not None:
+        allowed, reason = _check_scan_type_against_roe(roe, scan_type)
+        if not allowed:
+            return False, reason, target_list
+
+    scope_in = roe.get("scope_in") or []
+    scope_out = roe.get("scope_out") or []
     rejected: list[str] = []
     first_reason: Optional[str] = None
-    for t in targets:
-        ok, reason = check_target(db, organization_id, t, scan_type=scan_type)
-        if not ok:
-            rejected.append(t)
+    for target in target_list:
+        reason = None
+        if scope_in and not any(_host_matches(target, rule) for rule in scope_in):
+            reason = f"Target '{target}' is not covered by any in-scope rule in the RoE."
+        else:
+            for rule in scope_out:
+                if _host_matches(target, rule):
+                    reason = f"Target '{target}' matches the explicitly excluded rule '{rule}'."
+                    break
+        if reason:
+            rejected.append(target)
             if first_reason is None:
                 first_reason = reason
     return (len(rejected) == 0), first_reason, rejected

@@ -14,6 +14,7 @@ from app.core.rate_limit import register_rate_limiting
 from app.db.database import engine, Base, SessionLocal
 from app.core.security import get_password_hash
 from app.models.user import User, UserRole
+from app.models.scan_profile import ScanProfile, DEFAULT_PROFILES
 from app.models.netblock import Netblock  # Import to ensure table creation
 from app.models.finding_exception import FindingException  # Required for Vulnerability relationship resolution
 from app.models.jira_integration import JiraIntegration, JiraTicket  # noqa: F401 — ensure tables are created
@@ -25,7 +26,7 @@ from app.models.f5_integration import F5Integration  # noqa: F401 — ensure tab
 from app.models.akamai_integration import AkamaiWafIntegration  # noqa: F401 — ensure table is created
 from app.models.cloudflare_integration import CloudflareWafIntegration  # noqa: F401 — ensure table is created
 from app.models.custom_nuclei_template import CustomNucleiTemplate  # noqa: F401 — ensure table is created
-from app.api.routes import auth, users, organizations, assets, vulnerabilities, scans, discovery, nuclei, ports, screenshots, external_discovery, waybackurls, netblocks, labels, scan_schedules, tools, sni_discovery, scan_config, acquisitions, oracle, agent
+from app.api.routes import auth, users, organizations, assets, vulnerabilities, scans, discovery, nuclei, ports, screenshots, external_discovery, waybackurls, netblocks, labels, scan_schedules, scan_profiles, tools, sni_discovery, scan_config, acquisitions, oracle, agent
 from app.api.routes import integrations
 from app.api.routes import scoring as scoring_router
 from app.api.routes import threat_intel as threat_intel_router
@@ -165,6 +166,7 @@ app.include_router(waybackurls.router, prefix=settings.API_PREFIX)
 app.include_router(netblocks.router, prefix=settings.API_PREFIX)
 app.include_router(labels.router, prefix=settings.API_PREFIX)
 app.include_router(scan_schedules.router, prefix=settings.API_PREFIX)
+app.include_router(scan_profiles.router, prefix=settings.API_PREFIX)
 app.include_router(tools.router, prefix=settings.API_PREFIX)
 app.include_router(sni_discovery.router, prefix=settings.API_PREFIX)
 app.include_router(scan_config.router, prefix=settings.API_PREFIX)
@@ -282,6 +284,7 @@ async def startup_event():
 
     # Apply Oracle schema migrations so the Go service's tables exist
     apply_oracle_migrations()
+    apply_scan_profile_migrations()
 
     # Check ProjectDiscovery tools installation
     from app.services.nuclei_service import NucleiService
@@ -312,6 +315,7 @@ async def startup_event():
         logger.warning(f"✗ EyeWitness is not installed: {ew_status.get('error', '')}")
 
     ensure_default_admin()
+    ensure_default_scan_profiles()
 
 
 @app.on_event("shutdown")
@@ -670,6 +674,29 @@ def apply_oracle_migrations():
         logger.error("Oracle schema migrations failed (non-fatal): %s", exc)
 
 
+def apply_scan_profile_migrations():
+    """Upgrade legacy global profiles to tenant-aware profiles atomically."""
+    from sqlalchemy import text
+
+    statements = [
+        "ALTER TABLE scan_profiles ADD COLUMN IF NOT EXISTS organization_id INTEGER REFERENCES organizations(id) ON DELETE CASCADE",
+        "ALTER TABLE scan_profiles ADD COLUMN IF NOT EXISTS created_by VARCHAR(100)",
+        "ALTER TABLE scan_profiles DROP CONSTRAINT IF EXISTS scan_profiles_name_key",
+        "DROP INDEX IF EXISTS ix_scan_profiles_name",
+        "CREATE INDEX IF NOT EXISTS ix_scan_profiles_name_lookup ON scan_profiles(name)",
+        "CREATE INDEX IF NOT EXISTS ix_scan_profiles_organization_id ON scan_profiles(organization_id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_scan_profiles_builtin_name ON scan_profiles (LOWER(name)) WHERE organization_id IS NULL",
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_scan_profiles_org_name ON scan_profiles (organization_id, LOWER(name)) WHERE organization_id IS NOT NULL",
+    ]
+    try:
+        with engine.begin() as connection:
+            for statement in statements:
+                connection.execute(text(statement))
+        logger.info("Scan profile schema migrations applied.")
+    except Exception as exc:
+        logger.error("Scan profile schema migrations failed (non-fatal): %s", exc)
+
+
 def ensure_default_admin():
     """Ensure a known-good admin account exists and is usable.
 
@@ -736,5 +763,25 @@ def ensure_default_admin():
             logger.info("Default admin user already valid.")
     except Exception as exc:
         logger.error(f"Failed to ensure default admin user: {exc}")
+    finally:
+        db.close()
+
+
+def ensure_default_scan_profiles():
+    """Idempotently install the built-in profiles used by the scan launcher."""
+    db = SessionLocal()
+    try:
+        existing_names = {
+            name for (name,) in db.query(ScanProfile.name)
+            .filter(ScanProfile.organization_id.is_(None))
+            .all()
+        }
+        for definition in DEFAULT_PROFILES:
+            if definition["name"] not in existing_names:
+                db.add(ScanProfile(**definition, organization_id=None))
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.error("Failed to ensure default scan profiles: %s", exc)
     finally:
         db.close()

@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
-import { ScanLine, CalendarClock } from 'lucide-react';
+import { ScanLine, CalendarClock, SlidersHorizontal } from 'lucide-react';
 
 interface NavTab {
   name: string;
@@ -24,6 +24,12 @@ const tabs: NavTab[] = [
     href: '/schedules',
     icon: CalendarClock,
     description: 'Recurring scan schedules',
+  },
+  {
+    name: 'Profiles',
+    href: '/scan-profiles',
+    icon: SlidersHorizontal,
+    description: 'Reusable scan settings',
   },
 ];
 
@@ -57,4 +63,3 @@ export function ScanNavTabs() {
     </div>
   );
 }
-

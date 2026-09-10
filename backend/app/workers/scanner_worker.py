@@ -45,6 +45,14 @@ from app.services.port_findings_service import PortFindingsService
 from app.services.discovery_service import DiscoveryService
 from app.services.dns_resolution_service import DNSResolutionService
 from app.services.geolocation_service import get_geolocation_service
+from app.services.scan_registry import job_type_for_scan_type
+from app.services.scan_runtime import (
+    discard_scan_processes,
+    install_process_tracking,
+    reset_current_scan,
+    set_current_scan,
+    terminate_scan_processes,
+)
 import ipaddress
 import re
 
@@ -177,6 +185,8 @@ class ScannerWorker:
     def __init__(self):
         """Initialize the scanner worker."""
         global scan_semaphore
+        install_process_tracking()
+        self.active_scan_tasks: dict[int, asyncio.Task] = {}
         
         # Database connection
         if DATABASE_URL:
@@ -236,6 +246,61 @@ class ScannerWorker:
                 pass  # Ignore if no transaction to rollback
             return session
         return None
+
+    def _preserve_cancelled_status(self, scan_id: int) -> None:
+        """Ensure a late handler commit cannot overwrite a cancellation request."""
+        db = self.get_db_session()
+        if not db:
+            return
+        try:
+            scan = db.query(Scan).filter(Scan.id == scan_id).first()
+            config = scan.config or {} if scan else {}
+            if scan and config.get("cancel_requested"):
+                config = dict(config)
+                config["cancel_acknowledged_at"] = datetime.utcnow().isoformat()
+                scan.config = config
+                scan.status = ScanStatus.CANCELLED
+                scan.current_step = None
+                scan.completed_at = scan.completed_at or datetime.utcnow()
+                db.commit()
+        except Exception as exc:
+            db.rollback()
+            logger.error("Failed to preserve cancellation for scan %s: %s", scan_id, exc)
+        finally:
+            db.close()
+
+    async def _monitor_cancellations(self) -> None:
+        """Stop active tasks whose durable database state requests cancellation."""
+        while not shutdown_requested:
+            scan_ids = list(self.active_scan_tasks)
+            cancelled_ids: list[int] = []
+            if scan_ids:
+                db = self.get_db_session()
+                if db:
+                    try:
+                        scans = db.query(Scan).filter(Scan.id.in_(scan_ids)).all()
+                        cancelled_ids = [
+                            scan.id
+                            for scan in scans
+                            if scan.status == ScanStatus.CANCELLED
+                            or (scan.config or {}).get("cancel_requested")
+                        ]
+                    except Exception as exc:
+                        logger.error("Cancellation monitor database error: %s", exc)
+                    finally:
+                        db.close()
+
+            for scan_id in cancelled_ids:
+                task = self.active_scan_tasks.get(scan_id)
+                if task and not task.done():
+                    terminated = await terminate_scan_processes(scan_id)
+                    logger.info(
+                        "Cancelling scan %s task after terminating %s process group(s)",
+                        scan_id,
+                        terminated,
+                    )
+                    task.cancel()
+            await asyncio.sleep(0.5)
     
     async def poll_for_jobs(self):
         """Poll for scan jobs from SQS and database (hybrid approach).
@@ -450,7 +515,6 @@ class ScannerWorker:
             # Calculate how many more scans we can run
             available_slots = MAX_CONCURRENT_SCANS - len(active_scans)
             if available_slots <= 0:
-                await asyncio.sleep(5)  # Brief wait when at capacity
                 return []
             
             # Find pending scans, prioritizing ad-hoc over scheduled
@@ -465,52 +529,20 @@ class ScannerWorker:
             ).limit(available_slots).all()
             
             if not pending_scans:
-                await asyncio.sleep(POLL_INTERVAL)
                 return []
             
-            # Convert to message format
-            job_type_map = {
-                ScanType.VULNERABILITY: 'NUCLEI_SCAN',
-                ScanType.PORT_SCAN: 'PORT_SCAN',
-                ScanType.PORT_VERIFY: 'PORT_VERIFY',
-                ScanType.SERVICE_DETECT: 'SERVICE_DETECT',
-                ScanType.DISCOVERY: 'DISCOVERY',
-                ScanType.FULL: 'RECON_PIPELINE',  # FULL = recon workflow (discovery → port → http → resource_enum → vuln)
-                ScanType.SUBDOMAIN_ENUM: 'SUBDOMAIN_ENUM',
-                ScanType.DNS_RESOLUTION: 'DNS_RESOLUTION',
-                ScanType.HTTP_PROBE: 'HTTP_PROBE',
-                ScanType.DNS_ENUM: 'DNS_RESOLUTION',  # Alias
-                ScanType.LOGIN_PORTAL: 'LOGIN_PORTAL',
-                ScanType.SCREENSHOT: 'SCREENSHOT',
-                ScanType.PARAMSPIDER: 'PARAMSPIDER',
-                ScanType.WAYBACKURLS: 'WAYBACKURLS',
-                ScanType.KATANA: 'KATANA',
-                ScanType.CLEANUP: 'CLEANUP',
-                ScanType.TECHNOLOGY: 'TECHNOLOGY_SCAN',
-                ScanType.WHATWEB: 'WHATWEB_SCAN',
-                ScanType.GEO_ENRICH: 'GEO_ENRICH',
-                ScanType.TLDFINDER: 'TLDFINDER',
-                ScanType.COMMONCRAWL_ENUM: 'COMMONCRAWL_ENUM',
-                ScanType.LLM_RED_TEAM: 'LLM_RED_TEAM',
-                ScanType.ATLAS_DISCOVERY: 'ATLAS_DISCOVERY',
-                ScanType.ARGUS_SECRETS: 'ARGUS_SECRETS',
-                ScanType.HERMES_SECRETS: 'HERMES_SECRETS',
-                ScanType.JANUS_DAST: 'JANUS_DAST',
-                ScanType.THEMIS_CSPM: 'THEMIS_CSPM',
-                ScanType.SUBDOMAIN_TAKEOVER: 'SUBDOMAIN_TAKEOVER',
-                ScanType.GRAPHQL_SCAN: 'GRAPHQL_SCAN',
-                ScanType.JS_RECON: 'JS_RECON',
-                ScanType.JSLUICE_SCAN: 'JSLUICE_SCAN',
-                ScanType.TRUFFLEHOG_SCAN: 'TRUFFLEHOG_SCAN',
-                ScanType.EMAIL_BREACH: 'EMAIL_BREACH',
-                ScanType.DNS_THREAT: 'DNS_THREAT',
-                ScanType.URLHAUS_LOOKUP: 'URLHAUS_LOOKUP',
-                ScanType.BGP_LOOKUP: 'BGP_LOOKUP',
-            }
-            
             messages = []
+            invalid_scans_found = False
             for pending_scan in pending_scans:
-                job_type = job_type_map.get(pending_scan.scan_type, 'NUCLEI_SCAN')
+                try:
+                    job_type = job_type_for_scan_type(pending_scan.scan_type)
+                except ValueError as exc:
+                    pending_scan.status = ScanStatus.FAILED
+                    pending_scan.error_message = str(exc)[:500]
+                    pending_scan.completed_at = datetime.utcnow()
+                    invalid_scans_found = True
+                    logger.error("Scan %s cannot be dispatched: %s", pending_scan.id, exc)
+                    continue
                 config = pending_scan.config or {}
                 is_scheduled = config.get('triggered_by_schedule') is not None
                 
@@ -543,6 +575,9 @@ class ScannerWorker:
                 
                 scan_type_str = 'scheduled' if is_scheduled else 'ad-hoc'
                 logger.info(f"Found {scan_type_str} scan {pending_scan.id} ({pending_scan.scan_type.value})")
+
+            if invalid_scans_found:
+                db.commit()
             
             return messages
             
@@ -587,7 +622,7 @@ class ScannerWorker:
             return
         try:
             scan = db.query(Scan).filter(Scan.id == scan_id).first()
-            if scan and scan.status != ScanStatus.COMPLETED:
+            if scan and scan.status not in (ScanStatus.COMPLETED, ScanStatus.CANCELLED):
                 scan.status = ScanStatus.FAILED
                 scan.error_message = error_message[:500] if error_message else "Unknown error"
                 scan.completed_at = datetime.utcnow()
@@ -1701,12 +1736,12 @@ class ScannerWorker:
             # Materialize this org's active custom (analyst/AI-generated) templates
             # from the DB to disk so Nuclei can actually run them alongside the
             # shipped/official templates.
-            extra_templates = None
+            extra_templates = list(config.get("templates") or [])
             try:
                 from app.services.custom_template_store import materialize_org_templates
                 custom_dir = materialize_org_templates(db, organization_id)
                 if custom_dir:
-                    extra_templates = [custom_dir]
+                    extra_templates.append(custom_dir)
                     logger.info(f"Including custom templates from {custom_dir} in Nuclei scan")
             except Exception as e:
                 logger.warning(f"Failed to materialize custom Nuclei templates: {e}")
@@ -1716,8 +1751,11 @@ class ScannerWorker:
                 severity=severity,
                 tags=tags if tags else None,
                 exclude_tags=exclude_tags if exclude_tags else None,
-                templates=extra_templates,
+                templates=extra_templates or None,
                 rate_limit=rate_limit,
+                bulk_size=int(config.get("bulk_size", 25)),
+                concurrency=int(config.get("concurrency", 25)),
+                timeout=int(config.get("timeout", 10)),
                 interactsh=bool(config.get("interactsh", True)),
             )
             
@@ -6226,9 +6264,12 @@ class ScannerWorker:
     async def _process_with_semaphore(self, message: dict):
         """Process a message with semaphore limiting."""
         scan_id = None
+        context_token = None
         try:
             body = json.loads(message.get('Body', '{}'))
             scan_id = body.get('scan_id')
+            if scan_id:
+                context_token = set_current_scan(scan_id)
 
             # Note: scan_id is already added to active_scans in the main loop
             # to prevent race conditions during polling
@@ -6236,12 +6277,30 @@ class ScannerWorker:
             async with self.scan_semaphore:
                 await self.process_message(message)
 
+        except asyncio.CancelledError:
+            if scan_id:
+                await terminate_scan_processes(scan_id)
+                self._preserve_cancelled_status(scan_id)
+            message_id = message.get("MessageId")
+            receipt_handle = message.get("ReceiptHandle")
+            is_db_message = bool(message_id and message_id.startswith("db-"))
+            self._delete_sqs_message_safe(
+                message_id, receipt_handle, is_db_message, scan_id
+            )
+            logger.info("Scan %s processing task cancelled", scan_id)
+            raise
         except Exception as e:
             logger.error(f"Error processing scan {scan_id}: {e}", exc_info=True)
         finally:
+            if context_token is not None:
+                reset_current_scan(context_token)
             # Remove from active scans when complete
             if scan_id:
+                self._preserve_cancelled_status(scan_id)
+                discard_scan_processes(scan_id)
                 active_scans.discard(scan_id)
+                if self.active_scan_tasks.get(scan_id) is asyncio.current_task():
+                    self.active_scan_tasks.pop(scan_id, None)
                 logger.info(f"Scan {scan_id} removed from active scans")
     
     async def handle_llm_red_team(self, job_data: dict):
@@ -7282,6 +7341,7 @@ class ScannerWorker:
         logger.info(f"Starting scanner worker (max_concurrent={MAX_CONCURRENT_SCANS})...")
         
         pending_tasks = set()
+        cancellation_monitor = asyncio.create_task(self._monitor_cancellations())
         last_stale_check = datetime.utcnow()
         STALE_CHECK_INTERVAL = 300  # Check for stale scans every 5 minutes
         
@@ -7311,6 +7371,8 @@ class ScannerWorker:
                 for message in messages:
                     if shutdown_requested:
                         break
+
+                    scan_id = None
                     
                     # Add scan to active_scans BEFORE creating task to prevent race condition
                     try:
@@ -7325,6 +7387,8 @@ class ScannerWorker:
                     # Create task for concurrent processing
                     task = asyncio.create_task(self._process_with_semaphore(message))
                     pending_tasks.add(task)
+                    if scan_id:
+                        self.active_scan_tasks[scan_id] = task
                     task.add_done_callback(pending_tasks.discard)
                 
                 # Brief pause to let async tasks start processing
@@ -7344,6 +7408,9 @@ class ScannerWorker:
         if pending_tasks:
             logger.info(f"Waiting for {len(pending_tasks)} active scans to complete...")
             await asyncio.gather(*pending_tasks, return_exceptions=True)
+
+        cancellation_monitor.cancel()
+        await asyncio.gather(cancellation_monitor, return_exceptions=True)
         
         logger.info("Scanner worker shutting down...")
 
@@ -7360,7 +7427,6 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
 
 
 

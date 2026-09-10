@@ -1,7 +1,9 @@
 """Scan Schedule model for continuous monitoring."""
 
 import enum
+import calendar
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum, ForeignKey, Text, JSON
 from sqlalchemy.orm import relationship
 
@@ -74,72 +76,85 @@ class ScanSchedule(Base):
     def __repr__(self):
         return f"<ScanSchedule(id={self.id}, name='{self.name}', freq={self.frequency.value})>"
     
-    def calculate_next_run(self):
-        """Calculate the next run time based on frequency."""
+    def calculate_next_run(self, now: datetime | None = None):
+        """Calculate the next UTC run time using the schedule's local timezone."""
         from datetime import timedelta
-        now = datetime.now(timezone.utc)
+        now_utc = now or datetime.now(timezone.utc)
+        if now_utc.tzinfo is None:
+            now_utc = now_utc.replace(tzinfo=timezone.utc)
+        try:
+            schedule_tz = ZoneInfo(self.timezone or "UTC")
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(f"Unknown schedule timezone '{self.timezone}'") from exc
+        local_now = now_utc.astimezone(schedule_tz)
         
         if self.frequency == ScheduleFrequency.EVERY_15_MINUTES:
             # Next 15-minute mark
-            minutes = (now.minute // 15 + 1) * 15
+            minutes = (local_now.minute // 15 + 1) * 15
             if minutes >= 60:
-                next_run = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+                next_run = local_now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
             else:
-                next_run = now.replace(minute=minutes, second=0, microsecond=0)
+                next_run = local_now.replace(minute=minutes, second=0, microsecond=0)
         elif self.frequency == ScheduleFrequency.EVERY_30_MINUTES:
             # Next 30-minute mark
-            if now.minute < 30:
-                next_run = now.replace(minute=30, second=0, microsecond=0)
+            if local_now.minute < 30:
+                next_run = local_now.replace(minute=30, second=0, microsecond=0)
             else:
-                next_run = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+                next_run = local_now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
         elif self.frequency == ScheduleFrequency.HOURLY:
-            next_run = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+            next_run = local_now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
         elif self.frequency == ScheduleFrequency.EVERY_2_HOURS:
-            next_hour = ((now.hour // 2) + 1) * 2
+            next_hour = ((local_now.hour // 2) + 1) * 2
             if next_hour >= 24:
-                next_run = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                next_run = local_now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
             else:
-                next_run = now.replace(hour=next_hour, minute=0, second=0, microsecond=0)
+                next_run = local_now.replace(hour=next_hour, minute=0, second=0, microsecond=0)
         elif self.frequency == ScheduleFrequency.EVERY_4_HOURS:
-            next_hour = ((now.hour // 4) + 1) * 4
+            next_hour = ((local_now.hour // 4) + 1) * 4
             if next_hour >= 24:
-                next_run = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                next_run = local_now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
             else:
-                next_run = now.replace(hour=next_hour, minute=0, second=0, microsecond=0)
+                next_run = local_now.replace(hour=next_hour, minute=0, second=0, microsecond=0)
         elif self.frequency == ScheduleFrequency.EVERY_6_HOURS:
-            next_hour = ((now.hour // 6) + 1) * 6
+            next_hour = ((local_now.hour // 6) + 1) * 6
             if next_hour >= 24:
-                next_run = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                next_run = local_now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
             else:
-                next_run = now.replace(hour=next_hour, minute=0, second=0, microsecond=0)
+                next_run = local_now.replace(hour=next_hour, minute=0, second=0, microsecond=0)
         elif self.frequency == ScheduleFrequency.EVERY_12_HOURS:
-            if now.hour < 12:
-                next_run = now.replace(hour=12, minute=0, second=0, microsecond=0)
+            if local_now.hour < 12:
+                next_run = local_now.replace(hour=12, minute=0, second=0, microsecond=0)
             else:
-                next_run = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+                next_run = local_now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
         elif self.frequency == ScheduleFrequency.DAILY:
-            next_run = now.replace(hour=self.run_at_hour, minute=0, second=0, microsecond=0)
-            if next_run <= now:
+            next_run = local_now.replace(hour=self.run_at_hour, minute=0, second=0, microsecond=0)
+            if next_run <= local_now:
                 next_run += timedelta(days=1)
         elif self.frequency == ScheduleFrequency.WEEKLY:
-            # Find next occurrence of the target day
-            days_ahead = (self.run_on_day or 0) - now.weekday()
-            if days_ahead <= 0:
-                days_ahead += 7
-            next_run = now.replace(hour=self.run_at_hour, minute=0, second=0, microsecond=0) + timedelta(days=days_ahead)
+            run_on_day = self.run_on_day if self.run_on_day is not None else 0
+            if not 0 <= run_on_day <= 6:
+                raise ValueError("Weekly run_on_day must be between 0 and 6")
+            days_ahead = (run_on_day - local_now.weekday()) % 7
+            next_run = local_now.replace(hour=self.run_at_hour, minute=0, second=0, microsecond=0) + timedelta(days=days_ahead)
+            if next_run <= local_now:
+                next_run += timedelta(days=7)
         elif self.frequency == ScheduleFrequency.MONTHLY:
-            # Next month on the specified day
-            next_run = now.replace(day=min(self.run_on_day or 1, 28), hour=self.run_at_hour, minute=0, second=0, microsecond=0)
-            if next_run <= now:
-                if now.month == 12:
-                    next_run = next_run.replace(year=now.year + 1, month=1)
-                else:
-                    next_run = next_run.replace(month=now.month + 1)
+            requested_day = self.run_on_day or 1
+            if not 1 <= requested_day <= 31:
+                raise ValueError("Monthly run_on_day must be between 1 and 31")
+            def monthly_candidate(year: int, month: int) -> datetime:
+                day = min(requested_day, calendar.monthrange(year, month)[1])
+                return local_now.replace(year=year, month=month, day=day, hour=self.run_at_hour, minute=0, second=0, microsecond=0)
+            next_run = monthly_candidate(local_now.year, local_now.month)
+            if next_run <= local_now:
+                next_run = monthly_candidate(local_now.year + (local_now.month == 12), 1 if local_now.month == 12 else local_now.month + 1)
         else:
-            # Custom - calculate from cron
-            next_run = now + timedelta(hours=1)  # Fallback
+            if not self.cron_expression:
+                raise ValueError("Custom schedules require a cron_expression")
+            from croniter import croniter
+            next_run = croniter(self.cron_expression, local_now).get_next(datetime)
         
-        return next_run
+        return next_run.astimezone(timezone.utc)
 
 
 # Critical ports that should be monitored for exposure

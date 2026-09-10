@@ -2,7 +2,7 @@
 
 import enum
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum, Text, JSON
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum, ForeignKey, Text, JSON
 from sqlalchemy.orm import relationship
 
 from app.db.database import Base
@@ -24,9 +24,15 @@ class ScanProfile(Base):
     id = Column(Integer, primary_key=True, index=True)
     
     # Profile identification
-    name = Column(String(255), unique=True, nullable=False, index=True)
+    name = Column(String(255), nullable=False, index=True)
     description = Column(Text, nullable=True)
     profile_type = Column(Enum(ProfileType), default=ProfileType.CUSTOM)
+
+    # NULL profiles are platform-provided and immutable. Organization profiles
+    # are tenant-owned and may be managed by that organization's analysts.
+    organization_id = Column(Integer, ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True, index=True)
+    organization = relationship("Organization", backref="scan_profiles")
+    created_by = Column(String(100), nullable=True)
     
     # Nuclei-specific settings
     nuclei_templates = Column(JSON, default=list)  # List of template paths/tags
@@ -166,7 +172,6 @@ DEFAULT_PROFILES = [
         "enable_vulnerability_scan": False,
     },
 ]
-
 
 
 
