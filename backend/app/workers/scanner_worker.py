@@ -2973,12 +2973,25 @@ class ScannerWorker:
             http_probe = toggles.get('http_probe', True)
             resource_enum = toggles.get('resource_enum', True)
             js_analysis = toggles.get('js_analysis', True)
+            js_secret_scan = toggles.get('js_secret_scan', True)
+            js_intruder_planning = toggles.get('js_intruder_planning', True)
             vuln_scan = toggles.get('vuln_scan', True)
         except Exception as e:
             logger.warning(f"Could not load scan_toggles, using defaults: {e}")
-            domain_discovery = port_scan = http_probe = resource_enum = js_analysis = vuln_scan = True
+            domain_discovery = port_scan = http_probe = resource_enum = js_analysis = js_secret_scan = js_intruder_planning = vuln_scan = True
         finally:
             db.close()
+
+        js_coverage = {
+            "status": "skipped",
+            "reason": "js_analysis disabled",
+            "jsluice": "not_run",
+            "static_recon": "not_run",
+            "gitleaks_no_git": "not_run",
+            "structural_secrets": "not_run",
+            "intruder_planning": "available" if js_intruder_planning else "disabled",
+            "intruder_execution": "agent_confirmation_required",
+        }
         
         def _set_pipeline_step(step_name: str):
             d = self.get_db_session()
@@ -3109,6 +3122,122 @@ class ScannerWorker:
                     },
                 })
 
+                jsluice_errors: list[str] = []
+                d = self.get_db_session()
+                try:
+                    if d:
+                        current_scan = d.query(Scan).filter(Scan.id == scan_id).first()
+                        current_results = dict((current_scan.results if current_scan else {}) or {})
+                        jsluice_errors = list(current_results.get("errors") or [])
+                except Exception as e:
+                    jsluice_errors = [f"could not read jsluice coverage: {e}"]
+                finally:
+                    if d:
+                        d.close()
+
+                js_coverage.update({
+                    "status": "running",
+                    "reason": "",
+                    "jsluice": "degraded" if jsluice_errors else "completed",
+                    "jsluice_errors": jsluice_errors[:20],
+                    "js_urls_discovered": len(set(pipeline_js_urls)),
+                })
+
+                if js_secret_scan and bool(config.get('extensive_js_detection', True)):
+                    _set_pipeline_step("JS security (secrets, source maps, DOM sinks)")
+                    d = self.get_db_session()
+                    try:
+                        if not d:
+                            raise RuntimeError("database unavailable for JS security persistence")
+                        from app.services.js_recon_service import run_js_recon, persist_js_findings
+                        from app.services.js_url_secrets_service import (
+                            persist_js_url_secret_findings,
+                            scan_js_urls_for_secrets,
+                        )
+
+                        seed_targets = targets or ([domain] if domain else [])
+                        recon = await run_js_recon(
+                            targets=seed_targets,
+                            js_urls=list(dict.fromkeys(pipeline_js_urls))[:1000],
+                            max_scripts=int(config.get('max_js', config.get('max_scripts', 500))),
+                            timeout=int(config.get('js_timeout', 600)),
+                            include_source_maps=bool(config.get('include_source_maps', True)),
+                            verify_secrets=bool(config.get('verify_secrets', False)),
+                            include_jsluice=False,
+                        )
+                        recon_created = await asyncio.to_thread(
+                            persist_js_findings,
+                            d, organization_id, scan_id, recon.findings,
+                        )
+
+                        scanned_sources = sorted({
+                            f.source_url for f in recon.findings if f.source_url
+                        } | set(pipeline_js_urls))
+                        secret_result = await asyncio.to_thread(
+                            scan_js_urls_for_secrets,
+                            "\n".join(scanned_sources[:100]),
+                            100,
+                        ) if scanned_sources else {
+                            "success": True,
+                            "urls_scanned": 0,
+                            "gitleaks_findings": [],
+                            "regex_hints": [],
+                            "client_signing_findings": [],
+                            "client_signing_summary": {"count": 0},
+                        }
+                        secret_created = await asyncio.to_thread(
+                            persist_js_url_secret_findings,
+                            d, organization_id, scan_id, secret_result,
+                        )
+
+                        js_coverage.update({
+                            "status": (
+                                "completed"
+                                if not recon.errors and not jsluice_errors and not secret_result.get('gitleaks_error')
+                                else "degraded"
+                            ),
+                            "static_recon": "completed",
+                            "gitleaks_no_git": (
+                                "completed" if not secret_result.get('gitleaks_error')
+                                else "degraded"
+                            ),
+                            "structural_secrets": "completed",
+                            "scripts_analyzed": recon.scripts_analyzed,
+                            "secrets_found": (
+                                recon.secrets_found
+                                + len(secret_result.get('gitleaks_findings') or [])
+                                + sum(
+                                    len(values or [])
+                                    for group in (secret_result.get('regex_hints') or [])
+                                    for values in (group.get('hints') or {}).values()
+                                )
+                                + int((secret_result.get('client_signing_summary') or {}).get('count') or 0)
+                            ),
+                            "source_maps_found": recon.source_maps_found,
+                            "dom_sinks_found": recon.dom_sinks,
+                            "endpoints_extracted": recon.endpoints_extracted,
+                            "findings_persisted": recon_created + secret_created,
+                            "errors": (
+                                jsluice_errors
+                                + recon.errors
+                                + ([secret_result.get('gitleaks_error')] if secret_result.get('gitleaks_error') else [])
+                            )[:20],
+                        })
+                    except Exception as e:
+                        logger.warning("Recon pipeline: extensive JS security degraded: %s", e, exc_info=True)
+                        js_coverage.update({
+                            "status": "degraded",
+                            "reason": str(e),
+                        })
+                    finally:
+                        if d:
+                            d.close()
+                else:
+                    js_coverage.update({
+                        "status": "partial",
+                        "reason": "extensive JS secret detection disabled",
+                    })
+
             if vuln_scan:
                 _set_pipeline_step("Vulnerability scan")
                 vuln_targets = []
@@ -3152,10 +3281,19 @@ class ScannerWorker:
             if d:
                 try:
                     scan = d.query(Scan).filter(Scan.id == scan_id).first()
-                    if scan and scan.status != ScanStatus.COMPLETED:
-                        scan.status = ScanStatus.COMPLETED
-                        scan.completed_at = datetime.utcnow()
-                        scan.current_step = "Pipeline completed"
+                    if scan:
+                        existing_results = dict(scan.results or {})
+                        assessment_coverage = dict(existing_results.get("assessment_coverage") or {})
+                        assessment_coverage["javascript_security"] = js_coverage
+                        existing_results["assessment_coverage"] = assessment_coverage
+                        scan.results = existing_results
+                        scan.vulnerabilities_found = d.query(Vulnerability).filter(
+                            Vulnerability.scan_id == scan_id
+                        ).count()
+                        if scan.status != ScanStatus.COMPLETED:
+                            scan.status = ScanStatus.COMPLETED
+                            scan.completed_at = datetime.utcnow()
+                            scan.current_step = "Pipeline completed"
                         d.commit()
                         logger.info(f"Scan {scan_id} marked COMPLETED (recon pipeline)")
                 except Exception as e:
@@ -6643,7 +6781,7 @@ class ScannerWorker:
             max_scripts (int, default 200)
             timeout (seconds, default 300)
             include_source_maps (bool, default True)
-            verify_secrets (bool, default True)
+            verify_secrets (bool, default False; live provider calls require opt-in)
         """
         scan_id = job_data.get('scan_id')
         organization_id = job_data.get('organization_id')
@@ -6688,10 +6826,11 @@ class ScannerWorker:
 
             result = await run_js_recon(
                 targets=urls,
+                js_urls=config.get('js_urls') or [],
                 max_scripts=int(config.get('max_scripts', 200)),
                 timeout=int(config.get('timeout', 300)),
                 include_source_maps=bool(config.get('include_source_maps', True)),
-                verify_secrets=bool(config.get('verify_secrets', True)),
+                verify_secrets=bool(config.get('verify_secrets', False)),
                 progress_callback=progress_cb,
             )
 
@@ -6713,12 +6852,14 @@ class ScannerWorker:
                 _endpoints = sorted({
                     f.match for f in result.findings if f.kind in ("endpoint", "js_path")
                 })
+                from app.services.secret_safety import safe_source_url, secret_descriptor
+
                 _secrets = [
                     {
                         "kind": f.pattern_name,
                         "severity": f.severity,
-                        "match": f.match[:80],   # truncate for safety
-                        "source_url": f.source_url,
+                        **secret_descriptor(f.match),
+                        "source_url": safe_source_url(f.source_url),
                         "verified": f.verified,
                     }
                     for f in result.findings if f.kind == "secret"
@@ -7427,12 +7568,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
-
-
-
-
-
-

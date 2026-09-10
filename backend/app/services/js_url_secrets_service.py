@@ -19,7 +19,9 @@ import os
 import shutil
 import subprocess
 import tempfile
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import httpx
 
@@ -28,6 +30,7 @@ from app.services.js_client_signing_secrets import (
     summarize_client_signing_findings,
 )
 from app.services.katana_service import KatanaService
+from app.services.secret_safety import safe_source_url, secret_descriptor, secret_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +127,7 @@ def _run_gitleaks_no_git(source_dir: str, timeout: int = 180) -> Tuple[List[Dict
     exe = shutil.which("gitleaks")
     if not exe:
         return [], "gitleaks binary not found in PATH"
+    report_path = os.path.join(source_dir, ".gitleaks-report.json")
     cmd = [
         exe,
         "detect",
@@ -132,6 +136,8 @@ def _run_gitleaks_no_git(source_dir: str, timeout: int = 180) -> Tuple[List[Dict
         "--no-git",
         "--report-format",
         "json",
+        "--report-path",
+        report_path,
         "--exit-code",
         "0",
         "--redact",
@@ -145,8 +151,15 @@ def _run_gitleaks_no_git(source_dir: str, timeout: int = 180) -> Tuple[List[Dict
         )
     except subprocess.TimeoutExpired:
         return [], "gitleaks timed out"
-    raw = (proc.stdout or "").strip()
+    raw = ""
+    try:
+        with open(report_path, "r", encoding="utf-8") as report:
+            raw = report.read().strip()
+    except OSError:
+        raw = (proc.stdout or "").strip()
     if not raw:
+        if proc.returncode not in (0, 1):
+            return [], (proc.stderr or "gitleaks failed")[-1000:]
         return [], None
     try:
         data = json.loads(raw)
@@ -171,6 +184,63 @@ def _run_gitleaks_no_git(source_dir: str, timeout: int = 180) -> Tuple[List[Dict
 
 def _non_empty_regex_hits(blob: Dict[str, List[str]]) -> Dict[str, List[str]]:
     return {k: v for k, v in blob.items() if v}
+
+
+def _safe_regex_hints(blob: Dict[str, List[str]]) -> Dict[str, List[Dict[str, Any]]]:
+    """Preserve detector categories without returning discovered credentials."""
+    return {
+        kind: [secret_descriptor(value) for value in values]
+        for kind, values in blob.items()
+        if values
+    }
+
+
+def _safe_client_signing_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove reconstructed values/property fragments from agent-visible output."""
+    raw = finding.get("reconstructed") or ""
+    safe = {
+        key: finding.get(key)
+        for key in (
+            "kind", "role", "severity", "cwe", "source_url", "object_name",
+            "object_ref", "reconstruction", "usage", "offset",
+            "joined_in_bundle", "ics_signals", "note",
+        )
+        if finding.get(key) not in (None, "", [])
+    }
+    safe["source_url"] = safe_source_url(safe.get("source_url"))
+    safe.update(secret_descriptor(raw))
+    return safe
+
+
+def _safe_gitleaks_finding(finding: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize Gitleaks output to a persistence-safe evidence record."""
+    raw = (
+        finding.get("Secret")
+        or finding.get("secret")
+        or finding.get("Match")
+        or finding.get("match")
+        or ""
+    )
+    safe = {
+        key: finding.get(key)
+        for key in (
+            "RuleID", "Description", "StartLine", "EndLine", "File",
+            "SymlinkFile", "Commit", "Author", "Email", "Date", "Message",
+            "Tags", "Fingerprint", "source_url",
+        )
+        if finding.get(key) not in (None, "", [])
+    }
+    if safe.get("File"):
+        safe["File"] = os.path.basename(str(safe["File"]))
+    safe.update(secret_descriptor(raw))
+    safe["source_url"] = safe_source_url(safe.get("source_url"))
+    if finding.get("Fingerprint"):
+        safe["fingerprint"] = finding["Fingerprint"]
+        safe["redacted"] = "[REDACTED by Gitleaks]"
+        safe.pop("length", None)
+    else:
+        safe["fingerprint"] = secret_fingerprint(raw)
+    return safe
 
 
 def scan_js_urls_for_secrets(
@@ -230,7 +300,7 @@ def scan_js_urls_for_secrets(
                 text = body.decode("utf-8", errors="replace")
                 hints = _non_empty_regex_hits(ks.extract_secrets_from_js(text))
                 if hints:
-                    regex_hints.append({"url": url, "hints": hints})
+                    regex_hints.append({"url": url, "hints": _safe_regex_hints(hints)})
                 signing = analyze_js_client_secrets(text, source_url=url)
                 if signing:
                     client_signing.extend(signing)
@@ -264,11 +334,13 @@ def scan_js_urls_for_secrets(
     out: Dict[str, Any] = {
         "success": True,
         "client_signing_summary": signing_summary,
-        "client_signing_findings": client_signing,
+        "client_signing_findings": [
+            _safe_client_signing_finding(f) for f in client_signing
+        ],
         "urls_requested": len(parsed),
         "urls_scanned": sum(1 for d in downloads if d.get("ok")),
         "downloads": downloads,
-        "gitleaks_findings": gl[:40],
+        "gitleaks_findings": [_safe_gitleaks_finding(f) for f in gl[:40]],
         "gitleaks_error": gl_err,
         "regex_hints": regex_hints[:20],
     }
@@ -283,3 +355,135 @@ def scan_js_urls_for_secrets(
     if gl_err and not gl:
         out["note"] = gl_err
     return out
+
+
+def persist_js_url_secret_findings(
+    db,
+    organization_id: int,
+    scan_id: Optional[int],
+    result: Dict[str, Any],
+) -> int:
+    """Persist safe Gitleaks, regex, and structural JS-secret evidence."""
+    from app.models.asset import Asset, AssetType
+    from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus
+
+    now = datetime.utcnow()
+    created = 0
+    records: List[Dict[str, Any]] = []
+
+    for finding in result.get("gitleaks_findings") or []:
+        records.append({
+            "source_url": safe_source_url(finding.get("source_url") or ""),
+            "kind": finding.get("RuleID") or "gitleaks",
+            "severity": "high",
+            "fingerprint": finding.get("fingerprint") or "",
+            "evidence": finding,
+        })
+    for group in result.get("regex_hints") or []:
+        for kind, hints in (group.get("hints") or {}).items():
+            for hint in hints or []:
+                records.append({
+                    "source_url": safe_source_url(group.get("url") or ""),
+                    "kind": f"regex.{kind}",
+                    "severity": "high",
+                    "fingerprint": hint.get("fingerprint") or "",
+                    "evidence": hint,
+                })
+    for finding in result.get("client_signing_findings") or []:
+        records.append({
+            "source_url": safe_source_url(finding.get("source_url") or ""),
+            "kind": finding.get("kind") or "structural_secret",
+            "severity": finding.get("severity") or "critical",
+            "fingerprint": finding.get("fingerprint") or "",
+            "evidence": finding,
+        })
+
+    severity_map = {
+        "critical": Severity.CRITICAL,
+        "high": Severity.HIGH,
+        "medium": Severity.MEDIUM,
+        "low": Severity.LOW,
+        "info": Severity.INFO,
+    }
+    touched_urls: List[str] = []
+    for record in records:
+        source_url = str(record["source_url"] or "")
+        hostname = urlparse(source_url).netloc or source_url or "unknown-js-source"
+        asset = (
+            db.query(Asset)
+            .filter(Asset.organization_id == organization_id, Asset.value == hostname)
+            .first()
+        )
+        if not asset:
+            asset = Asset(
+                organization_id=organization_id,
+                asset_type=AssetType.DOMAIN,
+                name=hostname,
+                value=hostname,
+                discovery_source="js_secret_scan",
+            )
+            db.add(asset)
+            db.flush()
+
+        stable = record["fingerprint"] or secret_descriptor(
+            f"{record['kind']}:{source_url}"
+        )["fingerprint"]
+        stable_material = f"{record['kind']}:{stable}"
+        template_hash = hashlib.sha256(stable_material.encode()).hexdigest()[:16]
+        template_id = f"js-secret-{template_hash}"
+        existing = (
+            db.query(Vulnerability)
+            .filter(
+                Vulnerability.asset_id == asset.id,
+                Vulnerability.template_id == template_id,
+            )
+            .first()
+        )
+        evidence = {
+            "kind": record["kind"],
+            "source_url": source_url,
+            "fingerprint": stable,
+            "scanner_evidence": record["evidence"],
+        }
+        if existing:
+            existing.last_detected = now
+            existing.status = VulnerabilityStatus.OPEN
+            existing.metadata_ = evidence
+            existing.evidence = json.dumps(evidence)[:5000]
+            continue
+
+        db.add(Vulnerability(
+            title=f"JavaScript Secret: {record['kind']}"[:500],
+            description=(
+                f"A secret candidate was detected in the public JavaScript asset "
+                f"`{source_url}`. The credential value is intentionally redacted; "
+                f"use fingerprint `{stable}` for correlation. Treat browser-shipped "
+                f"credentials as exposed and rotate after validation."
+            )[:4000],
+            severity=severity_map.get(str(record["severity"]).lower(), Severity.HIGH),
+            asset_id=asset.id,
+            scan_id=scan_id,
+            detected_by="js_secret_scan",
+            template_id=template_id,
+            status=VulnerabilityStatus.OPEN,
+            evidence=json.dumps(evidence)[:5000],
+            tags=["javascript", "secret", "redacted"],
+            metadata_=evidence,
+            remediation=(
+                "Rotate the credential, remove it from browser-delivered code, and "
+                "move privileged operations behind a server-side service."
+            ),
+            last_detected=now,
+        ))
+        created += 1
+        if source_url:
+            touched_urls.append(source_url)
+
+    if touched_urls:
+        try:
+            from app.services.sitemap_service import mark_secrets_on_urls
+            mark_secrets_on_urls(db, organization_id, touched_urls, source="js_secret_scan")
+        except Exception:
+            pass
+    db.commit()
+    return created

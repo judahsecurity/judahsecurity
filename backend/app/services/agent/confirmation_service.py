@@ -86,6 +86,7 @@ READONLY_TOOLS = {
     "get_coverage",
     "get_engagement_brain",
     "get_methodology_progress",
+    "plan_intruder_mutations",
 }
 
 # Passive / light recon: always auto-allow unless explicitly denied.
@@ -124,6 +125,7 @@ SAFE_RECON_TOOLS = {
     "dnsx_help",
     "mutate_list",
     "list_captured_requests",
+    "plan_intruder_mutations",
     "fetch_lazy_chunks",
     "extract_js_endpoints",
     "scan_js_sinks",
@@ -386,6 +388,7 @@ async def gate(
         decision == "confirm"
         and _autonomous_mode.get()
         and not roe_escalated
+        and tool_name not in {"run_intruder_batch"}
         and policy_cfg.get("agent_autonomous_auto_approve", True)
     ):
         logger.info(

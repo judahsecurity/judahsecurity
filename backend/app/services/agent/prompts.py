@@ -396,6 +396,8 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **mcp_call**: Invoke a tool on an attached MCP server. Args: **server**, **tool**, **arguments** (object).
 - **run_custom_probe** / **run_poc_python**: Sandboxed Python HTTP PoC (json/re/httpx only). In-scope hosts plus Interactsh/OAST. Never metadata/localhost. Args: **source** (Python that prints results), allowed_hosts (optional), timeout_sec (default 20). Not a shell.
 - **list_captured_requests**: Index XHR/API samples from the crawl map. Use before mutate_captured_request.
+- **plan_intruder_mutations**: Build a dry-run, bounded queue of one-field authorization, boundary, injection-canary, and URL-fetch mutations from captured requests. Read-only methods only by default. Review this before active execution.
+- **run_intruder_batch**: Execute up to 12 planned differential mutations at a bounded rate. Always confirmation-gated; state-changing methods remain excluded unless allow_state_change=true is explicitly approved. A difference is a lead, not a confirmed finding.
 - **mutate_captured_request**: Change ONE field on a captured request and send (baseline vs mutant). Args: sample_index, location (query|header|body_json|body_form|path|method), field, value, compare (default true). Plant Interactsh URLs for SSRF — not 169.254.169.254.
 - **mutate_list**: Single-shot list builder (paths, params, xss, passwords, subdomains). Not a ReAct loop. Args: kind, observed (optional), count (default 30).
 - **fetch_lazy_chunks**: Reconstruct webpack/Vite/Next lazy-chunk filenames from a first-party bundle, then download in-scope chunks (404s expected). Dry-run first. Args: bundle_url (optional — defaults to a map js_file), base_url, dry_run (bool). Then extract_js_endpoints.
@@ -744,6 +746,8 @@ TOOL_PHASE_MAP = {
     "run_custom_probe": ["informational", "exploitation", "post_exploitation"],
     "run_poc_python": ["informational", "exploitation", "post_exploitation"],
     "list_captured_requests": ["informational", "exploitation", "post_exploitation"],
+    "plan_intruder_mutations": ["informational", "exploitation", "post_exploitation"],
+    "run_intruder_batch": ["informational", "exploitation", "post_exploitation"],
     "mutate_captured_request": ["informational", "exploitation", "post_exploitation"],
     "mutate_list": ["informational", "exploitation", "post_exploitation"],
     "fetch_lazy_chunks": ["informational", "exploitation", "post_exploitation"],

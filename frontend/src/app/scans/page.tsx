@@ -122,6 +122,8 @@ export default function ScansPage() {
     ports: '',         // Port specification for port scans
     severity: ['critical', 'high'] as string[],  // Default to critical & high for faster scans
     katana_batch_stdin: false,  // One process, all JS URLs for AI/sensitive-data assessment
+    extensive_js_detection: true,
+    verify_secrets: false,
     // Themis (Prowler CSPM) options
     themis_provider: 'aws',
     themis_compliance: '',
@@ -239,6 +241,16 @@ export default function ScansPage() {
       } else if (formData.scan_type === 'katana') {
         config.depth = 5;
         config.batch_stdin = formData.katana_batch_stdin;
+      } else if (formData.scan_type === 'js_recon') {
+        config.max_scripts = 500;
+        config.include_source_maps = true;
+        config.verify_secrets = formData.verify_secrets;
+      } else if (formData.scan_type === 'full') {
+        config.extensive_js_detection = formData.extensive_js_detection;
+        config.verify_secrets = formData.verify_secrets;
+      } else if (formData.scan_type === 'trufflehog_scan') {
+        config.only_verified = true;
+        config.include_unverified = false;
       } else if (formData.scan_type === 'llm_red_team') {
         config.auto_discover = true;
         config.use_llm_grading = true;
@@ -299,6 +311,8 @@ export default function ScansPage() {
         ports: '',
         severity: ['critical', 'high'],
         katana_batch_stdin: false,
+        extensive_js_detection: true,
+        verify_secrets: false,
         themis_provider: 'aws',
         themis_compliance: '',
         themis_aws_profile: '',
@@ -742,6 +756,53 @@ export default function ScansPage() {
                   </div>
                 )}
 
+                {(formData.scan_type === 'full' || formData.scan_type === 'js_recon') && (
+                  <div className="space-y-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
+                    <p className="text-sm font-medium">JavaScript security coverage</p>
+                    {formData.scan_type === 'full' && (
+                      <div className="flex items-center space-x-2">
+                        <Checkbox
+                          id="extensive_js_detection"
+                          checked={formData.extensive_js_detection}
+                          onCheckedChange={(checked) =>
+                            setFormData({ ...formData, extensive_js_detection: !!checked })
+                          }
+                        />
+                        <label htmlFor="extensive_js_detection" className="text-sm cursor-pointer">
+                          Require Gitleaks, regex, structural-secret, source-map, endpoint, and DOM-sink analysis
+                        </label>
+                      </div>
+                    )}
+                    <div className="flex items-center space-x-2">
+                      <Checkbox
+                        id="verify_secrets"
+                        checked={formData.verify_secrets}
+                        onCheckedChange={(checked) =>
+                          setFormData({ ...formData, verify_secrets: !!checked })
+                        }
+                      />
+                      <label htmlFor="verify_secrets" className="text-sm cursor-pointer">
+                        Verify supported credentials with read-only provider calls
+                      </label>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Secret values are fingerprinted and redacted before storage. The agent can build Intruder-style
+                      differential queues from captured APIs; execution remains scope-checked and operator-confirmed.
+                    </p>
+                  </div>
+                )}
+
+                {formData.scan_type === 'trufflehog_scan' && (
+                  <div className="space-y-2 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
+                    <p className="text-sm font-medium">Verified repository secret scanning</p>
+                    <p className="text-xs text-muted-foreground">
+                      Enter authorized Git repository URLs or GitHub owner/repository slugs as targets. TruffleHog
+                      scans history and reports verified credentials with redacted evidence. Cloud/object-store
+                      sources can be supplied through the API when credentials and rules of engagement permit.
+                    </p>
+                  </div>
+                )}
+
                 {/* LLM Red Team Options */}
                 {formData.scan_type === 'llm_red_team' && (
                   <div className="space-y-2 rounded-lg border border-blue-200 bg-blue-50 dark:border-blue-800 dark:bg-blue-950 p-3">
@@ -1023,8 +1084,6 @@ export default function ScansPage() {
     </MainLayout>
   );
 }
-
-
 
 
 

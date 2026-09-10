@@ -291,15 +291,21 @@ def build_results_summary(result: JSluiceResult) -> dict:
         for p in result.paths
     ]
 
-    secrets_list = [
-        {
+    from app.services.secret_safety import (
+        extract_secret_candidate,
+        safe_source_url,
+        secret_descriptor,
+    )
+
+    secrets_list = []
+    for s in result.secrets:
+        descriptor = secret_descriptor(extract_secret_candidate(s.data))
+        secrets_list.append({
             "kind": s.kind,
             "severity": s.severity,
-            "match": (s.data.get("match") or s.data.get("key") or s.data.get("value") or "")[:80],
-            "source_js": s.source_js,
-        }
-        for s in result.secrets
-    ]
+            **descriptor,
+            "source_js": safe_source_url(s.source_js),
+        })
 
     return {
         # Summary counts
@@ -486,14 +492,20 @@ def persist_jsluice_findings(
 
     # ── secrets ───────────────────────────────────────────────────────────
     for s in result.secrets:
+        from app.services.secret_safety import (
+            extract_secret_candidate,
+            safe_source_url,
+            safe_secret_metadata,
+        )
+
         hostname = urlparse(s.source_js).netloc or s.source_js
         asset = _get_or_create_asset(hostname)
 
-        val = (
-            s.data.get("match")
-            or s.data.get("key")
-            or s.data.get("value")
-            or s.source_js
+        val = extract_secret_candidate(s.data) or s.source_js
+        safe_meta = safe_secret_metadata(
+            s.data,
+            source=safe_source_url(s.source_js),
+            kind=s.kind,
         )
         template_id = f"jsluice-secret-{_slug(s.kind)}-{_hash12(val)}"
         existing = (
@@ -523,9 +535,9 @@ def persist_jsluice_findings(
             detected_by="jsluice",
             template_id=template_id,
             status=VulnerabilityStatus.OPEN,
-            evidence=json.dumps(s.data)[:2000],
+            evidence=json.dumps(safe_meta)[:2000],
             tags=["jsluice", "secret", s.kind],
-            metadata_={"kind": s.kind, "data": s.data, "source_js": s.source_js},
+            metadata_=safe_meta,
             remediation=(
                 "Rotate the leaked credential immediately. Remove it from the "
                 "browser bundle and move secrets to a server-side proxy so the "
