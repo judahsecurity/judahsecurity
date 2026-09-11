@@ -174,11 +174,65 @@ interface ExposureStats {
   exposure_trend: 'increasing' | 'decreasing' | 'stable';
 }
 
+interface PostureDriver {
+  finding_id: number;
+  title: string;
+  severity: string;
+  status: string;
+  asset_name: string;
+  age_days: number;
+  overdue: boolean;
+  deduction: number;
+}
+
+interface PostureGrade {
+  enabled: boolean;
+  rating_status: 'rated' | 'pending' | 'unrated' | 'disabled';
+  score: number | null;
+  grade: 'A' | 'B' | 'C' | 'D' | 'F' | null;
+  confidence: 'high' | 'medium' | 'low' | null;
+  reason_code?: string | null;
+  cap_reason?: string | null;
+  eligible_finding_count: number;
+  active_external_asset_count: number;
+  coverage_percentage: number;
+  top_drivers: PostureDriver[];
+  calculated_at: string;
+}
+
+const GRADE_STYLES: Record<string, { text: string; border: string; background: string }> = {
+  A: { text: 'text-green-400', border: 'border-green-500/40', background: 'bg-green-500/10' },
+  B: { text: 'text-lime-400', border: 'border-lime-500/40', background: 'bg-lime-500/10' },
+  C: { text: 'text-yellow-400', border: 'border-yellow-500/40', background: 'bg-yellow-500/10' },
+  D: { text: 'text-orange-400', border: 'border-orange-500/40', background: 'bg-orange-500/10' },
+  F: { text: 'text-red-400', border: 'border-red-500/40', background: 'bg-red-500/10' },
+};
+
+function postureEmptyMessage(reason?: string | null): string {
+  if (reason === 'NO_ACTIVE_ASSETS') return 'No active internet-facing assets are available to assess.';
+  if (reason === 'NO_COMPLETED_SCAN') return 'Complete an external scan to establish a grade.';
+  if (reason === 'STALE_SCAN') return 'The latest completed scan is more than 30 days old.';
+  if (reason === 'SCAN_IN_PROGRESS') return 'An external scan is in progress. Your first grade will appear when it completes.';
+  return 'There is not enough current evidence to calculate a grade.';
+}
+
+function capMessage(reason?: string | null): string | null {
+  if (reason === 'CRITICAL_CAP') return 'Grade capped at B because a demonstrated Critical is open.';
+  if (reason === 'HIGH_COUNT_CAP') return 'Grade capped at B because three or more demonstrated Highs are open.';
+  if (reason === 'MULTIPLE_CRITICAL_CAP') return 'Grade capped at C because multiple demonstrated Criticals are open.';
+  if (reason === 'CRITICAL_HIGH_CAP') return 'Grade capped at C because Critical and High findings remain open.';
+  if (reason === 'SEVERE_CRITICAL_CAP' || reason === 'SEVERE_MIXED_CAP') {
+    return 'Grade capped at D because severe demonstrated exposure remains open.';
+  }
+  return null;
+}
+
 export default function DashboardPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [netblockStats, setNetblockStats] = useState<NetblockStats | null>(null);
   const [remediationStats, setRemediationStats] = useState<RemediationStats | null>(null);
   const [exposureStats, setExposureStats] = useState<ExposureStats | null>(null);
+  const [postureGrade, setPostureGrade] = useState<PostureGrade | null>(null);
   const [loading, setLoading] = useState(true);
   const [mapLoading, setMapLoading] = useState(true);
   const [recentVulns, setRecentVulns] = useState<any[]>([]);
@@ -237,7 +291,7 @@ export default function DashboardPage() {
     setMapLoading(true);
     try {
       // Fast path: aggregates first so cards paint without waiting on the map payload
-      const [vulnSummary, assetSummary, orgs, vulns, nbSummary, remediationData, exposureData, delphiPrios, delphiStat] =
+      const [vulnSummary, assetSummary, orgs, vulns, nbSummary, remediationData, exposureData, delphiPrios, delphiStat, postureData] =
         await Promise.all([
           api.getVulnerabilitiesSummary(undefined, findingsGroupBy),
           api.getAssetsSummary(),
@@ -248,6 +302,7 @@ export default function DashboardPage() {
           api.getVulnerabilityExposure().catch(() => null),
           api.getDelphiPriorities(10, false).catch(() => []),
           api.getDelphiStatus().catch(() => null),
+          api.getPostureGrade().catch(() => null),
         ]);
 
       setStats({
@@ -267,6 +322,7 @@ export default function DashboardPage() {
       if (nbSummary) setNetblockStats(nbSummary);
       if (remediationData) setRemediationStats(remediationData);
       if (exposureData) setExposureStats(exposureData);
+      setPostureGrade(postureData?.enabled ? postureData : null);
       setRecentVulns(vulns.items || vulns || []);
       setDelphiPriorities(Array.isArray(delphiPrios) ? delphiPrios : []);
       setDelphiStatus(delphiStat);
@@ -422,6 +478,115 @@ export default function DashboardPage() {
             </Link>
           ))}
         </div>
+
+        {/* External Security Posture Grade */}
+        {postureGrade && (
+          <Card className={postureGrade.grade ? GRADE_STYLES[postureGrade.grade].border : 'border-blue-500/30'}>
+            <CardHeader className="pb-3">
+              <div className="flex items-start justify-between gap-4 flex-wrap">
+                <div>
+                  <CardTitle className="text-lg flex items-center gap-2">
+                    <Shield className="h-5 w-5 text-primary" />
+                    External Security Posture
+                  </CardTitle>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    Validated risk on active, internet-facing assets
+                  </p>
+                </div>
+                {postureGrade.confidence && (
+                  <Badge variant="outline" className="capitalize">
+                    {postureGrade.confidence} confidence · {postureGrade.coverage_percentage}% coverage
+                  </Badge>
+                )}
+              </div>
+            </CardHeader>
+            <CardContent>
+              {postureGrade.rating_status === 'rated' && postureGrade.grade && postureGrade.score != null ? (
+                <div className="grid gap-6 lg:grid-cols-[220px_1fr]">
+                  <div className={`rounded-xl border p-5 ${GRADE_STYLES[postureGrade.grade].border} ${GRADE_STYLES[postureGrade.grade].background}`}>
+                    <div className="flex items-end gap-4">
+                      <span className={`text-7xl leading-none font-black ${GRADE_STYLES[postureGrade.grade].text}`}>
+                        {postureGrade.grade}
+                      </span>
+                      <div className="pb-1">
+                        <p className="text-2xl font-bold tabular-nums">{postureGrade.score}</p>
+                        <p className="text-xs text-muted-foreground">out of 100</p>
+                      </div>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-4">
+                      {postureGrade.eligible_finding_count} demonstrated finding{postureGrade.eligible_finding_count === 1 ? '' : 's'} across {postureGrade.active_external_asset_count} active external asset{postureGrade.active_external_asset_count === 1 ? '' : 's'}
+                    </p>
+                  </div>
+
+                  <div className="space-y-3">
+                    {capMessage(postureGrade.cap_reason) && (
+                      <div className="flex items-start gap-2 rounded-lg border border-orange-500/30 bg-orange-500/10 p-3 text-sm text-orange-200">
+                        <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" />
+                        <span>{capMessage(postureGrade.cap_reason)}</span>
+                      </div>
+                    )}
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-sm font-medium">Largest score drivers</p>
+                      <Link href="/findings" className="text-xs text-primary hover:underline">
+                        View findings
+                      </Link>
+                    </div>
+                    {postureGrade.top_drivers.length > 0 ? (
+                      <div className="space-y-2">
+                        {postureGrade.top_drivers.map((driver) => (
+                          <Link
+                            key={driver.finding_id}
+                            href="/findings"
+                            className="flex items-center justify-between gap-3 rounded-lg bg-muted/50 p-3 hover:bg-muted transition-colors"
+                          >
+                            <div className="min-w-0">
+                              <p className="text-sm font-medium truncate">{driver.title}</p>
+                              <p className="text-xs text-muted-foreground truncate">
+                                {driver.asset_name} · open {Math.floor(driver.age_days)} days
+                                {driver.status === 'accepted' ? ' · risk accepted' : ''}
+                                {driver.overdue ? ' · overdue' : ''}
+                              </p>
+                            </div>
+                            <Badge
+                              variant={
+                                driver.severity === 'critical' ? 'critical' :
+                                driver.severity === 'high' ? 'high' :
+                                driver.severity === 'medium' ? 'medium' : 'low'
+                              }
+                              className="capitalize shrink-0"
+                            >
+                              {driver.severity}
+                            </Badge>
+                          </Link>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-2 rounded-lg bg-green-500/10 p-4 text-sm text-green-300">
+                        <CheckCircle className="h-4 w-4" />
+                        No open demonstrated findings are reducing this score.
+                      </div>
+                    )}
+                    <p className="text-[11px] text-muted-foreground">
+                      Accepted risk remains in the technical score. This grade summarizes validated external exposure; it is not a guarantee of security or a prediction of breach likelihood.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex items-center gap-4 rounded-lg bg-muted/40 p-5">
+                  {postureGrade.rating_status === 'pending' ? (
+                    <RefreshCw className="h-8 w-8 text-blue-400 animate-spin" />
+                  ) : (
+                    <AlertCircle className="h-8 w-8 text-muted-foreground" />
+                  )}
+                  <div>
+                    <p className="font-semibold capitalize">{postureGrade.rating_status}</p>
+                    <p className="text-sm text-muted-foreground">{postureEmptyMessage(postureGrade.reason_code)}</p>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
 
         {/* World Map */}
         <Card>
@@ -1004,7 +1169,6 @@ export default function DashboardPage() {
     </MainLayout>
   );
 }
-
 
 
 

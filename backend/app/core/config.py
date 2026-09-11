@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     # POST /users/. Flip to True only for deployments that intentionally allow it.
     ALLOW_PUBLIC_REGISTRATION: bool = False
 
+    # Customer-facing external posture grade. This is an operational kill switch;
+    # keep the default on for new deployments and set false to hide it instantly.
+    POSTURE_GRADE_ENABLED: bool = True
+
     # CAPTCHA (bot / brute-force protection on auth endpoints)
     # Disabled by default: with no secret key configured, verification is skipped
     # so local/dev logins keep working. Set CAPTCHA_ENABLED=true + the keys in prod.
@@ -304,7 +308,6 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
-
 
 
 
