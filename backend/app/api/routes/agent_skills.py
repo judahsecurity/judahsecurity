@@ -6,11 +6,11 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from app.api.deps import require_analyst
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.services.agent import skills_service
 
 router = APIRouter(prefix="/agent/skills", tags=["agent-skills"])
@@ -24,6 +24,40 @@ class ResolvePayload(BaseModel):
 @router.get("")
 def list_skills(current_user: User = Depends(require_analyst)):
     return skills_service.list_skills()
+
+
+@router.post("/sync")
+def sync_skills(
+    enable: bool = False,
+    current_user: User = Depends(require_analyst),
+):
+    """Snapshot built-in manifests for review or explicitly enable them for an org."""
+    from app.db.database import SessionLocal
+    from app.services.agent.skill_registry import sync_builtin_skills
+
+    org_id = getattr(current_user, "organization_id", None)
+    if enable and not (
+        getattr(current_user, "is_superuser", False)
+        or getattr(current_user, "role", None) == UserRole.ADMIN
+    ):
+        raise HTTPException(status_code=403, detail="admin approval required to enable skills")
+    if not org_id:
+        return {"synced": 0, "enabled": False, "reason": "organization_required"}
+    db = SessionLocal()
+    try:
+        rows = sync_builtin_skills(
+            db,
+            organization_id=int(org_id),
+            approved_by=str(current_user.id),
+            enable=bool(enable),
+        )
+        db.commit()
+        return {"synced": len(rows), "enabled": bool(enable)}
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 @router.post("/resolve")

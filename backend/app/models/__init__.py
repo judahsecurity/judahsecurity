@@ -31,6 +31,15 @@ from app.models.agent_note import AgentNote
 from app.models.agent_knowledge import AgentKnowledge
 from app.models.agent_palace import AgentPalaceDrawer
 from app.models.agent_conversation import AgentConversation
+from app.models.agent_runtime import (
+    AgentRun,
+    AgentEventRecord,
+    AgentCommand,
+    AgentCheckpoint,
+    AgentSkillVersion,
+    AgentNotificationEndpoint,
+    AgentNotificationDelivery,
+)
 from app.models.recon_job import ReconJob, ReconWorkerHeartbeat
 from app.models.project_settings import (
     ProjectSettings,
@@ -116,6 +125,13 @@ __all__ = [
     "AgentKnowledge",
     "AgentPalaceDrawer",
     "AgentConversation",
+    "AgentRun",
+    "AgentEventRecord",
+    "AgentCommand",
+    "AgentCheckpoint",
+    "AgentSkillVersion",
+    "AgentNotificationEndpoint",
+    "AgentNotificationDelivery",
     "ReconJob",
     "ReconWorkerHeartbeat",
     "ProjectSettings",
