@@ -2,8 +2,14 @@ from unittest.mock import patch
 
 import pytest
 
-from app.services.geolocation_service import GeoLocationService, GeoProvider
-from app.api.routes.assets import _apply_ip_enrichment
+from fastapi import HTTPException
+
+from app.services.geolocation_service import (
+    GeoLocationService,
+    GeoProvider,
+    get_geolocation_service_for_org,
+)
+from app.api.routes.assets import _apply_ip_enrichment, _org_geo_service
 from app.models.asset import Asset, AssetType
 
 
@@ -39,6 +45,7 @@ def _reset_client(monkeypatch):
     _Client.responses = []
     _Client.requests = []
     monkeypatch.delenv("GEOLOCATION_PROVIDER", raising=False)
+    monkeypatch.delenv("IPINFO_TOKEN", raising=False)
 
 
 @pytest.mark.asyncio
@@ -231,3 +238,28 @@ def test_asset_persistence_keeps_rich_intelligence_and_attribution_warning():
     assert intel["hosted_domains"] == ["example.com"]
     assert intel["hosted_domains_attribution"] == "co-hosted_only"
     assert intel["fetched_at"].endswith("Z")
+
+
+def test_org_services_use_isolated_encrypted_ipinfo_keys():
+    def resolve_key(_db, service, organization_id):
+        if service == "ipinfo":
+            return f"org-{organization_id}-token"
+        return None
+
+    with patch("app.models.api_config.resolve_api_key", side_effect=resolve_key):
+        first = get_geolocation_service_for_org(object(), 11)
+        second = get_geolocation_service_for_org(object(), 22)
+
+    assert first.ipinfo_token == "org-11-token"
+    assert second.ipinfo_token == "org-22-token"
+    assert first is not second
+    assert first.preferred_provider == GeoProvider.IPINFO
+
+
+def test_explicit_ipinfo_enrichment_requires_an_org_key():
+    with patch("app.models.api_config.resolve_api_key", return_value=None):
+        with pytest.raises(HTTPException) as exc:
+            _org_geo_service(object(), 11, GeoProvider.IPINFO)
+
+    assert exc.value.status_code == 400
+    assert "Settings" in exc.value.detail

@@ -1547,6 +1547,13 @@ class ApiClient {
     return response.data;
   }
 
+  async testApiConfig(organizationId: number, serviceName: string) {
+    const response = await this.client.post(`/external-discovery/test/${serviceName}`, null, {
+      params: { organization_id: organizationId },
+    });
+    return response.data;
+  }
+
   async enrichDomainsDns(options?: {
     organizationId?: number;
     domainIds?: number[];

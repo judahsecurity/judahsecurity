@@ -331,6 +331,14 @@ class AvailableServicesResponse(BaseModel):
 # Service information
 PAID_SERVICES_INFO = [
     {
+        "name": "ipinfo",
+        "display_name": "IPinfo Core",
+        "description": "IP geolocation, ASN, network classification, and optional hosted-domain intelligence",
+        "requires_key": True,
+        "rate_limit": "Varies by plan",
+        "website": "https://ipinfo.io/dashboard/tokens",
+    },
+    {
         "name": "virustotal",
         "display_name": "VirusTotal",
         "description": "Subdomain enumeration from VT database",
@@ -467,7 +475,6 @@ FREE_SERVICES_INFO = [
         "notes": "Scans cloud provider IP ranges for SSL certificates, revealing domains/subdomains hosted on cloud infrastructure",
     },
 ]
-
 
 
 

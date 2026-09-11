@@ -44,7 +44,7 @@ from app.services.port_scanner_service import PortScannerService, ScannerType
 from app.services.port_findings_service import PortFindingsService
 from app.services.discovery_service import DiscoveryService
 from app.services.dns_resolution_service import DNSResolutionService
-from app.services.geolocation_service import get_geolocation_service
+from app.services.geolocation_service import get_geolocation_service_for_org
 from app.services.scan_registry import job_type_for_scan_type
 from app.services.scan_runtime import (
     discard_scan_processes,
@@ -3682,7 +3682,7 @@ class ScannerWorker:
                         
                         # Geo-enrich if enabled
                         if include_geo and dns_result.ip_addresses:
-                            geo_service = get_geolocation_service()
+                            geo_service = get_geolocation_service_for_org(db, organization_id)
                             geo_data = await geo_service.lookup_ip(dns_result.ip_addresses[0])
                             if geo_data:
                                 asset.latitude = geo_data.get('latitude')

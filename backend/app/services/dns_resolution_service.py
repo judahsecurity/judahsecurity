@@ -21,7 +21,11 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from app.models.asset import Asset, AssetType
-from app.services.geolocation_service import get_geolocation_service, GeoProvider
+from app.services.geolocation_service import (
+    GeoLocationService,
+    GeoProvider,
+    get_geolocation_service_for_org,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +79,6 @@ class DNSResolutionService:
     
     def __init__(self, db: Optional[Session] = None):
         self.db = db
-        self.geo_service = get_geolocation_service()
     
     def _check_dnsx_installed(self) -> bool:
         """Check if dnsx is available."""
@@ -410,9 +413,15 @@ class DNSResolutionService:
         
         # Geo-enrich IPs
         if include_geo and ips_to_geo:
+            geo_service = get_geolocation_service_for_org(
+                self.db,
+                organization_id,
+                preferred_provider=geo_provider,
+            )
             geo_results = await self._geo_enrich_ips(
                 list(ips_to_geo),
-                geo_provider
+                geo_service,
+                geo_provider,
             )
             
             # Update assets with geo data
@@ -436,6 +445,7 @@ class DNSResolutionService:
     async def _geo_enrich_ips(
         self,
         ips: List[str],
+        geo_service: GeoLocationService,
         provider: Optional[GeoProvider] = None,
         rate_limit_delay: float = 0.5
     ) -> Dict[str, Dict[str, Any]]:
@@ -454,7 +464,7 @@ class DNSResolutionService:
         
         for ip in ips:
             try:
-                geo = await self.geo_service.lookup_ip(ip, provider)
+                geo = await geo_service.lookup_ip(ip, provider)
                 if geo:
                     results[ip] = geo
                 await asyncio.sleep(rate_limit_delay)
@@ -541,4 +551,3 @@ def get_dns_resolution_service(db: Optional[Session] = None) -> DNSResolutionSer
     if _dns_service is None or db is not None:
         _dns_service = DNSResolutionService(db)
     return _dns_service
-

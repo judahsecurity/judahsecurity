@@ -462,6 +462,31 @@ def get_geolocation_service() -> GeoLocationService:
     return _geo_service
 
 
+def get_geolocation_service_for_org(
+    db,
+    organization_id: int,
+    *,
+    preferred_provider: Optional[GeoProvider] = None,
+    whoisxml_api_key: Optional[str] = None,
+) -> GeoLocationService:
+    """Build an isolated service using encrypted credentials for one org.
+
+    A fresh instance keeps API tokens and cached lookup results tenant-scoped.
+    Environment credentials remain a deployment-level fallback through
+    ``resolve_api_key``.
+    """
+    from app.models.api_config import ExternalService, resolve_api_key
+
+    return GeoLocationService(
+        ipinfo_token=resolve_api_key(db, ExternalService.IPINFO, organization_id),
+        whoisxml_api_key=(
+            whoisxml_api_key
+            or resolve_api_key(db, ExternalService.WHOISXML, organization_id)
+        ),
+        preferred_provider=preferred_provider,
+    )
+
+
 def configure_geolocation_service(
     ipinfo_token: Optional[str] = None,
     whoisxml_api_key: Optional[str] = None,

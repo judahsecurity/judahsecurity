@@ -93,9 +93,9 @@ SQS_QUEUE_URL=
 # Get API key at: https://cloud.projectdiscovery.io
 PDCP_API_KEY=
 
-# IPinfo network intelligence (optional)
-# When configured, IPinfo becomes the preferred IP geolocation/ASN source.
-# Keep this token server-side; never expose it through NEXT_PUBLIC_* variables.
+# IPinfo network intelligence (optional deployment-wide fallback)
+# Prefer adding a per-organization key in Settings -> API Keys -> IPinfo Core.
+# Keep either form server-side; never expose it through NEXT_PUBLIC_* variables.
 IPINFO_TOKEN=
 # Optional override: ipinfo, ip-api, or whoisxml
 # GEOLOCATION_PROVIDER=ipinfo

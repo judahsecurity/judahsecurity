@@ -145,6 +145,7 @@ class ExternalService:
     SECURITYTRAILS = "securitytrails"
     BINARYEDGE = "binaryedge"
     PASSIVETOTAL = "passivetotal"
+    IPINFO = "ipinfo"
 
     # Vulnerability intelligence / exploit signals
     VULNCHECK = "vulncheck"        # VulnCheck KEV + exploit intelligence
@@ -191,6 +192,7 @@ DEFAULT_RATE_LIMITS = {
     ExternalService.VULNCHECK: {"per_second": 10, "per_day": None},
     ExternalService.PDCP: {"per_second": 10, "per_day": None},
     ExternalService.NVD: {"per_second": 5, "per_day": None},
+    ExternalService.IPINFO: {"per_second": 10, "per_day": None},
 }
 
 
@@ -205,6 +207,7 @@ SERVICE_ENV_FALLBACK: dict[str, str] = {
     ExternalService.VIRUSTOTAL: "SUBCAT_VIRUSTOTAL_KEY",
     ExternalService.SECURITYTRAILS: "SUBCAT_SECURITYTRAILS_KEY",
     ExternalService.BINARYEDGE: "SUBCAT_BINARYEDGE_KEY",
+    ExternalService.IPINFO:     "IPINFO_TOKEN",
     # LLM providers
     ExternalService.ANTHROPIC:  "ANTHROPIC_API_KEY",
     ExternalService.OPENAI:     "OPENAI_API_KEY",
@@ -282,7 +285,6 @@ def resolve_api_key(db, service: str, organization_id: int | None = None) -> str
     if env_var:
         return os.environ.get(env_var) or None
     return None
-
 
 
 

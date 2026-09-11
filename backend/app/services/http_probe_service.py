@@ -26,7 +26,11 @@ from sqlalchemy.orm import Session
 
 from app.db.database import SessionLocal
 from app.models.asset import Asset, AssetType, AssetStatus
-from app.services.geolocation_service import get_geolocation_service, get_region_from_country
+from app.services.geolocation_service import (
+    GeoLocationService,
+    get_geolocation_service_for_org,
+    get_region_from_country,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -428,7 +432,10 @@ def run_dns_resolution_for_hosts(
 # Geolocation Enrichment
 # =============================================================================
 
-async def _enrich_geo_single(ip_address: str) -> dict:
+async def _enrich_geo_single(
+    ip_address: str,
+    geo_service: GeoLocationService,
+) -> dict:
     """
     Look up geolocation for a single IP address.
     
@@ -438,7 +445,6 @@ async def _enrich_geo_single(ip_address: str) -> dict:
         return {}
     
     try:
-        geo_service = get_geolocation_service()
         result = await geo_service.lookup_ip(ip_address)
         return result or {}
     except Exception as e:
@@ -446,9 +452,12 @@ async def _enrich_geo_single(ip_address: str) -> dict:
         return {}
 
 
-async def _enrich_geo_batch(ip_addresses: List[str]) -> List[dict]:
+async def _enrich_geo_batch(
+    ip_addresses: List[str],
+    geo_service: GeoLocationService,
+) -> List[dict]:
     """Enrich geolocation for a batch of IPs concurrently."""
-    tasks = [_enrich_geo_single(ip) for ip in ip_addresses]
+    tasks = [_enrich_geo_single(ip, geo_service) for ip in ip_addresses]
     return await asyncio.gather(*tasks, return_exceptions=True)
 
 
@@ -492,6 +501,7 @@ async def _enrich_geo_async(
         return {"total_assets": 0, "enriched": 0, "message": "No assets need geo enrichment"}
     
     logger.info(f"Starting geo enrichment for {total_assets} assets (organization_id={organization_id})")
+    geo_service = get_geolocation_service_for_org(db, organization_id)
     
     # Get unique IPs to look up
     ip_to_assets: dict[str, list[Asset]] = {}
@@ -516,7 +526,7 @@ async def _enrich_geo_async(
         
         logger.info(f"Geo lookup batch {batch_num}/{total_batches} ({len(batch)} IPs)")
         
-        results = await _enrich_geo_batch(batch)
+        results = await _enrich_geo_batch(batch, geo_service)
         
         for j, result in enumerate(results):
             if isinstance(result, Exception):
@@ -647,6 +657,7 @@ async def _enrich_ip_assets_geo_async(
         return {"total_assets": 0, "enriched": 0}
     
     logger.info(f"Starting IP asset geo enrichment for {total_assets} IPs")
+    geo_service = get_geolocation_service_for_org(db, organization_id)
     
     # Get IPs to look up
     ip_list = [asset.value for asset in assets]
@@ -666,7 +677,7 @@ async def _enrich_ip_assets_geo_async(
         
         logger.info(f"IP geo lookup batch {batch_num}/{total_batches} ({len(batch)} IPs)")
         
-        results = await _enrich_geo_batch(batch)
+        results = await _enrich_geo_batch(batch, geo_service)
         
         for j, result in enumerate(results):
             if isinstance(result, Exception):
@@ -914,8 +925,6 @@ async def run_full_geo_enrichment(
     Returns:
         Comprehensive summary dict
     """
-    from app.services.geolocation_service import get_geolocation_service, get_region_from_country
-    
     summary = {
         "total_assets": 0,
         "from_netblocks": 0,
@@ -970,7 +979,7 @@ async def run_full_geo_enrichment(
         progress_callback(30, f"Looking up {len(assets_to_lookup)} assets via IP geolocation API...")
     
     # Step 3: IP geo-lookup for remaining assets
-    geo_service = get_geolocation_service()
+    geo_service = get_geolocation_service_for_org(db, organization_id)
     
     batch_size = 20
     processed = 0

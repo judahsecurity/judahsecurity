@@ -21,6 +21,10 @@ from app.schemas.asset import (
 )
 from app.api.deps import get_current_active_user, require_analyst
 from app.api.routes.scans import send_scan_to_sqs
+from app.services.geolocation_service import (
+    GeoProvider,
+    get_geolocation_service_for_org,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +37,38 @@ ASSET_SUMMARY_GROUP_BY = {
     "organization",
     "root_domain",
 }
+
+
+def _parse_geo_provider(provider: Optional[str]) -> Optional[GeoProvider]:
+    if not provider:
+        return None
+    try:
+        return GeoProvider(provider.lower())
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unsupported geo provider. Choose ip-api, ipinfo, or whoisxml.",
+        ) from exc
+
+
+def _org_geo_service(
+    db: Session,
+    organization_id: int,
+    provider: Optional[GeoProvider],
+    whoisxml_api_key: Optional[str] = None,
+):
+    service = get_geolocation_service_for_org(
+        db,
+        organization_id,
+        preferred_provider=provider,
+        whoisxml_api_key=whoisxml_api_key,
+    )
+    if provider == GeoProvider.IPINFO and not service.ipinfo_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="IPinfo API key required. Add it under Settings → API Keys → IPinfo Core.",
+        )
+    return service
 
 
 def check_org_access(user: User, org_id: int) -> bool:
@@ -1356,31 +1392,13 @@ async def enrich_assets_geolocation(
     - ipinfo: Free tier 50k/month, optional token for higher limits
     - whoisxml: Requires API key (https://ip-geolocation.whoisxmlapi.com)
     
-    Configure IPINFO_TOKEN on the backend; credentials are never accepted from
-    browser query parameters.
+    Configure IPinfo in Settings. The encrypted, organization-scoped key is
+    loaded server-side and is never returned to the browser.
 
     Example with WhoisXML:
     POST /api/assets/enrich-geolocation?whoisxml_api_key=at_xxx&provider=whoisxml
     """
-    from app.services.geolocation_service import get_geolocation_service, GeoProvider
-    
-    geo_service = get_geolocation_service()
-    
-    # Configure API keys if provided
-    if whoisxml_api_key:
-        geo_service.set_api_keys(
-            whoisxml_api_key=whoisxml_api_key
-        )
-    
-    # Parse provider
-    geo_provider = None
-    if provider:
-        provider_map = {
-            "ip-api": GeoProvider.IP_API,
-            "ipinfo": GeoProvider.IPINFO,
-            "whoisxml": GeoProvider.WHOISXML,
-        }
-        geo_provider = provider_map.get(provider.lower())
+    geo_provider = _parse_geo_provider(provider)
     
     query = db.query(Asset)
     
@@ -1409,12 +1427,18 @@ async def enrich_assets_geolocation(
     
     if not assets:
         return {"enriched": 0, "total": 0, "message": "No assets to enrich"}
+
+    geo_services = {
+        org_id: _org_geo_service(db, org_id, geo_provider, whoisxml_api_key)
+        for org_id in {asset.organization_id for asset in assets}
+    }
     
     enriched_count = 0
     countries_found = {}
     
     for asset in assets:
         try:
+            geo_service = geo_services[asset.organization_id]
             # For IP addresses, look up directly; for hostnames, resolve first
             if asset.asset_type == AssetType.IP_ADDRESS:
                 geo_data = await geo_service.lookup_ip(
@@ -1438,9 +1462,11 @@ async def enrich_assets_geolocation(
                 country = geo_data.get("country") or geo_data.get("country_code")
                 if country:
                     countries_found[country] = countries_found.get(country, 0) + 1
+        except HTTPException:
+            raise
         except Exception as e:
             # Log but continue with other assets
-            pass
+            logger.debug("Geo enrichment failed for asset %s: %s", asset.id, e)
     
     db.commit()
     
@@ -1448,7 +1474,7 @@ async def enrich_assets_geolocation(
         "enriched": enriched_count,
         "total": len(assets),
         "countries": countries_found,
-        "provider_used": provider or "ip-api",
+        "provider_used": provider or ("ipinfo" if any(s.ipinfo_token for s in geo_services.values()) else "ip-api"),
         "message": f"Successfully enriched {enriched_count} of {len(assets)} assets with geo-location data"
     }
 
@@ -1665,8 +1691,6 @@ async def enrich_single_asset_geolocation(
     current_user: User = Depends(require_analyst)
 ):
     """Enrich a single asset with geo-location data."""
-    from app.services.geolocation_service import get_geolocation_service, GeoProvider
-    
     asset = db.query(Asset).filter(Asset.id == asset_id).first()
     
     if not asset:
@@ -1681,23 +1705,13 @@ async def enrich_single_asset_geolocation(
             detail="Access denied"
         )
     
-    geo_service = get_geolocation_service()
-    
-    # Configure API keys if provided
-    if whoisxml_api_key:
-        geo_service.set_api_keys(
-            whoisxml_api_key=whoisxml_api_key
-        )
-    
-    # Parse provider
-    geo_provider = None
-    if provider:
-        provider_map = {
-            "ip-api": GeoProvider.IP_API,
-            "ipinfo": GeoProvider.IPINFO,
-            "whoisxml": GeoProvider.WHOISXML,
-        }
-        geo_provider = provider_map.get(provider.lower())
+    geo_provider = _parse_geo_provider(provider)
+    geo_service = _org_geo_service(
+        db,
+        asset.organization_id,
+        geo_provider,
+        whoisxml_api_key,
+    )
     
     # For IP addresses, look up directly; for hostnames, resolve first
     if asset.asset_type == AssetType.IP_ADDRESS:

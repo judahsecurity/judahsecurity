@@ -1280,6 +1280,33 @@ async def test_api_config(
     
     if not config:
         raise HTTPException(status_code=404, detail="API config not found")
+
+    if service_name == ExternalService.IPINFO:
+        from app.services.geolocation_service import GeoLocationService, GeoProvider
+
+        try:
+            key = config.get_api_key()
+            result = await GeoLocationService(ipinfo_token=key).lookup_ip(
+                "8.8.8.8",
+                GeoProvider.IPINFO,
+            )
+            success = bool(result)
+            error = None if success else "IPinfo rejected the key or returned no data"
+        except Exception:
+            success = False
+            error = "IPinfo key validation failed"
+
+        config.is_valid = success
+        config.last_error = error
+        config.last_used = datetime.utcnow()
+        config.usage_count = (config.usage_count or 0) + 1
+        db.commit()
+        return {
+            "service": service_name,
+            "success": success,
+            "error": error,
+            "message": "IPinfo API key is valid" if success else error,
+        }
     
     service = ExternalDiscoveryService(db, organization_id)
     
@@ -1845,7 +1872,6 @@ async def get_asset_whois(
         "whois": metadata.get("whois", {}),
         "whois_fetched_at": metadata.get("whois_fetched_at"),
     }
-
 
 
 

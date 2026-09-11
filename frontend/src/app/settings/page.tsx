@@ -133,6 +133,15 @@ const API_SERVICES = [
     link: 'https://nvd.nist.gov/developers/request-an-api-key',
     group: 'Vulnerability Intelligence',
   },
+  {
+    name: 'ipinfo',
+    label: 'IPinfo Core',
+    description: 'Enrich IPs and resolved domains with location, ASN, network flags, and optional co-hosted domain candidates.',
+    free: false,
+    hasUser: false,
+    link: 'https://ipinfo.io/dashboard/tokens',
+    group: 'Asset Discovery',
+  },
   { 
     name: 'virustotal', 
     label: 'VirusTotal', 
@@ -188,6 +197,7 @@ export default function SettingsPage() {
   const [apiConfigs, setApiConfigs] = useState<ApiConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<string | null>(null);
+  const [testing, setTesting] = useState<string | null>(null);
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const [apiUsers, setApiUsers] = useState<Record<string, string>>({});
   // Delphi enrichment status
@@ -412,6 +422,28 @@ export default function SettingsPage() {
       });
     } finally {
       setSaving(null);
+    }
+  };
+
+  const handleTestApiKey = async (serviceName: string) => {
+    if (!selectedOrg) return;
+    setTesting(serviceName);
+    try {
+      const result = await api.testApiConfig(parseInt(selectedOrg), serviceName);
+      toast({
+        title: result.success ? 'Connection successful' : 'Connection failed',
+        description: result.message,
+        variant: result.success ? 'default' : 'destructive',
+      });
+      fetchApiConfigs(parseInt(selectedOrg));
+    } catch (error: any) {
+      toast({
+        title: 'Connection failed',
+        description: error?.response?.data?.detail || 'Could not validate the API key',
+        variant: 'destructive',
+      });
+    } finally {
+      setTesting(null);
     }
   };
 
@@ -705,6 +737,19 @@ export default function SettingsPage() {
                           'Save'
                         )}
                       </Button>
+                      {service.name === 'ipinfo' && config && (
+                        <Button
+                          variant="outline"
+                          onClick={() => handleTestApiKey(service.name)}
+                          disabled={testing === service.name}
+                        >
+                          {testing === service.name ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : (
+                            'Test'
+                          )}
+                        </Button>
+                      )}
                     </div>
                     
                     {service.hasUser && (
