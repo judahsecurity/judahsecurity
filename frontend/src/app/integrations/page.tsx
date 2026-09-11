@@ -59,6 +59,7 @@ import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 import { JiraProjectPicker } from '@/components/integrations/JiraProjectPicker';
 import { ServiceNowSection } from '@/components/integrations/ServiceNowSection';
+import { WizSection } from '@/components/integrations/WizSection';
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'] as const;
 
@@ -3206,6 +3207,9 @@ export default function IntegrationsPage() {
 
         {/* Censys ASM Integration Card */}
         <CensysSection />
+
+        {/* Wiz cloud exposure integration */}
+        <WizSection />
 
         {/* HackerOne Bug Bounty Integration Card */}
         <HackerOneSection />

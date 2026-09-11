@@ -394,6 +394,41 @@ export interface CensysSyncResult {
   risks_seen: number;
 }
 
+export interface WizIntegration {
+  id: number;
+  organization_id: number;
+  connection_name: string;
+  api_endpoint: string;
+  auth_url: string;
+  audience: string;
+  import_assets: boolean;
+  import_vulnerabilities: boolean;
+  internet_exposed_only: boolean;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WizSyncResult {
+  ok: boolean;
+  message: string;
+  assets_created: number;
+  assets_updated: number;
+  vulns_created: number;
+  vulns_updated: number;
+  findings_seen: number;
+  findings_filtered: number;
+}
+
 // ── HackerOne shared types ─────────────────────────────────────────────────
 
 export interface HackerOneIntegration {
@@ -2950,6 +2985,62 @@ class ApiClient {
 
   async syncCensysIntegration(id: number): Promise<CensysSyncResult> {
     const response = await this.client.post(`/integrations/censys/${id}/sync`);
+    return response.data;
+  }
+
+  // ── Wiz Integration ────────────────────────────────────────────────────────
+
+  async getWizIntegrations(): Promise<WizIntegration[]> {
+    const response = await this.client.get('/integrations/wiz');
+    return response.data;
+  }
+
+  async createWizIntegration(payload: {
+    connection_name: string;
+    api_endpoint: string;
+    auth_url?: string;
+    audience?: string;
+    client_id: string;
+    client_secret: string;
+    import_assets: boolean;
+    import_vulnerabilities: boolean;
+    internet_exposed_only: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<WizIntegration> {
+    const response = await this.client.post('/integrations/wiz', payload);
+    return response.data;
+  }
+
+  async updateWizIntegration(id: number, payload: Partial<{
+    connection_name: string;
+    api_endpoint: string;
+    auth_url: string;
+    audience: string;
+    client_id: string;
+    client_secret: string;
+    import_assets: boolean;
+    import_vulnerabilities: boolean;
+    internet_exposed_only: boolean;
+    is_active: boolean;
+    continuous_sync_enabled: boolean;
+    sync_interval_minutes: number;
+  }>): Promise<WizIntegration> {
+    const response = await this.client.put(`/integrations/wiz/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteWizIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/wiz/${id}`);
+  }
+
+  async testWizConnection(id: number): Promise<{ ok: boolean; message: string; findings_accessible: boolean }> {
+    const response = await this.client.post(`/integrations/wiz/${id}/test`);
+    return response.data;
+  }
+
+  async syncWizIntegration(id: number): Promise<WizSyncResult> {
+    const response = await this.client.post(`/integrations/wiz/${id}/sync`);
     return response.data;
   }
 

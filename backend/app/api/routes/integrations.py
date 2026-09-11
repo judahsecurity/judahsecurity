@@ -1,4 +1,4 @@
-"""Integrations router — Jira, ServiceNow, Censys, HackerOne, Akamai, Panorama, F5, Cloudflare."""
+"""Integrations router — ticketing, exposure, vulnerability, and network providers."""
 
 import logging
 from datetime import datetime
@@ -17,6 +17,7 @@ from app.db.database import get_db
 from app.models.jira_integration import JiraIntegration, JiraTicket
 from app.models.servicenow_integration import ServiceNowDelivery, ServiceNowIntegration
 from app.models.censys_integration import CensysAsmIntegration
+from app.models.wiz_integration import WizIntegration
 from app.models.hackerone_integration import HackerOneIntegration, HackerOneReportLink
 from app.models.akamai_integration import AkamaiWafIntegration
 from app.models.panorama_integration import (
@@ -59,6 +60,13 @@ from app.schemas.censys_schemas import (
     CensysSyncResult,
     CensysTestConnectionResponse,
 )
+from app.schemas.wiz_schemas import (
+    WizIntegrationCreate,
+    WizIntegrationResponse,
+    WizIntegrationUpdate,
+    WizSyncResult,
+    WizTestConnectionResponse,
+)
 from app.schemas.hackerone_schemas import (
     AssociateHackerOneReportRequest,
     HackerOneIntegrationCreate,
@@ -100,6 +108,7 @@ from app.schemas.cloudflare_schemas import (
 from app.services import (
     jira_service,
     censys_asm_service,
+    wiz_service,
     hackerone_service,
     akamai_waf_service,
     panorama_service,
@@ -733,6 +742,171 @@ async def sync_censys_integration(
 
     result = await censys_asm_service.sync_integration(db, integration)
     return CensysSyncResult(**result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Wiz — read-only import of internet-exposed VMs and vulnerability findings
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_wiz_integration(db: Session, org_id: int, integration_id: int) -> WizIntegration:
+    integration = (
+        db.query(WizIntegration)
+        .filter(
+            WizIntegration.id == integration_id,
+            WizIntegration.organization_id == org_id,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="Wiz connection not found.")
+    return integration
+
+
+@router.get("/wiz", response_model=List[WizIntegrationResponse])
+def list_wiz_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    return (
+        db.query(WizIntegration)
+        .filter(WizIntegration.organization_id == org_id)
+        .order_by(WizIntegration.created_at.desc())
+        .all()
+    )
+
+
+@router.post("/wiz", response_model=WizIntegrationResponse, status_code=status.HTTP_201_CREATED)
+async def create_wiz_integration(
+    payload: WizIntegrationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    existing = db.query(WizIntegration).filter(
+        WizIntegration.organization_id == org_id,
+        WizIntegration.connection_name == payload.connection_name,
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A Wiz connection named '{payload.connection_name}' already exists.",
+        )
+
+    result = await wiz_service.test_connection(
+        payload.api_endpoint,
+        payload.client_id,
+        payload.client_secret,
+        auth_url=payload.auth_url,
+        audience=payload.audience,
+    )
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+
+    integration = WizIntegration(
+        organization_id=org_id,
+        connection_name=payload.connection_name,
+        api_endpoint=payload.api_endpoint,
+        auth_url=payload.auth_url,
+        audience=payload.audience,
+        import_assets=payload.import_assets,
+        import_vulnerabilities=payload.import_vulnerabilities,
+        internet_exposed_only=payload.internet_exposed_only,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+        last_tested_at=datetime.utcnow(),
+        last_test_ok=True,
+    )
+    integration.set_client_id(payload.client_id)
+    integration.set_client_secret(payload.client_secret)
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.put("/wiz/{integration_id}", response_model=WizIntegrationResponse)
+async def update_wiz_integration(
+    integration_id: int,
+    payload: WizIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_wiz_integration(db, org_id, integration_id)
+    data = payload.model_dump(exclude_unset=True)
+    client_id = data.pop("client_id", None)
+    client_secret = data.pop("client_secret", None)
+    for field, value in data.items():
+        setattr(integration, field, value)
+    if client_id:
+        integration.set_client_id(client_id)
+    if client_secret:
+        integration.set_client_secret(client_secret)
+
+    result = await wiz_service.test_connection(
+        integration.api_endpoint,
+        integration.get_client_id(),
+        integration.get_client_secret(),
+        auth_url=integration.auth_url,
+        audience=integration.audience,
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    if not result["ok"]:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=result["message"])
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/wiz/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_wiz_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_wiz_integration(db, org_id, integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post("/wiz/{integration_id}/test", response_model=WizTestConnectionResponse)
+async def test_wiz_connection(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_wiz_integration(db, org_id, integration_id)
+    result = await wiz_service.test_connection(
+        integration.api_endpoint,
+        integration.get_client_id(),
+        integration.get_client_secret(),
+        auth_url=integration.auth_url,
+        audience=integration.audience,
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    db.commit()
+    return WizTestConnectionResponse(**result)
+
+
+@router.post("/wiz/{integration_id}/sync", response_model=WizSyncResult)
+async def sync_wiz_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_wiz_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This Wiz connection is disabled.")
+    return WizSyncResult(**(await wiz_service.sync_integration(db, integration)))
 
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -60,6 +60,7 @@ from app.models.workflow import (
     WorkflowNodeRunStatus,
     ScriptLanguage,
 )
+from app.models.wiz_integration import WizIntegration
 
 __all__ = [
     "User",
@@ -139,5 +140,6 @@ __all__ = [
     "WorkflowKind",
     "WorkflowRunStatus",
     "WorkflowNodeRunStatus",
+    "WizIntegration",
     "ScriptLanguage",
 ]
