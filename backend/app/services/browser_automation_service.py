@@ -498,7 +498,13 @@ def _format_session_output(session: BrowserSessionResult) -> str:
         lines.append(f"--- Action {i}: {r.get('action', '?')} [{status}] ---")
         if r.get("data"):
             for k, v in r["data"].items():
-                val_str = str(v)
+                selector = str((r.get("data") or {}).get("selector") or "")
+                sensitive = k == "value" and re.search(
+                    r"password|passwd|secret|token|otp|totp|one-time|verification|code",
+                    selector,
+                    re.IGNORECASE,
+                )
+                val_str = "[redacted]" if sensitive else str(v)
                 if len(val_str) > 500:
                     val_str = val_str[:500] + "..."
                 lines.append(f"  {k}: {val_str}")
@@ -519,7 +525,7 @@ def _format_session_output(session: BrowserSessionResult) -> str:
     if session.final_cookies:
         lines.append(f"Session Cookies: {len(session.final_cookies)}")
         for c in session.final_cookies[:10]:
-            lines.append(f"  {c['name']}={c['value'][:60]}{'...' if len(c['value']) > 60 else ''} (domain={c['domain']})")
+            lines.append(f"  {c['name']}=[redacted] (domain={c['domain']})")
 
     outgoing = [r for r in session.network_requests if not r["url"].startswith("data:")]
     if outgoing:

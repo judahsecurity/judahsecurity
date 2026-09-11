@@ -983,6 +983,26 @@ _SUBMIT_SELECTORS = [
     'button[class*="login" i]',
     'button',
 ]
+_TOTP_SELECTORS = [
+    'input[autocomplete="one-time-code"]',
+    'input[name*="totp" i]',
+    'input[name*="otp" i]',
+    'input[name*="verification" i]',
+    'input[name="code"]',
+    'input[id*="totp" i]',
+    'input[id*="otp" i]',
+    'input[id*="verification" i]',
+    'input[placeholder*="authenticator" i]',
+    'input[placeholder*="verification code" i]',
+]
+_TOTP_SUBMIT_SELECTORS = [
+    'button[type="submit"]',
+    'input[type="submit"]',
+    'button:has-text("Verify")',
+    'button:has-text("Continue")',
+    'button:has-text("Confirm")',
+    'button:has-text("Authenticate")',
+]
 
 
 async def _first_visible(page, selectors: List[str]):
@@ -1018,8 +1038,14 @@ async def _perform_login(page, login: Dict[str, Any], timeout_ms: int, result: "
     # references so they never have to sit inline in the agent's tool trace.
     raw_user = f"env:{login['username_env']}" if login.get("username_env") else login.get("username")
     raw_pass = f"env:{login['password_env']}" if login.get("password_env") else login.get("password")
+    raw_totp = (
+        f"env:{login['totp_secret_env']}"
+        if login.get("totp_secret_env")
+        else login.get("totp_secret")
+    )
     username = _resolve_secret(raw_user)
     password = _resolve_secret(raw_pass)
+    totp_secret = _resolve_secret(raw_totp) if raw_totp else None
 
     if not login_url:
         result.errors.append("login requires a url")
@@ -1103,6 +1129,59 @@ async def _perform_login(page, login: Dict[str, Any], timeout_ms: int, result: "
     except Exception:
         await asyncio.sleep(SETTLE_MS / 1000)
 
+    # Complete an RFC 6238 authenticator challenge when the application asks
+    # for one. Generate the code only after the challenge renders so it has as
+    # much of its 30-second validity window remaining as possible.
+    totp_handle = None
+    totp_sel = login.get("totp_selector")
+    totp_candidates = [totp_sel] if totp_sel else _TOTP_SELECTORS
+    attempts = 12 if totp_secret else 1
+    for _ in range(attempts):
+        totp_handle = await _first_visible(page, totp_candidates)
+        if totp_handle:
+            break
+        if totp_secret:
+            await asyncio.sleep(0.25)
+
+    if totp_handle:
+        if not totp_secret:
+            result.errors.append(
+                "login reached an MFA challenge but no TOTP secret was configured"
+            )
+            return False
+        try:
+            from app.services.totp_service import generate_totp
+
+            code = generate_totp(
+                str(totp_secret),
+                digits=int(login.get("totp_digits") or 6),
+                period=int(login.get("totp_period") or 30),
+            )
+            await totp_handle.fill(code)
+        except Exception as e:
+            result.errors.append(f"login TOTP: {str(e)[:120]}")
+            return False
+
+        otp_submit_sel = login.get("totp_submit_selector")
+        otp_submit = (
+            await _first_visible(page, [otp_submit_sel])
+            if otp_submit_sel
+            else await _first_visible(page, _TOTP_SUBMIT_SELECTORS)
+        )
+        try:
+            if otp_submit:
+                await otp_submit.click(timeout=5000)
+            else:
+                await totp_handle.press("Enter")
+        except Exception as e:
+            result.errors.append(f"login TOTP submit: {str(e)[:120]}")
+            return False
+
+        try:
+            await page.wait_for_load_state("networkidle", timeout=timeout_ms)
+        except Exception:
+            await asyncio.sleep(SETTLE_MS / 1000)
+
     # Verify.
     success_url = str(login.get("success_url") or "").strip()
     success_selector = str(login.get("success_selector") or "").strip()
@@ -1113,15 +1192,16 @@ async def _perform_login(page, login: Dict[str, Any], timeout_ms: int, result: "
         ok = success_url in (page.url or "")
     else:
         remaining_pw = await page.query_selector('input[type="password"]')
+        remaining_totp = await _first_visible(page, totp_candidates)
         try:
-            ok = not (remaining_pw and await remaining_pw.is_visible())
+            ok = not (remaining_pw and await remaining_pw.is_visible()) and not remaining_totp
         except Exception:
-            ok = True
+            ok = not remaining_totp
 
     if not ok:
         result.errors.append(
-            "login may have failed (still shows a password field / not at success_url) — "
-            "check credentials or pass explicit username_selector/password_selector/submit_selector"
+            "login may have failed (credential or MFA field remains / not at success_url) — "
+            "check credentials or pass explicit login field and success selectors"
         )
     return ok
 
