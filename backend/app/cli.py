@@ -202,6 +202,80 @@ async def _status(args: argparse.Namespace) -> int:
     return 0 if available else 3
 
 
+async def _runs(args: argparse.Namespace) -> int:
+    from app.services.agent.runtime_store import list_runs
+
+    rows = list_runs(args.org, user_id=args.user, limit=args.limit)
+    if args.json:
+        print(json.dumps(rows, indent=2, default=str), flush=True)
+        return 0
+    if not rows:
+        print("No durable agent runs found.", flush=True)
+        return 0
+    for row in rows:
+        objective = (row.get("objective") or "").replace("\n", " ")[:70]
+        print(
+            f"{row['session_id']:<24} {row['status']:<12} "
+            f"{str(row.get('current_phase') or '-'):<18} {objective}",
+            flush=True,
+        )
+    return 0
+
+
+async def _run_status(args: argparse.Namespace) -> int:
+    from app.services.agent.runtime_store import get_run
+
+    row = get_run(args.session, args.org)
+    if row is None:
+        print(f"Run not found: {args.session}", file=sys.stderr, flush=True)
+        return 1
+    if args.json:
+        print(json.dumps(row, indent=2, default=str), flush=True)
+    else:
+        for key, value in row.items():
+            print(f"{key}: {value}", flush=True)
+    return 0
+
+
+async def _events(args: argparse.Namespace) -> int:
+    from app.services.agent.runtime_store import get_run, list_events
+
+    if get_run(args.session, args.org) is None:
+        print(f"Run not found: {args.session}", file=sys.stderr, flush=True)
+        return 1
+    rows = list_events(args.session, args.org, after_id=args.after_id, limit=args.limit)
+    if args.json:
+        print(json.dumps(rows, indent=2, default=str), flush=True)
+        return 0
+    for row in rows:
+        payload = json.dumps(row.get("payload") or {}, separators=(",", ":"), default=str)
+        print(
+            f"{row['id']:>7} {row.get('created_at') or '-'} "
+            f"{row['event_type']:<24} {payload[:160]}",
+            flush=True,
+        )
+    return 0
+
+
+async def _stop(args: argparse.Namespace) -> int:
+    from app.services.agent.runtime_store import get_run, queue_command
+
+    row = get_run(args.session, args.org)
+    if row is None:
+        print(f"Run not found: {args.session}", file=sys.stderr, flush=True)
+        return 1
+    command_id = queue_command(args.session, "stop", {}, issued_by=args.issued_by)
+    if not command_id:
+        print("Unable to queue stop command.", file=sys.stderr, flush=True)
+        return 2
+    result = {"session_id": args.session, "command_id": command_id, "status": "queued"}
+    if args.json:
+        print(json.dumps(result, indent=2), flush=True)
+    else:
+        print(f"Stop queued for {args.session} (command {command_id}).", flush=True)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="aegis-agent",
@@ -244,6 +318,34 @@ def build_parser() -> argparse.ArgumentParser:
     st = sub.add_parser("status", help="Check whether an LLM runtime is configured.")
     st.add_argument("--json", action="store_true", help="Emit as JSON.")
     st.set_defaults(func=_status)
+
+    runs = sub.add_parser("runs", help="List durable agent runs.")
+    runs.add_argument("--org", type=int, default=1, help="Organization id (default 1).")
+    runs.add_argument("--user", type=int, help="Optionally filter by user id.")
+    runs.add_argument("--limit", type=int, default=50, help="Maximum rows (1-200).")
+    runs.add_argument("--json", action="store_true", help="Emit as JSON.")
+    runs.set_defaults(func=_runs)
+
+    run_status = sub.add_parser("run-status", help="Inspect one durable agent run.")
+    run_status.add_argument("--session", required=True, help="Session id.")
+    run_status.add_argument("--org", type=int, default=1, help="Organization id (default 1).")
+    run_status.add_argument("--json", action="store_true", help="Emit as JSON.")
+    run_status.set_defaults(func=_run_status)
+
+    events = sub.add_parser("events", help="Read the durable event stream for a run.")
+    events.add_argument("--session", required=True, help="Session id.")
+    events.add_argument("--org", type=int, default=1, help="Organization id (default 1).")
+    events.add_argument("--after-id", type=int, default=0, help="Only return events after this row id.")
+    events.add_argument("--limit", type=int, default=200, help="Maximum rows (1-1000).")
+    events.add_argument("--json", action="store_true", help="Emit as JSON.")
+    events.set_defaults(func=_events)
+
+    stop = sub.add_parser("stop", help="Queue a durable stop command for a run.")
+    stop.add_argument("--session", required=True, help="Session id.")
+    stop.add_argument("--org", type=int, default=1, help="Organization id (default 1).")
+    stop.add_argument("--issued-by", default="cli", help="Operator identifier for the audit trail.")
+    stop.add_argument("--json", action="store_true", help="Emit as JSON.")
+    stop.set_defaults(func=_stop)
 
     return parser
 

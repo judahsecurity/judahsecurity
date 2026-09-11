@@ -1,5 +1,7 @@
 # Documentation
 
+- [Durable agent runtime](AGENT_RUNTIME.md) — lifecycle events, checkpoints, governed skills, notifications, eval gates, and sandboxing
+
 Technical docs for the Judah Security ASM platform, AI agent, and Aegis tooling.
 
 ## Start here

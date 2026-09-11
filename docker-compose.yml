@@ -167,9 +167,13 @@ services:
       retries: 3
     networks:
       - asm_network
-    cap_add:
-      - NET_RAW
-      - NET_ADMIN
+    # The API/orchestrator does not need raw-socket privileges. Active network
+    # scanners run in the dedicated scanner worker below.
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
 
   # Next.js Frontend
   frontend:
@@ -299,13 +303,18 @@ services:
       - nuclei_templates:/home/appuser/.config/nuclei
       - scan_outputs:/app/outputs
       - screenshots_data:/app/data/screenshots
-      # Host Docker daemon — required for AEGIS_VALIDATOR_MODE=docker
-      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+      # Docker validation is intentionally absent from the default deployment.
+      # Use docker-compose.validator.yml only on a dedicated, trusted worker.
     networks:
       - asm_network
+    cap_drop:
+      - ALL
     cap_add:
       - NET_RAW
       - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 1024
     # Run scanner as root for masscan raw socket access
     user: "0:0"
 

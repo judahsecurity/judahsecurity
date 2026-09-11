@@ -704,9 +704,53 @@ def list_skills() -> list[dict]:
             "scan_type": s.scan_type,
             "playbook_id": s.playbook_id,
             "required_inputs": s.required_inputs,
+            "manifest": manifest_for_skill(s),
         }
         for s in SKILLS
     ]
+
+
+def manifest_for_skill(skill: Skill) -> dict:
+    """Return the versioned governance envelope for a legacy registry skill.
+
+    Tool allowlists are introduced incrementally. Until a skill declares one,
+    Praetorium remains the enforcing tool policy and the manifest is audit-only.
+    """
+    from aegis_runtime import RiskClass, SkillManifest
+
+    passive = {
+        "threat-model",
+        "surface-ranking",
+        "evidence-hygiene",
+        "finding-validation",
+        "chain-detection",
+    }
+    high_impact = {"credential-spray"}
+    risk = (
+        RiskClass.HIGH_IMPACT
+        if skill.id in high_impact
+        else RiskClass.PASSIVE
+        if skill.id in passive
+        else RiskClass.ACTIVE
+    )
+    manifest = SkillManifest(
+        id=skill.id,
+        version="1.0.0",
+        description=skill.description,
+        risk=risk,
+        required_inputs=tuple(skill.required_inputs or []),
+        max_cost_usd=5.0,
+        max_runtime_minutes=30,
+        evaluation_suite=skill.id,
+        requires_approval=skill.id in high_impact,
+        metadata={
+            "governance_mode": "audit_only",
+            "policy_enforcer": "aegis_praetorium",
+            "scan_type": skill.scan_type,
+            "playbook_id": skill.playbook_id,
+        },
+    )
+    return manifest.to_dict()
 
 
 def get_skill(name: str) -> Optional[Skill]:

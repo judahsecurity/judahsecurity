@@ -37,6 +37,7 @@ from app.api.routes import github_secrets as github_secrets_router
 from app.api.routes import agent_knowledge as agent_knowledge_router
 from app.api.routes import agent_confirmations as agent_confirmations_router
 from app.api.routes import agent_skills as agent_skills_router
+from app.api.routes import agent_notifications as agent_notifications_router
 from app.api.routes import roe as roe_router
 from app.api.routes import delphi as delphi_router
 from app.api.routes import ingestion as ingestion_router
@@ -53,6 +54,15 @@ from app.api.routes import recon as recon_router
 from app.api.routes import workflows as workflows_router
 from app.api.routes import attacks as attacks_router
 from app.models.agent_palace import AgentPalaceDrawer  # noqa: F401 — palace memory table
+from app.models.agent_runtime import (  # noqa: F401 — durable agent control plane
+    AgentRun,
+    AgentEventRecord,
+    AgentCommand,
+    AgentCheckpoint,
+    AgentSkillVersion,
+    AgentNotificationEndpoint,
+    AgentNotificationDelivery,
+)
 from app.models.recon_job import ReconJob, ReconWorkerHeartbeat  # noqa: F401 — interceptor workers
 from app.models.sitemap_entry import SitemapEntry  # noqa: F401 — Praetorian-style app sitemap
 from app.models.workflow import (  # noqa: F401 — ensure workflow tables are created
@@ -183,6 +193,7 @@ app.include_router(github_secrets_router.router, prefix=settings.API_PREFIX)
 app.include_router(agent_knowledge_router.router, prefix=settings.API_PREFIX)
 app.include_router(agent_confirmations_router.router, prefix=settings.API_PREFIX)
 app.include_router(agent_skills_router.router, prefix=settings.API_PREFIX)
+app.include_router(agent_notifications_router.router, prefix=settings.API_PREFIX)
 app.include_router(roe_router.router, prefix=settings.API_PREFIX)
 app.include_router(delphi_router.router, prefix=settings.API_PREFIX)
 app.include_router(ingestion_router.router, prefix=settings.API_PREFIX)

@@ -31,6 +31,30 @@ def _tool_output_max_chars() -> int:
 logger = logging.getLogger(__name__)
 
 
+def _emit_finding_event(event_type: str, payload: Dict[str, Any]) -> None:
+    """Emit a redacted finding lifecycle event without coupling tools to storage."""
+    user_id, organization_id = get_tenant_context()
+    session_id = current_session_id.get()
+    if not organization_id or not session_id:
+        return
+    try:
+        from aegis_runtime import AgentEvent
+        from app.services.agent.runtime_events import emit
+
+        emit(
+            AgentEvent(
+                run_id=session_id,
+                organization_id=int(organization_id),
+                user_id=str(user_id) if user_id is not None else None,
+                event_type=event_type,
+                severity=str(payload.get("severity") or "info").lower(),
+                payload=payload,
+            )
+        )
+    except Exception:
+        logger.debug("finding lifecycle event emission skipped", exc_info=True)
+
+
 def _emit_finding_to_sink(
     *,
     title: str,
@@ -2451,6 +2475,17 @@ class ASMToolsManager(AssessmentCapabilities):
                 self._engagement_brain = brain.to_dict()
             except Exception:
                 logger.debug("create_finding coverage update failed", exc_info=True)
+            _emit_finding_event(
+                "finding.published",
+                {
+                    "finding_id": vuln.id,
+                    "title": vuln.title,
+                    "target": target or target_clean,
+                    "severity": vuln.severity.value,
+                    "asset_id": asset.id,
+                    "verified": str(gate_msg or "").startswith("verify_ok"),
+                },
+            )
             return msg
         except Exception as e:
             db.rollback()
@@ -6852,6 +6887,16 @@ class ASMToolsManager(AssessmentCapabilities):
             specialist=specialist or "",
         )
         self._engagement_brain = brain.to_dict()
+        _emit_finding_event(
+            "finding.proposed",
+            {
+                "candidate_id": cand.id,
+                "title": cand.title,
+                "target": cand.target,
+                "severity": cand.severity,
+                "specialist": cand.specialist,
+            },
+        )
         return json.dumps(
             {
                 "candidate": cand.to_dict(),
@@ -6897,6 +6942,17 @@ class ASMToolsManager(AssessmentCapabilities):
                     "candidate_id": candidate_id,
                 },
                 indent=2,
+            )
+        if str(getattr(cand, "status", verdict) or "").lower() == "confirmed":
+            _emit_finding_event(
+                "finding.verified",
+                {
+                    "candidate_id": cand.id,
+                    "title": cand.title,
+                    "target": cand.target,
+                    "severity": cand.severity,
+                    "verdict": "confirmed",
+                },
             )
         return json.dumps(
             {

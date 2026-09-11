@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 import re
+from datetime import datetime
 from typing import Any, Optional
 
 from sqlalchemy import or_
@@ -254,6 +255,10 @@ def store_drawer(
     tool_name: Optional[str] = None,
     session_id: Optional[str] = None,
     target: Optional[str] = None,
+    trust_level: Optional[str] = None,
+    retention_class: Optional[str] = None,
+    provenance: Optional[dict] = None,
+    expires_at: Optional[datetime] = None,
 ) -> list[int]:
     """Persist one or more verbatim drawers. Dedupes by content hash. Returns ids."""
     text = redact_for_palace((content or "").strip())
@@ -263,6 +268,12 @@ def store_drawer(
     wing = wing or wing_for_org(organization_id)
     title = (title or text[:80].split("\n", 1)[0])[:512]
     target = (target or "")[:512] or None
+    trust_level = trust_level or (
+        "curated" if source in ("manual", "knowledge") else "observed"
+    )
+    retention_class = retention_class or (
+        "durable" if source in ("manual", "knowledge") else "engagement"
+    )
     chunks = chunk_text(text, max_chars=DRAWER_MAX_CHARS, overlap=120)
     if source == "tool":
         chunks = chunks[:TOOL_MAX_CHUNKS]
@@ -300,6 +311,15 @@ def store_drawer(
                 tool_name=tool_name,
                 session_id=session_id,
                 target=target,
+                trust_level=trust_level[:32],
+                retention_class=retention_class[:32],
+                provenance=dict(provenance or {
+                    "source": source,
+                    "source_id": source_id,
+                    "session_id": session_id,
+                    "tool_name": tool_name,
+                }),
+                expires_at=expires_at,
                 embedding=vec or None,
                 embedding_model=model,
             )
@@ -307,6 +327,18 @@ def store_drawer(
             db.flush()
             ids.append(drawer.id)
         db.commit()
+        _emit_memory_event(
+            "memory.written",
+            organization_id,
+            session_id,
+            {
+                "drawer_ids": ids,
+                "room": room,
+                "source": source,
+                "trust_level": trust_level,
+                "retention_class": retention_class,
+            },
+        )
         return ids
     except Exception:
         db.rollback()
@@ -341,7 +373,14 @@ def search_memory(
             AgentPalaceDrawer.organization_id == organization_id,
             AgentPalaceDrawer.organization_id.is_(None),
         )
-        q = db.query(AgentPalaceDrawer).filter(tenant)
+        q = db.query(AgentPalaceDrawer).filter(
+            tenant,
+            AgentPalaceDrawer.quarantined.is_(False),
+            or_(
+                AgentPalaceDrawer.expires_at.is_(None),
+                AgentPalaceDrawer.expires_at > datetime.utcnow(),
+            ),
+        )
         if wing:
             q = q.filter(AgentPalaceDrawer.wing == wing)
         if room:
@@ -391,6 +430,7 @@ def search_memory(
         ranked.sort(key=lambda x: x[0], reverse=True)
         out: list[dict] = []
         total = 0
+        accessed_at = datetime.utcnow()
         for score, drawer in ranked[:limit]:
             snippet = (drawer.content or "")[:900]
             if len(drawer.content or "") > 900:
@@ -404,14 +444,26 @@ def search_memory(
                 "snippet": snippet,
                 "score": round(float(score), 4),
                 "source": drawer.source,
+                "trust_level": drawer.trust_level,
+                "retention_class": drawer.retention_class,
+                "provenance": drawer.provenance or {},
                 "tool_name": drawer.tool_name,
                 "target": drawer.target,
                 "created_at": drawer.created_at.isoformat() if drawer.created_at else "",
             }
             out.append(row)
+            drawer.last_accessed_at = accessed_at
             total += len(snippet) + len(drawer.title)
             if total >= max_chars:
                 break
+        db.commit()
+        _org_id, session_id = _current_tenant()
+        _emit_memory_event(
+            "memory.read",
+            organization_id,
+            session_id,
+            {"query": str(query)[:200], "room": room, "result_ids": [row["id"] for row in out]},
+        )
         return out
     except Exception:
         logger.exception("search_memory failed")
@@ -455,7 +507,14 @@ def wake_up(
             AgentPalaceDrawer.organization_id == organization_id,
             AgentPalaceDrawer.organization_id.is_(None),
         )
-        q = db.query(AgentPalaceDrawer).filter(tenant)
+        q = db.query(AgentPalaceDrawer).filter(
+            tenant,
+            AgentPalaceDrawer.quarantined.is_(False),
+            or_(
+                AgentPalaceDrawer.expires_at.is_(None),
+                AgentPalaceDrawer.expires_at > datetime.utcnow(),
+            ),
+        )
         if specialist:
             q = q.filter(
                 or_(
@@ -491,10 +550,13 @@ def wake_up(
             if used + len(line) > max_chars:
                 break
             facts.append(line)
+            drawer.last_accessed_at = datetime.utcnow()
             rooms_seen.add(drawer.room)
             used += len(line)
             if len(facts) >= 8:
                 break
+
+        db.commit()
 
         count = (
             db.query(AgentPalaceDrawer)
@@ -672,6 +734,30 @@ def _current_tenant() -> tuple[Optional[int], Optional[str]]:
         return org_id, current_session_id.get()
     except Exception:
         return None, None
+
+
+def _emit_memory_event(
+    event_type: str,
+    organization_id: Optional[int],
+    session_id: Optional[str],
+    payload: dict,
+) -> None:
+    if not organization_id or not session_id:
+        return
+    try:
+        from aegis_runtime import AgentEvent
+        from app.services.agent.runtime_events import emit
+
+        emit(
+            AgentEvent(
+                run_id=session_id,
+                organization_id=int(organization_id),
+                event_type=event_type,
+                payload=payload,
+            )
+        )
+    except Exception:
+        logger.debug("palace memory event emission skipped", exc_info=True)
 
 
 def remember_tool_result(
