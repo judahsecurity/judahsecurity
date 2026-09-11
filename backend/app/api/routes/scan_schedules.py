@@ -37,6 +37,7 @@ IPV4_ONLY_SCAN_TYPES = [
     # ICS/OT scan types
     "ics_ot_ports", "ics_plc_scan", "ics_scada_scan", 
     "ics_building_automation", "ics_full_discovery",
+    "logix_runtime_status", "logix_program_inventory",
 ]
 
 

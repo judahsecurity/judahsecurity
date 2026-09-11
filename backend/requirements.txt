@@ -30,6 +30,9 @@ aiohttp==3.13.5
 # DNS and network discovery
 dnspython==2.4.2
 
+# Read-only Allen-Bradley Logix runtime identity and optional schema inventory
+pycomm3==1.2.16
+
 # SSL/TLS analysis
 cryptography==41.0.7
 pyOpenSSL==23.3.0

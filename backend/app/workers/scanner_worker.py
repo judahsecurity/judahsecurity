@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 from app.models.scan import Scan, ScanType, ScanStatus
 from app.models.asset import Asset, AssetType, AssetStatus
 from app.models.netblock import Netblock
-from app.models.vulnerability import Vulnerability
+from app.models.vulnerability import Vulnerability, Severity, VulnerabilityStatus
 # Must import FindingValidation so SQLAlchemy can resolve
 # Vulnerability.validations (order_by=FindingValidation.created_at.desc()).
 # Also required by poll_database_for_validations().
@@ -534,8 +534,9 @@ class ScannerWorker:
             messages = []
             invalid_scans_found = False
             for pending_scan in pending_scans:
+                config = pending_scan.config or {}
                 try:
-                    job_type = job_type_for_scan_type(pending_scan.scan_type)
+                    job_type = job_type_for_scan_type(pending_scan.scan_type, config)
                 except ValueError as exc:
                     pending_scan.status = ScanStatus.FAILED
                     pending_scan.error_message = str(exc)[:500]
@@ -543,7 +544,6 @@ class ScannerWorker:
                     invalid_scans_found = True
                     logger.error("Scan %s cannot be dispatched: %s", pending_scan.id, exc)
                     continue
-                config = pending_scan.config or {}
                 is_scheduled = config.get('triggered_by_schedule') is not None
                 
                 # Build job data with config values extracted
@@ -881,6 +881,8 @@ class ScannerWorker:
                     await self.handle_nuclei_scan(body)
                 elif job_type == 'PORT_SCAN':
                     await self.handle_port_scan(body)
+                elif job_type == 'LOGIX_RUNTIME':
+                    await self.handle_logix_runtime_scan(body)
                 elif job_type == 'PORT_VERIFY':
                     await self.handle_port_verify(body)
                 elif job_type == 'SERVICE_DETECT':
@@ -1538,6 +1540,66 @@ class ScannerWorker:
             return 1
         except Exception as e:
             logger.error(f"Failed to queue ICS Nuclei follow-up: {e}", exc_info=True)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return 0
+
+    def _queue_logix_runtime_after_port_scan(self, db, parent_scan, port_results, config):
+        """Chain a read-only Logix status scan from confirmed ENIP evidence."""
+        if not parent_scan or not (config or {}).get("run_logix_runtime_status"):
+            return 0
+
+        try:
+            from app.services.logix_detection_service import select_logix_candidates
+
+            targets = select_logix_candidates(
+                port_results,
+                require_identity_evidence=config.get(
+                    "logix_require_identity_evidence", True
+                ),
+                max_hosts=max(0, min(int(config.get("logix_max_hosts", 10)), 25)),
+            )
+            if not targets:
+                logger.info(
+                    "Scan %s: no Logix controllers confirmed by EtherNet/IP evidence",
+                    parent_scan.id,
+                )
+                return 0
+
+            follow_config = {
+                "scan_engine": "logix_runtime",
+                "adhoc_scan_type": "logix_runtime_status",
+                "include_program_inventory": False,
+                "require_owned": config.get("logix_require_owned", False),
+                "max_hosts": len(targets),
+                "socket_timeout": config.get("logix_socket_timeout", 5),
+                "triggered_by_ics_port_scan": parent_scan.id,
+                "schedule_name": config.get("schedule_name"),
+                "triggered_by_schedule": config.get("triggered_by_schedule"),
+                "schedule_scan_type": config.get("schedule_scan_type"),
+            }
+            child = Scan(
+                name=f"{parent_scan.name or 'ICS/OT discovery'} - Logix Runtime Status",
+                # Reuse the existing DB enum; scan_engine selects the worker.
+                scan_type=ScanType.PORT_SCAN,
+                organization_id=parent_scan.organization_id,
+                targets=targets,
+                config=follow_config,
+                started_by=parent_scan.started_by or "system",
+                status=ScanStatus.PENDING,
+            )
+            db.add(child)
+            db.commit()
+            logger.info(
+                "Queued Logix runtime follow-up for scan %s: %s controller(s)",
+                parent_scan.id,
+                len(targets),
+            )
+            return len(targets)
+        except Exception as exc:
+            logger.error("Failed to queue Logix runtime follow-up: %s", exc, exc_info=True)
             try:
                 db.rollback()
             except Exception:
@@ -2320,6 +2382,23 @@ class ScannerWorker:
                 # Trigger graph sync after port scan (updates port relationships)
                 if organization_id and len(result.ports_found) > 0:
                     trigger_graph_sync(organization_id)
+
+                # Detection chain: protocol scan -> confirmed Logix candidate ->
+                # read-only controller runtime status. The follow-up receives
+                # only hosts backed by EtherNet/IP identity evidence.
+                logix_queued = 0
+                if result.success and scan:
+                    logix_queued = self._queue_logix_runtime_after_port_scan(
+                        db, scan, result.ports_found, config
+                    )
+                    if logix_queued:
+                        scan = db.query(Scan).filter(Scan.id == scan_id).first()
+                        if scan:
+                            scan_results = dict(scan.results or {})
+                            scan_results["logix_runtime_follow_up_queued"] = True
+                            scan_results["logix_runtime_follow_up_hosts"] = logix_queued
+                            scan.results = scan_results
+                            db.commit()
 
                 # ICS full discovery: after nmap/NSE, queue Nuclei only on hosts
                 # that actually had open ports (config.run_nuclei + nuclei_tags).
@@ -3979,6 +4058,327 @@ class ScannerWorker:
             if db:
                 db.close()
     
+    def _upsert_logix_finding(
+        self,
+        db,
+        *,
+        asset,
+        scan_id: int,
+        template_id: str,
+        title: str,
+        severity: Severity,
+        description: str,
+        evidence: str,
+        metadata: dict,
+    ) -> int:
+        finding = db.query(Vulnerability).filter(
+            Vulnerability.asset_id == asset.id,
+            Vulnerability.template_id == template_id,
+        ).order_by(Vulnerability.id.desc()).first()
+        now = datetime.utcnow()
+        if finding:
+            finding.title = title
+            finding.severity = severity
+            finding.description = description
+            finding.evidence = evidence[:5000]
+            finding.scan_id = scan_id
+            finding.last_detected = now
+            finding.metadata_ = metadata
+            if finding.status == VulnerabilityStatus.RESOLVED:
+                finding.status = VulnerabilityStatus.OPEN
+                finding.resolved_at = None
+            return 1
+
+        db.add(Vulnerability(
+            title=title,
+            description=description,
+            severity=severity,
+            asset_id=asset.id,
+            scan_id=scan_id,
+            detected_by="logix_runtime",
+            template_id=template_id,
+            detection_confidence="endpoint_confirmed",
+            status=VulnerabilityStatus.OPEN,
+            evidence=evidence[:5000],
+            remediation=(
+                "Confirm the approved controller operating mode and maintenance window. "
+                "Place production controllers in hard RUN when operationally appropriate, "
+                "restrict EtherNet/IP access to authorized engineering stations, and review "
+                "unexpected project, firmware, serial, or program-schema changes."
+            ),
+            tags=["ics", "ot", "plc", "logix", "runtime-status"],
+            metadata_=metadata,
+        ))
+        return 1
+
+    def _resolve_logix_posture_finding(self, db, asset) -> None:
+        findings = db.query(Vulnerability).filter(
+            Vulnerability.asset_id == asset.id,
+            Vulnerability.template_id == "logix-keyswitch-not-hard-run",
+            Vulnerability.status.in_([
+                VulnerabilityStatus.OPEN,
+                VulnerabilityStatus.IN_PROGRESS,
+            ]),
+        ).all()
+        for finding in findings:
+            finding.status = VulnerabilityStatus.RESOLVED
+            finding.resolved_at = datetime.utcnow()
+
+    async def handle_logix_runtime_scan(self, job_data: dict):
+        """Run a scoped, read-only Logix runtime or schema-inventory scan."""
+        scan_id = job_data.get("scan_id")
+        organization_id = job_data.get("organization_id")
+        requested_targets = job_data.get("targets") or []
+        config = job_data.get("config") or {}
+        include_inventory = bool(config.get("include_program_inventory", False))
+        hard_cap = 5 if include_inventory else 25
+        max_hosts = max(1, min(int(config.get("max_hosts", 10)), hard_cap))
+        # Inventory can expose proprietary project structure. Always require
+        # an explicitly owned asset, even if a caller supplies weaker config.
+        require_owned = include_inventory or bool(config.get("require_owned", False))
+
+        db = self.get_db_session()
+        if not db:
+            self._mark_scan_failed(scan_id, "No database connection")
+            return
+
+        try:
+            from app.services.logix_detection_service import (
+                detect_observation_changes,
+                inspect_logix_controller,
+            )
+
+            scan = db.query(Scan).filter(Scan.id == scan_id).first()
+            if scan:
+                scan.current_step = (
+                    "Reading Logix program schemas"
+                    if include_inventory
+                    else "Reading Logix runtime status"
+                )
+                scan.progress = 5
+                db.commit()
+
+            asset_query = db.query(Asset).filter(
+                Asset.organization_id == organization_id,
+                Asset.in_scope.is_(True),
+                Asset.asset_type == AssetType.IP_ADDRESS,
+            )
+            if require_owned:
+                asset_query = asset_query.filter(Asset.is_owned.is_(True))
+
+            scoped_assets = {}
+            for asset in asset_query.all():
+                values = [asset.value, asset.ip_address, *(asset.ip_addresses or [])]
+                for value in values:
+                    try:
+                        scoped_assets[str(ipaddress.ip_address(str(value)))] = asset
+                    except (TypeError, ValueError):
+                        continue
+
+            targets = []
+            skipped = []
+            for raw in requested_targets:
+                try:
+                    target = str(ipaddress.ip_address(str(raw).strip()))
+                except ValueError:
+                    skipped.append({"target": str(raw), "reason": "plain IP required"})
+                    continue
+                if target not in scoped_assets:
+                    skipped.append({"target": target, "reason": "not an in-scope asset"})
+                    continue
+                if target not in targets:
+                    targets.append(target)
+                if len(targets) >= max_hosts:
+                    break
+
+            observations = []
+            detections = []
+            findings_detected = 0
+            slots = config.get("slots") or {}
+
+            for index, target in enumerate(targets):
+                asset = scoped_assets[target]
+                slot = slots.get(target) if isinstance(slots, dict) else None
+                observation = await asyncio.to_thread(
+                    inspect_logix_controller,
+                    target,
+                    slot=slot,
+                    include_program_inventory=include_inventory,
+                    max_stored_tags=min(int(config.get("max_stored_tags", 500)), 2000),
+                    socket_timeout=config.get("socket_timeout", 5),
+                )
+                observations.append(observation)
+
+                if observation.get("reachable"):
+                    asset_metadata = dict(asset.metadata_ or {})
+                    logix_metadata = dict(asset_metadata.get("logix_detection") or {})
+                    previous = logix_metadata.get("current")
+                    changes = detect_observation_changes(previous, observation)
+                    observation["changes"] = changes
+
+                    history = list(logix_metadata.get("history") or [])
+                    history_fields = (
+                        "observed_at", "keyswitch", "posture", "project_name",
+                        "product_name", "revision", "serial", "inventory_hash",
+                    )
+                    history.append({
+                        key: observation.get(key)
+                        for key in history_fields
+                        if observation.get(key) is not None
+                    })
+                    logix_metadata.update({
+                        "current": observation,
+                        "history": history[-20:],
+                        "last_scan_id": scan_id,
+                    })
+                    asset_metadata["logix_detection"] = logix_metadata
+                    asset.metadata_ = asset_metadata
+                    asset.system_type = asset.system_type or "Industrial Controller"
+                    asset.device_class = asset.device_class or "Industrial/SCADA"
+                    asset.device_subclass = (
+                        observation.get("product_name") or asset.device_subclass
+                    )
+                    asset.last_seen = datetime.utcnow()
+                    asset.is_live = True
+
+                    finding_fields = (
+                        "target", "observed_at", "vendor", "product_name",
+                        "product_code", "revision", "serial", "project_name",
+                        "keyswitch", "posture", "hard_run", "remote_mode",
+                        "inventory_hash", "program_count", "task_count",
+                        "module_count", "tag_count",
+                    )
+                    finding_observation = {
+                        key: observation.get(key)
+                        for key in finding_fields
+                        if observation.get(key) is not None
+                    }
+                    identity_evidence = {
+                        "type": "unauthenticated_identity_read",
+                        "target": target,
+                        "vendor": observation.get("vendor"),
+                        "product_name": observation.get("product_name"),
+                        "revision": observation.get("revision"),
+                        "serial": observation.get("serial"),
+                        "project_name": observation.get("project_name"),
+                        "keyswitch": observation.get("keyswitch"),
+                        "severity": "medium",
+                    }
+                    detections.append(identity_evidence)
+                    findings_detected += self._upsert_logix_finding(
+                        db,
+                        asset=asset,
+                        scan_id=scan_id,
+                        template_id="logix-unauthenticated-identity-read",
+                        title="Logix Controller Allows Unauthenticated Identity Read",
+                        severity=Severity.MEDIUM,
+                        description=(
+                            "The EtherNet/IP management plane returned controller identity, "
+                            "firmware, project name, and runtime keyswitch state without "
+                            "authentication. Hard RUN can reduce modification risk but does "
+                            "not prevent this reconnaissance path."
+                        ),
+                        evidence=json.dumps(identity_evidence, sort_keys=True),
+                        metadata={"observation": finding_observation},
+                    )
+
+                    keyswitch = observation.get("keyswitch", "UNKNOWN")
+                    if keyswitch != "UNKNOWN" and not observation.get("hard_run"):
+                        severity = (
+                            Severity.HIGH
+                            if observation.get("posture") in {
+                                "program_mode", "remote_program"
+                            }
+                            else Severity.MEDIUM
+                        )
+                        detection = {
+                            "type": "keyswitch_not_hard_run",
+                            "target": target,
+                            "keyswitch": keyswitch,
+                            "severity": severity.value,
+                        }
+                        detections.append(detection)
+                        findings_detected += self._upsert_logix_finding(
+                            db,
+                            asset=asset,
+                            scan_id=scan_id,
+                            template_id="logix-keyswitch-not-hard-run",
+                            title="Logix Controller Is Not in Hard RUN",
+                            severity=severity,
+                            description=(
+                                "The controller answered an unauthenticated read-only runtime "
+                                f"query and reported keyswitch state {keyswitch}. The physical "
+                                "hard-RUN mitigation is not currently in effect."
+                            ),
+                            evidence=json.dumps(detection, sort_keys=True),
+                            metadata={"observation": finding_observation},
+                        )
+                    elif observation.get("hard_run"):
+                        self._resolve_logix_posture_finding(db, asset)
+
+                    material_changes = [
+                        change for change in changes if change["field"] != "keyswitch"
+                    ]
+                    if material_changes:
+                        detection = {
+                            "type": "identity_or_project_change",
+                            "target": target,
+                            "changes": material_changes,
+                            "severity": "high",
+                        }
+                        detections.append(detection)
+                        findings_detected += self._upsert_logix_finding(
+                            db,
+                            asset=asset,
+                            scan_id=scan_id,
+                            template_id="logix-identity-project-change",
+                            title="Logix Controller Identity or Project Changed",
+                            severity=Severity.HIGH,
+                            description=(
+                                "A material controller identity, firmware, project-name, or "
+                                "program-schema change was observed relative to the prior baseline."
+                            ),
+                            evidence=json.dumps(detection, sort_keys=True),
+                            metadata={
+                                "observation": finding_observation,
+                                "changes": material_changes,
+                            },
+                        )
+
+                if scan:
+                    scan.progress = 5 + int(((index + 1) / max(len(targets), 1)) * 90)
+                    db.commit()
+
+            successful = sum(1 for item in observations if item.get("reachable"))
+            if scan:
+                scan.status = ScanStatus.COMPLETED
+                scan.completed_at = datetime.utcnow()
+                scan.progress = 100
+                scan.current_step = "Completed"
+                scan.assets_discovered = successful
+                scan.vulnerabilities_found = findings_detected
+                scan.results = {
+                    "scan_engine": "logix_runtime",
+                    "read_only": True,
+                    "inventory_included": include_inventory,
+                    "targets_requested": len(requested_targets),
+                    "targets_checked": len(targets),
+                    "successful_reads": successful,
+                    "failed_reads": len(observations) - successful,
+                    "skipped": skipped,
+                    "detections": detections,
+                    "observations": observations,
+                }
+            db.commit()
+            if organization_id and successful:
+                trigger_graph_sync(organization_id)
+        except Exception as exc:
+            logger.error("Logix runtime scan %s failed: %s", scan_id, exc, exc_info=True)
+            db.rollback()
+            self._mark_scan_failed(scan_id, str(exc)[:500])
+        finally:
+            db.close()
+
     async def handle_screenshot_scan(self, job_data: dict):
         """
         Handle screenshot capture scan job.

@@ -195,12 +195,12 @@ def send_scan_to_sqs(scan: Scan) -> bool:
     if not sqs:
         return False
     
+    config = scan.config or {}
     try:
-        job_type = job_type_for_scan_type(scan.scan_type)
+        job_type = job_type_for_scan_type(scan.scan_type, config)
     except ValueError as exc:
         logger.error("Refusing to queue scan %s: %s", scan.id, exc)
         return False
-    config = scan.config or {}
     
     message_body = {
         'job_type': job_type,
@@ -606,6 +606,12 @@ def create_adhoc_scan(
     if request.scan_type == "ics_hmi_screenshot":
         config["ics_only"] = True
         config["capture_category"] = "ICS/OT"
+
+    if request.scan_type in {"logix_runtime_status", "logix_program_inventory"}:
+        config["scan_engine"] = "logix_runtime"
+        config["include_program_inventory"] = (
+            request.scan_type == "logix_program_inventory"
+        )
     
     # Create the scan
     new_scan = Scan(
@@ -2129,8 +2135,6 @@ def create_service_detection_scan(
         "unknown_count": unknown_count,
         "ports_to_scan": min(unknown_count, max_ports)
     }
-
-
 
 
 

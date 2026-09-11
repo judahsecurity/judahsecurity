@@ -60,6 +60,8 @@ SCAN_TYPE_ALIASES = {
     "ics_building_automation": ScanType.PORT_SCAN,
     "ics_full_discovery": ScanType.PORT_SCAN,
     "ics_hmi_screenshot": ScanType.SCREENSHOT,
+    "logix_runtime_status": ScanType.PORT_SCAN,
+    "logix_program_inventory": ScanType.PORT_SCAN,
     "full_discovery": ScanType.DISCOVERY,
 }
 
@@ -75,7 +77,9 @@ def resolve_scan_type(scan_type_id: str) -> ScanType:
         raise ValueError(f"Scan type '{scan_type_id}' has no execution mapping") from exc
 
 
-def job_type_for_scan_type(scan_type: ScanType) -> str:
+def job_type_for_scan_type(scan_type: ScanType, config: dict | None = None) -> str:
+    if (config or {}).get("scan_engine") == "logix_runtime":
+        return "LOGIX_RUNTIME"
     try:
         return JOB_TYPE_BY_SCAN_TYPE[scan_type]
     except KeyError as exc:

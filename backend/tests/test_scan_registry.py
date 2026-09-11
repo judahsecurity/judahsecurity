@@ -21,6 +21,14 @@ def test_full_scan_uses_the_same_recon_pipeline_for_every_queue_backend():
     assert job_type_for_scan_type(ScanType.FULL) == "RECON_PIPELINE"
 
 
+def test_logix_profiles_use_the_runtime_worker():
+    for profile in ("logix_runtime_status", "logix_program_inventory"):
+        scan_type = resolve_scan_type(profile)
+        config = CONTINUOUS_SCAN_TYPES[profile]["default_config"]
+        assert scan_type is ScanType.PORT_SCAN
+        assert job_type_for_scan_type(scan_type, config) == "LOGIX_RUNTIME"
+
+
 def test_unknown_and_unimplemented_types_fail_closed():
     with pytest.raises(ValueError):
         resolve_scan_type("not-a-real-scan")

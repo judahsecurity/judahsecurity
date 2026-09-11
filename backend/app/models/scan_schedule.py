@@ -560,6 +560,9 @@ CONTINUOUS_SCAN_TYPES = {
             "rate": 1000,
             "service_detection": True,
             "nse_scripts": ["modbus-discover", "s7-info", "enip-info", "omron-info"],
+            "run_logix_runtime_status": True,
+            "logix_require_identity_evidence": True,
+            "logix_max_hosts": 10,
             "generate_findings": True,
             "finding_category": "ics_plc",
         },
@@ -615,6 +618,41 @@ CONTINUOUS_SCAN_TYPES = {
         "recommended_frequency": "daily",
         "tags": ["ics", "ot", "scada", "hmi", "screenshot"],
     },
+    "logix_runtime_status": {
+        "name": "Logix Runtime Status",
+        "description": (
+            "Read controller identity, firmware, project name, and keyswitch state "
+            "from in-scope Allen-Bradley Logix controllers. Does not initialize "
+            "tags, read tag values, change mode, or write to the controller."
+        ),
+        "default_config": {
+            "scan_engine": "logix_runtime",
+            "include_program_inventory": False,
+            "require_owned": False,
+            "max_hosts": 10,
+            "socket_timeout": 5,
+        },
+        "recommended_frequency": "daily",
+        "tags": ["ics", "ot", "plc", "logix", "runtime-status"],
+    },
+    "logix_program_inventory": {
+        "name": "Logix Program Inventory (Opt-in)",
+        "description": (
+            "Upload names and schemas for programs, tasks, modules, and tags from "
+            "in-scope Logix controllers. No tag values or project files are read. "
+            "Use only during an approved OT maintenance window."
+        ),
+        "default_config": {
+            "scan_engine": "logix_runtime",
+            "include_program_inventory": True,
+            "require_owned": True,
+            "max_hosts": 3,
+            "max_stored_tags": 500,
+            "socket_timeout": 10,
+        },
+        "recommended_frequency": "monthly",
+        "tags": ["ics", "ot", "plc", "logix", "program-inventory", "opt-in"],
+    },
     "nuclei_ics": {
         "name": "Nuclei ICS/SCADA Vulnerabilities",
         "description": "Scan for ICS/SCADA specific vulnerabilities using Nuclei ICS templates. Detects vulnerable HMIs, exposed historians, default credentials on industrial devices, and known CVEs.",
@@ -642,6 +680,9 @@ CONTINUOUS_SCAN_TYPES = {
                 "modbus-discover", "s7-info", "enip-info", "bacnet-info",
                 "fox-info", "omron-info", "iec-identify",
             ],
+            "run_logix_runtime_status": True,
+            "logix_require_identity_evidence": True,
+            "logix_max_hosts": 10,
             "nuclei_tags": ["ics", "scada"],
             "generate_findings": True,
             "run_nuclei": True,

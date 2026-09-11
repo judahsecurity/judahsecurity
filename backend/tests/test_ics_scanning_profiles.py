@@ -48,6 +48,16 @@ def test_ics_screenshot_profile_is_registered_and_conservative():
     assert profile["default_config"]["capture_category"] == "ICS/OT"
     assert profile["default_config"]["max_hosts"] == 100
 
+    plc_profile = CONTINUOUS_SCAN_TYPES["ics_plc_scan"]
+    assert plc_profile["default_config"]["run_logix_runtime_status"] is True
+    assert plc_profile["default_config"]["logix_require_identity_evidence"] is True
+
+    runtime_profile = CONTINUOUS_SCAN_TYPES["logix_runtime_status"]
+    assert runtime_profile["default_config"]["include_program_inventory"] is False
+    inventory_profile = CONTINUOUS_SCAN_TYPES["logix_program_inventory"]
+    assert inventory_profile["default_config"]["include_program_inventory"] is True
+    assert inventory_profile["default_config"]["require_owned"] is True
+
 
 def test_ics_evidence_requires_asset_or_service_marker():
     assert asset_has_ics_evidence(_asset(device_class="Industrial HMI")) is True

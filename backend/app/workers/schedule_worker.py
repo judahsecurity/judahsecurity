@@ -40,6 +40,7 @@ IPV4_ONLY_SCAN_TYPES = [
     "port_scan", "masscan", "critical_ports",
     "ics_ot_ports", "ics_plc_scan", "ics_scada_scan",
     "ics_building_automation", "ics_full_discovery",
+    "logix_runtime_status", "logix_program_inventory",
     "http_probe", "screenshot", "login_portal",
     "nuclei", "nuclei_critical", "nuclei_high", "nuclei_critical_high",
     "nuclei_medium", "nuclei_low_info", "nuclei_ics", "vulnerability", "technology",
