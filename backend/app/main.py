@@ -29,6 +29,7 @@ from app.models.custom_nuclei_template import CustomNucleiTemplate  # noqa: F401
 from app.api.routes import auth, users, organizations, assets, vulnerabilities, scans, discovery, nuclei, ports, screenshots, external_discovery, waybackurls, netblocks, labels, scan_schedules, scan_profiles, tools, sni_discovery, scan_config, acquisitions, oracle, agent
 from app.api.routes import integrations
 from app.api.routes import scoring as scoring_router
+from app.api.routes import posture as posture_router
 from app.api.routes import threat_intel as threat_intel_router
 from app.api.routes import custom_templates as custom_templates_router
 from app.api.routes import remediation as remediation_router
@@ -175,6 +176,7 @@ app.include_router(oracle.router, prefix=settings.API_PREFIX)
 app.include_router(agent.router, prefix=settings.API_PREFIX)
 app.include_router(integrations.router, prefix=settings.API_PREFIX)
 app.include_router(scoring_router.router, prefix=settings.API_PREFIX)
+app.include_router(posture_router.router, prefix=settings.API_PREFIX)
 app.include_router(threat_intel_router.router, prefix=settings.API_PREFIX)
 app.include_router(custom_templates_router.router, prefix=settings.API_PREFIX)
 app.include_router(remediation_router.router, prefix=settings.API_PREFIX)

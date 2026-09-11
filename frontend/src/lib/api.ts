@@ -996,6 +996,14 @@ class ApiClient {
     return response.data;
   }
 
+  /** Current external posture score for the caller's organization. */
+  async getPostureGrade(organizationId?: number) {
+    const response = await this.client.get('/posture/grade', {
+      params: organizationId ? { organization_id: organizationId } : undefined,
+    });
+    return response.data;
+  }
+
   async getPrioritizationFunnel(params?: { organizationId?: number; includeOutOfScope?: boolean }) {
     const response = await this.client.get('/vulnerabilities/stats/prioritization-funnel', {
       params: {
