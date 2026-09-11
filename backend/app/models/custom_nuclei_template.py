@@ -58,6 +58,7 @@ class CustomNucleiTemplate(Base):
     source = Column(String(20), default="manual")  # manual | ai_generated
     ai_model = Column(String(64), nullable=True)   # which model was used
     ai_generation_context = Column(Text, nullable=True)  # CVE description / prompt context stored for reproducibility
+    content_digest = Column(String(64), nullable=True)  # SHA-256 of YAML; safe provenance/version identifier
 
     # Lifecycle status
     status = Column(String(20), default="draft", nullable=False)
@@ -69,6 +70,10 @@ class CustomNucleiTemplate(Base):
     validated = Column(Boolean, default=False, nullable=False)
     validated_by_user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     validated_at = Column(DateTime, nullable=True)
+
+    # Durable lifecycle timestamps used by the CVE intelligence timeline.
+    released_at = Column(DateTime, nullable=True, index=True)
+    enabled_at = Column(DateTime, nullable=True, index=True)
 
     # Usage statistics (updated when Nuclei reports a match)
     last_run_at = Column(DateTime, nullable=True)

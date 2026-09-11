@@ -17,6 +17,7 @@ Endpoints:
   POST   /nuclei-templates/generate           AI generation
 """
 
+import hashlib
 import logging
 from datetime import datetime
 from typing import Any, Optional
@@ -36,6 +37,21 @@ from app.services import custom_template_ai as ai
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/nuclei-templates", tags=["nuclei-templates"])
+
+
+def _content_digest(template_yaml: str) -> str:
+    return hashlib.sha256((template_yaml or "").encode()).hexdigest()
+
+
+def _record_lifecycle(template: CustomNucleiTemplate, *, becoming_active: bool = False) -> None:
+    """Persist provenance moments once; re-activation does not rewrite history."""
+    template.content_digest = _content_digest(template.template_yaml)
+    if becoming_active:
+        now = datetime.utcnow()
+        if template.released_at is None:
+            template.released_at = now
+        if template.enabled_at is None:
+            template.enabled_at = now
 
 # ── Pydantic schemas ──────────────────────────────────────────────────────────
 
@@ -112,11 +128,14 @@ def _template_response(t: CustomNucleiTemplate) -> dict:
         "template_type": t.template_type,
         "source": t.source,
         "ai_model": t.ai_model,
+        "content_digest": f"sha256:{t.content_digest}" if t.content_digest else None,
         "status": t.status,
         "validated": t.validated,
         "times_matched": t.times_matched,
         "last_run_at": t.last_run_at.isoformat() if t.last_run_at else None,
         "last_match_at": t.last_match_at.isoformat() if t.last_match_at else None,
+        "released_at": t.released_at.isoformat() if t.released_at else None,
+        "enabled_at": t.enabled_at.isoformat() if t.enabled_at else None,
         "created_at": t.created_at.isoformat() if t.created_at else None,
         "updated_at": t.updated_at.isoformat() if t.updated_at else None,
     }
@@ -167,6 +186,7 @@ def create_template(
         source="manual",
         created_by_user_id=getattr(user, "id", None),
     )
+    _record_lifecycle(t, becoming_active=payload.status == "active")
     db.add(t)
     db.commit()
     db.refresh(t)
@@ -197,6 +217,7 @@ def update_template(
     if not t:
         raise HTTPException(status_code=404, detail="Template not found")
 
+    becoming_active = payload.status == "active" and t.status != "active"
     for field, val in payload.model_dump(exclude_none=True).items():
         if field == "cve_ids" and val:
             val = [c.upper() for c in val]
@@ -205,6 +226,7 @@ def update_template(
             t.validated_by_user_id = getattr(user, "id", None)
         setattr(t, field, val)
 
+    _record_lifecycle(t, becoming_active=becoming_active)
     t.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(t)
@@ -264,6 +286,7 @@ async def activate_template(
                 t.template_id, v.get("error"),
             )
 
+    _record_lifecycle(t, becoming_active=t.status != "active")
     t.status = "active"
     t.updated_at = datetime.utcnow()
     db.commit()
@@ -520,6 +543,7 @@ async def generate_template(
         status="draft",
         created_by_user_id=getattr(user, "id", None),
     )
+    _record_lifecycle(t)
     db.add(t)
     db.commit()
     db.refresh(t)

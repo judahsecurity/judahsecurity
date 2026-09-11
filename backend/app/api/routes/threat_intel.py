@@ -31,6 +31,12 @@ from app.api.deps import get_db, get_current_active_user
 from app.core.config import settings
 from app.models.api_config import ExternalService, resolve_api_key
 from app.services.vuln_intel_enrichment import enrich_cve_catalog
+from app.schemas.threat_intel import CveDetailResponse
+from app.services.threat_intel_timeline import (
+    build_cve_timeline,
+    first_party_detection_events,
+    resolve_organization_id,
+)
 from app.services.vuln_intel_feeds import (
     fetch_kevintel_attestations,
     fetch_shadowserver_from_circl_kev,
@@ -46,6 +52,20 @@ _ENRICH_CONCURRENCY = 8
 # Hard budget so the Vulnerability Intel list cannot hang behind CIRCL/VulnCheck.
 _FEED_TIMEOUT_S = 10.0
 _CVE_ID_RE = re.compile(r"(CVE-\d{4}-\d+)", re.I)
+
+
+def _cached_exploitation_evidence(cve_id: str, vulncheck_token: str) -> dict[str, Any]:
+    """Read dated exploitation evidence from existing caches without adding network latency."""
+    cisa = None
+    cached_cisa = read_json_cache("cisa_kev.json") or {}
+    for row in cached_cisa.get("vulnerabilities") or []:
+        if _canonical_cve_id((row or {}).get("cveID")) == cve_id:
+            cisa = row
+            break
+    vulncheck = (fetch_vulncheck_kev(
+        vulncheck_token or "", cache_only=True, request_timeout=20, page_limit=100
+    ) or {}).get(cve_id)
+    return {"cisa": cisa or {}, "vulncheck": vulncheck or {}}
 
 
 def _get_vulncheck_token(db: Session, org_id: int | None = None) -> str:
@@ -860,9 +880,9 @@ async def get_emerging_vulnerabilities(
         False,
         description="Enrich with AlienVault OTX pulse counts. Off by default — OTX is slow (~10s/CVE) and loads on CVE detail instead.",
     ),
-    organization_id: Optional[int] = Query(None, description="Org whose stored API keys to use; omit to use any available key"),
+    organization_id: Optional[int] = Query(None, description="Tenant scope; non-superusers are always restricted to their account organization"),
     db: Session = Depends(get_db),
-    _current_user=Depends(get_current_active_user),
+    current_user=Depends(get_current_active_user),
 ):
     """
     Returns CVEs from ALL exploitation intelligence sources merged by CVE ID:
@@ -876,6 +896,7 @@ async def get_emerging_vulnerabilities(
     OTX campaign pulses are deferred to GET /threat-intel/cve/{id} by default so
     this list endpoint stays fast enough for the Vulnerability Intel UI.
     """
+    organization_id = resolve_organization_id(current_user, organization_id)
     vulncheck_token = _get_vulncheck_token(db, organization_id)
     pdcp_key = _get_pdcp_key(db, organization_id)
 
@@ -1092,12 +1113,12 @@ async def get_emerging_vulnerabilities(
     }
 
 
-@router.get("/cve/{cve_id}")
+@router.get("/cve/{cve_id}", response_model=CveDetailResponse)
 async def get_cve_detail(
     cve_id: str,
     organization_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
-    _current_user=Depends(get_current_active_user),
+    current_user=Depends(get_current_active_user),
 ):
     """
     Full enrichment for a single CVE: PDCP data + OTX + NVD/OSV/GHSA catalog
@@ -1105,12 +1126,13 @@ async def get_cve_detail(
     Exploit-DB, CXSecurity) + any Oracle analysis on record.
     """
     cve_id = cve_id.upper().strip()
+    organization_id = resolve_organization_id(current_user, organization_id)
     pdcp_key = _get_pdcp_key(db, organization_id)
     nvd_key = resolve_api_key(db, ExternalService.NVD, organization_id) or getattr(settings, "NVD_API_KEY", None)
     github_token = getattr(settings, "GITHUB_TOKEN", None)
 
     async with httpx.AsyncClient() as client:
-        pdcp, otx_count, catalog = await asyncio.gather(
+        pdcp, otx_count, catalog, exploitation = await asyncio.gather(
             _fetch_pdcp_cve(client, cve_id, pdcp_key),
             _fetch_otx_pulse_count(client, cve_id),
             asyncio.to_thread(
@@ -1119,9 +1141,16 @@ async def get_cve_detail(
                 nvd_api_key=nvd_key,
                 github_token=github_token,
             ),
+            asyncio.to_thread(
+                _cached_exploitation_evidence,
+                cve_id,
+                _get_vulncheck_token(db, organization_id),
+            ),
         )
 
     oracle = _get_oracle_analysis_for_cves(db, [cve_id]).get(cve_id, {})
+    detection_events = first_party_detection_events(db, cve_id, organization_id)
+    timeline = build_cve_timeline(cve_id, catalog, exploitation, detection_events)
 
     return {
         "cve_id": cve_id,
@@ -1134,6 +1163,7 @@ async def get_cve_detail(
         "is_remote": bool(pdcp.get("is_remote")),
         "catalog": catalog,
         "oracle": oracle,
+        **timeline,
     }
 
 

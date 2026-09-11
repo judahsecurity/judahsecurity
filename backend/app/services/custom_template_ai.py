@@ -20,6 +20,7 @@ The refine flow closes the validate → diagnose → refine loop:
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -424,6 +425,7 @@ async def refine_template(
         source=source,
         ai_model=resolved_ai_model(),
         ai_generation_context=context,
+        content_digest=hashlib.sha256(clean_yaml.encode()).hexdigest(),
         status="draft",
         created_by_user_id=created_by_user_id,
     )

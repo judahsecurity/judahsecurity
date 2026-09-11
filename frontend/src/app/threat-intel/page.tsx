@@ -22,12 +22,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sheet';
 import {
   Tooltip,
   TooltipContent,
@@ -63,6 +58,7 @@ import {
 import { api } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
+import { IntelTimeline, type IntelTimelineEvent } from '@/components/threat-intel/IntelTimeline';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -122,6 +118,12 @@ interface EmergingResponse {
   days: number;
   entries: EmergingEntry[];
   summary: Summary;
+}
+
+interface CveDetailResponse {
+  cve_id: string;
+  intel_updates: IntelTimelineEvent[];
+  exploitation_timeline: IntelTimelineEvent[];
 }
 
 // ── Style helpers ─────────────────────────────────────────────────────────────
@@ -411,27 +413,29 @@ function SourceBadges({ sources }: { sources: string[] }) {
   );
 }
 
-// ── Detail dialog ─────────────────────────────────────────────────────────────
+// ── Detail flyout ─────────────────────────────────────────────────────────────
 
-function EntryDetail({ entry, open, onClose, oracleResult, onAnalyze, analyzing }: {
+function EntryDetail({ entry, open, onClose, oracleResult, onAnalyze, analyzing, detail, detailLoading }: {
   entry: EmergingEntry | null;
   open: boolean;
   onClose: () => void;
   oracleResult?: OracleResult;
   onAnalyze: (cveId: string) => void;
   analyzing: boolean;
+  detail: CveDetailResponse | null;
+  detailLoading: boolean;
 }) {
   if (!entry) return null;
   return (
-    <Dialog open={open} onOpenChange={onClose}>
-      <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2 text-base">
+    <Sheet open={open} onOpenChange={next => { if (!next) onClose(); }}>
+      <SheetContent side="right" className="w-full sm:max-w-xl lg:max-w-2xl overflow-y-auto">
+        <SheetHeader>
+          <SheetTitle className="flex items-center gap-2 text-base">
             <Shield className="h-4 w-4 text-primary" />
             {entry.cve_id}
             {severityBadge(entry.severity)}
-          </DialogTitle>
-        </DialogHeader>
+          </SheetTitle>
+        </SheetHeader>
 
         <div className="space-y-4 text-sm">
           {/* Description */}
@@ -504,6 +508,12 @@ function EntryDetail({ entry, open, onClose, oracleResult, onAnalyze, analyzing 
               </div>
             </div>
           </div>
+
+          <IntelTimeline
+            updates={detail?.intel_updates ?? []}
+            timeline={detail?.exploitation_timeline ?? []}
+            loading={detailLoading}
+          />
 
           {/* Oracle */}
           {(entry.oracle_analyzed || oracleResult) ? (
@@ -622,8 +632,8 @@ function EntryDetail({ entry, open, onClose, oracleResult, onAnalyze, analyzing 
             )}
           </div>
         </div>
-      </DialogContent>
-    </Dialog>
+      </SheetContent>
+    </Sheet>
   );
 }
 
@@ -672,6 +682,8 @@ export default function ThreatIntelPage() {
   const [sourceFilter, setSourceFilter] = useState('all');
   const [search, setSearch] = useState('');
   const [selected, setSelected] = useState<EmergingEntry | null>(null);
+  const [detail, setDetail] = useState<CveDetailResponse | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [sortField, setSortField] = useState<'date_added_kev' | 'cvss_score' | 'otx_pulse_count'>('date_added_kev');
   const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc');
   const [oracleResults, setOracleResults] = useState<Record<string, OracleResult>>({});
@@ -709,6 +721,28 @@ export default function ThreatIntelPage() {
   }, [days, severityFilter, detectionFilter, sourceFilter, toast]);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    let active = true;
+    if (!selected) {
+      setDetail(null);
+      setDetailLoading(false);
+      return () => { active = false; };
+    }
+    setDetail(null);
+    setDetailLoading(true);
+    api.get(`/threat-intel/cve/${selected.cve_id}`, {}, { timeout: 30000 })
+      .then(resp => { if (active) setDetail(resp.data); })
+      .catch(err => {
+        if (active) toast({
+          title: 'Timeline unavailable',
+          description: err?.response?.data?.detail || err.message,
+          variant: 'destructive',
+        });
+      })
+      .finally(() => { if (active) setDetailLoading(false); });
+    return () => { active = false; };
+  }, [selected, toast]);
 
   const analyzeWithOracle = useCallback(async (cveId: string) => {
     if (analyzingCves.has(cveId)) return;
@@ -1110,6 +1144,8 @@ export default function ThreatIntelPage() {
         oracleResult={selected ? oracleResults[selected.cve_id] : undefined}
         onAnalyze={analyzeWithOracle}
         analyzing={selected ? analyzingCves.has(selected.cve_id) : false}
+        detail={detail}
+        detailLoading={detailLoading}
       />
     </MainLayout>
   );
