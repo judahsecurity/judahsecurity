@@ -35,28 +35,43 @@ import { Button } from '@/components/ui/button';
 import { useAuth } from '@/store/auth';
 import { useState } from 'react';
 
-const navigation = [
-  { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
-  { name: 'Organizations', href: '/organizations', icon: Building2 },
-  { name: 'Assets', href: '/assets', icon: Globe },
-  { name: 'Inventory', href: '/inventory', icon: ServerCrash },
-  { name: 'Graph', href: '/graph', icon: GitBranch },
-  { name: 'Findings', href: '/findings', icon: Shield },
-  { name: 'Attacks', href: '/attacks', icon: GitFork },
-  { name: 'Vulnerability Intel', href: '/vulnerability-intel', icon: Radio },
-  { name: 'Detection Coverage', href: '/nuclei-templates', icon: FileCode },
-  { name: 'Detection Patterns', href: '/detection-patterns', icon: ShieldOff },
-  { name: 'Exceptions', href: '/exceptions', icon: FileText },
-  { name: 'Remediation', href: '/remediation', icon: Wrench },
-  { name: 'Screenshots', href: '/screenshots', icon: Camera },
-  { name: 'Scans', href: '/scans', icon: ScanLine },
-  { name: 'Loom', href: '/workflows', icon: Workflow },
-  { name: 'Schedules', href: '/schedules', icon: CalendarClock },
-  { name: 'Ports', href: '/ports', icon: Network },
-  { name: 'Discovery', href: '/discovery', icon: Search },
-  { name: 'Agent', href: '/agent', icon: MessageSquare },
-  { name: 'Pentest', href: '/pentest', icon: Crosshair },
-  { name: 'Integrations', href: '/integrations', icon: Plug },
+const navigationGroups = [
+  {
+    name: 'Overview',
+    items: [
+      { name: 'Dashboard', href: '/dashboard', icon: LayoutDashboard },
+      { name: 'Organizations', href: '/organizations', icon: Building2 },
+      { name: 'Assets', href: '/assets', icon: Globe },
+      { name: 'Inventory', href: '/inventory', icon: ServerCrash },
+      { name: 'Graph', href: '/graph', icon: GitBranch },
+    ],
+  },
+  {
+    name: 'Exposure',
+    items: [
+      { name: 'Findings', href: '/findings', icon: Shield },
+      { name: 'Attacks', href: '/attacks', icon: GitFork },
+      { name: 'Vulnerability Intel', href: '/vulnerability-intel', icon: Radio },
+      { name: 'Detection Coverage', href: '/nuclei-templates', icon: FileCode },
+      { name: 'Detection Patterns', href: '/detection-patterns', icon: ShieldOff },
+      { name: 'Exceptions', href: '/exceptions', icon: FileText },
+      { name: 'Remediation', href: '/remediation', icon: Wrench },
+    ],
+  },
+  {
+    name: 'Operations',
+    items: [
+      { name: 'Screenshots', href: '/screenshots', icon: Camera },
+      { name: 'Scans', href: '/scans', icon: ScanLine },
+      { name: 'Loom', href: '/workflows', icon: Workflow },
+      { name: 'Schedules', href: '/schedules', icon: CalendarClock },
+      { name: 'Ports', href: '/ports', icon: Network },
+      { name: 'Discovery', href: '/discovery', icon: Search },
+      { name: 'Agent', href: '/agent', icon: MessageSquare },
+      { name: 'Pentest', href: '/pentest', icon: Crosshair },
+      { name: 'Integrations', href: '/integrations', icon: Plug },
+    ],
+  },
 ];
 
 const adminNavigation = [
@@ -119,26 +134,40 @@ export function Sidebar() {
       </div>
 
       {/* Navigation */}
-      <nav className="flex-1 px-2 py-4 space-y-1 overflow-y-auto">
-        {navigation.map((item) => {
-          const isActive = pathname === item.href || pathname.startsWith(`${item.href}/`)
-            || (item.href === '/agent' && pathname === '/oracle');
-          return (
-            <Link
-              key={item.name}
-              href={item.href}
-              className={cn(
-                'flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-150',
-                isActive
-                  ? 'bg-primary/15 text-primary border border-primary/25 shadow-[0_0_12px_hsl(213,100%,62%,0.12)]'
-                  : 'text-foreground/90 hover:bg-muted/80 hover:text-foreground border border-transparent'
-              )}
-            >
-              <item.icon className={cn('h-5 w-5 shrink-0', isActive ? 'text-primary drop-shadow-[0_0_6px_hsl(213,100%,62%,0.8)]' : 'text-primary/40')} />
-              {!collapsed && <span>{item.name}</span>}
-            </Link>
-          );
-        })}
+      <nav className="flex-1 px-2 py-4 overflow-y-auto">
+        {navigationGroups.map((group, groupIndex) => (
+          <div key={group.name} className={cn(groupIndex > 0 && 'mt-5')}>
+            {!collapsed ? (
+              <p className="mb-1.5 px-3 text-[9px] font-semibold uppercase tracking-[0.2em] text-muted-foreground/65">
+                {group.name}
+              </p>
+            ) : groupIndex > 0 ? (
+              <div className="mx-3 mb-3 border-t border-border" />
+            ) : null}
+            <div className="space-y-1">
+              {group.items.map((item) => {
+                const isActive = pathname === item.href || pathname.startsWith(`${item.href}/`)
+                  || (item.href === '/agent' && pathname === '/oracle');
+                return (
+                  <Link
+                    key={item.name}
+                    href={item.href}
+                    className={cn(
+                      'flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-all duration-150',
+                      isActive
+                        ? 'bg-primary/15 text-primary border border-primary/25 shadow-[0_0_12px_hsl(213,100%,62%,0.12)]'
+                        : 'text-foreground/90 hover:bg-muted/80 hover:text-foreground border border-transparent'
+                    )}
+                    title={collapsed ? item.name : undefined}
+                  >
+                    <item.icon className={cn('h-5 w-5 shrink-0', isActive ? 'text-primary drop-shadow-[0_0_6px_hsl(213,100%,62%,0.8)]' : 'text-primary/40')} />
+                    {!collapsed && <span>{item.name}</span>}
+                  </Link>
+                );
+              })}
+            </div>
+          </div>
+        ))}
 
         {user?.role === 'admin' && (
           <>
@@ -198,4 +227,3 @@ export function Sidebar() {
     </div>
   );
 }
-
