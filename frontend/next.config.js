@@ -1,6 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: 'standalone',
+  // FastAPI collection routes use a trailing slash. Preserve it so Next does
+  // not trigger redirects to Docker's internal backend hostname.
+  skipTrailingSlashRedirect: true,
   eslint: {
     ignoreDuringBuilds: true,
   },
@@ -36,4 +39,3 @@ const nextConfig = {
 };
 
 module.exports = nextConfig;
-
