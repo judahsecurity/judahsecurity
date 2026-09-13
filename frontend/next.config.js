@@ -29,10 +29,18 @@ const nextConfig = {
     ];
   },
   async rewrites() {
+    const apiOrigin = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
     return [
+      // FastAPI defines the asset collection at `/assets/`. An explicit rule
+      // prevents its 307 Location header from leaking Docker's `backend` host
+      // to the browser when Next normalizes the incoming path.
+      {
+        source: '/api/v1/assets',
+        destination: `${apiOrigin}/api/v1/assets/`,
+      },
       {
         source: '/api/:path*',
-        destination: `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}/api/:path*`,
+        destination: `${apiOrigin}/api/:path*`,
       },
     ];
   },
