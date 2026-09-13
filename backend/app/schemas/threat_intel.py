@@ -17,6 +17,9 @@ class IntelTimelineEvent(BaseModel):
         "cve_published",
         "cve_modified",
         "public_exploit_released",
+        "public_exploit_first_seen",
+        "weaponized_exploit_first_seen",
+        "exploitation_attempt_observed",
         "known_exploited_added",
         "ransomware_activity_reported",
         "detection_authored",
@@ -56,5 +59,9 @@ class CveDetailResponse(BaseModel):
     is_remote: bool
     catalog: dict[str, Any]
     oracle: dict[str, Any]
+    signals: dict[str, Any] = Field(default_factory=dict)
+    exploit_intelligence: dict[str, Any] = Field(default_factory=dict)
+    prioritization: dict[str, Any] = Field(default_factory=dict)
+    shadowserver: dict[str, Any] = Field(default_factory=dict)
     intel_updates: list[IntelTimelineEvent]
     exploitation_timeline: list[IntelTimelineEvent]

@@ -112,6 +112,27 @@ def test_missing_dates_are_omitted_instead_of_invented():
     assert timeline == {"intel_updates": [], "exploitation_timeline": []}
 
 
+def test_first_public_weaponized_and_shadow_attempt_events_use_trustworthy_dates():
+    catalog = {"exploit_intelligence": {"artifact_count": 2, "artifacts": [
+        {"artifact_id": "github:poc", "source": "github_repos", "maturity": "proof_of_concept",
+         "published_at": "2026-09-02", "canonical_url": "https://github.com/x/poc"},
+        {"artifact_id": "metasploit:x", "source": "metasploit", "maturity": "weaponized_turnkey",
+         "published_at": "2026-09-05", "canonical_url": "https://github.com/rapid7/metasploit-framework"},
+    ]}}
+    exploitation = {"shadowserver_direct": {
+        "status": "ok", "found": True, "stale": False, "first_seen": "2026-09-06T00:00:00Z",
+        "sighting_count": 4, "observation_days": 2, "report_type": "event4_honeypot_http_scan",
+        "telemetry_class": "observed_exploitation_attempt", "canonical_url": "https://www.shadowserver.org/",
+    }}
+    timeline = build_cve_timeline("CVE-2026-1234", catalog, exploitation)["exploitation_timeline"]
+    assert [event["kind"] for event in timeline] == [
+        "public_exploit_first_seen", "weaponized_exploit_first_seen", "exploitation_attempt_observed",
+    ]
+    attempt = timeline[-1]
+    assert attempt["scope"] == "organization"
+    assert "does not prove successful compromise" in attempt["description"]
+
+
 def test_non_superuser_cannot_select_another_tenant():
     user = SimpleNamespace(is_superuser=False, organization_id=42)
     assert resolve_organization_id(user, None) == 42

@@ -6,14 +6,15 @@ Aggregates CVEs from all major public exploitation intelligence sources:
   - VulnCheck KEV         (requires VULNCHECK_API_TOKEN)
   - ENISA EU KEV          (free, no key)
   - EUVD                  (EU Vulnerability Database, free, no key)
-  - Shadowserver          (honeypot exploited via CIRCL, free)
+  - Shadowserver          (existing CIRCL feed plus optional org-scoped Reports API)
   - KEVIntel              (attestations via CIRCL KEV catalog, free)
 
 Enriched with:
   - Detection coverage via ProjectDiscovery PDCP (optional key)
   - Active campaign signals via AlienVault OTX (free)
   - NVD / OSV / GHSA first-party CVE metadata (on CVE detail)
-  - Public exploit indexes: PoC-in-GitHub, trickest/cve, GitHub repos, Exploit-DB, CXSecurity
+  - Public exploit indexes: Metasploit metadata, canonical Exploit-DB CSV,
+    PoC-in-GitHub, trickest/cve, GitHub repos, and display-only CXSecurity
   - Oracle OPES analysis from local DB
 """
 
@@ -24,13 +25,15 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db, get_current_active_user
+from app.api.deps import get_db, get_current_active_user, require_analyst
 from app.core.config import settings
 from app.models.api_config import ExternalService, resolve_api_key
 from app.services.vuln_intel_enrichment import enrich_cve_catalog
+from app.services.exploit_intelligence import bounded_priority_contribution
+from app.services.shadowserver_reports import refresh_shadowserver_cache, shadowserver_cve_signal
 from app.schemas.threat_intel import CveDetailResponse
 from app.services.threat_intel_timeline import (
     build_cve_timeline,
@@ -52,6 +55,17 @@ _ENRICH_CONCURRENCY = 8
 # Hard budget so the Vulnerability Intel list cannot hang behind CIRCL/VulnCheck.
 _FEED_TIMEOUT_S = 10.0
 _CVE_ID_RE = re.compile(r"(CVE-\d{4}-\d+)", re.I)
+
+
+def _refresh_shadowserver_background(organization_id: int, days: int, limit: int) -> None:
+    """Refresh with an independent session so request-scoped sessions never escape."""
+    from app.db.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        refresh_shadowserver_cache(db, organization_id, days=days, limit=limit)
+    finally:
+        db.close()
 
 
 def _cached_exploitation_evidence(cve_id: str, vulncheck_token: str) -> dict[str, Any]:
@@ -1113,6 +1127,22 @@ async def get_emerging_vulnerabilities(
     }
 
 
+@router.post("/shadowserver/refresh", status_code=202)
+async def refresh_shadowserver_reports(
+    background_tasks: BackgroundTasks,
+    organization_id: Optional[int] = Query(None),
+    days: int = Query(2, ge=1, le=7),
+    limit: int = Query(1000, ge=1, le=1000),
+    current_user=Depends(require_analyst),
+):
+    """Queue a bounded organization-scoped Shadowserver Reports API refresh."""
+    resolved_org = resolve_organization_id(current_user, organization_id)
+    if resolved_org is None:
+        raise HTTPException(status_code=400, detail="Select an organization before refreshing Shadowserver")
+    background_tasks.add_task(_refresh_shadowserver_background, resolved_org, days, limit)
+    return {"status": "accepted", "organization_id": resolved_org, "window_days": days, "limit": limit}
+
+
 @router.get("/cve/{cve_id}", response_model=CveDetailResponse)
 async def get_cve_detail(
     cve_id: str,
@@ -1148,9 +1178,41 @@ async def get_cve_detail(
             ),
         )
 
+    shadowserver = shadowserver_cve_signal(db, organization_id, cve_id)
+    exploitation["shadowserver_direct"] = shadowserver
     oracle = _get_oracle_analysis_for_cves(db, [cve_id]).get(cve_id, {})
     detection_events = first_party_detection_events(db, cve_id, organization_id)
     timeline = build_cve_timeline(cve_id, catalog, exploitation, detection_events)
+    exploit_intelligence = catalog.get("exploit_intelligence") or {}
+    known_exploited = bool(exploitation.get("cisa") or exploitation.get("vulncheck"))
+    observed_scanning = bool(
+        shadowserver.get("status") == "ok"
+        and shadowserver.get("found")
+        and not shadowserver.get("stale")
+        and shadowserver.get("cve_id") == cve_id
+    )
+    prioritization = bounded_priority_contribution(
+        maturity=exploit_intelligence.get("maturity", "unknown_source_unavailable"),
+        kev=known_exploited,
+        shadowserver_signal=shadowserver,
+    )
+    signals = {
+        "observed_exploitation": {
+            "known_exploited": known_exploited,
+            "observed_scanning": observed_scanning,
+            "shadowserver": shadowserver,
+        },
+        "exploitation_probability": {
+            "provider": "FIRST EPSS",
+            "score": pdcp.get("epss_score"),
+            "percentile": pdcp.get("epss_percentile"),
+        },
+        "public_exploit_maturity": exploit_intelligence,
+        "detection_coverage": {
+            "nuclei_template": bool(pdcp.get("is_template") or pdcp.get("nuclei_templates")),
+            "template_count": pdcp.get("template_count") or (1 if pdcp.get("is_template") else 0),
+        },
+    }
 
     return {
         "cve_id": cve_id,
@@ -1163,6 +1225,10 @@ async def get_cve_detail(
         "is_remote": bool(pdcp.get("is_remote")),
         "catalog": catalog,
         "oracle": oracle,
+        "signals": signals,
+        "exploit_intelligence": exploit_intelligence,
+        "prioritization": prioritization,
+        "shadowserver": shadowserver,
         **timeline,
     }
 
@@ -1268,12 +1334,14 @@ async def analyze_kev_cve(
 async def get_threat_intel_stats(
     organization_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
-    _current_user=Depends(get_current_active_user),
+    current_user=Depends(get_current_active_user),
 ):
     """Quick health-check showing which data sources are configured."""
+    organization_id = resolve_organization_id(current_user, organization_id)
     vulncheck_token = _get_vulncheck_token(db, organization_id)
     pdcp_key = _get_pdcp_key(db, organization_id)
     nvd_key = resolve_api_key(db, ExternalService.NVD, organization_id) or getattr(settings, "NVD_API_KEY", None)
+    shadowserver_status = shadowserver_cve_signal(db, organization_id, "CVE-0000-0000")
     return {
         "sources": {
             "vulncheck_kev": {
@@ -1318,7 +1386,12 @@ async def get_threat_intel_stats(
             },
             "exploitdb": {
                 "configured": True,
-                "description": "Exploit-DB via offensive-security/exploitdb mirror (GITHUB_TOKEN raises rate limits)",
+                "description": "Canonical Exploit-DB CSV metadata with a low-confidence mirror fallback",
+                "key_source": "none_required",
+            },
+            "metasploit": {
+                "configured": True,
+                "description": "Read-only official Metasploit module metadata; no modules or payloads are executed",
                 "key_source": "none_required",
             },
             "cxsecurity": {
@@ -1330,6 +1403,11 @@ async def get_threat_intel_stats(
                 "configured": True,
                 "description": "Shadowserver honeypot exploited CVEs via CIRCL (free)",
                 "key_source": "none_required",
+            },
+            "shadowserver_reports": {
+                "configured": bool(shadowserver_status.get("configured")),
+                "description": "Organization-scoped, redacted CVE attempt aggregates from subscribed Shadowserver reports",
+                "key_source": "db",
             },
             "kevintel": {
                 "configured": True,

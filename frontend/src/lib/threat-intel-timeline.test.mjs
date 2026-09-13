@@ -14,6 +14,10 @@ test('Nuclei lifecycle and first detection receive separate tones', () => {
   assert.equal(timelineEventTone({ category: 'asset_detected' }), 'detected');
 });
 
+test('Shadowserver attempt activity uses an exploitation tone without claiming success', () => {
+  assert.equal(timelineEventTone({ category: 'threat_activity' }), 'exploitation');
+});
+
 test('only web and application references render as links', () => {
   assert.equal(isSafeTimelineReference('https://nvd.nist.gov/vuln/detail/CVE-2024-1'), true);
   assert.equal(isSafeTimelineReference('/nuclei-templates/7'), true);

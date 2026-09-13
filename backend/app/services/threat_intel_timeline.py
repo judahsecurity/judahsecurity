@@ -160,23 +160,49 @@ def external_intel_events(
         title="VulnCheck reported exploitation", source_id="vulncheck_kev",
         source_label="VulnCheck KEV", source_url="https://vulncheck.com/advisories"))
 
-    exploit_sources = catalog.get("exploit_sources") or {}
-    source_specs = (
-        ("poc_github", "PoC-in-GitHub", "pocs"),
-        ("trickest", "trickest/cve", "pocs"),
-        ("github_repos", "GitHub", "repos"),
-    )
-    for source_id, source_label, row_key in source_specs:
-        for row in (exploit_sources.get(source_id) or {}).get(row_key) or []:
-            if not isinstance(row, dict):
-                continue
-            reference = row.get("url")
-            _append(events, _event(cve_id=cve, kind="public_exploit_released", category="exploitation",
-                timestamp=row.get("created_at") or row.get("published_at"),
-                title=f"Public exploit published via {source_label}",
-                description=row.get("description"), source_id=source_id, source_label=source_label,
-                source_url=reference, identity=str(row.get("full_name") or row.get("name") or reference or ""),
-                metadata={"reference": reference, "provider": source_label}))
+    exploit_intelligence = catalog.get("exploit_intelligence") or {}
+    dated_artifacts = [
+        artifact for artifact in (exploit_intelligence.get("artifacts") or [])
+        if isinstance(artifact, dict) and normalize_timestamp(artifact.get("published_at"))
+    ]
+    if dated_artifacts:
+        first_public = min(dated_artifacts, key=lambda row: normalize_timestamp(row.get("published_at")) or "")
+        reference = first_public.get("canonical_url")
+        _append(events, _event(
+            cve_id=cve, kind="public_exploit_first_seen", category="exploitation",
+            timestamp=first_public.get("published_at"), title="First public exploit artifact observed",
+            source_id=str(first_public.get("source") or "public_exploit"),
+            source_label=str(first_public.get("source") or "Public exploit source"),
+            source_url=reference, identity=str(first_public.get("artifact_id") or reference or ""),
+            metadata={"reference": reference, "maturity": first_public.get("maturity"),
+                      "artifact_count": exploit_intelligence.get("artifact_count")},
+        ))
+        weaponized = [row for row in dated_artifacts if row.get("maturity") == "weaponized_turnkey"]
+        if weaponized:
+            first_weaponized = min(weaponized, key=lambda row: normalize_timestamp(row.get("published_at")) or "")
+            reference = first_weaponized.get("canonical_url")
+            _append(events, _event(
+                cve_id=cve, kind="weaponized_exploit_first_seen", category="exploitation",
+                timestamp=first_weaponized.get("published_at"), title="First weaponized public exploit observed",
+                source_id=str(first_weaponized.get("source") or "public_exploit"),
+                source_label=str(first_weaponized.get("source") or "Public exploit source"),
+                source_url=reference, identity=str(first_weaponized.get("artifact_id") or reference or ""),
+                metadata={"reference": reference, "maturity": "weaponized_turnkey"},
+            ))
+
+    shadow = exploitation.get("shadowserver_direct") or {}
+    if shadow.get("status") == "ok" and shadow.get("found") and not shadow.get("stale"):
+        _append(events, _event(
+            cve_id=cve, kind="exploitation_attempt_observed", category="threat_activity",
+            timestamp=shadow.get("first_seen"), title="CVE-targeted exploitation attempt observed",
+            description="Shadowserver honeypot telemetry indicates scanning or an exploit attempt; it does not prove successful compromise.",
+            source_id="shadowserver_reports", source_label="Shadowserver Reports API",
+            source_url=shadow.get("canonical_url"), scope="organization",
+            metadata={"sighting_count": shadow.get("sighting_count"),
+                      "observation_days": shadow.get("observation_days"),
+                      "report_type": shadow.get("report_type"),
+                      "telemetry_class": shadow.get("telemetry_class")},
+        ))
     return events
 
 

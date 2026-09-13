@@ -53,6 +53,7 @@ def _resolve_token() -> tuple[str, str]:
 
 
 def _status() -> int:
+    from app.services.exploit_intelligence import public_exploit_index_status
     from app.services.vuln_intel_feeds import _cache_dir, fetch_vulncheck_kev, read_json_cache
 
     cache_dir = _cache_dir()
@@ -63,6 +64,8 @@ def _status() -> int:
     print(f"vulncheck_kev: {len(vkev)} entries")
     print(f"cisa_kev:      {len(cisa)} entries")
     print(f"enisa_eukev:   {len(enisa)} entries")
+    for source, status in public_exploit_index_status().items():
+        print(f"{source:16} {status['cves']} CVEs ({status['status']})")
     token, source = _resolve_token()
     print(f"vulncheck token: {'configured' if token else 'MISSING'} ({source})")
     return 0 if (vkev or cisa or enisa) else 1
@@ -91,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
         fetch_enisa_eukev_catalog,
         fetch_vulncheck_kev,
     )
+    from app.services.exploit_intelligence import refresh_public_exploit_indexes
 
     cache_dir = _cache_dir()
     print(f"cache dir: {cache_dir}")
@@ -116,6 +120,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  vulncheck_kev: {len(vkev)} entries")
     else:
         print("skipping VulnCheck (no token)")
+
+    print("refreshing canonical Metasploit and Exploit-DB metadata indexes…")
+    exploit_indexes = refresh_public_exploit_indexes(force=args.force)
+    for source, status in exploit_indexes.items():
+        print(f"  {source}: {status.get('status')} ({status.get('cves', 'cached')} CVEs)")
 
     elapsed = (datetime.now(timezone.utc) - started).total_seconds()
     print(f"done in {elapsed:.1f}s")

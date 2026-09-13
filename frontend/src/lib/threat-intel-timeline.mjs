@@ -2,7 +2,7 @@ export function timelineEventTone(event) {
   if (event?.deadline) return 'deadline';
   if (event?.category === 'asset_detected') return 'detected';
   if (String(event?.category || '').startsWith('detection_')) return 'detection';
-  if (event?.category === 'exploitation') return 'exploitation';
+  if (event?.category === 'exploitation' || event?.category === 'threat_activity') return 'exploitation';
   return 'neutral';
 }
 

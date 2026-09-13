@@ -124,6 +124,26 @@ interface CveDetailResponse {
   cve_id: string;
   intel_updates: IntelTimelineEvent[];
   exploitation_timeline: IntelTimelineEvent[];
+  exploit_intelligence: {
+    maturity: string;
+    label: string;
+    artifact_count: number;
+    artifacts: Array<{
+      artifact_id: string;
+      source: string;
+      title?: string;
+      maturity: string;
+      canonical_url?: string;
+      verified?: boolean | null;
+      rank?: number;
+    }>;
+  };
+  signals: {
+    observed_exploitation?: { known_exploited?: boolean; observed_scanning?: boolean; shadowserver?: { sighting_count?: number } };
+    exploitation_probability?: { score?: number | null; percentile?: number | null };
+    detection_coverage?: { nuclei_template?: boolean; template_count?: number };
+  };
+  prioritization: { total?: number; maximum?: number; reasons?: string[] };
 }
 
 // ── Style helpers ─────────────────────────────────────────────────────────────
@@ -477,6 +497,68 @@ function EntryDetail({ entry, open, onClose, oracleResult, onAnalyze, analyzing,
                 {entry.epss_score != null ? `${(entry.epss_score * 100).toFixed(1)}%` : '—'}
               </p>
             </div>
+          </div>
+
+          {/* Independent exploitation dimensions */}
+          <div className="border border-border rounded-lg p-3 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Exploit Availability & Activity</p>
+              {detail?.prioritization?.total != null && (
+                <Badge variant="outline" className="text-[10px]">
+                  Evidence +{detail.prioritization.total}/{detail.prioritization.maximum}
+                </Badge>
+              )}
+            </div>
+            <div className="grid grid-cols-2 gap-3 text-xs">
+              <div>
+                <p className="text-muted-foreground">Observed exploitation</p>
+                <p className="font-medium">
+                  {detail?.signals?.observed_exploitation?.known_exploited
+                    ? 'Confirmed / KEV'
+                    : detail?.signals?.observed_exploitation?.observed_scanning
+                      ? `CVE-targeted attempts (${detail.signals.observed_exploitation.shadowserver?.sighting_count ?? 1})`
+                      : 'Not observed in checked sources'}
+                </p>
+              </div>
+              <div>
+                <p className="text-muted-foreground">EPSS probability</p>
+                <p className="font-medium">
+                  {detail?.signals?.exploitation_probability?.score != null
+                    ? `${(detail.signals.exploitation_probability.score * 100).toFixed(1)}%`
+                    : 'Unavailable'}
+                </p>
+              </div>
+              <div>
+                <p className="text-muted-foreground">Public exploit maturity</p>
+                <p className="font-medium">{detail?.exploit_intelligence?.label ?? 'Loading…'}</p>
+              </div>
+              <div>
+                <p className="text-muted-foreground">Judah detection coverage</p>
+                <p className="font-medium">
+                  {detail?.signals?.detection_coverage?.nuclei_template
+                    ? `${detail.signals.detection_coverage.template_count ?? 1} Nuclei template(s)`
+                    : 'No Nuclei template'}
+                </p>
+              </div>
+            </div>
+            {(detail?.prioritization?.reasons ?? []).map(reason => (
+              <p key={reason} className="text-xs text-amber-300">{reason}</p>
+            ))}
+            {(detail?.exploit_intelligence?.artifacts ?? []).slice(0, 5).map(artifact => (
+              <div key={artifact.artifact_id} className="flex items-center gap-2 text-xs">
+                <Badge variant="outline" className="text-[10px] capitalize">{artifact.source.replaceAll('_', ' ')}</Badge>
+                <span className="truncate">{artifact.title ?? artifact.artifact_id}</span>
+                <span className="ml-auto shrink-0 text-muted-foreground">{artifact.maturity.replaceAll('_', ' ')}</span>
+                {artifact.canonical_url?.startsWith('https://') && (
+                  <a href={artifact.canonical_url} target="_blank" rel="noopener noreferrer" aria-label="Open exploit metadata source">
+                    <ExternalLink className="h-3 w-3" />
+                  </a>
+                )}
+              </div>
+            ))}
+            {detail?.signals?.observed_exploitation?.observed_scanning && (
+              <p className="text-[11px] text-muted-foreground">Shadowserver telemetry indicates scanning or an exploitation attempt, not successful compromise.</p>
+            )}
           </div>
 
           {/* Detection */}

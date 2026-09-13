@@ -331,6 +331,15 @@ class AvailableServicesResponse(BaseModel):
 # Service information
 PAID_SERVICES_INFO = [
     {
+        "name": "shadowserver",
+        "display_name": "Shadowserver Reports API",
+        "description": "Organization-scoped, redacted CVE aggregates from subscribed honeypot HTTP scanner reports",
+        "requires_key": True,
+        "rate_limit": "Bounded background refresh only",
+        "website": "https://www.shadowserver.org/what-we-do/network-reporting/api-research/",
+        "config_options": ["api_uri"],
+    },
+    {
         "name": "ipinfo",
         "display_name": "IPinfo Core",
         "description": "IP geolocation, ASN, network classification, and optional hosted-domain intelligence",
@@ -475,7 +484,6 @@ FREE_SERVICES_INFO = [
         "notes": "Scans cloud provider IP ranges for SSL certificates, revealing domains/subdomains hosted on cloud infrastructure",
     },
 ]
-
 
 
 

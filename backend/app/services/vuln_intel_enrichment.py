@@ -8,7 +8,8 @@ Public exploit / PoC sources (aligned with Aegis Oracle enrichers):
   - nomi-sec/PoC-in-GitHub
   - trickest/cve (broader GitHub PoC aggregator)
   - GitHub repo search (CVE in name)
-  - Exploit-DB (offensive-security/exploitdb mirror)
+  - Exploit-DB canonical CSV (mirror search only as a low-confidence fallback)
+  - Metasploit official module metadata (read-only; no modules or payloads)
   - CXSecurity cveshow
 
 Used by the threat-intel CVE detail endpoint (and any caller that needs
@@ -28,7 +29,14 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+
+from app.services.exploit_intelligence import (
+    build_exploit_intelligence,
+    exploitdb_for_cve,
+    metasploit_for_cve,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -364,7 +372,10 @@ def _fetch_github_repos(cve_id: str, github_token: Optional[str] = None) -> Dict
 
 
 def _fetch_exploitdb(cve_id: str, github_token: Optional[str] = None) -> Dict[str, Any]:
-    """Exploit-DB via offensive-security/exploitdb GitHub code search."""
+    """Prefer Exploit-DB's canonical CSV; use code search only when its cache is unavailable."""
+    canonical = exploitdb_for_cve(cve_id)
+    if canonical.get("available"):
+        return canonical
     try:
         q = f"{cve_id} repo:offensive-security/exploitdb"
         url = f"{GITHUB_SEARCH_CODE}?{urllib.parse.urlencode({'q': q, 'per_page': 10})}"
@@ -373,10 +384,14 @@ def _fetch_exploitdb(cve_id: str, github_token: Optional[str] = None) -> Dict[st
             return {
                 "source": "exploitdb",
                 "found": False,
+                "available": False,
+                "status": "unavailable",
+                "confidence": "unknown",
                 "note": "GitHub rate limit; set GITHUB_TOKEN for higher limits",
             }
         if status != 200:
-            return {"source": "exploitdb", "found": False, "note": f"HTTP {status}"}
+            return {"source": "exploitdb", "found": False, "available": False,
+                    "status": "unavailable", "confidence": "unknown", "note": f"HTTP {status}"}
         payload = json.loads(body.decode("utf-8", errors="replace"))
         total = int(payload.get("total_count") or 0)
         exploits: List[Dict[str, Any]] = []
@@ -395,9 +410,12 @@ def _fetch_exploitdb(cve_id: str, github_token: Optional[str] = None) -> Dict[st
             elif path.startswith("shellcodes/"):
                 exp_type = "shellcode"
             exploits.append({
-                "file": path,
-                "url": item.get("html_url"),
-                "type": exp_type,
+                "artifact_id": f"exploitdb-fallback:{item.get('sha') or item.get('html_url')}",
+                "source": "exploitdb",
+                "canonical_url": item.get("html_url"),
+                "exploit_type": exp_type,
+                "verified": None,
+                "confidence": "low",
             })
             if len(exploits) >= 8:
                 break
@@ -406,11 +424,17 @@ def _fetch_exploitdb(cve_id: str, github_token: Optional[str] = None) -> Dict[st
             "found": bool(exploits),
             "count": total,
             "exploits": exploits,
-            "note": "exploit-db.com via offensive-security/exploitdb mirror",
+            "available": True,
+            "status": "ok",
+            "confidence": "low",
+            "fallback": True,
+            "canonical_url": "https://www.exploit-db.com/",
+            "note": "Fallback mirror search used because the canonical Exploit-DB CSV cache was unavailable",
         }
     except Exception as exc:
         logger.debug("Exploit-DB lookup failed for %s: %s", cve_id, exc)
-        return {"source": "exploitdb", "found": False, "note": str(exc)}
+        return {"source": "exploitdb", "found": False, "available": False,
+                "status": "unavailable", "confidence": "unknown", "note": type(exc).__name__}
 
 
 def _fetch_cxsecurity(cve_id: str) -> Dict[str, Any]:
@@ -624,13 +648,14 @@ def enrich_cve_catalog(
         fut_nvd = pool.submit(_fetch_nvd, cve, nvd_api_key)
         fut_osv = pool.submit(_fetch_osv, cve)
         fut_ghsa = pool.submit(_fetch_ghsa, cve, github_token)
-        fut_poc = fut_trickest = fut_repos = fut_edb = fut_cx = None
+        fut_poc = fut_trickest = fut_repos = fut_edb = fut_cx = fut_msf = None
         if include_exploit_sources:
             fut_poc = pool.submit(_fetch_poc_github, cve)
             fut_trickest = pool.submit(_fetch_trickest, cve)
             fut_repos = pool.submit(_fetch_github_repos, cve, github_token)
             fut_edb = pool.submit(_fetch_exploitdb, cve, github_token)
             fut_cx = pool.submit(_fetch_cxsecurity, cve)
+            fut_msf = pool.submit(metasploit_for_cve, cve)
 
         nvd = fut_nvd.result()
         osv = fut_osv.result()
@@ -643,6 +668,7 @@ def enrich_cve_catalog(
             and fut_repos
             and fut_edb
             and fut_cx
+            and fut_msf
         ):
             exploit_sources = {
                 "poc_github": fut_poc.result(),
@@ -650,7 +676,29 @@ def enrich_cve_catalog(
                 "github_repos": fut_repos.result(),
                 "exploitdb": fut_edb.result(),
                 "cxsecurity": fut_cx.result(),
+                "metasploit": fut_msf.result(),
             }
+
+    retrieved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    canonical_urls = {
+        "poc_github": "https://github.com/nomi-sec/PoC-in-GitHub",
+        "trickest": "https://github.com/trickest/cve",
+        "github_repos": "https://github.com/search",
+        "cxsecurity": f"{CXSECURITY_CVE_SHOW}/{cve}/",
+    }
+    for source, source_result in exploit_sources.items():
+        if not isinstance(source_result, dict):
+            continue
+        source_result.setdefault("retrieved_at", retrieved_at)
+        source_result.setdefault("canonical_url", canonical_urls.get(source))
+        checked_response = any(
+            key in source_result for key in ("pocs", "repos", "entries", "exploits", "artifacts", "count")
+        )
+        source_result.setdefault("available", bool(source_result.get("found") or checked_response))
+        source_result.setdefault("status", "ok" if source_result.get("available") else "unavailable")
+        source_result.setdefault("confidence", "low" if source == "cxsecurity" else "medium")
+        if source == "cxsecurity":
+            source_result["display_only"] = True
 
     # If OSV missed on the CVE id but GHSA has an id, try that.
     if not osv:
@@ -690,6 +738,7 @@ def enrich_cve_catalog(
     )
     cwes = _collect_cwes_from_catalog(nvd, osv, ghsa if isinstance(ghsa, list) else [])
     cwe_intel = build_cwe_intel(cwes)
+    exploit_intelligence = build_exploit_intelligence(cve, exploit_sources) if include_exploit_sources else {}
     result = {
         "cve_id": cve,
         "enriched": bool(nvd or osv or ghsa or exploit_found),
@@ -697,6 +746,7 @@ def enrich_cve_catalog(
         "osv": osv,
         "ghsa": ghsa,
         "exploit_sources": exploit_sources,
+        "exploit_intelligence": exploit_intelligence,
         "cwes": cwes,
         "cwe_intel": cwe_intel,
     }

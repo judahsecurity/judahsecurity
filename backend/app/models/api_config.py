@@ -151,6 +151,7 @@ class ExternalService:
     VULNCHECK = "vulncheck"        # VulnCheck KEV + exploit intelligence
     PDCP = "pdcp"                  # ProjectDiscovery Cloud Platform (vulnx, Nuclei templates)
     NVD = "nvd"                    # NVD API key (raises rate limits)
+    SHADOWSERVER = "shadowserver"  # Org-scoped Reports API key + HMAC secret
 
     # LLM providers (bring-your-own-key). Keys are encrypted at rest and are
     # ONLY ever handed to the model SDK client at construction time — they must
@@ -192,6 +193,7 @@ DEFAULT_RATE_LIMITS = {
     ExternalService.VULNCHECK: {"per_second": 10, "per_day": None},
     ExternalService.PDCP: {"per_second": 10, "per_day": None},
     ExternalService.NVD: {"per_second": 5, "per_day": None},
+    ExternalService.SHADOWSERVER: {"per_second": 0.2, "per_day": None},
     ExternalService.IPINFO: {"per_second": 10, "per_day": None},
 }
 
@@ -285,7 +287,6 @@ def resolve_api_key(db, service: str, organization_id: int | None = None) -> str
     if env_var:
         return os.environ.get(env_var) or None
     return None
-
 
 
 

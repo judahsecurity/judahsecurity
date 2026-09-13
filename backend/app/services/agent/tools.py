@@ -1668,7 +1668,7 @@ class ASMToolsManager(AssessmentCapabilities):
         Returns a comprehensive snapshot including:
           - CVSS score & vector, EPSS score & percentile
           - CISA KEV and VulnCheck KEV membership
-          - Public PoC count and URLs (source, added date)
+          - Public PoC count, URLs, and normalized exploit maturity from read-only metadata
           - HackerOne disclosed report count and rank
           - Nuclei template name and raw YAML (when available)
           - Affected products with CPEs and deployment models
@@ -1716,6 +1716,17 @@ class ASMToolsManager(AssessmentCapabilities):
         if not data:
             return f"No data returned for {cve_id}."
 
+        exploit_intelligence: dict[str, Any] = {}
+        try:
+            from app.services.vuln_intel_enrichment import enrich_cve_catalog
+
+            catalog = await asyncio.to_thread(
+                enrich_cve_catalog, cve_id, use_cache=True, include_exploit_sources=True
+            )
+            exploit_intelligence = catalog.get("exploit_intelligence") or {}
+        except Exception as exc:
+            logger.debug("Public exploit maturity lookup failed for %s: %s", cve_id, type(exc).__name__)
+
         lines = [f"# vulnx — {cve_id}\n"]
 
         # Core severity
@@ -1745,6 +1756,17 @@ class ASMToolsManager(AssessmentCapabilities):
             added = p.get("added_at", "")[:10] if p.get("added_at") else ""
             lines.append(f"  - [{p.get('source','?')}] {p.get('url','')}  (added {added})")
         lines.append("")
+        if exploit_intelligence:
+            lines.append(f"**Public Exploit Maturity**: {exploit_intelligence.get('label', 'Unknown')}")
+            lines.append(
+                "  This is distinct from KEV/observed exploitation, EPSS probability, and detection coverage."
+            )
+            for artifact in (exploit_intelligence.get("artifacts") or [])[:5]:
+                lines.append(
+                    f"  - [{artifact.get('source', '?')}] {artifact.get('title') or artifact.get('artifact_id', '')} "
+                    f"({artifact.get('maturity', 'unknown')}) {artifact.get('canonical_url', '')}"
+                )
+            lines.append("")
 
         # HackerOne
         h1 = data.get("h1") or {}

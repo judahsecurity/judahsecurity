@@ -24,6 +24,12 @@ export interface IntelTimelineEvent {
     provider?: string;
     reference?: string;
     known_ransomware_use?: string;
+    maturity?: string;
+    artifact_count?: number;
+    sighting_count?: number;
+    observation_days?: number;
+    report_type?: string;
+    telemetry_class?: string;
   };
 }
 

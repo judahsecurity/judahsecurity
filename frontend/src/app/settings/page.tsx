@@ -134,6 +134,16 @@ const API_SERVICES = [
     group: 'Vulnerability Intelligence',
   },
   {
+    name: 'shadowserver',
+    label: 'Shadowserver Reports API',
+    description: 'Optional organization-scoped Honeypot HTTP Scanner Events. The HMAC secret is encrypted and only redacted CVE-level exploitation-attempt aggregates are exposed.',
+    free: true,
+    hasUser: false,
+    hasSecret: true,
+    link: 'https://www.shadowserver.org/what-we-do/network-reporting/api-research/',
+    group: 'Vulnerability Intelligence',
+  },
+  {
     name: 'ipinfo',
     label: 'IPinfo Core',
     description: 'Enrich IPs and resolved domains with location, ASN, network flags, and optional co-hosted domain candidates.',
@@ -200,6 +210,7 @@ export default function SettingsPage() {
   const [testing, setTesting] = useState<string | null>(null);
   const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
   const [apiUsers, setApiUsers] = useState<Record<string, string>>({});
+  const [apiSecrets, setApiSecrets] = useState<Record<string, string>>({});
   // Delphi enrichment status
   const [delphiStatus, setDelphiStatus] = useState<any>(null);
   const [delphiLoading, setDelphiLoading] = useState(false);
@@ -393,6 +404,9 @@ export default function SettingsPage() {
       if (serviceName === 'virustotal' && apiUsers[serviceName]) {
         payload.api_user = apiUsers[serviceName];
       }
+      if (serviceName === 'shadowserver' && apiSecrets[serviceName]) {
+        payload.api_secret = apiSecrets[serviceName];
+      }
       
       // Add organization names for WhoisXML
       if (serviceName === 'whoisxml' && orgNames.length > 0) {
@@ -413,6 +427,7 @@ export default function SettingsPage() {
       
       setApiKeys({ ...apiKeys, [serviceName]: '' });
       setApiUsers({ ...apiUsers, [serviceName]: '' });
+      setApiSecrets({ ...apiSecrets, [serviceName]: '' });
       fetchApiConfigs(parseInt(selectedOrg));
     } catch (error: any) {
       toast({
@@ -758,6 +773,17 @@ export default function SettingsPage() {
                           placeholder="API Username (optional)"
                           value={apiUsers[service.name] || ''}
                           onChange={(e) => setApiUsers({ ...apiUsers, [service.name]: e.target.value })}
+                          className="flex-1"
+                        />
+                      </div>
+                    )}
+                    {'hasSecret' in service && service.hasSecret && (
+                      <div className="flex gap-2">
+                        <Input
+                          type="password"
+                          placeholder="API HMAC secret"
+                          value={apiSecrets[service.name] || ''}
+                          onChange={(e) => setApiSecrets({ ...apiSecrets, [service.name]: e.target.value })}
                           className="flex-1"
                         />
                       </div>
