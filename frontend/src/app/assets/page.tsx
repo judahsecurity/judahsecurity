@@ -4,6 +4,8 @@ import { useEffect, useState, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { MainLayout } from '@/components/layout/MainLayout';
 import { Header } from '@/components/layout/Header';
+import { AssetDetailDrawer } from '@/components/assets/AssetDetailDrawer';
+import { TechnologyAssetPivot } from '@/components/assets/TechnologyAssetPivot';
 import { Card } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -182,11 +184,12 @@ export default function AssetsPage() {
   const [typeFilter, setTypeFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<string>('all');
   const [liveFilter, setLiveFilter] = useState<string>('live'); // Default to live assets
-  const [viewMode, setViewMode] = useState<'all' | 'by_host'>('by_host'); // Consolidated by host by default
+  const [viewMode, setViewMode] = useState<'all' | 'by_host' | 'by_technology'>('all'); // Asset-first inventory by default
   const [organizations, setOrganizations] = useState<any[]>([]);
   const [sortColumn, setSortColumn] = useState<string>('');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
   const [selectedScreenshot, setSelectedScreenshot] = useState<{ url: string; asset: string } | null>(null);
+  const [selectedAssetId, setSelectedAssetId] = useState<number | null>(null);
   const [editingLabels, setEditingLabels] = useState<Asset | null>(null);
   const [newLabel, setNewLabel] = useState('');
   const { toast } = useToast();
@@ -580,7 +583,7 @@ export default function AssetsPage() {
   };
 
   const handleFilterChange = (key: string, value: string) => {
-    if (key === 'view') setViewMode(value as 'all' | 'by_host');
+    if (key === 'view') setViewMode(value as 'all' | 'by_host' | 'by_technology');
     if (key === 'type') setTypeFilter(value);
     if (key === 'status') setStatusFilter(value);
     if (key === 'organization') setOrgFilter(value);
@@ -620,8 +623,9 @@ export default function AssetsPage() {
       key: 'view',
       label: 'View',
       options: [
-        { label: 'By host (consolidated)', value: 'by_host' },
         { label: 'All assets', value: 'all' },
+        { label: 'By host (consolidated)', value: 'by_host' },
+        { label: 'By technology', value: 'by_technology' },
       ],
     },
     {
@@ -984,6 +988,14 @@ export default function AssetsPage() {
           filterValues={{ view: viewMode, organization: orgFilter, live: liveFilter, type: typeFilter, status: statusFilter }}
           onFilterChange={handleFilterChange}
         >
+          {viewMode === 'by_technology' ? (
+            <TechnologyAssetPivot
+              organizationId={orgFilter !== 'all' ? parseInt(orgFilter) : undefined}
+              search={search}
+              liveFilter={liveFilter}
+              onSelectAsset={setSelectedAssetId}
+            />
+          ) : (
           <Card className="overflow-hidden">
             <Table>
               <TableHeader>
@@ -1046,7 +1058,7 @@ export default function AssetsPage() {
                       <TableRow 
                         key={isGroup ? `host-${row.host}` : asset.id} 
                         className={`border-border cursor-pointer transition-colors hover:bg-secondary/50 ${isSelected ? 'bg-primary/5' : ''}`}
-                        onClick={() => router.push(`/assets/${asset.id}`)}
+                        onClick={() => setSelectedAssetId(asset.id)}
                       >
                         {/* Checkbox */}
                         <TableCell onClick={(e) => e.stopPropagation()}>
@@ -1484,6 +1496,7 @@ export default function AssetsPage() {
               </TableBody>
             </Table>
           </Card>
+          )}
         </TableCustomization>
 
         {/* Pagination controls */}
@@ -1525,6 +1538,15 @@ export default function AssetsPage() {
           </div>
         </div>
       </div>
+
+      <AssetDetailDrawer
+        assetId={selectedAssetId}
+        open={selectedAssetId !== null}
+        onOpenChange={(nextOpen) => {
+          if (!nextOpen) setSelectedAssetId(null);
+        }}
+        onAssetChanged={() => fetchData(currentPage)}
+      />
 
       {/* Screenshot Preview Dialog */}
       <Dialog open={!!selectedScreenshot} onOpenChange={() => setSelectedScreenshot(null)}>
