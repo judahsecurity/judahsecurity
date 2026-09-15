@@ -60,13 +60,19 @@ rollback() {
       build_services+=("$service")
     fi
   done
-  for service in oast-worker backend scanner scheduler intel-refresher frontend aegis-oracle nginx; do
+  for service in oast-worker backend scanner scheduler intel-refresher frontend aegis-oracle neo4j nginx; do
     if printf '%s\n' "${available[@]}" | grep -qx "$service"; then
       run_services+=("$service")
     fi
   done
   sudo docker compose build "${build_services[@]}"
   sudo docker compose up -d "${run_services[@]}"
+  # Nginx resolves Compose service names when its configuration is loaded.
+  # Reload it after upstream containers are replaced so it does not retain a
+  # stale backend/frontend address during rollback.
+  if printf '%s\n' "${available[@]}" | grep -qx nginx; then
+    sudo docker compose restart nginx
+  fi
   exit "$status"
 }
 trap rollback EXIT
@@ -97,7 +103,9 @@ echo "[4/7] Building images"
 sudo docker compose build backend scanner intel-refresher frontend aegis-oracle
 
 echo "[5/7] Starting services"
-sudo docker compose up -d oast-worker backend scanner scheduler intel-refresher frontend aegis-oracle nginx
+sudo docker compose up -d oast-worker backend scanner scheduler intel-refresher frontend aegis-oracle neo4j nginx
+# Re-resolve backend and frontend service names after Compose recreates them.
+sudo docker compose restart nginx
 
 echo "[6/7] Running additive migrations"
 sudo docker exec asm_backend python scripts/migrate_add_oracle_columns.py --backfill 2>/dev/null || true
