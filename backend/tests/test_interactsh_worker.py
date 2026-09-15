@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import signal
 import sys
 from pathlib import Path
 
@@ -47,6 +48,59 @@ def test_rpc_healthcheck_rejects_missing_worker_response(monkeypatch):
     )
 
     assert interactsh_worker.rpc_healthcheck() is False
+
+
+def test_register_checkpoints_session_before_return(monkeypatch, tmp_path):
+    ish = interactsh_worker.interactsh_service
+    processes = []
+    session_path = None
+
+    class _Process:
+        def __init__(self, command, first):
+            nonlocal session_path
+            session_path = command[command.index("-sf") + 1]
+            self.stdout = iter(
+                ["[INF] abc123def45678901234.oast.fun\n"] if first else []
+            )
+            self.returncode = None
+            self.signal = None
+
+        def poll(self):
+            return self.returncode
+
+        def send_signal(self, sent):
+            self.signal = sent
+            Path(session_path).write_text("saved-session", encoding="utf-8")
+            self.returncode = 1
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+        def terminate(self):
+            self.returncode = 0
+
+        def kill(self):
+            self.returncode = -9
+
+    def _popen(command, **_kwargs):
+        process = _Process(command, first=not processes)
+        processes.append(process)
+        return process
+
+    monkeypatch.setenv("AEGIS_INTERACTSH_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(ish, "_binary", lambda: "/usr/local/bin/interactsh-client")
+    monkeypatch.setattr(ish.subprocess, "Popen", _popen)
+    ish._SESSIONS.clear()
+    try:
+        result = ish.register()
+        assert result["success"] is True
+        assert len(processes) == 2
+        assert processes[0].signal == signal.SIGINT
+        assert Path(session_path).read_text(encoding="utf-8") == "saved-session"
+        assert ish._SESSIONS[result["session_id"]].proc is processes[1]
+    finally:
+        for sid in list(ish._SESSIONS):
+            ish.stop(sid)
 
 
 def test_live_canary_reports_worker_health_failure_without_keyerror(monkeypatch):
