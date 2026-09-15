@@ -16,10 +16,10 @@
 # API docs:    http://localhost:8000/api/docs
 # Oracle:      http://localhost:8742/health
 #
-# Lighter stack (UI + API + DB + Redis + Oracle only — no nginx/scanner/scheduler):
+# Lighter stack (UI + API + intel refresh + DB + Redis + Oracle only — no nginx/scanner/scheduler):
 #
 #   docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build \
-#     db redis backend frontend aegis-oracle
+#     db redis backend intel-refresher frontend aegis-oracle
 # =============================================================================
 
 services:

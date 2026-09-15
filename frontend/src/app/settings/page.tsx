@@ -109,7 +109,7 @@ const API_SERVICES = [
   {
     name: 'vulncheck',
     label: 'VulnCheck',
-    description: 'KEV exploit intelligence — recently-added known-exploited CVEs, ransomware associations, threat-actor attribution, weaponized exploit evidence. Powers the Vulnerability Intelligence feed and OPES X-component scoring.',
+    description: 'KEV and exploit/XDB intelligence — known-exploited CVEs, public exploit maturity, validation, ransomware associations, and weaponized evidence. Powers Vulnerability Intelligence and OPES scoring.',
     free: false,
     hasUser: false,
     link: 'https://vulncheck.com/',
@@ -118,7 +118,7 @@ const API_SERVICES = [
   {
     name: 'pdcp',
     label: 'ProjectDiscovery Cloud Platform',
-    description: 'Nuclei template availability (is_template), PoC detection, remote exploitability flags per CVE. Powers the Vulnerability Intelligence detection coverage column and raises vulnx rate limits.',
+    description: 'Optional ProjectDiscovery Cloud enrichment and higher vulnx rate limits. Public Nuclei template coverage is also synchronized from the checksum-verified nuclei-templates CVE index without a key.',
     free: true,
     hasUser: false,
     link: 'https://cloud.projectdiscovery.io/',

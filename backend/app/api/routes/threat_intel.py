@@ -13,8 +13,10 @@ Enriched with:
   - Detection coverage via ProjectDiscovery PDCP (optional key)
   - Active campaign signals via AlienVault OTX (free)
   - NVD / OSV / GHSA first-party CVE metadata (on CVE detail)
-  - Public exploit indexes: Metasploit metadata, canonical Exploit-DB CSV,
-    PoC-in-GitHub, trickest/cve, GitHub repos, and display-only CXSecurity
+  - Public exploit indexes: VulnCheck exploits/XDB, Metasploit metadata,
+    canonical Exploit-DB CSV, PoC-in-GitHub, trickest/cve, GitHub repos,
+    and display-only CXSecurity
+  - Public Nuclei CVE template index (checksum-verified; no PDCP key required)
   - Oracle OPES analysis from local DB
 """
 
@@ -33,6 +35,11 @@ from app.core.config import settings
 from app.models.api_config import ExternalService, resolve_api_key
 from app.services.vuln_intel_enrichment import enrich_cve_catalog
 from app.services.exploit_intelligence import bounded_priority_contribution
+from app.services.external_vuln_indexes import (
+    external_index_status,
+    nuclei_coverage_for_cves,
+    vulncheck_exploits_for_cves,
+)
 from app.services.shadowserver_reports import refresh_shadowserver_cache, shadowserver_cve_signal
 from app.schemas.threat_intel import CveDetailResponse
 from app.services.threat_intel_timeline import (
@@ -754,7 +761,46 @@ def _detection_tier(pdcp: dict) -> str:
         return "poc_available"     # PoC exists, can verify manually
     if is_remote:
         return "remote_no_template"  # remotely exploitable, no auto-detection
+    if not pdcp.get("_coverage_sources_available", bool(pdcp)):
+        return "unknown"
     return "no_detection"
+
+
+def _merge_external_coverage(
+    cve_id: str,
+    pdcp: dict,
+    *,
+    nuclei: dict | None = None,
+    vulncheck: dict | None = None,
+) -> dict:
+    """Combine optional PDCP enrichment with cached public metadata indexes."""
+    merged = dict(pdcp) if isinstance(pdcp, dict) else {}
+    if nuclei is None:
+        nuclei = nuclei_coverage_for_cves([cve_id]).get(cve_id, {})
+    if vulncheck is None:
+        vulncheck = vulncheck_exploits_for_cves([cve_id]).get(cve_id, {})
+    if nuclei.get("found"):
+        try:
+            existing_count = int(merged.get("template_count") or 0)
+        except (TypeError, ValueError):
+            existing_count = 0
+        merged["is_template"] = True
+        merged["template_count"] = max(
+            existing_count,
+            int(nuclei.get("template_count") or 0),
+        )
+    if vulncheck.get("found"):
+        merged["is_poc"] = True
+    if vulncheck.get("is_remote"):
+        merged["is_remote"] = True
+    merged["nuclei_templates_public"] = nuclei.get("templates") or []
+    merged["nuclei_source_status"] = nuclei.get("status") or "unavailable"
+    merged["vulncheck_exploit_types"] = vulncheck.get("exploit_types") or []
+    merged["vulncheck_exploit_source_status"] = vulncheck.get("status") or "unavailable"
+    merged["_coverage_sources_available"] = bool(
+        pdcp or nuclei.get("available") or vulncheck.get("available")
+    )
+    return merged
 
 
 def _safe_float(value: Any) -> Optional[float]:
@@ -870,6 +916,10 @@ def _build_entry(
         "is_remote": bool(pdcp.get("is_remote")),
         "detection_tier": _detection_tier(pdcp),
         "template_count": pdcp.get("template_count") or (1 if pdcp.get("is_template") else 0),
+        "nuclei_templates": pdcp.get("nuclei_templates_public") or [],
+        "nuclei_source_status": pdcp.get("nuclei_source_status") or "unavailable",
+        "exploit_types": pdcp.get("vulncheck_exploit_types") or [],
+        "exploit_source_status": pdcp.get("vulncheck_exploit_source_status") or "unavailable",
         "otx_pulse_count": pulses,
         "otx_active_campaign": pulses >= 20,
         "tags": _as_tag_list(pdcp.get("tags")),
@@ -887,7 +937,7 @@ def _build_entry(
 async def get_emerging_vulnerabilities(
     days: int = Query(30, ge=0, le=3650, description="KEV entries added in the last N days; 0 = all time"),
     severity: Optional[str] = Query(None, description="Filter by severity (critical,high,medium,low)"),
-    detection: Optional[str] = Query(None, description="Filter: nuclei_template | poc_available | remote_no_template | no_detection"),
+    detection: Optional[str] = Query(None, description="Filter: nuclei_template | poc_available | remote_no_template | no_detection | unknown"),
     source: Optional[str] = Query(None, description="Filter by source(s): cisa_kev,vulncheck_kev,enisa_kev,euvd,shadowserver,kevintel (comma-separated)"),
     limit: int = Query(500, ge=1, le=2000),
     include_otx: bool = Query(
@@ -913,6 +963,7 @@ async def get_emerging_vulnerabilities(
     organization_id = resolve_organization_id(current_user, organization_id)
     vulncheck_token = _get_vulncheck_token(db, organization_id)
     pdcp_key = _get_pdcp_key(db, organization_id)
+    index_status = external_index_status()
 
     cutoff = (
         datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -941,6 +992,10 @@ async def get_emerging_vulnerabilities(
         "multi_source_count": 0,
         "vulncheck_configured": bool(vulncheck_token),
         "pdcp_configured": bool(pdcp_key),
+        "nuclei_index_status": index_status.get("nuclei", {"status": "unavailable", "cves": 0}),
+        "vulncheck_exploits_status": index_status.get(
+            "vulncheck_exploits", {"status": "unavailable", "cves": 0}
+        ),
         "otx_deferred": not include_otx,
         "catalog": {
             "cisa_kev": 0,
@@ -1043,6 +1098,16 @@ async def get_emerging_vulnerabilities(
     if not isinstance(epss_map, dict):
         epss_map = {}
 
+    nuclei_map = nuclei_coverage_for_cves(cve_ids)
+    vulncheck_exploit_map = vulncheck_exploits_for_cves(cve_ids)
+    for cve_id in cve_ids:
+        pdcp_map[cve_id] = _merge_external_coverage(
+            cve_id,
+            pdcp_map.get(cve_id) or {},
+            nuclei=nuclei_map.get(cve_id) or {},
+            vulncheck=vulncheck_exploit_map.get(cve_id) or {},
+        )
+
     # Oracle DB lookup (sync, local DB — no HTTP)
     oracle_map = _get_oracle_analysis_for_cves(db, cve_ids)
 
@@ -1115,6 +1180,10 @@ async def get_emerging_vulnerabilities(
         "multi_source_count": sum(1 for e in entries if len(e.get("kev_sources", [])) > 1),
         "vulncheck_configured": bool(vulncheck_token),
         "pdcp_configured": bool(pdcp_key),
+        "nuclei_index_status": index_status.get("nuclei", {"status": "unavailable", "cves": 0}),
+        "vulncheck_exploits_status": index_status.get(
+            "vulncheck_exploits", {"status": "unavailable", "cves": 0}
+        ),
         "otx_deferred": not include_otx,
         "catalog": catalog,
     }
@@ -1162,7 +1231,7 @@ async def get_cve_detail(
     github_token = getattr(settings, "GITHUB_TOKEN", None)
 
     async with httpx.AsyncClient() as client:
-        pdcp, otx_count, catalog, exploitation = await asyncio.gather(
+        pdcp, otx_count, catalog, exploitation, epss_map = await asyncio.gather(
             _fetch_pdcp_cve(client, cve_id, pdcp_key),
             _fetch_otx_pulse_count(client, cve_id),
             asyncio.to_thread(
@@ -1176,7 +1245,11 @@ async def get_cve_detail(
                 cve_id,
                 _get_vulncheck_token(db, organization_id),
             ),
+            _fetch_epss_batch(client, [cve_id]),
         )
+
+    pdcp = _merge_external_coverage(cve_id, pdcp)
+    epss = epss_map.get(cve_id) or {}
 
     shadowserver = shadowserver_cve_signal(db, organization_id, cve_id)
     exploitation["shadowserver_direct"] = shadowserver
@@ -1204,13 +1277,15 @@ async def get_cve_detail(
         },
         "exploitation_probability": {
             "provider": "FIRST EPSS",
-            "score": pdcp.get("epss_score"),
-            "percentile": pdcp.get("epss_percentile"),
+            "score": pdcp.get("epss_score") if pdcp.get("epss_score") is not None else epss.get("epss_score"),
+            "percentile": pdcp.get("epss_percentile") if pdcp.get("epss_percentile") is not None else epss.get("epss_percentile"),
         },
         "public_exploit_maturity": exploit_intelligence,
         "detection_coverage": {
             "nuclei_template": bool(pdcp.get("is_template") or pdcp.get("nuclei_templates")),
             "template_count": pdcp.get("template_count") or (1 if pdcp.get("is_template") else 0),
+            "source_status": pdcp.get("nuclei_source_status") or "unavailable",
+            "templates": pdcp.get("nuclei_templates_public") or [],
         },
     }
 
@@ -1342,6 +1417,7 @@ async def get_threat_intel_stats(
     pdcp_key = _get_pdcp_key(db, organization_id)
     nvd_key = resolve_api_key(db, ExternalService.NVD, organization_id) or getattr(settings, "NVD_API_KEY", None)
     shadowserver_status = shadowserver_cve_signal(db, organization_id, "CVE-0000-0000")
+    index_status = external_index_status()
     return {
         "sources": {
             "vulncheck_kev": {
@@ -1351,8 +1427,20 @@ async def get_threat_intel_stats(
             },
             "pdcp_vulnx": {
                 "configured": bool(pdcp_key),
-                "description": "ProjectDiscovery PDCP — Nuclei template & PoC availability",
+                "description": "ProjectDiscovery PDCP — optional richer Nuclei template & PoC metadata",
                 "key_source": "db" if resolve_api_key(db, ExternalService.PDCP, organization_id) else "env",
+            },
+            "nuclei_public_index": {
+                "configured": index_status.get("nuclei", {}).get("status") in {"ok", "stale"},
+                "description": "ProjectDiscovery public Nuclei CVE index — checksum-verified template coverage",
+                "key_source": "none_required",
+                **index_status.get("nuclei", {}),
+            },
+            "vulncheck_exploits": {
+                "configured": bool(vulncheck_token),
+                "description": "VulnCheck exploits/XDB — public exploit metadata and maturity signals",
+                "key_source": "db" if resolve_api_key(db, ExternalService.VULNCHECK, organization_id) else "env",
+                **index_status.get("vulncheck_exploits", {}),
             },
             "nvd": {
                 "configured": bool(nvd_key),

@@ -36,10 +36,10 @@ ssh $SSH_OPTS "$SSH_USER@$EC2_IP" bash <<EOF
   # scanner  — scanner_worker.py (CommonCrawl handler, in_scope guards)
   # scheduler — schedule_worker.py (daily CC refresh)
   # frontend  — settings page UI updates
-  docker compose build backend scanner scheduler frontend aegis-oracle
+  docker compose build backend scanner scheduler intel-refresher frontend aegis-oracle
 
   echo "[3/5] Restarting services..."
-  docker compose up -d --no-deps backend scanner scheduler frontend aegis-oracle nginx
+  docker compose up -d --no-deps backend scanner scheduler intel-refresher frontend aegis-oracle nginx
 
   echo "[4/5] Running migrations..."
   # Oracle columns (existing)

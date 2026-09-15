@@ -1,8 +1,8 @@
-"""Bootstrap / increment VulnCheck KEV (and CISA/ENISA caches) on the host.
+"""Refresh KEV, exploit metadata, and public Nuclei coverage caches on the host.
 
 Run this on the AWS instance inside the backend container so Vulnerability Intel
-has disk-cached data to serve. First run downloads the community KEV backup;
-later runs only merge newly added rows.
+has disk-cached data to serve. This includes VulnCheck KEV and exploit/XDB
+metadata plus ProjectDiscovery's generated Nuclei CVE index.
 
 Usage (on the EC2 host)::
 
@@ -54,6 +54,7 @@ def _resolve_token() -> tuple[str, str]:
 
 def _status() -> int:
     from app.services.exploit_intelligence import public_exploit_index_status
+    from app.services.external_vuln_indexes import external_index_status
     from app.services.vuln_intel_feeds import _cache_dir, fetch_vulncheck_kev, read_json_cache
 
     cache_dir = _cache_dir()
@@ -66,6 +67,8 @@ def _status() -> int:
     print(f"enisa_eukev:   {len(enisa)} entries")
     for source, status in public_exploit_index_status().items():
         print(f"{source:16} {status['cves']} CVEs ({status['status']})")
+    for source, status in external_index_status().items():
+        print(f"{source:20} {status['cves']} CVEs ({status['status']})")
     token, source = _resolve_token()
     print(f"vulncheck token: {'configured' if token else 'MISSING'} ({source})")
     return 0 if (vkev or cisa or enisa) else 1
@@ -95,6 +98,10 @@ def main(argv: list[str] | None = None) -> int:
         fetch_vulncheck_kev,
     )
     from app.services.exploit_intelligence import refresh_public_exploit_indexes
+    from app.services.external_vuln_indexes import (
+        refresh_nuclei_cve_index,
+        refresh_vulncheck_exploit_index,
+    )
 
     cache_dir = _cache_dir()
     print(f"cache dir: {cache_dir}")
@@ -118,8 +125,19 @@ def main(argv: list[str] | None = None) -> int:
         print("fetching VulnCheck community KEV (backup if empty, else new rows)…")
         vkev = fetch_vulncheck_kev(token, force=args.force, request_timeout=120)
         print(f"  vulncheck_kev: {len(vkev)} entries")
+        print("fetching VulnCheck exploit/XDB metadata…")
+        vulncheck_exploits = refresh_vulncheck_exploit_index(token, force=args.force)
+        print(
+            "  vulncheck_exploits: "
+            f"{vulncheck_exploits.get('status')} "
+            f"({vulncheck_exploits.get('cves', 0)} CVEs)"
+        )
     else:
         print("skipping VulnCheck (no token)")
+
+    print("refreshing ProjectDiscovery Nuclei CVE template index…")
+    nuclei = refresh_nuclei_cve_index(force=args.force)
+    print(f"  nuclei: {nuclei.get('status')} ({nuclei.get('cves', 0)} CVEs)")
 
     print("refreshing canonical Metasploit and Exploit-DB metadata indexes…")
     exploit_indexes = refresh_public_exploit_indexes(force=args.force)

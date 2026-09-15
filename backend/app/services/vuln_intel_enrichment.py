@@ -37,6 +37,7 @@ from app.services.exploit_intelligence import (
     exploitdb_for_cve,
     metasploit_for_cve,
 )
+from app.services.external_vuln_indexes import vulncheck_exploits_for_cve
 
 logger = logging.getLogger(__name__)
 
@@ -648,7 +649,7 @@ def enrich_cve_catalog(
         fut_nvd = pool.submit(_fetch_nvd, cve, nvd_api_key)
         fut_osv = pool.submit(_fetch_osv, cve)
         fut_ghsa = pool.submit(_fetch_ghsa, cve, github_token)
-        fut_poc = fut_trickest = fut_repos = fut_edb = fut_cx = fut_msf = None
+        fut_poc = fut_trickest = fut_repos = fut_edb = fut_cx = fut_msf = fut_vulncheck = None
         if include_exploit_sources:
             fut_poc = pool.submit(_fetch_poc_github, cve)
             fut_trickest = pool.submit(_fetch_trickest, cve)
@@ -656,6 +657,7 @@ def enrich_cve_catalog(
             fut_edb = pool.submit(_fetch_exploitdb, cve, github_token)
             fut_cx = pool.submit(_fetch_cxsecurity, cve)
             fut_msf = pool.submit(metasploit_for_cve, cve)
+            fut_vulncheck = pool.submit(vulncheck_exploits_for_cve, cve)
 
         nvd = fut_nvd.result()
         osv = fut_osv.result()
@@ -669,6 +671,7 @@ def enrich_cve_catalog(
             and fut_edb
             and fut_cx
             and fut_msf
+            and fut_vulncheck
         ):
             exploit_sources = {
                 "poc_github": fut_poc.result(),
@@ -677,6 +680,7 @@ def enrich_cve_catalog(
                 "exploitdb": fut_edb.result(),
                 "cxsecurity": fut_cx.result(),
                 "metasploit": fut_msf.result(),
+                "vulncheck": fut_vulncheck.result(),
             }
 
     retrieved_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -685,6 +689,7 @@ def enrich_cve_catalog(
         "trickest": "https://github.com/trickest/cve",
         "github_repos": "https://github.com/search",
         "cxsecurity": f"{CXSECURITY_CVE_SHOW}/{cve}/",
+        "vulncheck": f"https://www.vulncheck.com/xdb/?cve={cve}",
     }
     for source, source_result in exploit_sources.items():
         if not isinstance(source_result, dict):

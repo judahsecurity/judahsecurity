@@ -372,6 +372,29 @@ services:
     networks:
       - asm_network
 
+  # Incremental vulnerability intelligence updates. Runs once on startup and
+  # then on the configured cadence, sharing the backend's persistent cache.
+  intel-refresher:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: asm_intel_refresher
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-asm_user}:${POSTGRES_PASSWORD:-asm_password}@db:5432/${POSTGRES_DB:-asm_db}
+      - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-change-in-production}
+      - VULNCHECK_API_TOKEN=${VULNCHECK_API_TOKEN:-}
+      - DELPHI_CACHE_DIR=${DELPHI_CACHE_DIR:-/app/data/delphi_cache}
+      - VULN_INTEL_REFRESH_INTERVAL_SECONDS=${VULN_INTEL_REFRESH_INTERVAL_SECONDS:-3600}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["python", "-m", "app.workers.vuln_intel_worker"]
+    volumes:
+      - delphi_cache:/app/data/delphi_cache
+    networks:
+      - asm_network
+
   # Database Admin Interface (optional, for development)
   adminer:
     image: adminer:latest

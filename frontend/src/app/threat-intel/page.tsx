@@ -62,7 +62,7 @@ import { IntelTimeline, type IntelTimelineEvent } from '@/components/threat-inte
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
-type DetectionTier = 'nuclei_template' | 'poc_available' | 'remote_no_template' | 'no_detection';
+type DetectionTier = 'nuclei_template' | 'poc_available' | 'remote_no_template' | 'no_detection' | 'unknown';
 
 interface EmergingEntry {
   cve_id: string;
@@ -81,6 +81,10 @@ interface EmergingEntry {
   is_remote: boolean;
   detection_tier: DetectionTier;
   template_count: number;
+  nuclei_templates?: { template_id: string; name: string; canonical_url: string; file_path: string }[];
+  nuclei_source_status?: string;
+  exploit_types?: string[];
+  exploit_source_status?: string;
   otx_pulse_count: number;
   otx_active_campaign: boolean;
   tags: string[];
@@ -111,6 +115,8 @@ interface Summary {
   multi_source_count: number;
   vulncheck_configured: boolean;
   pdcp_configured: boolean;
+  nuclei_index_status?: { status: string; cves: number; retrieved_at?: string };
+  vulncheck_exploits_status?: { status: string; cves: number; retrieved_at?: string };
 }
 
 interface EmergingResponse {
@@ -141,7 +147,12 @@ interface CveDetailResponse {
   signals: {
     observed_exploitation?: { known_exploited?: boolean; observed_scanning?: boolean; shadowserver?: { sighting_count?: number } };
     exploitation_probability?: { score?: number | null; percentile?: number | null };
-    detection_coverage?: { nuclei_template?: boolean; template_count?: number };
+    detection_coverage?: {
+      nuclei_template?: boolean;
+      template_count?: number;
+      source_status?: string;
+      templates?: { template_id: string; name: string; canonical_url: string; file_path: string }[];
+    };
   };
   prioritization: { total?: number; maximum?: number; reasons?: string[] };
 }
@@ -225,6 +236,14 @@ function DetectionBadge({ entry }: { entry: EmergingEntry }) {
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>
+    );
+  }
+  if (entry.detection_tier === 'unknown') {
+    return (
+      <Badge variant="outline" className="bg-muted text-muted-foreground border-border gap-1 cursor-default">
+        <AlertCircle className="h-3 w-3" />
+        Coverage Unknown
+      </Badge>
     );
   }
   return (
@@ -484,7 +503,7 @@ function EntryDetail({ entry, open, onClose, oracleResult, onAnalyze, analyzing,
               <p className="font-medium">{entry.vendor_project} — {entry.product}</p>
             </div>
             <div className="space-y-1">
-              <p className="text-xs text-muted-foreground uppercase tracking-wider">Added to KEV</p>
+              <p className="text-xs text-muted-foreground uppercase tracking-wider">Latest KEV Source Listing</p>
               <p className="font-medium">{entry.date_added_kev} ({daysAgo(entry.date_added_kev)})</p>
             </div>
             <div className="space-y-1">
@@ -537,7 +556,9 @@ function EntryDetail({ entry, open, onClose, oracleResult, onAnalyze, analyzing,
                 <p className="font-medium">
                   {detail?.signals?.detection_coverage?.nuclei_template
                     ? `${detail.signals.detection_coverage.template_count ?? 1} Nuclei template(s)`
-                    : 'No Nuclei template'}
+                    : detail?.signals?.detection_coverage?.source_status === 'unavailable'
+                      ? 'Nuclei coverage source unavailable'
+                      : 'No Nuclei template in checked index'}
                 </p>
               </div>
             </div>
@@ -692,7 +713,7 @@ function EntryDetail({ entry, open, onClose, oracleResult, onAnalyze, analyzing,
             {entry.is_template ? (
               <Button variant="outline" size="sm" asChild>
                 <a
-                  href={`https://cloud.projectdiscovery.io/templates?cveId=${entry.cve_id}`}
+                  href={entry.nuclei_templates?.[0]?.canonical_url || `https://cloud.projectdiscovery.io/templates?cveId=${entry.cve_id}`}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="gap-1.5 border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10"
@@ -906,8 +927,12 @@ export default function ThreatIntelPage() {
                 <span className="text-teal-400">✓ EUVD <span className="text-muted-foreground">(free)</span></span>
                 <span className="text-orange-400">✓ Shadowserver <span className="text-muted-foreground">(free via CIRCL)</span></span>
                 <span className="text-rose-400">✓ KEVIntel <span className="text-muted-foreground">(free via CIRCL)</span></span>
+                {summary.nuclei_index_status?.status === 'ok' || summary.nuclei_index_status?.status === 'stale'
+                  ? <span className="text-emerald-400">✓ Public Nuclei index <span className="text-muted-foreground">({summary.nuclei_index_status.cves.toLocaleString()} CVEs{summary.nuclei_index_status.status === 'stale' ? ', stale' : ''})</span></span>
+                  : <span className="text-yellow-500">⚠ Public Nuclei index unavailable — run <code className="bg-black/20 px-0.5 rounded">refresh_vuln_intel</code></span>
+                }
                 {!summary.pdcp_configured && (
-                  <span className="text-yellow-500">⚠ PDCP — add <code className="bg-black/20 px-0.5 rounded">PDCP_API_KEY</code> for Nuclei template data (<a href="https://cloud.projectdiscovery.io" target="_blank" rel="noopener noreferrer" className="underline">free key</a>)</span>
+                  <span className="text-muted-foreground">PDCP key optional for richer template metadata</span>
                 )}
               </div>
             </div>
@@ -1011,6 +1036,7 @@ export default function ThreatIntelPage() {
               <SelectItem value="poc_available">PoC Available</SelectItem>
               <SelectItem value="remote_no_template">Remote / No Template</SelectItem>
               <SelectItem value="no_detection">No Detection</SelectItem>
+              <SelectItem value="unknown">Coverage Unknown</SelectItem>
             </SelectContent>
           </Select>
 
@@ -1215,7 +1241,7 @@ export default function ThreatIntelPage() {
         </Card>
 
         <p className="text-xs text-muted-foreground text-center">
-          Sources: CISA KEV · VulnCheck KEV · ENISA EU KEV · EUVD · AlienVault OTX (campaign signals) · ProjectDiscovery PDCP (template availability) · Oracle OPES
+          Sources: CISA KEV · VulnCheck KEV + Exploits/XDB · ENISA EU KEV · EUVD · AlienVault OTX · ProjectDiscovery Nuclei CVE index + PDCP · Oracle OPES
         </p>
       </div>
 
