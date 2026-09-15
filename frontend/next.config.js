@@ -38,6 +38,13 @@ const nextConfig = {
         source: '/api/v1/assets',
         destination: `${apiOrigin}/api/v1/assets/`,
       },
+      // The netblock list route is also defined at a slash-terminated FastAPI
+      // collection endpoint. Keep the redirect inside the proxy so the browser
+      // is never sent to Docker's private `backend` hostname.
+      {
+        source: '/api/v1/netblocks',
+        destination: `${apiOrigin}/api/v1/netblocks/`,
+      },
       {
         source: '/api/:path*',
         destination: `${apiOrigin}/api/:path*`,
