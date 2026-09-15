@@ -156,7 +156,7 @@ services:
       redis:
         condition: service_healthy
       oast-worker:
-        condition: service_started
+        condition: service_healthy
     volumes:
       # Note: Dev mount commented out to avoid read-only filesystem issues
       # - ./backend/app:/app/app:ro  # Mount app code for development
@@ -194,6 +194,12 @@ services:
       redis:
         condition: service_healthy
     command: ["python", "-m", "app.workers.interactsh_worker"]
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.workers.interactsh_worker", "--healthcheck"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      start_period: 5s
     volumes:
       - interactsh_state:/app/data/interactsh
     networks:
