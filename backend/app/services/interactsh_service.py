@@ -79,13 +79,14 @@ def _rpc_call(operation: str, **arguments) -> Dict[str, Any]:
     try:
         import redis
 
+        timeout = max(
+            5, int(os.environ.get("AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS", "35"))
+        )
         client = redis.Redis.from_url(
             os.environ.get("REDIS_URL", "redis://redis:6379/0"),
             decode_responses=True,
             socket_connect_timeout=3,
-            socket_timeout=max(
-                5, int(os.environ.get("AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS", "35"))
-            ),
+            socket_timeout=timeout + 2,
         )
         request_id = uuid.uuid4().hex
         response_key = f"aegis:interactsh:response:{request_id}"
@@ -99,9 +100,6 @@ def _rpc_call(operation: str, **arguments) -> Dict[str, Any]:
             default=str,
         )
         client.rpush("aegis:interactsh:requests", request)
-        timeout = max(
-            5, int(os.environ.get("AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS", "35"))
-        )
         response = client.blpop(response_key, timeout=timeout)
         client.delete(response_key)
         if not response:

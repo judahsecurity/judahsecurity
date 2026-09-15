@@ -83,7 +83,11 @@ def main(argv=None) -> int:
     if args.live and result.get("success"):
         result = {"health": result, "live": live_check(args.timeout)}
     print(json.dumps(result, indent=2, default=str))
-    success = result.get("success") if not args.live else result["live"].get("success")
+    success = (
+        result.get("success")
+        if not args.live
+        else result.get("live", {}).get("success", False)
+    )
     return 0 if success else 1
 
 
