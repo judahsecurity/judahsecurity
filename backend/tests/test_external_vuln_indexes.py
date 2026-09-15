@@ -11,6 +11,7 @@ from app.services.external_vuln_indexes import (
     parse_nuclei_cve_index,
     parse_vulncheck_exploits,
     refresh_nuclei_cve_index,
+    vulncheck_exploit_feed_entries,
     vulncheck_exploits_for_cve,
 )
 
@@ -127,6 +128,10 @@ def test_vulncheck_cache_contributes_to_public_exploit_maturity(tmp_path, monkey
     result = build_exploit_intelligence("CVE-2025-25252", {"vulncheck": source})
     assert result["maturity"] == "proof_of_concept"
     assert result["artifact_count"] == 1
+
+    feed = vulncheck_exploit_feed_entries()
+    assert feed[0]["cve_id"] == "CVE-2025-25252"
+    assert feed[0]["kev_sources"] == ["vulncheck_xdb"]
 
 
 def test_vulncheck_warm_cache_uses_incremental_index(tmp_path, monkeypatch):

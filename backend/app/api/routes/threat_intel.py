@@ -38,6 +38,7 @@ from app.services.exploit_intelligence import bounded_priority_contribution
 from app.services.external_vuln_indexes import (
     external_index_status,
     nuclei_coverage_for_cves,
+    vulncheck_exploit_feed_entries,
     vulncheck_exploits_for_cves,
 )
 from app.services.shadowserver_reports import refresh_shadowserver_cache, shadowserver_cve_signal
@@ -195,6 +196,11 @@ async def _fetch_vulncheck_kev(client: httpx.AsyncClient, days: int, token: str)
             "cvss_score": entry.get("cvss_score"),
         })
     return entries
+
+
+async def _fetch_vulncheck_exploit_feed() -> list[dict]:
+    """Serve cached VulnCheck XDB records as independent exploit feed rows."""
+    return await asyncio.to_thread(vulncheck_exploit_feed_entries)
 
 
 # ── CISA KEV ──────────────────────────────────────────────────────────────────
@@ -938,7 +944,7 @@ async def get_emerging_vulnerabilities(
     days: int = Query(30, ge=0, le=3650, description="KEV entries added in the last N days; 0 = all time"),
     severity: Optional[str] = Query(None, description="Filter by severity (critical,high,medium,low)"),
     detection: Optional[str] = Query(None, description="Filter: nuclei_template | poc_available | remote_no_template | no_detection | unknown"),
-    source: Optional[str] = Query(None, description="Filter by source(s): cisa_kev,vulncheck_kev,enisa_kev,euvd,shadowserver,kevintel (comma-separated)"),
+    source: Optional[str] = Query(None, description="Filter by source(s): cisa_kev,vulncheck_kev,vulncheck_xdb,enisa_kev,euvd,shadowserver,kevintel (comma-separated)"),
     limit: int = Query(500, ge=1, le=2000),
     include_otx: bool = Query(
         False,
@@ -984,6 +990,7 @@ async def get_emerging_vulnerabilities(
         "by_source": {
             "cisa_kev": 0,
             "vulncheck_kev": 0,
+            "vulncheck_xdb": 0,
             "enisa_kev": 0,
             "euvd": 0,
             "shadowserver": 0,
@@ -1000,6 +1007,7 @@ async def get_emerging_vulnerabilities(
         "catalog": {
             "cisa_kev": 0,
             "vulncheck_kev": 0,
+            "vulncheck_xdb": 0,
             "enisa_kev": 0,
             "euvd": 0,
             "shadowserver": 0,
@@ -1010,6 +1018,7 @@ async def get_emerging_vulnerabilities(
     async with httpx.AsyncClient(timeout=httpx.Timeout(_HTTP_TIMEOUT, connect=5.0)) as client:
         (
             vulncheck_entries,
+            vulncheck_exploit_entries,
             cisa_entries,
             enisa_entries,
             euvd_entries,
@@ -1017,6 +1026,7 @@ async def get_emerging_vulnerabilities(
             kevintel_entries,
         ) = await asyncio.gather(
             _feed_or_empty("vulncheck", _fetch_vulncheck_kev(client, days, vulncheck_token)),
+            _feed_or_empty("vulncheck_xdb", _fetch_vulncheck_exploit_feed()),
             _feed_or_empty("cisa", _fetch_cisa_kev(client, cutoff)),
             _feed_or_empty("enisa", _fetch_enisa_kev(client, cutoff)),
             _feed_or_empty("euvd", _fetch_euvd(client, cutoff, paginated=False)),
@@ -1032,6 +1042,7 @@ async def get_emerging_vulnerabilities(
                 euvd_entries,
                 shadowserver_entries,
                 kevintel_entries,
+                vulncheck_exploit_entries,
             ])
         except Exception:
             logger.exception("threat-intel merge failed; serving unmerged feed rows")
@@ -1039,6 +1050,7 @@ async def get_emerging_vulnerabilities(
                 row
                 for group in (
                     vulncheck_entries,
+                    vulncheck_exploit_entries,
                     cisa_entries,
                     enisa_entries,
                     euvd_entries,
@@ -1053,6 +1065,7 @@ async def get_emerging_vulnerabilities(
         catalog = {
             "cisa_kev": len(cisa_entries),
             "vulncheck_kev": len(vulncheck_entries),
+            "vulncheck_xdb": len(vulncheck_exploit_entries),
             "enisa_kev": len(enisa_entries),
             "euvd": len(euvd_entries),
             "shadowserver": len(shadowserver_entries),
@@ -1172,6 +1185,7 @@ async def get_emerging_vulnerabilities(
         "by_source": {
             "cisa_kev": sum(1 for e in entries if "cisa_kev" in e.get("kev_sources", [])),
             "vulncheck_kev": sum(1 for e in entries if "vulncheck_kev" in e.get("kev_sources", [])),
+            "vulncheck_xdb": sum(1 for e in entries if "vulncheck_xdb" in e.get("kev_sources", [])),
             "enisa_kev": sum(1 for e in entries if "enisa_kev" in e.get("kev_sources", [])),
             "euvd": sum(1 for e in entries if "euvd" in e.get("kev_sources", [])),
             "shadowserver": sum(1 for e in entries if "shadowserver" in e.get("kev_sources", [])),

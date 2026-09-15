@@ -525,6 +525,52 @@ def vulncheck_exploits_for_cve(cve_id: str) -> dict[str, Any]:
     return vulncheck_exploits_for_cves([cve_id]).get(_canonical_cve(cve_id), {})
 
 
+def vulncheck_exploit_feed_entries() -> list[dict[str, Any]]:
+    """Return cached XDB/exploit records as portal feed rows.
+
+    This is intentionally separate from VulnCheck KEV: a public exploit is an
+    availability signal, not a claim that exploitation has been observed.
+    """
+    payload, path = _read_cache("vulncheck_exploits")
+    if not payload or not path.exists():
+        return []
+    records = payload.get("entries") if isinstance(payload.get("entries"), dict) else {}
+    output: list[dict[str, Any]] = []
+    for raw_cve, value in records.items():
+        cve_id = _canonical_cve(raw_cve)
+        record = value if isinstance(value, dict) else {}
+        if not cve_id or not record.get("public_exploit_found"):
+            continue
+        artifacts = [item for item in (record.get("artifacts") or []) if isinstance(item, dict)]
+        source_dates = sorted(
+            {
+                str(date).strip()
+                for artifact in artifacts
+                for date in (artifact.get("published_at"), artifact.get("source_timestamp"))
+                if date
+            }
+        )
+        exploit_types = [str(item) for item in (record.get("exploit_types") or []) if item]
+        output.append(
+            {
+                "cve_id": cve_id,
+                "all_cves": [cve_id],
+                "date_added": source_dates[-1] if source_dates else "",
+                "source_dates": source_dates,
+                "vendor_project": "",
+                "product": "",
+                "vulnerability_name": "VulnCheck public exploit",
+                "short_description": (
+                    "Public exploit metadata indexed by VulnCheck"
+                    + (f" ({', '.join(exploit_types)})" if exploit_types else "")
+                ),
+                "known_ransomware_use": "Unknown",
+                "kev_sources": ["vulncheck_xdb"],
+            }
+        )
+    return output
+
+
 def external_index_status() -> dict[str, dict[str, Any]]:
     output: dict[str, dict[str, Any]] = {}
     for source in ("nuclei", "vulncheck_exploits"):
