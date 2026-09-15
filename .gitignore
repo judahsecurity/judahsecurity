@@ -108,3 +108,6 @@ frontend/node_modules/
 
 # Materialized custom Nuclei templates (source of truth is the DB)
 backend/nuclei-templates-generated/
+
+# Production deployment backups
+backups/
