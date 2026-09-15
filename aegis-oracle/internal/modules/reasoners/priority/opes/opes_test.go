@@ -10,11 +10,8 @@ import (
 )
 
 // TestOPES_CVE_2025_55130_TenantContainer reproduces the analyst's
-// reference reasoning. With both blocker preconditions Unknown (we can't
-// verify Node permission flags or in-process JS execution from external
-// signals), OPES should land in Low "Low - Verification Required"
-// — not Critical (NVD's reading) and not Informational Not Exploitable
-// (premature dismissal).
+// reference reasoning. Missing local evidence must lower confidence without
+// artificially lowering the score or producing a safety claim.
 //
 // See knowledgebase/patterns/nodejs.permissions-symlink-escape.yaml for
 // the canonical preconditions used here.
@@ -22,14 +19,14 @@ func TestOPES_CVE_2025_55130_TenantContainer(t *testing.T) {
 	in := cve202555130Input()
 	score := Compute(in, DefaultConfig())
 
-	if score.Category != schema.PriorityLow {
-		t.Errorf("category: got %s, want %s", score.Category, schema.PriorityLow)
+	if score.Category != schema.PriorityMedium {
+		t.Errorf("category: got %s, want %s", score.Category, schema.PriorityMedium)
 	}
 	if score.Value < 3.5 || score.Value > 5.5 {
 		t.Errorf("score: got %.2f, want 3.5..5.5 (Low territory)", score.Value)
 	}
-	if score.Confidence != schema.ConfidenceMedium {
-		t.Errorf("confidence: got %s, want medium (unknown blockers)", score.Confidence)
+	if score.Confidence != schema.ConfidenceLow {
+		t.Errorf("confidence: got %s, want low (unknown blockers)", score.Confidence)
 	}
 	if score.Override != "" {
 		t.Errorf("override: got %q, want empty (no override should fire)", score.Override)
@@ -61,9 +58,8 @@ func TestOPES_CVE_2025_55130_TenantContainer(t *testing.T) {
 }
 
 // TestOPES_CVE_2025_55130_PermissionsNotInUse demonstrates the
-// blocker-unsatisfied override. When verification confirms the Node
-// permissions model is NOT in use, the exploit becomes impossible and
-// the finding drops to Informational with score 0 — no LLM call required.
+// path-scoped behavior. A failed documented condition reduces P, but cannot
+// make a universal claim that every exploit path is impossible.
 func TestOPES_CVE_2025_55130_PermissionsNotInUse(t *testing.T) {
 	in := cve202555130Input()
 	for i, e := range in.Preconditions {
@@ -75,17 +71,14 @@ func TestOPES_CVE_2025_55130_PermissionsNotInUse(t *testing.T) {
 
 	score := Compute(in, DefaultConfig())
 
-	if score.Value != 0.0 {
-		t.Errorf("score: got %.2f, want 0.0", score.Value)
+	if score.Value == 0.0 {
+		t.Errorf("score: got %.2f, missing path must not force zero", score.Value)
 	}
-	if score.Category != schema.PriorityInformational {
-		t.Errorf("category: got %s, want informational", score.Category)
+	if score.Override != "" {
+		t.Errorf("override: got %q, want empty", score.Override)
 	}
-	if score.Override != "blocker_unsatisfied" {
-		t.Errorf("override: got %q, want blocker_unsatisfied", score.Override)
-	}
-	if score.Label != "Not Exploitable" {
-		t.Errorf("label: got %q, want Not Exploitable", score.Label)
+	if strings.Contains(strings.ToLower(score.Label), "not exploitable") {
+		t.Errorf("label must not make universal safety claim: %q", score.Label)
 	}
 }
 
@@ -134,21 +127,22 @@ func TestOPES_AllPreconditionsSatisfied(t *testing.T) {
 	}
 }
 
-// TestOPES_IsolatedAsset verifies the unreachable override.
+// TestOPES_IsolatedAsset verifies isolation affects reachability without
+// becoming a permanent "not reachable" override.
 func TestOPES_IsolatedAsset(t *testing.T) {
 	in := cve202555130Input()
 	in.Asset.Exposure = schema.ExposureIsolated
 
 	score := Compute(in, DefaultConfig())
 
-	if score.Value != 0.0 {
-		t.Errorf("score: got %.2f, want 0.0 (isolated)", score.Value)
+	if score.Value == 0.0 {
+		t.Errorf("score: got %.2f, isolation must not force zero", score.Value)
 	}
-	if score.Category != schema.PriorityInformational {
-		t.Errorf("category: got %s, want informational (unreachable)", score.Category)
+	if score.Category != schema.PriorityLow {
+		t.Errorf("category: got %s, want low (limited reachability evidence)", score.Category)
 	}
-	if score.Override != "unreachable" {
-		t.Errorf("override: got %q, want unreachable", score.Override)
+	if score.Override != "" {
+		t.Errorf("override: got %q, want empty", score.Override)
 	}
 }
 

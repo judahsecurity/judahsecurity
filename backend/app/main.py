@@ -467,6 +467,7 @@ def apply_oracle_migrations():
             detection_signals     jsonb NOT NULL DEFAULT '[]',
             rationale             text NOT NULL DEFAULT '',
             confidence            text NOT NULL DEFAULT '',
+            intrinsic_context     jsonb NOT NULL DEFAULT '{}',
             token_usage           jsonb,
             cost_usd              numeric(8,4),
             created_at            timestamptz NOT NULL DEFAULT now(),
@@ -553,6 +554,7 @@ def apply_oracle_migrations():
             recommendation_text     text NOT NULL DEFAULT '',
             cvss_reconciliation     jsonb,
             analyst_brief           jsonb,
+            contextual_assessment   jsonb NOT NULL DEFAULT '{}',
             status                  text NOT NULL DEFAULT 'open',
             superseded_by           uuid,
             created_at              timestamptz NOT NULL DEFAULT now(),
@@ -561,6 +563,8 @@ def apply_oracle_migrations():
         "CREATE INDEX IF NOT EXISTS oracle_findings_open_priority_idx ON oracle.findings (opes_category, created_at DESC) WHERE status = 'open'",
         "CREATE INDEX IF NOT EXISTS oracle_findings_asset_open_idx ON oracle.findings (asset_id) WHERE status = 'open'",
         "CREATE INDEX IF NOT EXISTS oracle_findings_cve_idx ON oracle.findings (cve_id)",
+        "ALTER TABLE oracle.cve_intrinsic_analyses ADD COLUMN IF NOT EXISTS intrinsic_context jsonb NOT NULL DEFAULT '{}'",
+        "ALTER TABLE oracle.findings ADD COLUMN IF NOT EXISTS contextual_assessment jsonb NOT NULL DEFAULT '{}'",
 
         # Verification tasks
         """CREATE TABLE IF NOT EXISTS oracle.verification_tasks (
