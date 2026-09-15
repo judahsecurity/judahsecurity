@@ -13,7 +13,7 @@ services:
       # Note: DB init scripts are optional - remove if causing mount issues
       # - ./db/init:/docker-entrypoint-initdb.d
     ports:
-      - "${DB_PORT:-5432}:5432"
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:${DB_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-asm_user} -d ${POSTGRES_DB:-asm_db}"]
       interval: 10s
@@ -28,7 +28,7 @@ services:
     container_name: asm_redis
     restart: unless-stopped
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis_data:/data
     healthcheck:
@@ -44,6 +44,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    image: ${BACKEND_IMAGE:-asm-backend:latest}
     container_name: asm_backend
     restart: unless-stopped
     environment:
@@ -52,6 +53,10 @@ services:
       - DEBUG=${DEBUG:-false}
       - CORS_ORIGINS=${CORS_ORIGINS:-["https://aegis.theforcesecurity.io","https://aegis.judahsecurity.io","http://localhost","http://localhost:80","http://localhost:3000","http://localhost:8000","http://frontend:3000"]}
       - REDIS_URL=redis://redis:6379/0
+      - AEGIS_INTERACTSH_RPC_ENABLED=${AEGIS_INTERACTSH_RPC_ENABLED:-true}
+      - AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS=${AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS:-35}
+      - AEGIS_EVIDENCE_DIR=${AEGIS_EVIDENCE_DIR:-/app/data/evidence}
+      - AEGIS_EVIDENCE_RETENTION_SECONDS=${AEGIS_EVIDENCE_RETENTION_SECONDS:-86400}
       # AWS SQS Configuration (optional - for async scan job submission)
       - SQS_QUEUE_URL=${SQS_QUEUE_URL:-}
       - AWS_REGION=${AWS_REGION:-us-east-1}
@@ -141,7 +146,7 @@ services:
       - INTERCEPTOR_PREFER_REMOTE_WORKERS=${INTERCEPTOR_PREFER_REMOTE_WORKERS:-true}
       - INTERCEPTOR_BIN=${INTERCEPTOR_BIN:-}
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:${BACKEND_PORT:-8000}:8000"
     # For "secret:NAME" references, mount Docker/K8s secrets, e.g.:
     # secrets:
     #   - target_pass
@@ -150,6 +155,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      oast-worker:
+        condition: service_started
     volumes:
       # Note: Dev mount commented out to avoid read-only filesystem issues
       # - ./backend/app:/app/app:ro  # Mount app code for development
@@ -160,6 +167,7 @@ services:
       - sni_data:/app/data/sni-ip-ranges
       - panorama_data:/app/data/panorama
       - delphi_cache:/app/data/delphi_cache
+      - evidence_data:/app/data/evidence
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -170,6 +178,26 @@ services:
     cap_add:
       - NET_RAW
       - NET_ADMIN
+
+  # Dedicated owner for Interactsh client processes. API replicas use Redis RPC,
+  # while session files survive worker restarts on the named volume.
+  oast-worker:
+    image: ${BACKEND_IMAGE:-asm-backend:latest}
+    container_name: asm_oast_worker
+    restart: unless-stopped
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - AEGIS_INTERACTSH_LOCAL=true
+      - AEGIS_INTERACTSH_STATE_DIR=/app/data/interactsh
+      - AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS=${AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS:-35}
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: ["python", "-m", "app.workers.interactsh_worker"]
+    volumes:
+      - interactsh_state:/app/data/interactsh
+    networks:
+      - asm_network
 
   # Next.js Frontend
   frontend:
@@ -244,6 +272,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.scanner
+    image: ${SCANNER_IMAGE:-asm-scanner:latest}
     container_name: asm_scanner
     restart: unless-stopped
     environment:
@@ -335,7 +364,7 @@ services:
       # fallback (used when vulnx doesn't yet have a brand-new CVE id).
       - NVD_API_KEY=${NVD_API_KEY:-}
     ports:
-      - "${ORACLE_PORT:-8742}:8742"
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:${ORACLE_PORT:-8742}:8742"
     depends_on:
       db:
         condition: service_healthy
@@ -349,9 +378,7 @@ services:
 
   # Schedule Worker for recurring scans
   scheduler:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile.scanner
+    image: ${SCANNER_IMAGE:-asm-scanner:latest}
     container_name: asm_scheduler
     restart: unless-stopped
     environment:
@@ -401,7 +428,7 @@ services:
     container_name: asm_adminer
     restart: unless-stopped
     ports:
-      - "${ADMINER_PORT:-8080}:8080"
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:${ADMINER_PORT:-8080}:8080"
     depends_on:
       - db
     networks:
@@ -419,8 +446,8 @@ services:
       - NEO4J_PLUGINS=["apoc"]
       - NEO4J_dbms_security_procedures_unrestricted=apoc.*
     ports:
-      - "${NEO4J_HTTP_PORT:-7474}:7474"
-      - "${NEO4J_BOLT_PORT:-7687}:7687"
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:${NEO4J_HTTP_PORT:-7474}:7474"
+      - "${HOST_BIND_ADDRESS:-127.0.0.1}:${NEO4J_BOLT_PORT:-7687}:7687"
     volumes:
       - neo4j_data:/data
       - neo4j_logs:/logs
@@ -572,4 +599,8 @@ volumes:
   ollama_data:
     driver: local
   phoenix_data:
+    driver: local
+  evidence_data:
+    driver: local
+  interactsh_state:
     driver: local

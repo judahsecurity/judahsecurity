@@ -1086,6 +1086,44 @@ def test_evidence_eviction_removes_persisted_artifact(manager, tmp_path, monkeyp
     assert not (tmp_path / store.id).exists()
 
 
+def test_evidence_rehydrates_within_same_session_namespace(tmp_path, monkeypatch):
+    from app.services.agent.evidence_store import EvidenceStore
+
+    monkeypatch.setenv("AEGIS_EVIDENCE_DIR", str(tmp_path))
+    namespace = "assessment_session_123"
+    first = EvidenceStore(namespace=namespace)
+    token = verification_run.set(VerificationRun("run-1", "candidate-1", 2, "nonce"))
+    try:
+        artifact_id = first.record(
+            "oob_poll",
+            {"interactions": [{"protocol": "dns"}]},
+            target="https://app.test/fetch",
+            success=True,
+        )
+    finally:
+        verification_run.reset(token)
+
+    restarted = EvidenceStore(namespace=namespace)
+    assert restarted.records[artifact_id]["payload"]["interactions"][0]["protocol"] == "dns"
+    assert restarted.read(artifact_id)["run_id"] == "run-1"
+
+
+def test_evidence_rejects_tampered_persisted_artifact(tmp_path, monkeypatch):
+    from app.services.agent.evidence_store import EvidenceStore
+
+    monkeypatch.setenv("AEGIS_EVIDENCE_DIR", str(tmp_path))
+    namespace = "assessment_session_456"
+    store = EvidenceStore(namespace=namespace)
+    artifact_id = store.record("oob_poll", {"interactions": []})
+    path = tmp_path / namespace / f"{artifact_id}.json"
+    persisted = json.loads(path.read_text())
+    persisted["payload"]["interactions"] = [{"protocol": "dns"}]
+    path.write_text(json.dumps(persisted))
+
+    restarted = EvidenceStore(namespace=namespace)
+    assert artifact_id not in restarted.records
+
+
 def test_session_runtime_is_lru_bounded(manager):
     from app.services.agent.session_runtime import MAX_MANAGER_SESSIONS
 

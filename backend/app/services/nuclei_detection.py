@@ -7,6 +7,7 @@ chain.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -21,6 +22,9 @@ _CURL_RE = re.compile(
     re.DOTALL,
 )
 _MATCHED_AT_RE = re.compile(r"Matched at:\s*(\S+)")
+_OAST_DOMAIN_RE = re.compile(
+    r"\b[a-z0-9]{10,}\.(?:oast\.[a-z]+|oastify\.[a-z]+)\b", re.IGNORECASE
+)
 
 _PROTOCOLS = (
     "http",
@@ -237,6 +241,67 @@ def build_nuclei_detection(nuclei_result: Any) -> dict[str, Any]:
             "template_id": getattr(nuclei_result, "template_id", None) or "",
             "template_yaml": template_yaml,
             "matcher_name": matcher_name,
+        }
+    )
+
+
+def build_nuclei_oast_proof(
+    nuclei_result: Any,
+    detection: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Normalize a correlated Nuclei Interactsh match into publishable proof."""
+    detection = detection or build_nuclei_detection(nuclei_result)
+    template = str(detection.get("template_yaml") or "")
+    match_criteria = str(detection.get("match_criteria") or "")
+    template_id = str(detection.get("template_id") or "")
+    matcher_name = str(detection.get("matcher_name") or "")
+    template_uses_interactsh = "{{interactsh-url}}" in template
+    matcher_uses_interaction = bool(
+        re.search(r"\binteract_(?:protocol|request|response|address)\b", template)
+        or re.search(r"\binteract_(?:protocol|request|response|address)\b", match_criteria)
+    )
+    if not (
+        template_uses_interactsh
+        and matcher_uses_interaction
+        and bool(getattr(nuclei_result, "matcher_status", True))
+    ):
+        return {}
+
+    request = str(detection.get("request") or "")
+    response = str(detection.get("response") or "")
+    protocols = sorted(
+        {
+            protocol.lower()
+            for protocol in (
+                re.findall(
+                    r"interact_protocol[^\n]*(dns|http|smtp)",
+                    template,
+                    flags=re.IGNORECASE,
+                )
+                + re.findall(
+                    r"^\s*-\s*(dns|http|smtp)\s*$",
+                    template,
+                    flags=re.IGNORECASE | re.MULTILINE,
+                )
+            )
+        }
+    )
+    timestamp = getattr(nuclei_result, "timestamp", None)
+    return compact_detection(
+        {
+            "kind": "oob_callback",
+            "source": "nuclei_interactsh",
+            "confirmed": True,
+            "correlation": "nuclei_template_request_interaction",
+            "template_id": template_id,
+            "matcher_name": matcher_name,
+            "target": getattr(nuclei_result, "host", None) or "",
+            "matched_at": getattr(nuclei_result, "matched_at", None) or "",
+            "protocols": protocols,
+            "callback_domains": sorted(set(_OAST_DOMAIN_RE.findall(request))),
+            "request_sha256": hashlib.sha256(request.encode()).hexdigest() if request else "",
+            "response_sha256": hashlib.sha256(response.encode()).hexdigest() if response else "",
+            "captured_at": timestamp.isoformat() if timestamp else "",
         }
     )
 

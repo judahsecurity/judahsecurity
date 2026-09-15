@@ -17,7 +17,7 @@ from app.models.asset import Asset, AssetType
 from app.models.vulnerability import Vulnerability, Severity, VulnerabilityStatus
 from app.models.scan import Scan
 from app.services.nuclei_service import NucleiResult, NucleiScanResult
-from app.services.nuclei_detection import build_nuclei_detection
+from app.services.nuclei_detection import build_nuclei_detection, build_nuclei_oast_proof
 
 logger = logging.getLogger(__name__)
 
@@ -630,6 +630,11 @@ class NucleiFindingsService:
         detection = build_nuclei_detection(nuclei_result)
         if detection:
             metadata["detection"] = detection
+        oast_proof = build_nuclei_oast_proof(nuclei_result, detection)
+        if oast_proof:
+            metadata["oast_proof"] = oast_proof
+            tags.append("proof:oob_callback")
+            dc = DETECTION_CONFIDENCE_EXPLOIT_CONFIRMED
 
         vulnerability = Vulnerability(
             title=title,
@@ -708,6 +713,14 @@ class NucleiFindingsService:
             existing = meta.get("detection") if isinstance(meta.get("detection"), dict) else {}
             existing.update(detection)
             meta["detection"] = existing
+        oast_proof = build_nuclei_oast_proof(nuclei_result, detection)
+        if oast_proof:
+            meta["oast_proof"] = oast_proof
+            vulnerability.detection_confidence = DETECTION_CONFIDENCE_EXPLOIT_CONFIRMED
+            tags = list(vulnerability.tags or [])
+            if "proof:oob_callback" not in tags:
+                tags.append("proof:oob_callback")
+                vulnerability.tags = tags
         vulnerability.metadata_ = meta
 
         # Potentially update severity if it changed (unusual but possible)
@@ -875,7 +888,6 @@ class NucleiFindingsService:
             logger.info(f"Closed {closed_count} stale Nuclei findings")
         
         return closed_count
-
 
 
 

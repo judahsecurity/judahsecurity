@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 
+from app.models.project_settings import default_nuclei_config
 from app.services.agent.independent_verify import FindingCandidate, verifier_mission
 from app.services.agent.interactsh_proof import (
     has_interactsh_proof,
@@ -12,7 +15,6 @@ from app.services.agent.interactsh_proof import (
     mailbox_for_domain,
 )
 from app.services.agent.methodology_catalog import methodologies_from_capability_map
-from app.models.project_settings import default_nuclei_config
 
 
 def test_nuclei_interactsh_on_by_default():
@@ -127,6 +129,48 @@ def test_health_reports_configured_binary(monkeypatch, tmp_path):
     assert result["success"] is True
     assert result["binary"] == str(binary)
     assert "v1.3.1" in result["version_output"]
+
+
+def test_persisted_interactsh_session_recovers_after_worker_restart(monkeypatch, tmp_path):
+    from app.services import interactsh_service as ish
+
+    class _Alive:
+        def __init__(self):
+            self.stdout = []
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            return None
+
+        def wait(self, timeout=None):
+            return 0
+
+    sid = "abc123def456"
+    monkeypatch.setenv("AEGIS_INTERACTSH_STATE_DIR", str(tmp_path))
+    monkeypatch.setattr(ish, "_binary", lambda: "/usr/local/bin/interactsh-client")
+    monkeypatch.setattr(ish.subprocess, "Popen", lambda *args, **kwargs: _Alive())
+    (tmp_path / f"{sid}.session").write_text("saved-session")
+    (tmp_path / f"{sid}.jsonl").write_text("")
+    (tmp_path / f"{sid}.metadata.json").write_text(
+        json.dumps(
+            {
+                "sid": sid,
+                "payload_domain": "abc123def456.oast.fun",
+                "created_at": time.time() - 5,
+                "last_used": time.time(),
+                "read_offset": 0,
+            }
+        )
+    )
+    ish._SESSIONS.clear()
+    try:
+        result = ish.recover_sessions()
+        assert result == {"success": True, "recovered": 1}
+        assert ish.list_sessions()["sessions"][0]["payload_domain"] == "abc123def456.oast.fun"
+    finally:
+        ish._SESSIONS.clear()
 
 
 def test_mcp_health_passes_availability_and_censor_gates(monkeypatch):

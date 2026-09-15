@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState, useRef } from 'react';
+import { Suspense, useCallback, useEffect, useState, useRef } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { MainLayout } from '@/components/layout/MainLayout';
 import { Header } from '@/components/layout/Header';
@@ -739,7 +739,7 @@ function DetectionGapsTab({
 
 // ── Main page ─────────────────────────────────────────────────────────────────
 
-export default function DetectionCoveragePage() {
+function DetectionCoveragePageContent() {
   const { toast } = useToast();
   const searchParams = useSearchParams();
   const [orgs, setOrgs] = useState<any[]>([]);
@@ -1039,5 +1039,13 @@ export default function DetectionCoveragePage() {
         onDelete={handleDelete}
       />
     </MainLayout>
+  );
+}
+
+export default function DetectionCoveragePage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-background" />}>
+      <DetectionCoveragePageContent />
+    </Suspense>
   );
 }
