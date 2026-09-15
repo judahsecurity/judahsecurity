@@ -273,6 +273,14 @@ type IntrinsicAnalysis struct {
 	// increases the OPES criticality score above the asset's base value.
 	LateralMovementPotential LateralMovementPotential `json:"lateral_movement_potential"`
 	Preconditions            []Precondition           `json:"preconditions"`
+	AttackerStartingPosition string                   `json:"attacker_starting_position,omitempty"`
+	AffectedComponent        string                   `json:"affected_component,omitempty"`
+	RealisticWorkflow        string                   `json:"realistic_workflow,omitempty"`
+	InputSource              string                   `json:"input_source,omitempty"`
+	AttackerInfluence        string                   `json:"attacker_influence,omitempty"`
+	ResultingCapability      string                   `json:"resulting_capability,omitempty"`
+	ExploitPaths             []ExploitPath            `json:"exploit_paths,omitempty"`
+	Transitions              []AttackTransition       `json:"transitions,omitempty"`
 	CVSSReconciliation       CVSSReconciliation       `json:"cvss_reconciliation"`
 	AttackChainSummary       string                   `json:"attack_chain_summary"`
 	// AnalystBrief is the human-readable vulnerability intelligence writeup
@@ -290,4 +298,31 @@ type IntrinsicAnalysis struct {
 
 	PromptVersion string `json:"prompt_version,omitempty"`
 	LLMModel      string `json:"llm_model,omitempty"`
+}
+
+func (a IntrinsicAnalysis) Context() IntrinsicContext {
+	return IntrinsicContext{
+		AttackerStartingPosition: a.AttackerStartingPosition,
+		AffectedComponent:        a.AffectedComponent,
+		RealisticWorkflow:        a.RealisticWorkflow,
+		InputSource:              a.InputSource,
+		AttackerInfluence:        a.AttackerInfluence,
+		ResultingCapability:      a.ResultingCapability,
+		ExploitPaths:             a.ExploitPaths,
+		Transitions:              a.Transitions,
+	}
+}
+
+func (a *IntrinsicAnalysis) ApplyContext(context IntrinsicContext) {
+	if a == nil {
+		return
+	}
+	a.AttackerStartingPosition = context.AttackerStartingPosition
+	a.AffectedComponent = context.AffectedComponent
+	a.RealisticWorkflow = context.RealisticWorkflow
+	a.InputSource = context.InputSource
+	a.AttackerInfluence = context.AttackerInfluence
+	a.ResultingCapability = context.ResultingCapability
+	a.ExploitPaths = context.ExploitPaths
+	a.Transitions = context.Transitions
 }

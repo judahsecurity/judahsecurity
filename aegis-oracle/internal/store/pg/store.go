@@ -134,19 +134,19 @@ func (s *Store) ListAssets(ctx context.Context, f ListFilter) ([](*schema.Asset)
 
 // ListFilter constrains ListAssets.
 type ListFilter struct {
-	TenantID    string
-	Exposure    []string
+	TenantID     string
+	Exposure     []string
 	UpdatedSince *time.Time
 }
 
 func scanAsset(row pgx.Row) (*schema.Asset, error) {
 	var (
-		a         schema.Asset
-		ipStr     *string
-		openPorts []int32
+		a          schema.Asset
+		ipStr      *string
+		openPorts  []int32
 		signalsRaw []byte
-		tenantID  *string
-		hostname  *string
+		tenantID   *string
+		hostname   *string
 	)
 	err := row.Scan(
 		&a.ID, &tenantID, &hostname, &ipStr,
@@ -355,29 +355,31 @@ func (s *Store) GetIntrinsicAnalysis(ctx context.Context, cveID string) (*schema
 		prompt_version, llm_model,
 		COALESCE(attack_path_class, ''),
 		COALESCE(lateral_movement_potential, ''),
-		COALESCE(analyst_brief, '{}'::jsonb)
+		COALESCE(analyst_brief, '{}'::jsonb),
+		COALESCE(intrinsic_context, '{}'::jsonb)
 		FROM %s.cve_intrinsic_analyses
 		WHERE cve_id = $1
 		ORDER BY created_at DESC LIMIT 1`, s.cfg.OracleSchema)
 	row := s.pool.QueryRow(ctx, q, cveID)
 
 	var (
-		a              schema.IntrinsicAnalysis
-		precondsRaw    []byte
-		reconcileRaw   []byte
-		detectionRaw   []byte
-		briefRaw       []byte
-		promptVersion  *string
-		llmModel       *string
-		attackPath     string
-		lateralMov     string
+		a             schema.IntrinsicAnalysis
+		precondsRaw   []byte
+		reconcileRaw  []byte
+		detectionRaw  []byte
+		briefRaw      []byte
+		contextRaw    []byte
+		promptVersion *string
+		llmModel      *string
+		attackPath    string
+		lateralMov    string
 	)
 	err := row.Scan(
 		&a.RemoteTriggerability, &a.ExploitComplexity, &a.AttackerCapability,
 		&precondsRaw, &reconcileRaw, &a.AttackChainSummary,
 		&detectionRaw, &a.Rationale, &a.Confidence,
 		&promptVersion, &llmModel,
-		&attackPath, &lateralMov, &briefRaw,
+		&attackPath, &lateralMov, &briefRaw, &contextRaw,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -397,6 +399,9 @@ func (s *Store) GetIntrinsicAnalysis(ctx context.Context, cveID string) (*schema
 	_ = json.Unmarshal(reconcileRaw, &a.CVSSReconciliation)
 	_ = json.Unmarshal(detectionRaw, &a.DetectionSignals)
 	_ = json.Unmarshal(briefRaw, &a.AnalystBrief)
+	var intrinsicContext schema.IntrinsicContext
+	_ = json.Unmarshal(contextRaw, &intrinsicContext)
+	a.ApplyContext(intrinsicContext)
 	a.CVEID = cveID
 	return &a, nil
 }
@@ -409,14 +414,15 @@ func (s *Store) UpsertIntrinsicAnalysis(ctx context.Context, cveID, inputHash st
 	reconcileJSON, _ := json.Marshal(a.CVSSReconciliation)
 	detectionJSON, _ := json.Marshal(a.DetectionSignals)
 	briefJSON, _ := json.Marshal(a.AnalystBrief)
+	contextJSON, _ := json.Marshal(a.Context())
 
 	q := fmt.Sprintf(`INSERT INTO %s.cve_intrinsic_analyses
 		(cve_id, input_hash, prompt_version, llm_provider, llm_model,
 		 remote_triggerability, exploit_complexity, attacker_capability,
 		 preconditions, cvss_reconciliation, attack_chain_summary,
 		 detection_signals, rationale, confidence, cost_usd,
-		 attack_path_class, lateral_movement_potential, analyst_brief)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+		 attack_path_class, lateral_movement_potential, analyst_brief, intrinsic_context)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
 		ON CONFLICT DO NOTHING`, s.cfg.OracleSchema)
 
 	provider := providerFromModel(a.LLMModel)
@@ -427,7 +433,7 @@ func (s *Store) UpsertIntrinsicAnalysis(ctx context.Context, cveID, inputHash st
 		string(a.RemoteTriggerability), string(a.ExploitComplexity), string(a.AttackerCapability),
 		precondsJSON, reconcileJSON, a.AttackChainSummary,
 		detectionJSON, a.Rationale, string(a.Confidence), costUSD,
-		attackPath, lateralMov, briefJSON,
+		attackPath, lateralMov, briefJSON, contextJSON,
 	)
 	return err
 }
@@ -460,27 +466,28 @@ func (s *Store) UpsertFinding(ctx context.Context, f *schema.Finding) error {
 	contribsJSON, _ := json.Marshal(f.OPES.TopContributors)
 	reconcileJSON, _ := json.Marshal(f.CVSSReconciliation)
 	briefJSON, _ := json.Marshal(f.AnalystBrief)
+	contextJSON, _ := json.Marshal(f.ContextualAssessment)
 	attackPath := nullableText(string(f.AttackPathClass))
 	lateralMov := nullableText(string(f.LateralMovementPotential))
 
 	insertQ := fmt.Sprintf(`INSERT INTO %s.findings
 		(finding_id, cve_id, asset_id,
 		 intrinsic_input_hash, asset_signals_hash, evaluator_version,
-		 preconditions_evaluated,
+		 preconditions_evaluated, contextual_assessment,
 		 opes_score, opes_category, opes_label, opes_components,
 		 opes_top_contributors, opes_dampener, opes_override,
 		 confidence, priority_rationale, recommendation_text,
 		 cvss_reconciliation, analyst_brief,
 		 attack_path_class, lateral_movement_potential,
 		 status, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,now(),now())
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,now(),now())
 		ON CONFLICT (cve_id, asset_id, intrinsic_input_hash, asset_signals_hash, evaluator_version)
 		DO NOTHING`, s.cfg.OracleSchema)
 
 	_, err = tx.Exec(ctx, insertQ,
 		f.ID, f.CVEID, f.AssetID,
 		f.IntrinsicInputHash, f.AssetSignalsHash, f.EvaluatorVersion,
-		precsJSON,
+		precsJSON, contextJSON,
 		f.OPES.Value, string(f.OPES.Category), f.OPES.Label, compsJSON,
 		contribsJSON, f.OPES.Dampener, f.OPES.Override,
 		string(f.OPES.Confidence), "", f.RecommendationText,
@@ -522,7 +529,8 @@ func (s *Store) GetOpenFindings(ctx context.Context, cveID, assetID string) ([]*
 		COALESCE(analyst_brief, '{}'::jsonb),
 		COALESCE(attack_path_class, ''),
 		COALESCE(lateral_movement_potential, ''),
-		COALESCE(preconditions_evaluated, '[]'::jsonb)
+		COALESCE(preconditions_evaluated, '[]'::jsonb),
+		COALESCE(contextual_assessment, '{}'::jsonb)
 		FROM %s.findings WHERE status = 'open'`, s.cfg.OracleSchema)
 	args := []any{}
 	n := 1
@@ -549,13 +557,13 @@ func (s *Store) GetOpenFindings(ctx context.Context, cveID, assetID string) ([]*
 	for rows.Next() {
 		var f schema.Finding
 		var dampener, override *string
-		var reconcileRaw, briefRaw, precsRaw []byte
+		var reconcileRaw, briefRaw, precsRaw, contextRaw []byte
 		var attackPath, lateralMov string
 		err := rows.Scan(
 			&f.ID, &f.CVEID, &f.AssetID,
 			&f.OPES.Value, &f.OPES.Category, &f.OPES.Label, &dampener, &override,
 			&f.OPES.Confidence, &f.RecommendationText, &f.Status, &f.CreatedAt, &f.UpdatedAt,
-			&reconcileRaw, &briefRaw, &attackPath, &lateralMov, &precsRaw,
+			&reconcileRaw, &briefRaw, &attackPath, &lateralMov, &precsRaw, &contextRaw,
 		)
 		if err != nil {
 			return nil, err
@@ -571,6 +579,7 @@ func (s *Store) GetOpenFindings(ctx context.Context, cveID, assetID string) ([]*
 		_ = json.Unmarshal(reconcileRaw, &f.CVSSReconciliation)
 		_ = json.Unmarshal(briefRaw, &f.AnalystBrief)
 		_ = json.Unmarshal(precsRaw, &f.PreconditionsEvaluated)
+		_ = json.Unmarshal(contextRaw, &f.ContextualAssessment)
 		out = append(out, &f)
 	}
 	return out, rows.Err()
@@ -676,4 +685,3 @@ func providerFromModel(model string) string {
 		return "unknown"
 	}
 }
-

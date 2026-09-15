@@ -29,15 +29,19 @@ type Precondition struct {
 	MatchValue         string               `json:"match_value,omitempty" yaml:"match_value,omitempty"`
 	VerificationMethod string               `json:"verification_method" yaml:"verification_method"`
 	Severity           PreconditionSeverity `json:"severity" yaml:"severity"`
+	// PathIDs scopes this prerequisite to one or more documented exploit
+	// paths. A failed prerequisite blocks those paths, not every possible path.
+	PathIDs []string `json:"path_ids,omitempty" yaml:"path_ids,omitempty"`
 }
 
 // PreconditionEval is the contextual reasoner's evaluation of a single
 // precondition against a specific asset's signals.
 type PreconditionEval struct {
-	Precondition Precondition       `json:"precondition"`
-	Status       PreconditionStatus `json:"status"`
-	Reason       string             `json:"reason"`
-	SignalValue  string             `json:"signal_value,omitempty"`
+	Precondition Precondition          `json:"precondition"`
+	Status       PreconditionStatus    `json:"status"`
+	Reason       string                `json:"reason"`
+	SignalValue  string                `json:"signal_value,omitempty"`
+	Evidence     []EvidenceObservation `json:"evidence,omitempty"`
 }
 
 // PreconditionEvalSet is a slice of evaluations with helpers for OPES

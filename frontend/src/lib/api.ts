@@ -2540,6 +2540,11 @@ class ApiClient {
     opes_category?: string;
     opes_label?: string;
     attack_path_class?: string;
+    opes_confidence?: string;
+    contextual_assessment?: any;
+    exploitation_evidence?: any;
+    recommendation_text?: string;
+    analyst_brief?: any;
     analysis_status?: string;
     analysis_error?: string;
   }> {

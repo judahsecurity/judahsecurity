@@ -55,7 +55,7 @@ func New(store Store, intrinsicReasoner *intrinsic.Reasoner, opesConf opes.Confi
 // RunResult is the output of a single pipeline execution.
 type RunResult struct {
 	Finding   *schema.Finding
-	Cached    bool   // true if intrinsic analysis was served from cache
+	Cached    bool // true if intrinsic analysis was served from cache
 	LLMModel  string
 	CostUSD   float64
 	ElapsedMS int64
@@ -89,7 +89,9 @@ func (r *Runner) Run(ctx context.Context, cveID, assetID string, refs []intrinsi
 	}
 
 	// Phase B — contextual evaluation.
-	preconditions := contextual.Evaluate(analysis, asset)
+	assessedAt := time.Now().UTC()
+	contextualAssessment := contextual.Assess(analysis, asset, assessedAt)
+	preconditions := contextualAssessment.Preconditions
 
 	// OPES scoring.
 	score := opes.Compute(opes.Input{
@@ -98,11 +100,11 @@ func (r *Runner) Run(ctx context.Context, cveID, assetID string, refs []intrinsi
 		Asset:         asset,
 		Preconditions: preconditions,
 		Exploitation:  exploitation,
-		Now:           time.Now().UTC(),
+		Now:           assessedAt,
 	}, r.opesConf)
 
 	// Build finding.
-	finding := buildFinding(cve, asset, analysis, preconditions, score, exploitation)
+	finding := buildFinding(cve, asset, analysis, contextualAssessment, score, exploitation)
 
 	// Persist.
 	if err := r.store.UpsertFinding(ctx, finding); err != nil {
@@ -132,7 +134,9 @@ func (r *Runner) RunWithObjects(
 		return nil, fmt.Errorf("intrinsic analysis: %w", err)
 	}
 
-	preconditions := contextual.Evaluate(analysis, asset)
+	assessedAt := time.Now().UTC()
+	contextualAssessment := contextual.Assess(analysis, asset, assessedAt)
+	preconditions := contextualAssessment.Preconditions
 
 	score := opes.Compute(opes.Input{
 		CVE:           cve,
@@ -140,10 +144,10 @@ func (r *Runner) RunWithObjects(
 		Asset:         asset,
 		Preconditions: preconditions,
 		Exploitation:  exploitation,
-		Now:           time.Now().UTC(),
+		Now:           assessedAt,
 	}, r.opesConf)
 
-	finding := buildFinding(cve, asset, analysis, preconditions, score, exploitation)
+	finding := buildFinding(cve, asset, analysis, contextualAssessment, score, exploitation)
 
 	if r.store != nil {
 		_ = r.store.UpsertFinding(ctx, finding)
@@ -162,7 +166,7 @@ func buildFinding(
 	cve *schema.CVE,
 	asset *schema.Asset,
 	analysis *schema.IntrinsicAnalysis,
-	preconditions schema.PreconditionEvalSet,
+	contextualAssessment schema.ContextualAssessment,
 	score schema.OPESScore,
 	exploitation schema.ExploitationEvidence,
 ) *schema.Finding {
@@ -170,26 +174,27 @@ func buildFinding(
 	inputHash := shortHash(cve.ID + analysis.PromptVersion)
 
 	f := &schema.Finding{
-		ID:                     newFindingID(cve.ID, asset.ID, inputHash, signalsHash),
-		CVEID:                  cve.ID,
-		AssetID:                asset.ID,
-		IntrinsicInputHash:     inputHash,
-		AssetSignalsHash:       signalsHash,
-		EvaluatorVersion:       opes.Version,
-		PreconditionsEvaluated: preconditions,
-		OPES:                   score,
+		ID:                       newFindingID(cve.ID, asset.ID, inputHash, signalsHash),
+		CVEID:                    cve.ID,
+		AssetID:                  asset.ID,
+		IntrinsicInputHash:       inputHash,
+		AssetSignalsHash:         signalsHash,
+		EvaluatorVersion:         opes.Version,
+		PreconditionsEvaluated:   contextualAssessment.Preconditions,
+		ContextualAssessment:     contextualAssessment,
+		OPES:                     score,
 		CVSSReconciliation:       analysis.CVSSReconciliation,
 		AnalystBrief:             analysis.AnalystBrief,
 		AttackPathClass:          analysis.AttackPathClass,
 		LateralMovementPotential: analysis.LateralMovementPotential,
-		RecommendationText:       buildRecommendation(cve, asset, analysis, score, preconditions, exploitation),
-		Status:                 schema.StatusOpen,
-		CreatedAt:              time.Now().UTC(),
-		UpdatedAt:              time.Now().UTC(),
+		RecommendationText:       buildRecommendation(cve, asset, analysis, score, contextualAssessment, exploitation),
+		Status:                   schema.StatusOpen,
+		CreatedAt:                time.Now().UTC(),
+		UpdatedAt:                time.Now().UTC(),
 	}
 
 	// Attach verification tasks for unknown blocker preconditions.
-	for _, e := range preconditions {
+	for _, e := range contextualAssessment.Preconditions {
 		if e.Status != schema.PreconditionUnknown {
 			continue
 		}
@@ -232,27 +237,53 @@ func buildRecommendation(
 	asset *schema.Asset,
 	analysis *schema.IntrinsicAnalysis,
 	score schema.OPESScore,
-	preconditions schema.PreconditionEvalSet,
+	contextualAssessment schema.ContextualAssessment,
 	exploitation schema.ExploitationEvidence,
 ) string {
 	_ = cve // reserved for future per-CVE annotations (e.g. vendor priors)
 	var sb strings.Builder
+	preconditions := contextualAssessment.Preconditions
 
 	// ── Headline ─────────────────────────────────────────────────────────
 	fmt.Fprintf(&sb, "[%s] %s — OPES %.1f (confidence: %s)\n",
 		score.Category, score.Label, score.Value, score.Confidence)
 
 	switch score.Override {
-	case "blocker_unsatisfied":
-		sb.WriteString("Verdict: Not exploitable on this asset — a blocker precondition is confirmed unsatisfied. Safe to suppress.\n")
-	case "unreachable":
-		sb.WriteString("Verdict: Asset is isolated or unreachable by the required attacker class. Safe to suppress.\n")
 	case "kev_floor":
 		sb.WriteString("Verdict: CISA/VulnCheck KEV — confirmed exploited in the wild. Treat as P0 and patch on emergency cadence.\n")
 	default:
 		if score.Dampener != "" {
 			fmt.Fprintf(&sb, "Verdict: %s\n", score.Dampener)
 		}
+	}
+
+	// ── Asset-specific contextual exploitability ───────────────────────
+	sb.WriteString("\nCONTEXTUAL EXPLOITABILITY\n")
+	fmt.Fprintf(&sb, "  State: %s — %s\n", contextualAssessment.State, contextualAssessment.Summary)
+	if contextualAssessment.AttackerStartingPosition != "" {
+		fmt.Fprintf(&sb, "  Attacker starts: %s\n", contextualAssessment.AttackerStartingPosition)
+	}
+	if contextualAssessment.AffectedComponent != "" {
+		fmt.Fprintf(&sb, "  Affected component: %s\n", contextualAssessment.AffectedComponent)
+	}
+	if contextualAssessment.RealisticWorkflow != "" {
+		fmt.Fprintf(&sb, "  Practical workflow: %s\n", contextualAssessment.RealisticWorkflow)
+	}
+	if contextualAssessment.InputSource != "" {
+		fmt.Fprintf(&sb, "  Input source: %s\n", contextualAssessment.InputSource)
+	}
+	if contextualAssessment.AttackerInfluence != "" {
+		fmt.Fprintf(&sb, "  Attacker influence: %s\n", contextualAssessment.AttackerInfluence)
+	}
+	if contextualAssessment.ResultingCapability != "" {
+		fmt.Fprintf(&sb, "  Resulting capability: %s\n", contextualAssessment.ResultingCapability)
+	}
+	for _, path := range contextualAssessment.Paths {
+		fmt.Fprintf(&sb, "  Path %s: %s — %s\n", path.Path.Name, path.Status, path.Reason)
+	}
+	for _, transition := range contextualAssessment.Transitions {
+		fmt.Fprintf(&sb, "  Transition %s: access=%s capability=%s result=%s\n",
+			transition.Transition.ID, transition.AccessStatus, transition.CapabilityStatus, transition.Status)
 	}
 
 	// ── Attack path ─────────────────────────────────────────────────────
@@ -363,7 +394,7 @@ func reachabilityVerdict(asset *schema.Asset, analysis *schema.IntrinsicAnalysis
 		return ""
 	}
 	if asset.Exposure == schema.ExposureIsolated {
-		return "Asset is isolated — not reachable by any external attacker."
+		return "Current inventory marks the asset isolated; this lowers observed network reachability but does not rule out alternate or future paths."
 	}
 	switch analysis.AttackPathClass {
 	case schema.AttackPathExploitPublicFacing:

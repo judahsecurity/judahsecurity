@@ -45,7 +45,9 @@ import logging
 import os
 import re
 import threading
-from datetime import datetime, timezone
+import hashlib
+import json
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
@@ -82,6 +84,7 @@ ORACLE_TIMEOUT = float(os.getenv("ORACLE_TIMEOUT", "180"))
 # enrich_vulnerability_*() call. Lets the batch worker idempotently skip
 # vulnerabilities that were enriched recently.
 ENRICH_TTL_HOURS = int(os.getenv("ORACLE_ENRICH_TTL_HOURS", "168"))  # 7 days
+EVIDENCE_TTL_HOURS = int(os.getenv("ORACLE_EVIDENCE_TTL_HOURS", "24"))
 
 
 # Regex that recognises a well-formed CVE id. We accept up to 7 digits in
@@ -123,19 +126,25 @@ def enrich_vulnerability(db: Session, vuln: Vulnerability, *, force: bool = Fals
     `force=False` and the existing enrichment is within `ENRICH_TTL_HOURS`,
     returns the cached payload without an HTTP call.
     """
+    oracle_asset = _build_oracle_asset(vuln.asset) if vuln.asset is not None else None
+    context_hash = _context_hash(vuln, oracle_asset)
     if not force:
-        cached = _existing_fresh_payload(vuln)
+        cached = _existing_fresh_payload(vuln, context_hash=context_hash)
         if cached is not None:
             return cached
 
-    oracle_asset = _build_oracle_asset(vuln.asset) if vuln.asset is not None else None
     cve_id = _normalise_cve_id(vuln.cve_id)
     if oracle_asset is not None:
         if cve_id:
-            return _persist(db, vuln, _call_analyze(cve_id, oracle_asset))
-        return _persist(db, vuln, _call_generic_finding(vuln, oracle_asset))
+            payload = _call_analyze(cve_id, oracle_asset)
+        else:
+            payload = _call_generic_finding(vuln, oracle_asset)
+        payload["context_hash"] = context_hash
+        return _persist(db, vuln, payload)
     if cve_id:
-        return _persist(db, vuln, _call_intrinsic(cve_id))
+        payload = _call_intrinsic(cve_id)
+        payload["context_hash"] = context_hash
+        return _persist(db, vuln, payload)
     raise OracleInputError(f"vulnerability {vuln.id} has no usable cve_id and no usable asset context")
 
 
@@ -239,7 +248,11 @@ def _normalise_cve_id(raw: Optional[str]) -> Optional[str]:
     return s if _CVE_RE.match(s) else None
 
 
-def _existing_fresh_payload(vuln: Vulnerability) -> Optional[Dict[str, Any]]:
+def _existing_fresh_payload(
+    vuln: Vulnerability,
+    *,
+    context_hash: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
     """Return the cached Oracle payload if it is still within TTL, else None.
 
     We treat any payload without an `enriched_at` timestamp as stale so the
@@ -247,6 +260,12 @@ def _existing_fresh_payload(vuln: Vulnerability) -> Optional[Dict[str, Any]]:
     """
     payload = get_oracle_payload(vuln)
     if not payload:
+        return None
+    expected_context_hash = context_hash or _context_hash(
+        vuln,
+        _build_oracle_asset(vuln.asset) if vuln.asset is not None else None,
+    )
+    if not payload.get("context_hash") or payload.get("context_hash") != expected_context_hash:
         return None
     stamp = payload.get("enriched_at")
     if not stamp:
@@ -258,7 +277,60 @@ def _existing_fresh_payload(vuln: Vulnerability) -> Optional[Dict[str, Any]]:
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
     age_hours = (datetime.now(timezone.utc) - when).total_seconds() / 3600
-    return payload if age_hours <= ENRICH_TTL_HOURS else None
+    max_age_hours = min(ENRICH_TTL_HOURS, EVIDENCE_TTL_HOURS)
+    return payload if age_hours <= max_age_hours else None
+
+
+def _context_hash(vuln: Vulnerability, asset_payload: Optional[Dict[str, Any]]) -> str:
+    """Hash the material finding and asset context used by Oracle.
+
+    This makes cache invalidation event-driven: exposure, ports, detected
+    software, authentication, finding evidence, and similar changes trigger a
+    reassessment immediately instead of waiting for an age-only TTL.
+    """
+    material = {
+        "cve_id": _normalise_cve_id(getattr(vuln, "cve_id", None)),
+        "title": getattr(vuln, "title", None),
+        "description": getattr(vuln, "description", None),
+        "severity": str(getattr(vuln, "severity", "") or ""),
+        "affected_component": getattr(vuln, "affected_component", None),
+        "evidence": getattr(vuln, "evidence", None),
+        "proof_of_concept": getattr(vuln, "proof_of_concept", None),
+        "detection_confidence": getattr(vuln, "detection_confidence", None),
+        "asset": asset_payload,
+    }
+    encoded = json.dumps(material, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:24]
+
+
+def _component_key(name: str) -> str:
+    """Return the canonical signal-path token for a detected component."""
+    return re.sub(r"[^a-z0-9]+", "", name.lower())
+
+
+def _evidence(
+    path: str,
+    value: Any,
+    *,
+    source: str,
+    observed_at: Optional[datetime],
+    scope: str,
+) -> Dict[str, Any]:
+    observed = observed_at or datetime.now(timezone.utc)
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    valid_until = observed + timedelta(hours=EVIDENCE_TTL_HOURS)
+    freshness = "fresh" if valid_until >= datetime.now(timezone.utc) else "stale"
+    return {
+        "signal_path": path,
+        "value": str(value).lower() if isinstance(value, bool) else str(value),
+        "source": source,
+        "scope": scope,
+        "collected_by": "judah-asm",
+        "observed_at": _utc_iso(observed),
+        "valid_until": _utc_iso(valid_until),
+        "freshness": freshness,
+    }
 
 
 def _build_oracle_asset(asset: Asset) -> Optional[Dict[str, Any]]:
@@ -292,6 +364,19 @@ def _build_oracle_asset(asset: Asset) -> Optional[Dict[str, Any]]:
         return None
 
     asset_id = f"asm-{asset.id}"
+    observed_at = asset.updated_at or datetime.now(timezone.utc)
+    signal_evidence: Dict[str, List[Dict[str, Any]]] = {}
+
+    def record(path: str, value: Any, source: str) -> None:
+        signal_evidence.setdefault(path, []).append(
+            _evidence(
+                path,
+                value,
+                source=source,
+                observed_at=observed_at,
+                scope=asset_id,
+            )
+        )
 
     # Network signals — open ports + WAF detection from technologies.
     open_ports: List[int] = []
@@ -313,10 +398,13 @@ def _build_oracle_asset(asset: Asset) -> Optional[Dict[str, Any]]:
     network: Dict[str, Any] = {}
     if asset.is_public is not None:
         network["internet_facing"] = bool(asset.is_public)
+        record("network.internet_facing", bool(asset.is_public), "asm_inventory")
     if open_ports:
         network["open_ports"] = open_ports
+        record("network.open_ports", ",".join(str(port) for port in open_ports), "asm_port_scan")
     if waf_name:
         network["waf"] = waf_name
+        record("network.waf", waf_name, "asm_technology_detection")
 
     # HTTP signals — best-effort from indexer fields. Many assets won't
     # have a banner; Phase B treats missing as PreconditionUnknown rather
@@ -369,6 +457,7 @@ def _build_oracle_asset(asset: Asset) -> Optional[Dict[str, Any]]:
     auth: Dict[str, Any] = {}
     if asset.has_login_portal:
         auth["required"] = True
+        record("auth.required", True, "asm_http_probe")
         if asset.login_portals and isinstance(asset.login_portals, list):
             # Best-effort method inference: SAML/OIDC URLs tend to mention it
             for lp in asset.login_portals:
@@ -377,9 +466,11 @@ def _build_oracle_asset(asset: Asset) -> Optional[Dict[str, Any]]:
                 url = (lp.get("url") or "").lower()
                 if "saml" in url:
                     auth["method"] = "saml"
+                    record("auth.method", "saml", "asm_http_probe")
                     break
                 if "oidc" in url or "/oauth" in url:
                     auth["method"] = "oidc"
+                    record("auth.method", "oidc", "asm_http_probe")
                     break
 
     # Extra signals — anything not in the formal Oracle schema goes here
@@ -407,6 +498,36 @@ def _build_oracle_asset(asset: Asset) -> Optional[Dict[str, Any]]:
     if asset_type_val:
         extra["asset_type"] = asset_type_val
 
+    for key, value in extra.items():
+        record(f"extra.{key}", value, "asm_inventory")
+
+    # Technology detection establishes presence only. It deliberately does
+    # not infer enabled, used, executing, or attacker-reachable state.
+    components: List[Dict[str, Any]] = []
+    for tech in tech_stack:
+        key = _component_key(str(tech.get("name") or ""))
+        if not key:
+            continue
+        version = str(tech.get("version") or "")
+        path = f"components.{key}.installed"
+        observation = _evidence(
+            path,
+            True,
+            source="asm_technology_detection",
+            observed_at=observed_at,
+            scope=asset_id,
+        )
+        component: Dict[str, Any] = {
+            "name": key,
+            "installed": True,
+            "evidence": [observation],
+        }
+        if version:
+            component["version"] = version
+            record(f"tech_stack.{tech['name']}", version, "asm_technology_detection")
+            record(f"tech_stack.{tech['name']}.version", version, "asm_technology_detection")
+        components.append(component)
+
     signals: Dict[str, Any] = {}
     if network:
         signals["network"] = network
@@ -418,8 +539,12 @@ def _build_oracle_asset(asset: Asset) -> Optional[Dict[str, Any]]:
         signals["tech_stack"] = tech_stack
     if auth:
         signals["auth"] = auth
+    if components:
+        signals["components"] = components
     if extra:
         signals["extra"] = extra
+    if signal_evidence:
+        signals["signal_evidence"] = signal_evidence
 
     payload: Dict[str, Any] = {
         "asset_id": asset_id,
@@ -511,7 +636,7 @@ def _call_analyze(cve_id: str, asset_payload: Dict[str, Any]) -> Dict[str, Any]:
         mode="full",
         finding=finding,
         intrinsic=None,
-        exploitation=None,
+        exploitation=data.get("exploitation") or {},
         analysis_status=data.get("analysis_status"),
         analysis_error=data.get("analysis_error"),
     )
@@ -616,7 +741,7 @@ def _build_payload(
     payload: Dict[str, Any] = {
         "mode": mode,
         "enriched_at": datetime.now(timezone.utc).isoformat(),
-        "schema_version": 1,
+        "schema_version": 2,
     }
     if analysis_status:
         payload["analysis_status"] = analysis_status
@@ -643,7 +768,9 @@ def _build_payload(
             "recommendation_text": finding.get("recommendation_text"),
             "cvss_reconciliation": finding.get("cvss_reconciliation"),
             "preconditions_evaluated": finding.get("preconditions_evaluated"),
+            "contextual_assessment": finding.get("contextual_assessment"),
             "verification_tasks": finding.get("verification_tasks"),
+            "exploitation_evidence": exploitation or {},
         })
         return payload
 
@@ -658,6 +785,14 @@ def _build_payload(
             "remote_triggerability": intrinsic.get("remote_triggerability"),
             "exploit_complexity": intrinsic.get("exploit_complexity"),
             "attacker_capability": intrinsic.get("attacker_capability"),
+            "attacker_starting_position": intrinsic.get("attacker_starting_position"),
+            "affected_component": intrinsic.get("affected_component"),
+            "realistic_workflow": intrinsic.get("realistic_workflow"),
+            "input_source": intrinsic.get("input_source"),
+            "attacker_influence": intrinsic.get("attacker_influence"),
+            "resulting_capability": intrinsic.get("resulting_capability"),
+            "exploit_paths": intrinsic.get("exploit_paths"),
+            "transitions": intrinsic.get("transitions"),
             "confidence": intrinsic.get("confidence"),
             "exploitation_evidence": exploitation,
         })
