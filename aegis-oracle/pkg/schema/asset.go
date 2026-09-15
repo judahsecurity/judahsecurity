@@ -58,10 +58,12 @@ type AssetSignals struct {
 	// flat Criticality enum when lateral movement risk is elevated.
 	NetworkPosition *NetworkPositionSignals `json:"network_position,omitempty"`
 
-	RuntimeFlags map[string]string `json:"runtime_flags,omitempty"`
-	Container    *ContainerSignals `json:"container,omitempty"`
-	Tenant       *TenantSignals    `json:"tenant,omitempty"`
-	FS           *FSSignals        `json:"fs,omitempty"`
+	RuntimeFlags   map[string]string                `json:"runtime_flags,omitempty"`
+	Container      *ContainerSignals                `json:"container,omitempty"`
+	Tenant         *TenantSignals                   `json:"tenant,omitempty"`
+	FS             *FSSignals                       `json:"fs,omitempty"`
+	Components     []ComponentObservation           `json:"components,omitempty"`
+	SignalEvidence map[string][]EvidenceObservation `json:"signal_evidence,omitempty"`
 
 	Extra map[string]string `json:"extra,omitempty"`
 }
@@ -247,6 +249,34 @@ func (s AssetSignals) Lookup(path string) (string, bool) {
 				}
 			}
 		}
+	case "components":
+		name, state, ok := strings.Cut(tail, ".")
+		if !ok {
+			return "", false
+		}
+		for _, component := range s.Components {
+			if !strings.EqualFold(component.Name, name) {
+				continue
+			}
+			var value *bool
+			switch state {
+			case "installed":
+				value = component.Installed
+			case "enabled":
+				value = component.Enabled
+			case "used":
+				value = component.Used
+			case "idle_on_demand":
+				value = component.IdleOnDemand
+			case "executing":
+				value = component.Executing
+			case "attacker_reachable":
+				value = component.AttackerReachable
+			}
+			if value != nil {
+				return strconv.FormatBool(*value), true
+			}
+		}
 	case "network_position":
 		if s.NetworkPosition == nil {
 			return "", false
@@ -275,4 +305,29 @@ func (s AssetSignals) Lookup(path string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// LookupWithEvidence returns the signal value together with observations that
+// establish its provenance and freshness.
+func (s AssetSignals) LookupWithEvidence(path string) (string, []EvidenceObservation, bool) {
+	value, ok := s.Lookup(path)
+	if !ok {
+		return "", s.SignalEvidence[path], false
+	}
+	evidence := append([]EvidenceObservation(nil), s.SignalEvidence[path]...)
+	if strings.HasPrefix(path, "components.") {
+		parts := strings.Split(path, ".")
+		if len(parts) >= 3 {
+			for _, component := range s.Components {
+				if strings.EqualFold(component.Name, parts[1]) {
+					for _, observation := range component.Evidence {
+						if observation.SignalPath == path {
+							evidence = append(evidence, observation)
+						}
+					}
+				}
+			}
+		}
+	}
+	return value, evidence, true
 }

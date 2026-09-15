@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
+import { Suspense, useState, useRef, useEffect, useCallback } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { MainLayout } from '@/components/layout/MainLayout';
 import { Header } from '@/components/layout/Header';
@@ -659,7 +659,7 @@ function CveLookupResult({ data }: { data: { cve: any; analysis: any; exploitati
 // Main page
 // ═══════════════════════════════════════════════════════
 
-export default function AgentPage() {
+function AgentPageContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
 
@@ -2211,5 +2211,13 @@ export default function AgentPage() {
         </div>
       </div>
     </MainLayout>
+  );
+}
+
+export default function AgentPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-background" />}>
+      <AgentPageContent />
+    </Suspense>
   );
 }

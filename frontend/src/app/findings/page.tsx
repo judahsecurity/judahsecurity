@@ -200,6 +200,8 @@ interface OracleEnrichment {
   opes_confidence?: 'high' | 'medium' | 'low';
   attack_path_class?: string;
   recommendation_text?: string;
+  contextual_assessment?: ContextualAssessment;
+  exploitation_evidence?: Record<string, any>;
   analyst_brief?: {
     title?: string;
     attack_vector_summary?: string;
@@ -207,6 +209,61 @@ interface OracleEnrichment {
     exploitability_score?: number;
     exploitability_tier?: string;
   };
+}
+
+interface EvidenceObservation {
+  signal_path?: string;
+  value?: string;
+  source?: string;
+  scope?: string;
+  observed_at?: string;
+  valid_until?: string;
+  freshness?: 'fresh' | 'stale' | 'error' | 'unsupported' | 'unknown';
+  error?: string;
+}
+
+interface ComponentObservation {
+  name: string;
+  version?: string;
+  installed?: boolean;
+  enabled?: boolean;
+  used?: boolean;
+  idle_on_demand?: boolean;
+  executing?: boolean;
+  attacker_reachable?: boolean;
+}
+
+interface ContextualAssessment {
+  state?: 'conditions_met' | 'needs_evidence' | 'documented_path_blocked' | 'conditional';
+  summary?: string;
+  attacker_starting_position?: string;
+  affected_component?: string;
+  realistic_workflow?: string;
+  input_source?: string;
+  attacker_influence?: string;
+  required_capability?: string;
+  resulting_capability?: string;
+  components?: ComponentObservation[];
+  preconditions?: Array<{
+    precondition?: { id?: string; description?: string; verification_method?: string };
+    status?: 'satisfied' | 'unsatisfied' | 'unknown';
+    reason?: string;
+    evidence?: EvidenceObservation[];
+  }>;
+  paths?: Array<{
+    path?: { id?: string; name?: string; description?: string; resulting_capability?: string };
+    status?: 'satisfied' | 'unsatisfied' | 'unknown';
+    reason?: string;
+    blocking_condition?: string;
+  }>;
+  transitions?: Array<{
+    transition?: { id?: string; description?: string; from_position?: string; target?: string; resulting_capability?: string };
+    access_status?: 'satisfied' | 'unsatisfied' | 'unknown';
+    capability_status?: 'satisfied' | 'unsatisfied' | 'unknown';
+    status?: 'satisfied' | 'unsatisfied' | 'unknown';
+    reason?: string;
+  }>;
+  missing_checks?: string[];
 }
 
 type SortMode = 'opes' | 'severity' | 'delphi' | 'recent' | 'cvss';
@@ -271,6 +328,39 @@ const opesCategoryStyle: Record<string, { label: string; className: string }> = 
   low:          { label: 'OPES Low',          className: 'bg-blue-500/20 text-blue-300 border-blue-500/40' },
   informational:{ label: 'OPES Info',         className: 'bg-muted text-muted-foreground border-muted-foreground/30' },
 };
+
+const contextualStateStyle: Record<string, { label: string; className: string }> = {
+  conditions_met: { label: 'Conditions met', className: 'border-red-500/40 text-red-300 bg-red-500/10' },
+  needs_evidence: { label: 'Needs evidence', className: 'border-yellow-500/40 text-yellow-300 bg-yellow-500/10' },
+  documented_path_blocked: { label: 'Documented paths blocked', className: 'border-blue-500/40 text-blue-300 bg-blue-500/10' },
+  conditional: { label: 'Conditional', className: 'border-orange-500/40 text-orange-300 bg-orange-500/10' },
+};
+
+function globalEvidenceSummary(evidence?: Record<string, any>): string[] {
+  if (!evidence) return [];
+  const lines: string[] = [];
+  const kev = Array.isArray(evidence.in_kev_sources) ? evidence.in_kev_sources : [];
+  if (kev.length) lines.push(`Known exploited: ${kev.join(', ')}`);
+  if (evidence.ransomware_associated) lines.push('Associated with ransomware activity');
+  if (evidence.breach_confirmed) lines.push(`Confirmed breach evidence${evidence.breach_incident_count ? ` (${evidence.breach_incident_count})` : ''}`);
+  if (evidence.vulncheck_reported_exploited) lines.push('VulnCheck reports exploitation in the wild');
+  if (evidence.metasploit_available) lines.push('Metasploit module available');
+  if (evidence.public_poc_found) lines.push(`Public proof of concept${evidence.public_poc_count ? ` (${evidence.public_poc_count})` : ''}`);
+  if (evidence.attacker_discoverability_tier) lines.push(`Attacker discoverability: ${String(evidence.attacker_discoverability_tier).replace(/_/g, ' ')}`);
+  return lines;
+}
+
+const componentStateFields: Array<[
+  'installed' | 'enabled' | 'used' | 'idle_on_demand' | 'executing' | 'attacker_reachable',
+  string,
+]> = [
+  ['installed', 'Installed'],
+  ['enabled', 'Enabled'],
+  ['used', 'Used'],
+  ['idle_on_demand', 'On demand'],
+  ['executing', 'Executing'],
+  ['attacker_reachable', 'Reachable'],
+];
 
 function OracleBadge({ oracle, compact = false }: { oracle?: OracleEnrichment; compact?: boolean }) {
   if (!oracle || !oracle.opes_category) return null;
@@ -341,7 +431,12 @@ function OracleEnrichmentPanel({
         opes_score: summary.opes_score ?? oracle?.opes_score,
         opes_category: (summary.opes_category as OracleEnrichment['opes_category']) ?? oracle?.opes_category,
         opes_label: summary.opes_label ?? oracle?.opes_label,
+        opes_confidence: (summary.opes_confidence as OracleEnrichment['opes_confidence']) ?? oracle?.opes_confidence,
         attack_path_class: summary.attack_path_class ?? oracle?.attack_path_class,
+        contextual_assessment: summary.contextual_assessment ?? oracle?.contextual_assessment,
+        exploitation_evidence: summary.exploitation_evidence ?? oracle?.exploitation_evidence,
+        recommendation_text: summary.recommendation_text ?? oracle?.recommendation_text,
+        analyst_brief: summary.analyst_brief ?? oracle?.analyst_brief,
       });
       toast({
         title: 'Oracle analysis updated',
@@ -386,6 +481,9 @@ function OracleEnrichmentPanel({
   // Enrichment present — render the OPES headline, attack path, analyst brief
   // summary, and the recommendation narrative.
   const style = oracle.opes_category ? opesCategoryStyle[oracle.opes_category] : null;
+  const context = oracle.contextual_assessment;
+  const contextStyle = context?.state ? contextualStateStyle[context.state] : null;
+  const globalEvidence = globalEvidenceSummary(oracle.exploitation_evidence);
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -433,6 +531,131 @@ function OracleEnrichmentPanel({
             </Badge>
           )}
         </div>
+
+        {context && (
+          <div className="rounded-md border border-orange-500/20 bg-background/30 p-3 space-y-3">
+            <div className="flex items-start justify-between gap-2 flex-wrap">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-wide text-orange-300">Contextual exploitability</p>
+                {context.summary && <p className="mt-1 text-xs text-foreground/80">{context.summary}</p>}
+              </div>
+              {contextStyle && (
+                <Badge variant="outline" className={cn('text-[10px]', contextStyle.className)}>
+                  {contextStyle.label}
+                </Badge>
+              )}
+            </div>
+
+            <div className="grid gap-2 text-xs sm:grid-cols-2">
+              {context.attacker_starting_position && <div><span className="text-muted-foreground">Attacker starts:</span> {context.attacker_starting_position}</div>}
+              {context.affected_component && <div><span className="text-muted-foreground">Affected component:</span> {context.affected_component}</div>}
+              {context.input_source && <div><span className="text-muted-foreground">Input source:</span> {context.input_source}</div>}
+              {context.attacker_influence && <div><span className="text-muted-foreground">Attacker controls:</span> {context.attacker_influence}</div>}
+              {context.required_capability && <div><span className="text-muted-foreground">Required capability:</span> {context.required_capability.replace(/_/g, ' ')}</div>}
+              {context.resulting_capability && <div><span className="text-muted-foreground">Result:</span> {context.resulting_capability}</div>}
+            </div>
+            {context.realistic_workflow && (
+              <div className="text-xs">
+                <p className="text-muted-foreground">Practical workflow</p>
+                <p className="mt-0.5 text-foreground/90">{context.realistic_workflow}</p>
+              </div>
+            )}
+
+            {!!context.components?.length && (
+              <div className="space-y-2">
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Observed component state</p>
+                {context.components.map((component, index) => (
+                  <div key={`${component.name}-${index}`} className="rounded border border-border/60 p-2">
+                    <p className="text-xs font-medium">{component.name}{component.version ? ` ${component.version}` : ''}</p>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {componentStateFields.map(([field, label]) => {
+                        const value = component[field];
+                        return (
+                          <Badge
+                            key={field}
+                            variant="outline"
+                            className={cn(
+                              'text-[9px] font-normal',
+                              value === true && 'border-green-500/40 text-green-300',
+                              value === false && 'border-blue-500/40 text-blue-300',
+                              value == null && 'border-muted-foreground/20 text-muted-foreground',
+                            )}
+                          >
+                            {label}: {value === true ? 'yes' : value === false ? 'no' : 'unknown'}
+                          </Badge>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {!!context.paths?.length && (
+              <div className="space-y-1">
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Documented exploit paths</p>
+                {context.paths.map((path, index) => (
+                  <div key={path.path?.id ?? index} className="text-xs border-l-2 border-border pl-2">
+                    <span className="font-medium">{path.path?.name ?? `Path ${index + 1}`}</span>
+                    <span className="text-muted-foreground"> · {path.status ?? 'unknown'}</span>
+                    {path.reason && <p className="text-foreground/70">{path.reason}</p>}
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {!!context.transitions?.length && (
+              <div className="space-y-1">
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">Attack transitions</p>
+                {context.transitions.map((transition, index) => (
+                  <div key={transition.transition?.id ?? index} className="text-xs">
+                    <span className="font-medium">{transition.transition?.description || transition.transition?.id || `Transition ${index + 1}`}</span>
+                    <p className="text-muted-foreground">
+                      access {transition.access_status ?? 'unknown'} · capability {transition.capability_status ?? 'unknown'} · result {transition.status ?? 'unknown'}
+                    </p>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {!!context.preconditions?.length && (
+              <details className="text-xs">
+                <summary className="cursor-pointer text-muted-foreground hover:text-foreground">Prerequisite evidence</summary>
+                <div className="mt-2 space-y-2">
+                  {context.preconditions.map((item, index) => (
+                    <div key={item.precondition?.id ?? index} className="border-l-2 border-border pl-2">
+                      <p><span className="font-medium">{item.precondition?.description || item.precondition?.id}</span> · {item.status ?? 'unknown'}</p>
+                      {item.reason && <p className="text-muted-foreground">{item.reason}</p>}
+                      {item.evidence?.map((evidence, evidenceIndex) => (
+                        <p key={evidenceIndex} className="text-[10px] text-muted-foreground">
+                          {evidence.source || 'unknown source'} · {evidence.freshness || 'unknown freshness'}
+                          {evidence.observed_at ? ` · observed ${formatDate(evidence.observed_at)}` : ''}
+                        </p>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              </details>
+            )}
+
+            {!!context.missing_checks?.length && (
+              <div className="rounded border border-yellow-500/30 bg-yellow-500/5 p-2 text-xs">
+                <p className="font-medium text-yellow-300">Evidence still needed</p>
+                {context.missing_checks.map((check, index) => <p key={index} className="mt-1 text-foreground/80">• {check}</p>)}
+              </div>
+            )}
+          </div>
+        )}
+
+        {globalEvidence.length > 0 && (
+          <div className="rounded-md border border-purple-500/20 bg-purple-500/5 p-3 text-xs">
+            <p className="font-semibold uppercase tracking-wide text-purple-300">Global threat intelligence</p>
+            <p className="mt-1 text-[10px] text-muted-foreground">Observed globally; kept separate from this asset&apos;s contextual assessment.</p>
+            <div className="mt-2 space-y-1">
+              {globalEvidence.map((line) => <p key={line}>• {line}</p>)}
+            </div>
+          </div>
+        )}
 
         {/* Analyst brief highlights — single attack-vector summary + likelihood line */}
         {oracle.analyst_brief?.attack_vector_summary && (

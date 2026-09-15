@@ -2,6 +2,7 @@
 
 from app.services.nuclei_detection import (
     build_nuclei_detection,
+    build_nuclei_oast_proof,
     detection_from_evidence,
     extract_match_criteria,
     scanner_detection_for_vulnerability,
@@ -31,6 +32,23 @@ http:
   - type: dsl
     dsl:
     - duration>=7 && duration <=16
+""".strip()
+
+OAST_YAML = """
+id: blind-ssrf-oast
+info:
+  name: Blind SSRF
+  severity: high
+http:
+- raw:
+  - |
+    GET /fetch?url=http://{{interactsh-url}} HTTP/1.1
+    Host: {{Hostname}}
+  matchers:
+  - type: word
+    part: interact_protocol
+    words:
+    - dns
 """.strip()
 
 
@@ -85,6 +103,43 @@ def test_build_nuclei_detection_includes_request_curl_response():
     assert detection["match"].startswith("https://uniqo.asem.it/help/")
     assert "duration>=7" in detection["match_criteria"]
     assert "id: time-based-sqli" in detection["template_yaml"]
+
+
+def test_nuclei_interactsh_match_builds_publishable_oast_proof():
+    result = NucleiResult(
+        template_id="blind-ssrf-oast",
+        template_name="Blind SSRF",
+        severity="high",
+        host="https://app.test",
+        matched_at="https://app.test/fetch",
+        request=(
+            "GET /fetch?url=http://abc123456789.oast.fun HTTP/1.1\n"
+            "Host: app.test"
+        ),
+        matcher_name="interact-dns",
+        matcher_status=True,
+        template_yaml=OAST_YAML,
+    )
+    proof = build_nuclei_oast_proof(result)
+    assert proof["kind"] == "oob_callback"
+    assert proof["source"] == "nuclei_interactsh"
+    assert proof["confirmed"] is True
+    assert proof["protocols"] == ["dns"]
+    assert proof["callback_domains"] == ["abc123456789.oast.fun"]
+    assert len(proof["request_sha256"]) == 64
+
+
+def test_non_oast_nuclei_match_does_not_claim_callback_proof():
+    result = NucleiResult(
+        template_id="time-based-sqli",
+        template_name="Time-Based SQLi",
+        severity="high",
+        host="https://app.test",
+        matched_at="https://app.test/help",
+        matcher_status=True,
+        template_yaml=TIME_BASED_SQLI_YAML,
+    )
+    assert build_nuclei_oast_proof(result) == {}
 
 
 def test_legacy_evidence_reconstructs_curl_and_match():

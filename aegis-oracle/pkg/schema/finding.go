@@ -16,31 +16,32 @@ const (
 // One per (CVE, Asset) pair. New findings are written for each
 // re-evaluation; old ones are marked superseded for audit.
 type Finding struct {
-	ID                     string              `json:"finding_id"`
-	CVEID                  string              `json:"cve_id"`
-	AssetID                string              `json:"asset_id"`
-	IntrinsicInputHash     string              `json:"intrinsic_input_hash"`
-	AssetSignalsHash       string              `json:"asset_signals_hash"`
-	EvaluatorVersion       string              `json:"evaluator_version"`
-	PreconditionsEvaluated PreconditionEvalSet `json:"preconditions_evaluated"`
-	OPES                   OPESScore           `json:"opes"`
-	CVSSReconciliation     CVSSReconciliation  `json:"cvss_reconciliation"`
+	ID                     string               `json:"finding_id"`
+	CVEID                  string               `json:"cve_id"`
+	AssetID                string               `json:"asset_id"`
+	IntrinsicInputHash     string               `json:"intrinsic_input_hash"`
+	AssetSignalsHash       string               `json:"asset_signals_hash"`
+	EvaluatorVersion       string               `json:"evaluator_version"`
+	PreconditionsEvaluated PreconditionEvalSet  `json:"preconditions_evaluated"`
+	ContextualAssessment   ContextualAssessment `json:"contextual_assessment"`
+	OPES                   OPESScore            `json:"opes"`
+	CVSSReconciliation     CVSSReconciliation   `json:"cvss_reconciliation"`
 	// AnalystBrief carries the plain-language vulnerability intelligence
 	// written by Phase A — rendered in the UI as the first thing an analyst
 	// reads when opening a finding.
-	AnalystBrief             AnalystBrief             `json:"analyst_brief"`
+	AnalystBrief AnalystBrief `json:"analyst_brief"`
 	// AttackPathClass is the MITRE ATT&CK initial access technique category
 	// for this finding — propagated from IntrinsicAnalysis for display and
 	// filtering without requiring a separate intrinsic lookup.
-	AttackPathClass          AttackPathClass          `json:"attack_path_class,omitempty"`
+	AttackPathClass AttackPathClass `json:"attack_path_class,omitempty"`
 	// LateralMovementPotential describes the pivot/lateral movement value an
 	// attacker gains from exploiting this finding. Propagated from Phase A.
 	LateralMovementPotential LateralMovementPotential `json:"lateral_movement_potential,omitempty"`
 	RecommendationText       string                   `json:"recommendation_text"`
-	VerificationTasks      []VerificationTask  `json:"verification_tasks,omitempty"`
-	Status                 FindingStatus       `json:"status"`
-	CreatedAt              time.Time           `json:"created_at"`
-	UpdatedAt              time.Time           `json:"updated_at"`
+	VerificationTasks        []VerificationTask       `json:"verification_tasks,omitempty"`
+	Status                   FindingStatus            `json:"status"`
+	CreatedAt                time.Time                `json:"created_at"`
+	UpdatedAt                time.Time                `json:"updated_at"`
 }
 
 // VerificationTask is a work item generated when a precondition's status is

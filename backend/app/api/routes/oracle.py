@@ -211,6 +211,7 @@ class EnrichResponse(BaseModel):
     analyst_brief: Optional[Dict[str, Any]] = None
     cvss_reconciliation: Optional[Dict[str, Any]] = None
     exploitation_evidence: Optional[Dict[str, Any]] = None
+    contextual_assessment: Optional[Dict[str, Any]] = None
     analysis_status: Optional[str] = None
     analysis_error: Optional[str] = None
 
@@ -270,6 +271,7 @@ def oracle_enrich_one(
         analyst_brief=payload.get("analyst_brief"),
         cvss_reconciliation=payload.get("cvss_reconciliation"),
         exploitation_evidence=payload.get("exploitation_evidence"),
+        contextual_assessment=payload.get("contextual_assessment"),
         analysis_status=payload.get("analysis_status"),
         analysis_error=payload.get("analysis_error"),
     )

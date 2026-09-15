@@ -12,10 +12,9 @@
 package prompts
 
 // V1Version is the prompt version recorded on outputs produced with V1.
-// Bumped to intrinsic.v5 — adds patch_bypass detection. CVEs that bypass a
-// prior patch now carry predecessor_cve, bypass_mechanism, and bypass_summary.
-// All v4 cached rows lacked patch_bypass; they will re-run when force=true.
-const V1Version = "intrinsic.v5"
+// Bumped to intrinsic.v6 — adds practical workflow, explicit alternate exploit
+// paths, and access-versus-capability transitions for contextual evaluation.
+const V1Version = "intrinsic.v6"
 
 // V1 is the production prompt for Phase A intrinsic analysis.
 //
@@ -41,9 +40,10 @@ explain the disagreement in cvss_reconciliation.disagreements.
 - A precondition is a concrete, verifiable fact about the target
   environment that must be true for exploitation to succeed. "Has the
   vulnerable version" is implicit — DO NOT add it as a precondition.
-- A blocker precondition is one whose absence makes exploitation
-  impossible. A contributing precondition makes exploitation easier or
-  available, but alternative paths may exist.
+- A blocker precondition is one whose absence blocks its associated
+  path_ids. It does not prove the vulnerability is globally impossible when
+  another documented or undiscovered path may exist. A contributing
+  precondition makes exploitation easier or available.
 - "Remote triggerability" means an unauthenticated network attacker can
   initiate the exploit chain with packets/requests, with no prior
   foothold. Authenticated network exploits are NOT remotely triggerable
@@ -72,6 +72,9 @@ other path will be permanently "unknown".
   runtime_flags.<process>      container.startup_args
   container.image              tenant.runs_user_code
   tenant.sandbox_kind          fs.writable_paths
+  components.<name>.installed  components.<name>.enabled
+  components.<name>.used       components.<name>.idle_on_demand
+  components.<name>.executing  components.<name>.attacker_reachable
   extra.<key>
 
 If a precondition genuinely needs a signal not on this list, prefer
@@ -101,6 +104,12 @@ Return ONLY a JSON object — no prose before or after — matching:
       "high"    // exploitation gives credential theft, domain-controller or secrets-manager access, pivot gateway
     | "medium"  // limited pivot: one adjacent segment or partial credential exposure
     | "low",    // isolated blast radius — no meaningful path to other hosts or credentials
+  "attacker_starting_position": "where the attacker begins before this exploit",
+  "affected_component":         "specific vulnerable function, service, library, or parser",
+  "realistic_workflow":         "how the component is invoked in a real deployment, including on-demand activation",
+  "input_source":               "request, file, message, API field, config, or other input that reaches it",
+  "attacker_influence":         "which part of that input the attacker controls and under what access",
+  "resulting_capability":       "the concrete capability gained if the path succeeds",
   "preconditions": [
     {
       "id":                   "kebab-case-stable-id",
@@ -109,7 +118,30 @@ Return ONLY a JSON object — no prose before or after — matching:
       "match_kind":           "regex" | "equals" | "contains" | "version_lte" | "present",
       "match_value":          "...",
       "verification_method":  "exact human steps to verify on the asset",
-      "severity":             "blocker" | "contributing"
+      "severity":             "blocker" | "contributing",
+      "path_ids":             ["ids of exploit paths requiring this condition"]
+    }
+  ],
+  "exploit_paths": [
+    {
+      "id":                   "stable-path-id",
+      "name":                 "analyst-facing path name",
+      "description":          "end-to-end path, including defaults/config/credentials/UI",
+      "precondition_ids":     ["precondition ids required for this path"],
+      "resulting_capability": "capability produced by this path"
+    }
+  ],
+  "transitions": [
+    {
+      "id":                    "stable-transition-id",
+      "description":           "what attacker progress this transition represents",
+      "from_position":         "attacker position before transition",
+      "target":                "target service/component",
+      "access_required":       "network/application access required",
+      "capability_required":   "attacker capability required in addition to access",
+      "resulting_capability":  "capability after successful exploitation",
+      "access_signal":         "canonical signal path that can establish access",
+      "capability_signal":     "canonical signal path that can establish required capability"
     }
   ],
   "cvss_reconciliation": {
@@ -146,6 +178,18 @@ Return ONLY a JSON object — no prose before or after — matching:
 }
 
 # Authoring rules for attack_path_class and lateral_movement_potential
+
+- Describe every documented alternative path separately. A disabled HTTP
+  listener may block the HTTP path while HTTPS or another management plane
+  remains viable; do not turn one path-specific blocker into a global claim.
+- Distinguish installed, enabled, used, idle/on-demand, executing, and
+  attacker-reachable. A missing process is not proof that an on-demand handler
+  cannot activate. Installed software alone does not prove untrusted input can
+  reach it.
+- For each network transition, require both access and the capability needed
+  to exploit the target. A firewall/F5 allow rule establishes access only.
+  Authentication bypass establishes authentication progress, not host code
+  execution, unless the documented exploit path proves that additional step.
 
 attack_path_class — pick exactly one:
 - exploit_public_facing: the vulnerability is directly exploitable by any
@@ -476,7 +520,9 @@ const V1OutputSchema = `{
   "required": [
     "remote_triggerability","exploit_complexity","attacker_capability",
     "attack_path_class","lateral_movement_potential",
-    "preconditions","cvss_reconciliation","attack_chain_summary",
+    "attacker_starting_position","affected_component","realistic_workflow",
+    "input_source","attacker_influence","resulting_capability",
+    "preconditions","exploit_paths","transitions","cvss_reconciliation","attack_chain_summary",
     "analyst_brief","patch_bypass","rationale","confidence"
   ],
   "properties": {
@@ -500,6 +546,12 @@ const V1OutputSchema = `{
       "type": "string",
       "enum": ["high","medium","low"]
     },
+    "attacker_starting_position": { "type": "string" },
+    "affected_component":         { "type": "string" },
+    "realistic_workflow":         { "type": "string" },
+    "input_source":               { "type": "string" },
+    "attacker_influence":         { "type": "string" },
+    "resulting_capability":       { "type": "string" },
     "preconditions": {
       "type": "array",
       "items": {
@@ -513,7 +565,42 @@ const V1OutputSchema = `{
           "match_kind":          { "type": "string", "enum": ["regex","equals","contains","version_lte","present"] },
           "match_value":         { "type": "string" },
           "verification_method": { "type": "string" },
-          "severity":            { "type": "string", "enum": ["blocker","contributing"] }
+          "severity":            { "type": "string", "enum": ["blocker","contributing"] },
+          "path_ids":            { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    },
+    "exploit_paths": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id","name","precondition_ids"],
+        "properties": {
+          "id":                   { "type": "string" },
+          "name":                 { "type": "string" },
+          "description":          { "type": "string" },
+          "precondition_ids":     { "type": "array", "items": { "type": "string" } },
+          "resulting_capability": { "type": "string" }
+        }
+      }
+    },
+    "transitions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id","description","from_position","target","access_required","capability_required","resulting_capability","access_signal","capability_signal"],
+        "properties": {
+          "id":                   { "type": "string" },
+          "description":          { "type": "string" },
+          "from_position":        { "type": "string" },
+          "target":               { "type": "string" },
+          "access_required":      { "type": "string" },
+          "capability_required":  { "type": "string" },
+          "resulting_capability": { "type": "string" },
+          "access_signal":        { "type": "string" },
+          "capability_signal":    { "type": "string" }
         }
       }
     },

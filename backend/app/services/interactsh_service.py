@@ -16,6 +16,7 @@ interactions are streamed by the client to a JSONL file which `poll` tails.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -45,6 +46,8 @@ class _Session:
     sid: str
     proc: subprocess.Popen
     output_file: str
+    session_file: Optional[str] = None
+    metadata_file: Optional[str] = None
     server: Optional[str] = None
     payload_domain: Optional[str] = None
     created_at: float = field(default_factory=time.time)
@@ -56,6 +59,113 @@ class _Session:
 
 _SESSIONS: Dict[str, _Session] = {}
 _LOCK = threading.Lock()
+
+
+def _truthy(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _rpc_enabled() -> bool:
+    return _truthy("AEGIS_INTERACTSH_RPC_ENABLED") and not _truthy(
+        "AEGIS_INTERACTSH_LOCAL"
+    )
+
+
+def _rpc_call(operation: str, **arguments) -> Dict[str, Any]:
+    """Send one command to the dedicated Interactsh worker over Redis."""
+    try:
+        import redis
+
+        client = redis.Redis.from_url(
+            os.environ.get("REDIS_URL", "redis://redis:6379/0"),
+            decode_responses=True,
+            socket_connect_timeout=3,
+            socket_timeout=max(
+                5, int(os.environ.get("AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS", "35"))
+            ),
+        )
+        request_id = uuid.uuid4().hex
+        response_key = f"aegis:interactsh:response:{request_id}"
+        request = json.dumps(
+            {
+                "id": request_id,
+                "operation": operation,
+                "arguments": arguments,
+                "response_key": response_key,
+            },
+            default=str,
+        )
+        client.rpush("aegis:interactsh:requests", request)
+        timeout = max(
+            5, int(os.environ.get("AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS", "35"))
+        )
+        response = client.blpop(response_key, timeout=timeout)
+        client.delete(response_key)
+        if not response:
+            return {
+                "success": False,
+                "error": "Interactsh worker did not respond before the RPC timeout",
+            }
+        payload = json.loads(response[1])
+        return payload if isinstance(payload, dict) else {
+            "success": False,
+            "error": "Interactsh worker returned an invalid response",
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Interactsh worker RPC failed: %s", exc)
+        return {"success": False, "error": f"Interactsh worker unavailable: {exc}"}
+
+
+def _state_dir() -> Optional[Path]:
+    configured = (os.environ.get("AEGIS_INTERACTSH_STATE_DIR") or "").strip()
+    if not configured:
+        return None
+    root = Path(configured)
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    return root
+
+
+def _session_paths(sid: str) -> tuple[str, Optional[str], Optional[str]]:
+    root = _state_dir()
+    if root is None:
+        fd, output_file = tempfile.mkstemp(prefix=f"interactsh_{sid}_", suffix=".jsonl")
+        os.close(fd)
+        return output_file, None, None
+    output_file = root / f"{sid}.jsonl"
+    output_file.touch(mode=0o600, exist_ok=True)
+    return str(output_file), str(root / f"{sid}.session"), str(root / f"{sid}.metadata.json")
+
+
+def _persist_session(session: _Session) -> None:
+    if not session.metadata_file:
+        return
+    payload = {
+        "sid": session.sid,
+        "output_file": session.output_file,
+        "session_file": session.session_file,
+        "server": session.server,
+        "payload_domain": session.payload_domain,
+        "created_at": session.created_at,
+        "last_used": session.last_used,
+        "read_offset": session.read_offset,
+    }
+    path = Path(session.metadata_file)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_text(json.dumps(payload), encoding="utf-8")
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
+
+
+def _delete_session_files(session: _Session) -> None:
+    for filename in (session.output_file, session.session_file, session.metadata_file):
+        if filename:
+            try:
+                os.unlink(filename)
+            except OSError:
+                pass
 
 
 def _binary() -> Optional[str]:
@@ -73,6 +183,8 @@ def _binary() -> Optional[str]:
 
 def health() -> Dict[str, Any]:
     """Report whether the standalone callback client is executable."""
+    if _rpc_enabled():
+        return _rpc_call("health")
     exe = _binary()
     if not exe:
         return {
@@ -154,15 +266,14 @@ def _stop_locked(sid: str) -> bool:
                 s.proc.kill()
     except Exception:  # noqa: BLE001
         pass
-    try:
-        os.unlink(s.output_file)
-    except OSError:
-        pass
+    _delete_session_files(s)
     return True
 
 
 def register(server: Optional[str] = None, token: Optional[str] = None) -> Dict[str, Any]:
     """Start an interactsh-client session and return its unique payload domain."""
+    if _rpc_enabled():
+        return _rpc_call("register", server=server, token=token)
     exe = _binary()
     if not exe:
         return {
@@ -183,10 +294,11 @@ def register(server: Optional[str] = None, token: Optional[str] = None) -> Dict[
             }
 
     sid = uuid.uuid4().hex[:12]
-    fd, out_path = tempfile.mkstemp(prefix=f"interactsh_{sid}_", suffix=".jsonl")
-    os.close(fd)
+    out_path, session_file, metadata_file = _session_paths(sid)
 
     cmd = [exe, "-json", "-o", out_path]
+    if session_file:
+        cmd += ["-sf", session_file]
     if server:
         cmd += ["-s", server]
     if token:
@@ -201,13 +313,22 @@ def register(server: Optional[str] = None, token: Optional[str] = None) -> Dict[
             bufsize=1,
         )
     except Exception as e:  # noqa: BLE001
-        try:
-            os.unlink(out_path)
-        except OSError:
-            pass
+        for filename in (out_path, session_file, metadata_file):
+            if filename:
+                try:
+                    os.unlink(filename)
+                except OSError:
+                    pass
         return {"success": False, "error": f"failed to launch interactsh-client: {e}"}
 
-    session = _Session(sid=sid, proc=proc, output_file=out_path, server=server)
+    session = _Session(
+        sid=sid,
+        proc=proc,
+        output_file=out_path,
+        session_file=session_file,
+        metadata_file=metadata_file,
+        server=server,
+    )
     reader = threading.Thread(target=_drain, args=(session,), daemon=True)
     session._reader = reader
     reader.start()
@@ -231,6 +352,13 @@ def register(server: Optional[str] = None, token: Optional[str] = None) -> Dict[
 
     with _LOCK:
         _SESSIONS[sid] = session
+        _persist_session(session)
+
+    if session_file and os.path.exists(session_file):
+        try:
+            os.chmod(session_file, 0o600)
+        except OSError:
+            pass
 
     return _public_session(session, reused=False)
 
@@ -265,6 +393,8 @@ def ensure_session(
     token: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Reuse a live Interactsh session or register a new one."""
+    if _rpc_enabled():
+        return _rpc_call("ensure_session", server=server, token=token)
     with _LOCK:
         _reap_locked()
         for session in _SESSIONS.values():
@@ -272,6 +402,7 @@ def ensure_session(
                 if server and session.server and session.server != server:
                     continue
                 session.last_used = time.time()
+                _persist_session(session)
                 return _public_session(session, reused=True)
     return register(server, token)
 
@@ -287,15 +418,103 @@ def _stop_locked_direct(session: _Session) -> None:
                 session.proc.kill()
     except Exception:  # noqa: BLE001
         pass
-    try:
-        os.unlink(session.output_file)
-    except OSError:
-        pass
+    _delete_session_files(session)
+
+
+def recover_sessions() -> Dict[str, Any]:
+    """Resume persisted Interactsh registrations after the worker restarts."""
+    root = _state_dir()
+    exe = _binary()
+    if root is None or not exe:
+        return {"success": bool(exe), "recovered": 0}
+
+    recovered = 0
+    now = time.time()
+    for metadata_path in sorted(root.glob("*.metadata.json")):
+        if recovered >= _MAX_SESSIONS:
+            break
+        proc = None
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            sid = str(metadata.get("sid") or "")
+            if not re.fullmatch(r"[0-9a-f]{12}", sid):
+                raise ValueError("invalid session id")
+            created_at = float(metadata.get("created_at") or 0)
+            last_used = float(metadata.get("last_used") or created_at)
+            if not created_at or now - last_used > _SESSION_TTL:
+                raise TimeoutError("expired session")
+            output_file = root / f"{sid}.jsonl"
+            session_file = root / f"{sid}.session"
+            if not session_file.is_file():
+                raise FileNotFoundError("missing Interactsh session file")
+            output_file.touch(mode=0o600, exist_ok=True)
+            command = [
+                exe,
+                "-json",
+                "-o",
+                str(output_file),
+                "-sf",
+                str(session_file),
+            ]
+            server = metadata.get("server")
+            if server:
+                command += ["-s", str(server)]
+            proc = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            session = _Session(
+                sid=sid,
+                proc=proc,
+                output_file=str(output_file),
+                session_file=str(session_file),
+                metadata_file=str(metadata_path),
+                server=str(server) if server else None,
+                payload_domain=str(metadata.get("payload_domain") or "") or None,
+                created_at=created_at,
+                last_used=last_used,
+                read_offset=max(0, int(metadata.get("read_offset") or 0)),
+            )
+            reader = threading.Thread(target=_drain, args=(session,), daemon=True)
+            session._reader = reader
+            reader.start()
+            time.sleep(0.05)
+            if proc.poll() is not None:
+                raise RuntimeError("resumed Interactsh client exited")
+            with _LOCK:
+                _SESSIONS[sid] = session
+                _persist_session(session)
+            recovered += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not recover Interactsh session %s: %s", metadata_path, exc)
+            if proc is not None and proc.poll() is None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=5)
+                except Exception:  # noqa: BLE001
+                    try:
+                        proc.kill()
+                    except Exception:  # noqa: BLE001
+                        pass
+            for candidate in (
+                metadata_path,
+                root / f"{metadata_path.name.removesuffix('.metadata.json')}.jsonl",
+                root / f"{metadata_path.name.removesuffix('.metadata.json')}.session",
+            ):
+                try:
+                    candidate.unlink(missing_ok=True)
+                except OSError:
+                    pass
+    return {"success": True, "recovered": recovered}
 
 
 def poll(session_id: str, only_new: bool = True) -> Dict[str, Any]:
     """Return interactions captured by a session since the last poll."""
-    import json as _json
+    if _rpc_enabled():
+        return _rpc_call("poll", session_id=session_id, only_new=only_new)
 
     with _LOCK:
         session = _SESSIONS.get(session_id)
@@ -322,8 +541,8 @@ def poll(session_id: str, only_new: bool = True) -> Dict[str, Any]:
         if not ln:
             continue
         try:
-            evt = _json.loads(ln)
-        except _json.JSONDecodeError:
+            evt = json.loads(ln)
+        except json.JSONDecodeError:
             continue
         interactions.append({
             "protocol": evt.get("protocol"),
@@ -335,6 +554,7 @@ def poll(session_id: str, only_new: bool = True) -> Dict[str, Any]:
         })
 
     alive = session.proc.poll() is None
+    _persist_session(session)
     return {
         "success": True,
         "session_id": session_id,
@@ -347,6 +567,8 @@ def poll(session_id: str, only_new: bool = True) -> Dict[str, Any]:
 
 
 def list_sessions() -> Dict[str, Any]:
+    if _rpc_enabled():
+        return _rpc_call("list")
     with _LOCK:
         _reap_locked()
         sessions = [
@@ -363,6 +585,8 @@ def list_sessions() -> Dict[str, Any]:
 
 
 def stop(session_id: str) -> Dict[str, Any]:
+    if _rpc_enabled():
+        return _rpc_call("stop", session_id=session_id)
     with _LOCK:
         ok = _stop_locked(session_id)
     if not ok:

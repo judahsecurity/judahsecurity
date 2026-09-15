@@ -13,6 +13,10 @@ POSTGRES_PASSWORD=CHANGE_ME_TO_A_SECURE_PASSWORD
 POSTGRES_DB=asm_db
 DB_PORT=5432
 
+# Database, Redis, backend, Oracle, and optional admin ports bind to loopback by
+# default. Set this only when a private network must reach them directly.
+HOST_BIND_ADDRESS=127.0.0.1
+
 # Backend
 BACKEND_PORT=8000
 SECRET_KEY=GENERATE_WITH_openssl_rand_hex_32
@@ -49,6 +53,17 @@ LETSENCRYPT_STAGING=0
 
 # Redis
 REDIS_PORT=6379
+
+# =============================================================================
+# Assessment evidence and OAST callbacks
+# =============================================================================
+# Compose supplies these production-safe defaults. Evidence and Interactsh
+# session state are stored in private named volumes so backend/worker restarts
+# do not discard callback correlation or proof artifacts.
+AEGIS_INTERACTSH_RPC_ENABLED=true
+AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS=35
+AEGIS_EVIDENCE_DIR=/app/data/evidence
+AEGIS_EVIDENCE_RETENTION_SECONDS=86400
 
 # =============================================================================
 # Auth hardening: CAPTCHA + rate limiting (brute-force / bot protection)

@@ -45,25 +45,25 @@ func cweExploitCeiling(cweID string) float64 {
 		return 3.0
 
 	// Easy — classic injection, widely tooled
-	case "CWE-89":  // SQL Injection
+	case "CWE-89": // SQL Injection
 		return 3.0
-	case "CWE-78":  // OS Command Injection
+	case "CWE-78": // OS Command Injection
 		return 3.0
-	case "CWE-77":  // Command Injection (generic)
+	case "CWE-77": // Command Injection (generic)
 		return 3.0
-	case "CWE-94":  // Code Injection
+	case "CWE-94": // Code Injection
 		return 3.0
-	case "CWE-79":  // Cross-site Scripting (XSS)
+	case "CWE-79": // Cross-site Scripting (XSS)
 		return 3.5
-	case "CWE-22":  // Path Traversal
+	case "CWE-22": // Path Traversal
 		return 3.0
-	case "CWE-23":  // Relative Path Traversal
+	case "CWE-23": // Relative Path Traversal
 		return 3.0
-	case "CWE-73":  // External Control of File Name or Path
+	case "CWE-73": // External Control of File Name or Path
 		return 3.5
-	case "CWE-90":  // LDAP Injection
+	case "CWE-90": // LDAP Injection
 		return 3.5
-	case "CWE-91":  // XML Injection
+	case "CWE-91": // XML Injection
 		return 3.5
 
 	// Moderate — requires chaining or specific server-side conditions
@@ -372,12 +372,11 @@ func reachability(in Input, _ Config) float64 {
 // preconditionScore (P) — fraction of preconditions actually satisfied.
 //
 // Per-evaluation values: Satisfied=10, Unknown=5 (neutral, signals no
-// information), Unsatisfied=2 (contradicts; full-block handled by
-// override). Average across all preconditions, weighted equally.
+// information), Unsatisfied=2 (contradicts one documented condition).
+// Average across all preconditions, weighted equally.
 //
 // The Unknown=5 value is intentional: we don't penalize for not yet
-// knowing. The unknown-blocker dampener (in combine.go) handles the
-// "we don't know, so don't be confident" case at the score level.
+// knowing. Missing evidence lowers confidence, not the score.
 func preconditionScore(set schema.PreconditionEvalSet) float64 {
 	if len(set) == 0 {
 		return 5.0

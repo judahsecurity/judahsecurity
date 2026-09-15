@@ -74,11 +74,11 @@ type Config struct {
 	// Scheduler controls the background CVE freshness sync jobs.
 	// Omit or set to zero to use DefaultIntervals (1h NVD delta, 6h KEV, 12h EPSS, 15m analyze).
 	Scheduler struct {
-		Disabled             bool          `yaml:"disabled"`              // set true to run on-demand only
-		NVDDeltaEvery        time.Duration `yaml:"nvd_delta_every"`       // default: 1h
-		CISAKEVEvery         time.Duration `yaml:"cisa_kev_every"`        // default: 6h
-		EPSSEvery            time.Duration `yaml:"epss_every"`            // default: 12h
-		AnalyzePendingEvery  time.Duration `yaml:"analyze_pending_every"` // default: 15m
+		Disabled            bool          `yaml:"disabled"`              // set true to run on-demand only
+		NVDDeltaEvery       time.Duration `yaml:"nvd_delta_every"`       // default: 1h
+		CISAKEVEvery        time.Duration `yaml:"cisa_kev_every"`        // default: 6h
+		EPSSEvery           time.Duration `yaml:"epss_every"`            // default: 12h
+		AnalyzePendingEvery time.Duration `yaml:"analyze_pending_every"` // default: 15m
 	} `yaml:"scheduler"`
 }
 
@@ -355,6 +355,7 @@ func buildMux(
 				"finding":         nil,
 				"analysis_status": "failed",
 				"analysis_error":  "Analysis pipeline could not be completed: " + err.Error(),
+				"exploitation":    exploitation,
 				"llm_model":       "",
 				"elapsed_ms":      int64(0),
 			})
@@ -364,6 +365,7 @@ func buildMux(
 		writeJSON(w, http.StatusOK, map[string]any{
 			"finding":         result.Finding,
 			"analysis_status": "complete",
+			"exploitation":    exploitation,
 			"llm_model":       result.LLMModel,
 			"elapsed_ms":      result.ElapsedMS,
 		})
@@ -545,7 +547,9 @@ func buildExploitationEvidence(ctx context.Context, cveID, vulnCheckToken string
 
 func analyzeGenericFinding(v schema.GenericVulnerability, asset *schema.Asset, cfg opes.Config) schema.GenericFindingAnalysis {
 	class, analysis, exploitation, detectionSignals := classifyGenericFinding(v)
-	preconditions := contextual.Evaluate(analysis, asset)
+	assessedAt := time.Now().UTC()
+	contextualAssessment := contextual.Assess(analysis, asset, assessedAt)
+	preconditions := contextualAssessment.Preconditions
 
 	// Infer detection confidence from scanner signals. This tells OPES difficulty
 	// whether the vulnerable feature was confirmed active (endpoint_confirmed,
@@ -560,7 +564,7 @@ func analyzeGenericFinding(v schema.GenericVulnerability, asset *schema.Asset, c
 		Asset:               asset,
 		Preconditions:       preconditions,
 		Exploitation:        exploitation,
-		Now:                 time.Now().UTC(),
+		Now:                 assessedAt,
 		CWEID:               v.CWEID,
 		DetectionConfidence: dc,
 	}, cfg)
@@ -574,6 +578,7 @@ func analyzeGenericFinding(v schema.GenericVulnerability, asset *schema.Asset, c
 		AttackPathClass:          analysis.AttackPathClass,
 		LateralMovementPotential: analysis.LateralMovementPotential,
 		PreconditionsEvaluated:   preconditions,
+		ContextualAssessment:     contextualAssessment,
 		RecommendationText:       buildGenericRecommendation(v, asset, analysis, score, preconditions),
 		DetectionSignals:         detectionSignals,
 	}
@@ -943,7 +948,7 @@ func classifyGenericFinding(v schema.GenericVulnerability) (string, *schema.Intr
 			AttackVectorSummary: "Attacker path depends on the detected finding class and reachable asset surface.",
 			RealWorldLikelihood: "Medium until the finding is classified with stronger evidence or validated by a scanner/operator.",
 			AffectedIf:          "Affected when the detector evidence accurately reflects a reachable, exploitable condition on this asset.",
-			NotAffectedIf:       "Not affected when the evidence is stale, unreachable, or blocked by compensating controls.",
+			NotAffectedIf:       "Not affected only when current, asset-scoped evidence independently verifies that every documented exploitation path is blocked or the vulnerable condition is absent. Stale or missing evidence remains unknown.",
 			ExploitabilityScore: 3.0,
 			ExploitabilityTier:  "moderate",
 		}
@@ -1066,18 +1071,18 @@ func inferDetectionConfidence(v schema.GenericVulnerability) schema.DetectionCon
 // the template sends an actual exploit payload (not just a detection probe).
 func isExploitTemplate(templateID string) bool {
 	return containsAny(templateID,
-		"/cves/",       // CVE-specific exploits
-		"/exploits/",   // explicit exploit category
-		"/rce/",        // remote code execution
-		"/sqli/",       // SQL injection
-		"/ssrf/",       // server-side request forgery  
-		"/lfi/",        // local file inclusion
-		"/rfi/",        // remote file inclusion
-		"-rce",         // e.g. spring4shell-rce, log4j-rce
+		"/cves/",     // CVE-specific exploits
+		"/exploits/", // explicit exploit category
+		"/rce/",      // remote code execution
+		"/sqli/",     // SQL injection
+		"/ssrf/",     // server-side request forgery
+		"/lfi/",      // local file inclusion
+		"/rfi/",      // remote file inclusion
+		"-rce",       // e.g. spring4shell-rce, log4j-rce
 		"-sqli",
 		"-ssrf",
-		"-blind",       // blind injection variants
-		"-oast",        // out-of-band application security testing
+		"-blind", // blind injection variants
+		"-oast",  // out-of-band application security testing
 	)
 }
 

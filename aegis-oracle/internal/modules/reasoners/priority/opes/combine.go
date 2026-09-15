@@ -8,45 +8,13 @@ import (
 	"github.com/your-org/aegis-oracle/pkg/schema"
 )
 
-// combine takes the six component scores and produces the final OPESScore,
-// applying overrides and dampeners in this order:
-//
-//  1. Blocker-unsatisfied override → score 0, Informational "Not Exploitable"
-//  2. Reachability-zero override   → score 0, Informational "Not Reachable"
-//  3. Weighted sum                 → raw 0–10
-//  4. KEV-floor override (X high)  → floor at KEVFloorScore, Critical
-//  5. Unknown-blocker dampener     → cap at UnknownBlockerCap (Low-territory)
-//
-// Order matters: an unsatisfied blocker beats KEV listing (the exploit
-// genuinely cannot happen), but KEV beats unknown blockers (we know
-// someone is exploiting it; verify fast).
+// combine takes the six component scores and produces the final OPESScore.
+// Local prerequisites influence the P component and confidence, but never
+// produce a universal "not exploitable" claim: an observation may only block
+// one documented path, and alternate paths may exist. Likewise, isolation is
+// not a permanent safety claim. Confirmed global exploitation can still apply
+// the KEV floor independently of local evidence.
 func combine(in Input, c schema.OPESComponents, cfg Config) schema.OPESScore {
-	if in.Preconditions.AnyBlocker(schema.PreconditionUnsatisfied) {
-		return schema.OPESScore{
-			Value:            0.0,
-			Category:         schema.PriorityInformational,
-			Label:            "Not Exploitable",
-			Confidence:       schema.ConfidenceHigh,
-			Components:       c,
-			TopContributors:  []string{"At least one blocker precondition is unsatisfied — exploit is impossible on this asset"},
-			Override:         "blocker_unsatisfied",
-			EvaluatorVersion: Version,
-		}
-	}
-
-	if c.R == 0 {
-		return schema.OPESScore{
-			Value:            0.0,
-			Category:         schema.PriorityInformational,
-			Label:            "Not Reachable",
-			Confidence:       schema.ConfidenceHigh,
-			Components:       c,
-			TopContributors:  []string{"Asset is isolated or otherwise unreachable by the required attacker class"},
-			Override:         "unreachable",
-			EvaluatorVersion: Version,
-		}
-	}
-
 	raw := cfg.Weights.X*c.X +
 		cfg.Weights.P*c.P +
 		cfg.Weights.R*c.R +
@@ -65,20 +33,12 @@ func combine(in Input, c schema.OPESComponents, cfg Config) schema.OPESScore {
 		return score
 	}
 
-	dampener := ""
-	if in.Preconditions.AnyBlocker(schema.PreconditionUnknown) {
-		if raw > cfg.Dampeners.UnknownBlockerCap {
-			raw = cfg.Dampeners.UnknownBlockerCap
-			dampener = fmt.Sprintf(
-				"Unknown-blocker dampener applied: %d blocker precondition(s) unverifiable from current asset signals; capped at Low until verified",
-				in.Preconditions.CountBlockers(schema.PreconditionUnknown),
-			)
-		}
-	}
-
 	score := buildScore(raw, c, in, cfg)
-	if dampener != "" {
-		score.Dampener = dampener
+	if unknown := in.Preconditions.CountBlockers(schema.PreconditionUnknown); unknown > 0 {
+		score.Dampener = fmt.Sprintf(
+			"Confidence reduced: %d required condition(s) need fresh asset evidence; score was not lowered for missing evidence",
+			unknown,
+		)
 	}
 	return score
 }
@@ -109,7 +69,7 @@ func bucketize(v float64, cfg Config) (schema.Priority, string) {
 	case v >= cfg.Bucketing.Low:
 		return schema.PriorityLow, "Low - Verification Required"
 	default:
-		return schema.PriorityInformational, "Informational - Unlikely to be Exploited"
+		return schema.PriorityInformational, "Informational - Limited Current Evidence"
 	}
 }
 
@@ -118,7 +78,7 @@ func deriveConfidence(in Input) schema.Confidence {
 		return schema.ConfidenceLow
 	}
 	if in.Preconditions.AnyBlocker(schema.PreconditionUnknown) {
-		return schema.ConfidenceMedium
+		return schema.ConfidenceLow
 	}
 	if in.Intrinsic.Confidence == "" {
 		return schema.ConfidenceMedium

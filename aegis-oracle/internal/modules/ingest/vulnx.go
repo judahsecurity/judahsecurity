@@ -104,29 +104,29 @@ func (c *VulnxClient) FetchCVE(ctx context.Context, cveID string) (*schema.CVE, 
 // Extra fields are silently ignored so vulnx schema additions don't break
 // the daemon.
 type vulnxRaw struct {
-	CVEID           string          `json:"cve_id"`
-	Severity        string          `json:"severity"`
-	Description     string          `json:"description"`
-	CVSSScore       float64         `json:"cvss_score"`
-	CVSSMetrics     json.RawMessage `json:"cvss_metrics"`
-	EPSSScore       float64         `json:"epss_score"`
-	EPSSPercentile  float64         `json:"epss_percentile"`
-	IsKEV           bool            `json:"is_kev"`
-	IsVKEV          bool            `json:"is_vkev"`
-	KEV             *struct {
+	CVEID          string          `json:"cve_id"`
+	Severity       string          `json:"severity"`
+	Description    string          `json:"description"`
+	CVSSScore      float64         `json:"cvss_score"`
+	CVSSMetrics    json.RawMessage `json:"cvss_metrics"`
+	EPSSScore      float64         `json:"epss_score"`
+	EPSSPercentile float64         `json:"epss_percentile"`
+	IsKEV          bool            `json:"is_kev"`
+	IsVKEV         bool            `json:"is_vkev"`
+	KEV            *struct {
 		DateAdded string `json:"dateAdded"`
 	} `json:"kev"`
-	POCCount         int      `json:"poc_count"`
+	POCCount         int              `json:"poc_count"`
 	POCs             []map[string]any `json:"pocs"`
 	Templates        []map[string]any `json:"templates"`
-	Filename         string   `json:"filename"`
-	CWE              []string `json:"cwe"`
-	References       []string `json:"references"`
+	Filename         string           `json:"filename"`
+	CWE              []string         `json:"cwe"`
+	References       []string         `json:"references"`
 	AffectedProducts []map[string]any `json:"affected_products"`
-	CPEs             []string `json:"cpe"`
-	PublishedAt      string   `json:"published_at"`
-	UpdatedAt        string   `json:"updated_at"`
-	DateAdded        string   `json:"date_added"`
+	CPEs             []string         `json:"cpe"`
+	PublishedAt      string           `json:"published_at"`
+	UpdatedAt        string           `json:"updated_at"`
+	DateAdded        string           `json:"date_added"`
 }
 
 // parseVulnx converts a raw vulnx response into a schema.CVE.
@@ -174,9 +174,7 @@ func parseVulnx(cveID string, data json.RawMessage) (*schema.CVE, error) {
 
 	// CVSS vectors — vulnx returns them under cvss_metrics with keys like
 	// "cvss_v31", "cvss_v40", with "source" + "vector" + "score" fields.
-	if len(raw.CVSSMetrics) > 0 {
-		cve.CVSSVectors = parseCVSSMetrics(raw.CVSSMetrics, raw.CVSSScore, raw.Severity)
-	}
+	cve.CVSSVectors = parseCVSSMetrics(raw.CVSSMetrics, raw.CVSSScore, raw.Severity)
 
 	// Nuclei template name is exposed as `filename` on a hit row, e.g.
 	// "cves/2024/CVE-2024-12345.yaml". Templates array may also be present.
@@ -280,7 +278,7 @@ func classifyReferenceKind(url string) string {
 		strings.Contains(u, "cisco.com/security"),
 		strings.Contains(u, "vmware.com/security"),
 		strings.Contains(u, "fortinet.com/psirt"),
-		strings.Contains(u, "paloaltonetworks.com/security"):
+		strings.Contains(u, "paloaltonetworks.com"):
 		return "vendor"
 	case strings.Contains(u, "mitre.org"), strings.Contains(u, "nvd.nist.gov"):
 		return "mitre"
