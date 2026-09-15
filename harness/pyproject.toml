@@ -11,6 +11,9 @@ requires-python = ">=3.10"
 license = { text = "MIT" }
 dependencies = []
 
+[project.scripts]
+aegis-eval-gate = "local_harness.eval_gate:main"
+
 [project.optional-dependencies]
 # LLM-backed judge (optional — the default heuristic judge needs nothing).
 anthropic = ["anthropic>=0.39"]

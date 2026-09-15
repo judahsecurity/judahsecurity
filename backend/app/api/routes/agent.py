@@ -145,6 +145,41 @@ def _resolve_agent_organization_id(current_user: User, db: Session):
     return None
 
 
+def _require_agent_session_access(
+    session_id: str,
+    current_user: User,
+    organization_id: int,
+    db: Session,
+    *,
+    require_exists: bool = True,
+) -> None:
+    """Enforce ownership before control commands or WebSocket registration."""
+    from app.services.agent.runtime_store import safe_call
+
+    run = safe_call("get_run", session_id, organization_id)
+    if run and (
+        getattr(current_user, "is_superuser", False)
+        or run.get("user_id") == current_user.id
+    ):
+        return
+
+    conversation = (
+        db.query(AgentConversation)
+        .filter(
+            AgentConversation.session_id == session_id,
+            AgentConversation.organization_id == organization_id,
+        )
+        .first()
+    )
+    if conversation and (
+        getattr(current_user, "is_superuser", False)
+        or conversation.user_id == current_user.id
+    ):
+        return
+    if run or conversation or require_exists:
+        raise HTTPException(status_code=404, detail="Agent session not found")
+
+
 def _handle_agent_error(result_error: str):
     """Raise appropriate HTTP exception for agent errors."""
     err = result_error.lower()
@@ -343,6 +378,13 @@ async def query_agent(
     org_id = _resolve_agent_organization_id(current_user, db)
     if not org_id:
         raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
+    _require_agent_session_access(
+        session_id,
+        current_user,
+        org_id,
+        db,
+        require_exists=False,
+    )
     
     question = request.question
     initial_todos = None
@@ -457,6 +499,7 @@ async def approve_phase_transition(
     org_id = _resolve_agent_organization_id(current_user, db)
     if not org_id:
         raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
+    _require_agent_session_access(request.session_id, current_user, org_id, db)
     
     try:
         invoke_task = asyncio.create_task(
@@ -505,6 +548,7 @@ async def answer_agent_question(
     org_id = _resolve_agent_organization_id(current_user, db)
     if not org_id:
         raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
+    _require_agent_session_access(request.session_id, current_user, org_id, db)
     
     _save_conversation(db, request.session_id, current_user.id, org_id, "user", request.answer)
 
@@ -546,7 +590,8 @@ async def stop_agent_run(
     org_id = _resolve_agent_organization_id(current_user, db)
     if not org_id:
         raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
-    cancelled = _stop_agent_session(session_id)
+    _require_agent_session_access(session_id, current_user, org_id, db)
+    cancelled = _stop_agent_session(session_id, issued_by=str(current_user.id))
     logger.info(
         "Agent stop requested by user %s for session %s (task_cancelled=%s)",
         current_user.id,
@@ -569,9 +614,10 @@ async def steer_agent_run(
     org_id = _resolve_agent_organization_id(current_user, db)
     if not org_id:
         raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
+    _require_agent_session_access(session_id, current_user, org_id, db)
     from app.services.agent.run_control import has_running_task, queue_steer
 
-    in_flight = queue_steer(session_id, request.message)
+    in_flight = queue_steer(session_id, request.message, issued_by=str(current_user.id))
     return {
         "ok": True,
         "session_id": session_id,
@@ -590,10 +636,74 @@ async def compact_agent_run(
     org_id = _resolve_agent_organization_id(current_user, db)
     if not org_id:
         raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
+    _require_agent_session_access(session_id, current_user, org_id, db)
     from app.services.agent.run_control import request_compact
 
-    request_compact(session_id)
+    request_compact(session_id, issued_by=str(current_user.id))
     return {"ok": True, "session_id": session_id, "compact_queued": True}
+
+
+@router.get("/runs")
+async def list_agent_runs(
+    limit: int = Query(50, ge=1, le=200),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """List durable runs visible to the current operator."""
+    org_id = _resolve_agent_organization_id(current_user, db)
+    if not org_id:
+        raise HTTPException(status_code=400, detail="User must belong to an organization.")
+    from app.services.agent.runtime_store import list_runs
+
+    user_filter = None if getattr(current_user, "is_superuser", False) else current_user.id
+    return {"runs": list_runs(org_id, user_id=user_filter, limit=limit)}
+
+
+@router.get("/runs/{session_id}")
+async def get_agent_run(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return restart-safe run status and budget metadata."""
+    org_id = _resolve_agent_organization_id(current_user, db)
+    if not org_id:
+        raise HTTPException(status_code=400, detail="User must belong to an organization.")
+    from app.services.agent.runtime_store import get_run
+
+    run = get_run(session_id, org_id)
+    if not run or (
+        not getattr(current_user, "is_superuser", False)
+        and run.get("user_id") != current_user.id
+    ):
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    return run
+
+
+@router.get("/runs/{session_id}/events")
+async def get_agent_run_events(
+    session_id: str,
+    after_id: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=1000),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Read the canonical event timeline for replay, UI, and audit."""
+    org_id = _resolve_agent_organization_id(current_user, db)
+    if not org_id:
+        raise HTTPException(status_code=400, detail="User must belong to an organization.")
+    from app.services.agent.runtime_store import get_run, list_events
+
+    run = get_run(session_id, org_id)
+    if not run or (
+        not getattr(current_user, "is_superuser", False)
+        and run.get("user_id") != current_user.id
+    ):
+        raise HTTPException(status_code=404, detail="Agent run not found")
+    return {
+        "session_id": session_id,
+        "events": list_events(session_id, org_id, after_id=after_id, limit=limit),
+    }
 
 
 @router.post("/sessions/{session_id}/load")
@@ -836,12 +946,13 @@ class WebSocketManager:
     def __init__(self):
         self.active_connections: dict[str, WebSocket] = {}
     
-    async def connect(self, websocket: WebSocket, session_id: str):
-        await websocket.accept()
+    def register(self, websocket: WebSocket, session_id: str) -> None:
         self.active_connections[session_id] = websocket
     
-    def disconnect(self, session_id: str):
-        self.active_connections.pop(session_id, None)
+    def disconnect(self, session_id: str, websocket: Optional[WebSocket] = None):
+        current = self.active_connections.get(session_id)
+        if websocket is None or current is websocket:
+            self.active_connections.pop(session_id, None)
     
     async def send_message(self, session_id: str, message: dict):
         ws = self.active_connections.get(session_id)
@@ -855,12 +966,12 @@ class WebSocketManager:
 ws_manager = WebSocketManager()
 
 
-def _stop_agent_session(session_id: str) -> bool:
+def _stop_agent_session(session_id: str, *, issued_by: Optional[str] = None) -> bool:
     """Cancel an in-flight agent run and its recon streams."""
     from app.services.agent.run_control import request_stop
     from app.services.agent import recon_workers
 
-    cancelled = request_stop(session_id)
+    cancelled = request_stop(session_id, issued_by=issued_by)
     try:
         recon_workers.clear_session(session_id)
     except Exception:
@@ -945,7 +1056,9 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
     - {"type": "error", "message": "..."}
     - {"type": "pong"}
     """
-    await ws_manager.connect(websocket, session_id)
+    # Accept so the client can authenticate, but do not register the session in
+    # the shared connection map until ownership has been verified.
+    await websocket.accept()
 
     try:
         await websocket.send_json({"type": "connected", "session_id": session_id})
@@ -1030,6 +1143,22 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
             return
         user_id = user.id
         authenticated = True
+        access_db = SessionLocal()
+        try:
+            _require_agent_session_access(
+                session_id,
+                user,
+                org_id,
+                access_db,
+                require_exists=False,
+            )
+        except HTTPException:
+            await websocket.send_json({"type": "error", "message": "Agent session not found"})
+            await websocket.close(code=4003)
+            return
+        finally:
+            access_db.close()
+        ws_manager.register(websocket, session_id)
         await websocket.send_json({"type": "authenticated", "user_id": user_id})
 
         while True:
@@ -1224,7 +1353,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                     continue
                 from app.services.agent.run_control import has_running_task, queue_steer
 
-                in_flight = queue_steer(session_id, message)
+                in_flight = queue_steer(session_id, message, issued_by=str(user_id))
                 await websocket.send_json({
                     "type": "steer_queued",
                     "queued": True,
@@ -1237,7 +1366,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                     continue
                 from app.services.agent.run_control import request_compact
 
-                request_compact(session_id)
+                request_compact(session_id, issued_by=str(user_id))
                 await websocket.send_json({"type": "compact_queued", "session_id": session_id})
 
             elif msg_type == "load":
@@ -1262,24 +1391,22 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                 if not brief:
                     await websocket.send_json({"type": "error", "message": "Prior session not found"})
                     continue
-                queue_load_brief(session_id, brief)
+                queue_load_brief(session_id, brief, issued_by=str(user_id))
                 await websocket.send_json({
                     "type": "load_queued",
                     "source_session_id": source,
                 })
 
             elif msg_type == "stop":
-                _stop_agent_session(session_id)
+                _stop_agent_session(session_id, issued_by=str(user_id) if user_id else None)
                 await emit_cancelled()
             
             elif msg_type == "ping":
                 await websocket.send_json({"type": "pong"})
     
     except WebSocketDisconnect:
-        _stop_agent_session(session_id)
-        ws_manager.disconnect(session_id)
-        logger.info(f"WebSocket disconnected: {session_id}")
+        ws_manager.disconnect(session_id, websocket)
+        logger.info("WebSocket disconnected; durable run continues: %s", session_id)
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
-        _stop_agent_session(session_id)
-        ws_manager.disconnect(session_id)
+        ws_manager.disconnect(session_id, websocket)

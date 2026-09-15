@@ -3009,6 +3009,17 @@ class AgentOrchestrator:
         set_autonomous_mode(mode == "agent")
         logger.info(f"[{user_id}/{session_id}] Invoking with: {question[:100]}... (mode={mode}, max_iter={max_iterations or 'default'})")
 
+        from app.services.agent import runtime_events
+
+        runtime_events.start_run(
+            session_id=session_id,
+            organization_id=organization_id,
+            user_id=user_id,
+            mode=mode,
+            objective=question,
+            price_limit_usd=price_limit_usd,
+        )
+
         from app.services.agent.run_control import (
             clear_stop,
             queue_load_brief,
@@ -3038,8 +3049,14 @@ class AgentOrchestrator:
             except Exception:
                 logger.debug("prior hunt load skipped", exc_info=True)
 
-        if status_callback:
-            self.set_status_callback(status_callback)
+        self.set_status_callback(
+            runtime_events.callback_for(
+                session_id=session_id,
+                organization_id=organization_id,
+                user_id=user_id,
+                downstream=status_callback,
+            )
+        )
         
         # EvoGraph: record chain start
         evograph.record_chain_start(
@@ -3075,6 +3092,13 @@ class AgentOrchestrator:
             )
             self._persist_palace_brain(organization_id, session_id, final_state)
 
+            runtime_events.finish_run(
+                session_id=session_id,
+                organization_id=organization_id,
+                user_id=user_id,
+                response=response,
+            )
+
             return response
         
         except asyncio.CancelledError:
@@ -3082,15 +3106,27 @@ class AgentOrchestrator:
             evograph.record_chain_end(
                 session_id=session_id, status="cancelled", outcome="Stopped by operator",
             )
-            return self._stopped_response()
+            response = self._stopped_response()
+            runtime_events.cancel_run(
+                session_id=session_id,
+                organization_id=organization_id,
+                user_id=user_id,
+            )
+            return response
         except Exception as e:
             logger.exception(f"[{user_id}/{session_id}] Error: {e}")
             evograph.record_chain_end(session_id=session_id, status="error", outcome=str(e)[:300])
-            return InvokeResponse(error=str(e))
+            response = InvokeResponse(error=str(e))
+            runtime_events.finish_run(
+                session_id=session_id,
+                organization_id=organization_id,
+                user_id=user_id,
+                response=response,
+            )
+            return response
         finally:
             unregister_run(session_id, this_task)
-            if status_callback:
-                self.clear_status_callback()
+            self.clear_status_callback()
     
     async def _arm_autonomous_from_state(self, config: dict) -> None:
         """Restore autonomous auto-approval on resume from the checkpointed run
@@ -3120,12 +3156,25 @@ class AgentOrchestrator:
             return InvokeResponse(error="Agent not initialized")
 
         self._start_turn_deadline()
+        from app.services.agent import runtime_events
         from app.services.agent.run_control import clear_stop, register_run, unregister_run
+        runtime_events.resume_run(
+            session_id=session_id,
+            organization_id=organization_id,
+            user_id=user_id,
+            reason="approval",
+        )
         clear_stop(session_id)
         this_task = asyncio.current_task()
         register_run(session_id, this_task)
-        if status_callback:
-            self.set_status_callback(status_callback)
+        self.set_status_callback(
+            runtime_events.callback_for(
+                session_id=session_id,
+                organization_id=organization_id,
+                user_id=user_id,
+                downstream=status_callback,
+            )
+        )
         
         try:
             config = {"configurable": {"thread_id": session_id}}
@@ -3140,18 +3189,36 @@ class AgentOrchestrator:
             
             final_state = await self.graph.ainvoke(update_data, config)
             self._persist_palace_brain(organization_id, session_id, final_state)
-            return self._build_response(final_state)
+            response = self._build_response(final_state)
+            runtime_events.finish_run(
+                session_id=session_id,
+                organization_id=organization_id,
+                user_id=user_id,
+                response=response,
+            )
+            return response
         
         except asyncio.CancelledError:
             logger.info(f"[{user_id}/{session_id}] Stopped by operator during resume")
+            runtime_events.cancel_run(
+                session_id=session_id,
+                organization_id=organization_id,
+                user_id=user_id,
+            )
             return self._stopped_response()
         except Exception as e:
             logger.error(f"[{user_id}/{session_id}] Resume error: {e}")
-            return InvokeResponse(error=str(e))
+            response = InvokeResponse(error=str(e))
+            runtime_events.finish_run(
+                session_id=session_id,
+                organization_id=organization_id,
+                user_id=user_id,
+                response=response,
+            )
+            return response
         finally:
             unregister_run(session_id, this_task)
-            if status_callback:
-                self.clear_status_callback()
+            self.clear_status_callback()
     
     async def resume_after_answer(
         self,
@@ -3166,12 +3233,25 @@ class AgentOrchestrator:
             return InvokeResponse(error="Agent not initialized")
 
         self._start_turn_deadline()
+        from app.services.agent import runtime_events
         from app.services.agent.run_control import clear_stop, register_run, unregister_run
+        runtime_events.resume_run(
+            session_id=session_id,
+            organization_id=organization_id,
+            user_id=user_id,
+            reason="answer",
+        )
         clear_stop(session_id)
         this_task = asyncio.current_task()
         register_run(session_id, this_task)
-        if status_callback:
-            self.set_status_callback(status_callback)
+        self.set_status_callback(
+            runtime_events.callback_for(
+                session_id=session_id,
+                organization_id=organization_id,
+                user_id=user_id,
+                downstream=status_callback,
+            )
+        )
         
         try:
             config = {"configurable": {"thread_id": session_id}}
@@ -3185,18 +3265,36 @@ class AgentOrchestrator:
             
             final_state = await self.graph.ainvoke(update_data, config)
             self._persist_palace_brain(organization_id, session_id, final_state)
-            return self._build_response(final_state)
+            response = self._build_response(final_state)
+            runtime_events.finish_run(
+                session_id=session_id,
+                organization_id=organization_id,
+                user_id=user_id,
+                response=response,
+            )
+            return response
         
         except asyncio.CancelledError:
             logger.info(f"[{user_id}/{session_id}] Stopped by operator during resume")
+            runtime_events.cancel_run(
+                session_id=session_id,
+                organization_id=organization_id,
+                user_id=user_id,
+            )
             return self._stopped_response()
         except Exception as e:
             logger.error(f"[{user_id}/{session_id}] Resume error: {e}")
-            return InvokeResponse(error=str(e))
+            response = InvokeResponse(error=str(e))
+            runtime_events.finish_run(
+                session_id=session_id,
+                organization_id=organization_id,
+                user_id=user_id,
+                response=response,
+            )
+            return response
         finally:
             unregister_run(session_id, this_task)
-            if status_callback:
-                self.clear_status_callback()
+            self.clear_status_callback()
     
     @staticmethod
     def _stopped_response() -> InvokeResponse:

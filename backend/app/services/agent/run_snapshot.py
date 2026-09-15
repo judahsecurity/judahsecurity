@@ -68,6 +68,21 @@ def save_run_snapshot(
         if len(encoded) > _MAX_SNAPSHOT_BYTES:
             logger.warning("run snapshot exceeds %d bytes; prior snapshot retained", _MAX_SNAPSHOT_BYTES)
             return
+        # Primary production checkpoint: organization-scoped PostgreSQL row.
+        # Keep the local file below as a single-node fallback for development and
+        # for upgrades where the migration has not run yet.
+        try:
+            from app.services.agent.runtime_store import safe_call
+
+            safe_call(
+                "save_checkpoint",
+                int(organization_id),
+                session_id,
+                json.loads(encoded.decode("utf-8")),
+                schema_version=_SCHEMA_VERSION,
+            )
+        except Exception:
+            logger.debug("database run checkpoint skipped", exc_info=True)
         _DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(_DIR, 0o700)
         destination = _path(int(organization_id), session_id)
@@ -95,6 +110,14 @@ def load_run_snapshot(
 ) -> Dict[str, Any]:
     if not organization_id or not session_id:
         return {}
+    try:
+        from app.services.agent.runtime_store import safe_call
+
+        durable = safe_call("load_checkpoint", int(organization_id), session_id)
+        if isinstance(durable, dict) and durable:
+            return durable
+    except Exception:
+        logger.debug("database run checkpoint load skipped", exc_info=True)
     path = _path(int(organization_id), session_id)
     if not path.is_file():
         return {}

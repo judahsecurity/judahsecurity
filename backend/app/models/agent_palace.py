@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, Index, Integer, JSON, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Index, Integer, JSON, String, Text
 
 from app.db.database import Base
 
@@ -35,6 +35,13 @@ class AgentPalaceDrawer(Base):
     tool_name = Column(String(128), nullable=True)
     session_id = Column(String(64), nullable=True, index=True)
     target = Column(String(512), nullable=True)
+    trust_level = Column(String(32), nullable=False, default="observed", index=True)
+    retention_class = Column(String(32), nullable=False, default="engagement", index=True)
+    provenance = Column(JSON, nullable=False, default=dict)
+    expires_at = Column(DateTime, nullable=True, index=True)
+    quarantined = Column(Boolean, nullable=False, default=False, index=True)
+    quarantine_reason = Column(String(512), nullable=True)
+    last_accessed_at = Column(DateTime, nullable=True)
     embedding = Column(JSON, nullable=True)
     embedding_model = Column(String(128), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)

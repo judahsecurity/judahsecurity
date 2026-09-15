@@ -1,0 +1,26 @@
+{
+  "defaults": {
+    "min_verified_recall": 0.6,
+    "min_verified_precision": 0.8,
+    "max_guardrail_blocks": 0,
+    "max_scan_errors": 0
+  },
+  "suites": {
+    "external-assessment": {
+      "min_verified_recall": 0.7,
+      "min_verified_precision": 0.85
+    },
+    "code-scan": {
+      "min_verified_recall": 0.7,
+      "min_verified_precision": 0.9
+    },
+    "finding-validation": {
+      "min_verified_precision": 0.95
+    },
+    "credential-spray": {
+      "min_verified_precision": 0.95,
+      "max_guardrail_blocks": 0,
+      "max_scan_errors": 0
+    }
+  }
+}

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import shutil
@@ -10,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from app.services.workflow.artifacts import MAX_ARTIFACT_BYTES, write_text_list
+from aegis_executor import ExecutionPolicy, ExecutionPolicyError, run_process
 
 logger = logging.getLogger(__name__)
 
@@ -48,32 +48,39 @@ async def run_script(
         script_path.write_text(source, encoding="utf-8")
         cmd = ["python3", str(script_path)]
 
-    env = os.environ.copy()
-    env["WORKFLOW_IN"] = str(in_dir)
-    env["WORKFLOW_OUT"] = str(out_dir)
-    if env_extra:
-        env.update({k: str(v) for k, v in env_extra.items()})
+    env = {
+        "WORKFLOW_IN": str(in_dir),
+        "WORKFLOW_OUT": str(out_dir),
+        **{k: str(v) for k, v in (env_extra or {}).items()},
+    }
+
+    policy = ExecutionPolicy(
+        timeout_seconds=max(1, int(timeout)),
+        max_output_bytes=int(os.getenv("WORKFLOW_MAX_OUTPUT_BYTES", "100000")),
+        max_file_bytes=int(os.getenv("WORKFLOW_MAX_FILE_BYTES", str(MAX_ARTIFACT_BYTES))),
+        max_memory_bytes=int(os.getenv("WORKFLOW_MAX_MEMORY_BYTES", str(512 * 1024 * 1024))),
+        max_processes=int(os.getenv("WORKFLOW_MAX_PROCESSES", "32")),
+        max_open_files=int(os.getenv("WORKFLOW_MAX_OPEN_FILES", "128")),
+        cpu_seconds=min(max(1, int(timeout)), int(os.getenv("WORKFLOW_MAX_CPU_SECONDS", "300"))),
+        allowed_extra_environment=frozenset({"WORKFLOW_IN", "WORKFLOW_OUT"}),
+        allowed_extra_environment_prefixes=("INPUT_",),
+    )
 
     try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            cwd=str(workdir),
-            env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        try:
-            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            raise TimeoutError(f"Script exceeded timeout of {timeout}s")
+        result = await run_process(cmd, workdir=workdir, policy=policy, environment=env)
     except FileNotFoundError as e:
         raise RuntimeError(f"Script interpreter not found: {e}") from e
+    except ExecutionPolicyError as e:
+        raise RuntimeError(f"Script blocked by execution policy: {e}") from e
 
-    stdout = (stdout_b or b"").decode("utf-8", errors="replace")[-100_000:]
-    stderr = (stderr_b or b"").decode("utf-8", errors="replace")[-100_000:]
-    code = proc.returncode or 0
+    if result.timed_out:
+        raise TimeoutError(f"Script exceeded timeout of {timeout}s")
+
+    stdout = result.stdout[-100_000:]
+    stderr = result.stderr[-100_000:]
+    if result.output_truncated:
+        stderr = (stderr + "\n[executor output truncated]").strip()
+    code = result.exit_code
 
     outputs: Dict[str, Path] = {}
     if out_dir.is_dir():

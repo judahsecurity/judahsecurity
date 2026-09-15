@@ -89,11 +89,10 @@ async def _emit_crawl_progress(thought: str) -> None:
     except Exception:
         pass
 
-# Common launch flags — safe under both root (scanner, user 0:0) and non-root
-# (backend appuser) containers.
+# Common launch flags. Chromium's sandbox stays enabled by default. Containers
+# that cannot support it must opt out explicitly while they migrate to the
+# dedicated rootless browser worker.
 _LAUNCH_ARGS = [
-    "--no-sandbox",
-    "--disable-setuid-sandbox",
     "--disable-dev-shm-usage",
     "--headless=new",
     "--disable-blink-features=AutomationControlled",
@@ -102,6 +101,14 @@ _LAUNCH_ARGS = [
     "--start-maximized",
     "--lang=en-US",
 ]
+
+
+def _launch_args() -> list[str]:
+    args = list(_LAUNCH_ARGS)
+    if os.environ.get("AEGIS_BROWSER_DISABLE_SANDBOX", "").lower() in ("1", "true", "yes"):
+        logger.warning("Chromium sandbox disabled by explicit assessment configuration")
+        args.extend(["--no-sandbox", "--disable-setuid-sandbox"])
+    return args
 
 # System Chromium candidates, tried when Playwright's managed browser is absent
 # (e.g. a cloud build where `playwright install` was skipped/failed). The apt
@@ -138,7 +145,7 @@ async def _launch_chromium(pw):
     actionable message if neither is available.
     """
     try:
-        return await pw.chromium.launch(headless=True, args=_LAUNCH_ARGS)
+        return await pw.chromium.launch(headless=True, args=_launch_args())
     except Exception as managed_err:
         sys_chrome = _find_system_chromium()
         if not sys_chrome:
@@ -153,7 +160,7 @@ async def _launch_chromium(pw):
             str(managed_err)[:120], sys_chrome,
         )
         return await pw.chromium.launch(
-            headless=True, args=_LAUNCH_ARGS, executable_path=sys_chrome,
+            headless=True, args=_launch_args(), executable_path=sys_chrome,
         )
 
 # Bounds — keep a single crawl cheap and predictable for agent sessions.

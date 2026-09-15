@@ -1,0 +1,11 @@
+# Optional high-trust override for Docker-based finding validation.
+#
+# Mounting the Docker socket is equivalent to host-root authority. Do not use
+# this override for multi-tenant agent or workflow execution. Prefer native
+# validation, which is the default in docker-compose.yml.
+services:
+  scanner:
+    environment:
+      - AEGIS_VALIDATOR_MODE=docker
+    volumes:
+      - ${DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
