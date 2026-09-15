@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -348,6 +349,11 @@ def register(server: Optional[str] = None, token: Optional[str] = None) -> Dict[
             "client_output": banner,
         }
 
+    checkpoint_error = _checkpoint_and_resume(session, cmd)
+    if checkpoint_error:
+        _stop_locked_direct(session)
+        return {"success": False, "error": checkpoint_error}
+
     with _LOCK:
         _SESSIONS[sid] = session
         _persist_session(session)
@@ -417,6 +423,56 @@ def _stop_locked_direct(session: _Session) -> None:
     except Exception:  # noqa: BLE001
         pass
     _delete_session_files(session)
+
+
+def _checkpoint_and_resume(session: _Session, command: List[str]) -> Optional[str]:
+    """Persist a new client registration, then resume polling from that file.
+
+    Interactsh writes ``-sf`` only when it receives SIGINT. Saving before the
+    registration is returned makes the session recoverable after a container
+    restart or replacement.
+    """
+    if not session.session_file:
+        return None
+
+    # The client prints its payload just before installing its interrupt
+    # handler. Give it a short moment to enter the polling loop before asking
+    # it to save the session.
+    time.sleep(0.25)
+    try:
+        session.proc.send_signal(signal.SIGINT)
+        session.proc.wait(timeout=5)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"could not checkpoint Interactsh session: {exc}"
+
+    session_path = Path(session.session_file)
+    if not session_path.is_file() or session_path.stat().st_size == 0:
+        return "interactsh-client did not write the requested session file"
+    try:
+        os.chmod(session_path, 0o600)
+    except OSError:
+        pass
+
+    try:
+        resumed = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return f"failed to resume checkpointed Interactsh session: {exc}"
+
+    session.proc = resumed
+    session.raw_lines = []
+    reader = threading.Thread(target=_drain, args=(session,), daemon=True)
+    session._reader = reader
+    reader.start()
+    time.sleep(0.25)
+    if resumed.poll() is not None:
+        return "checkpointed Interactsh session exited while resuming"
+    return None
 
 
 def recover_sessions() -> Dict[str, Any]:
