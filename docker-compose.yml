@@ -423,6 +423,14 @@ services:
       db:
         condition: service_healthy
     command: ["python", "-m", "app.workers.vuln_intel_worker"]
+    # Override the backend image's HTTP healthcheck: this is a long-running
+    # background worker and intentionally does not listen on port 8000.
+    healthcheck:
+      test: ["CMD-SHELL", "grep -aq 'app.workers.vuln_intel_worker' /proc/1/cmdline"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     volumes:
       - delphi_cache:/app/data/delphi_cache
     networks:
