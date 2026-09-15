@@ -60,7 +60,7 @@ rollback() {
       build_services+=("$service")
     fi
   done
-  for service in oast-worker backend scanner scheduler intel-refresher frontend aegis-oracle nginx; do
+  for service in oast-worker backend scanner scheduler intel-refresher frontend aegis-oracle neo4j nginx; do
     if printf '%s\n' "${available[@]}" | grep -qx "$service"; then
       run_services+=("$service")
     fi
@@ -103,7 +103,7 @@ echo "[4/7] Building images"
 sudo docker compose build backend scanner intel-refresher frontend aegis-oracle
 
 echo "[5/7] Starting services"
-sudo docker compose up -d oast-worker backend scanner scheduler intel-refresher frontend aegis-oracle nginx
+sudo docker compose up -d oast-worker backend scanner scheduler intel-refresher frontend aegis-oracle neo4j nginx
 # Re-resolve backend and frontend service names after Compose recreates them.
 sudo docker compose restart nginx
 
