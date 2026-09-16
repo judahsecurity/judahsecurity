@@ -153,7 +153,6 @@ Restart=always
 RestartSec=3
 KillMode=mixed
 TimeoutStopSec=20
-NoNewPrivileges=true
 PrivateTmp=true
 
 [Install]
