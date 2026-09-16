@@ -1,42 +1,38 @@
-# Services module for ASM scanning and discovery
-from app.services.dns_service import DNSService
-from app.services.subdomain_service import SubdomainService
-from app.services.wappalyzer_service import WappalyzerService
-from app.services.whatruns_service import WhatRunsService, get_whatruns_service
-from app.services.discovery_service import DiscoveryService
-from app.services.http_service import HTTPService
-from app.services.nuclei_service import NucleiService
-from app.services.nuclei_findings_service import NucleiFindingsService
-from app.services.projectdiscovery_service import ProjectDiscoveryService
-from app.services.port_scanner_service import PortScannerService, ScannerType, PortResult, ScanResult
-from app.services.port_findings_service import PortFindingsService, PORT_FINDING_RULES
-from app.services.data_normalizer_service import (
-    DataNormalizerService,
-    normalize_tool_output,
-    get_supported_sources,
-    get_source_info,
-)
+"""Service exports, loaded lazily so standalone workers stay lightweight."""
 
-__all__ = [
-    "DNSService",
-    "SubdomainService",
-    "WappalyzerService",
-    "WhatRunsService",
-    "get_whatruns_service",
-    "DiscoveryService",
-    "HTTPService",
-    "NucleiService",
-    "NucleiFindingsService",
-    "ProjectDiscoveryService",
-    "PortScannerService",
-    "PortFindingsService",
-    "PORT_FINDING_RULES",
-    "ScannerType",
-    "PortResult",
-    "ScanResult",
-    # Data normalization
-    "DataNormalizerService",
-    "normalize_tool_output",
-    "get_supported_sources",
-    "get_source_info",
-]
+from importlib import import_module
+
+_LAZY_IMPORTS = {
+    "DNSService": ("app.services.dns_service", "DNSService"),
+    "SubdomainService": ("app.services.subdomain_service", "SubdomainService"),
+    "WappalyzerService": ("app.services.wappalyzer_service", "WappalyzerService"),
+    "WhatRunsService": ("app.services.whatruns_service", "WhatRunsService"),
+    "get_whatruns_service": ("app.services.whatruns_service", "get_whatruns_service"),
+    "DiscoveryService": ("app.services.discovery_service", "DiscoveryService"),
+    "HTTPService": ("app.services.http_service", "HTTPService"),
+    "NucleiService": ("app.services.nuclei_service", "NucleiService"),
+    "NucleiFindingsService": ("app.services.nuclei_findings_service", "NucleiFindingsService"),
+    "ProjectDiscoveryService": ("app.services.projectdiscovery_service", "ProjectDiscoveryService"),
+    "PortScannerService": ("app.services.port_scanner_service", "PortScannerService"),
+    "ScannerType": ("app.services.port_scanner_service", "ScannerType"),
+    "PortResult": ("app.services.port_scanner_service", "PortResult"),
+    "ScanResult": ("app.services.port_scanner_service", "ScanResult"),
+    "PortFindingsService": ("app.services.port_findings_service", "PortFindingsService"),
+    "PORT_FINDING_RULES": ("app.services.port_findings_service", "PORT_FINDING_RULES"),
+    "DataNormalizerService": ("app.services.data_normalizer_service", "DataNormalizerService"),
+    "normalize_tool_output": ("app.services.data_normalizer_service", "normalize_tool_output"),
+    "get_supported_sources": ("app.services.data_normalizer_service", "get_supported_sources"),
+    "get_source_info": ("app.services.data_normalizer_service", "get_source_info"),
+}
+
+__all__ = list(_LAZY_IMPORTS)
+
+
+def __getattr__(name: str):
+    target = _LAZY_IMPORTS.get(name)
+    if target is None:
+        raise AttributeError(name)
+    module_name, attribute = target
+    value = getattr(import_module(module_name), attribute)
+    globals()[name] = value
+    return value

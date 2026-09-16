@@ -38,6 +38,54 @@ from typing import Any, Dict, Optional
 logger = logging.getLogger(__name__)
 
 
+def _status_value(status: str, key: str) -> Optional[str]:
+    """Read a single ``key: value`` row from Interceptor verbose status."""
+    prefix = key.lower() + ":"
+    for line in (status or "").splitlines():
+        if line.strip().lower().startswith(prefix):
+            return line.split(":", 1)[1].strip()[:160] or None
+    return None
+
+
+async def probe_runtime() -> Dict[str, Any]:
+    """Return safe worker metadata and prove the real browser is reachable."""
+    from app.services.interceptor_recon import InterceptorCLI, resolve_bin
+
+    checked_at = int(time.time())
+    bin_path = resolve_bin()
+    if not bin_path:
+        return {
+            "interceptor_ready": False,
+            "readiness_error": "interceptor binary not found",
+            "checked_at": checked_at,
+        }
+
+    cli = InterceptorCLI(bin_path)
+    status = await cli.run("status", "--verbose", timeout=15)
+    ready = cli.status_is_reachable(status)
+    version_out = await cli.run("--version", timeout=10)
+    version = next(
+        (
+            line.strip()[:120]
+            for line in version_out.splitlines()
+            if line.strip() and not line.startswith("__")
+        ),
+        None,
+    )
+    meta: Dict[str, Any] = {
+        "interceptor_ready": ready,
+        "interceptor_bin": bin_path,
+        "interceptor_version": version,
+        "mode": _status_value(status, "mode"),
+        "daemon": _status_value(status, "daemon"),
+        "extension": _status_value(status, "extension"),
+        "checked_at": checked_at,
+    }
+    if not ready:
+        meta["readiness_error"] = "Interceptor extension is not reachable"
+    return {key: value for key, value in meta.items() if value is not None}
+
+
 def _api_base() -> str:
     base = (
         os.environ.get("ASM_API_BASE")
@@ -178,6 +226,8 @@ async def poll_loop(
     heartbeat_sec: float = 30.0,
 ) -> None:
     last_hb = 0.0
+    last_not_ready_log = 0.0
+    runtime_meta: Dict[str, Any] = {"interceptor_ready": False}
     logger.info(
         "Interceptor worker starting kind=%s id=%s api=%s",
         worker_kind,
@@ -188,10 +238,25 @@ async def poll_loop(
         now = time.time()
         if now - last_hb >= heartbeat_sec:
             try:
-                heartbeat(worker_id, worker_kind, meta={"pid": os.getpid()})
+                runtime_meta = await probe_runtime()
+                heartbeat(
+                    worker_id,
+                    worker_kind,
+                    meta={"pid": os.getpid(), **runtime_meta},
+                )
                 last_hb = now
             except Exception as e:
                 logger.warning("heartbeat failed: %s", e)
+
+        if not runtime_meta.get("interceptor_ready"):
+            if now - last_not_ready_log >= heartbeat_sec:
+                logger.warning(
+                    "Interceptor runtime is not ready; refusing to claim jobs: %s",
+                    runtime_meta.get("readiness_error") or "extension unavailable",
+                )
+                last_not_ready_log = now
+            await asyncio.sleep(poll_sec)
+            continue
 
         try:
             job = claim_job(worker_id, worker_kind)

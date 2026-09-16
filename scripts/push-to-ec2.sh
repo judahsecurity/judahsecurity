@@ -73,6 +73,9 @@ rollback() {
   if printf '%s\n' "${available[@]}" | grep -qx nginx; then
     sudo docker compose restart nginx
   fi
+  if sudo systemctl list-unit-files asm-interceptor-worker.service --no-legend 2>/dev/null | grep -q asm-interceptor-worker; then
+    sudo systemctl restart asm-interceptor-browser.service asm-interceptor-worker.service
+  fi
   exit "$status"
 }
 trap rollback EXIT
@@ -112,6 +115,12 @@ sudo docker exec asm_backend python scripts/migrate_add_oracle_columns.py --back
 sudo docker exec asm_backend python scripts/migrate_agent_knowledge_embeddings.py
 sudo docker exec asm_backend python scripts/migrate_commoncrawl_enum.py
 
+# A host Interceptor worker imports the checked-out backend package. Restart it
+# after the checkout changes so its runtime contract matches the API revision.
+if sudo systemctl list-unit-files asm-interceptor-worker.service --no-legend 2>/dev/null | grep -q asm-interceptor-worker; then
+  sudo systemctl restart asm-interceptor-browser.service asm-interceptor-worker.service
+fi
+
 echo "[7/7] Running production gates"
 for attempt in $(seq 1 30); do
   if curl -fsS http://127.0.0.1:8000/health >/dev/null; then
@@ -124,6 +133,20 @@ for attempt in $(seq 1 30); do
   sleep 2
 done
 sudo docker exec asm_backend python /app/scripts/check_interactsh.py --live --timeout 30
+if sudo systemctl list-unit-files asm-interceptor-worker.service --no-legend 2>/dev/null | grep -q asm-interceptor-worker; then
+  for attempt in $(seq 1 30); do
+    if sudo docker exec asm_backend python -c \
+      'from app.services.recon_jobs_service import online_kinds; raise SystemExit(0 if "ubuntu" in online_kinds() else 1)'; then
+      break
+    fi
+    if [ "$attempt" -eq 30 ]; then
+      sudo journalctl -u asm-interceptor-browser.service -u asm-interceptor-worker.service -n 100 --no-pager >&2
+      echo "Interceptor worker failed its deployment readiness gate" >&2
+      exit 1
+    fi
+    sleep 2
+  done
+fi
 unhealthy="$(sudo docker compose ps --format json | python3 -c '
 import json, sys
 bad=[]

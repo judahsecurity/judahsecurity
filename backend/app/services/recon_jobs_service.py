@@ -247,12 +247,13 @@ def record_heartbeat(
             )
             db.add(row)
         db.commit()
+        runtime_ready = (meta or {}).get("interceptor_ready") is not False
         return {
             "worker_id": worker_id,
             "worker_kind": worker_kind,
             "hostname": hostname,
             "last_seen": now.isoformat() + "Z",
-            "online": True,
+            "online": runtime_ready,
         }
     finally:
         db.close()
@@ -266,12 +267,16 @@ def list_online_workers(ttl_sec: int = HEARTBEAT_TTL_SEC) -> List[Dict[str, Any]
         out = []
         for r in rows:
             ts = r.last_seen.timestamp() if r.last_seen else 0
-            online = ts >= cutoff
+            meta = r.meta or {}
+            # New workers explicitly attest browser readiness. Preserve
+            # compatibility with older workers that do not send this field.
+            runtime_ready = meta.get("interceptor_ready") is not False
+            online = ts >= cutoff and runtime_ready
             out.append({
                 "worker_id": r.worker_id,
                 "worker_kind": r.worker_kind,
                 "hostname": r.hostname,
-                "meta": r.meta or {},
+                "meta": meta,
                 "last_seen": r.last_seen.isoformat() + "Z" if r.last_seen else None,
                 "online": online,
             })

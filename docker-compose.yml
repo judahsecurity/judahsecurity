@@ -500,35 +500,6 @@ services:
     profiles:
       - ollama
 
-  # Optional Ubuntu Interceptor worker (host Chrome/Xvfb — not a full Interceptor image).
-  # Preferred path is running the poller on the host; this service is a thin wrapper.
-  # Enable: docker compose --profile interceptor up -d interceptor-worker
-  # Requires: INTERCEPTOR_WORKER_TOKEN, host DISPLAY=:99, Chrome profile + extension loaded.
-  # See docs/interceptor-workers.md
-  interceptor-worker:
-    image: python:3.11-slim
-    container_name: asm_interceptor_worker
-    restart: unless-stopped
-    network_mode: host
-    working_dir: /opt/asm/backend
-    environment:
-      - DISPLAY=${DISPLAY:-:99}
-      - ASM_API_BASE=${ASM_API_BASE:-http://127.0.0.1:8000/api/v1}
-      - INTERCEPTOR_WORKER_TOKEN=${INTERCEPTOR_WORKER_TOKEN:-}
-      - INTERCEPTOR_BIN=${INTERCEPTOR_BIN:-interceptor}
-      - PYTHONPATH=/opt/asm/backend
-    volumes:
-      - ./backend:/opt/asm/backend:ro
-      - ${INTERCEPTOR_CHROME_PROFILE:-/var/lib/asm-interceptor/chrome-profile}:/chrome-profile
-    command:
-      - /bin/sh
-      - -c
-      - |
-        pip install -q requests 2>/dev/null || true
-        python -m app.services.interceptor_worker --kind ubuntu --worker-id ubuntu-compose-1
-    profiles:
-      - interceptor
-
   # One-shot model pull after Ollama is up (re-runs safely if model already present).
   ollama-init:
     image: ollama/ollama:latest
