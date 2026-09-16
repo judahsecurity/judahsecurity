@@ -7,6 +7,7 @@ MODE="${1:-start}"
 CAIDO_PROXY_SERVER="${CAIDO_PROXY_SERVER:-http://127.0.0.1:8082}"
 CAIDO_CA_URL="${CAIDO_CA_URL:-http://127.0.0.1:8081/ca.crt}"
 CAIDO_CA_CERT="${CAIDO_CA_CERT:-/etc/asm/caido-ca.crt}"
+CAIDO_PROBE_URL="${CAIDO_PROBE_URL:-https://example.com/}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this script as root." >&2
@@ -46,6 +47,19 @@ for attempt in $(seq 1 30); do
   sleep 2
 done
 chmod 0644 "$CAIDO_CA_CERT"
+
+# Caido accepts proxy connections before a project database is selected. In
+# that state every request fails with HTTP 500, which the browser driver can
+# mistake for a successfully visited page. Prove a real TLS request through
+# the proxy before allowing the Interceptor smoke test to run.
+if ! curl --noproxy '' -fsS \
+  --proxy "$CAIDO_PROXY_SERVER" \
+  --cacert "$CAIDO_CA_CERT" \
+  --output /dev/null \
+  "$CAIDO_PROBE_URL"; then
+  echo "Caido proxy preflight failed. Create and select a persistent Caido project, then rerun: $0 activate" >&2
+  exit 1
+fi
 
 APP_DIR="$APP_DIR" \
 INTERCEPTOR_PROXY_SERVER="$CAIDO_PROXY_SERVER" \
