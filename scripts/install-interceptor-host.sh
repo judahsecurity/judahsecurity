@@ -153,7 +153,6 @@ Restart=always
 RestartSec=3
 KillMode=mixed
 TimeoutStopSec=20
-PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
@@ -175,7 +174,6 @@ ExecStart=/usr/bin/python3 -m app.services.interceptor_worker --kind ubuntu --wo
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
-PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
