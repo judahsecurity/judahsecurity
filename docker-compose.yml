@@ -553,10 +553,24 @@ services:
   # Private interception proxy for the host Interceptor browser. The UI and
   # unauthenticated proxy listener stay on loopback and are reached by SSH
   # tunnel or by the Brave process running on this host.
+  caido-data-init:
+    image: caido/caido:0.58.3@sha256:1e5058bebeb9acb6de8f04b4956fa16c68f6fcb3b61d89ab8715860d753e3205
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown -R 996:996 /home/caido/.local/share/caido"]
+    restart: "no"
+    volumes:
+      - caido_data:/home/caido/.local/share/caido
+    profiles:
+      - caido
+
   caido:
     image: caido/caido:0.58.3@sha256:1e5058bebeb9acb6de8f04b4956fa16c68f6fcb3b61d89ab8715860d753e3205
     container_name: asm_caido
     restart: unless-stopped
+    depends_on:
+      caido-data-init:
+        condition: service_completed_successfully
     command:
       - caido-cli
       - --no-open
