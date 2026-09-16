@@ -192,18 +192,29 @@ def _extract_targets(parsed_args: List[str]) -> List[str]:
     return targets
 
 
-def _hostname_from_target(target: str) -> Optional[str]:
-    """Extract bare hostname from a URL or host:port string."""
+def _scope_key_from_target(target: str) -> Optional[str]:
+    """Extract hostname, retaining an explicit port as an endpoint boundary."""
     t = (target or "").strip()
     if not t:
         return None
     if t.startswith(("http://", "https://")):
         try:
             p = urlparse(t)
-            return (p.hostname or "").lower() or None
+            host = (p.hostname or "").lower()
+            if not host:
+                return None
+            return f"{host}:{p.port}" if p.port is not None else host
         except Exception:
             return None
-    return t.split("/")[0].split(":")[0].lower() or None
+    candidate = t.split("/")[0]
+    try:
+        p = urlparse(f"//{candidate}")
+        host = (p.hostname or "").lower()
+        if not host:
+            return None
+        return f"{host}:{p.port}" if p.port is not None else host
+    except (TypeError, ValueError):
+        return None
 
 
 def block_ssrf_targets(ctx: HookContext) -> HookResult:
@@ -280,11 +291,11 @@ def enforce_scope(ctx: HookContext) -> HookResult:
     targets = _extract_targets(ctx.parsed_args)
     if not targets:
         return HookResult(allowed=True)
-    hostnames = {h for h in (_hostname_from_target(t) for t in targets) if h}
-    if not hostnames:
+    scope_keys = {h for h in (_scope_key_from_target(t) for t in targets) if h}
+    if not scope_keys:
         return HookResult(allowed=True)
     resolver = get_scope_resolver()
-    out_of_scope = [h for h in hostnames if not resolver.is_in_scope(h, org_id=ctx.org_id)]
+    out_of_scope = [h for h in scope_keys if not resolver.is_in_scope(h, org_id=ctx.org_id)]
     if out_of_scope:
         logger.warning(
             "lictor.enforce_scope: blocked %s — out_of_scope=%s",

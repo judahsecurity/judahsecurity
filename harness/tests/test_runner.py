@@ -19,6 +19,16 @@ def test_build_command_appends_target_scope_and_extra_args():
                    "--scope", "x.com", "--fast"]
 
 
+def test_build_command_preserves_dynamic_localhost_port_in_scope():
+    cfg = default_config()
+    cfg.scanner_cmd = ["scanner"]
+    cmd = build_command(cfg, "http://localhost:52490/", "localhost")
+    assert cmd == [
+        "scanner", "--target", "http://localhost:52490/",
+        "--scope", "localhost:52490",
+    ]
+
+
 def test_run_scan_captures_findings_via_injected_runner(tmp_path):
     cfg = default_config()
     cfg.work_dir = tmp_path

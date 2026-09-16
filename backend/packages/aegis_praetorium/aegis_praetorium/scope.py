@@ -1,16 +1,16 @@
 """
 aegis_praetorium.scope — pluggable scope resolver.
 
-Lictor's ``enforce_scope`` pre-hook delegates the "is this hostname in scope
+Lictor's ``enforce_scope`` pre-hook delegates the "is this target in scope
 for this org?" decision to whichever resolver the host application registers.
 
 Two implementations ship in-box:
 
   - ``AllowAllResolver``  — default; never rejects (used when no host has
                             opted in to scope enforcement)
-  - ``HostListResolver``  — accepts a list of allowed hostnames / root
-                            domains. Wildcard subdomain matching is built in:
-                            "example.com" matches "foo.example.com".
+  - ``HostListResolver``  — accepts hostnames, root domains, or exact
+                            ``host:port`` endpoints. Wildcard subdomain
+                            matching is built in for portless domain scopes.
 
 The platform agent (`backend/`) registers a SQLAlchemy-backed resolver that
 queries its ``Asset`` table by org_id. The Aegis Vanguard agent registers a
@@ -24,11 +24,12 @@ from __future__ import annotations
 
 from threading import Lock
 from typing import Iterable, Optional, Protocol, runtime_checkable
+from urllib.parse import urlparse
 
 
 @runtime_checkable
 class ScopeResolver(Protocol):
-    """Decide whether a hostname is in scope for the calling org."""
+    """Decide whether a hostname or host:port endpoint is in scope."""
 
     def is_in_scope(self, hostname: str, *, org_id: Optional[int] = None) -> bool: ...
 
@@ -49,22 +50,44 @@ class HostListResolver:
     """
 
     def __init__(self, allowed: Iterable[str]) -> None:
-        self._allowed = {h.strip().lower() for h in allowed if h and h.strip()}
+        self._allowed = set()
+        for host in allowed:
+            self.add(host)
+
+    @staticmethod
+    def _split(value: str) -> tuple[str, Optional[int]]:
+        text = (value or "").strip().lower()
+        if not text:
+            return "", None
+        parsed = urlparse(text if "://" in text else f"//{text}")
+        try:
+            port = parsed.port
+        except ValueError:
+            return "", None
+        if port is None and parsed.scheme == "http":
+            port = 80
+        elif port is None and parsed.scheme == "https":
+            port = 443
+        return (parsed.hostname or ""), port
 
     def add(self, host: str) -> None:
-        if host and host.strip():
-            self._allowed.add(host.strip().lower())
+        parsed = self._split(host)
+        if parsed[0]:
+            self._allowed.add(parsed)
 
     def is_in_scope(self, hostname: str, *, org_id: Optional[int] = None) -> bool:
         if not hostname:
             return False
-        h = hostname.strip().lower()
-        if h in self._allowed:
-            return True
-        # Subdomain match: "foo.bar.example.com" is allowed if "example.com" is.
-        parts = h.split(".")
-        for i in range(len(parts) - 1):
-            if ".".join(parts[i:]) in self._allowed:
+        h, port = self._split(hostname)
+        if not h:
+            return False
+        for allowed_host, allowed_port in self._allowed:
+            if allowed_port is not None:
+                # A port-bearing scope denotes one exact network endpoint.
+                if h == allowed_host and port == allowed_port:
+                    return True
+                continue
+            if h == allowed_host or h.endswith(f".{allowed_host}"):
                 return True
         return False
 

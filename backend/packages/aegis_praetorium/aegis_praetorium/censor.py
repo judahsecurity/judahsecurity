@@ -49,7 +49,7 @@ _BACKTICK_DOLLAR_PAREN = re.compile(r"(\$\(|`)")
 class FieldSchema:
     """Schema for a single tool argument."""
 
-    type: str = "cli_string"      # cli_string | url | hostname | json | integer
+    type: str = "cli_string"      # cli_string | payload | request_url | url | hostname | json | integer
     required: bool = True
     max_length: int = _DEFAULT_MAX_ARG_LEN
     pattern: Optional[str] = None              # extra regex to match
@@ -114,9 +114,45 @@ def _check_cli_string(value: str, schema: FieldSchema) -> Optional[str]:
     return None
 
 
+def _check_payload(value: str, schema: FieldSchema) -> Optional[str]:
+    """Validate non-shell request data without interpreting attack syntax.
+
+    HTTP bodies are intentionally allowed to contain quotes, ampersands,
+    redirects, dollar signs, and newlines.  Those bytes are payload data, not a
+    command line; treating them as CLI syntax prevents the scanner from safely
+    exercising the very inputs it is designed to test.
+    """
+    if not value and not schema.allow_empty:
+        return "value is empty"
+    if len(value) > schema.max_length:
+        return f"exceeds max length ({len(value)} > {schema.max_length})"
+    if "\x00" in value:
+        return "contains a NUL byte"
+    for bad in schema.forbidden_substrings:
+        if bad.lower() in value.lower():
+            return f"contains forbidden substring '{bad}'"
+    pat = schema.compiled()
+    if pat and not pat.search(value):
+        return f"does not match required pattern: {schema.pattern}"
+    return None
+
+
 def _check_url(value: str, schema: FieldSchema) -> Optional[str]:
+    """Validate a URL that may subsequently be embedded in CLI arguments."""
+    error = _check_request_url(value, schema)
+    if error:
+        return error
+    return _check_cli_string(value, schema)
+
+
+def _check_request_url(value: str, schema: FieldSchema) -> Optional[str]:
+    """Validate a URL passed as structured data, never through a shell."""
     if not value:
         return None if schema.allow_empty else "url is empty"
+    if len(value) > schema.max_length:
+        return f"url exceeds max length ({len(value)} > {schema.max_length})"
+    if any(ord(ch) <= 0x20 or ord(ch) == 0x7F for ch in value):
+        return "url contains whitespace or control characters"
     if not value.startswith(("http://", "https://")):
         return "url must start with http:// or https://"
     try:
@@ -125,7 +161,13 @@ def _check_url(value: str, schema: FieldSchema) -> Optional[str]:
         return f"unparseable url: {e}"
     if not p.hostname:
         return "url has no hostname"
-    return _check_cli_string(value, schema)
+    for bad in schema.forbidden_substrings:
+        if bad.lower() in value.lower():
+            return f"contains forbidden substring '{bad}'"
+    pat = schema.compiled()
+    if pat and not pat.search(value):
+        return f"does not match required pattern: {schema.pattern}"
+    return None
 
 
 _HOSTNAME_RE = re.compile(
@@ -167,6 +209,8 @@ def _check_integer(value: Any, schema: FieldSchema) -> Optional[str]:
 
 _TYPE_DISPATCH: Dict[str, Callable[[Any, FieldSchema], Optional[str]]] = {
     "cli_string": _check_cli_string,
+    "payload": _check_payload,
+    "request_url": _check_request_url,
     "url": _check_url,
     "hostname": _check_hostname,
     "json": _check_json,
@@ -199,6 +243,30 @@ def _build_default_schemas() -> Dict[str, ToolSchema]:
     ]:
         s[name] = cli_only(name)
 
+    # Structured Aegis Vanguard wrappers whose kwargs are NOT a raw CLI string.
+    # Registered under their EXACT tool name so they win over the prefix-
+    # normalized raw-CLI schema above: without this, `scan_nuclei` canonicalizes
+    # to `nuclei` and is rejected for missing the CLI `args` field (it passes
+    # structured target/templates instead), blocking nuclei for every hunter.
+    # The raw `nuclei` / `nikto` CLI guards above are left untouched.
+    s["scan_nuclei"] = ToolSchema(
+        tool_name="scan_nuclei",
+        fields={
+            "target": FieldSchema(type="request_url", max_length=4096),
+            "templates": FieldSchema(type="cli_string", required=False,
+                                     max_length=2048, allow_empty=True),
+            "severity": FieldSchema(type="cli_string", required=False,
+                                    max_length=256, allow_empty=True),
+            "timeout": FieldSchema(type="integer", required=False),
+        },
+    )
+    s["scan_nikto"] = ToolSchema(
+        tool_name="scan_nikto",
+        fields={
+            "target": FieldSchema(type="request_url", max_length=4096),
+            "timeout": FieldSchema(type="integer", required=False),
+        },
+    )
     s["wappalyzer"] = ToolSchema(
         tool_name="wappalyzer",
         fields={"args": FieldSchema(type="url", max_length=512)},
@@ -370,6 +438,55 @@ def _build_default_schemas() -> Dict[str, ToolSchema]:
         },
     )
 
+    # Vanguard's Python-kwarg tools carry structured request data.  Their
+    # bodies must not fall through to the CLI-string validator: SQLi/XSS test
+    # payloads legitimately contain shell metacharacters as inert HTTP data.
+    s["send_http_request"] = ToolSchema(
+        tool_name="send_http_request",
+        fields={
+            "method": FieldSchema(type="cli_string", max_length=16,
+                                  pattern=r"^(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)$"),
+            "url": FieldSchema(type="request_url", max_length=4096),
+            "headers_json": FieldSchema(type="json", required=False,
+                                        max_length=16384, allow_empty=True),
+            "body": FieldSchema(type="payload", required=False,
+                                max_length=131072, allow_empty=True),
+        },
+    )
+    s["probe_sqli_params"] = ToolSchema(
+        tool_name="probe_sqli_params",
+        fields={
+            "target_url": FieldSchema(type="request_url", max_length=4096),
+            "method": FieldSchema(type="cli_string", required=False, max_length=16,
+                                  pattern=r"^(GET|POST)$"),
+            "body": FieldSchema(type="payload", required=False,
+                                max_length=131072, allow_empty=True),
+            "params": FieldSchema(type="cli_string", required=False,
+                                  max_length=4096, allow_empty=True),
+            "headers_json": FieldSchema(type="json", required=False,
+                                        max_length=16384, allow_empty=True),
+            "timeout": FieldSchema(type="integer", required=False),
+        },
+    )
+    s["sql_injection_test"] = ToolSchema(
+        tool_name="sql_injection_test",
+        fields={
+            "target_url": FieldSchema(type="request_url", max_length=4096),
+            "timeout": FieldSchema(type="integer", required=False),
+            "data": FieldSchema(type="payload", required=False,
+                                max_length=131072, allow_empty=True),
+            "param": FieldSchema(type="cli_string", required=False,
+                                 max_length=512, allow_empty=True),
+            "cookie": FieldSchema(type="cli_string", required=False,
+                                  max_length=16384, allow_empty=True),
+            "method": FieldSchema(type="cli_string", required=False,
+                                  max_length=16, allow_empty=True,
+                                  pattern=r"^(|GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)$"),
+            "level": FieldSchema(type="integer", required=False),
+            "risk": FieldSchema(type="integer", required=False),
+        },
+    )
+
     # All ``*_help`` tools take no arguments — permissive empty schema.
     for name in list(s.keys()):
         s.setdefault(name + "_help", ToolSchema(tool_name=name + "_help", fields={}))
@@ -412,7 +529,11 @@ class Censor:
     def validate(self, tool_name: str, arguments: Dict[str, Any]) -> CensorVerdict:
         """Validate arguments against the registered schema (or permissive default)."""
         arguments = dict(arguments or {})
-        schema = self._schemas.get(_canonical_tool(tool_name))
+        # Exact entries support Python-kwarg tools such as ``scan_nuclei``;
+        # canonical fallback retains compatibility with CLI wrappers such as
+        # ``execute_nuclei(args=...)``.
+        schema = (self._schemas.get(tool_name)
+                  or self._schemas.get(_canonical_tool(tool_name)))
 
         # Permissive default: still defend against the worst.
         if schema is None:

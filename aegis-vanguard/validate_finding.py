@@ -537,7 +537,7 @@ def main() -> int:
 
     parsed = urlparse(target)
     target_host = parsed.hostname or ""
-    scope_domain = args.scope or target_host
+    scope_domain = args.scope or parsed.netloc or target_host
     model = args.model or os.environ.get(
         "AEGIS_MODEL", "claude-sonnet-4-6"
     )

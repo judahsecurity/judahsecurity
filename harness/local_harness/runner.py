@@ -76,7 +76,19 @@ def _default_subprocess_runner(
 def build_command(config: HarnessConfig, target: str, scope: Optional[str]) -> List[str]:
     cmd = list(config.scanner_cmd) + ["--target", target]
     if scope:
-        cmd += ["--scope", scope]
+        effective_scope = scope
+        target_parsed = urlparse(target if "://" in target else f"//{target}")
+        scope_parsed = urlparse(scope if "://" in scope else f"//{scope}")
+        # XBEN publishes each localhost target on a random host port. Carry
+        # that port into the scanner scope so a benchmark run cannot pivot to
+        # unrelated services on the Docker host.
+        if (
+            target_parsed.port is not None
+            and scope_parsed.port is None
+            and target_parsed.hostname == scope_parsed.hostname
+        ):
+            effective_scope = target_parsed.netloc
+        cmd += ["--scope", effective_scope]
     cmd += list(config.scanner_extra_args)
     return cmd
 

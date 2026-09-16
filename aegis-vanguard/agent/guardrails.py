@@ -12,6 +12,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from typing import List, Optional, Set
+from urllib.parse import urlparse
 
 logger = logging.getLogger("agent.guardrails")
 
@@ -78,6 +79,40 @@ class GuardrailEngine:
         self.max_risk = max_risk
         self._risk_levels = ["safe", "low", "medium", "high", "critical"]
         self.violations: List[GuardrailViolation] = []
+
+    @staticmethod
+    def _split_scope_target(value: str) -> tuple[str, Optional[int]]:
+        text = (value or "").strip().lower()
+        if not text:
+            return "", None
+        parsed = urlparse(text if "://" in text else f"//{text}")
+        try:
+            port = parsed.port
+        except ValueError:
+            return "", None
+        if port is None and parsed.scheme == "http":
+            port = 80
+        elif port is None and parsed.scheme == "https":
+            port = 443
+        return (parsed.hostname or ""), port
+
+    def _target_is_in_scope(self, target: str) -> bool:
+        target_host, target_port = self._split_scope_target(target)
+        if not target_host:
+            return False
+        for scope in self.scope_domains:
+            scope_host, scope_port = self._split_scope_target(scope)
+            if not scope_host:
+                continue
+            if scope_port is not None:
+                # Port-qualified scope is an exact endpoint, not permission to
+                # enumerate every service on the same machine.
+                if target_host == scope_host and target_port == scope_port:
+                    return True
+                continue
+            if target_host == scope_host or target_host.endswith(f".{scope_host}"):
+                return True
+        return False
 
     def check_tool_call(self, tool_name: str, arguments: dict, risk_level: str = "safe") -> Optional[GuardrailViolation]:
         if not self.enabled:
@@ -177,11 +212,8 @@ class GuardrailEngine:
             for target in targets:
                 if not isinstance(target, str):
                     continue
-                target_clean = target.lower().replace("https://", "").replace("http://", "").split("/")[0].split(":")[0]
-                in_scope = any(
-                    target_clean == d or target_clean.endswith(f".{d}")
-                    for d in self.scope_domains
-                )
+                target_clean = target.lower().replace("https://", "").replace("http://", "").split("/")[0]
+                in_scope = self._target_is_in_scope(target)
                 if not in_scope:
                     v = GuardrailViolation(
                         rule="scope_violation",
