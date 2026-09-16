@@ -208,7 +208,10 @@ class InterceptorCLI:
                 stderr=asyncio.subprocess.STDOUT,
             )
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            return (out or b"").decode("utf-8", errors="replace")
+            text = (out or b"").decode("utf-8", errors="replace")
+            if proc.returncode:
+                return f"__error__ exit {proc.returncode}: {text}"
+            return text
         except asyncio.TimeoutError:
             return f"__timeout__ after {timeout}s: {' '.join(args)}"
         except FileNotFoundError:
@@ -216,14 +219,26 @@ class InterceptorCLI:
         except Exception as e:  # pragma: no cover - defensive
             return f"__error__ {e}: {' '.join(args)}"
 
-    async def reachable(self) -> bool:
-        """True if the daemon + extension respond (status reports a context)."""
-        out = await self.run("status", timeout=15)
+    @staticmethod
+    def status_is_reachable(out: str) -> bool:
+        """True only when verbose status proves browser command delivery."""
         low = out.lower()
         if "not reachable" in low or "__error__" in low or "__timeout__" in low:
             return False
-        # A working install reports a mode: line (browser-only / full).
-        return "mode:" in low or "daemon:" in low or "context" in low
+        # Current Interceptor builds always expose an explicit extension row in
+        # verbose status. A mode line alone only proves that the CLI is installed;
+        # it does not prove that browser commands can be served.
+        if re.search(r"^extension:\s+reachable\b", low, re.MULTILINE):
+            return True
+        if re.search(r"^extension:\s+", low, re.MULTILINE):
+            return False
+        # Compatibility with older builds that predate the extension row.
+        return "context" in low and "reachable" in low
+
+    async def reachable(self) -> bool:
+        """True if the daemon + extension can serve browser commands."""
+        out = await self.run("status", "--verbose", timeout=15)
+        return self.status_is_reachable(out)
 
 
 async def supports_spider(cli: InterceptorCLI) -> bool:

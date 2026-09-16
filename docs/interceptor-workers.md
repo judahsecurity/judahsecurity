@@ -102,25 +102,34 @@ python -m app.services.interceptor_recon https://www.emulate3d.com/ \
   --token "$ASM_TOKEN" --org 1
 ```
 
-## Ubuntu Interceptor worker (same EC2 or sibling host)
+## Ubuntu Interceptor worker (production)
 
-Do **not** bake Interceptor into the backend Docker image. Run on the host (or a dedicated GUI box):
+Run Interceptor on the host because the native messaging daemon, browser
+extension, and persistent Brave profile share a per-user runtime. The backend
+container only owns the queue API.
 
-1. Install Brave/Chrome + Xvfb (or a real desktop session).
-2. Build/install Interceptor browser-only from upstream (`scripts/install.sh --browser-only`).
-3. One-time: enable Developer mode and load the unpacked extension (use x11vnc / VNC if headless).
-4. Persist the browser profile under e.g. `/var/lib/asm-interceptor/chrome-profile`.
-5. Start the poller:
+The production installer pins Interceptor `v1.0.1`, verifies the official Linux
+x64 release SHA-256, installs Brave from its official apt repository, enables
+extension developer mode in a dedicated profile, and creates two systemd units:
+
+- `asm-interceptor-browser.service`: Brave + Xvfb + unpacked Interceptor extension
+- `asm-interceptor-worker.service`: authenticated ASM job poller
+
+From the production checkout:
 
 ```bash
-export DISPLAY=:99
-export ASM_API_BASE=http://127.0.0.1:8000/api/v1   # or public URL
-export INTERCEPTOR_WORKER_TOKEN=...
-export PYTHONPATH=/opt/asm/backend
-python -m app.services.interceptor_worker --kind ubuntu --worker-id ubuntu-ec2-1
+cd /opt/asm
+sudo APP_DIR=/opt/asm scripts/install-interceptor-host.sh
 ```
 
-Compose helper service (profile `interceptor`) mounts the host display and profile — see `docker-compose.yml` comments for `interceptor-worker`. Expect ~2–4 GB RAM for Chrome.
+The installer preserves an existing `INTERCEPTOR_WORKER_TOKEN` or generates one,
+updates `/opt/asm/.env`, recreates the backend, and runs an end-to-end job against
+`https://example.com`. The gate only passes when the stored result has an
+`interceptor_*` engine and came from the Ubuntu worker.
+
+Use `RUN_E2E_SMOKE=0` to omit the queued smoke job during a repeat installation.
+Normal deployments restart an installed host worker and require a ready heartbeat.
+Expect roughly 2–4 GB RAM for Brave.
 
 ## Verify
 
@@ -137,6 +146,17 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 ## Ops notes
 
 - If both workers are down, behaviour falls back to deep_crawl with the same depth/interact defaults.
+- A fresh heartbeat is only online when its metadata contains
+  `interceptor_ready: true`; an installed CLI with an unreachable extension
+  cannot claim jobs.
 - Mac is preferred when both are online (job claim skips Ubuntu while Mac is healthy).
 - Job tables: `recon_jobs`, `recon_worker_heartbeats` (created via SQLAlchemy `create_all` / migration SQL).
 - For customer assessments: keep at least one worker online so WAF/SPA apps get a real Chrome walkthrough.
+
+## License boundary
+
+Interceptor is distributed under the Elastic License 2.0. Internal organizational
+use is permitted by the upstream commercial-use guidance. If Judah Security makes
+Interceptor functionality available as a hosted or managed customer service, or
+embeds it as a substantial part of a sold product, confirm a commercial license
+with Hacker Valley Media before offering that use.
