@@ -56,7 +56,8 @@ curl -fL "$release_url" -o "$archive"
 printf '%s  %s\n' "$INTERCEPTOR_SHA256" "$archive" | sha256sum --check --status
 rm -rf "$release_dir"
 install -d -m 0755 "$release_dir"
-tar -xzf "$archive" -C "$release_dir"
+# Official release archives wrap their payload in one versioned directory.
+tar -xzf "$archive" -C "$release_dir" --strip-components=1
 chown -R "$INTERCEPTOR_USER:$INTERCEPTOR_USER" "$release_dir"
 ln -sfn "$release_dir" "$INTERCEPTOR_ROOT/current"
 ln -sfn "$INTERCEPTOR_ROOT/current/dist/interceptor" /usr/local/bin/interceptor
