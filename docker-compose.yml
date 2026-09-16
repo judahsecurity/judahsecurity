@@ -550,6 +550,29 @@ services:
     profiles:
       - observability
 
+  # Private interception proxy for the host Interceptor browser. The UI and
+  # unauthenticated proxy listener stay on loopback and are reached by SSH
+  # tunnel or by the Brave process running on this host.
+  caido:
+    image: caido/caido:0.58.3@sha256:1e5058bebeb9acb6de8f04b4956fa16c68f6fcb3b61d89ab8715860d753e3205
+    container_name: asm_caido
+    restart: unless-stopped
+    command:
+      - caido-cli
+      - --no-open
+      - --no-renderer-sandbox
+      - --ui-listen
+      - 0.0.0.0:8080
+      - --proxy-listen
+      - 0.0.0.0:8082
+    ports:
+      - "127.0.0.1:8081:8080"
+      - "127.0.0.1:8082:8082"
+    volumes:
+      - caido_data:/home/caido/.local/share/caido
+    profiles:
+      - caido
+
 networks:
   asm_network:
     driver: bridge
@@ -588,4 +611,6 @@ volumes:
   evidence_data:
     driver: local
   interactsh_state:
+    driver: local
+  caido_data:
     driver: local

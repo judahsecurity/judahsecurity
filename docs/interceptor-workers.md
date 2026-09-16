@@ -127,6 +127,34 @@ updates `/opt/asm/.env`, recreates the backend, and runs an end-to-end job again
 `https://example.com`. The gate only passes when the stored result has an
 `interceptor_*` engine and came from the Ubuntu worker.
 
+## Capture Interceptor traffic in Caido
+
+The optional Caido service is pinned and bound to host loopback. Start it without
+changing the working browser route:
+
+```bash
+sudo APP_DIR=/opt/asm scripts/configure-interceptor-caido.sh start
+```
+
+From an operator workstation, open an SSH tunnel and visit
+`http://127.0.0.1:8081` to register or sign in to the private instance:
+
+```bash
+ssh -L 8081:127.0.0.1:8081 aegis
+```
+
+After registration, activate capture. This downloads the instance CA from its
+loopback proxy, trusts it only in the dedicated Interceptor browser account,
+adds Brave's explicit proxy flag, and reruns the real-browser smoke gate:
+
+```bash
+sudo APP_DIR=/opt/asm scripts/configure-interceptor-caido.sh activate
+```
+
+Keep request interception disabled for unattended crawls so requests do not
+pause waiting for an operator. Use HTTP History, HTTPQL, Replay, and Automate on
+the captured project. The proxy port is intentionally not exposed publicly.
+
 Use `RUN_E2E_SMOKE=0` to omit the queued smoke job during a repeat installation.
 Normal deployments restart an installed host worker and require a ready heartbeat.
 Expect roughly 2–4 GB RAM for Brave.
