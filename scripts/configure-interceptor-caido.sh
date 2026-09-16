@@ -5,6 +5,7 @@ set -euo pipefail
 APP_DIR="${APP_DIR:-/opt/asm}"
 MODE="${1:-start}"
 CAIDO_PROXY_SERVER="${CAIDO_PROXY_SERVER:-http://127.0.0.1:8082}"
+CAIDO_CA_URL="${CAIDO_CA_URL:-http://127.0.0.1:8081/ca.crt}"
 CAIDO_CA_CERT="${CAIDO_CA_CERT:-/etc/asm/caido-ca.crt}"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -17,6 +18,10 @@ if [ ! -f "$APP_DIR/docker-compose.yml" ]; then
 fi
 
 cd "$APP_DIR"
+docker compose --profile caido stop caido >/dev/null 2>&1 || true
+docker compose --profile caido run --rm --no-deps --user 0:0 \
+  --entrypoint /bin/sh caido -c \
+  'chown -R 996:996 /home/caido/.local/share/caido'
 docker compose --profile caido up -d caido
 
 if [ "$MODE" = "start" ]; then
@@ -31,7 +36,7 @@ fi
 
 install -d -m 0755 "$(dirname "$CAIDO_CA_CERT")"
 for attempt in $(seq 1 30); do
-  if curl -fsS "$CAIDO_PROXY_SERVER/ca.crt" -o "$CAIDO_CA_CERT"; then
+  if curl -fsS "$CAIDO_CA_URL" -o "$CAIDO_CA_CERT"; then
     break
   fi
   if [ "$attempt" -eq 30 ]; then
