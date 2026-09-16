@@ -11,6 +11,8 @@ APP_DIR="${APP_DIR:-/opt/asm}"
 PROFILE="${INTERCEPTOR_PROFILE:-Default}"
 DISPLAY_NUMBER="${INTERCEPTOR_DISPLAY_NUMBER:-99}"
 RUN_E2E_SMOKE="${RUN_E2E_SMOKE:-1}"
+INTERCEPTOR_PROXY_SERVER="${INTERCEPTOR_PROXY_SERVER:-}"
+INTERCEPTOR_PROXY_CA_CERT="${INTERCEPTOR_PROXY_CA_CERT:-}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this installer as root." >&2
@@ -32,7 +34,7 @@ prefs="$profile_root/$PROFILE/Preferences"
 
 echo "[1/8] Installing Brave and Xvfb"
 apt-get update
-apt-get install -y --no-install-recommends curl ca-certificates gnupg xvfb python3 openssl
+apt-get install -y --no-install-recommends curl ca-certificates gnupg xvfb python3 openssl libnss3-tools
 install -d -m 0755 /usr/share/keyrings /etc/apt/sources.list.d
 curl -fsS https://brave-browser-apt-release.s3.brave.com/brave-browser-archive-keyring.gpg \
   -o /usr/share/keyrings/brave-browser-archive-keyring.gpg
@@ -93,6 +95,28 @@ with os.fdopen(fd, "w", encoding="utf-8") as handle:
 os.replace(temp_path, path)
 PY
 
+proxy_flag=""
+if [ -n "$INTERCEPTOR_PROXY_SERVER" ]; then
+  if [[ ! "$INTERCEPTOR_PROXY_SERVER" =~ ^https?://[A-Za-z0-9._:-]+$ ]]; then
+    echo "INTERCEPTOR_PROXY_SERVER must be an HTTP(S) proxy URL without a path." >&2
+    exit 1
+  fi
+  if [ ! -s "$INTERCEPTOR_PROXY_CA_CERT" ]; then
+    echo "INTERCEPTOR_PROXY_CA_CERT must identify the Caido CA certificate." >&2
+    exit 1
+  fi
+  nss_db="$INTERCEPTOR_HOME/.pki/nssdb"
+  install -d -m 0700 -o "$INTERCEPTOR_USER" -g "$INTERCEPTOR_USER" "$nss_db"
+  if [ ! -f "$nss_db/cert9.db" ]; then
+    runuser -u "$INTERCEPTOR_USER" -- certutil -N --empty-password -d "sql:$nss_db"
+  fi
+  runuser -u "$INTERCEPTOR_USER" -- \
+    certutil -D -d "sql:$nss_db" -n "ASM Caido" 2>/dev/null || true
+  runuser -u "$INTERCEPTOR_USER" -- \
+    certutil -A -d "sql:$nss_db" -n "ASM Caido" -t "C,," -i "$INTERCEPTOR_PROXY_CA_CERT"
+  proxy_flag="--proxy-server=$INTERCEPTOR_PROXY_SERVER"
+fi
+
 echo "[5/8] Registering the native messaging host"
 runuser -u "$INTERCEPTOR_USER" -- env HOME="$INTERCEPTOR_HOME" \
   bash "$release_dir/scripts/install.sh" \
@@ -148,7 +172,7 @@ Type=simple
 User=$INTERCEPTOR_USER
 Group=$INTERCEPTOR_USER
 Environment=HOME=$INTERCEPTOR_HOME
-ExecStart=/usr/bin/xvfb-run -n $DISPLAY_NUMBER -s "-screen 0 1920x1080x24 -nolisten tcp" /usr/bin/brave-browser --user-data-dir=$profile_root --profile-directory=$PROFILE --load-extension=$INTERCEPTOR_ROOT/current/extension/dist --no-first-run --no-default-browser-check --disable-dev-shm-usage --disable-background-mode about:blank
+ExecStart=/usr/bin/xvfb-run -n $DISPLAY_NUMBER -s "-screen 0 1920x1080x24 -nolisten tcp" /usr/bin/brave-browser --user-data-dir=$profile_root --profile-directory=$PROFILE --load-extension=$INTERCEPTOR_ROOT/current/extension/dist $proxy_flag --no-first-run --no-default-browser-check --disable-dev-shm-usage --disable-background-mode about:blank
 Restart=always
 RestartSec=3
 KillMode=mixed
