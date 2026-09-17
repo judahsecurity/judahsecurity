@@ -92,6 +92,35 @@ def test_run_scan_loads_trace_cost_and_guardrail_summary(tmp_path):
     assert result.trace_summary["guardrail_blocks"] == 3
 
 
+def test_run_scan_does_not_reuse_a_stale_trace(tmp_path):
+    cfg = default_config()
+    cfg.work_dir = tmp_path
+    out_dir = tmp_path / "out" / "stable-id"
+    out_dir.mkdir(parents=True)
+    (out_dir / "trace_old.json").write_text(json.dumps({
+        "summary": {
+            "estimated_cost_usd": 9.99,
+            "guardrail_blocks": 7,
+        }
+    }))
+
+    def failing(cmd, cwd, env, timeout):
+        return 2, "argument error"
+
+    result = run_scan(
+        "https://x.com",
+        cfg,
+        tmp_path / "out",
+        subprocess_runner=failing,
+        artifact_name="stable-id",
+    )
+
+    assert result.status == "error"
+    assert result.trace_summary is None
+    assert result.cost_usd is None
+    assert not list(out_dir.glob("trace_*.json"))
+
+
 def test_run_scan_nonzero_exit_is_error(tmp_path):
     cfg = default_config()
 

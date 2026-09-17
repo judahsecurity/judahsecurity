@@ -119,9 +119,12 @@ def run_scan(
     findings_path = out_dir / "findings.jsonl"
     log_path = out_dir / "scan.log"
 
-    # Fresh sink per run so counts are accurate on re-runs.
+    # Fresh artifacts per run so findings, cost, and guardrail counts cannot be
+    # inherited from an older attempt that used the same stable benchmark ID.
     if findings_path.exists():
         findings_path.unlink()
+    for trace_path in out_dir.glob("trace_*.json"):
+        trace_path.unlink()
     # An empty artifact is a valid zero-finding result. Pre-creating it lets us
     # distinguish that result from a scanner that deleted/failed to emit its sink.
     findings_path.touch()
