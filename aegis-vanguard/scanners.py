@@ -3622,12 +3622,33 @@ def run_send_http_request(
     except (_json.JSONDecodeError, ValueError):
         return {"error": f"headers_json is not valid JSON: {headers_json[:200]}"}
 
+    def _finish(result: dict) -> dict:
+        """Record exchanges for cross-hunter replay and differential analysis."""
+        try:
+            from agent.request_ledger import adaptive_hints, get_request_ledger
+            record = get_request_ledger().record(
+                method=method,
+                url=url,
+                headers=headers,
+                body=body,
+                follow_redirects=follow_redirects,
+                response=result,
+            )
+            enriched = dict(result)
+            enriched["request_id"] = record["request_id"]
+            enriched["response_classes"] = record["classes"]
+            enriched["adaptive_hints"] = adaptive_hints(record["classes"])
+            return enriched
+        except Exception as exc:  # ledger failure must never break a probe
+            logger.debug("request ledger record failed: %s", exc)
+            return result
+
     if not _tool_available("curl"):
         # Fallback to httpx if available
         try:
             import httpx
         except ImportError:
-            return {"error": "neither curl nor httpx is available"}
+            return _finish({"error": "neither curl nor httpx is available"})
         try:
             with httpx.Client(timeout=timeout, follow_redirects=follow_redirects, max_redirects=5) as client:
                 resp = client.request(
@@ -3636,15 +3657,16 @@ def run_send_http_request(
                     headers=headers,
                     content=body.encode() if body else None,
                 )
-            return {
+            return _finish({
                 "status": resp.status_code,
                 "headers": dict(resp.headers),
                 "body": resp.text[:8000],
                 "elapsed_ms": round(resp.elapsed.total_seconds() * 1000) if resp.elapsed else None,
                 "redirect_history": [str(r.url) for r in resp.history],
-            }
+                "url": url,
+            })
         except Exception as e:
-            return {"error": str(e)}
+            return _finish({"error": str(e), "url": url})
 
     # Build curl command
     t0 = time.time()
@@ -3663,31 +3685,39 @@ def run_send_http_request(
     elapsed_ms = round((time.time() - t0) * 1000)
     raw = raw_result.stdout if hasattr(raw_result, "stdout") else (raw_result or "")
     if not raw:
-        return {"error": "empty response from curl", "elapsed_ms": elapsed_ms}
+        return _finish({"error": "empty response from curl", "elapsed_ms": elapsed_ms, "url": url})
 
-    # Parse status from first line
-    lines = raw.split("\n")
+    # curl -i -L emits one header block per redirect. Use the final block so
+    # baseline/candidate diffs compare the application response rather than the
+    # first 30x hop (or an HTTP CONNECT preface).
+    header_blocks = list(_re.finditer(
+        r"(?m)^HTTP/\S+\s+\d{3}[^\r\n]*\r?\n(?:[^\r\n]+\r?\n)*\r?\n",
+        raw,
+    ))
     status = None
-    for line in lines:
-        if line.startswith("HTTP/"):
-            try:
-                status = int(line.split()[1])
-            except (IndexError, ValueError):
-                pass
-            break
+    raw_headers = ""
+    resp_body = ""
+    if header_blocks:
+        final_headers = header_blocks[-1]
+        raw_headers = final_headers.group(0).rstrip("\r\n")
+        try:
+            status = int(raw_headers.splitlines()[0].split()[1])
+        except (IndexError, ValueError):
+            pass
+        resp_body = raw[final_headers.end():][:8000]
+    else:
+        separator = "\r\n\r\n" if "\r\n\r\n" in raw else "\n\n"
+        parts = raw.split(separator, 1)
+        raw_headers = parts[0] if parts else ""
+        resp_body = parts[1][:8000] if len(parts) > 1 else ""
 
-    # Find body after double CRLF
-    separator = "\r\n\r\n" if "\r\n\r\n" in raw else "\n\n"
-    parts = raw.split(separator, 1)
-    resp_body = parts[1][:8000] if len(parts) > 1 else ""
-
-    return {
+    return _finish({
         "status": status,
-        "raw_headers": parts[0] if parts else "",
+        "raw_headers": raw_headers,
         "body": resp_body,
         "url": url,
         "elapsed_ms": elapsed_ms,
-    }
+    })
 
 
 # =============================================================================

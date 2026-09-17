@@ -58,3 +58,32 @@ def test_active_request_allows_read_only_sqli_evidence():
             "body": "fullname=1%27%20AND%20SLEEP(2)--&submit=",
         },
     ) is None
+
+
+def test_replay_request_keeps_scope_and_destructive_sql_guards():
+    guard = GuardrailEngine(scope_domains=["example.test:8443"])
+    assert guard.check_tool_call(
+        "replay_http_request",
+        {"request_id": "req-1", "url": "https://example.test:8443/admin"},
+        "medium",
+    ) is None
+
+    violation = guard.check_tool_call(
+        "replay_http_request",
+        {"request_id": "req-1", "url": "https://example.test/admin"},
+        "medium",
+    )
+    assert violation is not None
+    assert violation.rule == "scope_violation"
+
+    violation = guard.check_tool_call(
+        "replay_http_request",
+        {
+            "request_id": "req-1",
+            "url": "https://example.test:8443/admin",
+            "body": "q=1%27%3BDELETE%20FROM%20users%3B--",
+        },
+        "medium",
+    )
+    assert violation is not None
+    assert violation.rule == "destructive_sql"

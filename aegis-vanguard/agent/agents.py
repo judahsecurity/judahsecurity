@@ -1083,6 +1083,142 @@ def send_http_request(
     return json.dumps(result, default=str)
 
 
+@security_tool(category="vuln_analysis", risk="safe")
+def list_http_requests(
+    limit: int = 50,
+    classification: str = "",
+    url_contains: str = "",
+) -> str:
+    """List redacted HTTP exchanges captured during the current assessment.
+
+    Use this before repeating discovery or declaring a surface clean. Filter by
+    response classification (for example access_denied, input_reflected,
+    sql_error, server_error) or by URL substring.
+
+    Args:
+        limit: Maximum records to return (1-200)
+        classification: Optional exact response class filter
+        url_contains: Optional case-insensitive URL substring filter
+    """
+    from agent.request_ledger import get_request_ledger
+    return json.dumps({
+        "requests": get_request_ledger().list(limit, classification, url_contains),
+    }, default=str)
+
+
+@security_tool(category="vuln_analysis", risk="safe")
+def get_http_request(request_id: str) -> str:
+    """Get one redacted captured request and response by request_id.
+
+    Sensitive request headers and common credential fields are redacted. The
+    replay tool can still preserve them internally without exposing them.
+
+    Args:
+        request_id: Identifier returned by send_http_request or a ledger listing
+    """
+    from agent.request_ledger import get_request_ledger
+    record = get_request_ledger().get(request_id)
+    if not record:
+        return json.dumps({"error": f"request not found in current assessment: {request_id}"})
+    return json.dumps(record, default=str)
+
+
+@security_tool(category="vuln_analysis", risk="safe")
+def diff_http_requests(baseline_request_id: str, candidate_request_id: str) -> str:
+    """Compare two captured responses and classify meaningful differences.
+
+    Args:
+        baseline_request_id: Clean/control request identifier
+        candidate_request_id: Mutated/probe request identifier
+    """
+    from agent.request_ledger import get_request_ledger
+    return json.dumps(
+        get_request_ledger().diff(baseline_request_id, candidate_request_id),
+        default=str,
+    )
+
+
+@security_tool(category="exploit", risk="medium")
+def replay_http_request(
+    request_id: str,
+    url: str,
+    method: str = "",
+    headers_json: str = "{}",
+    body: str = "",
+    replace_body: bool = False,
+    follow_redirects: bool = True,
+) -> str:
+    """Replay a captured request with controlled mutations and return its diff.
+
+    The URL is required so normal scope guardrails inspect every replay. It must
+    keep the original origin; paths and query parameters may change. Original
+    cookies/auth headers are preserved internally, with provided headers merged
+    over them. Set replace_body only when intentionally changing the body.
+
+    Args:
+        request_id: Baseline request identifier
+        url: In-scope replay URL on the same origin as the baseline
+        method: Optional replacement HTTP method
+        headers_json: JSON headers to merge over the captured headers
+        body: Replacement body when replace_body is true
+        replace_body: Whether to replace the captured request body
+        follow_redirects: Whether to follow redirects
+    """
+    from urllib.parse import urlparse
+    import scanners
+    from agent.request_ledger import get_request_ledger
+
+    ledger = get_request_ledger()
+    original = ledger.get_raw(request_id)
+    if not original:
+        return json.dumps({"error": f"request not found in current assessment: {request_id}"})
+    request = original["request"]
+    old, new = urlparse(str(request.get("url") or "")), urlparse(url)
+    def origin(parsed):
+        port = parsed.port
+        if port is None:
+            port = 443 if parsed.scheme.lower() == "https" else 80
+        return parsed.scheme.lower(), (parsed.hostname or "").lower(), port
+    try:
+        old_origin = origin(old)
+        new_origin = origin(new)
+    except ValueError as exc:
+        return json.dumps({"error": f"invalid replay URL: {exc}"})
+    if old_origin != new_origin:
+        return json.dumps({"error": "replay URL must preserve the captured request origin"})
+    try:
+        overrides = json.loads(headers_json or "{}")
+        if not isinstance(overrides, dict):
+            raise ValueError("headers_json must be an object")
+    except (json.JSONDecodeError, ValueError) as exc:
+        return json.dumps({"error": str(exc)})
+
+    headers = dict(request.get("headers") or {})
+    headers.update({str(k): str(v) for k, v in overrides.items()})
+    if replace_body:
+        headers = {k: v for k, v in headers.items() if k.lower() != "content-length"}
+    sensitive_session = any(k.lower() in {"authorization", "cookie", "proxy-authorization"}
+                            for k in headers)
+    safe_follow_redirects = follow_redirects and not sensitive_session
+    result = scanners.run_send_http_request(
+        method=method or str(request.get("method") or "GET"),
+        url=url,
+        headers_json=json.dumps(headers),
+        body=body if replace_body else str(request.get("body") or ""),
+        follow_redirects=safe_follow_redirects,
+        bridge=_get_bridge(),
+    )
+    candidate_id = result.get("request_id")
+    return json.dumps({
+        "response": result,
+        "diff": ledger.diff(request_id, candidate_id) if candidate_id else {},
+        "redirect_policy": (
+            "disabled to prevent forwarding captured credentials across origins"
+            if follow_redirects and sensitive_session else "as requested"
+        ),
+    }, default=str)
+
+
 @security_tool(category="exploit", risk="medium")
 def run_custom_probe(source: str, allowed_hosts: str = "", timeout_sec: float = 20.0) -> str:
     """Run a short sandboxed Python HTTP probe (json/re/httpx only). Not a shell.
@@ -1745,7 +1881,9 @@ EXPLOIT_TOOLS = [
     "deep_tls_test", "scan_nuclei", "confirm_vulnerability_poc",
     "janus_dast_full",
     # Manual probing tools
-    "send_http_request", "test_cors_policy", "test_race_condition", "test_file_upload",
+    "send_http_request", "replay_http_request", "list_http_requests",
+    "get_http_request", "diff_http_requests",
+    "test_cors_policy", "test_race_condition", "test_file_upload",
     "run_custom_probe",
 ]
 
@@ -1771,6 +1909,10 @@ APP_MAPPER_TOOLS = [
 
 VALIDATOR_TOOLS = [
     "send_http_request",
+    "replay_http_request",
+    "list_http_requests",
+    "get_http_request",
+    "diff_http_requests",
     "scan_nuclei",
     "confirm_vulnerability_poc",
     "submit_findings_to_platform",
@@ -1778,6 +1920,10 @@ VALIDATOR_TOOLS = [
 
 CHAIN_TOOLS = [
     "send_http_request",
+    "replay_http_request",
+    "list_http_requests",
+    "get_http_request",
+    "diff_http_requests",
     "crawl_urls",
     "discover_parameters",
     "confirm_vulnerability_poc",
@@ -1798,6 +1944,10 @@ SAST_TOOLS = [
 
 # Tools available to all hunters for brain + prior-art access
 HUNTER_CORE_TOOLS = [
+    "list_http_requests",
+    "get_http_request",
+    "diff_http_requests",
+    "replay_http_request",
     "search_prior_art",
     "brain_query",
     "brain_mark_exhausted",
