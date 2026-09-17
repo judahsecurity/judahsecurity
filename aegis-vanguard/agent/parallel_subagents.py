@@ -25,6 +25,7 @@ import copy
 import hashlib
 import json
 import logging
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -436,10 +437,59 @@ class ParallelVulnPhase:
 
     @staticmethod
     def _finding_key(f: dict) -> str:
+        title = str(f.get("name") or f.get("title") or "")
+        endpoint = str(
+            f.get("matched_at")
+            or f.get("matched-at")
+            or f.get("url")
+            or f.get("endpoint")
+            or ""
+        ).rstrip("/")
+        kind_source = " ".join(
+            str(value)
+            for value in (
+                f.get("vuln_type"), f.get("type"), f.get("template"),
+                f.get("template-id"), f.get("template_id"), title,
+                " ".join(f.get("tags") or []),
+            )
+            if value
+        ).lower()
+        kind = ""
+        for canonical, pattern in (
+            ("sqli", r"\bsqli\b|sql[\s-]*injection"),
+            ("xss", r"\bxss\b|cross[\s-]*site[\s-]*script"),
+            ("ssrf", r"\bssrf\b|server[\s-]*side[\s-]*request"),
+            ("ssti", r"\bssti\b|template[\s-]*injection"),
+            ("xxe", r"\bxxe\b|xml[\s-]*external[\s-]*entity"),
+            ("idor", r"\bidor\b|insecure[\s-]*direct[\s-]*object"),
+        ):
+            if re.search(pattern, kind_source):
+                kind = canonical
+                break
+
+        parameter = str(f.get("parameter") or f.get("param") or "").lower()
+        if not parameter:
+            for pattern in (
+                r"(?:parameter|param)\s+['\"`]?([a-zA-Z_][\w.-]*)",
+                r"['\"`]([a-zA-Z_][\w.-]*)['\"`]\s*\(",
+                r"\(([a-zA-Z_][\w.-]*)\s+parameter\)",
+            ):
+                match = re.search(pattern, title, re.IGNORECASE)
+                if match:
+                    parameter = match.group(1).lower()
+                    break
+
+        # Different tools often emit the same defect under different titles
+        # and severities.  Collapse those records before validation/chain
+        # building so one SQLi cannot masquerade as a multi-finding chain.
+        if kind and endpoint:
+            semantic = f"{kind}|{endpoint.lower()}|{parameter}"
+            return hashlib.sha256(semantic.encode()).hexdigest()[:16]
+
         parts = [
             str(f.get("template") or f.get("template-id") or f.get("template_id") or ""),
-            str(f.get("name") or f.get("title") or ""),
-            str(f.get("matched_at") or f.get("matched-at") or f.get("url") or ""),
+            title,
+            endpoint,
             str(f.get("severity") or ""),
         ]
         return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]

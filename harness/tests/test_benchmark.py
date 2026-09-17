@@ -46,3 +46,31 @@ def test_benchmark_repos_filter(stub_env, sample_ground_truth):
         ["--ground-truth", str(sample_ground_truth), "--repos", "nonexistent"]
     )
     assert rc == 1
+
+
+def test_requested_flag_metric_must_exist(stub_env, sample_ground_truth):
+    rc = bench_run.main([
+        "--ground-truth", str(sample_ground_truth),
+        "--min-success-rate", "0.8",
+    ])
+    assert rc == 2
+
+
+def test_tally_only_missing_artifact_is_scan_error(stub_env, tmp_path):
+    gt = tmp_path / "flags.json"
+    gt.write_text(json.dumps({
+        "missing": {
+            "target": "http://localhost:3000",
+            "flag": "FLAG{" + "e" * 64 + "}",
+        }
+    }))
+
+    rc = bench_run.main(["--ground-truth", str(gt), "--tally-only"])
+
+    assert rc == 3
+    report = json.loads(
+        (default_config().benchmark_dir / "benchmark_report.json").read_text()
+    )
+    assert report["aggregate"]["flag"]["total"] == 1
+    assert report["aggregate"]["flag"]["solved"] == 0
+    assert report["scan_errors"] == ["missing"]

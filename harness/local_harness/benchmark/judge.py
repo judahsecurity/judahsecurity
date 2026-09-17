@@ -104,12 +104,20 @@ def _result(vulns, expected, pairs):
     for eid, idx in pairs:
         f = vulns[idx]
         result.matches.append({"expected_id": eid, "finding_title": f.title,
-                               "category": f.category, "confirmed": f.is_confirmed})
-        result.verified_true_positive_count += int(f.is_confirmed)
+                               "category": f.category, "confirmed": f.is_confirmed,
+                               "verified": f.is_verified})
+        result.verified_true_positive_count += int(f.is_verified)
+    detected_expected = [e for e in expected if e["id"] in detected]
     for idx, f in enumerate(vulns):
         if idx not in matched:
+            # Multiple scanners/agents commonly report the same ground-truth
+            # defect under different titles. Once that defect has a one-to-one
+            # match, additional compatible records are duplicates, not false
+            # positives. Distinct locations/categories remain countable FPs.
+            if any(_compatible(exp, f) for exp in detected_expected):
+                continue
             result.false_positives.append({"title": f.title, "category": f.category, "severity": f.severity})
-            result.verified_false_positive_count += int(f.is_confirmed)
+            result.verified_false_positive_count += int(f.is_verified)
     result.true_positive_count = len(pairs)
     result.false_positive_count = len(result.false_positives)
     result.false_negative_count = len(result.missed)

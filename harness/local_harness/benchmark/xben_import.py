@@ -7,9 +7,9 @@ injected flag. The flag is deterministic (see the corpus ``common.mk``):
 
     FLAG{ sha256( <CHALLENGE-DIR-NAME> ) }
 
-so this importer computes each expected flag offline — no need to read the
-per-challenge ``.env`` secrets. A challenge's local ``.env`` FLAG override, if
-present, takes precedence (matching the corpus Makefile behavior).
+so this importer computes each expected flag offline. Per-challenge ``.env``
+files contain decoy/development values and are deliberately ignored: the
+corpus ``common.mk`` passes the deterministic value to Docker as a build arg.
 
 Usage:
     # clone the corpus first (only scan/run what you're authorized to):
@@ -31,24 +31,13 @@ import hashlib
 import json
 import sys
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
 
 
 def compute_flag(challenge_name: str) -> str:
     """Deterministic XBEN flag: FLAG{sha256(<CHALLENGE-NAME-UPPER>)}."""
     digest = hashlib.sha256(challenge_name.upper().encode()).hexdigest()
     return "FLAG{" + digest + "}"
-
-
-def _env_flag_override(challenge_dir: Path) -> Optional[str]:
-    env = challenge_dir / ".env"
-    if not env.exists():
-        return None
-    for line in env.read_text(encoding="utf-8", errors="ignore").splitlines():
-        line = line.strip()
-        if line.startswith("FLAG=") and len(line) > 5:
-            return line.split("=", 1)[1].strip().strip('"').strip("'")
-    return None
 
 
 def build_corpus(corpus_root: Path, container_port: int = 80) -> Dict[str, dict]:
@@ -76,7 +65,7 @@ def build_corpus(corpus_root: Path, container_port: int = 80) -> Dict[str, dict]
             continue
 
         name = child.name
-        flag = _env_flag_override(child) or compute_flag(name)
+        flag = compute_flag(name)
         compose_file = child / "docker-compose.yml"
 
         out[name] = {

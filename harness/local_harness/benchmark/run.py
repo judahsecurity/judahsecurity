@@ -35,7 +35,7 @@ from ..config import HarnessConfig, default_config
 from ..cost import cost_metrics, load_trace_summary
 from ..manifest import build_manifest
 from ..sarif import findings_to_sarif
-from ..findings import load_findings
+from ..findings import FindingsArtifactError, load_findings
 from ..llm import build_llm_call
 from ..runner import run_scan, slugify
 from .judge import FlagResult, JudgeResult, judge, judge_flag_capture
@@ -120,38 +120,59 @@ def cmd_run(config: HarnessConfig, args: argparse.Namespace) -> int:
 
         trace_dir = findings_path.parent
         scan_cost_summary = None
+        findings = []
+        target_error = None
         if args.tally_only:
-            findings = load_findings(findings_path)
-            print(f"[{name}] tally-only ({mode}): {len(findings)} findings from prior run")
+            try:
+                findings = load_findings(findings_path, strict=True)
+            except FindingsArtifactError as exc:
+                target_error = f"artifact: {exc}"
+                scan_errors.append(name)
+                print(f"[{name}] ARTIFACT ERROR: {exc}")
+            print(
+                f"[{name}] tally-only ({mode}): {len(findings)} findings from prior run"
+            )
             scan_cost_summary = load_trace_summary(trace_dir)
             if scan_cost_summary is None and target_url:
                 scan_cost_summary = load_trace_summary(out_root / slugify(target_url))
         else:
+            setup_succeeded = False
             if tm is not None and (spec.get("setup") or {}):
                 print(f"[{name}] setup …")
                 setup = tm.setup(spec)
                 if not setup.ok:
                     print(f"[{name}] SETUP FAILED: {setup.detail}")
                     scan_errors.append(name)
-                    report_targets[name] = {"mode": mode, "error": f"setup: {setup.detail}"}
-                    continue
-                target_url = setup.target_url
+                    target_error = f"setup: {setup.detail}"
+                else:
+                    setup_succeeded = True
+                    target_url = setup.target_url
 
-            try:
-                print(f"[{name}] scanning {target_url} ({mode} mode) …")
-                result = run_scan(target_url, config, out_root, scope=spec.get("scope"))
-                findings = result.findings
-                trace_dir = result.out_dir
-                scan_cost_summary = result.trace_summary
-                print(
-                    f"[{name}] scan {result.status}: {result.finding_count} findings "
-                    f"in {result.duration_sec:.0f}s"
-                )
-                if result.status != "done":
-                    scan_errors.append(name)
-            finally:
-                if tm is not None and (spec.get("setup") or {}):
-                    tm.teardown(spec)
+            if target_error is None:
+                try:
+                    print(f"[{name}] scanning {target_url} ({mode} mode) …")
+                    result = run_scan(
+                        target_url,
+                        config,
+                        out_root,
+                        scope=spec.get("scope"),
+                        artifact_name=name,
+                    )
+                    findings = result.findings
+                    trace_dir = result.out_dir
+                    scan_cost_summary = result.trace_summary
+                    print(
+                        f"[{name}] scan {result.status}: {result.finding_count} findings "
+                        f"in {result.duration_sec:.0f}s"
+                    )
+                    if result.status != "done":
+                        target_error = result.error or f"scan status: {result.status}"
+                        scan_errors.append(name)
+                        # Partial artifacts from an errored scan cannot solve a target.
+                        findings = []
+                finally:
+                    if setup_succeeded:
+                        tm.teardown(spec)
 
         if mode == "flag":
             fr = judge_flag_capture(
@@ -196,6 +217,9 @@ def cmd_run(config: HarnessConfig, args: argparse.Namespace) -> int:
                 encoding="utf-8",
             )
 
+        if target_error:
+            report_targets[name]["error"] = target_error
+
         tp = 0
         if name in findings_results:
             tp = findings_results[name].true_positive_count
@@ -221,6 +245,16 @@ def cmd_run(config: HarnessConfig, args: argparse.Namespace) -> int:
             )
 
     aggregate: Dict[str, object] = {}
+    error_count = len(set(scan_errors))
+    selected_count = len(corpus)
+    aggregate["completion"] = {
+        "selected": selected_count,
+        "completed": selected_count - error_count,
+        "errors": error_count,
+        "completion_rate": round(
+            (selected_count - error_count) / selected_count, 4
+        ) if selected_count else 0.0,
+    }
     if findings_results:
         aggregate["findings"] = _aggregate_findings_metrics(findings_results)
     if flag_results:
@@ -282,6 +316,12 @@ def _print_summary(report: dict, backend: str) -> None:
     print("  BENCHMARK SUMMARY")
     print(f"  judge backend: {backend}")
     print(f"  targets:       {len(report['targets'])}")
+    completion = agg.get("completion", {})
+    if completion:
+        print(
+            f"  completion:    {completion['completed']}/{completion['selected']} "
+            f"({completion['completion_rate']:.2%})"
+        )
     if "findings" in agg:
         f = agg["findings"]
         print(
@@ -314,15 +354,25 @@ def _exit_code(report: dict, args: argparse.Namespace) -> int:
         print(f"\n[gate] scan errors present → exit 3")
         return 3
     threshold = getattr(args, "min_verified_recall", None)
-    if threshold is not None and "findings" in agg and agg["findings"]["verified_recall"] < threshold:
-        print("\n[gate] verified recall below --min-verified-recall → exit 2")
-        return 2
-    if args.min_recall is not None and "findings" in agg:
+    if threshold is not None:
+        if "findings" not in agg:
+            print("\n[gate] --min-verified-recall requested but findings metrics are absent → exit 2")
+            return 2
+        if agg["findings"]["verified_recall"] < threshold:
+            print("\n[gate] verified recall below --min-verified-recall → exit 2")
+            return 2
+    if args.min_recall is not None:
+        if "findings" not in agg:
+            print("\n[gate] --min-recall requested but findings metrics are absent → exit 2")
+            return 2
         recall = agg["findings"]["recall"]
         if recall < args.min_recall:
             print(f"\n[gate] recall {recall:.2f} < --min-recall {args.min_recall} → exit 2")
             return 2
-    if args.min_success_rate is not None and "flag" in agg:
+    if args.min_success_rate is not None:
+        if "flag" not in agg:
+            print("\n[gate] --min-success-rate requested but flag metrics are absent → exit 2")
+            return 2
         sr = agg["flag"]["success_rate"]
         if sr < args.min_success_rate:
             print(
@@ -330,9 +380,15 @@ def _exit_code(report: dict, args: argparse.Namespace) -> int:
                 f"--min-success-rate {args.min_success_rate} → exit 2"
             )
             return 2
-    if args.max_cost_per_tp is not None and "cost" in agg:
+    if args.max_cost_per_tp is not None:
+        if "cost" not in agg:
+            print("\n[gate] --max-cost-per-tp requested but cost metrics are absent → exit 2")
+            return 2
         cpt = agg["cost"].get("cost_per_true_positive")
-        if cpt is not None and cpt > args.max_cost_per_tp:
+        if cpt is None:
+            print("\n[gate] --max-cost-per-tp requested but no true-positive cost exists → exit 2")
+            return 2
+        if cpt > args.max_cost_per_tp:
             print(
                 f"\n[gate] cost/TP {cpt:.4f} > "
                 f"--max-cost-per-tp {args.max_cost_per_tp} → exit 2"
@@ -376,9 +432,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--min-success-rate", type=float, default=None,
         help="CI gate: exit 2 if flag-mode success rate is below this (0-1)",
     )
-    parser.add_argument(
-        "--fail-on-scan-error", action="store_true",
-        help="CI gate: exit 3 if any target failed to scan/setup",
+    error_gate = parser.add_mutually_exclusive_group()
+    error_gate.add_argument(
+        "--fail-on-scan-error", dest="fail_on_scan_error", action="store_true",
+        default=True,
+        help="exit 3 if any target failed to scan/setup (default)",
+    )
+    error_gate.add_argument(
+        "--allow-scan-errors", dest="fail_on_scan_error", action="store_false",
+        help="exploratory mode: report scan/setup errors without failing the run",
     )
     parser.add_argument(
         "--max-cost-per-tp", type=float, default=None,

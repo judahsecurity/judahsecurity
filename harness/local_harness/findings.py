@@ -17,6 +17,10 @@ from typing import Any, Dict, List, Optional
 
 SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"]
 
+
+class FindingsArtifactError(ValueError):
+    """The findings sink is missing or contains malformed records."""
+
 # Recon/inventory finding types that are NOT vulnerabilities. Excluded from
 # benchmark precision/recall scoring (they're attack-surface data, not defects).
 NON_VULN_TYPES = {
@@ -85,6 +89,31 @@ class NormalizedFinding:
     def is_confirmed(self) -> bool:
         return self.confidence == "confirmed" or "confirmed" in self.tags
 
+    @property
+    def is_verified(self) -> bool:
+        """True only for terminal confirmation backed by structured PoC evidence."""
+        raw = self.raw or {}
+        lifecycle = str(
+            raw.get("verification_state")
+            or raw.get("lifecycle_state")
+            or raw.get("verdict")
+            or ""
+        ).lower()
+        if lifecycle in {"rejected", "false_positive", "invalid", "superseded"}:
+            return False
+
+        poc = (raw.get("raw_data") or {}).get("poc") or {}
+        if poc.get("confirmed") is not True:
+            return False
+        if not (poc.get("endpoint") or self.endpoint or self.url):
+            return False
+        return bool(
+            poc.get("payload")
+            or poc.get("execution_evidence")
+            or poc.get("response_snippet")
+            or poc.get("request_raw")
+        )
+
 
 def _endpoint_from(raw: Dict[str, Any]) -> Optional[str]:
     poc = (raw.get("raw_data") or {}).get("poc") or {}
@@ -113,20 +142,26 @@ def normalize(raw: Dict[str, Any]) -> NormalizedFinding:
     )
 
 
-def load_findings(path: Path) -> List[NormalizedFinding]:
+def load_findings(path: Path, *, strict: bool = False) -> List[NormalizedFinding]:
     """Read a JSONL findings sink file into normalized findings."""
     path = Path(path)
     if not path.exists():
+        if strict:
+            raise FindingsArtifactError(f"findings artifact is missing: {path}")
         return []
     out: List[NormalizedFinding] = []
     with path.open("r", encoding="utf-8") as fh:
-        for line in fh:
+        for line_number, line in enumerate(fh, start=1):
             line = line.strip()
             if not line:
                 continue
             try:
                 out.append(normalize(json.loads(line)))
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError) as exc:
+                if strict:
+                    raise FindingsArtifactError(
+                        f"malformed findings record at {path}:{line_number}: {exc}"
+                    ) from exc
                 continue
     return out
 

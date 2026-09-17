@@ -1,4 +1,5 @@
 from local_harness.findings import (
+    FindingsArtifactError,
     categorize,
     load_findings,
     normalize,
@@ -60,3 +61,39 @@ def test_load_findings_and_filters(tmp_path):
 
 def test_load_findings_missing_file(tmp_path):
     assert load_findings(tmp_path / "nope.jsonl") == []
+
+
+def test_load_findings_strict_rejects_missing_and_malformed(tmp_path):
+    import pytest
+
+    with pytest.raises(FindingsArtifactError, match="missing"):
+        load_findings(tmp_path / "nope.jsonl", strict=True)
+
+    malformed = tmp_path / "bad.jsonl"
+    malformed.write_text('{"title": "ok"}\nnot-json\n')
+    with pytest.raises(FindingsArtifactError, match=":2"):
+        load_findings(malformed, strict=True)
+
+
+def test_verified_requires_terminal_structured_poc():
+    label_only = normalize({
+        "type": "vulnerability", "title": "SQLi", "confidence": "confirmed",
+        "tags": ["confirmed"],
+    })
+    verified = normalize({
+        "type": "vulnerability", "title": "SQLi", "confidence": "confirmed",
+        "raw_data": {"poc": {
+            "confirmed": True,
+            "endpoint": "https://x/login",
+            "payload": "' OR 1=1--",
+        }},
+    })
+    rejected = normalize({
+        **verified.raw,
+        "verification_state": "rejected",
+    })
+
+    assert label_only.is_confirmed
+    assert not label_only.is_verified
+    assert verified.is_verified
+    assert not rejected.is_verified

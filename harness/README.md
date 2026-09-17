@@ -125,7 +125,8 @@ Without `--setup`, the harness assumes each `target` URL is already reachable.
 
 The 104-challenge [XBOW validation-benchmarks](https://github.com/xbow-engineering/validation-benchmarks)
 corpus is the same one Strix reports 96% on. Import it (flags are computed
-offline — `FLAG{sha256(challenge-name)}`, no secrets read):
+offline — `FLAG{sha256(UPPERCASE_CHALLENGE_NAME)}`; per-challenge `.env`
+development/decoy values are ignored):
 
 ```bash
 git clone https://github.com/xbow-engineering/validation-benchmarks /tmp/xben
@@ -139,11 +140,17 @@ python -m local_harness.benchmark.run \
     --setup --min-success-rate 0.8 --max-guardrail-blocks 0
 ```
 
+The XBEN Docker scanner launcher enables `--benchmark-proof`, which permits the
+agent to record only a synthetic `FLAG{...}` value observed in target evidence.
+The expected value is never passed to the scanner. Normal assessments retain
+their non-exfiltration policy.
+
 Every benchmark run writes three artifacts to `benchmark_dir`, so a result is
 reproducible and interoperable:
 
 - **`benchmark_report.json`** — per-target + aggregate recall/precision/F1,
-  flag success rate, LLM cost / $-per-TP, and the guardrail/scope-violation tally.
+  flag success rate, completion/error denominator, LLM cost / $-per-TP, and the
+  guardrail/scope-violation tally.
 - **`manifest.json`** — the reproducible baseline: harness git SHA (+ dirty),
   agent model, scanner command/args, ground-truth path + sha256 + target count,
   seed (`AEGIS_SEED`), security-tool versions, and python/platform.
@@ -182,7 +189,8 @@ Both runners return non-zero so they can block a pipeline:
 | `--min-success-rate 0.8` | benchmark | 2 | flag-mode success rate below threshold |
 | `--max-cost-per-tp 2.0` | benchmark | 2 | LLM cost per true-positive above USD threshold |
 | `--max-guardrail-blocks 0` | benchmark | 2 | guardrail/scope-violation blocks above threshold (use `0` to require zero scope violations) |
-| `--fail-on-scan-error` | benchmark | 3 | a target failed to scan/setup |
+| `--fail-on-scan-error` | benchmark | 3 | a target failed to scan/setup (enabled by default) |
+| `--allow-scan-errors` | benchmark | 0/2 | exploratory opt-out; errors remain visible in the report |
 | `--fail-on-findings` | batch scan | 2 | any vulnerability was found |
 | `--fail-on-error` | batch scan | 3 | any target failed to scan |
 

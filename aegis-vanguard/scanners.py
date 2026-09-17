@@ -7,6 +7,8 @@ into the ASM Bridge for submission to the platform.
 """
 
 import hashlib
+import difflib
+from html.parser import HTMLParser
 import json
 import logging
 import os
@@ -16,7 +18,7 @@ import subprocess
 import tempfile
 import time
 from typing import List, Optional, Dict, Any
-from urllib.parse import parse_qsl, urljoin, urlparse
+from urllib.parse import parse_qsl, urlencode, urldefrag, urljoin, urlparse
 
 from asm_bridge import ASMBridge, Finding
 
@@ -30,6 +32,604 @@ def _run(cmd: List[str], timeout: int = 600) -> subprocess.CompletedProcess:
 
 def _tool_available(name: str) -> bool:
     return shutil.which(name) is not None
+
+
+class _FormControlParser(HTMLParser):
+    """Extract hidden and submit controls needed to activate a form handler."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.forms: List[dict] = []
+        self._form: Optional[dict] = None
+
+    def handle_starttag(self, tag: str, attrs: List[tuple]) -> None:
+        values = {str(k).lower(): (v or "") for k, v in attrs}
+        tag = tag.lower()
+        if tag == "form":
+            self._form = {
+                "action": values.get("action", ""),
+                "method": values.get("method", "GET").upper(),
+                "controls": [],
+            }
+            return
+        if self._form is None or "disabled" in values:
+            return
+        name = values.get("name", "").strip()
+        if not name:
+            return
+        if tag == "input":
+            control_type = values.get("type", "text").lower()
+            if control_type in {"hidden", "submit", "image"}:
+                self._form["controls"].append((name, values.get("value", "")))
+        elif tag == "button" and values.get("type", "submit").lower() == "submit":
+            self._form["controls"].append((name, values.get("value", "")))
+
+    def handle_startendtag(self, tag: str, attrs: List[tuple]) -> None:
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "form" and self._form is not None:
+            self.forms.append(self._form)
+            self._form = None
+
+
+class _InputSurfaceParser(HTMLParser):
+    """Collect links and successful form controls without executing forms."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.forms: List[dict] = []
+        self.links: List[str] = []
+        self.scripts: List[str] = []
+        self.script_sources: List[str] = []
+        self._form: Optional[dict] = None
+        self._textarea: Optional[dict] = None
+        self._script: Optional[List[str]] = None
+
+    @staticmethod
+    def _attrs(attrs: List[tuple]) -> dict:
+        return {str(k).lower(): (v or "") for k, v in attrs}
+
+    def handle_starttag(self, tag: str, attrs: List[tuple]) -> None:
+        values = self._attrs(attrs)
+        tag = tag.lower()
+        if tag == "script":
+            if values.get("src"):
+                self.script_sources.append(values["src"])
+            else:
+                self._script = []
+            return
+        if tag == "a" and values.get("href"):
+            self.links.append(values["href"])
+            return
+        if tag == "form":
+            self._form = {
+                "action": values.get("action", ""),
+                "method": values.get("method", "GET").upper(),
+                "enctype": values.get(
+                    "enctype", "application/x-www-form-urlencoded"
+                ).lower(),
+                "controls": [],
+            }
+            return
+        if self._form is None or "disabled" in values:
+            return
+
+        name = values.get("name", "").strip()
+        if not name:
+            return
+        if tag == "input":
+            control_type = values.get("type", "text").lower()
+            # Unchecked radio/checkbox controls are not submitted by a browser.
+            if control_type in {"radio", "checkbox"} and "checked" not in values:
+                return
+            self._form["controls"].append({
+                "name": name,
+                "type": control_type,
+                "value": values.get("value", ""),
+                "readonly": "readonly" in values,
+            })
+        elif tag == "textarea":
+            self._textarea = {"name": name, "type": "textarea", "value": ""}
+        elif tag == "select":
+            self._form["controls"].append({
+                "name": name,
+                "type": "select",
+                "value": "",
+                "readonly": False,
+            })
+        elif tag == "button":
+            self._form["controls"].append({
+                "name": name,
+                "type": values.get("type", "submit").lower(),
+                "value": values.get("value", ""),
+                "readonly": False,
+            })
+
+    def handle_startendtag(self, tag: str, attrs: List[tuple]) -> None:
+        self.handle_starttag(tag, attrs)
+
+    def handle_data(self, data: str) -> None:
+        if self._script is not None:
+            self._script.append(data)
+            return
+        if self._textarea is not None:
+            self._textarea["value"] += data
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag == "script" and self._script is not None:
+            self.scripts.append("".join(self._script))
+            self._script = None
+        elif tag == "textarea" and self._textarea is not None:
+            if self._form is not None:
+                self._form["controls"].append(self._textarea)
+            self._textarea = None
+        elif tag == "form" and self._form is not None:
+            self.forms.append(self._form)
+            self._form = None
+
+
+_FORM_CONTROL_TYPES = {"hidden", "submit", "button", "reset", "image", "file"}
+_CONTROL_NAME_RE = re.compile(
+    r"(?:csrf|xsrf|authenticity|nonce|token|captcha|submit|action)", re.I
+)
+_STATIC_PATH_RE = re.compile(
+    r"\.(?:css|js|mjs|map|png|jpe?g|gif|svg|ico|woff2?|ttf|eot|pdf|zip)(?:$|\?)",
+    re.I,
+)
+
+
+def _js_balanced_calls(source: str, function_name: str) -> List[str]:
+    """Return argument text for JavaScript calls without executing JavaScript."""
+    calls: List[str] = []
+    pattern = re.compile(rf"\b{re.escape(function_name)}\s*\(")
+    for match in pattern.finditer(source):
+        start = match.end()
+        depth = 1
+        quote = ""
+        escaped = False
+        index = start
+        while index < len(source):
+            char = source[index]
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif quote:
+                if char == quote:
+                    quote = ""
+            elif char in {"'", '"', "`"}:
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    calls.append(source[start:index])
+                    break
+            index += 1
+    return calls
+
+
+def _js_split_top_level(source: str, delimiter: str = ",") -> List[str]:
+    """Split JavaScript-like text at top-level delimiters."""
+    parts: List[str] = []
+    start = 0
+    depths = {"(": 0, "[": 0, "{": 0}
+    closing = {")": "(", "]": "[", "}": "{"}
+    quote = ""
+    escaped = False
+    for index, char in enumerate(source):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if quote:
+            if char == quote:
+                quote = ""
+            continue
+        if char in {"'", '"', "`"}:
+            quote = char
+        elif char in depths:
+            depths[char] += 1
+        elif char in closing:
+            depths[closing[char]] = max(0, depths[closing[char]] - 1)
+        elif char == delimiter and not any(depths.values()):
+            parts.append(source[start:index].strip())
+            start = index + 1
+    parts.append(source[start:].strip())
+    return parts
+
+
+def _js_literal(expr: str, variables: Dict[str, str]) -> Optional[str]:
+    expr = expr.strip().rstrip(";")
+    if expr in variables:
+        return variables[expr]
+    if len(expr) >= 2 and expr[0] in {"'", '"', "`"} and expr[-1] == expr[0]:
+        value = expr[1:-1]
+        # Interpolations identify user-controlled positions, but their runtime
+        # values may be secrets. Preserve the shape with a synthetic marker.
+        return re.sub(r"\$\{[^}]+\}", "aegis", value)
+    return None
+
+
+def _js_variables(source: str) -> Dict[str, str]:
+    variables: Dict[str, str] = {}
+    assignment = re.compile(
+        r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*"
+        r"(`(?:\\.|[^`])*`|'(?:\\.|[^'])*'|\"(?:\\.|[^\"])*\")\s*;?",
+        re.S,
+    )
+    for match in assignment.finditer(source):
+        value = _js_literal(match.group(2), variables)
+        if value is not None:
+            variables[match.group(1)] = value
+    return variables
+
+
+def _js_json_object(expr: str, variables: Dict[str, str]) -> Optional[dict]:
+    """Build a sanitized JSON template from a simple JSON.stringify object."""
+    expr = expr.strip()
+    if not (expr.startswith("{") and expr.endswith("}")):
+        return None
+    result: Dict[str, Any] = {}
+    for item in _js_split_top_level(expr[1:-1]):
+        if not item:
+            continue
+        fields = _js_split_top_level(item, delimiter=":")
+        if len(fields) == 1:
+            key = fields[0].strip().strip("'\"")
+            if re.fullmatch(r"[A-Za-z_$][\w$]*", key):
+                result[key] = variables.get(key, "aegis")
+            continue
+        key = fields[0].strip().strip("'\"")
+        if not re.fullmatch(r"[A-Za-z_$][\w$-]*", key):
+            continue
+        value_expr = item[item.find(":") + 1:].strip()
+        literal = _js_literal(value_expr, variables)
+        if literal is not None:
+            result[key] = literal
+        elif value_expr in {"true", "false"}:
+            result[key] = value_expr == "true"
+        elif re.fullmatch(r"-?\d+(?:\.\d+)?", value_expr):
+            result[key] = float(value_expr) if "." in value_expr else int(value_expr)
+        else:
+            result[key] = "aegis"
+    return result or None
+
+
+def _discover_js_request_templates(
+    source: str,
+    page_url: str,
+    target_origin: tuple,
+) -> tuple[List[dict], int]:
+    """Statically inventory literal fetch() requests and controllable fields."""
+    templates: List[dict] = []
+    skipped_cross_origin = 0
+    variables = _js_variables(source)
+    for args_text in _js_balanced_calls(source, "fetch"):
+        args = _js_split_top_level(args_text)
+        request_path = _js_literal(args[0], variables) if args else None
+        if not request_path:
+            continue
+        action_url, _ = urldefrag(urljoin(page_url, request_path))
+        parsed = urlparse(action_url)
+        if (parsed.scheme.lower(), parsed.netloc.lower()) != target_origin:
+            skipped_cross_origin += 1
+            continue
+
+        options = args[1] if len(args) > 1 else ""
+        method_match = re.search(r"\bmethod\s*:\s*(['\"])([A-Za-z]+)\1", options)
+        method = method_match.group(2).upper() if method_match else "GET"
+        content_type = ""
+        content_match = re.search(
+            r"['\"]Content-Type['\"]\s*:\s*(['\"])([^'\"]+)\1",
+            options,
+            re.I,
+        )
+        if content_match:
+            content_type = content_match.group(2)
+
+        body_obj: Optional[dict] = None
+        stringify_calls = _js_balanced_calls(options, "JSON.stringify")
+        if stringify_calls:
+            body_obj = _js_json_object(stringify_calls[0], variables)
+            content_type = content_type or "application/json"
+
+        eligible: List[str] = []
+        if body_obj is not None:
+            query = body_obj.get("query")
+            if isinstance(query, str) and re.search(r"\b(?:query|mutation)\b", query):
+                eligible = [
+                    f"graphql:{name}" for name in dict.fromkeys(
+                        re.findall(r"\b([A-Za-z_]\w*)\s*:\s*['\"]aegis['\"]", query)
+                    )
+                ]
+            if not eligible:
+                eligible = [f"json:{key}" for key in body_obj]
+
+        body_template = json.dumps(body_obj, separators=(",", ":")) if body_obj else ""
+        headers = {"Content-Type": content_type} if content_type else {}
+        query_names = [name for name, _ in parse_qsl(parsed.query, keep_blank_values=True)]
+        if method == "GET" and query_names:
+            eligible.extend(f"query:{name}" for name in query_names)
+        eligible = list(dict.fromkeys(eligible))
+        templates.append({
+            "source_url": page_url,
+            "source": "javascript-fetch",
+            "method": method,
+            "action_url": action_url,
+            "content_type": content_type,
+            "headers_json": json.dumps(headers, separators=(",", ":")),
+            "body_template": body_template,
+            "eligible_parameters": eligible,
+            "coverage": {name: "pending" for name in eligible},
+        })
+    return templates, skipped_cross_origin
+
+
+def _safe_form_value(control: dict) -> str:
+    """Return a synthetic baseline value, never a page-provided secret."""
+    control_type = (control.get("type") or "text").lower()
+    if control_type == "email":
+        return "aegis@example.invalid"
+    if control_type == "tel":
+        return "5550100"
+    if control_type in {"number", "range"}:
+        return "1"
+    if control_type == "url":
+        return "https://example.invalid/"
+    if control_type == "password":
+        return "Aegis-Test-123!"
+    if control_type in {"date", "datetime-local"}:
+        return "2000-01-01"
+    if control_type in {"checkbox", "radio", "select"}:
+        return str(control.get("value") or "1")[:200]
+    return "aegis"
+
+
+def _form_control_summary(control: dict) -> dict:
+    name = str(control.get("name") or "").strip()
+    control_type = str(control.get("type") or "text").lower()
+    excluded_reason = ""
+    if control_type in _FORM_CONTROL_TYPES:
+        excluded_reason = f"browser control ({control_type})"
+    elif _CONTROL_NAME_RE.search(name):
+        excluded_reason = "framework/control token"
+    elif control.get("readonly"):
+        excluded_reason = "readonly"
+    return {
+        "name": name,
+        "type": control_type,
+        "eligible": not bool(excluded_reason),
+        "exclusion_reason": excluded_reason or None,
+        # Hidden/default values can be credentials or CSRF tokens. The active
+        # probe fetches fresh controls internally, so the model never needs them.
+        "has_default_value": bool(control.get("value")),
+    }
+
+
+def run_discover_input_surface(
+    target_url: str,
+    bridge: ASMBridge,
+    timeout: int = 60,
+    max_pages: int = 12,
+    *,
+    fetch_html=None,
+) -> Dict[str, Any]:
+    """Passively inventory HTML forms and their user-controlled parameters.
+
+    Only GET requests are sent. Form submissions are represented as canonical,
+    sanitized request templates for later guarded probes. Hidden values are
+    deliberately omitted; active probes restore fresh hidden/submit controls.
+    """
+    parsed_target = urlparse(target_url)
+    if parsed_target.scheme not in {"http", "https"} or not parsed_target.netloc:
+        return {"success": False, "error": "target_url must be HTTP(S)", "forms": []}
+
+    max_pages = max(1, min(int(max_pages or 12), 25))
+    timeout = max(5, min(int(timeout or 60), 120))
+    fetch = fetch_html or _fetch_form_html
+    target_origin = (parsed_target.scheme.lower(), parsed_target.netloc.lower())
+    deadline = time.time() + timeout
+    queue: List[str] = [target_url]
+    visited: set = set()
+    seen_forms: set = set()
+    seen_requests: set = set()
+    forms: List[dict] = []
+    request_templates: List[dict] = []
+    skipped_cross_origin = 0
+
+    while queue and len(visited) < max_pages and time.time() < deadline:
+        page_url, _fragment = urldefrag(queue.pop(0))
+        if page_url in visited:
+            continue
+        visited.add(page_url)
+        html = fetch(page_url)
+        if not html:
+            continue
+        parser = _InputSurfaceParser()
+        try:
+            parser.feed(html)
+        except Exception as exc:
+            logger.debug("input surface parse failed for %s: %s", page_url, exc)
+            continue
+
+        script_sources = list(parser.scripts)
+        for script_path in parser.script_sources:
+            script_url, _ = urldefrag(urljoin(page_url, script_path))
+            script_parsed = urlparse(script_url)
+            if (script_parsed.scheme.lower(), script_parsed.netloc.lower()) != target_origin:
+                skipped_cross_origin += 1
+                continue
+            script_text = fetch(script_url)
+            if script_text:
+                script_sources.append(script_text)
+        for script_source in script_sources:
+            discovered, skipped = _discover_js_request_templates(
+                script_source, page_url, target_origin
+            )
+            skipped_cross_origin += skipped
+            for request in discovered:
+                key = (
+                    request["method"], request["action_url"],
+                    request["body_template"], tuple(request["eligible_parameters"]),
+                )
+                if key in seen_requests:
+                    continue
+                seen_requests.add(key)
+                request_templates.append(request)
+                bridge.submit_url(request["action_url"], source="javascript-fetch")
+
+        for form in parser.forms:
+            action_url, _ = urldefrag(urljoin(page_url, form.get("action") or page_url))
+            action = urlparse(action_url)
+            if (action.scheme.lower(), action.netloc.lower()) != target_origin:
+                skipped_cross_origin += 1
+                continue
+            method = (form.get("method") or "GET").upper()
+            controls = [_form_control_summary(c) for c in form.get("controls", [])]
+            eligible = list(dict.fromkeys(
+                c["name"] for c in controls if c["eligible"] and c["name"]
+            ))
+            raw_by_name = {
+                str(c.get("name") or ""): c for c in form.get("controls", [])
+            }
+            body_pairs = [
+                (name, _safe_form_value(raw_by_name[name])) for name in eligible
+            ]
+            key = (method, action_url, tuple(eligible))
+            if key in seen_forms:
+                continue
+            seen_forms.add(key)
+            forms.append({
+                "source_url": page_url,
+                "method": method,
+                "action_url": action_url,
+                "content_type": form.get("enctype") or "application/x-www-form-urlencoded",
+                "controls": controls,
+                "eligible_parameters": eligible,
+                "body_template": urlencode(body_pairs, doseq=True) if method != "GET" else "",
+                "query_template": urlencode(body_pairs, doseq=True) if method == "GET" else "",
+                "coverage": {name: "pending" for name in eligible},
+            })
+            bridge.submit_url(action_url, source="html-form")
+
+        for href in parser.links:
+            candidate, _ = urldefrag(urljoin(page_url, href))
+            parsed = urlparse(candidate)
+            if (parsed.scheme.lower(), parsed.netloc.lower()) != target_origin:
+                continue
+            if _STATIC_PATH_RE.search(parsed.path or ""):
+                continue
+            if candidate not in visited and candidate not in queue:
+                queue.append(candidate)
+
+    if forms or request_templates:
+        bridge.flush()
+    eligible_count = sum(
+        len(item["eligible_parameters"]) for item in forms + request_templates
+    )
+    return {
+        "success": True,
+        "target": target_url,
+        "pages_visited": len(visited),
+        "forms_discovered": len(forms),
+        "request_templates_discovered": len(request_templates),
+        "eligible_parameters": eligible_count,
+        "skipped_cross_origin_forms": skipped_cross_origin,
+        "forms": forms,
+        "request_templates": request_templates,
+        "next_step": (
+            "Test every pending eligible parameter; preserve the request template and "
+            "let the probe restore hidden/submit controls."
+            if forms or request_templates else
+            "No HTML forms or static fetch templates found; continue with runtime API "
+            "and hidden-parameter discovery."
+        ),
+    }
+
+
+def _endpoint_key(url: str) -> tuple:
+    parsed = urlparse(url)
+    port = parsed.port
+    if port is None:
+        port = 443 if parsed.scheme == "https" else 80
+    return parsed.scheme, (parsed.hostname or "").lower(), port, parsed.path or "/"
+
+
+def _fetch_form_html(url: str, timeout: int = 12) -> str:
+    """Fetch full HTML without redirects; normal probes truncate at 8 KiB.
+
+    Redirects stay disabled so an in-scope endpoint cannot send this internal
+    helper to a different host outside the guardrail layer.
+    """
+    bounded = max(1, min(int(timeout or 12), 15))
+    try:
+        result = _run(
+            ["curl", "-sS", "--max-time", str(bounded), url],
+            timeout=bounded + 2,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    if result.returncode != 0:
+        return ""
+    return (result.stdout or "")[:2_000_000]
+
+
+def _augment_form_body(
+    target_url: str,
+    method: str,
+    body: str,
+    *,
+    fetch_html=None,
+) -> tuple[str, set]:
+    """Restore hidden/submit controls omitted from a model-built POST body.
+
+    Many handlers gate all application logic on a named submit button or hidden
+    token. Dropping those controls turns every active probe into a redirect and
+    creates a false negative. Existing caller-provided values always win.
+    """
+    if (method or "GET").upper() not in {"POST", "PUT", "PATCH"} or not body:
+        return body, set()
+
+    fetch = fetch_html or _fetch_form_html
+    parsed = urlparse(target_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}/"
+    parent = urljoin(target_url, "./")
+    pages = list(dict.fromkeys([parent, origin]))
+    target_key = _endpoint_key(target_url)
+    existing = parse_qsl(body, keep_blank_values=True)
+    existing_names = {name for name, _ in existing}
+
+    for page_url in pages:
+        html = fetch(page_url)
+        if not html:
+            continue
+        parser = _FormControlParser()
+        try:
+            parser.feed(html)
+        except Exception:
+            continue
+        for form in parser.forms:
+            action_url = urljoin(page_url, form.get("action") or page_url)
+            if _endpoint_key(action_url) != target_key:
+                continue
+            if form.get("method", "GET").upper() != (method or "GET").upper():
+                continue
+            additions = [
+                (name, value) for name, value in form.get("controls", [])
+                if name not in existing_names
+            ]
+            if not additions:
+                return body, set()
+            merged = list(existing)
+            merged.extend(additions)
+            return urlencode(merged, doseq=True), {name for name, _ in additions}
+    return body, set()
 
 
 # =========================================================================
@@ -352,21 +952,46 @@ def run_sqlmap(
     data: str = "",
     param: str = "",
     cookie: str = "",
+    headers_json: str = "{}",
     method: str = "",
     level: int = 3,
     risk: int = 2,
-) -> List[dict]:
+) -> dict:
     """SQL injection testing via sqlmap with structured finding output.
 
     Prefer calling after probe_sqli_params flags a candidate. Supports POST body,
-    specific -p params, and cookies. Safe flags only (--batch, no os-shell).
+    JSON content types, specific -p params, and cookies. Safe flags only.
     """
     if not _tool_available("sqlmap"):
-        logger.error("sqlmap not installed")
-        return []
+        error = "sqlmap not installed"
+        logger.error(error)
+        return {
+            "status": "error", "error": error, "exit_code": None,
+            "findings": [], "results": [], "vulnerable": False, "count": 0,
+            "form_controls_restored": [],
+        }
 
     level = max(1, min(int(level or 3), 5))
     risk = max(1, min(int(risk or 2), 3))
+    method = (method or ("POST" if data else "GET")).upper()
+    try:
+        request_headers = json.loads(headers_json) if headers_json else {}
+        if not isinstance(request_headers, dict):
+            request_headers = {}
+    except json.JSONDecodeError:
+        request_headers = {}
+    content_type = next(
+        (str(value) for key, value in request_headers.items() if key.lower() == "content-type"),
+        "",
+    )
+    restored_controls: set = set()
+    if "json" not in content_type.lower():
+        data, restored_controls = _augment_form_body(target_url, method, data)
+    if restored_controls:
+        logger.info(
+            "sqlmap: restored required form controls for %s: %s",
+            target_url, ", ".join(sorted(restored_controls)),
+        )
     out_dir = tempfile.mkdtemp(prefix="sqlmap_")
     cmd = [
         "sqlmap", "-u", target_url,
@@ -375,26 +1000,49 @@ def run_sqlmap(
         f"--risk={risk}",
         f"--output-dir={out_dir}",
         "--forms",
-        "--smart",
         "--technique=BEUSTQ",
         "--threads=2",
     ]
     if data:
         cmd += ["--data", data]
     if param:
-        cmd += ["-p", param]
+        sqlmap_param = param.split(":", 1)[-1] if ":" in param else param
+        cmd += ["-p", sqlmap_param]
+    extra_headers = {
+        str(key): str(value) for key, value in request_headers.items()
+        if key.lower() != "cookie"
+    }
+    if extra_headers:
+        cmd += ["--headers", "\n".join(f"{key}: {value}" for key, value in extra_headers.items())]
+    if not cookie:
+        cookie = next(
+            (str(value) for key, value in request_headers.items() if key.lower() == "cookie"),
+            "",
+        )
     if cookie:
         cmd += ["--cookie", cookie]
     if method:
-        cmd += ["--method", method.upper()]
+        cmd += ["--method", method]
 
     try:
         result = _run(cmd, timeout=timeout)
     except subprocess.TimeoutExpired:
         logger.warning("sqlmap timed out on %s", target_url)
-        return []
+        return {
+            "status": "timeout", "error": "sqlmap timed out", "exit_code": None,
+            "findings": [], "results": [], "vulnerable": False, "count": 0,
+            "form_controls_restored": sorted(restored_controls),
+        }
 
     output = (result.stdout or "") + "\n" + (result.stderr or "")
+    if result.returncode != 0:
+        error = output.strip()[-1500:] or f"sqlmap exited with code {result.returncode}"
+        logger.error("sqlmap failed on %s (exit %s): %s", target_url, result.returncode, error)
+        return {
+            "status": "error", "error": error, "exit_code": result.returncode,
+            "findings": [], "results": [], "vulnerable": False, "count": 0,
+            "form_controls_restored": sorted(restored_controls),
+        }
     findings: List[dict] = []
 
     # Parse "Parameter: <name> ..." / "is vulnerable" blocks
@@ -457,7 +1105,12 @@ def run_sqlmap(
         bridge.flush()
 
     logger.info("sqlmap: %d injection points on %s", len(findings), target_url)
-    return findings
+    return {
+        "status": "ok", "error": None, "exit_code": result.returncode,
+        "findings": findings, "results": findings,
+        "vulnerable": bool(findings), "count": len(findings),
+        "form_controls_restored": sorted(restored_controls),
+    }
 
 
 # =========================================================================
@@ -894,12 +1547,17 @@ def run_ffuf(target_url: str, bridge: ASMBridge, wordlist: str = "/usr/share/wor
     return findings
 
 
-def run_arjun(target_url: str, bridge: ASMBridge, timeout: int = 300) -> List[str]:
+def run_arjun(target_url: str, bridge: ASMBridge, timeout: int = 60) -> List[str]:
     """HTTP parameter discovery via arjun."""
     if not _tool_available("arjun"):
         logger.error("arjun not installed"); return []
-    cmd = ["arjun", "-u", target_url, "--stable", "-oJ", "-"]
-    result = _run(cmd, timeout=timeout)
+    timeout = max(1, min(int(timeout or 60), 60))
+    cmd = ["arjun", "-u", target_url, "--stable", "-T", "5", "-oJ", "-"]
+    try:
+        result = _run(cmd, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        logger.warning("arjun timed out after %ss on %s", timeout, target_url)
+        return []
     params = []
     try:
         data = json.loads(result.stdout)
@@ -3087,10 +3745,17 @@ def _mutate_body_param(body: str, param: str, value: str, content_type: str) -> 
     if "json" in (content_type or "").lower():
         try:
             obj = json.loads(body) if body else {}
-            if isinstance(obj, dict) and param in obj:
-                obj[param] = value
-                return json.dumps(obj)
-        except json.JSONDecodeError:
+            path = param.split(".") if param else []
+            cursor: Any = obj
+            for segment in path[:-1]:
+                cursor = cursor[int(segment)] if isinstance(cursor, list) else cursor[segment]
+            if path and isinstance(cursor, list):
+                cursor[int(path[-1])] = value
+                return json.dumps(obj, separators=(",", ":"))
+            if path and isinstance(cursor, dict) and path[-1] in cursor:
+                cursor[path[-1]] = value
+                return json.dumps(obj, separators=(",", ":"))
+        except (json.JSONDecodeError, KeyError, IndexError, TypeError, ValueError):
             pass
     # form-urlencoded
     pairs = parse_qsl(body or "", keep_blank_values=True)
@@ -3098,8 +3763,111 @@ def _mutate_body_param(body: str, param: str, value: str, content_type: str) -> 
         pairs.append((param, value))
     else:
         pairs = [(k, value if k == param else v) for k, v in pairs]
-    from urllib.parse import urlencode
     return urlencode(pairs, doseq=True)
+
+
+def _json_leaf_paths(value: Any, prefix: str = "") -> List[str]:
+    paths: List[str] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            paths.extend(_json_leaf_paths(child, path))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            path = f"{prefix}.{index}" if prefix else str(index)
+            paths.extend(_json_leaf_paths(child, path))
+    elif prefix:
+        paths.append(prefix)
+    return paths
+
+
+def _mutate_graphql_param(body: str, param: str, value: str) -> str:
+    try:
+        obj = json.loads(body)
+    except json.JSONDecodeError:
+        return body
+    if not isinstance(obj, dict) or not isinstance(obj.get("query"), str):
+        return body
+    pattern = re.compile(
+        rf"(\b{re.escape(param)}\s*:\s*)(['\"])(.*?)(\2)", re.S
+    )
+    query, count = pattern.subn(
+        lambda match: f"{match.group(1)}{match.group(2)}{value}{match.group(2)}",
+        obj["query"],
+        count=1,
+    )
+    if not count:
+        return body
+    obj["query"] = query
+    return json.dumps(obj, separators=(",", ":"))
+
+
+def _mutate_cookie(headers: Dict[str, str], name: str, value: str) -> Dict[str, str]:
+    mutated = dict(headers)
+    cookie_key = next((key for key in mutated if key.lower() == "cookie"), "Cookie")
+    pairs: List[tuple] = []
+    for item in str(mutated.get(cookie_key, "")).split(";"):
+        if "=" in item:
+            key, current = item.strip().split("=", 1)
+            pairs.append((key, current))
+    if any(key == name for key, _ in pairs):
+        pairs = [(key, value if key == name else current) for key, current in pairs]
+    else:
+        pairs.append((name, value))
+    mutated[cookie_key] = "; ".join(f"{key}={current}" for key, current in pairs)
+    return mutated
+
+
+def _normalized_response_body(response: dict) -> str:
+    body = str(response.get("body") or "")
+    try:
+        parsed = json.loads(body)
+        body = json.dumps(parsed, sort_keys=True, separators=(",", ":"))
+    except (json.JSONDecodeError, TypeError):
+        body = re.sub(r"\s+", " ", body).strip()
+    body = re.sub(
+        r"\b[0-9a-f]{8}-[0-9a-f-]{27,}\b|\b[0-9a-f]{24,}\b",
+        "<volatile>", body, flags=re.I,
+    )
+    return body[:8000]
+
+
+def _response_similarity(left: dict, right: dict) -> float:
+    if left.get("status") != right.get("status"):
+        return 0.0
+    return difflib.SequenceMatcher(
+        None, _normalized_response_body(left), _normalized_response_body(right)
+    ).ratio()
+
+
+def _response_fingerprint(response: dict) -> dict:
+    body = _normalized_response_body(response)
+    return {
+        "status": response.get("status"),
+        "body_length": len(str(response.get("body") or "")),
+        "body_sha256": hashlib.sha256(body.encode()).hexdigest()[:16],
+        "elapsed_ms": response.get("elapsed_ms"),
+    }
+
+
+def _parameter_location(
+    spec: str,
+    query_params: List[str],
+    body_params: List[str],
+    content_type: str,
+    method: str,
+) -> tuple[str, str]:
+    if ":" in spec:
+        location, name = spec.split(":", 1)
+        if location.lower() in {"query", "form", "json", "graphql", "cookie", "header"}:
+            return location.lower(), name
+    if spec in query_params or method == "GET":
+        return "query", spec
+    if "json" in content_type.lower():
+        return "json", spec
+    if spec in body_params:
+        return "form", spec
+    return "form", spec
 
 
 def run_probe_sqli_params(
@@ -3110,6 +3878,7 @@ def run_probe_sqli_params(
     params: str = "",
     headers_json: str = "{}",
     timeout: int = 25,
+    max_params: int = 50,
 ) -> dict:
     """Differential SQLi probe across URL/body parameters.
 
@@ -3129,25 +3898,58 @@ def run_probe_sqli_params(
         content_type = "application/x-www-form-urlencoded"
         headers["Content-Type"] = content_type
 
+    method = (method or "GET").upper()
+    restored_controls: set = set()
+    if "json" not in content_type.lower():
+        body, restored_controls = _augment_form_body(target_url, method, body)
+    if restored_controls:
+        logger.info(
+            "SQLi probe: restored required form controls for %s: %s",
+            target_url, ", ".join(sorted(restored_controls)),
+        )
+
     parsed = urlparse(target_url)
     query_params = [k for k, _ in parse_qsl(parsed.query, keep_blank_values=True)]
     body_params = [k for k, _ in parse_qsl(body or "", keep_blank_values=True)]
+    graphql_params: List[str] = []
     if "json" in content_type.lower() and body:
         try:
             obj = json.loads(body)
-            if isinstance(obj, dict):
-                body_params = list(obj.keys())
+            body_params = _json_leaf_paths(obj)
+            if isinstance(obj, dict) and isinstance(obj.get("query"), str):
+                graphql_params = list(dict.fromkeys(re.findall(
+                    r"\b([A-Za-z_]\w*)\s*:\s*['\"][^'\"]*['\"]", obj["query"]
+                )))
         except json.JSONDecodeError:
             pass
 
     if params.strip():
         param_list = [p.strip() for p in params.split(",") if p.strip()]
     else:
-        param_list = list(dict.fromkeys(query_params + body_params))
+        body_specs: List[str]
+        if "json" in content_type.lower():
+            body_specs = [f"graphql:{p}" for p in graphql_params]
+            body_specs.extend(
+                f"json:{p}" for p in body_params
+                if p != "query"
+            )
+        else:
+            body_specs = [
+                f"form:{p}" for p in body_params if p not in restored_controls
+            ]
+        param_list = list(dict.fromkeys([
+            *[f"query:{p}" for p in query_params],
+            *body_specs,
+        ]))
 
     # Prioritize high-signal names
-    param_list.sort(key=lambda p: (0 if p.lower() in _SQLI_PRIORITY_PARAMS else 1, p))
-    param_list = param_list[:12]  # keep probe budget bounded
+    param_list.sort(key=lambda p: (
+        0 if p.split(":", 1)[-1].split(".")[-1].lower() in _SQLI_PRIORITY_PARAMS else 1,
+        p,
+    ))
+    max_params = max(1, min(int(max_params or 50), 200))
+    skipped_parameters = param_list[max_params:]
+    param_list = param_list[:max_params]
 
     if not param_list:
         return {
@@ -3157,31 +3959,56 @@ def run_probe_sqli_params(
             "error": "no parameters found — pass params= or a URL with ?id=1",
         }
 
-    method = (method or "GET").upper()
-    baseline = _http_probe(method, target_url, body=body, headers=headers, timeout=timeout)
-    if baseline.get("error"):
-        return {"url": target_url, "vulnerable": False, "candidates": [], "error": baseline["error"]}
+    baselines = [
+        _http_probe(method, target_url, body=body, headers=headers, timeout=timeout)
+        for _ in range(2)
+    ]
+    if any(item.get("error") for item in baselines):
+        error = next(item["error"] for item in baselines if item.get("error"))
+        return {"url": target_url, "vulnerable": False, "candidates": [], "error": error}
+    baseline = baselines[0]
+    baseline_stability = _response_similarity(baselines[0], baselines[1])
 
     base_status = baseline.get("status")
-    base_body = baseline.get("body") or ""
-    base_len = len(base_body)
     base_ms = baseline.get("elapsed_ms") or 0
 
     candidates: List[dict] = []
+    coverage: List[dict] = []
 
-    def _send_mutated(param: str, value: str) -> dict:
-        if param in query_params or method == "GET":
-            url = _mutate_url_param(target_url, param, value)
-            return _http_probe(method, url, body=body, headers=headers, timeout=timeout + 8)
-        mutated_body = _mutate_body_param(body, param, value, content_type)
-        return _http_probe(method, target_url, body=mutated_body, headers=headers, timeout=timeout + 8)
+    def _send_mutated(spec: str, value: str) -> dict:
+        location, name = _parameter_location(
+            spec, query_params, body_params, content_type, method
+        )
+        mutated_url, mutated_body, mutated_headers = target_url, body, dict(headers)
+        if location == "query":
+            mutated_url = _mutate_url_param(target_url, name, value)
+        elif location in {"form", "json"}:
+            mutated_body = _mutate_body_param(body, name, value, content_type)
+        elif location == "graphql":
+            mutated_body = _mutate_graphql_param(body, name, value)
+        elif location == "cookie":
+            mutated_headers = _mutate_cookie(headers, name, value)
+        elif location == "header":
+            header_key = next(
+                (key for key in mutated_headers if key.lower() == name.lower()), name
+            )
+            mutated_headers[header_key] = value
+        return _http_probe(
+            method, mutated_url, body=mutated_body, headers=mutated_headers,
+            timeout=timeout + 8,
+        )
 
-    for param in param_list:
+    for param_spec in param_list:
+        location, param = _parameter_location(
+            param_spec, query_params, body_params, content_type, method
+        )
         signals: List[str] = []
         evidence_bits: List[str] = []
+        fingerprints: Dict[str, Any] = {}
 
         # 1) Error-based quote
-        err_resp = _send_mutated(param, "'")
+        err_resp = _send_mutated(param_spec, "'")
+        fingerprints["quote"] = _response_fingerprint(err_resp)
         err_body = err_resp.get("body") or ""
         if _SQL_ERROR_RE.search(err_body):
             signals.append("sql_error")
@@ -3190,30 +4017,71 @@ def run_probe_sqli_params(
             signals.append("500_on_quote")
             evidence_bits.append(f"status {base_status}→{err_resp['status']} on '")
 
-        # 2) Boolean differential (numeric-ish)
-        true_resp = _send_mutated(param, "1 AND 1=1")
-        false_resp = _send_mutated(param, "1 AND 1=2")
-        t_body, f_body = true_resp.get("body") or "", false_resp.get("body") or ""
-        if t_body and f_body and abs(len(t_body) - len(f_body)) > max(40, int(0.05 * max(len(t_body), 1))):
-            if abs(len(t_body) - base_len) < abs(len(f_body) - base_len) or t_body != f_body:
-                signals.append("boolean_diff")
-                evidence_bits.append(
-                    f"boolean len true={len(t_body)} false={len(f_body)} base={base_len}"
+        # 2) Boolean differential, including string and login-bypass contexts.
+        if "sql_error" not in signals:
+            boolean_pairs = [
+                ("1 AND 1=1", "1 AND 1=2"),
+                # Mixed-case operators exercise common case-sensitive keyword
+                # filters while preserving the same true/false control.
+                ("aegis' oR '1'='1", "aegis' aNd '1'='2"),
+                ("aegis' OR '1'='1", "aegis' AND '1'='2"),
+                ("' oR '1'='1' -- ", "' aNd '1'='2' -- "),
+                ("' OR '1'='1' -- ", "' AND '1'='2' -- "),
+            ]
+            for pair_index, (true_payload, false_payload) in enumerate(boolean_pairs):
+                true_resp = _send_mutated(param_spec, true_payload)
+                false_resp = _send_mutated(param_spec, false_payload)
+                true_false = _response_similarity(true_resp, false_resp)
+                true_base = max(_response_similarity(true_resp, item) for item in baselines)
+                false_base = max(_response_similarity(false_resp, item) for item in baselines)
+                asymmetric = (
+                    max(true_base, false_base) >= max(0.88, baseline_stability - 0.08)
+                    and min(true_base, false_base) <= max(true_base, false_base) - 0.12
                 )
+                if true_false <= 0.82 and (
+                    asymmetric or abs(true_base - false_base) >= 0.12
+                ):
+                    true_repeat = _send_mutated(param_spec, true_payload)
+                    false_repeat = _send_mutated(param_spec, false_payload)
+                    repeat_stable = (
+                        _response_similarity(true_resp, true_repeat) >= 0.90
+                        and _response_similarity(false_resp, false_repeat) >= 0.90
+                        and _response_similarity(true_repeat, false_repeat) <= 0.82
+                    )
+                    if repeat_stable:
+                        signals.append("boolean_diff")
+                        evidence_bits.append(
+                            "repeatable boolean response differential "
+                            f"(pair={pair_index + 1}, true/false similarity={true_false:.2f})"
+                        )
+                        fingerprints["boolean_true"] = _response_fingerprint(true_resp)
+                        fingerprints["boolean_false"] = _response_fingerprint(false_resp)
+                        break
 
-        # 3) Time-based (short sleep — 4s threshold vs baseline)
-        time_payloads = [
-            "1 AND SLEEP(4)",
-            "1;SELECT pg_sleep(4)--",
-            "1 WAITFOR DELAY '0:0:4'--",
-        ]
-        for tp in time_payloads:
-            tr = _send_mutated(param, tp)
-            ms = tr.get("elapsed_ms") or 0
-            if ms and base_ms is not None and ms >= max(3500, (base_ms or 0) + 3000):
-                signals.append("time_delay")
-                evidence_bits.append(f"time {ms}ms vs baseline {base_ms}ms with {tp[:40]}")
-                break
+        # 3) Time-based checks use a paired zero-delay control and repeat a hit.
+        if not any(signal in signals for signal in {"sql_error", "boolean_diff"}):
+            time_payloads = [
+                ("1 AND SLEEP(4)", "1 AND SLEEP(0)"),
+                ("1;SELECT pg_sleep(4)--", "1;SELECT pg_sleep(0)--"),
+                ("1 WAITFOR DELAY '0:0:4'--", "1 WAITFOR DELAY '0:0:0'--"),
+            ]
+            for delay_payload, control_payload in time_payloads:
+                control = _send_mutated(param_spec, control_payload)
+                delayed = _send_mutated(param_spec, delay_payload)
+                control_ms = control.get("elapsed_ms") or base_ms or 0
+                delayed_ms = delayed.get("elapsed_ms") or 0
+                if delayed_ms >= max(3500, control_ms + 3000):
+                    confirmation = _send_mutated(param_spec, delay_payload)
+                    confirmation_ms = confirmation.get("elapsed_ms") or 0
+                    if confirmation_ms >= max(3500, control_ms + 3000):
+                        signals.append("time_delay")
+                        evidence_bits.append(
+                            f"repeatable delay {delayed_ms}/{confirmation_ms}ms "
+                            f"vs control {control_ms}ms"
+                        )
+                        fingerprints["time_control"] = _response_fingerprint(control)
+                        fingerprints["time_delay"] = _response_fingerprint(delayed)
+                        break
 
         if signals:
             severity = "critical" if "sql_error" in signals or "time_delay" in signals else "high"
@@ -3224,13 +4092,18 @@ def run_probe_sqli_params(
                 "url": target_url,
                 "matched_at": target_url,
                 "parameter": param,
+                "parameter_spec": param_spec,
+                "location": location,
                 "severity": severity,
                 "vuln_type": "sqli",
                 "type": "sqli",
                 "vulnerable": True,
-                "confirmed": "sql_error" in signals or "time_delay" in signals,
+                "confirmed": any(
+                    signal in signals for signal in {"sql_error", "boolean_diff", "time_delay"}
+                ),
                 "signals": signals,
                 "evidence": "; ".join(evidence_bits),
+                "response_fingerprints": fingerprints,
                 "source": "probe_sqli",
             }
             candidates.append(finding)
@@ -3244,6 +4117,21 @@ def run_probe_sqli_params(
                 confidence="confirmed" if finding["confirmed"] else "high",
                 tags=["sqli", "injection", "probe"] + signals,
             )
+            coverage.append({
+                "parameter_spec": param_spec,
+                "location": location,
+                "parameter": param,
+                "status": "candidate",
+                "signals": signals,
+            })
+        else:
+            coverage.append({
+                "parameter_spec": param_spec,
+                "location": location,
+                "parameter": param,
+                "status": "tested_negative",
+                "signals": [],
+            })
 
     if candidates:
         bridge.flush()
@@ -3252,14 +4140,22 @@ def run_probe_sqli_params(
         "url": target_url,
         "method": method,
         "params_tested": param_list,
+        "skipped_parameters": skipped_parameters,
+        "coverage_complete": not skipped_parameters,
+        "coverage": coverage,
         "baseline_ms": base_ms,
         "baseline_status": base_status,
+        "baseline_stability": round(baseline_stability, 3),
+        "baseline_fingerprints": [_response_fingerprint(item) for item in baselines],
+        "normalized_body": body,
+        "form_controls_restored": sorted(restored_controls),
         "vulnerable": len(candidates) > 0,
         "candidates": candidates,
         "findings": candidates,
         "count": len(candidates),
         "next_step": (
-            "Call sql_injection_test(target_url=..., param=<name>) on each candidate"
+            "Call sql_injection_test with this exact normalized_body and "
+            "param=<name> on each candidate"
             if candidates else
             "No differential signals — try other endpoints or discover_parameters"
         ),

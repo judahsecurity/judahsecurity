@@ -5,7 +5,7 @@ ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 
 # ── System dependencies ──────────────────────────────────────────────
 RUN apt-get update && apt-get install -y \
-    curl wget git unzip jq python3 python3-pip python3-venv \
+    curl wget git unzip jq python3 python3-pip python3-venv python-is-python3 \
     dnsutils nmap masscan libpcap-dev whois \
     nikto ruby ruby-dev build-essential libffi-dev \
     openssl openssh-client hydra \
@@ -160,9 +160,7 @@ COPY aegis-vanguard/agent/ ./agent/
 
 # Default env vars (override at runtime)
 ENV ASM_API_URL=""
-ENV ASM_API_KEY=""
 ENV ASM_AGENT_ID="aegis-vanguard"
-ENV ANTHROPIC_API_KEY=""
 ENV AEGIS_MODEL="claude-sonnet-4-6"
 ENV AEGIS_GUARDRAILS="true"
 ENV AEGIS_TRACING="true"

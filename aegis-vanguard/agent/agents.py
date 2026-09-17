@@ -187,6 +187,30 @@ def crawl_urls(target_url: str, depth: int = 5, timeout: int = 600) -> str:
 
 
 @security_tool(category="recon", risk="safe")
+def discover_input_surface(
+    target_url: str,
+    timeout: int = 60,
+    max_pages: int = 12,
+) -> str:
+    """Passively inventory forms and user-controlled parameters before testing.
+
+    Returns sanitized canonical request templates. It does not submit forms or
+    expose hidden token values. Use this before parameter fuzzing so POST bodies
+    and non-query-string inputs are not missed.
+
+    Args:
+        target_url: Starting URL to crawl for HTML forms
+        timeout: Total discovery budget in seconds
+        max_pages: Maximum same-origin HTML pages to inspect
+    """
+    import scanners
+    result = scanners.run_discover_input_surface(
+        target_url, _get_bridge(), timeout=timeout, max_pages=max_pages
+    )
+    return json.dumps(result, default=str)
+
+
+@security_tool(category="recon", risk="safe")
 def scan_js_urls_for_secrets(urls: str, max_urls: int = 30) -> str:
     """Download remote JavaScript and scan for hardcoded secrets (Gitleaks + regex + CWE-321 client HMAC).
 
@@ -265,12 +289,12 @@ def fuzz_directories(target_url: str, wordlist: str = "/usr/share/wordlists/dirb
 
 
 @security_tool(category="recon", risk="low")
-def discover_parameters(target_url: str, timeout: int = 300) -> str:
+def discover_parameters(target_url: str, timeout: int = 60) -> str:
     """Discover hidden HTTP parameters on an endpoint using arjun.
 
     Args:
         target_url: URL to discover parameters on
-        timeout: Max seconds to run
+        timeout: Max seconds to run (capped at 60)
     """
     import scanners
     results = scanners.run_arjun(target_url, _get_bridge(), timeout=timeout)
@@ -674,6 +698,7 @@ def sql_injection_test(
     data: str = "",
     param: str = "",
     cookie: str = "",
+    headers_json: str = "{}",
     method: str = "",
     level: int = 3,
     risk: int = 2,
@@ -681,7 +706,7 @@ def sql_injection_test(
     """Confirm SQL injection with sqlmap after probe_sqli_params flags a candidate.
 
     Prefer probe_sqli_params first to find the parameter, then call this with
-    param= that name. Supports POST --data and cookies.
+    param= that name. Supports POST --data, JSON headers, and cookies.
 
     Args:
         target_url: URL with parameters (e.g. https://site.com/page?id=1)
@@ -689,28 +714,25 @@ def sql_injection_test(
         data: Optional POST body (form-urlencoded or as needed by sqlmap --data)
         param: Specific parameter name to test (-p)
         cookie: Cookie header value
+        headers_json: Request headers JSON, including Content-Type for JSON bodies
         method: Optional HTTP method override
         level: sqlmap level 1-5 (default 3)
         risk: sqlmap risk 1-3 (default 2)
     """
     import scanners
-    results = scanners.run_sqlmap(
+    result = scanners.run_sqlmap(
         target_url,
         _get_bridge(),
         timeout=timeout,
         data=data,
         param=param,
         cookie=cookie,
+        headers_json=headers_json,
         method=method,
         level=level,
         risk=risk,
     )
-    return json.dumps({
-        "results": results,
-        "findings": results,
-        "vulnerable": len(results) > 0,
-        "count": len(results),
-    }, default=str)
+    return json.dumps(result, default=str)
 
 
 @security_tool(category="exploit", risk="high")
@@ -742,6 +764,7 @@ def probe_sqli_params(
     params: str = "",
     headers_json: str = "{}",
     timeout: int = 25,
+    max_params: int = 50,
 ) -> str:
     """Deterministic SQLi differential probe across parameters.
 
@@ -754,9 +777,12 @@ def probe_sqli_params(
         target_url: URL to probe (include query string when possible)
         method: GET or POST
         body: POST body if applicable
-        params: Comma-separated param names (optional — auto-detected from URL/body)
+        params: Comma-separated location-aware names such as query:id,
+            form:username, json:filter.name, graphql:jobType, cookie:session,
+            or header:X-Filter (plain names remain supported)
         headers_json: Optional request headers JSON
         timeout: Per-request timeout seconds
+        max_params: Maximum parameters to test; skipped names are returned explicitly
     """
     import scanners
     result = scanners.run_probe_sqli_params(
@@ -767,6 +793,7 @@ def probe_sqli_params(
         params=params,
         headers_json=headers_json,
         timeout=timeout,
+        max_params=max_params,
     )
     return json.dumps(result, default=str)
 
@@ -1694,6 +1721,7 @@ RECON_TOOLS = [
     "scan_subdomains", "resolve_dns", "probe_http", "scan_ports",
     "scan_ports_nmap", "fingerprint_tech", "detect_waf", "detect_cms",
     "fingerprint_gitlab", "crawl_urls", "crawl_urls_authenticated",
+    "discover_input_surface",
     "discover_historical_urls", "discover_api_surface", "scan_js_urls_for_secrets",
     "analyze_js_with_jsluice",
     "fuzz_directories", "discover_parameters", "reverse_whois_search",
@@ -1729,6 +1757,7 @@ REPORT_TOOLS = [
 APP_MAPPER_TOOLS = [
     "crawl_urls",
     "crawl_urls_authenticated",
+    "discover_input_surface",
     "discover_api_surface",
     "discover_swagger_spec",
     "fingerprint_tech",
@@ -1903,6 +1932,11 @@ For PASS findings: call confirm_vulnerability_poc to lock in severity and submit
 For NEEDS_MORE_EVIDENCE: use send_http_request or scan_nuclei to re-test before deciding.
 For KILL/DOWNGRADE: explain why in one sentence.
 
+Validation must be non-destructive. Never send SQL that changes state or schema
+(INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, GRANT/REVOKE, INTO OUTFILE).
+Use error-, boolean-, or bounded time-based read-only proof. Preserve every
+required form control from the discovered request template when replaying it.
+
 ## Never-submit list (instant KILL without a working chain)
 - Missing security headers alone (X-Frame-Options, X-Content-Type-Options, etc.)
 - GraphQL introspection alone (need authz bypass or cross-user node access)
@@ -1995,7 +2029,16 @@ can constitute a critical account takeover or full compromise.
 ## Rules
 - Document chains, never execute them destructively.
 - Only test steps against the authorised scope.
-- A chain requires at least 2 confirmed findings; don't invent hypotheticals.
+- A chain requires at least 2 distinct confirmed vulnerabilities. Multiple tool
+  reports for the same vulnerability, endpoint, and parameter count as one.
+- Never confirm a hypothetical capability as an observed chain. Database read,
+  credential access, privilege changes, file writes, and code execution each
+  require their own non-destructive observed evidence. If a link was not
+  observed, describe it only as a remediation consideration, not a finding.
+- Never claim or submit a webshell/RCE chain based on an assumed FILE privilege,
+  inferred webroot, default configuration, or the mere presence of SQLi.
+- If all input findings converge on one defect, explicitly report that no
+  multi-vulnerability chain exists and make no confirmation tool call.
 """,
         tool_names=CHAIN_TOOLS,
         max_turns=30,
@@ -2081,31 +2124,34 @@ def create_recon_agent() -> Agent:
 complete attack surface of the target.
 
 Strategy (adapt based on what you find):
-1. Start with fingerprint_tech and detect_waf on the target URL
-2. Enumerate subdomains for the root domain
-3. If a company or brand name is available, use reverse_whois_search in preview
+1. Read the precomputed input_surface context, then run discover_input_surface
+   only if it is missing or incomplete. Treat its form actions, request templates,
+   and eligible parameters as a mandatory hunter queue.
+2. Start with fingerprint_tech and detect_waf on the target URL
+3. Enumerate subdomains for the root domain
+4. If a company or brand name is available, use reverse_whois_search in preview
    mode to estimate related-domain exposure; use purchase mode only when API
    credit usage is explicitly authorized
-4. If GitLab is detected or suspected, run fingerprint_gitlab to hash /help
+5. If GitLab is detected or suspected, run fingerprint_gitlab to hash /help
    stylesheet assets and correlate versions without exploitation
-5. Resolve DNS for all discovered hosts
-6. Probe for live HTTP services
-7. Port scan the primary target (nmap for service detection)
-8. Crawl the target for URLs and endpoints using crawl_urls (katana)
-9. Run discover_api_surface to build a blackbox API inventory from browser traffic,
+6. Resolve DNS for all discovered hosts
+7. Probe for live HTTP services
+8. Port scan the primary target (nmap for service detection)
+9. Crawl the target for URLs and endpoints using crawl_urls (katana)
+10. Run discover_api_surface to build a blackbox API inventory from browser traffic,
    page links, JavaScript bundles, JSON responses, GraphQL routes, and WebSocket hints
-10. Run discover_swagger_spec on the target base URL (and any live API subdomains).
+11. Run discover_swagger_spec on the target base URL (and any live API subdomains).
     This probes 30+ common spec paths (/swagger.json, /openapi.json, /api-docs, etc.)
     and also scrapes Swagger UI pages for the embedded spec URL. If a spec is found,
     note ALL documented endpoints and pass them to the Vulnerability Agent — this is
     the highest-signal API surface artifact available.
-11. If the target appears to be a SPA (React/Angular/Vue), also run crawl_urls_authenticated
+12. If the target appears to be a SPA (React/Angular/Vue), also run crawl_urls_authenticated
     to capture routes that only render after JS execution
-12. Discover historical URLs
-13. For discovered JavaScript bundles (e.g. .js under /static, /clientlibs), run scan_js_urls_for_secrets with those URLs to detect hardcoded keys/tokens
-14. Fuzz for hidden directories/API paths
-15. Discover parameters on interesting endpoints
-16. Flag **enterprise perimeter signals** explicitly in your summary when seen:
+13. Discover historical URLs
+14. For discovered JavaScript bundles (e.g. .js under /static, /clientlibs), run scan_js_urls_for_secrets with those URLs to detect hardcoded keys/tokens
+15. Fuzz for hidden directories/API paths
+16. Discover parameters on interesting endpoints
+17. Flag **enterprise perimeter signals** explicitly in your summary when seen:
     - Entra/M365: login.microsoftonline.com, *.onmicrosoft.com, autodiscover
     - Okta: *.okta.com / custom Okta domains
     - SharePoint: /_layouts/, /_vti_bin/, Authentication.asmx

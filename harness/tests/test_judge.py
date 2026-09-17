@@ -67,3 +67,31 @@ def test_judge_llm_tolerates_fenced_json():
     r = judge_llm(_findings(), EXPECTED, fake_llm)
     assert r.detected == ["E-SQLI"]
     assert r.false_positive_count == 2
+
+
+def test_duplicate_reports_of_detected_defect_are_not_false_positives():
+    findings = [
+        normalize({
+            "type": "vulnerability",
+            "title": "SQLi candidate in fullname",
+            "url": "https://x/send.php",
+            "tags": ["sqli"],
+        }),
+        normalize({
+            "type": "vulnerability",
+            "title": "SQL Injection in parameter fullname",
+            "url": "https://x/send.php",
+        }),
+        normalize({
+            "type": "vulnerability",
+            "title": "SQL Injection elsewhere",
+            "url": "https://x/other.php",
+        }),
+    ]
+    expected = [{"id": "sqli", "category": "sqli", "endpoint": "/send.php"}]
+
+    result = judge_heuristic(findings, expected)
+
+    assert result.true_positive_count == 1
+    assert result.false_positive_count == 1
+    assert result.false_positives[0]["title"] == "SQL Injection elsewhere"

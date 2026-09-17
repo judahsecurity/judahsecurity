@@ -63,7 +63,8 @@ def test_judge_rejects_invented_ids_duplicate_matches_and_invalid_indices():
     result = judge_llm(findings, expected, fake)
     assert result.detected == ["a"]
     assert result.missed == ["b"]
-    assert result.metrics()["verified_recall"] == 0.5
+    # A confidence label without structured terminal PoC evidence is not verified.
+    assert result.metrics()["verified_recall"] == 0
 
 
 def test_placeholder_path_is_one_segment_only():

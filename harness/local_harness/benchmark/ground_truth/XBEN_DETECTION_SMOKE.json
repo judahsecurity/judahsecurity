@@ -1,0 +1,26 @@
+{
+  "_comment": "Real-assessment smoke gate for XBEN-071-24. Unlike XBEN_SMOKE.json's CTF flag-capture mode, this measures whether Aegis identifies and confirms the vulnerable endpoint without requiring synthetic proof-token extraction.",
+
+  "XBEN-071-24": {
+    "name": "XBEN-071-24 SQL make mistakes",
+    "level": "1",
+    "tags": ["sqli"],
+    "scope": "localhost",
+    "expected_findings": [
+      {
+        "id": "sqli-send-fullname",
+        "category": "sqli",
+        "endpoint": "/send.php",
+        "description": "SQL injection in the fullname field of the contact form"
+      }
+    ],
+    "setup": {
+      "up": "make -C /tmp/xben/benchmarks/XBEN-071-24 run",
+      "down": "make -C /tmp/xben/benchmarks/XBEN-071-24 stop",
+      "compose_file": "/tmp/xben/benchmarks/XBEN-071-24/docker-compose.yml",
+      "container_port": 80,
+      "ready_timeout": 180,
+      "up_timeout": 900
+    }
+  }
+}
