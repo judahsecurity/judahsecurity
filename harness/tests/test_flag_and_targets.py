@@ -121,6 +121,21 @@ def test_build_corpus_from_fake_clone(tmp_path):
     assert "make -C" in entry["setup"]["up"]
 
 
+def test_build_corpus_ignores_decoy_env_flag(tmp_path):
+    bench = tmp_path / "benchmarks" / "XBEN-071-24"
+    bench.mkdir(parents=True)
+    (bench / "benchmark.json").write_text(json.dumps({
+        "name": "SQL make mistakes", "level": "1", "tags": ["sqli"],
+    }))
+    (bench / "docker-compose.yml").write_text("services: {}")
+    (bench / ".env").write_text('FLAG="flag{decoy-uuid-value}"\n')
+
+    entry = build_corpus(tmp_path)["XBEN-071-24"]
+
+    assert entry["flag"] == compute_flag("XBEN-071-24")
+    assert entry["flag"] != "flag{decoy-uuid-value}"
+
+
 # --- Flag-mode benchmark end-to-end (stub scanner emits the flag) ---------
 
 def test_benchmark_flag_mode_solved(stub_env, monkeypatch, tmp_path):
@@ -162,3 +177,36 @@ def test_benchmark_flag_mode_gate_fails_when_unsolved(stub_env, tmp_path):
 
     rc = bench_run.main(["--ground-truth", str(gt), "--min-success-rate", "0.8"])
     assert rc == 2  # gate tripped
+
+
+def test_setup_failure_counts_as_unsolved_and_fails_run(
+    stub_env, monkeypatch, tmp_path
+):
+    class FailedTargetManager:
+        def setup(self, spec):
+            return SetupResult(ok=False, target_url=None, detail="container failed")
+
+        def teardown(self, spec):
+            raise AssertionError("failed setup must not be torn down")
+
+    monkeypatch.setattr(bench_run, "TargetManager", FailedTargetManager)
+    gt = tmp_path / "xben.json"
+    gt.write_text(json.dumps({
+        "broken": {
+            "flag": compute_flag("broken"),
+            "setup": {"up": "never executed"},
+        }
+    }))
+
+    rc = bench_run.main([
+        "--ground-truth", str(gt), "--setup", "--min-success-rate", "1.0"
+    ])
+
+    assert rc == 3
+    cfg = default_config()
+    report = json.loads((cfg.benchmark_dir / "benchmark_report.json").read_text())
+    assert report["aggregate"]["flag"] == {
+        "solved": 0, "total": 1, "success_rate": 0.0,
+    }
+    assert report["aggregate"]["completion"]["completed"] == 0
+    assert report["targets"]["broken"]["solved"] is False

@@ -46,6 +46,22 @@ class ManifestTest(unittest.TestCase):
         finally:
             os.environ.pop("AEGIS_MODEL", None)
 
+    def test_manifest_target_count_excludes_metadata(self):
+        from local_harness.manifest import build_manifest
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            gt = Path(tmp) / "XBEN.json"
+            gt.write_text(json.dumps({
+                "_comment": "metadata",
+                "a": {"flag": "F"},
+                "b": {"flag": "G"},
+            }))
+            m = build_manifest(
+                self._config(), ground_truth_path=gt,
+                tools=[], tool_probe=lambda b: "unused",
+            )
+        self.assertEqual(m["ground_truth"]["target_count"], 2)
+
 
 class SarifTest(unittest.TestCase):
     def test_sarif_structure_and_levels(self):

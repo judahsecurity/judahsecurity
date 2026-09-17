@@ -72,7 +72,7 @@ def _ground_truth_count(path: Path) -> Optional[int]:
         if isinstance(data, dict):
             # {targets: {...}} or flat {name: spec}
             tgts = data.get("targets") if isinstance(data.get("targets"), dict) else data
-            return len(tgts)
+            return sum(1 for key in tgts if not str(key).startswith("_"))
         if isinstance(data, list):
             return len(data)
     except Exception:

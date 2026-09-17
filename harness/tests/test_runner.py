@@ -49,6 +49,49 @@ def test_run_scan_captures_findings_via_injected_runner(tmp_path):
     assert result.log_path.exists()
 
 
+def test_run_scan_can_use_a_stable_artifact_name(tmp_path):
+    cfg = default_config()
+    cfg.work_dir = tmp_path
+
+    def fake_runner(cmd, cwd, env, timeout):
+        return 0, "ok"
+
+    result = run_scan(
+        "http://localhost:54321/",
+        cfg,
+        tmp_path / "out",
+        subprocess_runner=fake_runner,
+        artifact_name="XBEN-071-24",
+    )
+
+    assert result.slug == "XBEN-071-24"
+    assert result.out_dir == tmp_path / "out" / "XBEN-071-24"
+
+
+def test_run_scan_loads_trace_cost_and_guardrail_summary(tmp_path):
+    cfg = default_config()
+    cfg.work_dir = tmp_path
+
+    def fake_runner(cmd, cwd, env, timeout):
+        trace_dir = env["AEGIS_TRACES_DIR"]
+        with open(f"{trace_dir}/trace_test.json", "w", encoding="utf-8") as fh:
+            json.dump({
+                "summary": {
+                    "estimated_cost_usd": 1.25,
+                    "tokens": {"input": 100, "output": 25},
+                    "guardrail_blocks": 3,
+                }
+            }, fh)
+        return 0, "ok"
+
+    result = run_scan(
+        "https://x.com", cfg, tmp_path / "out", subprocess_runner=fake_runner
+    )
+
+    assert result.cost_usd == 1.25
+    assert result.trace_summary["guardrail_blocks"] == 3
+
+
 def test_run_scan_nonzero_exit_is_error(tmp_path):
     cfg = default_config()
 

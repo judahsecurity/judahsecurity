@@ -453,6 +453,14 @@ def _build_default_schemas() -> Dict[str, ToolSchema]:
                                 max_length=131072, allow_empty=True),
         },
     )
+    s["discover_input_surface"] = ToolSchema(
+        tool_name="discover_input_surface",
+        fields={
+            "target_url": FieldSchema(type="request_url", max_length=4096),
+            "timeout": FieldSchema(type="integer", required=False),
+            "max_pages": FieldSchema(type="integer", required=False),
+        },
+    )
     s["probe_sqli_params"] = ToolSchema(
         tool_name="probe_sqli_params",
         fields={
@@ -466,6 +474,48 @@ def _build_default_schemas() -> Dict[str, ToolSchema]:
             "headers_json": FieldSchema(type="json", required=False,
                                         max_length=16384, allow_empty=True),
             "timeout": FieldSchema(type="integer", required=False),
+            "max_params": FieldSchema(type="integer", required=False),
+        },
+    )
+    s["confirm_vulnerability_poc"] = ToolSchema(
+        tool_name="confirm_vulnerability_poc",
+        fields={
+            # PoC fields are structured evidence persisted by the bridge.  They
+            # are never evaluated as commands, so quotes, ampersands, SQL
+            # operators, and raw HTTP newlines are legitimate data here.
+            "host": FieldSchema(type="payload", max_length=512),
+            "finding_title": FieldSchema(type="payload", max_length=2048),
+            "vuln_type": FieldSchema(
+                type="cli_string", max_length=64, pattern=r"^[a-zA-Z0-9_-]+$"
+            ),
+            "endpoint": FieldSchema(type="request_url", max_length=4096),
+            "payload": FieldSchema(type="payload", max_length=131072),
+            "request_raw": FieldSchema(
+                type="payload", required=False, max_length=131072, allow_empty=True
+            ),
+            "response_snippet": FieldSchema(
+                type="payload", required=False, max_length=131072, allow_empty=True
+            ),
+            "current_severity": FieldSchema(
+                type="cli_string",
+                required=False,
+                max_length=16,
+                pattern=r"^(info|low|medium|high|critical)$",
+            ),
+            "tool": FieldSchema(
+                type="cli_string", required=False, max_length=128, allow_empty=True
+            ),
+        },
+    )
+    s["generate_report"] = ToolSchema(
+        tool_name="generate_report",
+        fields={
+            "target_url": FieldSchema(type="request_url", max_length=4096),
+            "scope_domain": FieldSchema(type="payload", max_length=512),
+            "pre_recon": FieldSchema(type="json", max_length=262144),
+            "discovery": FieldSchema(type="json", max_length=262144),
+            "vuln_analysis": FieldSchema(type="json", max_length=524288),
+            "exploit_validation": FieldSchema(type="json", max_length=262144),
         },
     )
     s["sql_injection_test"] = ToolSchema(
@@ -479,11 +529,44 @@ def _build_default_schemas() -> Dict[str, ToolSchema]:
                                  max_length=512, allow_empty=True),
             "cookie": FieldSchema(type="cli_string", required=False,
                                   max_length=16384, allow_empty=True),
+            "headers_json": FieldSchema(type="json", required=False,
+                                        max_length=16384, allow_empty=True),
             "method": FieldSchema(type="cli_string", required=False,
                                   max_length=16, allow_empty=True,
                                   pattern=r"^(|GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)$"),
             "level": FieldSchema(type="integer", required=False),
             "risk": FieldSchema(type="integer", required=False),
+        },
+    )
+    s["custom_probe"] = ToolSchema(
+        tool_name="custom_probe",
+        fields={
+            # Source is parsed and executed by the restricted Python probe
+            # sandbox. It is structured data here, never a shell command.
+            "source": FieldSchema(type="payload", max_length=131072),
+            "allowed_hosts": FieldSchema(type="cli_string", required=False,
+                                          max_length=4096, allow_empty=True),
+            "timeout_sec": FieldSchema(type="integer", required=False),
+        },
+    )
+    s["brain_add_note"] = ToolSchema(
+        tool_name="brain_add_note",
+        fields={"note": FieldSchema(type="payload", max_length=2000)},
+    )
+    s["brain_add_payload"] = ToolSchema(
+        tool_name="brain_add_payload",
+        fields={
+            "category": FieldSchema(type="cli_string", max_length=128),
+            "payload": FieldSchema(type="payload", max_length=131072),
+        },
+    )
+    s["search_prior_art"] = ToolSchema(
+        tool_name="search_prior_art",
+        fields={
+            "query": FieldSchema(type="payload", max_length=4096),
+            "category": FieldSchema(type="cli_string", required=False,
+                                     max_length=128, allow_empty=True),
+            "top_k": FieldSchema(type="integer", required=False),
         },
     )
 

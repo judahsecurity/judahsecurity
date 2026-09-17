@@ -28,6 +28,10 @@ def cost_metrics(
 ) -> Dict[str, Any]:
     cost = float((summary or {}).get("estimated_cost_usd") or 0)
     tokens = (summary or {}).get("tokens") or {}
+    # Production traces may redact token counts as a string.  Cost reporting
+    # must remain best-effort and must never abort an otherwise valid benchmark.
+    if not isinstance(tokens, dict):
+        tokens = {}
     return {
         "cost_usd": round(cost, 6),
         "input_tokens": int(tokens.get("input") or tokens.get("input_tokens") or 0),

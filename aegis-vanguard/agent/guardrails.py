@@ -12,7 +12,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from typing import List, Optional, Set
-from urllib.parse import urlparse
+from urllib.parse import unquote_plus, urlparse
 
 logger = logging.getLogger("agent.guardrails")
 
@@ -60,6 +60,27 @@ BLOCKED_COMMANDS = [
 ]
 
 BLOCKED_PATTERNS = [re.compile(p, re.IGNORECASE) for p in BLOCKED_COMMANDS]
+
+DESTRUCTIVE_SQL_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bdrop\s+(?:table|database|schema|view)\b",
+        r"\btruncate\s+(?:table\s+)?[a-zA-Z0-9_`.]",
+        r"\bdelete\s+from\b",
+        r"\bupdate\s+[a-zA-Z0-9_`.]+\s+set\b",
+        r"\binsert\s+into\b",
+        r"\balter\s+table\b",
+        r"\binto\s+(?:out|dump)file\b",
+        r"\b(?:grant|revoke)\b.{0,120}\bon\b",
+    )
+]
+ACTIVE_REQUEST_TOOLS = {
+    "send_http_request",
+    "run_custom_probe",
+    "custom_probe",
+    "probe_sqli_params",
+    "sql_injection_test",
+}
 
 SQLMAP_SAFE_FLAGS = {"--batch", "--level", "--risk", "--forms", "--output-dir"}
 SQLMAP_BLOCKED_FLAGS = {"--os-shell", "--os-cmd", "--os-pwn", "--priv-esc", "--file-write", "--file-read"}
@@ -134,6 +155,11 @@ class GuardrailEngine:
             if not isinstance(val, str):
                 continue
 
+            if tool_name in ACTIVE_REQUEST_TOOLS:
+                violation = self._check_destructive_sql(val, tool_name, key)
+                if violation:
+                    return violation
+
             violation = self._check_blocked_commands(val, tool_name, key)
             if violation:
                 return violation
@@ -152,6 +178,32 @@ class GuardrailEngine:
             if violation:
                 return violation
 
+        return None
+
+    def _check_destructive_sql(
+        self, value: str, tool_name: str, arg_name: str
+    ) -> Optional[GuardrailViolation]:
+        decoded = value
+        for _ in range(2):
+            decoded_next = unquote_plus(decoded)
+            if decoded_next == decoded:
+                break
+            decoded = decoded_next
+        for pattern in DESTRUCTIVE_SQL_PATTERNS:
+            if pattern.search(decoded):
+                violation = GuardrailViolation(
+                    rule="destructive_sql",
+                    description=(
+                        f"Blocked state-changing SQL in {tool_name}.{arg_name}; "
+                        "use read-only/error/boolean/time-based proof"
+                    ),
+                    severity="block",
+                    tool_name=tool_name,
+                    argument=arg_name,
+                )
+                self.violations.append(violation)
+                logger.warning("GUARDRAIL BLOCK: %s", violation.description)
+                return violation
         return None
 
     def _check_blocked_commands(self, value: str, tool_name: str, arg_name: str) -> Optional[GuardrailViolation]:

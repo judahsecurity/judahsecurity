@@ -388,6 +388,12 @@ class AgentRunner:
 
         return result
 
+    def execute_tool(self, agent: Agent, tool_name: str, arguments: dict) -> str:
+        """Run a pipeline-planned tool through the same safety and trace path."""
+        return self._execute_tool(
+            agent, tool_name, arguments, tool_use_id=f"pipeline:{tool_name}"
+        )
+
     def _build_system_prompt(self, agent: Agent, context: Dict[str, Any]) -> str:
         parts = [agent.instructions]
 

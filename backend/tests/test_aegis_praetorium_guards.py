@@ -33,20 +33,96 @@ def test_sqli_tools_accept_structured_payloads():
     }
     probe = censor.validate(
         "probe_sqli_params",
-        {**common, "body": "fullname=' OR 1=1 -- &message=x", "params": "fullname"},
+        {
+            **common,
+            "body": '{"filter":{"name":"aegis\' OR 1=1 -- "}}',
+            "params": "json:filter.name,header:X-Filter",
+            "headers_json": '{"Content-Type":"application/json"}',
+            "max_params": 50,
+        },
     )
     confirm = censor.validate(
         "sql_injection_test",
-        {**common, "data": "fullname=' OR 1=1 -- &message=x", "param": "fullname"},
+        {
+            **common,
+            "data": '{"fullname":"\' OR 1=1 -- "}',
+            "param": "json:fullname",
+            "headers_json": '{"Content-Type":"application/json"}',
+        },
     )
 
     assert probe.ok, probe.error
     assert confirm.ok, confirm.error
 
 
+def test_confirm_poc_accepts_raw_attack_evidence_as_structured_data():
+    verdict = Censor().validate(
+        "confirm_vulnerability_poc",
+        {
+            "host": "host.docker.internal:52490",
+            "finding_title": "SQL Injection in POST /send.php (fullname)",
+            "vuln_type": "sqli",
+            "endpoint": "http://host.docker.internal:52490/send.php",
+            "payload": "fullname=' OR 1=1 -- &email=test@example.com;$probe",
+            "request_raw": (
+                "POST /send.php HTTP/1.1\r\n"
+                "Content-Type: application/x-www-form-urlencoded\r\n\r\n"
+                "fullname=' OR 1=1 -- &email=test@example.com"
+            ),
+            "response_snippet": "SQLSTATE[42000]: syntax error near '<proof>'\n",
+            "current_severity": "high",
+            "tool": "probe_sqli_params",
+        },
+    )
+
+    assert verdict.ok, verdict.error
+
+
+def test_report_accepts_json_containing_attack_evidence():
+    evidence = '{"payload":"\u0027 OR 1=1 -- &x=$probe","request":"POST /send.php"}'
+    verdict = Censor().validate(
+        "generate_report",
+        {
+            "target_url": "http://host.docker.internal:52490/",
+            "scope_domain": "host.docker.internal:52490",
+            "pre_recon": "{}",
+            "discovery": evidence,
+            "vuln_analysis": evidence,
+            "exploit_validation": evidence,
+        },
+    )
+
+    assert verdict.ok, verdict.error
+
+
 def test_cli_fallback_still_blocks_command_chaining():
     verdict = Censor().validate("unknown_tool", {"args": "safe; whoami"})
     assert not verdict.ok
+
+
+def test_non_shell_agent_data_is_not_treated_as_cli():
+    censor = Censor()
+    verdicts = [
+        censor.validate(
+            "run_custom_probe",
+            {
+                "source": "payload = \"' OR 1=1 -- &x=$probe\"\nprint(payload)",
+                "allowed_hosts": "host.docker.internal",
+                "timeout_sec": 20,
+            },
+        ),
+        censor.validate("brain_add_note", {"note": "SQLi: ' OR 1=1; $probe"}),
+        censor.validate(
+            "brain_add_payload",
+            {"category": "sqli", "payload": "' UNION SELECT 1,2 -- &x=$probe"},
+        ),
+        censor.validate(
+            "search_prior_art",
+            {"query": "SSTI ${7*7}\nSQLi ' OR 1=1; --", "category": "injection", "top_k": 6},
+        ),
+    ]
+
+    assert all(verdict.ok for verdict in verdicts), [verdict.error for verdict in verdicts]
 
 
 def test_scan_nuclei_uses_structured_schema():

@@ -92,6 +92,7 @@ A single blocked attempt is not evidence of no vulnerability.
 # =============================================================================
 
 INJECTION_TOOLS = [
+    "discover_input_surface",
     "discover_api_surface",
     "discover_parameters",
     "probe_sqli_params",
@@ -295,6 +296,16 @@ Hunt: SQL injection (error / boolean / time / UNION), NoSQL operator injection, 
 
 ## Mandatory workflow (do NOT start with nuclei-only spray)
 
+### Phase 0 — Consume deterministic input coverage (FIRST)
+Read `input_surface` from Current Context. For every form AND request_template,
+copy its action_url, method, body_template, headers_json, and eligible_parameters
+into your test queue. JavaScript fetch templates may identify JSON fields as
+`json:path.to.field` or GraphQL arguments as `graphql:argument`; preserve those
+location prefixes exactly. You MUST call probe_sqli_params for every pending
+eligible parameter before spending turns on generic directory fuzzing. Do not
+rediscover a request already present in this map.
+If input_surface is missing or empty, call discover_input_surface immediately.
+
 ### Phase 1 — Rank injectable surfaces (2–4 turns)
 1. Read recon/app profile for parameterized URLs and forms.
 2. Priority targets (test these FIRST):
@@ -308,17 +319,26 @@ Hunt: SQL injection (error / boolean / time / UNION), NoSQL operator injection, 
 
 ### Phase 2 — Differential probe (REQUIRED before sqlmap)
 For each ranked URL call:
-  probe_sqli_params(target_url=..., method=..., body=..., params="id,q,...")
+  probe_sqli_params(target_url=..., method=..., body=..., headers_json=...,
+                    params="query:id,form:q,json:filter.name,graphql:jobType")
+Use the returned normalized_body for every follow-up. It contains restored hidden
+and submit controls; never drop those controls when changing the tested parameter.
 This runs quote / boolean / short time checks and returns candidates[].
 
 Interpretation:
 - signals include sql_error or time_delay → HIGH confidence → escalate to sqlmap
-- boolean_diff only → still escalate with -p that param
-- no candidates → try next endpoint / POST JSON / header sinks — do not declare clean after one URL
+- repeatable boolean_diff → independent proof; still escalate with -p that param
+- 500_on_quote alone is only a clue, never confirmation
+- case-sensitive keyword filters → preserve a paired true/false control while trying
+  mixed-case operators or inline comments; a filter bypass without a differential is not proof
+- coverage_complete=false → schedule every skipped_parameters entry before moving on
+- no candidates → try next endpoint / POST JSON / GraphQL / cookie / header sinks — do not declare clean after one URL
 
 ### Phase 3 — Confirm with sqlmap (targeted)
 For EACH candidate:
-  sql_injection_test(target_url=..., param="<name>", data="<post body if any>", level=3, risk=2)
+  sql_injection_test(target_url=..., param="<parameter_spec>",
+                     data="<normalized_body if any>", headers_json=...,
+                     method="<mapped method>", level=3, risk=2)
 Never run sqlmap on the bare homepage with no params.
 
 ### Phase 4 — Technique choice (manual follow-up via send_http_request)

@@ -30,3 +30,31 @@ def test_domain_scope_still_allows_subdomains_and_ports():
         "send_http_request",
         {"url": "https://api.example.com:8443/v1"},
     ) is None
+
+
+def test_active_request_blocks_destructive_sql_even_when_url_encoded():
+    guard = GuardrailEngine(scope_domains=["example.test"])
+    violation = guard.check_tool_call(
+        "send_http_request",
+        {
+            "method": "POST",
+            "url": "http://example.test/send.php",
+            "body": "fullname=test%27%3B%20DROP%20TABLE%20users%3B--",
+        },
+    )
+
+    assert violation is not None
+    assert violation.rule == "destructive_sql"
+
+
+def test_active_request_allows_read_only_sqli_evidence():
+    guard = GuardrailEngine(scope_domains=["example.test"])
+
+    assert guard.check_tool_call(
+        "send_http_request",
+        {
+            "method": "POST",
+            "url": "http://example.test/send.php",
+            "body": "fullname=1%27%20AND%20SLEEP(2)--&submit=",
+        },
+    ) is None

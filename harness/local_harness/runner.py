@@ -21,7 +21,7 @@ from typing import Callable, List, Optional
 from urllib.parse import urlparse
 
 from .config import HarnessConfig
-from .findings import NormalizedFinding, load_findings
+from .findings import FindingsArtifactError, NormalizedFinding, load_findings
 
 
 def slugify(target: str) -> str:
@@ -99,6 +99,7 @@ def run_scan(
     out_root: Path,
     scope: Optional[str] = None,
     subprocess_runner: SubprocessRunner = _default_subprocess_runner,
+    artifact_name: Optional[str] = None,
 ) -> ScanResult:
     """Run a single scan against ``target`` and return a ScanResult.
 
@@ -108,8 +109,11 @@ def run_scan(
         out_root: Directory under which a per-target folder is created.
         scope: Optional root-domain scope; defaults to the target host.
         subprocess_runner: Injectable launcher (defaults to real subprocess).
+        artifact_name: Stable per-target directory name. Benchmark callers use
+            the corpus ID so ``--tally-only`` still works when setup assigns a
+            different localhost port on every run.
     """
-    slug = slugify(target)
+    slug = artifact_name or slugify(target)
     out_dir = Path(out_root) / slug
     out_dir.mkdir(parents=True, exist_ok=True)
     findings_path = out_dir / "findings.jsonl"
@@ -118,6 +122,9 @@ def run_scan(
     # Fresh sink per run so counts are accurate on re-runs.
     if findings_path.exists():
         findings_path.unlink()
+    # An empty artifact is a valid zero-finding result. Pre-creating it lets us
+    # distinguish that result from a scanner that deleted/failed to emit its sink.
+    findings_path.touch()
 
     env = dict(os.environ)
     env["AEGIS_FINDINGS_SINK"] = str(findings_path)
@@ -154,7 +161,12 @@ def run_scan(
         encoding="utf-8",
     )
 
-    findings = load_findings(findings_path)
+    try:
+        findings = load_findings(findings_path, strict=True)
+    except FindingsArtifactError as exc:
+        findings = []
+        status = "error"
+        error = str(exc)
 
     from .cost import load_trace_summary
 
