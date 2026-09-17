@@ -87,6 +87,24 @@ Before marking ANY injection surface clean, test at minimum:
 A single blocked attempt is not evidence of no vulnerability.
 """
 
+_ADAPTIVE_REQUEST_PROTOCOL = """
+## Adaptive Request Protocol
+Every manual or deterministic HTTP probe is stored in a shared request ledger.
+Responses include a request_id, response_classes, and adaptive_hints.
+
+1. Establish a clean baseline before a mutation. Use diff_http_requests on the
+   baseline and candidate rather than judging status code or body size alone.
+2. Use replay_http_request to preserve cookies, auth headers, hidden controls,
+   and request shape while changing one variable at a time.
+3. Use list_http_requests before repeating work; other hunters' requests are
+   shared with you during this assessment.
+4. After three structurally similar probes produce no new evidence, stop that
+   axis. State at least two different hypotheses and send one discriminating
+   probe for each. Do not merely encode or paraphrase the same failed payload.
+5. Treat server_error as a parser clue, access_denied/filter_blocked as a filter
+   characterization opportunity, and objective_found as an immediate stop.
+"""
+
 # =============================================================================
 # Tool palettes per hunter
 # =============================================================================
@@ -1407,6 +1425,9 @@ def create_hunters_for_engagement(
     # Always consider cloud_iam lightly when any secrets/JS analysis ran —
     # covered by signal patterns; if force enterprise, already included.
 
+    for hunter in hunters:
+        if "## Adaptive Request Protocol" not in hunter.instructions:
+            hunter.instructions += "\n\n" + _ADAPTIVE_REQUEST_PROTOCOL
     return hunters
 
 

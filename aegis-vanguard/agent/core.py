@@ -37,6 +37,7 @@ from agent.guardrails import GuardrailEngine
 from agent.tracing import Tracer, TokenUsage
 from agent.session_ops import compact_message_tool_results, over_budget
 from agent.distiller import get_distiller
+from agent.request_ledger import request_source
 
 # Cloud billing / quota / auth signals (Anthropic, OpenAI, etc.) that should
 # trigger a local Ollama retry when OLLAMA_FALLBACK_ENABLED is on.
@@ -812,7 +813,8 @@ class AgentRunner:
         ) as span:
             logger.info(f"[{agent.name}] Calling: {tool_name}({json.dumps(arguments)[:200]})")
             start = time.time()
-            result = self.registry.execute(tool_name, arguments)
+            with request_source(agent.name, tool_name):
+                result = self.registry.execute(tool_name, arguments)
             elapsed = time.time() - start
             if span:
                 span.attributes["duration_sec"] = round(elapsed, 1)

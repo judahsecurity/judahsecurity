@@ -76,6 +76,7 @@ DESTRUCTIVE_SQL_PATTERNS = [
 ]
 ACTIVE_REQUEST_TOOLS = {
     "send_http_request",
+    "replay_http_request",
     "run_custom_probe",
     "custom_probe",
     "probe_sqli_params",
