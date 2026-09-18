@@ -41,6 +41,23 @@ def test_benchmark_tally_only_reuses_artifacts(stub_env, sample_ground_truth):
     ) == 0
 
 
+def test_late_scanner_error_preserves_findings_for_diagnostic_scoring(
+    stub_env, sample_ground_truth, monkeypatch
+):
+    monkeypatch.setenv("AEGIS_STUB_EXIT_CODE", "1")
+
+    assert bench_run.main(["--ground-truth", str(sample_ground_truth)]) == 3
+
+    report = json.loads(
+        (default_config().benchmark_dir / "benchmark_report.json").read_text()
+    )
+    demo = report["targets"]["demo"]
+    assert demo["error"] == "scanner exited with code 1"
+    assert demo["true_positives"] == 2
+    assert demo["false_negatives"] == 1
+    assert report["aggregate"]["completion"]["completed"] == 0
+
+
 def test_benchmark_repos_filter(stub_env, sample_ground_truth):
     rc = bench_run.main(
         ["--ground-truth", str(sample_ground_truth), "--repos", "nonexistent"]

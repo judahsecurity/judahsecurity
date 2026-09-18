@@ -136,7 +136,13 @@ def judge_heuristic(findings: List[NormalizedFinding], expected: List[Dict[str, 
     vulns = vulnerabilities(findings)
     # Maximum one-to-one matching. One broad finding never counts as several bugs.
     matching = {}
-    order = sorted(range(len(vulns)), key=lambda i: not vulns[i].is_confirmed)
+    # Prefer terminal PoC evidence when several scanners/agents report the
+    # same defect. Otherwise an earlier unverified candidate can consume the
+    # one-to-one match and make verified recall incorrectly read as zero.
+    order = sorted(
+        range(len(vulns)),
+        key=lambda i: (not vulns[i].is_verified, not vulns[i].is_confirmed),
+    )
     def assign(eidx, visited):
         for idx in order:
             if idx in visited or not _compatible(expected[eidx], vulns[idx]):
