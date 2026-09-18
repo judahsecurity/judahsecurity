@@ -17,7 +17,7 @@ import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Sequence
 from urllib.parse import urlparse
 
 from .config import HarnessConfig
@@ -73,7 +73,12 @@ def _default_subprocess_runner(
     return proc.returncode, proc.stdout or ""
 
 
-def build_command(config: HarnessConfig, target: str, scope: Optional[str]) -> List[str]:
+def build_command(
+    config: HarnessConfig,
+    target: str,
+    scope: Optional[str],
+    extra_args: Optional[Sequence[str]] = None,
+) -> List[str]:
     cmd = list(config.scanner_cmd) + ["--target", target]
     if scope:
         effective_scope = scope
@@ -90,6 +95,10 @@ def build_command(config: HarnessConfig, target: str, scope: Optional[str]) -> L
             effective_scope = target_parsed.netloc
         cmd += ["--scope", effective_scope]
     cmd += list(config.scanner_extra_args)
+    # Per-target args (e.g. --benchmark-proof for a flag-mode target) come last
+    # so a caller can enable a mode for one target without touching global config.
+    if extra_args:
+        cmd += list(extra_args)
     return cmd
 
 
@@ -100,6 +109,7 @@ def run_scan(
     scope: Optional[str] = None,
     subprocess_runner: SubprocessRunner = _default_subprocess_runner,
     artifact_name: Optional[str] = None,
+    extra_args: Optional[Sequence[str]] = None,
 ) -> ScanResult:
     """Run a single scan against ``target`` and return a ScanResult.
 
@@ -112,6 +122,8 @@ def run_scan(
         artifact_name: Stable per-target directory name. Benchmark callers use
             the corpus ID so ``--tally-only`` still works when setup assigns a
             different localhost port on every run.
+        extra_args: Per-target scanner args appended after the global config
+            args (e.g. ``["--benchmark-proof"]`` for a flag-mode CTF target).
     """
     slug = artifact_name or slugify(target)
     out_dir = Path(out_root) / slug
@@ -133,7 +145,7 @@ def run_scan(
     env["AEGIS_FINDINGS_SINK"] = str(findings_path)
     env["AEGIS_TRACES_DIR"] = str(out_dir)
 
-    cmd = build_command(config, target, scope)
+    cmd = build_command(config, target, scope, extra_args=extra_args)
 
     start = time.time()
     status = "done"

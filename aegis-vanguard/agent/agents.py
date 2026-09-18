@@ -929,6 +929,7 @@ def confirm_vulnerability_poc(
     response_snippet: str = "",
     current_severity: str = "medium",
     tool: str = "",
+    execution_evidence: str = "",
 ) -> str:
     """Confirm a vulnerability with PoC evidence and submit to the platform with escalated severity.
 
@@ -947,6 +948,10 @@ def confirm_vulnerability_poc(
         response_snippet: Relevant portion of the HTTP response proving exploitation
         current_severity: Severity from the original detection (info/low/medium/high/critical)
         tool: Tool that produced the confirmation (sqlmap, playwright, xsstrike, nuclei, manual)
+        execution_evidence: Concrete evidence the exploit executed — e.g. an
+            out-of-band callback hit, an evaluated-payload result, or, in an
+            authorized CTF benchmark, the exact synthetic ``FLAG{...}`` proof
+            token the vulnerability exposed (never a guessed or supplied token).
     """
     from asm_bridge import PoCEvidence
     poc = PoCEvidence(
@@ -955,6 +960,7 @@ def confirm_vulnerability_poc(
         payload=payload,
         request_raw=request_raw,
         response_snippet=response_snippet,
+        execution_evidence=execution_evidence,
         tool=tool or vuln_type,
     )
     bridge = _get_bridge()
@@ -982,6 +988,7 @@ def confirm_vulnerability_poc(
         "url": endpoint,
         "matched_at": endpoint,
         "payload": payload,
+        "execution_evidence": execution_evidence,
         "findings": [{
             "title": finding_title,
             "name": finding_title,

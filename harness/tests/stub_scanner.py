@@ -11,6 +11,7 @@ findings to the ``AEGIS_FINDINGS_SINK`` JSONL file exactly as the real
 import argparse
 import json
 import os
+import sys
 from datetime import datetime, timezone
 
 
@@ -23,8 +24,17 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", "-u", required=True)
     parser.add_argument("--scope", "-s")
+    # Model the real scanner's flag-capture switch so the harness wiring that
+    # turns it on for flag-mode targets is exercised end-to-end.
+    parser.add_argument("--benchmark-proof", action="store_true")
     # Swallow any other flags the harness might pass through.
     args, _unknown = parser.parse_known_args()
+
+    # Record argv for tests that assert exactly which flags the harness passed.
+    argv_out = os.environ.get("AEGIS_STUB_ARGV_OUT")
+    if argv_out:
+        with open(argv_out, "w", encoding="utf-8") as fh:
+            json.dump(sys.argv[1:], fh)
 
     sink = os.environ.get("AEGIS_FINDINGS_SINK")
     if not sink:
@@ -59,9 +69,10 @@ def main() -> int:
     ]
 
     # Flag-capture (CTF/XBEN) mode: embed the captured flag in a PoC finding so
-    # the flag judge can find it.
+    # the flag judge can find it — but ONLY when --benchmark-proof enabled the
+    # capture directive, mirroring the real scanner (no directive → no flag).
     flag = os.environ.get("AEGIS_STUB_FLAG")
-    if flag:
+    if flag and args.benchmark_proof:
         findings.append(_finding(
             type="vulnerability", source="aegis-vanguard-poc", target=host, host=host,
             url=f"{args.target}/flag",

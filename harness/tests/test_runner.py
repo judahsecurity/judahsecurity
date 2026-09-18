@@ -19,6 +19,24 @@ def test_build_command_appends_target_scope_and_extra_args():
                    "--scope", "x.com", "--fast"]
 
 
+def test_build_command_appends_per_target_extra_args_last():
+    cfg = default_config()
+    cfg.scanner_cmd = ["python3", "run_pentest.py"]
+    cfg.scanner_extra_args = ["--fast"]
+    cmd = build_command(cfg, "https://x.com", "x.com",
+                        extra_args=["--benchmark-proof"])
+    # Global config args precede the per-target args.
+    assert cmd == ["python3", "run_pentest.py", "--target", "https://x.com",
+                   "--scope", "x.com", "--fast", "--benchmark-proof"]
+
+
+def test_build_command_without_extra_args_is_unchanged():
+    cfg = default_config()
+    cfg.scanner_cmd = ["scanner"]
+    assert build_command(cfg, "https://x.com", None) == \
+        build_command(cfg, "https://x.com", None, extra_args=None)
+
+
 def test_build_command_preserves_dynamic_localhost_port_in_scope():
     cfg = default_config()
     cfg.scanner_cmd = ["scanner"]

@@ -151,12 +151,20 @@ def cmd_run(config: HarnessConfig, args: argparse.Namespace) -> int:
             if target_error is None:
                 try:
                     print(f"[{name}] scanning {target_url} ({mode} mode) …")
+                    # Flag-mode (XBEN/XBOW) targets are scored on capturing the
+                    # synthetic flag, which requires the scanner to exploit — not
+                    # just detect — the vuln. Enable capture mode per flag target
+                    # so it stays off for the low-FP findings-mode corpus.
+                    scan_extra_args = (
+                        ["--benchmark-proof"] if mode == "flag" else None
+                    )
                     result = run_scan(
                         target_url,
                         config,
                         out_root,
                         scope=spec.get("scope"),
                         artifact_name=name,
+                        extra_args=scan_extra_args,
                     )
                     findings = result.findings
                     trace_dir = result.out_dir

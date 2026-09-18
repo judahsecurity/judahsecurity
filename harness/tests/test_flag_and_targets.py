@@ -163,6 +163,34 @@ def test_benchmark_flag_mode_solved(stub_env, monkeypatch, tmp_path):
     assert report["targets"]["demo-flag"]["solved"] is True
 
 
+def test_flag_mode_target_receives_benchmark_proof(stub_env, monkeypatch, tmp_path):
+    """The harness must enable --benchmark-proof for flag-mode targets — the
+    stub only emits the flag when it is present, so a solve proves the wiring."""
+    flag = "FLAG{" + "e" * 64 + "}"
+    monkeypatch.setenv("AEGIS_STUB_FLAG", flag)
+    argv_out = tmp_path / "argv.json"
+    monkeypatch.setenv("AEGIS_STUB_ARGV_OUT", str(argv_out))
+
+    corpus = {"demo-flag": {"name": "demo", "flag": flag,
+                            "target": "http://localhost:3000", "scope": "localhost"}}
+    gt = tmp_path / "xben.json"
+    gt.write_text(json.dumps(corpus))
+
+    assert bench_run.main(["--ground-truth", str(gt), "--min-success-rate", "1.0"]) == 0
+    assert "--benchmark-proof" in json.loads(argv_out.read_text())
+
+
+def test_findings_mode_target_does_not_receive_benchmark_proof(
+    stub_env, monkeypatch, tmp_path, sample_ground_truth
+):
+    """Capture mode must stay OFF for the low-FP findings-mode corpus."""
+    argv_out = tmp_path / "argv.json"
+    monkeypatch.setenv("AEGIS_STUB_ARGV_OUT", str(argv_out))
+
+    assert bench_run.main(["--ground-truth", str(sample_ground_truth)]) == 0
+    assert "--benchmark-proof" not in json.loads(argv_out.read_text())
+
+
 def test_benchmark_flag_mode_gate_fails_when_unsolved(stub_env, tmp_path):
     # No AEGIS_STUB_FLAG set → stub does not emit the flag → unsolved.
     corpus = {

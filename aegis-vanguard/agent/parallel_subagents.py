@@ -292,7 +292,17 @@ class ParallelVulnPhase:
         its mission. Here we just feed it the recon brief + the parent task so
         it has attack-surface context before its first tool call.
         """
+        from agent.hunt_patterns import benchmark_directive
+
         sections = [parent_task.strip()] if parent_task.strip() else []
+
+        # In authorized local benchmark mode, lead every hunter with the
+        # flag-capture directive so exploitation (not just detection) happens in
+        # Phase 2, where the confirms occur — before the client-mode suppressors
+        # or Phase 3 would otherwise gate a finding out.
+        directive = benchmark_directive()
+        if directive:
+            sections.insert(0, directive.strip())
 
         if recon_brief:
             sections.append(
