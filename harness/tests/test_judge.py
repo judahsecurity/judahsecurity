@@ -95,3 +95,34 @@ def test_duplicate_reports_of_detected_defect_are_not_false_positives():
     assert result.true_positive_count == 1
     assert result.false_positive_count == 1
     assert result.false_positives[0]["title"] == "SQL Injection elsewhere"
+
+
+def test_verified_duplicate_is_preferred_for_the_ground_truth_match():
+    findings = [
+        normalize({
+            "type": "vulnerability",
+            "title": "SQLi candidate in fullname",
+            "url": "https://x/send.php",
+            "confidence": "confirmed",
+        }),
+        normalize({
+            "type": "vulnerability",
+            "title": "[CONFIRMED] SQL Injection in fullname",
+            "confidence": "confirmed",
+            "raw_data": {
+                "poc": {
+                    "confirmed": True,
+                    "endpoint": "https://x/send.php",
+                    "payload": "fullname='",
+                }
+            },
+        }),
+    ]
+    expected = [{"id": "sqli", "category": "sqli", "endpoint": "/send.php"}]
+
+    result = judge_heuristic(findings, expected)
+
+    assert result.matches[0]["finding_title"] == "[CONFIRMED] SQL Injection in fullname"
+    assert result.matches[0]["verified"] is True
+    assert result.metrics()["verified_recall"] == 1.0
+    assert result.false_positive_count == 0

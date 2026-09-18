@@ -76,6 +76,7 @@ def _aggregate_findings_metrics(results: Dict[str, JudgeResult]) -> Dict[str, fl
         "f1": round(f1, 4),
         "verified_true_positives": sum(r.verified_true_positive_count for r in results.values()),
         "verified_false_positives": sum(r.verified_false_positive_count for r in results.values()),
+        "verified_false_negatives": sum(r.verified_false_negative_count for r in results.values()),
         "verified_recall": round(sum(r.verified_true_positive_count for r in results.values()) / max(1, tp + fn), 4),
         "verified_precision": round(sum(r.verified_true_positive_count for r in results.values()) /
             max(1, sum(r.verified_true_positive_count + r.verified_false_positive_count for r in results.values())), 4),
@@ -168,8 +169,10 @@ def cmd_run(config: HarnessConfig, args: argparse.Namespace) -> int:
                     if result.status != "done":
                         target_error = result.error or f"scan status: {result.status}"
                         scan_errors.append(name)
-                        # Partial artifacts from an errored scan cannot solve a target.
-                        findings = []
+                        # Keep partial artifacts for diagnostic scoring. The
+                        # completion gate still fails the run, but a late
+                        # report/orchestration crash must not be presented as
+                        # a vulnerability-detection miss.
                 finally:
                     if setup_succeeded:
                         tm.teardown(spec)
@@ -202,6 +205,13 @@ def cmd_run(config: HarnessConfig, args: argparse.Namespace) -> int:
                 f"[{name}] recall={m['recall']:.2f} precision={m['precision']:.2f} "
                 f"f1={m['f1']:.2f}  (TP={m['true_positives']} "
                 f"FN={m['false_negatives']} FP={m['false_positives']})"
+            )
+            print(
+                f"        verified recall={m['verified_recall']:.2f} "
+                f"precision={m['verified_precision']:.2f} "
+                f"(TP={m['verified_true_positives']} "
+                f"FN={m['verified_false_negatives']} "
+                f"FP={m['verified_false_positives']})"
             )
             if jr.missed:
                 print(f"        missed: {', '.join(jr.missed)}")
@@ -325,7 +335,14 @@ def _print_summary(report: dict, backend: str) -> None:
     if "findings" in agg:
         f = agg["findings"]
         print(
-            f"  findings mode: recall={f['recall']:.2f} "
+            f"  verified:      recall={f['verified_recall']:.2f} "
+            f"precision={f['verified_precision']:.2f} "
+            f"(TP={f['verified_true_positives']} "
+            f"FN={f['verified_false_negatives']} "
+            f"FP={f['verified_false_positives']})"
+        )
+        print(
+            f"  raw findings:  recall={f['recall']:.2f} "
             f"precision={f['precision']:.2f} f1={f['f1']:.2f} "
             f"(TP={f['true_positives']} FN={f['false_negatives']} FP={f['false_positives']})"
         )

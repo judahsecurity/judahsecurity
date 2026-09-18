@@ -95,7 +95,7 @@ def main() -> int:
             )
 
     print(f"stub scan complete for {args.target}: {len(findings)} findings")
-    return 0
+    return int(os.environ.get("AEGIS_STUB_EXIT_CODE", "0"))
 
 
 if __name__ == "__main__":
