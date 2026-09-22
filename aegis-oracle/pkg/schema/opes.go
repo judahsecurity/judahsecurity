@@ -28,6 +28,52 @@ type OPESScore struct {
 	Dampener         string         `json:"dampener,omitempty"`
 	Override         string         `json:"override,omitempty"`
 	EvaluatorVersion string         `json:"evaluator_version"`
+
+	// RiskModel is the Likelihood × Impact breakdown computed from the same
+	// inputs. It does not change Value or Category; it exists so reviewers
+	// can see severity, discoverability and exploit practicality separately.
+	RiskModel *RiskModelScore `json:"risk_model,omitempty"`
+}
+
+// RiskFactor is one 1–5 factor of the Likelihood × Impact risk model
+// (Network Location may be 0), with the reason it received that score.
+type RiskFactor struct {
+	Score  int    `json:"score"`
+	Rating string `json:"rating"`
+	Reason string `json:"reason"`
+}
+
+// RiskFactors are the seven factors of the risk model.
+//
+// Impact: BusinessImpact, NetworkLocation, VulnerabilitySeverity.
+// Likelihood: SkillLevel (5 = no skill needed), EaseOfDiscovery,
+// EaseOfExploit, Awareness.
+type RiskFactors struct {
+	BusinessImpact        RiskFactor `json:"business_impact"`
+	NetworkLocation       RiskFactor `json:"network_location"`
+	VulnerabilitySeverity RiskFactor `json:"vulnerability_severity"`
+	SkillLevel            RiskFactor `json:"skill_level"`
+	EaseOfDiscovery       RiskFactor `json:"ease_of_discovery"`
+	EaseOfExploit         RiskFactor `json:"ease_of_exploit"`
+	Awareness             RiskFactor `json:"awareness"`
+}
+
+// RiskModelScore is Risk = Impact × Likelihood on a 0–25 scale.
+//
+// Severity, Discoverability and ExploitPracticality are the three headline
+// questions the model answers: how bad is it, how easily is it found, and
+// how practical is it to exploit in the real world (mean of skill level,
+// ease of exploit and awareness, 1–5).
+type RiskModelScore struct {
+	Score               float64     `json:"score"`
+	Level               Priority    `json:"level"`
+	Impact              float64     `json:"impact"`
+	Likelihood          float64     `json:"likelihood"`
+	Severity            int         `json:"severity"`
+	Discoverability     int         `json:"discoverability"`
+	ExploitPracticality float64     `json:"exploit_practicality"`
+	Factors             RiskFactors `json:"factors"`
+	Version             string      `json:"version"`
 }
 
 // OPESComponents are the six 0–10 sub-scores that combine into the final

@@ -565,6 +565,7 @@ def apply_oracle_migrations():
         "CREATE INDEX IF NOT EXISTS oracle_findings_cve_idx ON oracle.findings (cve_id)",
         "ALTER TABLE oracle.cve_intrinsic_analyses ADD COLUMN IF NOT EXISTS intrinsic_context jsonb NOT NULL DEFAULT '{}'",
         "ALTER TABLE oracle.findings ADD COLUMN IF NOT EXISTS contextual_assessment jsonb NOT NULL DEFAULT '{}'",
+        "ALTER TABLE oracle.findings ADD COLUMN IF NOT EXISTS opes_risk_model jsonb",
 
         # Verification tasks
         """CREATE TABLE IF NOT EXISTS oracle.verification_tasks (

@@ -7,6 +7,7 @@ type Config struct {
 	Weights   Weights
 	Dampeners Dampeners
 	Bucketing Bucketing
+	RiskModel RiskModelConfig
 }
 
 // Weights distribute influence across the six components. Must sum to
@@ -47,6 +48,22 @@ type Bucketing struct {
 	Low          float64
 }
 
+// RiskModelConfig tunes the Likelihood × Impact risk model.
+//
+// Impact = BusinessImpact·w + NetworkLocation·w + VulnerabilitySeverity·w
+// (weights should sum to 1.0). Likelihood is the plain mean of its four
+// factors. Levels are half-open: Risk ≥ Critical → critical, ≥ High → high,
+// ≥ Medium → medium, otherwise low.
+type RiskModelConfig struct {
+	BusinessImpactWeight        float64
+	NetworkLocationWeight       float64
+	VulnerabilitySeverityWeight float64
+
+	Critical float64
+	High     float64
+	Medium   float64
+}
+
 // DefaultConfig returns the baseline OPES configuration. These numbers
 // are calibrated against the CVE-2025-55130 golden test in opes_test.go.
 // Adjust there too when changing weights.
@@ -71,6 +88,14 @@ func DefaultConfig() Config {
 			Medium:       5.0,
 			Low:          3.0,
 		},
+		RiskModel: RiskModelConfig{
+			BusinessImpactWeight:        0.20,
+			NetworkLocationWeight:       0.10,
+			VulnerabilitySeverityWeight: 0.70,
+			Critical:                    16,
+			High:                        11,
+			Medium:                      6,
+		},
 	}
 }
 
@@ -86,6 +111,9 @@ func (c Config) WithDefaults() Config {
 	}
 	if c.Bucketing == (Bucketing{}) {
 		c.Bucketing = d.Bucketing
+	}
+	if c.RiskModel == (RiskModelConfig{}) {
+		c.RiskModel = d.RiskModel
 	}
 	return c
 }

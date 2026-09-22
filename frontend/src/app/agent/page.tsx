@@ -65,6 +65,28 @@ interface AnalystBrief {
 
 interface OPESComponents { E: number; R: number; P: number; X: number; C: number; T: number; }
 
+interface RiskFactor { score: number; rating: string; reason: string; }
+
+interface RiskModelScore {
+  score: number;
+  level: 'critical' | 'high' | 'medium' | 'low' | 'informational';
+  impact: number;
+  likelihood: number;
+  severity: number;
+  discoverability: number;
+  exploit_practicality: number;
+  factors: {
+    business_impact: RiskFactor;
+    network_location: RiskFactor;
+    vulnerability_severity: RiskFactor;
+    skill_level: RiskFactor;
+    ease_of_discovery: RiskFactor;
+    ease_of_exploit: RiskFactor;
+    awareness: RiskFactor;
+  };
+  version: string;
+}
+
 interface OPESScore {
   score: number;
   category: 'urgent' | 'critical' | 'high' | 'medium' | 'low' | 'informational';
@@ -75,6 +97,7 @@ interface OPESScore {
   dampener?: string;
   override?: string;
   evaluator_version: string;
+  risk_model?: RiskModelScore;
 }
 
 interface PreconditionEval {
@@ -401,6 +424,56 @@ function AnalystBriefPanel({ brief }: { brief: AnalystBrief }) {
   );
 }
 
+const RISK_FACTOR_LABELS: [keyof RiskModelScore['factors'], string][] = [
+  ['vulnerability_severity', 'Vulnerability Severity'],
+  ['business_impact', 'Business Impact'],
+  ['network_location', 'Network Location'],
+  ['ease_of_discovery', 'Ease of Discovery'],
+  ['skill_level', 'Skill Level (5 = none needed)'],
+  ['ease_of_exploit', 'Ease of Exploit'],
+  ['awareness', 'Awareness'],
+];
+
+function RiskModelPanel({ rm }: { rm: RiskModelScore }) {
+  return (
+    <section>
+      <h4 className="text-sm font-semibold mb-2">
+        Risk Model <span className="text-xs font-normal text-muted-foreground">Impact {rm.impact.toFixed(2)} × Likelihood {rm.likelihood.toFixed(2)} = {rm.score.toFixed(1)}</span>
+      </h4>
+      <div className="grid grid-cols-3 gap-2 text-center mb-2">
+        <div className="rounded-lg border p-2">
+          <div className="text-xs text-muted-foreground">Severity</div>
+          <div className="text-lg font-bold">{rm.severity}/5</div>
+        </div>
+        <div className="rounded-lg border p-2">
+          <div className="text-xs text-muted-foreground">How easily found</div>
+          <div className="text-lg font-bold">{rm.discoverability}/5</div>
+        </div>
+        <div className="rounded-lg border p-2">
+          <div className="text-xs text-muted-foreground">Real-world practicality</div>
+          <div className="text-lg font-bold">{rm.exploit_practicality.toFixed(1)}/5</div>
+        </div>
+      </div>
+      <div className="flex items-center gap-2 mb-2">
+        <CategoryBadge cat={rm.level} />
+        <span className="text-xs text-muted-foreground">{rm.version}</span>
+      </div>
+      <ul className="space-y-1">
+        {RISK_FACTOR_LABELS.map(([key, label]) => {
+          const fac = rm.factors[key];
+          return (
+            <li key={key} className="text-xs flex gap-2">
+              <span className="w-44 shrink-0 text-muted-foreground">{label}</span>
+              <span className="w-6 shrink-0 font-semibold">{fac.score}</span>
+              <span className="text-muted-foreground">{fac.rating} — {fac.reason}</span>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
 function FindingDetail({ f }: { f: OracleFinding }) {
   const [open, setOpen] = useState(false);
   return (
@@ -445,6 +518,7 @@ function FindingDetail({ f }: { f: OracleFinding }) {
                 ))}
               </ul>
             </section>
+            {f.opes.risk_model && <RiskModelPanel rm={f.opes.risk_model} />}
             <section>
               <h4 className="text-sm font-semibold mb-2">CVSS Reconciliation</h4>
               <div className="rounded-lg border p-3 text-sm space-y-1">

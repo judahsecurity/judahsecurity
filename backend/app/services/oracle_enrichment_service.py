@@ -761,6 +761,7 @@ def _build_payload(
             "opes_components": opes.get("components"),
             "opes_dampener": opes.get("dampener"),
             "opes_override": opes.get("override"),
+            "opes_risk_model": opes.get("risk_model"),
             "evaluator_version": opes.get("evaluator_version"),
             "attack_path_class": finding.get("attack_path_class"),
             "lateral_movement_potential": finding.get("lateral_movement_potential"),
