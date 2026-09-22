@@ -49,6 +49,7 @@ class HunterResult:
     tool_calls: int
     turns_used: int
     elapsed_sec: float
+    coverage_events: List[dict] = field(default_factory=list)
     final_text: str = ""
     error: Optional[str] = None
 
@@ -60,6 +61,7 @@ class HunterResult:
             "tool_calls": self.tool_calls,
             "turns_used": self.turns_used,
             "elapsed_sec": round(self.elapsed_sec, 1),
+            "coverage_event_count": len(self.coverage_events),
             "error": self.error,
         }
 
@@ -99,6 +101,7 @@ class ParallelVulnResult:
             "wall_sec": round(self.total_elapsed_sec, 1),
             "serial_sec": round(self.serial_elapsed_sec, 1),
             "speedup": round(self.speedup, 2),
+            "coverage_event_count": sum(len(h.coverage_events) for h in self.hunters),
             "per_hunter": [h.to_dict() for h in self.hunters],
         }
 
@@ -261,6 +264,7 @@ class ParallelVulnPhase:
             )
 
         findings = self._extract_findings(run_result)
+        coverage_events = self._extract_coverage_events(run_result)
         elapsed = time.time() - start
 
         logger.info(
@@ -279,6 +283,7 @@ class ParallelVulnPhase:
             tool_calls=run_result.tool_calls_made,
             turns_used=run_result.turns_used,
             elapsed_sec=elapsed,
+            coverage_events=coverage_events,
             final_text=run_result.final_text or "",
         )
 
@@ -311,7 +316,54 @@ class ParallelVulnPhase:
     # ----------------------------------------------------- finding extract
 
     @staticmethod
-    def _extract_findings(result: RunResult) -> List[dict]:
+    def _tool_payloads(result: RunResult) -> List[dict]:
+        """Decode structured tool outputs, including Augur-wrapped payloads."""
+        payloads: List[dict] = []
+        for msg in result.messages:
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                raw = block.get("content", "")
+                if not isinstance(raw, str) or not raw.strip():
+                    continue
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                payload = (
+                    parsed.get("output")
+                    if isinstance(parsed, dict) and "augur" in parsed
+                    else parsed
+                )
+                if isinstance(payload, str):
+                    try:
+                        payload = json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+                if isinstance(payload, dict):
+                    payloads.append(payload)
+        return payloads
+
+    @classmethod
+    def _extract_coverage_events(cls, result: RunResult) -> List[dict]:
+        """Return only tool payloads that provide machine-readable test evidence."""
+        evidence_keys = {
+            "probe", "coverage", "tested_params", "params_tested",
+            "coverage_complete", "skipped_parameters",
+        }
+        return [
+            copy.deepcopy(payload)
+            for payload in cls._tool_payloads(result)
+            if evidence_keys.intersection(payload) or payload.get("error")
+        ]
+
+    @classmethod
+    def _extract_findings(cls, result: RunResult) -> List[dict]:
         """Scrape likely finding shapes out of the hunter's tool_result messages.
 
         Scanners in agents.py return JSON blobs whose `vulnerabilities`,
@@ -320,91 +372,65 @@ class ParallelVulnPhase:
         SQLi/XSS do not vanish at fan-in.
         """
         findings: List[dict] = []
-        for msg in result.messages:
-            if msg.get("role") != "user":
-                continue
-            content = msg.get("content")
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if not isinstance(block, dict):
+        for payload in cls._tool_payloads(result):
+
+            # confirm_vulnerability_poc — previously dropped at fan-in
+            if payload.get("confirmed") and (
+                payload.get("finding") or payload.get("poc_endpoint")
+            ):
+                findings.append({
+                    "title": payload.get("finding") or "Confirmed vulnerability",
+                    "name": payload.get("finding") or "Confirmed vulnerability",
+                    "url": payload.get("poc_endpoint") or payload.get("endpoint") or "",
+                    "matched_at": payload.get("poc_endpoint") or "",
+                    "severity": payload.get("escalated_severity")
+                                 or payload.get("original_severity")
+                                 or "high",
+                    "vuln_type": payload.get("vuln_type") or "confirmed",
+                    "host": payload.get("host") or "",
+                    "confirmed": True,
+                    "source": "confirm_vulnerability_poc",
+                })
+
+            for key in ("vulnerabilities", "findings", "results", "issues", "candidates"):
+                arr = payload.get(key)
+                if not isinstance(arr, list):
                     continue
-                if block.get("type") != "tool_result":
-                    continue
-                raw = block.get("content", "")
-                if not isinstance(raw, str) or not raw.strip():
-                    continue
-                # Augur wraps outputs as {"output": "...", "augur": {...}}
-                try:
-                    parsed = json.loads(raw)
-                except json.JSONDecodeError:
-                    continue
-                payload = parsed.get("output") if isinstance(parsed, dict) and "augur" in parsed else parsed
-                if isinstance(payload, str):
-                    try:
-                        payload = json.loads(payload)
-                    except json.JSONDecodeError:
+                for item in arr:
+                    if not isinstance(item, dict):
                         continue
-                if not isinstance(payload, dict):
-                    continue
-
-                # confirm_vulnerability_poc — previously dropped at fan-in
-                if payload.get("confirmed") and (
-                    payload.get("finding") or payload.get("poc_endpoint")
-                ):
-                    findings.append({
-                        "title": payload.get("finding") or "Confirmed vulnerability",
-                        "name": payload.get("finding") or "Confirmed vulnerability",
-                        "url": payload.get("poc_endpoint") or payload.get("endpoint") or "",
-                        "matched_at": payload.get("poc_endpoint") or "",
-                        "severity": payload.get("escalated_severity")
-                                     or payload.get("original_severity")
-                                     or "high",
-                        "vuln_type": payload.get("vuln_type") or "confirmed",
-                        "host": payload.get("host") or "",
-                        "confirmed": True,
-                        "source": "confirm_vulnerability_poc",
-                    })
-
-                for key in ("vulnerabilities", "findings", "results", "issues", "candidates"):
-                    arr = payload.get(key)
-                    if not isinstance(arr, list):
+                    # Skip empty sqlmap/xss "not vulnerable" stubs
+                    if item.get("vulnerable") is False and not item.get("title"):
                         continue
-                    for item in arr:
-                        if not isinstance(item, dict):
-                            continue
-                        # Skip empty sqlmap/xss "not vulnerable" stubs
-                        if item.get("vulnerable") is False and not item.get("title"):
-                            continue
-                        # Normalize minimal tool stubs into reportable findings
-                        if item.get("vulnerable") is True and not item.get("title"):
-                            item = {
-                                **item,
-                                "title": item.get("title")
-                                         or f"Potential injection at {item.get('url', 'unknown')}",
-                                "name": item.get("name")
-                                        or f"Potential injection at {item.get('url', 'unknown')}",
-                                "severity": item.get("severity") or "high",
-                                "vuln_type": item.get("vuln_type")
-                                             or item.get("type")
-                                             or "injection",
-                            }
-                        findings.append(item)
+                    # Normalize minimal tool stubs into reportable findings
+                    if item.get("vulnerable") is True and not item.get("title"):
+                        item = {
+                            **item,
+                            "title": item.get("title")
+                                     or f"Potential injection at {item.get('url', 'unknown')}",
+                            "name": item.get("name")
+                                    or f"Potential injection at {item.get('url', 'unknown')}",
+                            "severity": item.get("severity") or "high",
+                            "vuln_type": item.get("vuln_type")
+                                         or item.get("type")
+                                         or "injection",
+                        }
+                    findings.append(item)
 
-                # probe_* tools may set vulnerable/confirmed at top level with reflections
-                if payload.get("vulnerable") and not any(
-                    isinstance(payload.get(k), list) for k in ("findings", "results", "candidates")
-                ):
-                    findings.append({
-                        "title": payload.get("title") or "Probe-confirmed vulnerability",
-                        "name": payload.get("title") or "Probe-confirmed vulnerability",
-                        "url": payload.get("url") or "",
-                        "severity": payload.get("severity") or "high",
-                        "vuln_type": payload.get("vuln_type") or "unknown",
-                        "confirmed": True,
-                        "source": "probe",
-                        "evidence": payload.get("evidence") or "",
-                    })
+            # probe_* tools may set vulnerable/confirmed at top level with reflections
+            if payload.get("vulnerable") and not any(
+                isinstance(payload.get(k), list) for k in ("findings", "results", "candidates")
+            ):
+                findings.append({
+                    "title": payload.get("title") or "Probe-confirmed vulnerability",
+                    "name": payload.get("title") or "Probe-confirmed vulnerability",
+                    "url": payload.get("url") or "",
+                    "severity": payload.get("severity") or "high",
+                    "vuln_type": payload.get("vuln_type") or "unknown",
+                    "confirmed": True,
+                    "source": "probe",
+                    "evidence": payload.get("evidence") or "",
+                })
         return findings
 
     # ----------------------------------------------------- merge + dedupe

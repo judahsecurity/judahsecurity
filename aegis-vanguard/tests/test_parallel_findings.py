@@ -1,3 +1,6 @@
+import json
+from types import SimpleNamespace
+
 from agent.parallel_subagents import ParallelVulnPhase
 
 
@@ -41,3 +44,18 @@ def test_finding_key_keeps_different_parameters_distinct():
     }
 
     assert ParallelVulnPhase._finding_key(fullname) != ParallelVulnPhase._finding_key(email)
+
+
+def test_extract_coverage_events_keeps_structured_probe_evidence():
+    payload = {
+        "probe": "xss",
+        "target": "https://example.test/search",
+        "tested_params": ["query:q"],
+        "candidates": [],
+    }
+    result = SimpleNamespace(messages=[{
+        "role": "user",
+        "content": [{"type": "tool_result", "content": json.dumps(payload)}],
+    }])
+
+    assert ParallelVulnPhase._extract_coverage_events(result) == [payload]

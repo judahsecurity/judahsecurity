@@ -1205,30 +1205,34 @@ Host-header impact only. Generic open redirects belong to open_redirect_hunter.
 # Convenience: build all hunters at once
 # =============================================================================
 
-def create_core_hunters(max_turns: int = 50) -> List[Agent]:
-    """Return the always-on OWASP fireteam (webapp bug classes)."""
+def create_core_hunters(
+    max_turns: int = 50,
+    selected_categories: Optional[Sequence[str]] = None,
+) -> List[Agent]:
+    """Return all core hunters, or a selected subset in stable order."""
     broad_turns = max_turns
     narrow_turns = max(15, max_turns // 2)
-
-    return [
-        create_injection_hunter(broad_turns),
-        create_xss_hunter(broad_turns),
-        create_auth_hunter(broad_turns),
-        create_authz_hunter(broad_turns),
-        create_ssrf_hunter(broad_turns),
-        create_csrf_hunter(narrow_turns),
-        create_cors_hunter(narrow_turns),
-        create_file_upload_hunter(narrow_turns),
-        create_open_redirect_hunter(narrow_turns),
-        create_race_condition_hunter(narrow_turns),
-        create_business_logic_hunter(max(25, max_turns - 10)),
-        create_oauth_hunter(max(25, max_turns - 10)),
-        create_llm_ai_hunter(max(20, max_turns - 10)),
-        create_http_smuggling_hunter(narrow_turns),
-        create_cache_poison_hunter(narrow_turns),
-        create_saml_sso_hunter(max(20, max_turns - 10)),
-        create_host_header_hunter(narrow_turns),
+    selected = set(selected_categories) if selected_categories is not None else None
+    factories = [
+        ("injection", lambda: create_injection_hunter(broad_turns)),
+        ("xss", lambda: create_xss_hunter(broad_turns)),
+        ("auth", lambda: create_auth_hunter(broad_turns)),
+        ("authz", lambda: create_authz_hunter(broad_turns)),
+        ("ssrf", lambda: create_ssrf_hunter(broad_turns)),
+        ("csrf", lambda: create_csrf_hunter(narrow_turns)),
+        ("cors", lambda: create_cors_hunter(narrow_turns)),
+        ("file_upload", lambda: create_file_upload_hunter(narrow_turns)),
+        ("open_redirect", lambda: create_open_redirect_hunter(narrow_turns)),
+        ("race_condition", lambda: create_race_condition_hunter(narrow_turns)),
+        ("business_logic", lambda: create_business_logic_hunter(max(25, max_turns - 10))),
+        ("oauth", lambda: create_oauth_hunter(max(25, max_turns - 10))),
+        ("llm_ai", lambda: create_llm_ai_hunter(max(20, max_turns - 10))),
+        ("http_smuggling", lambda: create_http_smuggling_hunter(narrow_turns)),
+        ("cache_poison", lambda: create_cache_poison_hunter(narrow_turns)),
+        ("saml_sso", lambda: create_saml_sso_hunter(max(20, max_turns - 10))),
+        ("host_header", lambda: create_host_header_hunter(narrow_turns)),
     ]
+    return [factory() for category, factory in factories if selected is None or category in selected]
 
 
 def create_all_hunters(max_turns: int = 50) -> List[Agent]:
@@ -1341,6 +1345,75 @@ def detect_surface_signals(*texts: str) -> dict:
     }
 
 
+_CORE_SIGNALS = {
+    "auth": [
+        r"\blogin\b", r"sign[ -]?in", r"\bregister\b", r"password", r"\bsession\b",
+        r"\bjwt\b", r"\bmfa\b", r"/auth", r"\blogout\b",
+    ],
+    "authz": [
+        r"\b(?:user|account|tenant|org|project|order|invoice|owner)[_-]?id\b",
+        r"\b(?:admin|member|role|permission|authorization)\b", r"/api/.*\{?id\}?",
+    ],
+    "ssrf": [
+        r"\b(?:url|uri|callback|webhook|fetch|proxy|remote|feed|avatar|image|src)\b",
+        r"import.*(?:url|remote)", r"preview.*url",
+    ],
+    "cors": [r"access-control-allow", r"cross[ -]?origin", r"\bcors\b", r"\borigin\b"],
+    "file_upload": [r"\bupload\b", r"multipart/form-data", r"\battachment\b", r"type.?file", r"import.*file"],
+    "open_redirect": [r"\bredirect", r"return_?url", r"\bnext\b", r"\bcontinue\b", r"\bdestination\b"],
+    "race_condition": [r"\brace\b", r"concurr", r"\bredeem\b", r"\btransfer\b", r"\bcheckout\b", r"inventory"],
+    "business_logic": [
+        r"\bcart\b", r"\bcheckout\b", r"\border\b", r"\bpayment\b", r"\bcoupon\b",
+        r"\bredeem\b", r"\btransfer\b", r"\bbalance\b", r"\binventory\b", r"\bapprove\b",
+    ],
+    "oauth": [r"\boauth\b", r"\boidc\b", r"\bpkce\b", r"redirect_uri", r"/authorize\b", r"openid"],
+    "llm_ai": [r"\bllm\b", r"\bchatbot\b", r"\bprompt\b", r"\bcopilot\b", r"\bopenai\b", r"ai assistant"],
+    "http_smuggling": [r"transfer-encoding", r"http/1\.1", r"reverse proxy", r"load balancer", r"\bsmuggl"],
+    "cache_poison": [r"\bcdn\b", r"\bcache\b", r"\bvarnish\b", r"x-cache", r"\bage:\s*\d+"],
+    "saml_sso": [r"\bsaml\b", r"\bsso\b", r"samlresponse", r"assertionconsumer", r"identity provider"],
+    "host_header": [r"password.?reset", r"absolute.?url", r"x-forwarded-host", r"host.?header", r"reverse proxy"],
+}
+
+
+def detect_core_hunter_signals(
+    recon_brief: str = "",
+    app_profile: str = "",
+    input_surface: Optional[dict] = None,
+    identities: Optional[Sequence[dict]] = None,
+) -> dict:
+    """Select core hunters from observed application features.
+
+    Injection and XSS remain the minimum web baseline.  Other specialists are
+    activated by concrete surface signals; identity pools also activate the
+    authentication and authorization pair.
+    """
+    surface_text = ""
+    if isinstance(input_surface, dict):
+        parts = []
+        for item in list(input_surface.get("forms") or []) + list(input_surface.get("request_templates") or []):
+            if not isinstance(item, dict):
+                continue
+            parts.extend([
+                str(item.get("action_url") or ""),
+                str(item.get("method") or ""),
+                str(item.get("content_type") or ""),
+                " ".join(str(p) for p in item.get("eligible_parameters") or []),
+            ])
+        surface_text = "\n".join(parts)
+    blob = "\n".join(filter(None, [recon_brief, app_profile, surface_text]))
+    has_identities = bool(identities)
+    state_changing = bool(re.search(r"\b(?:POST|PUT|PATCH|DELETE)\b", surface_text, re.I))
+    auth_signal = _surface_matches(blob, _CORE_SIGNALS["auth"])
+
+    signals = {"injection": True, "xss": True}
+    for category, patterns in _CORE_SIGNALS.items():
+        signals[category] = _surface_matches(blob, patterns)
+    signals["auth"] = signals["auth"] or has_identities
+    signals["authz"] = signals["authz"] or len(identities or []) >= 2
+    signals["csrf"] = state_changing and (auth_signal or has_identities)
+    return signals
+
+
 def create_hunters_for_engagement(
     max_turns: int = 50,
     recon_brief: str = "",
@@ -1349,6 +1422,10 @@ def create_hunters_for_engagement(
     include_api_framework: Optional[bool] = None,
     include_enterprise: Optional[bool] = None,
     force_all_specialists: bool = False,
+    input_surface: Optional[dict] = None,
+    identities: Optional[Sequence[dict]] = None,
+    adaptive_core: bool = True,
+    requested_hunters: Optional[Sequence[str]] = None,
 ) -> List[Agent]:
     """Build core hunters + surface-triggered API/framework/enterprise packs.
 
@@ -1359,7 +1436,9 @@ def create_hunters_for_engagement(
             None=signal-selected (default).
         include_enterprise: True=all enterprise, False=none,
             None=signal-selected (default).
-        force_all_specialists: activate every specialist regardless of signals.
+        force_all_specialists: activate every core and add-on specialist.
+        adaptive_core: select core specialists from observed features.
+        requested_hunters: explicit category overrides (for ``--hunters``).
     """
     from agent.api_framework_hunters import (
         create_aspnet_hunter,
@@ -1382,7 +1461,29 @@ def create_hunters_for_engagement(
         create_vcenter_hunter,
     )
 
-    hunters = create_core_hunters(max_turns=max_turns)
+    requested = {
+        str(name).strip().lower().replace("-", "_")
+        for name in (requested_hunters or []) if str(name).strip()
+    }
+
+    def _requested_name(name: str) -> bool:
+        normalized = name.lower().replace("-", "_").removesuffix("_hunter")
+        tokens = {part for part in normalized.split("_") if part}
+        return bool(requested & ({normalized} | tokens))
+
+    core_signals = detect_core_hunter_signals(
+        recon_brief, app_profile, input_surface, identities
+    )
+    if force_all_specialists or not adaptive_core:
+        selected_core = None
+    else:
+        selected_core = {
+            category for category, active in core_signals.items() if active
+        } | {category for category in core_signals if _requested_name(category)}
+    hunters = create_core_hunters(
+        max_turns=max_turns,
+        selected_categories=selected_core,
+    )
     signals = detect_surface_signals(recon_brief, app_profile)
     narrow = max(15, max_turns // 2)
     mid = max(20, max_turns - 10)
@@ -1409,7 +1510,7 @@ def create_hunters_for_engagement(
     }
 
     def _should_add(group: str, name: str, include_flag: Optional[bool]) -> bool:
-        if force_all_specialists or include_flag is True:
+        if _requested_name(name) or force_all_specialists or include_flag is True:
             return True
         if include_flag is False:
             return False

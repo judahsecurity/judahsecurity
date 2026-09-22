@@ -32,7 +32,17 @@ process (engagement brain, fireteam, differentials), see
 ## Parallel hunters (fireteam)
 
 Phase 2 fans out specialist hunters (injection, XSS, auth, authz, SSRF, business
-logic, host-header, …) with surface-selected API/enterprise packs. See
+logic, host-header, …) with surface-selected core, API, and enterprise packs.
+Injection and XSS remain the minimum baseline; observed login, workflow, upload,
+redirect, infrastructure, identity, and framework signals activate the relevant
+specialists. Use `--all-core-hunters` for the legacy 17-hunter core or
+`--all-specialists` for every available hunter. Explicit `--hunters` selections
+always override adaptive selection.
+
+Each parallel run also builds an evidence-backed coverage ledger keyed by
+endpoint, method, parameter, identity, and vulnerability class. Only structured
+probe evidence advances a row from pending, so the report exposes untested gaps
+instead of treating tool activity as coverage. See
 `agent/owasp_hunters.py`, `agent/hunt_patterns.py`, and
 `docs/vanguard-system-card.md`. Claude Code playbook: `CLAUDE.md` +
 `.claude/skills/` (see `docs/skills/README.md`). Pass a real checkout or URL.
