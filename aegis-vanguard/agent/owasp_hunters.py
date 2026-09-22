@@ -118,6 +118,7 @@ INJECTION_TOOLS = [
     "probe_ssti",
     "probe_path_traversal",
     "probe_nosql",
+    "probe_command_injection",
     "probe_prototype_pollution",
     "scan_nuclei",
     "fuzz_directories",

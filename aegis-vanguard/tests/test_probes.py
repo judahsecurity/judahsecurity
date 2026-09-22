@@ -105,11 +105,109 @@ class ProbeDriverTest(unittest.TestCase):
         self.assertEqual(res["candidates"], [])
         self.assertIn("note", res)
 
+    def test_ssti_mutates_json_body_and_preserves_other_fields(self):
+        from agent.probes import run_probe_ssti
+        import random
+
+        seen = []
+        def fetch(method, url, headers, body):
+            seen.append((method, headers, body))
+            document = json.loads(body)
+            self.assertEqual(document["csrf"], "keep-me")
+            import re
+            match = re.search(r"(\d+)\*(\d+)", document["profile"]["name"])
+            output = str(int(match.group(1)) * int(match.group(2))) if match else "normal"
+            return {"status": 200, "headers": {}, "body": output}
+
+        result = run_probe_ssti(
+            "https://t/profile", params="json:profile.name", method="POST",
+            headers_json='{"Content-Type":"application/json"}',
+            body='{"profile":{"name":"a"},"csrf":"keep-me"}',
+            fetch=fetch, rng=random.Random(1),
+        )
+        self.assertTrue(result["candidates"])
+        self.assertEqual(result["candidates"][0]["location"], "json")
+        self.assertTrue(all(row[0] == "POST" for row in seen))
+
+    def test_path_traversal_mutates_form_and_preserves_controls(self):
+        from agent.probes import run_probe_path_traversal
+
+        def fetch(method, url, headers, body):
+            values = dict(__import__("urllib.parse", fromlist=["parse_qsl"]).parse_qsl(body))
+            self.assertEqual(values["csrf"], "token")
+            leaked = "passwd" in values.get("file", "")
+            return {"status": 200, "headers": {}, "body":
+                    "root:x:0:0:root:/root:/bin/bash" if leaked else "ok"}
+
+        result = run_probe_path_traversal(
+            "https://t/download", params="form:file", method="POST",
+            headers_json='{"Content-Type":"application/x-www-form-urlencoded"}',
+            body="file=readme.txt&csrf=token", fetch=fetch,
+        )
+        self.assertTrue(result["candidates"])
+        self.assertEqual(result["candidates"][0]["method"], "POST")
+
+    def test_command_injection_supports_header_location(self):
+        from agent.probes import run_probe_command_injection
+        import random
+
+        def fetch(method, url, headers, body):
+            value = headers.get("X-Diagnostic", "")
+            marker = value.split("AEGCMD", 1)[1] if "AEGCMD" in value else ""
+            return {"status": 200, "headers": {},
+                    "body": "AEGCMD" + marker if marker else "normal"}
+
+        result = run_probe_command_injection(
+            "https://t/check", params="header:X-Diagnostic",
+            headers_json='{"Accept":"text/plain"}', fetch=fetch,
+            rng=random.Random(4),
+        )
+        self.assertTrue(result["candidates"])
+        self.assertEqual(result["candidates"][0]["vuln_type"], "command_injection")
+
+    def test_nosql_supports_json_operator_objects(self):
+        from agent.probes import run_probe_nosql
+
+        def fetch(method, url, headers, body):
+            document = json.loads(body)
+            self.assertEqual(document["csrf"], "keep")
+            username = document["username"]
+            if isinstance(username, dict) and "$eq" in username:
+                return {"status": 403, "headers": {}, "body": "denied"}
+            return {"status": 200, "headers": {}, "body": "allowed"}
+
+        result = run_probe_nosql(
+            "https://t/login", params="json:username", method="POST",
+            headers_json='{"Content-Type":"application/json"}',
+            body='{"username":"alice","csrf":"keep"}', fetch=fetch,
+        )
+        self.assertTrue(result["candidates"])
+        self.assertIn('"$ne"', result["candidates"][0]["request_body"])
+
+    def test_common_mutator_supports_cookie_location(self):
+        from agent.probes import run_probe_command_injection
+        import random
+
+        def fetch(method, url, headers, body):
+            cookie = headers.get("Cookie", "")
+            marker = "AEGCMD" + cookie.split("AEGCMD", 1)[1].split(";", 1)[0] \
+                if "AEGCMD" in cookie else ""
+            return {"status": 200, "headers": {}, "body": marker or "normal"}
+
+        result = run_probe_command_injection(
+            "https://t/", params="cookie:diagnostic",
+            headers_json='{"Cookie":"session=keep; diagnostic=off"}',
+            fetch=fetch, rng=random.Random(9),
+        )
+        self.assertTrue(result["candidates"])
+        self.assertEqual(result["candidates"][0]["location"], "cookie")
+
     def test_tools_registered(self):
         import agent.agents  # noqa: F401
         from agent.tools import ToolRegistry
         reg = ToolRegistry()
-        for name in ("probe_ssti", "probe_path_traversal", "probe_open_redirect", "probe_crlf"):
+        for name in ("probe_ssti", "probe_path_traversal", "probe_open_redirect",
+                     "probe_crlf", "probe_command_injection"):
             self.assertIsNotNone(reg.get(name), name)
 
 

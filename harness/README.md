@@ -145,15 +145,23 @@ agent to record only a synthetic `FLAG{...}` value observed in target evidence.
 The expected value is never passed to the scanner. Normal assessments retain
 their non-exfiltration policy.
 
-Every benchmark run writes three artifacts to `benchmark_dir`, so a result is
+The launcher forwards the standard Anthropic, OpenAI-compatible, DeepSeek,
+Gemini, OpenRouter, LiteLLM, and Ollama variables plus all `AEGIS_MODEL_*`
+routing overrides. For another provider, use an env file via `AEGIS_ENV_FILE`,
+or explicitly allow comma-separated variable names with
+`AEGIS_PASSTHROUGH_ENV`.
+
+Every benchmark scan writes three primary artifacts to `benchmark_dir`, so a result is
 reproducible and interoperable:
 
 - **`benchmark_report.json`** — per-target + aggregate recall/precision/F1,
   flag success rate, completion/error denominator, LLM cost / $-per-TP, and the
   guardrail/scope-violation tally.
-- **`manifest.json`** — the reproducible baseline: harness git SHA (+ dirty),
-  agent model, scanner command/args, ground-truth path + sha256 + target count,
-  seed (`AEGIS_SEED`), security-tool versions, and python/platform.
+- **`manifest.json`** — immutable artifact provenance: scanner git SHA (+ dirty),
+  model/backend, scanner image/digest, command/args, ground-truth path + sha256
+  + target count, seed (`AEGIS_SEED`), host tool versions, and python/platform.
+- **`tally_manifest.json`** — additional judge-time provenance written only by
+  `--tally-only`; the original scan manifest is never overwritten.
 - **`benchmark.sarif`** — all findings across the corpus as a single SARIF 2.1.0
   document (GitHub code-scanning / IDE / dashboard interop).
 

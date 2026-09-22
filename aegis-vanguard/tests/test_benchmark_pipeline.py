@@ -38,8 +38,16 @@ def test_parallel_pipeline_completes_every_phase_in_benchmark_mode(monkeypatch):
 
         def run(self, agent, task, context):
             self.tasks[agent.name] = task
+            final_text = f"{agent.name} complete"
+            if agent.name == "validator_agent":
+                import re
+                ids = list(dict.fromkeys(re.findall(r'"finding_id":\s*"(F-[a-f0-9]+)"', task)))
+                final_text = json.dumps({"decisions": [
+                    {"finding_id": fid, "decision": "pass", "reason": "PoC"}
+                    for fid in ids
+                ]})
             return SimpleNamespace(
-                final_text=f"{agent.name} complete",
+                final_text=final_text,
                 turns_used=1,
                 tool_calls_made=1,
                 messages=[],

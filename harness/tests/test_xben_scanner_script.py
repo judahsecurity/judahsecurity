@@ -47,3 +47,37 @@ def test_docker_launcher_enables_trace_sink_and_rewrites_localhost(tmp_path):
     assert "http://host.docker.internal:52490/" in args
     assert "host.docker.internal:52490" in args
     assert "--benchmark-proof" in args
+
+
+def test_docker_launcher_forwards_provider_and_opt_in_env(tmp_path):
+    repo_root = Path(__file__).resolve().parents[2]
+    script = repo_root / "harness" / "scripts" / "xben_scanner_docker.sh"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    capture = tmp_path / "docker-args.txt"
+    docker = fake_bin / "docker"
+    docker.write_text(
+        "#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" > \"$CAPTURE_PATH\"\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    env = dict(os.environ)
+    env.update({
+        "PATH": f"{fake_bin}{os.pathsep}{env['PATH']}",
+        "CAPTURE_PATH": str(capture),
+        "DEEPSEEK_API_KEY": "test-deepseek",
+        "OPENAI_API_BASE": "https://provider.invalid/v1",
+        "CUSTOM_LITELLM_TOKEN": "test-custom",
+        "AEGIS_MODEL_RECON": "openai/test-recon",
+        "AEGIS_PASSTHROUGH_ENV": "CUSTOM_LITELLM_TOKEN,not-valid!",
+    })
+    subprocess.run(
+        ["bash", str(script), "--target", "http://localhost:3000"],
+        cwd=repo_root, env=env, check=True,
+    )
+    args = capture.read_text(encoding="utf-8").splitlines()
+    assert "DEEPSEEK_API_KEY" in args
+    assert "OPENAI_API_BASE" in args
+    assert "CUSTOM_LITELLM_TOKEN" in args
+    assert "AEGIS_MODEL_RECON" in args
+    assert "not-valid!" not in args

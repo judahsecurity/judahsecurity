@@ -330,6 +330,9 @@ All configuration is environment-variable driven; no `.env` file is required.
 --max-risk {safe,low,medium,high,critical}   tool-risk ceiling (default: high)
 --vuln-mode {parallel,sequential}            vuln phase shape (default: parallel)
 --hunter-turns N           per-hunter turn budget (default: 50)
+--login-user USER          legacy single test-account username
+--login-pass PASSWORD      legacy single test-account password
+--identity-file PATH       JSON identity pool for user/role/tenant comparisons
 --enterprise               force all enterprise perimeter hunters
 --no-enterprise            disable enterprise specialists
 --all-specialists          force API/framework + enterprise specialists

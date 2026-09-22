@@ -12,6 +12,7 @@ in tests without a real scanner, API key, or network.
 from __future__ import annotations
 
 import os
+import json
 import re
 import subprocess
 import time
@@ -118,11 +119,14 @@ def run_scan(
     out_dir.mkdir(parents=True, exist_ok=True)
     findings_path = out_dir / "findings.jsonl"
     log_path = out_dir / "scan.log"
+    result_path = out_dir / "scan_result.json"
 
     # Fresh artifacts per run so findings, cost, and guardrail counts cannot be
     # inherited from an older attempt that used the same stable benchmark ID.
     if findings_path.exists():
         findings_path.unlink()
+    if result_path.exists():
+        result_path.unlink()
     for trace_path in out_dir.glob("trace_*.json"):
         trace_path.unlink()
     # An empty artifact is a valid zero-finding result. Pre-creating it lets us
@@ -178,7 +182,7 @@ def run_scan(
     if trace_summary:
         cost_usd = float(trace_summary.get("estimated_cost_usd") or 0)
 
-    return ScanResult(
+    result = ScanResult(
         target=target,
         slug=slug,
         status=status,
@@ -192,3 +196,18 @@ def run_scan(
         cost_usd=cost_usd,
         trace_summary=trace_summary,
     )
+    result_path.write_text(json.dumps({
+        "target": target,
+        "slug": slug,
+        "status": status,
+        "return_code": return_code,
+        "duration_sec": round(duration, 6),
+        "error": error,
+        "finding_count": len(findings),
+        "scanner_command": cmd,
+        "model": os.environ.get("AEGIS_MODEL"),
+        "llm_backend": os.environ.get("AEGIS_LLM_BACKEND", "auto"),
+        "scanner_image": os.environ.get("ASM_SCANNER_IMAGE"),
+        "scanner_image_digest": os.environ.get("ASM_SCANNER_IMAGE_DIGEST"),
+    }, indent=2, default=str), encoding="utf-8")
+    return result

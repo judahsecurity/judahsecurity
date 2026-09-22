@@ -3396,6 +3396,7 @@ def run_playwright_crawl_authenticated(
     parsed = urlparse(target_url)
     base_origin = f"{parsed.scheme}://{parsed.netloc}"
     discovered_urls: List[str] = []
+    discovered: set = set()
     visited: set = set()
 
     def _in_scope(url: str) -> bool:
@@ -3419,8 +3420,8 @@ def run_playwright_crawl_authenticated(
         # Capture every in-scope network request as a discovered URL
         def _on_request(request):
             url = request.url
-            if _in_scope(url) and url not in visited:
-                visited.add(url)
+            if _in_scope(url) and url not in discovered:
+                discovered.add(url)
                 discovered_urls.append(url)
                 bridge.submit_url(url, source="playwright")
 
@@ -3461,7 +3462,8 @@ def run_playwright_crawl_authenticated(
                     for link in links:
                         if _in_scope(link) and link not in visited:
                             next_batch.append(link)
-                            if link not in discovered_urls:
+                            if link not in discovered:
+                                discovered.add(link)
                                 discovered_urls.append(link)
                                 bridge.submit_url(link, source="playwright")
                 except Exception:

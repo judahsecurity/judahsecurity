@@ -101,6 +101,12 @@ docker run --rm \
 
 See [DEPLOYMENT.md](./DEPLOYMENT.md) for local Python setup, compose examples, and the full env var reference.
 
+For authorization and workflow testing with more than one account, pass
+`--identity-file identities.json`. The file may be a JSON array or
+`{"identities": [...]}`; each item supports `label`, `username`, `password`,
+`role`, `tenant`, and optional authenticated `headers`. Use only dedicated test
+accounts and keep this file out of version control.
+
 ## Production notes
 
 #### API Key Rotation

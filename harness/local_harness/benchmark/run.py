@@ -97,6 +97,34 @@ def cmd_run(config: HarnessConfig, args: argparse.Namespace) -> int:
     jr_dir = config.benchmark_dir / "judge_results"
     jr_dir.mkdir(parents=True, exist_ok=True)
 
+    current_manifest = build_manifest(config, ground_truth_path=args.ground_truth)
+    manifest_path = config.benchmark_dir / "manifest.json"
+    tally_manifest = None
+    if args.tally_only:
+        tally_manifest = current_manifest
+        try:
+            artifact_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            artifact_manifest = {
+                "provenance_error": "original scan manifest is missing or invalid",
+                "ground_truth": current_manifest.get("ground_truth"),
+            }
+        expected_gt = (current_manifest.get("ground_truth") or {}).get("sha256")
+        artifact_gt = (artifact_manifest.get("ground_truth") or {}).get("sha256")
+        manifest_error = None
+        if not artifact_gt:
+            manifest_error = "provenance: artifact manifest has no ground-truth hash"
+        elif artifact_gt != expected_gt:
+            manifest_error = "provenance: artifact ground truth does not match this tally"
+    else:
+        artifact_manifest = current_manifest
+        manifest_error = None
+        # Write provenance before scanning so a crashed/interrupted suite still
+        # identifies the code, model, image, and ground truth that produced it.
+        manifest_path.write_text(
+            json.dumps(artifact_manifest, indent=2, default=str), encoding="utf-8"
+        )
+
     llm_call = build_llm_call(config)
     effective_backend = config.judge_backend if llm_call else "heuristic"
     if config.judge_backend in ("anthropic", "openai") and llm_call is None:
@@ -136,6 +164,22 @@ def cmd_run(config: HarnessConfig, args: argparse.Namespace) -> int:
             scan_cost_summary = load_trace_summary(trace_dir)
             if scan_cost_summary is None and target_url:
                 scan_cost_summary = load_trace_summary(out_root / slugify(target_url))
+            scan_result_path = trace_dir / "scan_result.json"
+            try:
+                prior_scan = json.loads(scan_result_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                prior_scan = None
+            if prior_scan is None:
+                target_error = target_error or "provenance: scan_result.json is missing"
+                scan_errors.append(name)
+            elif prior_scan.get("status") != "done":
+                target_error = target_error or (
+                    prior_scan.get("error") or f"prior scan status: {prior_scan.get('status')}"
+                )
+                scan_errors.append(name)
+            if manifest_error:
+                target_error = target_error or manifest_error
+                scan_errors.append(name)
         else:
             setup_succeeded = False
             if tm is not None and (spec.get("setup") or {}):
@@ -254,6 +298,7 @@ def cmd_run(config: HarnessConfig, args: argparse.Namespace) -> int:
                 )
             )
 
+    scan_errors = list(dict.fromkeys(scan_errors))
     aggregate: Dict[str, object] = {}
     error_count = len(set(scan_errors))
     selected_count = len(corpus)
@@ -292,12 +337,13 @@ def cmd_run(config: HarnessConfig, args: argparse.Namespace) -> int:
                    for t in report_targets.values() if isinstance(t, dict))
     aggregate["guardrail_blocks"] = total_gb
 
-    manifest = build_manifest(config, ground_truth_path=args.ground_truth)
+    manifest = artifact_manifest
 
     report = {
         "generated_at": _now(),
         "judge_backend": effective_backend,
         "manifest": manifest,
+        "tally_manifest": tally_manifest,
         "targets": report_targets,
         "detail": report_detail,
         "aggregate": aggregate,
@@ -307,9 +353,11 @@ def cmd_run(config: HarnessConfig, args: argparse.Namespace) -> int:
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
 
-    # Reproducible manifest + unified SARIF as first-class artifacts.
-    (config.benchmark_dir / "manifest.json").write_text(
-        json.dumps(manifest, indent=2, default=str), encoding="utf-8")
+    # Never overwrite the artifact-producing manifest during a tally-only run.
+    if tally_manifest is not None:
+        (config.benchmark_dir / "tally_manifest.json").write_text(
+            json.dumps(tally_manifest, indent=2, default=str), encoding="utf-8"
+        )
     sarif = findings_to_sarif(
         all_findings, version=(manifest.get("harness_git") or {}).get("sha") or "")
     (config.benchmark_dir / "benchmark.sarif").write_text(

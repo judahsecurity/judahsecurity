@@ -55,11 +55,40 @@ fi
 # Only pass -e VAR when the host has a value. Bare `-e VAR` would otherwise
 # override --env-file with an empty string.
 passthrough=(-e AEGIS_TRACING=true)
-for v in ANTHROPIC_API_KEY OPENAI_API_KEY AEGIS_MODEL AEGIS_LLM_BACKEND; do
+provider_vars=(
+  ANTHROPIC_API_KEY ANTHROPIC_BASE_URL
+  OPENAI_API_KEY OPENAI_API_BASE OPENAI_BASE_URL
+  DEEPSEEK_API_KEY DEEPSEEK_API_BASE
+  GEMINI_API_KEY GOOGLE_API_KEY
+  OPENROUTER_API_KEY
+  LITELLM_API_KEY LITELLM_BASE_URL
+  OLLAMA_BASE_URL OLLAMA_API_BASE
+  AEGIS_MODEL AEGIS_LLM_BACKEND AEGIS_SEED AEGIS_PRICE_LIMIT
+)
+for v in "${provider_vars[@]}"; do
   if [ -n "${!v:-}" ]; then
     passthrough+=(-e "$v")
   fi
 done
+# Preserve per-agent model routing used by Vanguard.
+while IFS= read -r v; do
+  if [ -n "$v" ] && [ -n "${!v:-}" ]; then
+    passthrough+=(-e "$v")
+  fi
+done < <(compgen -A variable AEGIS_MODEL_ || true)
+# Additional provider-specific variables may be opted in explicitly without
+# teaching this launcher every LiteLLM backend. Names are validated to avoid
+# turning malformed shell input into docker arguments.
+if [ -n "${AEGIS_PASSTHROUGH_ENV:-}" ]; then
+  IFS=',' read -r -a extra_env_vars <<< "$AEGIS_PASSTHROUGH_ENV"
+  for v in "${extra_env_vars[@]}"; do
+    v="${v//[[:space:]]/}"
+    [ -z "$v" ] && continue
+    if [[ "$v" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] && [ -n "${!v:-}" ]; then
+      passthrough+=(-e "$v")
+    fi
+  done
+fi
 
 docker_args=(run --rm --add-host=host.docker.internal:host-gateway)
 if [ -n "${AEGIS_ENV_FILE:-}" ] && [ -f "$AEGIS_ENV_FILE" ]; then

@@ -1523,7 +1523,8 @@ def authz_diff(
 
 
 @security_tool(category="exploit", risk="high")
-def probe_ssti(target_url: str, params: str = "") -> str:
+def probe_ssti(target_url: str, params: str = "", method: str = "GET",
+               headers_json: str = "{}", body: str = "") -> str:
     """Differential SSTI probe: inject an arithmetic canary and detect evaluation.
 
     Injects `{{a*b}}`/`${a*b}`/`#{a*b}`/`<%= a*b %>` style payloads with unique
@@ -1531,56 +1532,76 @@ def probe_ssti(target_url: str, params: str = "") -> str:
     template engine evaluated the expression (Jinja2, Twig, Freemarker, ERB, …).
 
     Args:
-        target_url: URL with query string to test.
-        params: Optional comma-separated params (default: all query params).
+        target_url: Request URL to test.
+        params: Typed params, e.g. query:q, form:name, json:profile.name, header:X-Name.
+        method: HTTP method from the discovered request template.
+        headers_json: Original request headers as JSON.
+        body: Original form/JSON/GraphQL body; non-tested fields are preserved.
     """
     from agent.probes import run_probe_ssti
-    return json.dumps(run_probe_ssti(target_url, params), default=str)
+    return json.dumps(run_probe_ssti(target_url, params, method, headers_json, body), default=str)
 
 
 @security_tool(category="exploit", risk="high")
-def probe_path_traversal(target_url: str, params: str = "") -> str:
+def probe_path_traversal(target_url: str, params: str = "", method: str = "GET",
+                         headers_json: str = "{}", body: str = "") -> str:
     """Differential path-traversal probe: request /etc/passwd or win.ini via
     ../ and encoded/`....//` variants and detect the leaked file signature.
 
     Args:
-        target_url: URL with query string to test.
-        params: Optional comma-separated params (default: all query params;
-                good candidates: file, path, template, page, doc, download).
+        target_url: Request URL to test.
+        params: Typed request params; good names include file, path, template, page, doc.
+        method: HTTP method from the discovered request template.
+        headers_json: Original request headers as JSON.
+        body: Original request body; non-tested fields are preserved.
     """
     from agent.probes import run_probe_path_traversal
-    return json.dumps(run_probe_path_traversal(target_url, params), default=str)
+    return json.dumps(
+        run_probe_path_traversal(target_url, params, method, headers_json, body),
+        default=str,
+    )
 
 
 @security_tool(category="exploit", risk="medium")
-def probe_open_redirect(target_url: str, params: str = "") -> str:
+def probe_open_redirect(target_url: str, params: str = "", method: str = "GET",
+                        headers_json: str = "{}", body: str = "") -> str:
     """Differential open-redirect probe: point a redirect param at a canary host
     and detect an off-origin Location / client-side redirect to it.
 
     Args:
-        target_url: URL to test (query string optional).
-        params: Optional comma-separated params (default: common redirect params
-                like next, url, redirect, return, dest).
+        target_url: Request URL to test.
+        params: Typed params; defaults to common query redirect names.
+        method: HTTP method from the discovered request template.
+        headers_json: Original request headers as JSON.
+        body: Original request body; non-tested fields are preserved.
     """
     from agent.probes import run_probe_open_redirect
-    return json.dumps(run_probe_open_redirect(target_url, params), default=str)
+    return json.dumps(
+        run_probe_open_redirect(target_url, params, method, headers_json, body),
+        default=str,
+    )
 
 
 @security_tool(category="exploit", risk="medium")
-def probe_crlf(target_url: str, params: str = "") -> str:
+def probe_crlf(target_url: str, params: str = "", method: str = "GET",
+               headers_json: str = "{}", body: str = "") -> str:
     """Differential CRLF / HTTP response-header injection probe: inject an
     encoded CRLF + marker header and detect it reflected in the response headers.
 
     Args:
-        target_url: URL with query string to test.
-        params: Optional comma-separated params (default: all query params).
+        target_url: Request URL to test.
+        params: Typed request params.
+        method: HTTP method from the discovered request template.
+        headers_json: Original request headers as JSON.
+        body: Original request body; non-tested fields are preserved.
     """
     from agent.probes import run_probe_crlf
-    return json.dumps(run_probe_crlf(target_url, params), default=str)
+    return json.dumps(run_probe_crlf(target_url, params, method, headers_json, body), default=str)
 
 
 @security_tool(category="exploit", risk="high")
-def probe_nosql(target_url: str, params: str = "") -> str:
+def probe_nosql(target_url: str, params: str = "", method: str = "GET",
+                headers_json: str = "{}", body: str = "") -> str:
     """Boolean-differential NoSQL (MongoDB-style operator) injection probe.
 
     Injects true/false operator payloads ([$ne]/[$regex] and string boolean) and
@@ -1588,11 +1609,33 @@ def probe_nosql(target_url: str, params: str = "") -> str:
     payload diverges.
 
     Args:
-        target_url: URL with query string to test.
-        params: Optional comma-separated params (default: all query params).
+        target_url: Request URL to test.
+        params: Typed params, especially form:user or json:username.
+        method: HTTP method from the discovered request template.
+        headers_json: Original request headers as JSON.
+        body: Original request body; non-tested fields are preserved.
     """
     from agent.probes import run_probe_nosql
-    return json.dumps(run_probe_nosql(target_url, params), default=str)
+    return json.dumps(run_probe_nosql(target_url, params, method, headers_json, body), default=str)
+
+
+@security_tool(category="exploit", risk="high")
+def probe_command_injection(target_url: str, params: str = "", method: str = "GET",
+                            headers_json: str = "{}", body: str = "") -> str:
+    """Non-destructive OS command-injection probe using a unique printed marker.
+
+    Args:
+        target_url: Request URL to test.
+        params: Typed params, e.g. query:host, form:address, json:command.
+        method: HTTP method from the discovered request template.
+        headers_json: Original request headers as JSON.
+        body: Original request body; non-tested fields are preserved.
+    """
+    from agent.probes import run_probe_command_injection
+    return json.dumps(
+        run_probe_command_injection(target_url, params, method, headers_json, body),
+        default=str,
+    )
 
 
 @security_tool(category="exploit", risk="medium")

@@ -102,7 +102,11 @@ def build_manifest(
         "scanner": {
             "cmd": list(getattr(config, "scanner_cmd", []) or []),
             "extra_args": list(getattr(config, "scanner_extra_args", []) or []),
+            "git": _git_info(root),
+            "image": os.environ.get("ASM_SCANNER_IMAGE"),
+            "image_digest": os.environ.get("ASM_SCANNER_IMAGE_DIGEST"),
         },
+        "llm_backend": os.environ.get("AEGIS_LLM_BACKEND", "auto"),
         "seed": os.environ.get("AEGIS_SEED"),
         "ground_truth": {
             "path": str(gt_path) if gt_path else None,
@@ -110,6 +114,7 @@ def build_manifest(
             "target_count": _ground_truth_count(gt_path) if gt_path else None,
         },
         "tool_versions": {t: probe(t) for t in tool_list},
+        "tool_versions_scope": "harness_host",
         "runtime": {
             "python": sys.version.split()[0],
             "platform": platform.platform(),
