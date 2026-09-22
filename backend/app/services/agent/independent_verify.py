@@ -34,6 +34,17 @@ class FindingCandidate:
     threat_id: str = ""
     claimed_request: str = ""
     specialist: str = ""
+    operation_id: str = ""
+    identity: str = ""
+    tenant: str = ""
+    parameter: str = ""
+    test_type: str = ""
+    coverage_cell_id: str = ""
+    capture_id: str = ""
+    evidence_ids: List[str] = field(default_factory=list)
+    proof_run_id: str = ""
+    verifier_run_id: str = ""
+    finding_id: str = ""
     nonce: str = ""
     revision: int = 1
     status: str = "pending"  # pending | confirmed | refuted | inconclusive
@@ -53,8 +64,10 @@ def candidate_from_dict(raw: Optional[Dict[str, Any]]) -> Optional[FindingCandid
     return FindingCandidate(**{k: v for k, v in raw.items() if k in allowed})
 
 
-def candidate_id(title: str, target: str = "") -> str:
+def candidate_id(title: str, target: str = "", coverage_cell_id: str = "") -> str:
     blob = f"{(title or '').strip().lower()}|{(target or '').strip()}"
+    if coverage_cell_id:
+        blob += "|" + coverage_cell_id.strip()
     return hashlib.sha1(blob.encode()).hexdigest()[:12]
 
 
@@ -240,6 +253,9 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         f"Severity: {candidate.severity}\n"
         f"Target: {candidate.target}\n"
         f"Hypothesis: {candidate.hypothesis_id or '—'}  threat={candidate.threat_id or '—'}\n"
+        f"Coverage cell: {candidate.coverage_cell_id or '—'}  operation={candidate.operation_id or '—'} "
+        f"identity={candidate.identity or '—'} tenant={candidate.tenant or '—'} "
+        f"parameter={candidate.parameter or '—'} test={candidate.test_type or '—'}\n"
         f"Claimed request: {candidate.claimed_request or '—'}\n"
         f"Finder evidence (untrusted):\n{(candidate.evidence or '')[:2500]}\n"
         f"Description (untrusted):\n{(candidate.description or '')[:1500]}\n\n"
@@ -401,6 +417,10 @@ def apply_verdict(
                     verdict = "inconclusive"
                     summary = why or "A supported impact explanation is required"
             c.status = verdict
+            c.verifier_run_id = run.id
+            c.evidence_ids = list(dict.fromkeys([*c.evidence_ids, *(evidence_ids or [])]))
+            if (proof or {}).get("kind") == "workflow":
+                c.proof_run_id = str((proof or {}).get("run_id") or "")
             c.verifier_evidence = (evidence or "")[:2000]
             c.verifier_summary = (summary or evidence or "")[:2000]
             c.verified_at = datetime.now(timezone.utc).isoformat()
@@ -424,6 +444,23 @@ def apply_verdict(
             node = brain.task_graph.get('nodes', {}).get(cand.hypothesis_id)
             if node:
                 node['status'] = 'retry'
+    if cand.coverage_cell_id:
+        for cell in brain.coverage_cells:
+            if cell.get("id") != cand.coverage_cell_id:
+                continue
+            cell["candidate_id"] = cand.id
+            cell["verifier_run_id"] = run.id
+            cell["evidence_ids"] = list(
+                dict.fromkeys([*(cell.get("evidence_ids") or []), *(evidence_ids or [])])
+            )
+            if cand.proof_run_id:
+                cell["proof_run_id"] = cand.proof_run_id
+            if verdict == "refuted":
+                cell.update(status="tested_clean", reason="Independent verification refuted the candidate")
+            elif verdict == "confirmed":
+                cell.update(status="in_focus", reason="Confirmed candidate awaits publication")
+            else:
+                cell.update(status="inconclusive", reason="Independent verification was inconclusive")
     tools_manager._engagement_brain = brain.to_dict()
 
     if not hasattr(tools_manager, "_verify_receipts") or tools_manager._verify_receipts is None:
@@ -460,8 +497,17 @@ def submit_candidate(
     threat_id: str = "",
     claimed_request: str = "",
     specialist: str = "",
+    operation_id: str = "",
+    identity: str = "",
+    tenant: str = "",
+    parameter: str = "",
+    test_type: str = "",
+    coverage_cell_id: str = "",
+    capture_id: str = "",
+    evidence_ids: Optional[List[str]] = None,
+    proof_run_id: str = "",
 ) -> FindingCandidate:
-    cid = candidate_id(title, target)
+    cid = candidate_id(title, target, coverage_cell_id)
     existing = []
     for raw in getattr(brain, "candidates", None) or []:
         c = raw if isinstance(raw, FindingCandidate) else candidate_from_dict(raw)
@@ -481,6 +527,22 @@ def submit_candidate(
                     c.status = "pending"
                     c.nonce = new_nonce()
                     c.verifier_evidence = c.verifier_summary = c.verified_at = ""
+                for name, value in (
+                    ("hypothesis_id", hypothesis_id), ("threat_id", threat_id),
+                    ("specialist", specialist), ("operation_id", operation_id),
+                    ("identity", identity), ("tenant", tenant), ("parameter", parameter),
+                    ("test_type", test_type), ("coverage_cell_id", coverage_cell_id),
+                    ("capture_id", capture_id), ("proof_run_id", proof_run_id),
+                ):
+                    if value:
+                        setattr(c, name, value)
+                c.evidence_ids = list(
+                    dict.fromkeys([*c.evidence_ids, *(evidence_ids or [])])
+                )
+                if c.coverage_cell_id:
+                    for cell in getattr(brain, "coverage_cells", None) or []:
+                        if cell.get("id") == c.coverage_cell_id:
+                            cell["candidate_id"] = c.id
                 brain.candidates = [c.to_dict() if (r.get("id") if isinstance(r, dict) else r.id) == cid
                                     else (r if isinstance(r, dict) else r.to_dict()) for r in brain.candidates]
                 return c
@@ -495,11 +557,24 @@ def submit_candidate(
         threat_id=threat_id,
         claimed_request=claimed_request[:2000],
         specialist=specialist,
+        operation_id=operation_id,
+        identity=identity,
+        tenant=tenant,
+        parameter=parameter,
+        test_type=test_type,
+        coverage_cell_id=coverage_cell_id,
+        capture_id=capture_id,
+        evidence_ids=list(dict.fromkeys(evidence_ids or [])),
+        proof_run_id=proof_run_id,
         nonce=new_nonce(),
         status="pending",
     )
     existing.append(cand)
     brain.candidates = [c.to_dict() for c in existing]
+    if cand.coverage_cell_id:
+        for cell in getattr(brain, "coverage_cells", None) or []:
+            if cell.get("id") == cand.coverage_cell_id:
+                cell["candidate_id"] = cand.id
     return cand
 
 
@@ -532,6 +607,15 @@ def ingest_report_findings(
                 target=target,
                 evidence=title,
                 specialist=specialist,
+                hypothesis_id=(
+                    (getattr(report, "hypothesis_ids", None) or [""])[0]
+                ),
+                coverage_cell_id=getattr(report, "coverage_cell_id", "") or "",
+                evidence_ids=[
+                    evidence_id
+                    for invocation in (getattr(report, "tool_calls", None) or [])
+                    for evidence_id in (getattr(invocation, "evidence_ids", None) or [])
+                ],
             )
             if cand.id not in known:
                 created.append(cand)

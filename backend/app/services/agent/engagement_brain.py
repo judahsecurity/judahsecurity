@@ -112,6 +112,7 @@ class EngagementBrain:
     focus_areas: List[Dict[str, Any]] = field(default_factory=list)
     candidates: List[Dict[str, Any]] = field(default_factory=list)
     coverage: List[Dict[str, Any]] = field(default_factory=list)
+    coverage_cells: List[Dict[str, Any]] = field(default_factory=list)
     task_graph: Dict[str, Any] = field(default_factory=dict)
     pending_risk_assessments: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -135,6 +136,7 @@ class EngagementBrain:
             "focus_areas": list(self.focus_areas or []),
             "candidates": list(self.candidates or []),
             "coverage": list(self.coverage or []),
+            "coverage_cells": list(self.coverage_cells or []),
             "task_graph": dict(self.task_graph or {}),
             "pending_risk_assessments": list(self.pending_risk_assessments or []),
         }
@@ -3797,10 +3799,14 @@ def seed_coverage_from_surfaces(brain: EngagementBrain) -> EngagementBrain:
             "reason": "",
             "hypothesis_id": "",
             "finding_title": "",
+            "source": "surface_inventory",
             "updated_at": datetime.now(timezone.utc).isoformat(),
         })
         existing.add(s["key"])
     brain.coverage = rows
+    from app.services.agent.coverage_cells import migrate_coverage_cells
+
+    migrate_coverage_cells(brain, denominator=denominator_surfaces(brain))
     return brain
 
 
@@ -3818,6 +3824,16 @@ def record_surface_coverage(
     test_type: str = "",
     parameter: str = "",
     evidence_id: str = "",
+    operation_id: str = "",
+    tenant: str = "",
+    coverage_cell_id: str = "",
+    coverage_lease_id: str = "",
+    capture_id: str = "",
+    request_ids: Optional[List[str]] = None,
+    candidate_id: str = "",
+    proof_run_id: str = "",
+    verifier_run_id: str = "",
+    finding_id: str = "",
 ) -> Dict[str, Any]:
     status = (status or "tested_clean").strip().lower()
     if status not in _COVERAGE_STATUSES:
@@ -3839,10 +3855,18 @@ def record_surface_coverage(
     rec_host = (host or "").strip().lower()
     check = {
         "identity": (identity or "").strip(),
+        "tenant": (tenant or "").strip(),
         "test_type": (test_type or "").strip().lower(),
         "parameter": (parameter or "").strip(),
         "evidence_id": (evidence_id or "").strip(),
         "hypothesis_id": (hypothesis_id or "").strip(),
+        "operation_id": (operation_id or "").strip(),
+        "coverage_cell_id": (coverage_cell_id or "").strip(),
+        "capture_id": (capture_id or "").strip(),
+        "candidate_id": (candidate_id or "").strip(),
+        "proof_run_id": (proof_run_id or "").strip(),
+        "verifier_run_id": (verifier_run_id or "").strip(),
+        "finding_id": str(finding_id or "").strip(),
         "status": status,
         "updated_at": now,
     }
@@ -3852,10 +3876,16 @@ def record_surface_coverage(
         if not has_check:
             return
         checks = list(row.get("checks") or [])
-        fingerprint = tuple(check[k] for k in ("identity", "test_type", "parameter", "hypothesis_id"))
+        fingerprint = tuple(
+            check[k]
+            for k in ("identity", "tenant", "test_type", "parameter", "operation_id", "hypothesis_id")
+        )
         checks = [
             item for item in checks
-            if tuple(item.get(k, "") for k in ("identity", "test_type", "parameter", "hypothesis_id")) != fingerprint
+            if tuple(
+                item.get(k, "")
+                for k in ("identity", "tenant", "test_type", "parameter", "operation_id", "hypothesis_id")
+            ) != fingerprint
         ]
         checks.append(check)
         row["checks"] = checks[-50:]
@@ -3874,7 +3904,34 @@ def record_surface_coverage(
             row["updated_at"] = now
             add_check(row)
             brain.coverage = rows
-            return row
+            from app.services.agent.coverage_cells import record_coverage_cell
+
+            cell = record_coverage_cell(
+                brain,
+                method=method,
+                path=path,
+                host=host,
+                status=status,
+                reason=reason,
+                identity=identity or ("anonymous" if not has_check else ""),
+                tenant=tenant,
+                test_type=test_type or ("surface_review" if not has_check else ""),
+                parameter=parameter or "endpoint",
+                evidence_id=evidence_id,
+                hypothesis_id=hypothesis_id,
+                operation_id=operation_id,
+                coverage_cell_id_value=coverage_cell_id,
+                coverage_lease_id=coverage_lease_id,
+                capture_id=capture_id,
+                request_ids=request_ids or [],
+                candidate_id=candidate_id,
+                proof_run_id=proof_run_id,
+                verifier_run_id=verifier_run_id,
+                finding_id=finding_id,
+                finding_title=finding_title,
+                updated_at=now,
+            )
+            return {**row, "coverage_cell": cell}
     rec = {
         "key": key,
         "method": method.upper(),
@@ -3886,10 +3943,38 @@ def record_surface_coverage(
         "finding_title": finding_title,
         "updated_at": now,
         "checks": [check] if has_check else [],
+        "source": "record_surface_coverage",
     }
     rows.append(rec)
     brain.coverage = rows
-    return rec
+    from app.services.agent.coverage_cells import record_coverage_cell
+
+    cell = record_coverage_cell(
+        brain,
+        method=method,
+        path=path,
+        host=host,
+        status=status,
+        reason=reason,
+        identity=identity or ("anonymous" if not has_check else ""),
+        tenant=tenant,
+        test_type=test_type or ("surface_review" if not has_check else ""),
+        parameter=parameter or "endpoint",
+        evidence_id=evidence_id,
+        hypothesis_id=hypothesis_id,
+        operation_id=operation_id,
+        coverage_cell_id_value=coverage_cell_id,
+        coverage_lease_id=coverage_lease_id,
+        capture_id=capture_id,
+        request_ids=request_ids or [],
+        candidate_id=candidate_id,
+        proof_run_id=proof_run_id,
+        verifier_run_id=verifier_run_id,
+        finding_id=finding_id,
+        finding_title=finding_title,
+        updated_at=now,
+    )
+    return {**rec, "coverage_cell": cell}
 
 
 def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[str, Any]:
@@ -3897,6 +3982,9 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
         brain = engagement_brain_from_dict(brain)
     seed_coverage_from_surfaces(brain)
     denom = denominator_surfaces(brain)
+    from app.services.agent.coverage_cells import CELL_TERMINAL, migrate_coverage_cells
+
+    cells = migrate_coverage_cells(brain, denominator=denom)
     by_key = {
         r.get("key"): r
         for r in (brain.coverage or [])
@@ -3920,7 +4008,12 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
         + len(buckets["skipped"])
     )
     denom_n = len(denom)
-    ready = len(untested) == 0
+    cell_counts: Dict[str, int] = {}
+    for cell in cells:
+        cell_status = str(cell.get("status") or "untested")
+        cell_counts[cell_status] = cell_counts.get(cell_status, 0) + 1
+    open_cells = [cell for cell in cells if cell.get("status") not in CELL_TERMINAL]
+    ready = len(open_cells) == 0
     return {
         "denominator": denom_n,
         "finding": len(buckets["finding"]),
@@ -3928,10 +4021,12 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
         "skipped": len(buckets["skipped"]),
         "untested_count": len(untested),
         "untested": untested[:20],
-        "verified_checks": sum(
-            len(row.get("checks") or []) for row in (brain.coverage or [])
-            if isinstance(row, dict)
-        ),
+        "verified_checks": sum(1 for cell in cells if cell.get("evidence_ids")),
+        "cell_denominator": len(cells),
+        "cell_counts": cell_counts,
+        "open_cell_count": len(open_cells),
+        "open_cells": open_cells[:50],
+        "coverage_cells": cells[:100],
         "tested_clean_rows": buckets["tested_clean"][:20],
         "skipped_rows": buckets["skipped"][:20],
         "finding_rows": buckets["finding"][:20],
@@ -3939,7 +4034,8 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
         "summary": (
             f"coverage {accounted}/{denom_n or 0} accounted "
             f"(finding={len(buckets['finding'])} clean={len(buckets['tested_clean'])} "
-            f"skipped={len(buckets['skipped'])} untested={len(untested)})"
+            f"skipped={len(buckets['skipped'])} untested={len(untested)}); "
+            f"cells {len(cells) - len(open_cells)}/{len(cells)} complete"
         ),
     }
 

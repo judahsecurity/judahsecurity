@@ -115,6 +115,9 @@ def generate_matrix(
                     )
                     hyps.add(hid)
     brain.authorization_matrix = list(cells.values())
+    from app.services.agent.coverage_cells import migrate_coverage_cells
+
+    migrate_coverage_cells(brain)
     brain.task_graph = sync_graph_from_brain(brain).to_dict()
     return brain.authorization_matrix
 
@@ -144,6 +147,19 @@ def apply_proof_result(brain, result: dict) -> dict:
         cleanup_status=result.get("cleanup_status", ""),
         cleanup_evidence_ids=list(result.get("cleanup_evidence_ids", [])),
     )
+    from app.services.agent.coverage_cells import migrate_coverage_cells
+
+    migrate_coverage_cells(brain)
+    for cell in brain.coverage_cells:
+        if cell.get("id") != row.get("coverage_cell_id"):
+            continue
+        cell.update(
+            proof_run_id=result["run_id"],
+            evidence_ids=list(result["evidence_ids"]),
+            capture_id=result.get("capture_id", ""),
+            status=("in_focus" if result["verdict"] == "confirmed" else "inconclusive"),
+            reason=result["reason"],
+        )
     # A deterministic proof is evidence for the independent verifier, not publication authority.
     for hyp in brain.hypotheses:
         if hyp.id == row["hypothesis_id"]:

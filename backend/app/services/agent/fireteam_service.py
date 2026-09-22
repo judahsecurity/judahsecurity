@@ -945,6 +945,8 @@ class SpecialistReport:
     hypothesis_results: list[dict] = field(default_factory=list)
     assigned_hypothesis_id: str = ""
     lease_id: str = ""
+    coverage_cell_id: str = ""
+    coverage_lease_id: str = ""
 
 
 @dataclass
@@ -1092,6 +1094,8 @@ async def _run_specialist(
         if len(directive.hypothesis_ids) == 1:
             report.assigned_hypothesis_id = directive.hypothesis_ids[0]
         report.lease_id = directive.lease_id
+        report.coverage_cell_id = directive.coverage_cell_id
+        report.coverage_lease_id = directive.coverage_lease_id
     else:
         directive_block = (
             f"Goal: execute your role ({profile.epithet}) against the shared mission.\n"

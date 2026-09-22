@@ -20,7 +20,23 @@ class RequestCaptureStore:
         self._records = OrderedDict()
         self.limit = limit
 
-    def record(self, request, *, identity, source, evidence_id=""):
+    def record(
+        self,
+        request,
+        *,
+        identity,
+        source,
+        evidence_id="",
+        hypothesis_id="",
+        coverage_cell_id="",
+        tenant="",
+        parameter="",
+        test_type="",
+        candidate_id="",
+        proof_run_id="",
+        verifier_run_id="",
+        finding_id="",
+    ):
         """Return safe metadata, or None when faithful replay is unsupported."""
         try:
             origin(request["url"])
@@ -71,6 +87,15 @@ class RequestCaptureStore:
                 "identity": identity,
                 "source": source,
                 "evidence_id": evidence_id,
+                "hypothesis_id": str(hypothesis_id or ""),
+                "coverage_cell_id": str(coverage_cell_id or ""),
+                "tenant": str(tenant or ""),
+                "parameter": str(parameter or ""),
+                "test_type": str(test_type or ""),
+                "candidate_id": str(candidate_id or ""),
+                "proof_run_id": str(proof_run_id or ""),
+                "verifier_run_id": str(verifier_run_id or ""),
+                "finding_id": str(finding_id or ""),
                 "request": deepcopy(spec),
             }
             self._records[capture_id] = row

@@ -2254,6 +2254,7 @@ class ASMToolsManager(AssessmentCapabilities):
         if not ok:
             return gate_msg
 
+        verified = None
         if str(gate_msg).startswith("verify_ok"):
             from app.services.agent.independent_verify import _brain, _candidate, verify_receipt_key
             receipt = self._verify_receipts[verify_receipt_key(title, target)]
@@ -2304,6 +2305,17 @@ class ASMToolsManager(AssessmentCapabilities):
                 session_id=current_session_id.get(),
             )
             parsed_refs = parse_references(refs_raw)
+            trace_metadata = None
+            if verified is not None:
+                trace_metadata = {
+                    key: getattr(verified, key, "")
+                    for key in (
+                        "coverage_cell_id", "operation_id", "hypothesis_id", "identity",
+                        "tenant", "parameter", "test_type", "capture_id", "evidence_ids",
+                        "proof_run_id", "verifier_run_id",
+                    )
+                }
+                trace_metadata["candidate_id"] = verified.id
             vuln = Vulnerability(
                 title=(title or "Agent finding")[:500],
                 description=(description or "")[:10000] if description else None,
@@ -2319,7 +2331,8 @@ class ASMToolsManager(AssessmentCapabilities):
                 impact=(str(impact_text)[:5000] if impact_text else None),
                 references=parsed_refs or None,
                 metadata_={"agent_detection": agent_detection,
-                           "verification": self._verify_receipts.get(verify_receipt_key(title, target)) if str(gate_msg).startswith("verify_ok") else None},
+                           "verification": self._verify_receipts.get(verify_receipt_key(title, target)) if str(gate_msg).startswith("verify_ok") else None,
+                           "trace": trace_metadata},
             )
             db.add(vuln)
             db.commit()
@@ -2465,12 +2478,32 @@ class ASMToolsManager(AssessmentCapabilities):
                     record_surface_coverage,
                 )
                 brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+                if verified is not None:
+                    for candidate_row in brain.candidates:
+                        if (
+                            isinstance(candidate_row, dict)
+                            and candidate_row.get("id") == verified.id
+                        ):
+                            candidate_row["finding_id"] = str(vuln.id)
                 record_surface_coverage(
                     brain,
                     path=target or target_clean,
                     status="finding",
                     finding_title=title or "",
                     reason="create_finding",
+                    hypothesis_id=(verified.hypothesis_id if verified else ""),
+                    identity=(verified.identity if verified else ""),
+                    tenant=(verified.tenant if verified else ""),
+                    test_type=(verified.test_type if verified else ""),
+                    parameter=(verified.parameter if verified else ""),
+                    evidence_id=(verified.evidence_ids[0] if verified and verified.evidence_ids else ""),
+                    operation_id=(verified.operation_id if verified else ""),
+                    coverage_cell_id=(verified.coverage_cell_id if verified else ""),
+                    capture_id=(verified.capture_id if verified else ""),
+                    candidate_id=(verified.id if verified else ""),
+                    proof_run_id=(verified.proof_run_id if verified else ""),
+                    verifier_run_id=(verified.verifier_run_id if verified else ""),
+                    finding_id=str(vuln.id),
                 )
                 self._engagement_brain = brain.to_dict()
             except Exception:
@@ -5967,7 +6000,8 @@ class ASMToolsManager(AssessmentCapabilities):
     async def _http_exchange(self, method: str, url: str, headers=None, body=None, cookies=None,
                              use_auth_session: bool = True, timeout: int = 25,
                              follow_redirects: bool = True, identity: Optional[str] = None,
-                             hypothesis_id: str = "", max_response_bytes: Optional[int] = None) -> Dict[str, Any]:
+                             hypothesis_id: str = "", coverage_cell_id: str = "",
+                             max_response_bytes: Optional[int] = None) -> Dict[str, Any]:
         import time as _time
         from app.services.agent.assessment_sessions import cookie_jar, identity_registry
         from app.services.agent.evidence_store import evidence_store, verification_run, origin
@@ -5987,6 +6021,29 @@ class ASMToolsManager(AssessmentCapabilities):
         elif use_auth_session:
             session = getattr(self, "_auth_session", None) or {}
         label = identity or ("legacy" if session else "anonymous")
+        trace = {}
+        if coverage_cell_id:
+            from app.services.agent.coverage_cells import (
+                migrate_coverage_cells,
+                trace_for_cell,
+            )
+            from app.services.agent.engagement_brain import (
+                denominator_surfaces,
+                engagement_brain_from_dict,
+            )
+
+            brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            migrate_coverage_cells(brain, denominator=denominator_surfaces(brain))
+            trace = trace_for_cell(brain, coverage_cell_id)
+            if not trace:
+                raise ValueError("Unknown coverage_cell_id")
+            expected_identity = str(trace.get("identity") or "")
+            if expected_identity not in ("", "unspecified", label):
+                raise ValueError("Coverage cell identity does not match the executing identity")
+            if hypothesis_id and trace.get("hypothesis_id") not in ("", hypothesis_id):
+                raise ValueError("Coverage cell does not belong to this hypothesis")
+            hypothesis_id = hypothesis_id or str(trace.get("hypothesis_id") or "")
+            self._engagement_brain = brain.to_dict()
         stored = session.get("cookies", [])
         if identity is None and session:
             stored = [c for c in stored if isinstance(c, dict) and c.get("domain")]
@@ -6049,20 +6106,47 @@ class ASMToolsManager(AssessmentCapabilities):
         }
         await self.map_application_traffic([dict(method=method, url=url, headers=hdrs, body=raw_body)],
                                            identity=label, source="http_exchange")
+        if not trace.get("operation_id"):
+            from app.services.agent.runtime_mapper import normalize_request
+
+            operations = normalize_request(
+                dict(method=method, url=url, headers=hdrs, body=raw_body),
+                identity=label,
+                source="http_exchange",
+            )
+            if operations:
+                trace["operation_id"] = operations[0]["id"]
         artifact_id = evidence_store(self).record("http_exchange", exchange, target=url, identity=label,
-                                                  hypothesis_id=hypothesis_id, success=resp.status_code < 400)
+                                                  hypothesis_id=hypothesis_id,
+                                                  operation_id=trace.get("operation_id", ""),
+                                                  coverage_cell_id=coverage_cell_id,
+                                                  tenant=trace.get("tenant", ""),
+                                                  parameter=trace.get("parameter", ""),
+                                                  test_type=trace.get("test_type", ""),
+                                                  success=resp.status_code < 400)
         capture = None
         if (identity not in (None, "anonymous") and not hypothesis_id and not run
                 and 200 <= resp.status_code < 300 and req.method == method
                 and str(req.url) == str(httpx.URL(url))):
             capture = self._capture_requests().record(
                 dict(method=method, url=str(req.url), headers=dict(req.headers), body=raw_body),
-                identity=label, source="http_exchange", evidence_id=artifact_id)
+                identity=label, source="http_exchange", evidence_id=artifact_id,
+                hypothesis_id=hypothesis_id,
+                coverage_cell_id=coverage_cell_id,
+                tenant=trace.get("tenant", ""),
+                parameter=trace.get("parameter", ""),
+                test_type=trace.get("test_type", ""))
         from app.services.agent.evidence_store import redact_artifact
         public = redact_artifact(exchange)
         public["response"].pop("body", None)
         public["request"].pop("body", None)
-        return {**public, "evidence_id": artifact_id, "capture": capture, "_body_text": body_text}
+        return {
+            **public,
+            "evidence_id": artifact_id,
+            "capture": capture,
+            "trace": {**trace, "coverage_cell_id": coverage_cell_id},
+            "_body_text": body_text,
+        }
 
     async def replay_http_request(
         self,
@@ -6075,6 +6159,7 @@ class ASMToolsManager(AssessmentCapabilities):
         timeout: int = 25,
         identity: Optional[str] = None,
         hypothesis_id: str = "",
+        coverage_cell_id: str = "",
     ) -> str:
         """Replay a captured HTTP request (tester-style request tampering).
 
@@ -6118,6 +6203,7 @@ class ASMToolsManager(AssessmentCapabilities):
                 timeout=timeout,
                 identity=identity,
                 hypothesis_id=hypothesis_id,
+                coverage_cell_id=coverage_cell_id,
             )
             note = (
                 "Use this to tamper method/headers/body on captured APIs. "
@@ -6131,6 +6217,7 @@ class ASMToolsManager(AssessmentCapabilities):
             out = {
                 "evidence_id": exchange["evidence_id"],
                 "capture": exchange.get("capture"),
+                "trace": exchange.get("trace"),
                 "request": exchange["request"],
                 "response": exchange["response"],
                 "note": note,
@@ -6147,6 +6234,7 @@ class ASMToolsManager(AssessmentCapabilities):
         use_auth_session: bool = True,
         timeout: int = 30,
         hypothesis_id: Optional[str] = None,
+        coverage_cell_id: str = "",
     ) -> str:
         """Differential HTTP proof — baseline vs one mutation (tester core loop).
 
@@ -6226,6 +6314,7 @@ class ASMToolsManager(AssessmentCapabilities):
                 cookies=b["cookies"],
                 identity=b.get("identity"),
                 hypothesis_id=hypothesis_id or "",
+                coverage_cell_id=coverage_cell_id,
                 use_auth_session=use_auth_session,
                 timeout=timeout,
                 follow_redirects=False,
@@ -6238,6 +6327,7 @@ class ASMToolsManager(AssessmentCapabilities):
                 cookies=m["cookies"],
                 identity=m.get("identity"),
                 hypothesis_id=hypothesis_id or "",
+                coverage_cell_id=coverage_cell_id,
                 use_auth_session=use_auth_session,
                 timeout=timeout,
                 follow_redirects=False,
@@ -6952,6 +7042,10 @@ class ASMToolsManager(AssessmentCapabilities):
         threat_id: str = "",
         claimed_request: str = "",
         specialist: str = "",
+        coverage_cell_id: str = "",
+        capture_id: str = "",
+        evidence_ids: Optional[List[str]] = None,
+        proof_run_id: str = "",
     ) -> str:
         """Queue a medium+ finding for independent verification. Hunters must not create_finding."""
         from app.services.agent.engagement_brain import engagement_brain_from_dict
@@ -6959,6 +7053,39 @@ class ASMToolsManager(AssessmentCapabilities):
 
         self._require_independent_verify = True
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        trace = {}
+        if evidence_ids:
+            from app.services.agent.evidence_store import evidence_store
+
+            evidence_rows = [evidence_store(self).records.get(item) for item in evidence_ids]
+            inferred_cells = {
+                str(row.get("coverage_cell_id") or "")
+                for row in evidence_rows
+                if row and row.get("coverage_cell_id")
+            }
+            if coverage_cell_id and inferred_cells - {coverage_cell_id}:
+                return json.dumps(
+                    {"error": "Candidate evidence belongs to a different coverage cell"},
+                    indent=2,
+                )
+            if not coverage_cell_id and len(inferred_cells) == 1:
+                coverage_cell_id = inferred_cells.pop()
+        if coverage_cell_id:
+            from app.services.agent.coverage_cells import (
+                migrate_coverage_cells,
+                trace_for_cell,
+            )
+            from app.services.agent.engagement_brain import denominator_surfaces
+
+            migrate_coverage_cells(brain, denominator=denominator_surfaces(brain))
+            trace = trace_for_cell(brain, coverage_cell_id)
+            if not trace:
+                return json.dumps({"error": "Unknown coverage_cell_id"}, indent=2)
+            if hypothesis_id and trace.get("hypothesis_id") not in ("", hypothesis_id):
+                return json.dumps(
+                    {"error": "Coverage cell does not belong to this hypothesis"}, indent=2
+                )
+            hypothesis_id = hypothesis_id or str(trace.get("hypothesis_id") or "")
         cand = submit_candidate(
             brain,
             title=title or "",
@@ -6970,6 +7097,15 @@ class ASMToolsManager(AssessmentCapabilities):
             threat_id=threat_id or "",
             claimed_request=claimed_request or "",
             specialist=specialist or "",
+            operation_id=str(trace.get("operation_id") or ""),
+            identity=str(trace.get("identity") or ""),
+            tenant=str(trace.get("tenant") or ""),
+            parameter=str(trace.get("parameter") or ""),
+            test_type=str(trace.get("test_type") or ""),
+            coverage_cell_id=coverage_cell_id or "",
+            capture_id=capture_id or "",
+            evidence_ids=evidence_ids or [],
+            proof_run_id=proof_run_id or "",
         )
         self._engagement_brain = brain.to_dict()
         return json.dumps(
@@ -7086,6 +7222,15 @@ class ASMToolsManager(AssessmentCapabilities):
         test_type: str = "",
         parameter: str = "",
         evidence_id: str = "",
+        operation_id: str = "",
+        tenant: str = "",
+        coverage_cell_id: str = "",
+        coverage_lease_id: str = "",
+        capture_id: str = "",
+        candidate_id: str = "",
+        proof_run_id: str = "",
+        verifier_run_id: str = "",
+        finding_id: str = "",
     ) -> str:
         """Record evidence-backed coverage for one surface/test/identity dimension."""
         from app.services.agent.engagement_brain import (
@@ -7096,6 +7241,23 @@ class ASMToolsManager(AssessmentCapabilities):
 
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         try:
+            if coverage_cell_id:
+                from app.services.agent.coverage_cells import (
+                    migrate_coverage_cells,
+                    trace_for_cell,
+                )
+                from app.services.agent.engagement_brain import denominator_surfaces
+
+                migrate_coverage_cells(brain, denominator=denominator_surfaces(brain))
+                trace = trace_for_cell(brain, coverage_cell_id)
+                if not trace:
+                    raise ValueError("Unknown coverage_cell_id")
+                identity = identity or str(trace.get("identity") or "")
+                tenant = tenant or str(trace.get("tenant") or "")
+                test_type = test_type or str(trace.get("test_type") or "")
+                parameter = parameter or str(trace.get("parameter") or "")
+                operation_id = operation_id or str(trace.get("operation_id") or "")
+                hypothesis_id = hypothesis_id or str(trace.get("hypothesis_id") or "")
             if (status or "").strip().lower() == "tested_clean":
                 if not evidence_id or not test_type:
                     raise ValueError(
@@ -7108,6 +7270,10 @@ class ASMToolsManager(AssessmentCapabilities):
                     raise ValueError("tested_clean evidence_id must reference live transport evidence")
                 if identity and evidence.get("identity") != identity:
                     raise ValueError("coverage identity does not match the cited evidence")
+                if coverage_cell_id and evidence.get("coverage_cell_id") not in (
+                    "", coverage_cell_id
+                ):
+                    raise ValueError("coverage cell does not match the cited evidence")
             row = record_surface_coverage(
                 brain,
                 method=method or "GET",
@@ -7121,6 +7287,15 @@ class ASMToolsManager(AssessmentCapabilities):
                 test_type=test_type or "",
                 parameter=parameter or "",
                 evidence_id=evidence_id or "",
+                operation_id=operation_id or "",
+                tenant=tenant or "",
+                coverage_cell_id=coverage_cell_id or "",
+                coverage_lease_id=coverage_lease_id or "",
+                capture_id=capture_id or "",
+                candidate_id=candidate_id or "",
+                proof_run_id=proof_run_id or "",
+                verifier_run_id=verifier_run_id or "",
+                finding_id=finding_id or "",
             )
         except ValueError as exc:
             return json.dumps({"error": str(exc)}, indent=2)
@@ -7540,12 +7715,22 @@ class ASMToolsManager(AssessmentCapabilities):
                 },
                 indent=2,
             )
+        from app.services.agent.coverage_cells import claim_coverage_cell_leases
+        from app.services.agent.engagement_brain import denominator_surfaces
+
+        coverage_leases = claim_coverage_cell_leases(
+            brain,
+            chosen,
+            task_leases=task_leases,
+            denominator=denominator_surfaces(brain),
+        )
         directives = directives_from_hypotheses(
             brain=brain,
             profiles_by_name=profiles,
             specialists=chosen,
             default_target=default_target or "",
             task_leases=task_leases,
+            coverage_leases=coverage_leases,
         )
 
         persist_graph(brain, graph)
@@ -7596,6 +7781,7 @@ class ASMToolsManager(AssessmentCapabilities):
                 specialists=retry_leases,
                 default_target=default_target or "",
                 task_leases=retry_leases,
+                coverage_leases=coverage_leases,
             )
             retry_profiles = []
             retry_directives = {}
@@ -7643,6 +7829,20 @@ class ASMToolsManager(AssessmentCapabilities):
                     ensure_spawned_hypotheses(brain, spawned)
                     graph = sync_graph_from_brain(brain)
 
+        # Specialist tools update the manager-owned brain while executors run.
+        # Preserve those execution-owned ledgers before persisting graph results.
+        live_brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        for field_name in (
+            "application_operations",
+            "authorization_matrix",
+            "proof_receipts",
+            "candidates",
+            "coverage",
+            "coverage_cells",
+        ):
+            live_value = getattr(live_brain, field_name, None)
+            if live_value:
+                setattr(brain, field_name, live_value)
         persist_graph(brain, graph)
         self._engagement_brain = brain.to_dict()
         _checkpoint_task_graph()
@@ -7656,6 +7856,43 @@ class ASMToolsManager(AssessmentCapabilities):
 
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         lifted = ingest_report_findings(brain, result.reports)
+        from app.services.agent.coverage_cells import release_coverage_cell_lease
+
+        reports_by_specialist = {}
+        for report in result.reports:
+            reports_by_specialist.setdefault(report.specialist, []).append(report)
+        for specialist, lease in coverage_leases.items():
+            reports = reports_by_specialist.get(specialist, [])
+            final_report = reports[-1] if reports else None
+            evidence_ids = [
+                evidence_id
+                for report in reports
+                for invocation in (report.tool_calls or [])
+                for evidence_id in (invocation.evidence_ids or [])
+            ]
+            candidate_id = next(
+                (
+                    str(raw.get("id") or "")
+                    for raw in (brain.candidates or [])
+                    if isinstance(raw, dict)
+                    and raw.get("coverage_cell_id") == lease.coverage_cell_id
+                ),
+                "",
+            )
+            release_coverage_cell_lease(
+                brain,
+                lease,
+                verdict=(getattr(final_report, "verdict", "") or "inconclusive"),
+                evidence_ids=evidence_ids,
+                candidate_id=candidate_id,
+                reason=(
+                    getattr(final_report, "error", "")
+                    or getattr(final_report, "evidence", "")
+                    or getattr(final_report, "summary", "")
+                    if final_report
+                    else "Specialist did not return a coverage receipt"
+                ),
+            )
         self._engagement_brain = brain.to_dict()
         pending = [
             c
@@ -7693,6 +7930,9 @@ class ASMToolsManager(AssessmentCapabilities):
             "task_leases": {
                 name: lease.to_dict() for name, lease in task_leases.items()
             },
+            "coverage_leases": {
+                name: lease.to_dict() for name, lease in coverage_leases.items()
+            },
             "specialists_run": result.specialists_run,
             "selection_mode": "auto" if auto else "explicit",
             "selection_source": selection_source,
@@ -7728,6 +7968,8 @@ class ASMToolsManager(AssessmentCapabilities):
                     "summary": r.summary,
                     "verdict": r.verdict,
                     "hypothesis_ids": r.hypothesis_ids,
+                    "coverage_cell_id": r.coverage_cell_id,
+                    "coverage_lease_id": r.coverage_lease_id,
                     "evidence": (r.evidence or "")[:800],
                     "spawn": r.spawn,
                     "key_findings": r.key_findings,

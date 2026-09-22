@@ -36,6 +36,8 @@ class OperationDirective:
     rewrite_note: str = ""
     brain_slice: str = ""
     lease_id: str = ""
+    coverage_cell_id: str = ""
+    coverage_lease_id: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -63,6 +65,8 @@ class OperationDirective:
             f"- OWASP: {owasp}\n"
             f"- Hypothesis IDs: {hyps}\n"
             f"- Execution lease: {self.lease_id or 'unleased'}\n"
+            f"- Coverage cell: {self.coverage_cell_id or 'unassigned'}\n"
+            f"- Coverage lease: {self.coverage_lease_id or 'unleased'}\n"
             f"- Max iterations: {self.max_iterations}\n"
             f"- Priority: {self.priority}\n"
             f"- Allowed tools: {tools}\n"
@@ -71,6 +75,12 @@ class OperationDirective:
             "execute the listed methodologies against observed evidence before spraying scanners; "
             "return the executor summary contract (verdict/evidence/spawn) — no raw scan dumps."
         )
+        if self.coverage_cell_id:
+            block += (
+                "\nTrace every replay/compare/candidate/coverage update with coverage_cell_id="
+                f"{self.coverage_cell_id}. When closing it, also pass coverage_lease_id="
+                f"{self.coverage_lease_id}."
+            )
         if self.rewrite_note:
             block = f"{block}\n\n{self.rewrite_note}"
         if self.brain_slice:
@@ -96,6 +106,7 @@ def directives_from_hypotheses(
     specialists: Iterable[str],
     default_target: str = "",
     task_leases: Optional[Dict[str, Any]] = None,
+    coverage_leases: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, OperationDirective]:
     """Build per-specialist directives from open/in_progress hypotheses."""
     open_hyps = [
@@ -115,6 +126,19 @@ def directives_from_hypotheses(
         lease_id = str(
             getattr(lease, "id", "")
             or (lease.get("id", "") if isinstance(lease, dict) else "")
+        )
+        coverage_lease = (coverage_leases or {}).get(name)
+        coverage_cell_id = str(
+            getattr(coverage_lease, "coverage_cell_id", "")
+            or (
+                coverage_lease.get("coverage_cell_id", "")
+                if isinstance(coverage_lease, dict)
+                else ""
+            )
+        )
+        coverage_lease_id = str(
+            getattr(coverage_lease, "id", "")
+            or (coverage_lease.get("id", "") if isinstance(coverage_lease, dict) else "")
         )
         matched = [h for h in open_hyps if getattr(h, "specialist", None) == name]
         if leased_hypothesis_id:
@@ -202,6 +226,8 @@ def directives_from_hypotheses(
             max_iterations=int(getattr(profile, "max_iterations", 6) or 6),
             priority=priority,
             lease_id=lease_id,
+            coverage_cell_id=coverage_cell_id,
+            coverage_lease_id=coverage_lease_id,
         )
         try:
             from app.services.agent.penetration_task_graph import format_executor_slice

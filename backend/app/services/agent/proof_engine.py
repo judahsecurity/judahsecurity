@@ -36,6 +36,7 @@ class ProofReceipt:
     capture_id: str = ""
     cleanup_status: str = ""
     cleanup_evidence_ids: tuple[str, ...] = ()
+    coverage_cell_id: str = ""
 
     def to_dict(self):
         return asdict(self)
@@ -274,6 +275,11 @@ class ProofEngine:
                     body=render(spec.get("body"), bindings),
                     identity=identity,
                     hypothesis_id=cell["hypothesis_id"],
+                    # The cell identity is the attacking identity. Setup/control
+                    # and owner verification intentionally run as other actors.
+                    coverage_cell_id=(
+                        cell.get("coverage_cell_id", "") if phase == "attack" else ""
+                    ),
                     follow_redirects=False,
                 )
                 artifact_id = response.get("evidence_id")
@@ -357,6 +363,7 @@ class ProofEngine:
             context.candidate_id if context else "",
             context.revision if context else 0,
             time.time(),
+            coverage_cell_id=cell.get("coverage_cell_id", ""),
             **metadata,
         )
         self.receipts[receipt.run_id] = receipt
