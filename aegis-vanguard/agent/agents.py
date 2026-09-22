@@ -1522,6 +1522,138 @@ def authz_diff(
     )
 
 
+@security_tool(category="vuln_analysis", risk="safe")
+def identity_session_status() -> str:
+    """List sanitized status for configured test-identity sessions.
+
+    Returns labels, roles, tenants, authentication state, cookie names, and
+    verification evidence. Passwords, tokens, cookie values, and auth headers
+    never leave the internal session vault.
+    """
+    from agent.identity_sessions import get_identity_sessions
+
+    return json.dumps({
+        "identities": get_identity_sessions().status(),
+    }, default=str)
+
+
+@security_tool(category="recon", risk="low")
+def establish_identity_session(identity_label: str, force: bool = False) -> str:
+    """Establish or refresh a persistent session for a configured identity.
+
+    Login credentials and pre-authenticated headers are retrieved internally by
+    label; do not pass secrets to this tool. The login request uses a discovered
+    login form or the identity file's explicit login configuration.
+
+    Args:
+        identity_label: Label from the configured identity pool.
+        force: Re-authenticate even if the session is already verified.
+    """
+    from agent.identity_sessions import get_identity_sessions
+
+    return json.dumps(
+        get_identity_sessions().establish(identity_label, force=force),
+        default=str,
+    )
+
+
+@security_tool(category="exploit", risk="medium")
+def identity_request(
+    identity_label: str,
+    method: str,
+    url: str,
+    headers_json: str = "{}",
+    body: str = "",
+    csrf_url: str = "",
+    refresh_on_auth_failure: bool = True,
+) -> str:
+    """Send an in-scope request through one persistent identity session.
+
+    Use ``{{csrf}}`` in the body or a non-session header to inject a freshly
+    fetched CSRF token without exposing it to the model. Authorization and
+    Cookie overrides are rejected so the returned identity label remains
+    trustworthy. Safe GET/HEAD/OPTIONS requests can re-authenticate and retry
+    once after a 401/403.
+
+    Args:
+        identity_label: Configured identity label.
+        method: HTTP method.
+        url: Absolute in-scope URL on the assessment target origin.
+        headers_json: Non-session request headers as a JSON object.
+        body: Request body; ``{{csrf}}`` is replaced internally when present.
+        csrf_url: Optional same-origin page from which to refresh a CSRF token.
+        refresh_on_auth_failure: Refresh and retry safe requests after 401/403.
+    """
+    from agent.identity_sessions import get_identity_sessions
+
+    try:
+        headers = json.loads(headers_json or "{}")
+        if not isinstance(headers, dict):
+            raise ValueError("headers_json must be an object")
+    except (json.JSONDecodeError, ValueError) as exc:
+        return json.dumps({"error": str(exc)})
+    return json.dumps(
+        get_identity_sessions().request(
+            identity_label=identity_label,
+            method=method,
+            url=url,
+            headers={str(k): str(v) for k, v in headers.items()},
+            body=body,
+            csrf_url=csrf_url,
+            refresh_on_auth_failure=refresh_on_auth_failure,
+        ),
+        default=str,
+    )
+
+
+@security_tool(category="exploit", risk="high")
+def identity_authz_diff(
+    owner_identity: str,
+    other_identity: str,
+    target_url: str,
+    method: str = "GET",
+    body: str = "",
+    headers_json: str = "{}",
+    test_unauth: bool = True,
+) -> str:
+    """Test one object as owner, another identity, and unauthenticated.
+
+    Sessions are selected by label from the internal vault. The result includes
+    explicit tested identities, conservative body-similarity evidence, coverage
+    events, and a candidate only when cross-identity or anonymous access is
+    actually demonstrated.
+
+    Args:
+        owner_identity: Label of the resource owner session.
+        other_identity: Label of a different user or tenant session.
+        target_url: Exact owner-object URL to test.
+        method: HTTP method.
+        body: Request body for non-GET object operations.
+        headers_json: Non-session headers shared by each request.
+        test_unauth: Also repeat without credentials.
+    """
+    from agent.identity_sessions import get_identity_sessions
+
+    try:
+        headers = json.loads(headers_json or "{}")
+        if not isinstance(headers, dict):
+            raise ValueError("headers_json must be an object")
+    except (json.JSONDecodeError, ValueError) as exc:
+        return json.dumps({"error": str(exc)})
+    return json.dumps(
+        get_identity_sessions().authz_diff(
+            owner_label=owner_identity,
+            other_label=other_identity,
+            target_url=target_url,
+            method=method,
+            body=body,
+            headers={str(k): str(v) for k, v in headers.items()},
+            test_unauth=test_unauth,
+        ),
+        default=str,
+    )
+
+
 @security_tool(category="exploit", risk="high")
 def probe_ssti(target_url: str, params: str = "", method: str = "GET",
                headers_json: str = "{}", body: str = "") -> str:
@@ -1926,6 +2058,8 @@ EXPLOIT_TOOLS = [
     # Manual probing tools
     "send_http_request", "replay_http_request", "list_http_requests",
     "get_http_request", "diff_http_requests",
+    "identity_session_status", "establish_identity_session",
+    "identity_request", "identity_authz_diff",
     "test_cors_policy", "test_race_condition", "test_file_upload",
     "run_custom_probe",
 ]
@@ -1951,6 +2085,10 @@ APP_MAPPER_TOOLS = [
 ]
 
 VALIDATOR_TOOLS = [
+    "identity_session_status",
+    "establish_identity_session",
+    "identity_request",
+    "identity_authz_diff",
     "send_http_request",
     "replay_http_request",
     "list_http_requests",
@@ -1962,6 +2100,10 @@ VALIDATOR_TOOLS = [
 ]
 
 CHAIN_TOOLS = [
+    "identity_session_status",
+    "establish_identity_session",
+    "identity_request",
+    "identity_authz_diff",
     "send_http_request",
     "replay_http_request",
     "list_http_requests",
@@ -1987,6 +2129,9 @@ SAST_TOOLS = [
 
 # Tools available to all hunters for brain + prior-art access
 HUNTER_CORE_TOOLS = [
+    "identity_session_status",
+    "establish_identity_session",
+    "identity_request",
     "list_http_requests",
     "get_http_request",
     "diff_http_requests",
@@ -2113,6 +2258,8 @@ Before the numbered gate: does this finding even make sense on the observed host
 - XSS in admin-only panel with no user reachable → downgrade severity
 
 **Q8: Identity check (authz/auth findings) — which session proved it?**
+- Use identity_session_status and identity_authz_diff with labels. Never request
+  or reproduce raw passwords, cookies, or Authorization values.
 - Record: anonymous vs user_A vs user_B vs privileged
 - Missing auth (works with no cookie) ≠ IDOR (cross-user with A's token)
 - Own-data-only responses → KILL Q8
@@ -2123,6 +2270,7 @@ For each finding: PASS / KILL (Q#) / DOWNGRADE / NEEDS_MORE_EVIDENCE
 
 For PASS findings: call confirm_vulnerability_poc to lock in severity and submit.
 For NEEDS_MORE_EVIDENCE: use send_http_request or scan_nuclei to re-test before deciding.
+For authz NEEDS_MORE_EVIDENCE: use identity_authz_diff when two ready identities exist.
 For KILL/DOWNGRADE: explain why in one sentence.
 
 Validation must be non-destructive. Never send SQL that changes state or schema
@@ -2262,7 +2410,9 @@ Strategy:
 4. If WordPress detected, run wpscan
    → If wpscan finds critical vulns: call confirm_vulnerability_poc
 5. If TLS grades are D/F, run deep TLS testing
-6. ALWAYS call confirm_vulnerability_poc for any confirmed finding before handing off —
+6. For authz candidates, use identity_authz_diff with the exact owner and other
+   identity labels. Do not copy session material into send_http_request.
+7. ALWAYS call confirm_vulnerability_poc for any confirmed finding before handing off —
    this escalates severity automatically (e.g. medium SQLi → critical) and attaches
    the request/response evidence to the platform record
 7. When done, hand off to the Report Agent with a summary of confirmed findings

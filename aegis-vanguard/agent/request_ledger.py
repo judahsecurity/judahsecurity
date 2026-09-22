@@ -31,6 +31,10 @@ _SENSITIVE_HEADER_NAMES = {
 _SENSITIVE_FIELD_RE = re.compile(
     r"(?:pass(?:word|wd)?|secret|token|api[_-]?key|authorization|cookie)", re.I,
 )
+_BEARER_VALUE_RE = re.compile(r"(?i)(\bbearer\s+)[A-Za-z0-9._~+/=-]{12,}")
+_JWT_VALUE_RE = re.compile(
+    r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b"
+)
 _FLAG_RE = re.compile(r"FLAG\{[0-9a-f]{64}\}", re.I)
 _SQL_ERROR_RE = re.compile(
     r"(?:SQL syntax|mysql_fetch|mysqli_|pg_query|PostgreSQL.*ERROR|ORA-\d{5}|"
@@ -105,6 +109,13 @@ def _redact_body(body: str) -> str:
             for k, v in pairs
         )
     return body
+
+
+def redact_response_body(body: str) -> str:
+    """Redact credential-shaped response data without hiding vuln evidence."""
+    redacted = _redact_body(str(body or ""))
+    redacted = _BEARER_VALUE_RE.sub(r"\1[REDACTED]", redacted)
+    return _JWT_VALUE_RE.sub("[REDACTED-JWT]", redacted)
 
 
 def _response_headers(response: Dict[str, Any]) -> Dict[str, str]:
@@ -250,6 +261,20 @@ class RequestLedger:
             record = self._records.get(_namespace(), {}).get(request_id)
             return dict(record) if record else None
 
+    def tag_identity(self, request_id: str, identity_label: str) -> bool:
+        """Attach a non-secret identity label to an existing exchange."""
+        label = str(identity_label or "").strip()
+        if not label:
+            return False
+        with self._lock:
+            record = self._records.get(_namespace(), {}).get(request_id)
+            if not record:
+                return False
+            source = dict(record.get("source") or {})
+            source["identity"] = label
+            record["source"] = source
+            return True
+
     def _public(self, record: Dict[str, Any], include_bodies: bool = False) -> Dict[str, Any]:
         request = record["request"]
         response = record["response"]
@@ -271,7 +296,7 @@ class RequestLedger:
         if include_bodies:
             public["request_body"] = _redact_body(str(request.get("body") or ""))[:8000]
             public["response_headers"] = _redact_headers(_response_headers(response))
-            public["response_body"] = body[:8000]
+            public["response_body"] = redact_response_body(body)[:8000]
             if response.get("error"):
                 public["error"] = response.get("error")
         return public

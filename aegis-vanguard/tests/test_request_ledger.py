@@ -183,7 +183,8 @@ def test_ledger_tools_are_registered_and_hunters_receive_protocol():
     registry = ToolRegistry()
     for name in (
         "list_http_requests", "get_http_request", "diff_http_requests",
-        "replay_http_request",
+        "replay_http_request", "identity_session_status",
+        "establish_identity_session", "identity_request", "identity_authz_diff",
     ):
         assert registry.get(name) is not None
 
@@ -213,3 +214,50 @@ def test_parallel_records_are_unique_and_session_isolated():
     ledger.clear()
     assert ledger.list(limit=200) == []
     assert ledger.get(ids[0]) is None
+
+
+def test_public_request_view_redacts_tokens_from_response_bodies():
+    ledger = _ledger()
+    record = ledger.record(
+        "POST",
+        "https://example.test/login",
+        {"Content-Type": "application/json"},
+        '{"password":"private-password"}',
+        False,
+        {
+            "status": 200,
+            "headers": {"Set-Cookie": "session=private-cookie"},
+            "body": json.dumps({
+                "access_token": "private-access-token",
+                "nested": {"refreshToken": "private-refresh-token"},
+                "message": "welcome",
+            }),
+        },
+    )
+
+    public = ledger.get(record["request_id"])
+    rendered = json.dumps(public)
+
+    assert "private-password" not in rendered
+    assert "private-cookie" not in rendered
+    assert "private-access-token" not in rendered
+    assert "private-refresh-token" not in rendered
+    assert "welcome" in rendered
+
+
+def test_request_identity_label_is_auditable_without_session_material():
+    ledger = _ledger()
+    record = ledger.record(
+        "GET",
+        "https://example.test/private",
+        {"Authorization": "Bearer private-token"},
+        "",
+        False,
+        {"status": 200, "headers": {}, "body": "private object"},
+    )
+
+    assert ledger.tag_identity(record["request_id"], "member-a")
+    public = ledger.get(record["request_id"])
+
+    assert public["source"]["identity"] == "member-a"
+    assert "private-token" not in json.dumps(public)

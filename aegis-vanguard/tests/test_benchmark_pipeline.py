@@ -28,12 +28,17 @@ def test_parallel_pipeline_completes_every_phase_in_benchmark_mode(monkeypatch):
             self.tasks = {}
 
         def execute_tool(self, agent, tool_name, arguments):
-            assert tool_name == "discover_input_surface"
+            if tool_name == "discover_input_surface":
+                return json.dumps({
+                    "success": True,
+                    "forms_discovered": 1,
+                    "eligible_parameters": 1,
+                    "forms": [],
+                })
+            assert tool_name == "establish_identity_session"
             return json.dumps({
-                "success": True,
-                "forms_discovered": 1,
-                "eligible_parameters": 1,
-                "forms": [],
+                "label": arguments["identity_label"],
+                "state": "ready_unverified",
             })
 
         def run(self, agent, task, context):
@@ -126,6 +131,15 @@ def test_parallel_pipeline_completes_every_phase_in_benchmark_mode(monkeypatch):
         target="http://localhost:8080",
         scope_domain="localhost:8080",
         hunter_turns=10,
+        identities=[{
+            "label": "benchmark-user",
+            "username": "alice",
+            "password": "private-benchmark-password",
+            "role": "member",
+            "tenant": "default",
+            "headers": {},
+            "login": {},
+        }],
         brain=brain,
         benchmark_proof=True,
     )
@@ -135,3 +149,4 @@ def test_parallel_pipeline_completes_every_phase_in_benchmark_mode(monkeypatch):
     assert runner.tasks["report_agent"].startswith("Phase: REPORT")
     assert brain.finding_count == 2
     assert len(brain.confirmed) == 2
+    assert "private-benchmark-password" not in str(result.context)

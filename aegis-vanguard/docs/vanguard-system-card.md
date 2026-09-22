@@ -146,6 +146,10 @@ CLI: `--enterprise`, `--no-enterprise`, `--all-specialists`, `--no-api-specialis
 ### Exploit Validation
 | Tool | Function | Risk |
 |------|----------|------|
+| `identity_session_status` | Sanitized identity/session readiness; never returns secret values | safe |
+| `establish_identity_session` | Guarded login or pre-authenticated-session verification by label | low |
+| `identity_request` | Persistent identity request with cookie rotation and internal CSRF substitution | medium |
+| `identity_authz_diff` | Owner vs other-label vs unauthenticated IDOR/BOLA proof | high |
 | `authz_diff` | Multi-identity IDOR/BOLA harness (owner vs other vs unauth) | high |
 | `compare_requests` | Baseline-vs-mutation differential (identity/tenant/role swap) | medium |
 | `register_oob_probe` / `check_oob_interactions` | Out-of-band callback to confirm BLIND SSRF/XXE/RCE/OOB-SQLi | low/safe |
@@ -241,6 +245,20 @@ echo "focus on the /admin API, skip subdomain enum" >> "$AEGIS_HITL_FILE"
 Enabled via `AEGIS_HITL=1` or by setting `AEGIS_HITL_FILE`. Directives are
 attached to the tool-result turn (preserving role alternation) and polling never
 blocks or raises.
+
+## Persistent identity sessions (`agent/identity_sessions.py`)
+
+Identity credentials and pre-authenticated headers are loaded into an internal
+vault before model execution. Model context contains only labels, roles,
+tenants, and sanitized readiness states. Each identity retains cookies, bearer
+tokens, and CSRF state across guarded requests; same-origin enforcement prevents
+session forwarding to another origin. Safe reads can re-authenticate once after
+a 401/403, while state-changing requests are never automatically replayed.
+
+`identity_authz_diff(owner_identity, other_identity, target_url)` selects both
+sessions by label and repeats the same object request unauthenticated. Its
+structured result includes exact tested identities and per-identity coverage
+events. The older header-based tools remain available for compatibility.
 
 ## Multi-identity authorization testing (`agent/authz_probe.py`)
 

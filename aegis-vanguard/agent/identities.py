@@ -44,6 +44,14 @@ def load_identities(
             )
         if headers and not isinstance(headers, dict):
             raise ValueError(f"identity #{index + 1} headers must be an object")
+        login = item.get("login") or {}
+        if login and not isinstance(login, dict):
+            raise ValueError(f"identity #{index + 1} login must be an object")
+        extra_fields = login.get("extra_fields") or {}
+        if extra_fields and not isinstance(extra_fields, dict):
+            raise ValueError(
+                f"identity #{index + 1} login.extra_fields must be an object"
+            )
         identities.append({
             "label": str(item.get("label") or f"identity-{index + 1}"),
             "username": user,
@@ -51,6 +59,21 @@ def load_identities(
             "role": str(item.get("role") or "unknown"),
             "tenant": str(item.get("tenant") or "default"),
             "headers": {str(k): str(v) for k, v in headers.items()},
+            "login": {
+                "url": str(login.get("url") or ""),
+                "action_url": str(login.get("action_url") or ""),
+                "method": str(login.get("method") or "").upper(),
+                "content_type": str(login.get("content_type") or ""),
+                "username_field": str(login.get("username_field") or ""),
+                "password_field": str(login.get("password_field") or ""),
+                "extra_fields": {
+                    str(k): str(v) for k, v in extra_fields.items()
+                },
+                "verify_url": str(login.get("verify_url") or ""),
+                "success_marker": str(login.get("success_marker") or ""),
+                "failure_marker": str(login.get("failure_marker") or ""),
+                "token_field": str(login.get("token_field") or ""),
+            },
         })
 
     if username:
@@ -61,6 +84,7 @@ def load_identities(
             "role": "unknown",
             "tenant": "default",
             "headers": {},
+            "login": {},
         })
 
     labels = [item["label"] for item in identities]
@@ -77,6 +101,12 @@ def identity_summary(identities: List[Dict[str, Any]]) -> List[Dict[str, str]]:
             "username": str(item.get("username") or "header-session"),
             "role": str(item.get("role") or "unknown"),
             "tenant": str(item.get("tenant") or "default"),
+            "auth_source": (
+                "session_headers" if item.get("headers")
+                else "credentials" if item.get("username")
+                else "unconfigured"
+            ),
+            "login_configured": str(bool((item.get("login") or {}).get("url"))).lower(),
         }
         for item in identities
     ]

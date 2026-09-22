@@ -287,13 +287,14 @@ class CoverageLedger:
                 if not isinstance(item, dict):
                     continue
                 parameter = item.get("parameter_spec") or item.get("parameter") or "endpoint"
+                item_identity = str(item.get("identity") or chosen_identity)
                 state = str(item.get("status") or "tested_negative")
                 if state not in COVERAGE_STATES:
                     state = "candidate" if item.get("signals") else "tested_negative"
                 self.update(
                     endpoint=endpoint,
                     method=method,
-                    identity=chosen_identity,
+                    identity=item_identity,
                     parameter=str(parameter),
                     vulnerability_class=vuln_class,
                     state=state,

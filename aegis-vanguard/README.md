@@ -114,8 +114,18 @@ See [DEPLOYMENT.md](./DEPLOYMENT.md) for local Python setup, compose examples, a
 For authorization and workflow testing with more than one account, pass
 `--identity-file identities.json`. The file may be a JSON array or
 `{"identities": [...]}`; each item supports `label`, `username`, `password`,
-`role`, `tenant`, and optional authenticated `headers`. Use only dedicated test
-accounts and keep this file out of version control.
+`role`, `tenant`, optional authenticated `headers`, and an optional `login`
+object. Login configuration supports `url`, `action_url`, `method`,
+`content_type`, `username_field`, `password_field`, `extra_fields`,
+`verify_url`, `success_marker`, `failure_marker`, and `token_field`.
+
+Credentials and session values remain in an internal vault and are never added
+to model context. Hunters address persistent sessions by identity label through
+`identity_request` and `identity_authz_diff`; cookies rotate automatically and
+`{{csrf}}` placeholders are filled from a freshly fetched same-origin form.
+Use a private success marker or verification URL when possible so Vanguard can
+distinguish a proven authenticated session from `ready_unverified`. Use only
+dedicated test accounts and keep the identity file out of version control.
 
 ## Production notes
 

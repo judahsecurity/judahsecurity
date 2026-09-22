@@ -38,3 +38,28 @@ def test_duplicate_labels_are_rejected(tmp_path):
     ]))
     with pytest.raises(ValueError, match="unique"):
         load_identities(str(path))
+
+
+def test_login_configuration_is_normalized_without_entering_summary(tmp_path):
+    path = tmp_path / "identities.json"
+    path.write_text(json.dumps([{
+        "label": "member",
+        "username": "alice",
+        "password": "secret",
+        "login": {
+            "url": "https://example.test/login",
+            "username_field": "email",
+            "password_field": "passwd",
+            "extra_fields": {"realm": "staff"},
+            "success_marker": "Welcome",
+        },
+    }]))
+
+    identity = load_identities(str(path))[0]
+    summary = identity_summary([identity])[0]
+
+    assert identity["login"]["username_field"] == "email"
+    assert identity["login"]["extra_fields"] == {"realm": "staff"}
+    assert summary["login_configured"] == "true"
+    assert "secret" not in str(summary)
+    assert "Welcome" not in str(summary)

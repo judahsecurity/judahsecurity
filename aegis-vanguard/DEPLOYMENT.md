@@ -335,7 +335,8 @@ All configuration is environment-variable driven; no `.env` file is required.
 --identity-file PATH       JSON identity pool for user/role/tenant comparisons
 --enterprise               force all enterprise perimeter hunters
 --no-enterprise            disable enterprise specialists
---all-specialists          force API/framework + enterprise specialists
+--all-specialists          force core + API/framework + enterprise specialists
+--all-core-hunters         disable adaptive selection and run all 17 core hunters
 --no-api-specialists       disable GraphQL/gRPC/framework specialists
 --no-guardrails            disable legacy guardrails + Praetorium (not recommended)
 --no-tracing               disable trace capture

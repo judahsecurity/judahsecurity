@@ -13,15 +13,18 @@ adapted for validate-don't-destroy ROE.
 IDENTITY_PROTOCOL = """
 ## Identity Discipline (mandatory for authz / auth findings)
 Before confirming IDOR, auth bypass, BFLA, or missing-auth:
-1. Record which identity found it: anonymous / user_A / user_B / privileged.
-2. Re-test anonymous (strip auth headers/cookies).
-3. Re-test cross-identity (user A reading user B's object ID).
-4. Classify correctly:
+1. Call identity_session_status. Establish any configured session that is not ready.
+2. Use identity_request or identity_authz_diff with identity labels; never copy
+   passwords, cookies, or Authorization values into prompts or tool arguments.
+3. Record which identity found it: anonymous / user_A / user_B / privileged.
+4. Re-test anonymous (strip auth headers/cookies).
+5. Re-test cross-identity (user A reading user B's object ID).
+6. Classify correctly:
    - Works with NO auth → **missing authentication** (not IDOR)
    - User A reads user B data with A's token → **IDOR/BOLA**
    - Low-priv reaches admin function → **BFLA / vertical privilege escalation**
    - Only works for own data → **KILL** (not a vuln)
-5. A 200 status alone is never enough — show other-user fields in the response body.
+7. A 200 status alone is never enough — show other-user fields in the response body.
 """
 
 SURFACE_RANK_PROTOCOL = """

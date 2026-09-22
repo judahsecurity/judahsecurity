@@ -110,3 +110,34 @@ def test_unspecified_identity_does_not_claim_identity_specific_coverage():
         row["identity"] == "unspecified" and row["state"] == "tested_negative"
         for row in rows
     )
+
+
+def test_coverage_event_can_attribute_each_tested_identity():
+    ledger = CoverageLedger.from_input_surface(
+        _surface(params=["order_id"]),
+        identities=[{"label": "owner"}, {"label": "other"}],
+    )
+
+    ledger.record_probe_result(
+        {
+            "probe": "authz",
+            "target": "https://example.test/orders",
+            "method": "POST",
+            "coverage": [
+                {"parameter_spec": "form:order_id", "identity": "owner",
+                 "status": "tested_negative"},
+                {"parameter_spec": "form:order_id", "identity": "other",
+                 "status": "candidate", "signals": ["idor"]},
+            ],
+        },
+        source="identity_authz_diff",
+    )
+
+    states = {
+        row["identity"]: row["state"]
+        for row in ledger.snapshot()
+        if row["vulnerability_class"] == "authz"
+        and row["parameter"] == "form:order_id"
+        and row["planned"]
+    }
+    assert states == {"owner": "tested_negative", "other": "candidate"}
