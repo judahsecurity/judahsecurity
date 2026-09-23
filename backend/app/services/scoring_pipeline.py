@@ -290,6 +290,8 @@ class ScoringPipeline:
                     self._errors += 1
 
             finally:
+                # Severity is re-scored by the severity worker: Oracle's
+                # writes mark the finding dirty (app.services.severity_dirty).
                 self._cleanup(item.vuln_id)
                 if db is not None:
                     db.close()

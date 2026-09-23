@@ -77,6 +77,19 @@ def refresh_once(*, interval_seconds: int | None = None) -> dict[str, Any]:
     return result
 
 
+def rescore_changed_findings() -> dict[str, int]:
+    """Queue findings whose CVE gained (or lost) KEV listings, exploits or
+    Nuclei templates in this refresh for the severity worker."""
+    import app.models  # noqa: F401 — register models
+    from app.db.database import SessionLocal
+    from app.services.severity_intel import mark_intel_changes
+
+    result = mark_intel_changes(SessionLocal)
+    if result["marked"]:
+        logger.info("Exploitation intel changed for %d open finding(s); queued for re-scoring", result["marked"])
+    return result
+
+
 def _handle_signal(_signum, _frame) -> None:
     _shutdown.set()
 
@@ -95,6 +108,10 @@ def main() -> None:
             refresh_once(interval_seconds=interval)
         except Exception:
             logger.exception("Vulnerability intelligence refresh cycle failed")
+        try:
+            rescore_changed_findings()
+        except Exception:
+            logger.exception("Marking findings with changed exploitation intel failed")
         _shutdown.wait(interval)
     logger.info("Vulnerability intelligence refresher stopped")
 

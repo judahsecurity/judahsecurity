@@ -37,6 +37,7 @@ import {
   Search,
 } from 'lucide-react';
 import { api } from '@/lib/api';
+import { SeverityWeightsCard } from '@/components/settings/SeverityWeightsCard';
 import { useToast } from '@/hooks/use-toast';
 
 interface ApiConfig {
@@ -1014,6 +1015,9 @@ export default function SettingsPage() {
             )}
           </CardContent>
         </Card>
+
+        {/* Severity evaluation: organization default factor weights */}
+        <SeverityWeightsCard />
 
         {/* Notifications */}
         <Card>

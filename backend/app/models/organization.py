@@ -23,6 +23,11 @@ class Organization(Base):
     commoncrawl_org_name = Column(String(255), nullable=True)  # Organization name for TLD search
     commoncrawl_keywords = Column(JSON, default=list)  # Keywords for wildcard search (e.g., ["rockwell", "allen-bradley"])
     sni_keywords = Column(JSON, default=list)  # Keywords for SNI cloud asset discovery
+
+    # Severity evaluation: this organization's default 1–4 weight per risk
+    # factor, e.g. {"business_impact": 3}. Missing factors use the platform
+    # default; analysts can still override per finding during triage.
+    risk_weight_defaults = Column(JSON, nullable=True)
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow)

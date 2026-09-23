@@ -530,7 +530,8 @@ func (s *Store) GetOpenFindings(ctx context.Context, cveID, assetID string) ([]*
 		COALESCE(attack_path_class, ''),
 		COALESCE(lateral_movement_potential, ''),
 		COALESCE(preconditions_evaluated, '[]'::jsonb),
-		COALESCE(contextual_assessment, '{}'::jsonb)
+		COALESCE(contextual_assessment, '{}'::jsonb),
+		opes_components, opes_top_contributors
 		FROM %s.findings WHERE status = 'open'`, s.cfg.OracleSchema)
 	args := []any{}
 	n := 1
@@ -558,12 +559,14 @@ func (s *Store) GetOpenFindings(ctx context.Context, cveID, assetID string) ([]*
 		var f schema.Finding
 		var dampener, override *string
 		var reconcileRaw, briefRaw, precsRaw, contextRaw []byte
+		var compsRaw, contribsRaw []byte
 		var attackPath, lateralMov string
 		err := rows.Scan(
 			&f.ID, &f.CVEID, &f.AssetID,
 			&f.OPES.Value, &f.OPES.Category, &f.OPES.Label, &dampener, &override,
 			&f.OPES.Confidence, &f.RecommendationText, &f.Status, &f.CreatedAt, &f.UpdatedAt,
 			&reconcileRaw, &briefRaw, &attackPath, &lateralMov, &precsRaw, &contextRaw,
+			&compsRaw, &contribsRaw,
 		)
 		if err != nil {
 			return nil, err
@@ -580,6 +583,8 @@ func (s *Store) GetOpenFindings(ctx context.Context, cveID, assetID string) ([]*
 		_ = json.Unmarshal(briefRaw, &f.AnalystBrief)
 		_ = json.Unmarshal(precsRaw, &f.PreconditionsEvaluated)
 		_ = json.Unmarshal(contextRaw, &f.ContextualAssessment)
+		_ = json.Unmarshal(compsRaw, &f.OPES.Components)
+		_ = json.Unmarshal(contribsRaw, &f.OPES.TopContributors)
 		out = append(out, &f)
 	}
 	return out, rows.Err()

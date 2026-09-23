@@ -616,8 +616,12 @@ async def run_external_discovery(
             domains_by_email = result.raw_data.get("domains_by_email", {})
             domains_by_company = result.raw_data.get("domains_by_company", {})
             
-            # Track which email caused each domain to be discovered
+            # Track which email caused each domain to be discovered. A
+            # registrant email on the queried organisation's own domain is a
+            # stronger ownership signal than a third-party address.
+            org_root = extract_root_domain(request.domain)
             for email, domains_list in domains_by_email.items():
+                email_root = extract_root_domain(email.rsplit("@", 1)[1]) if "@" in email else ""
                 for domain in domains_list:
                     if domain not in asset_sources:
                         asset_sources[domain] = []
@@ -628,7 +632,7 @@ async def run_external_discovery(
                         "match_value": email,
                         "query_domain": request.domain,
                         "timestamp": datetime.utcnow().isoformat(),
-                        "confidence": 90 if "@" in email and "rockwell" in email.lower() else 70
+                        "confidence": 90 if email_root and email_root == org_root else 70
                     })
             
             # Track which company caused each domain to be discovered
