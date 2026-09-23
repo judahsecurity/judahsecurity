@@ -10,7 +10,7 @@ import (
 
 // RiskModelVersion identifies the factor mapping below. Bump on any change
 // to how signals map to factor scores.
-const RiskModelVersion = "risk/v5"
+const RiskModelVersion = "risk/v6"
 
 // riskModel maps the OPES inputs onto the seven-factor Likelihood × Impact
 // model. Every factor is scored 0–4 (0 = none, 4 = highest), Impact and
@@ -28,7 +28,35 @@ func riskModel(in Input, cfg RiskModelConfig) *schema.RiskModelScore {
 		EaseOfExploit:         easeOfExploitFactor(in, realism),
 		Awareness:             awarenessFactor(in),
 	}
-	return scoreRiskFactors(f, realism, cfg)
+	rm := scoreRiskFactors(f, realism, cfg)
+	rm.NeedsAnalyst = markSources(&rm.Factors)
+	return rm
+}
+
+// markSources labels every factor not already marked assumed as measured
+// from evidence, and returns the keys an analyst should fill in at triage
+// because the data to score them automatically was missing.
+func markSources(f *schema.RiskFactors) []string {
+	var needs []string
+	for _, e := range []struct {
+		key string
+		f   *schema.RiskFactor
+	}{
+		{"business_impact", &f.BusinessImpact},
+		{"network_location", &f.NetworkLocation},
+		{"vulnerability_severity", &f.VulnerabilitySeverity},
+		{"skill_level", &f.SkillLevel},
+		{"ease_of_discovery", &f.EaseOfDiscovery},
+		{"ease_of_exploit", &f.EaseOfExploit},
+		{"awareness", &f.Awareness},
+	} {
+		if e.f.Source == schema.FactorAssumed {
+			needs = append(needs, e.key)
+			continue
+		}
+		e.f.Source = schema.FactorAuto
+	}
+	return needs
 }
 
 // scoreRiskFactors is the pure arithmetic of the model, split out so the
@@ -86,7 +114,7 @@ func scoreRiskFactors(f schema.RiskFactors, realism *schema.ExploitRealism, cfg 
 
 func businessImpactFactor(a *schema.Asset) schema.RiskFactor {
 	if a == nil {
-		return schema.RiskFactor{Score: 2, Rating: "Medium", Reason: "No asset context; assumed standard business operations"}
+		return schema.RiskFactor{Score: 2, Rating: "Medium", Source: schema.FactorAssumed, Reason: "No asset context; assumed standard business operations"}
 	}
 	switch a.Criticality {
 	case schema.CriticalityCritical:
@@ -98,7 +126,7 @@ func businessImpactFactor(a *schema.Asset) schema.RiskFactor {
 	case schema.CriticalityMedium:
 		return schema.RiskFactor{Score: 2, Rating: "Medium", Reason: "Asset classified medium (standard business operations)"}
 	}
-	return schema.RiskFactor{Score: 2, Rating: "Medium", Reason: "Asset criticality not set; assumed medium"}
+	return schema.RiskFactor{Score: 2, Rating: "Medium", Source: schema.FactorAssumed, Reason: "Asset criticality not set; assumed medium"}
 }
 
 // networkLocationFactor distinguishes company-hosted from third-party-hosted
@@ -106,7 +134,7 @@ func businessImpactFactor(a *schema.Asset) schema.RiskFactor {
 // third_party, unknown), which arrives in signals.extra.
 func networkLocationFactor(a *schema.Asset) schema.RiskFactor {
 	if a == nil {
-		return schema.RiskFactor{Score: 2, Rating: "Unknown", Reason: "No asset context; exposure unknown"}
+		return schema.RiskFactor{Score: 2, Rating: "Unknown", Source: schema.FactorAssumed, Reason: "No asset context; exposure unknown"}
 	}
 	exposure := a.Exposure
 	if exposure == "" || exposure == schema.ExposureUnknown {
@@ -138,9 +166,9 @@ func networkLocationFactor(a *schema.Asset) schema.RiskFactor {
 				Reason: "Internet-facing on company-owned infrastructure"}
 		}
 		return schema.RiskFactor{Score: 4, Rating: "Company Hosted",
-			Reason: "Internet-facing; hosting not classified, assumed company-hosted"}
+			Source: schema.FactorAssumed, Reason: "Internet-facing; hosting not classified, assumed company-hosted"}
 	}
-	return schema.RiskFactor{Score: 2, Rating: "Unknown", Reason: "Exposure unknown"}
+	return schema.RiskFactor{Score: 2, Rating: "Unknown", Source: schema.FactorAssumed, Reason: "Exposure unknown"}
 }
 
 func severityFactor(in Input) schema.RiskFactor {
@@ -170,7 +198,7 @@ func severityFactor(in Input) schema.RiskFactor {
 		}
 		return schema.RiskFactor{Score: 2, Rating: "Medium", Reason: fmt.Sprintf("No CVSS; %s has limited impact", class)}
 	}
-	return schema.RiskFactor{Score: 2, Rating: "Medium", Reason: "No CVSS score available; assumed medium"}
+	return schema.RiskFactor{Score: 2, Rating: "Medium", Source: schema.FactorAssumed, Reason: "No CVSS score available; assumed medium"}
 }
 
 // ── Likelihood factors ───────────────────────────────────────────────────────
@@ -197,7 +225,7 @@ func skillLevelFactor(in Input, realism *schema.ExploitRealism) schema.RiskFacto
 		case r > 0:
 			return schema.RiskFactor{Score: 3, Rating: "Some Technical Skills", Reason: "Misconfiguration abusable with basic security knowledge"}
 		}
-		return schema.RiskFactor{Score: 2, Rating: "Advanced Computer User", Reason: "No CVSS vector or exploit analysis; assumed advanced user"}
+		return schema.RiskFactor{Score: 2, Rating: "Advanced Computer User", Source: schema.FactorAssumed, Reason: "No CVSS vector or exploit analysis; assumed advanced user"}
 	}
 
 	// Difficulty points: higher = more skill needed. A clean
@@ -396,9 +424,9 @@ func discoveryFactor(in Input) schema.RiskFactor {
 		return schema.RiskFactor{Score: 4, Rating: "Automated Tools Available", Reason: "Exposure class is routinely found by internet scanners"}
 	}
 	if in.CVE != nil {
-		return schema.RiskFactor{Score: 3, Rating: "Easy", Reason: "Public CVE; no scanner coverage data"}
+		return schema.RiskFactor{Score: 3, Rating: "Easy", Source: schema.FactorAssumed, Reason: "Public CVE; no scanner coverage data"}
 	}
-	return schema.RiskFactor{Score: 3, Rating: "Easy", Reason: "No discoverability data; assumed detectable with effort"}
+	return schema.RiskFactor{Score: 3, Rating: "Easy", Source: schema.FactorAssumed, Reason: "No discoverability data; assumed detectable with effort"}
 }
 
 func easeOfExploitFactor(in Input, realism *schema.ExploitRealism) schema.RiskFactor {
@@ -469,7 +497,7 @@ func awarenessFactor(in Input) schema.RiskFactor {
 	case e.MisconfigBreachRisk > 0:
 		return schema.RiskFactor{Score: 3, Rating: "Obvious", Reason: "Exposure is visible to anyone who looks"}
 	}
-	return schema.RiskFactor{Score: 1, Rating: "Unknown", Reason: "No public disclosure (internal discovery)"}
+	return schema.RiskFactor{Score: 1, Rating: "Unknown", Source: schema.FactorAssumed, Reason: "No public disclosure (internal discovery)"}
 }
 
 func round2(v float64) float64 { return math.Round(v*100) / 100 }

@@ -336,3 +336,40 @@ func TestRiskModel_RealismControlsInFront(t *testing.T) {
 		t.Errorf("WAF in front: got %s, want conditional", r.Tier)
 	}
 }
+
+// TestRiskModel_NeedsAnalyst: factors scored on a default (no asset
+// criticality, no hosting classification, no CVSS) are flagged for triage.
+func TestRiskModel_NeedsAnalyst(t *testing.T) {
+	in := Input{
+		CVE:   &schema.CVE{ID: "CVE-2099-0006"},
+		Asset: &schema.Asset{Exposure: schema.ExposureInternet},
+	}
+	rm := Compute(in, DefaultConfig()).RiskModel
+	want := map[string]bool{"business_impact": true, "network_location": true, "vulnerability_severity": true, "skill_level": true}
+	got := map[string]bool{}
+	for _, k := range rm.NeedsAnalyst {
+		got[k] = true
+	}
+	for k := range want {
+		if !got[k] {
+			t.Errorf("expected %s in needs_analyst, got %v", k, rm.NeedsAnalyst)
+		}
+	}
+	if rm.Factors.BusinessImpact.Source != schema.FactorAssumed {
+		t.Errorf("business impact source: got %q", rm.Factors.BusinessImpact.Source)
+	}
+
+	// Fully evidenced input: nothing to fill in for the impact side.
+	full := kevMetasploitInput()
+	full.Asset.Criticality = schema.CriticalityCritical
+	full.Asset.Signals.Extra = map[string]string{"hosting_type": "owned"}
+	rm = Compute(full, DefaultConfig()).RiskModel
+	for _, k := range rm.NeedsAnalyst {
+		if k == "business_impact" || k == "network_location" || k == "vulnerability_severity" {
+			t.Errorf("%s flagged despite evidence", k)
+		}
+	}
+	if rm.Factors.VulnerabilitySeverity.Source != schema.FactorAuto {
+		t.Errorf("severity source: got %q, want auto", rm.Factors.VulnerabilitySeverity.Source)
+	}
+}

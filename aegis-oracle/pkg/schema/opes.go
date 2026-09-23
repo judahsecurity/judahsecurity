@@ -41,7 +41,18 @@ type RiskFactor struct {
 	Score  int    `json:"score"`
 	Rating string `json:"rating"`
 	Reason string `json:"reason"`
+	// Source says where the score came from: auto (measured from evidence),
+	// assumed (a default because the data was missing — an analyst should
+	// set it at triage) or analyst (set by an analyst; applied by the ASM).
+	Source string `json:"source,omitempty"`
 }
+
+// Risk factor sources.
+const (
+	FactorAuto    = "auto"
+	FactorAssumed = "assumed"
+	FactorAnalyst = "analyst"
+)
 
 // RiskFactors are the seven factors of the risk model.
 //
@@ -98,8 +109,11 @@ type RiskModelScore struct {
 	// cap Likelihood; LikelihoodUncapped shows the value before that cap.
 	Realism            *ExploitRealism `json:"exploit_realism,omitempty"`
 	LikelihoodUncapped float64         `json:"likelihood_uncapped"`
-	Factors            RiskFactors     `json:"factors"`
-	Version            string          `json:"version"`
+	// NeedsAnalyst lists factor keys scored on an assumption because the
+	// data was missing; analysts fill these in during triage.
+	NeedsAnalyst []string    `json:"needs_analyst,omitempty"`
+	Factors      RiskFactors `json:"factors"`
+	Version      string      `json:"version"`
 }
 
 // OPESComponents are the six 0–10 sub-scores that combine into the final

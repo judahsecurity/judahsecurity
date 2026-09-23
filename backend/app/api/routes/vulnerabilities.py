@@ -1752,6 +1752,85 @@ def write_finding_risk_assessment(
     return ra
 
 
+class RiskFactorInput(BaseModel):
+    score: int
+    note: Optional[str] = None
+
+
+class RealismInput(BaseModel):
+    tier: Optional[str] = None
+    note: Optional[str] = None
+
+
+class RiskFactorsTriage(BaseModel):
+    """Analyst triage input for the risk model.
+
+    ``factors`` maps a factor key to ``{score, note}``; a null value clears
+    the analyst score so the automatic one applies again. ``exploit_realism``
+    sets the realism tier after manual verification (null tier clears it).
+    """
+    factors: Dict[str, Optional[RiskFactorInput]] = {}
+    exploit_realism: Optional[RealismInput] = None
+
+
+def _risk_model_view(vuln: Vulnerability) -> dict:
+    from app.services.risk_model import merged_risk_model
+
+    meta = vuln.metadata_ or {}
+    auto = (meta.get("oracle") or {}).get("opes_risk_model")
+    return merged_risk_model(auto, meta.get("risk_overrides"))
+
+
+@router.get("/{vuln_id}/risk-factors")
+def get_finding_risk_factors(
+    vuln_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Risk model for a finding: automatic factors, analyst overrides, and
+    the factors still waiting on an analyst."""
+    vuln = db.query(Vulnerability).filter(Vulnerability.id == vuln_id).first()
+    if not vuln:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vulnerability not found")
+    if not check_org_access(db, current_user, vuln.asset_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    return _risk_model_view(vuln)
+
+
+@router.put("/{vuln_id}/risk-factors")
+def triage_finding_risk_factors(
+    vuln_id: int,
+    payload: RiskFactorsTriage,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Save analyst-scored risk factors from triage and return the
+    recomputed risk. Stored apart from Oracle output so re-enrichment keeps it."""
+    from sqlalchemy.orm.attributes import flag_modified
+    from app.services.risk_model import apply_overrides
+
+    vuln = db.query(Vulnerability).filter(Vulnerability.id == vuln_id).first()
+    if not vuln:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vulnerability not found")
+    if not check_org_access(db, current_user, vuln.asset_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+
+    meta = dict(vuln.metadata_ or {})
+    try:
+        meta["risk_overrides"] = apply_overrides(
+            meta.get("risk_overrides") or {},
+            {k: (v.model_dump() if v is not None else None) for k, v in payload.factors.items()},
+            payload.exploit_realism.model_dump() if payload.exploit_realism is not None else None,
+            analyst=current_user.email or current_user.username or "unknown",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    vuln.metadata_ = meta
+    flag_modified(vuln, "metadata_")
+    db.commit()
+    return _risk_model_view(vuln)
+
+
 @router.post("/{vuln_id}/risk-assessment/ask")
 async def ask_marcus(
     vuln_id: int,

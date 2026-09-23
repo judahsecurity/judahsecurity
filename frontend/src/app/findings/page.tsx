@@ -71,6 +71,7 @@ import { DemonstratedChain, type AgentDetection } from '@/components/findings/De
 import { DetectionPanel, hasScannerDetection, type ScannerDetection } from '@/components/findings/DetectionPanel';
 import { FindingWriteup } from '@/components/findings/FindingWriteup';
 import { RiskAssessmentPanel, raStatusLabel, type RiskAssessment } from '@/components/findings/RiskAssessmentPanel';
+import { RiskFactorTriagePanel } from '@/components/findings/RiskFactorTriagePanel';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
   Select,
@@ -2769,6 +2770,10 @@ export default function FindingsPage() {
                   );
                 }}
               />
+
+              {/* Risk scoring triage — analysts fill in the factors Oracle
+                  could not measure (business impact, hosting, verification). */}
+              {selectedFinding && <RiskFactorTriagePanel findingId={selectedFinding.id} />}
 
               {/* Generate Nuclei Template CTA */}
               {selectedFinding && (selectedFinding.cve_id || selectedFinding.template_id) && (

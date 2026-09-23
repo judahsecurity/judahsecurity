@@ -1122,6 +1122,22 @@ class ApiClient {
     return response.data;
   }
 
+  async getRiskFactors(vulnId: number) {
+    const response = await this.client.get(`/vulnerabilities/${vulnId}/risk-factors`);
+    return response.data;
+  }
+
+  async saveRiskFactors(
+    vulnId: number,
+    payload: {
+      factors: Record<string, { score: number; note?: string } | null>;
+      exploit_realism?: { tier: string | null; note?: string };
+    },
+  ) {
+    const response = await this.client.put(`/vulnerabilities/${vulnId}/risk-factors`, payload);
+    return response.data;
+  }
+
   async getValidationResult(vulnId: number) {
     const response = await this.client.get(`/vulnerabilities/${vulnId}/validation`);
     return response.data;
