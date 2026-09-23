@@ -10,31 +10,42 @@ import (
 
 // RiskModelVersion identifies the factor mapping below. Bump on any change
 // to how signals map to factor scores.
-const RiskModelVersion = "risk/v3"
+const RiskModelVersion = "risk/v4"
 
 // riskModel maps the OPES inputs onto the seven-factor Likelihood × Impact
 // model. Every factor carries a one-line reason so an analyst can see why a
 // finding scored the way it did. It never changes the OPES value.
 func riskModel(in Input, cfg RiskModelConfig) *schema.RiskModelScore {
+	realism := exploitRealism(in)
 	f := schema.RiskFactors{
 		BusinessImpact:        businessImpactFactor(in.Asset),
 		NetworkLocation:       networkLocationFactor(in.Asset),
 		VulnerabilitySeverity: severityFactor(in),
-		SkillLevel:            skillLevelFactor(in),
+		SkillLevel:            skillLevelFactor(in, realism),
 		EaseOfDiscovery:       discoveryFactor(in),
-		EaseOfExploit:         easeOfExploitFactor(in),
+		EaseOfExploit:         easeOfExploitFactor(in, realism),
 		Awareness:             awarenessFactor(in),
 	}
-	return scoreRiskFactors(f, cfg)
+	return scoreRiskFactors(f, realism, cfg)
 }
 
 // scoreRiskFactors is the pure arithmetic of the model, split out so the
 // documented worked examples can be tested without building full inputs.
-func scoreRiskFactors(f schema.RiskFactors, cfg RiskModelConfig) *schema.RiskModelScore {
+// realism may be nil (no likelihood cap).
+func scoreRiskFactors(f schema.RiskFactors, realism *schema.ExploitRealism, cfg RiskModelConfig) *schema.RiskModelScore {
 	impact := float64(f.BusinessImpact.Score)*cfg.BusinessImpactWeight +
 		float64(f.NetworkLocation.Score)*cfg.NetworkLocationWeight +
 		float64(f.VulnerabilitySeverity.Score)*cfg.VulnerabilitySeverityWeight
-	likelihood := float64(f.SkillLevel.Score+f.EaseOfDiscovery.Score+f.EaseOfExploit.Score+f.Awareness.Score) / 4
+	uncapped := float64(f.SkillLevel.Score+f.EaseOfDiscovery.Score+f.EaseOfExploit.Score+f.Awareness.Score) / 4
+	likelihood := uncapped
+	if realism != nil {
+		switch realism.Tier {
+		case schema.RealismBlocked:
+			likelihood = math.Min(likelihood, cfg.BlockedLikelihoodCap)
+		case schema.RealismConditional:
+			likelihood = math.Min(likelihood, cfg.ConditionalLikelihoodCap)
+		}
+	}
 	risk := impact * likelihood
 	practicality := float64(f.SkillLevel.Score+f.EaseOfExploit.Score+f.Awareness.Score) / 3
 
@@ -61,6 +72,8 @@ func scoreRiskFactors(f schema.RiskFactors, cfg RiskModelConfig) *schema.RiskMod
 		Severity:            f.VulnerabilitySeverity.Score,
 		Discoverability:     f.EaseOfDiscovery.Score,
 		ExploitPracticality: round2(practicality),
+		Realism:             realism,
+		LikelihoodUncapped:  round2(uncapped),
 		Factors:             f,
 		Version:             RiskModelVersion,
 	}
@@ -168,7 +181,7 @@ func severityFactor(in Input) schema.RiskFactor {
 // the hard part, so it raises the score to what the tool leaves the attacker
 // to do. Tooling cannot remove a positional requirement (existing code
 // execution or physical access), so those stay capped at Moderate.
-func skillLevelFactor(in Input) schema.RiskFactor {
+func skillLevelFactor(in Input, realism *schema.ExploitRealism) schema.RiskFactor {
 	vector := intrinsicVector(in)
 	if vector == "" {
 		vector = bestCVSSVector(in.CVE)
@@ -281,6 +294,10 @@ func skillLevelFactor(in Input) schema.RiskFactor {
 		if capability == schema.AttackerCodeExecution || capability == schema.AttackerPhysical {
 			floor = min3(floor)
 		}
+		// A tool only lowers the bar if it can realistically be used here.
+		if realism != nil && floor > realism.Score {
+			floor = realism.Score
+		}
 		if floor > score {
 			why = append(why, fmt.Sprintf("%s automates exploitation (difficulty alone: %d)", tool, score))
 			score = floor
@@ -379,7 +396,7 @@ func discoveryFactor(in Input) schema.RiskFactor {
 	return schema.RiskFactor{Score: 3, Rating: "Easy", Reason: "No discoverability data; assumed detectable with effort"}
 }
 
-func easeOfExploitFactor(in Input) schema.RiskFactor {
+func easeOfExploitFactor(in Input, realism *schema.ExploitRealism) schema.RiskFactor {
 	e := in.Exploitation
 	var f schema.RiskFactor
 	switch {
@@ -397,20 +414,21 @@ func easeOfExploitFactor(in Input) schema.RiskFactor {
 		f = schema.RiskFactor{Score: 1, Rating: "Theoretical", Reason: "No known working exploit"}
 	}
 
-	// Real-world practicality: a multi-stage path (foothold, phishing,
-	// credentials) or unmet preconditions caps how easy it is in practice.
-	if in.Intrinsic != nil && f.Score > 2 {
-		switch in.Intrinsic.AttackPathClass {
-		case schema.AttackPathLateralMovementRequired, schema.AttackPathPhishingDelivery, schema.AttackPathValidCredentials:
-			f = schema.RiskFactor{Score: 2, Rating: "Difficult",
-				Reason: fmt.Sprintf("%s, but exploitation needs a multi-stage path (%s)", f.Reason, in.Intrinsic.AttackPathClass)}
-		}
-	}
-	if f.Score > 2 && in.Preconditions.CountBlockers(schema.PreconditionUnsatisfied) > 0 {
-		f = schema.RiskFactor{Score: 2, Rating: "Difficult",
-			Reason: fmt.Sprintf("%s, but a required condition is not met on this asset", f.Reason)}
+	// Having an exploit is not the same as it working here: cap by what
+	// the asset evidence says is realistic.
+	if realism != nil && f.Score > realism.Score {
+		f = schema.RiskFactor{Score: realism.Score, Rating: easeRatings[realism.Score],
+			Reason: fmt.Sprintf("%s, but on this asset: %s", f.Reason, strings.Join(realism.Reasons, "; "))}
 	}
 	return f
+}
+
+var easeRatings = map[int]string{
+	5: "Simple/Scripted",
+	4: "Automated Tools Available",
+	3: "Easy",
+	2: "Difficult",
+	1: "Theoretical",
 }
 
 func awarenessFactor(in Input) schema.RiskFactor {
@@ -443,3 +461,114 @@ func awarenessFactor(in Input) schema.RiskFactor {
 }
 
 func round2(v float64) float64 { return math.Round(v*100) / 100 }
+
+// exploitRealism checks whether the known exploit can realistically work
+// against this asset, using only asset-specific evidence: prerequisite
+// evaluations, what our scanner confirmed, how the attacker must reach it,
+// and controls in front of it. The most restrictive finding wins.
+//
+//	confirmed   5  exploit or vulnerable code path proven on this asset
+//	likely      4  feature confirmed live / prerequisites met, nothing in the way
+//	unverified  3  only the version matched; exploit may not apply (backport,
+//	               feature disabled, config) — needs verification
+//	conditional 2  needs something first: foothold, credentials, a victim,
+//	               adjacent/local access, or getting past auth or a WAF
+//	blocked     1  a required prerequisite is not met on this asset, so the
+//	               documented exploit paths do not work here today
+func exploitRealism(in Input) *schema.ExploitRealism {
+	var blocked, conditional, verified []string
+
+	for _, e := range in.Preconditions {
+		if e.Precondition.Severity != schema.PreconditionBlocker {
+			continue
+		}
+		desc := e.Precondition.Description
+		if desc == "" {
+			desc = e.Precondition.ID
+		}
+		switch e.Status {
+		case schema.PreconditionUnsatisfied:
+			blocked = append(blocked, "required condition not met: "+desc)
+		case schema.PreconditionSatisfied:
+			verified = append(verified, "required condition met: "+desc)
+		}
+	}
+	if in.Asset != nil && in.Asset.Exposure == schema.ExposureIsolated {
+		blocked = append(blocked, "asset is isolated / air-gapped")
+	}
+
+	vector := intrinsicVector(in)
+	if vector == "" {
+		vector = bestCVSSVector(in.CVE)
+	}
+	internetFacing := in.Asset != nil && in.Asset.Exposure == schema.ExposureInternet
+	switch av, _ := parseAVAC(vector); av {
+	case "A":
+		if internetFacing {
+			conditional = append(conditional, "needs adjacent-network access (AV:A), not reachable from the internet")
+		}
+	case "L", "P":
+		conditional = append(conditional, fmt.Sprintf("needs local or physical access (AV:%s)", av))
+	}
+
+	unauthNetwork := false
+	if in.Intrinsic != nil {
+		switch in.Intrinsic.RemoteTriggerability {
+		case schema.TriggerNo:
+			conditional = append(conditional, "cannot be triggered remotely")
+		case schema.TriggerConditional:
+			conditional = append(conditional, "only remotely triggerable under specific conditions")
+		}
+		switch in.Intrinsic.AttackPathClass {
+		case schema.AttackPathLateralMovementRequired:
+			conditional = append(conditional, "attacker needs a foothold on the network first")
+		case schema.AttackPathValidCredentials:
+			conditional = append(conditional, "attacker needs valid credentials first")
+		case schema.AttackPathPhishingDelivery:
+			conditional = append(conditional, "attacker needs a victim to open or click something")
+		}
+		switch in.Intrinsic.AttackerCapability {
+		case schema.AttackerCodeExecution:
+			conditional = append(conditional, "attacker needs existing code execution")
+		case schema.AttackerPhysical:
+			conditional = append(conditional, "attacker needs physical access")
+		case schema.AttackerUnauthenticatedNetwork:
+			unauthNetwork = true
+		}
+	}
+	if unauthNetwork && in.Asset != nil {
+		if a := in.Asset.Signals.Auth; a != nil && a.Required != nil && *a.Required {
+			conditional = append(conditional, "unauthenticated exploit, but the asset requires authentication in front")
+		}
+		if n := in.Asset.Signals.Network; n != nil && n.WAF != "" {
+			conditional = append(conditional, "unauthenticated exploit, but a WAF ("+n.WAF+") sits in front")
+		}
+	}
+
+	switch {
+	case in.DetectionConfidence == schema.ExploitConfirmed:
+		// Proven beats inferred: the exploit fired against this asset.
+		return &schema.ExploitRealism{Score: 5, Tier: schema.RealismConfirmed,
+			Reasons: []string{"exploit or vulnerable code path confirmed on this asset by our scanner"}}
+	case len(blocked) > 0:
+		return &schema.ExploitRealism{Score: 1, Tier: schema.RealismBlocked,
+			Reasons: append(blocked, "documented exploit paths do not work here today; not a guarantee against other paths")}
+	case len(conditional) > 0:
+		return &schema.ExploitRealism{Score: 2, Tier: schema.RealismConditional, Reasons: conditional}
+	case in.DetectionConfidence == schema.EndpointConfirmed || len(verified) > 0:
+		reasons := verified
+		if in.DetectionConfidence == schema.EndpointConfirmed {
+			reasons = append([]string{"vulnerable feature confirmed live on this asset"}, reasons...)
+		}
+		return &schema.ExploitRealism{Score: 4, Tier: schema.RealismLikely, Reasons: reasons}
+	case in.Exploitation.MisconfigBreachRisk > 0 && in.CVE == nil:
+		// Exposure findings: the exposure itself is the observation.
+		return &schema.ExploitRealism{Score: 4, Tier: schema.RealismLikely,
+			Reasons: []string{"exposure observed directly on this asset"}}
+	}
+	reason := "no asset evidence that the exploit applies (version match only); verify before treating as exploitable"
+	if in.DetectionConfidence != schema.VersionOnly {
+		reason = "no asset evidence either way; verify before treating as exploitable"
+	}
+	return &schema.ExploitRealism{Score: 3, Tier: schema.RealismUnverified, Reasons: []string{reason}}
+}

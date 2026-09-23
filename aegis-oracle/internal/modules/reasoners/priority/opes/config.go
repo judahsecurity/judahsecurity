@@ -62,6 +62,13 @@ type RiskModelConfig struct {
 	Critical float64
 	High     float64
 	Medium   float64
+
+	// Likelihood ceilings applied by exploit realism. An exploit whose
+	// documented paths are blocked on this asset, or that needs a foothold,
+	// credentials or a victim first, cannot be as likely as one that works
+	// directly, however well known or weaponized it is.
+	BlockedLikelihoodCap     float64
+	ConditionalLikelihoodCap float64
 }
 
 // DefaultConfig returns the baseline OPES configuration. These numbers
@@ -95,6 +102,8 @@ func DefaultConfig() Config {
 			Critical:                    16,
 			High:                        11,
 			Medium:                      6,
+			BlockedLikelihoodCap:        2.0,
+			ConditionalLikelihoodCap:    3.0,
 		},
 	}
 }

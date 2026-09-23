@@ -41,7 +41,7 @@ func TestRiskModel_DocumentedScenarios(t *testing.T) {
 	cfg := DefaultConfig().RiskModel
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := scoreRiskFactors(tc.f, cfg)
+			got := scoreRiskFactors(tc.f, nil, cfg)
 			if math.Abs(got.Impact-tc.impact) > 0.001 {
 				t.Errorf("impact: got %.2f, want %.2f", got.Impact, tc.impact)
 			}
@@ -119,8 +119,13 @@ func TestRiskModel_KEVMetasploitCompanyHosted(t *testing.T) {
 	if f.BusinessImpact.Score != 5 || f.NetworkLocation.Score != 5 || f.VulnerabilitySeverity.Score != 5 {
 		t.Errorf("impact factors: %+v", f)
 	}
-	if f.SkillLevel.Score != 5 || f.EaseOfDiscovery.Score != 5 || f.EaseOfExploit.Score != 4 || f.Awareness.Score != 5 {
+	// Version match only: the Metasploit module is not yet shown to work
+	// on this asset, so Ease of Exploit is held at 3 pending verification.
+	if f.SkillLevel.Score != 5 || f.EaseOfDiscovery.Score != 5 || f.EaseOfExploit.Score != 3 || f.Awareness.Score != 5 {
 		t.Errorf("likelihood factors: %+v", f)
+	}
+	if rm.Realism == nil || rm.Realism.Tier != schema.RealismUnverified {
+		t.Errorf("realism: got %+v, want unverified", rm.Realism)
 	}
 	if rm.Level != schema.PriorityCritical {
 		t.Errorf("level: got %s (%.2f), want critical", rm.Level, rm.Score)
@@ -157,7 +162,7 @@ func TestRiskModel_PracticalityCappedByMultiStagePath(t *testing.T) {
 		Intrinsic:    &schema.IntrinsicAnalysis{AttackPathClass: schema.AttackPathLateralMovementRequired},
 		Exploitation: schema.ExploitationEvidence{MetasploitAvailable: true},
 	}
-	if got := easeOfExploitFactor(in).Score; got != 2 {
+	if got := easeOfExploitFactor(in, exploitRealism(in)).Score; got != 2 {
 		t.Errorf("ease of exploit: got %d, want 2 (multi-stage)", got)
 	}
 }
@@ -187,7 +192,7 @@ func TestRiskModel_SkillLevelFollowsExploitDifficulty(t *testing.T) {
 		{"code execution + high complexity", intrinsic(schema.AttackerCodeExecution, schema.ComplexityHigh, "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H"), 1},
 	}
 	for _, c := range cases {
-		if got := skillLevelFactor(c.in); got.Score != c.want {
+		if got := skillLevelFactor(c.in, nil); got.Score != c.want {
 			t.Errorf("%s: got %d (%s), want %d", c.name, got.Score, got.Reason, c.want)
 		}
 	}
@@ -195,36 +200,132 @@ func TestRiskModel_SkillLevelFollowsExploitDifficulty(t *testing.T) {
 	// Tooling lowers the skill bar: the same hard flaw with a Metasploit
 	// module needs no technical skill, a public PoC only moderate skill.
 	hard := withVector("CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:H")
-	if got := skillLevelFactor(hard).Score; got != 2 {
+	if got := skillLevelFactor(hard, nil).Score; got != 2 {
 		t.Errorf("hard flaw without tooling: got %d, want 2", got)
 	}
 	armed := withVector("CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:H")
 	armed.Exploitation.MetasploitAvailable = true
-	if got := skillLevelFactor(armed).Score; got != 5 {
+	if got := skillLevelFactor(armed, nil).Score; got != 5 {
 		t.Errorf("hard flaw with Metasploit: got %d, want 5", got)
 	}
 	poc := withVector("CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:H")
 	poc.Exploitation.PublicPOCFound = true
-	if got := skillLevelFactor(poc).Score; got != 3 {
+	if got := skillLevelFactor(poc, nil).Score; got != 3 {
 		t.Errorf("hard flaw with PoC: got %d, want 3", got)
 	}
 	// Tooling never lowers the score of an already-easy flaw.
 	easy := withVector("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H")
 	easy.Exploitation.PublicPOCFound = true
-	if got := skillLevelFactor(easy).Score; got != 5 {
+	if got := skillLevelFactor(easy, nil).Score; got != 5 {
 		t.Errorf("easy flaw with PoC: got %d, want 5", got)
 	}
 	// Tooling can't remove a code-execution prerequisite.
 	foothold := intrinsic(schema.AttackerCodeExecution, schema.ComplexityHigh, "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H")
 	foothold.Exploitation.MetasploitAvailable = true
-	if got := skillLevelFactor(foothold).Score; got != 3 {
+	if got := skillLevelFactor(foothold, nil).Score; got != 3 {
 		t.Errorf("code-exec prerequisite with Metasploit: got %d, want 3", got)
 	}
 
 	// A well-documented class never requires specialist skill.
 	sqli := withVector("CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:H/I:H/A:H")
 	sqli.CWEID = "CWE-89"
-	if got := skillLevelFactor(sqli).Score; got != 3 {
+	if got := skillLevelFactor(sqli, nil).Score; got != 3 {
 		t.Errorf("SQLi floor: got %d, want 3", got)
+	}
+}
+
+func kevMetasploitInput() Input {
+	return Input{
+		CVE: &schema.CVE{ID: "CVE-2099-0005", CVSSVectors: []schema.CVSSVector{{Version: "3.1", Score: 9.8,
+			Vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}}, NucleiTemplate: "x.yaml"},
+		Asset: &schema.Asset{Criticality: schema.CriticalityHigh, Exposure: schema.ExposureInternet},
+		Exploitation: schema.ExploitationEvidence{
+			InKEVSources: []string{"cisa_kev"}, MetasploitAvailable: true,
+		},
+		Now: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+}
+
+// TestRiskModel_ExploitRealism: a famous, weaponized exploit is only as
+// likely as the evidence says it can work on this asset.
+func TestRiskModel_ExploitRealism(t *testing.T) {
+	blocker := func(status schema.PreconditionStatus) schema.PreconditionEvalSet {
+		return schema.PreconditionEvalSet{{
+			Precondition: schema.Precondition{ID: "mod_enabled", Description: "vulnerable module enabled", Severity: schema.PreconditionBlocker},
+			Status:       status,
+		}}
+	}
+
+	confirmed := kevMetasploitInput()
+	confirmed.DetectionConfidence = schema.ExploitConfirmed
+
+	likely := kevMetasploitInput()
+	likely.DetectionConfidence = schema.EndpointConfirmed
+	likely.Preconditions = blocker(schema.PreconditionSatisfied)
+
+	unverified := kevMetasploitInput()
+	unverified.DetectionConfidence = schema.VersionOnly
+
+	conditional := kevMetasploitInput()
+	conditional.Intrinsic = &schema.IntrinsicAnalysis{AttackPathClass: schema.AttackPathLateralMovementRequired}
+
+	blocked := kevMetasploitInput()
+	blocked.Preconditions = blocker(schema.PreconditionUnsatisfied)
+
+	cases := []struct {
+		name      string
+		in        Input
+		tier      string
+		ease      int
+		maxLikely float64
+	}{
+		{"confirmed", confirmed, schema.RealismConfirmed, 5, 5},
+		{"likely", likely, schema.RealismLikely, 4, 5},
+		{"unverified", unverified, schema.RealismUnverified, 3, 5},
+		{"conditional", conditional, schema.RealismConditional, 2, 3.0},
+		{"blocked", blocked, schema.RealismBlocked, 1, 2.0},
+	}
+	prev := 26.0
+	for _, c := range cases {
+		rm := Compute(c.in, DefaultConfig()).RiskModel
+		if rm.Realism == nil || rm.Realism.Tier != c.tier {
+			t.Errorf("%s: realism got %+v, want %s", c.name, rm.Realism, c.tier)
+			continue
+		}
+		if rm.Factors.EaseOfExploit.Score != c.ease {
+			t.Errorf("%s: ease of exploit got %d, want %d", c.name, rm.Factors.EaseOfExploit.Score, c.ease)
+		}
+		if rm.Likelihood > c.maxLikely {
+			t.Errorf("%s: likelihood %.2f above cap %.2f", c.name, rm.Likelihood, c.maxLikely)
+		}
+		if rm.Score > prev {
+			t.Errorf("%s: risk %.2f should not exceed the more realistic tier above it (%.2f)", c.name, rm.Score, prev)
+		}
+		prev = rm.Score
+		t.Logf("%-11s risk %5.2f %-8s likelihood %.2f (uncapped %.2f) ease %d skill %d",
+			c.name, rm.Score, rm.Level, rm.Likelihood, rm.LikelihoodUncapped, rm.Factors.EaseOfExploit.Score, rm.Factors.SkillLevel.Score)
+	}
+
+	// Blocked: a KEV + Metasploit bug must not stay Critical when its
+	// required condition is absent on this asset.
+	if rm := Compute(blocked, DefaultConfig()).RiskModel; rm.Level == schema.PriorityCritical {
+		t.Errorf("blocked KEV+Metasploit still critical: %.2f", rm.Score)
+	}
+}
+
+// TestRiskModel_RealismControlsInFront: auth or a WAF in front of an
+// unauthenticated exploit makes it conditional, not direct.
+func TestRiskModel_RealismControlsInFront(t *testing.T) {
+	yes := true
+	in := kevMetasploitInput()
+	in.Intrinsic = &schema.IntrinsicAnalysis{AttackerCapability: schema.AttackerUnauthenticatedNetwork}
+	in.Asset.Signals.Auth = &schema.AuthSignals{Required: &yes}
+	if r := exploitRealism(in); r.Tier != schema.RealismConditional {
+		t.Errorf("auth in front: got %s, want conditional", r.Tier)
+	}
+	in.Asset.Signals.Auth = nil
+	in.Asset.Signals.Network = &schema.NetworkSignals{WAF: "cloudflare"}
+	if r := exploitRealism(in); r.Tier != schema.RealismConditional {
+		t.Errorf("WAF in front: got %s, want conditional", r.Tier)
 	}
 }

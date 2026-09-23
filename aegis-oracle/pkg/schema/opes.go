@@ -7,10 +7,10 @@ package schema
 type Priority string
 
 const (
-	PriorityCritical     Priority = "critical"
-	PriorityHigh         Priority = "high"
-	PriorityMedium       Priority = "medium"
-	PriorityLow          Priority = "low"
+	PriorityCritical      Priority = "critical"
+	PriorityHigh          Priority = "high"
+	PriorityMedium        Priority = "medium"
+	PriorityLow           Priority = "low"
 	PriorityInformational Priority = "informational"
 )
 
@@ -58,6 +58,25 @@ type RiskFactors struct {
 	Awareness             RiskFactor `json:"awareness"`
 }
 
+// Exploit realism tiers, from proven on this asset to blocked on this asset.
+const (
+	RealismConfirmed   = "confirmed"
+	RealismLikely      = "likely"
+	RealismUnverified  = "unverified"
+	RealismConditional = "conditional"
+	RealismBlocked     = "blocked"
+)
+
+// ExploitRealism is the asset-specific reality check on exploitability:
+// an exploit existing somewhere does not mean it works here. Score is 1–5
+// (5 = confirmed on this asset, 1 = known paths blocked on this asset).
+// Blocked is not a safety claim: it covers the documented paths only.
+type ExploitRealism struct {
+	Score   int      `json:"score"`
+	Tier    string   `json:"tier"`
+	Reasons []string `json:"reasons"`
+}
+
 // RiskModelScore is Risk = Impact × Likelihood on a 0–25 scale.
 //
 // Severity, Discoverability and ExploitPracticality are the three headline
@@ -65,15 +84,20 @@ type RiskFactors struct {
 // how practical is it to exploit in the real world (mean of skill level,
 // ease of exploit and awareness, 1–5).
 type RiskModelScore struct {
-	Score               float64     `json:"score"`
-	Level               Priority    `json:"level"`
-	Impact              float64     `json:"impact"`
-	Likelihood          float64     `json:"likelihood"`
-	Severity            int         `json:"severity"`
-	Discoverability     int         `json:"discoverability"`
-	ExploitPracticality float64     `json:"exploit_practicality"`
-	Factors             RiskFactors `json:"factors"`
-	Version             string      `json:"version"`
+	Score               float64  `json:"score"`
+	Level               Priority `json:"level"`
+	Impact              float64  `json:"impact"`
+	Likelihood          float64  `json:"likelihood"`
+	Severity            int      `json:"severity"`
+	Discoverability     int      `json:"discoverability"`
+	ExploitPracticality float64  `json:"exploit_practicality"`
+	// Realism answers "can the known exploit actually work against this
+	// asset?" It caps Ease of Exploit and tool-driven Skill Level, and can
+	// cap Likelihood; LikelihoodUncapped shows the value before that cap.
+	Realism            *ExploitRealism `json:"exploit_realism,omitempty"`
+	LikelihoodUncapped float64         `json:"likelihood_uncapped"`
+	Factors            RiskFactors     `json:"factors"`
+	Version            string          `json:"version"`
 }
 
 // OPESComponents are the six 0–10 sub-scores that combine into the final

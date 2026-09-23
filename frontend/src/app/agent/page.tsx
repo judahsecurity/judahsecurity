@@ -75,6 +75,8 @@ interface RiskModelScore {
   severity: number;
   discoverability: number;
   exploit_practicality: number;
+  exploit_realism?: { score: number; tier: 'confirmed' | 'likely' | 'unverified' | 'conditional' | 'blocked'; reasons: string[] };
+  likelihood_uncapped: number;
   factors: {
     business_impact: RiskFactor;
     network_location: RiskFactor;
@@ -454,6 +456,23 @@ function RiskModelPanel({ rm }: { rm: RiskModelScore }) {
           <div className="text-lg font-bold">{rm.exploit_practicality.toFixed(1)}/5</div>
         </div>
       </div>
+      {rm.exploit_realism && (
+        <div className="rounded-lg border p-2 mb-2">
+          <div className="text-xs">
+            <span className="text-muted-foreground">Realistic on this asset: </span>
+            <span className="font-semibold">{rm.exploit_realism.tier}</span>
+            <span className="text-muted-foreground"> ({rm.exploit_realism.score}/5)</span>
+            {rm.likelihood_uncapped > rm.likelihood && (
+              <span className="text-yellow-400"> · likelihood capped {rm.likelihood_uncapped.toFixed(2)} → {rm.likelihood.toFixed(2)}</span>
+            )}
+          </div>
+          <ul className="mt-1 space-y-0.5">
+            {rm.exploit_realism.reasons.map((r, i) => (
+              <li key={i} className="text-xs text-muted-foreground flex gap-1"><span className="text-primary">•</span> {r}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       <div className="flex items-center gap-2 mb-2">
         <CategoryBadge cat={rm.level} />
         <span className="text-xs text-muted-foreground">{rm.version}</span>
