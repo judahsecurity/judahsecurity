@@ -120,6 +120,34 @@ def test_cannot_link_another_orgs_app(client):
     assert client.put("/business-apps/assets/20", json={"business_app_id": 5}).status_code == 403
 
 
+def test_realism_override_refreshes_capped_exploit_factor(client):
+    import app.db.database as database
+
+    db = database.SessionLocal()
+    vuln = db.query(Vulnerability).filter(Vulnerability.id == 100).one()
+    vuln.cve_id = "CVE-2099-0001"
+    vuln.cvss_score = 9.8
+    vuln.metadata_ = {"oracle": {
+        "exploitation_evidence": {"public_poc_found": True},
+        "preconditions_evaluated": [{
+            "precondition": {"id": "module", "description": "module enabled", "severity": "blocker"},
+            "status": "unsatisfied",
+        }],
+    }}
+    db.commit()
+    db.close()
+
+    before = client.get("/vulnerabilities/100/risk-factors").json()
+    assert before["exploit_realism"]["tier"] == "blocked"
+    assert before["factors"]["ease_of_exploit"]["score"] == 0
+
+    after = client.put("/vulnerabilities/100/risk-factors", json={
+        "exploit_realism": {"tier": "confirmed", "note": "module enabled in manual verification"},
+    }).json()
+    assert after["factors"]["ease_of_exploit"]["score"] == 3
+    assert after["score"] > 0
+
+
 def test_org_default_weights(client):
     import app.db.database as database
     from app.workers.severity_worker import tick
@@ -127,7 +155,7 @@ def test_org_default_weights(client):
     client.post("/vulnerabilities/severity-evaluation/run", json={"only_missing": True})
     tick(database.SessionLocal)
     before = client.get("/vulnerabilities/101/risk-factors").json()
-    assert before["weights"]["network_location"] == {"weight": 1, "source": "default", "default": 1}
+    assert before["weights"]["network_location"] == {"weight": 2, "source": "default", "default": 2}
 
     got = client.put("/vulnerabilities/severity-evaluation/weights", json={"weights": {"network_location": 4}}).json()
     assert got["weights"]["network_location"]["source"] == "organization"

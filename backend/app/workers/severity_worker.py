@@ -79,7 +79,9 @@ def main() -> None:
 
     interval = _int_env("SEVERITY_EVAL_INTERVAL_SECONDS", DEFAULT_INTERVAL_SECONDS, MIN_INTERVAL_SECONDS)
     sweep_every = _int_env("SEVERITY_FULL_SWEEP_HOURS", DEFAULT_FULL_SWEEP_HOURS, 1) * 3600
-    last_sweep = time.monotonic()
+    # Recalculate stored scores after a deploy or restart, including model
+    # changes that did not alter a finding's dirty flag.
+    last_sweep = time.monotonic() - sweep_every
     logger.info("Starting severity worker (interval=%ss, full sweep every %sh)", interval, sweep_every // 3600)
 
     while not _shutdown.is_set():

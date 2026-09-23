@@ -1792,6 +1792,7 @@ export default function FindingsPage() {
           // Top chips filter by OPES priority score (scanner severity as unscored fallback)
           opes_category: selectedSeverity || undefined,
           detected_by: onlyAgent ? 'agent' : undefined,
+          sort: sortMode === 'risk' ? 'risk' : undefined,
           limit: 100,
         }),
         api.getFindingsSummary(),
@@ -1822,7 +1823,7 @@ export default function FindingsPage() {
     api.getOrganizations().then((orgs: any[]) => {
       if (orgs?.length) setFirstOrgId(orgs[0].id);
     }).catch(() => {});
-  }, [selectedSeverity, onlyAgent]);
+  }, [selectedSeverity, onlyAgent, sortMode]);
 
   const handleSearch = (query: string) => {
     setSearchQuery(query);

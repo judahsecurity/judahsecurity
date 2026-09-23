@@ -2085,7 +2085,15 @@ def triage_finding_risk_factors(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
     vuln.metadata_ = meta
     flag_modified(vuln, "metadata_")
-    view = _risk_model_view(db, vuln)  # also writes the sev_* columns
+    if payload.exploit_realism is not None:
+        # Refresh the uncapped automatic exploit factor before applying a
+        # changed realism tier, including for findings scored before it was
+        # stored separately.
+        from app.services.severity_evaluation import evaluate_finding
+
+        view = evaluate_finding(db, vuln)
+    else:
+        view = _risk_model_view(db, vuln)  # also writes the sev_* columns
     db.commit()
     return view
 
@@ -2205,7 +2213,6 @@ def create_finding_detection_feedback(
             logger.warning(f"Detection pattern evaluation failed: {e}")
 
     return feedback_to_dict(feedback)
-
 
 
 

@@ -36,7 +36,7 @@ from app.services.risk_model import FACTOR_KEYS, merged_risk_model
 
 logger = logging.getLogger(__name__)
 
-EVALUATOR_VERSION = "sev/v1"
+EVALUATOR_VERSION = "sev/v2"
 
 # ── Finding context ───────────────────────────────────────────────────────────
 
@@ -245,13 +245,15 @@ def exploit_realism(ctx: FindingContext) -> Dict[str, Any]:
         if ctx.waf:
             conditional.append(f"unauthenticated exploit, but a WAF ({ctx.waf}) sits in front")
 
-    if ctx.detection_confidence == "exploit_confirmed" or ctx.validation_verdict == "confirmed":
-        why = "exploit or vulnerable code path confirmed on this asset"
-        why += " by validation" if ctx.validation_verdict == "confirmed" else " by our scanner"
-        return {"score": 4, "tier": "confirmed", "reasons": [why]}
+    if blocked and ctx.detection_confidence == "exploit_confirmed":
+        return {"score": 2, "tier": "conditional",
+                "reasons": ["exploit proof conflicts with an unmet required condition; verify the current asset state"] + blocked,
+                "needs_analyst": True}
     if blocked:
         return {"score": 0, "tier": "blocked",
                 "reasons": blocked + ["documented exploit paths do not work here today; not a guarantee against other paths"]}
+    if ctx.detection_confidence == "exploit_confirmed":
+        return {"score": 4, "tier": "confirmed", "reasons": ["exploit confirmed on this asset by our scanner"]}
     if conditional:
         return {"score": 2, "tier": "conditional", "reasons": conditional}
     if ctx.detection_confidence == "endpoint_confirmed" or verified:
@@ -401,7 +403,7 @@ EASE_RATINGS = {4: "Automated Tools Available", 3: "Easy", 2: "Difficult", 1: "P
 def ease_of_exploit(ctx: FindingContext, realism: Dict[str, Any]) -> Factor:
     e = ctx.exploitation
     risk = float(e.get("misconfig_breach_risk") or 0)
-    if ctx.detection_confidence == "exploit_confirmed" or ctx.validation_verdict == "confirmed":
+    if ctx.detection_confidence == "exploit_confirmed":
         f = _f(4, EASE_RATINGS[4], "Exploit confirmed against this asset")
     elif risk >= 7.5:
         f = _f(4, EASE_RATINGS[4], "Exposure is directly usable (no exploit needed)")
@@ -415,9 +417,11 @@ def ease_of_exploit(ctx: FindingContext, realism: Dict[str, Any]) -> Factor:
         f = _f(3, EASE_RATINGS[3], f"Issue reproduced by {ctx.detected_by}; abuse follows directly from the finding")
     else:
         f = _f(1, EASE_RATINGS[1], "No known working exploit")
+    uncapped = dict(f)
     if f["score"] > realism["score"]:
         f = _f(realism["score"], EASE_RATINGS[realism["score"]],
                f"{f['reason']}, but on this asset: {'; '.join(realism['reasons'])}")
+    f["uncapped"] = uncapped
     return f
 
 
@@ -681,7 +685,7 @@ def evaluate_by_id(session_factory, vuln_id: int) -> bool:
         # Closed findings are scored but do not need gap-agent proposals.
         agent_needed = (
             vuln.status in (VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS)
-            and view.get("status") == "needs_analyst"
+            and any(k in FACTOR_KEYS for k in view.get("needs_analyst") or [])
             and not ((vuln.metadata_ or {}).get("severity_eval") or {}).get("agent_run_at")
         )
         db.flush()

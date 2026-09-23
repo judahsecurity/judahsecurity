@@ -51,16 +51,19 @@ FACTOR_RATINGS: Dict[str, Dict[int, str]] = {
 
 REALISM_TIERS = ("confirmed", "likely", "unverified", "conditional", "blocked")
 
-# Per-factor weights, 1–4, chosen by the analyst per finding during triage.
-# Impact and Likelihood are weighted averages, so they stay on the 0–4 scale.
-# Defaults approximate the scoring sheet's 70/20/10 impact split with whole
-# numbers (Severity 4 : Business 2 : Network 1 ≈ 57/29/14) and weight the
-# likelihood factors equally.
+# Per-factor 1–4 selectors multiply the impact sheet's 20/10/70 baseline.
+# Standard (2) for every factor preserves that baseline; the likelihood
+# factors start equally weighted. Both aggregates remain on the 0–4 scale.
 WEIGHT_LABELS: Dict[int, str] = {1: "Low", 2: "Standard", 3: "High", 4: "Highest"}
-DEFAULT_WEIGHTS: Dict[str, int] = {
+IMPACT_BASE_WEIGHTS: Dict[str, int] = {
     "business_impact": 2,
     "network_location": 1,
-    "vulnerability_severity": 4,
+    "vulnerability_severity": 7,
+}
+DEFAULT_WEIGHTS: Dict[str, int] = {
+    "business_impact": 2,
+    "network_location": 2,
+    "vulnerability_severity": 2,
     "skill_level": 2,
     "ease_of_discovery": 2,
     "ease_of_exploit": 2,
@@ -93,9 +96,10 @@ def score_factors(
     weights: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     """Risk = (Impact/4)·(Likelihood/4)·100 from seven 0–4 factor scores,
-    each side a weighted average using 1–4 weights."""
+    each side a weighted average using 1–4 selectors."""
     w = {**DEFAULT_WEIGHTS, **(weights or {})}
-    impact = _weighted_mean(scores, w, IMPACT_FACTORS)
+    impact_weights = {k: IMPACT_BASE_WEIGHTS[k] * w[k] for k in IMPACT_FACTORS}
+    impact = _weighted_mean(scores, impact_weights, IMPACT_FACTORS)
     uncapped = _weighted_mean(scores, w, LIKELIHOOD_FACTORS)
     likelihood = uncapped
     if realism_tier == "blocked":
@@ -247,6 +251,24 @@ def merged_risk_model(
             "at": realism_override.get("at"),
             "auto": auto.get("exploit_realism"),
         }
+        # Automatic Ease of Exploit was capped by the automatic realism tier.
+        # Restore its raw score, then apply the analyst's tier. A separate
+        # analyst Ease of Exploit score still takes precedence.
+        if "ease_of_exploit" not in analyst_factors and auto_factors.get("ease_of_exploit"):
+            original = auto_factors["ease_of_exploit"]
+            raw = original.get("uncapped") or original
+            cap = {"blocked": 0, "conditional": 2, "unverified": 3, "likely": 4, "confirmed": 4}[realism["tier"]]
+            score = min(int(raw["score"]), cap)
+            reason = raw["reason"]
+            if score < raw["score"]:
+                reason += f", but on this asset: {'; '.join(realism['reasons'])}"
+            factors["ease_of_exploit"] = {
+                **original,
+                "score": score,
+                "rating": ratings["ease_of_exploit"][score],
+                "reason": reason,
+                "auto": original,
+            }
 
     # Finding weight = analyst's choice, else the organization's default,
     # else the platform default.
@@ -265,6 +287,8 @@ def merged_risk_model(
 
     # Assumed defaults and gap-agent proposals both wait on an analyst.
     needs_analyst = [k for k in FACTOR_KEYS if k in missing or factors.get(k, {}).get("source") in ("assumed", "agent")]
+    if (realism or {}).get("needs_analyst") and not realism_override:
+        needs_analyst.append("exploit_realism")
     result: Dict[str, Any] = {
         "factors": factors,
         "exploit_realism": realism,
