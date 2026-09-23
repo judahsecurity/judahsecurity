@@ -2259,7 +2259,7 @@ class ASMToolsManager(AssessmentCapabilities):
             from app.services.agent.independent_verify import _brain, _candidate, verify_receipt_key
             receipt = self._verify_receipts[verify_receipt_key(title, target)]
             verified = _candidate(_brain(self), receipt["candidate_id"])
-            if (verified.target != target or verified.description != description
+            if (verified.title != title or verified.target != target or verified.description != description
                     or verified.severity.lower() != severity.lower()):
                 return "Verified claim changed; resubmit the candidate and reverify before publication"
 
@@ -5972,7 +5972,8 @@ class ASMToolsManager(AssessmentCapabilities):
         return json.dumps({"identity": identity, "authenticated": bool(ok), "evidence_id": exchange["evidence_id"]})
 
     async def test_authorization_boundary(self, url: str, owner_identity: str, other_identity: str,
-                                           object_field: str, hypothesis_id: str = "") -> str:
+                                           object_field: str, hypothesis_id: str = "",
+                                           coverage_cell_id: str = "") -> str:
         """Replay a known protected test object with its owner and a different test identity.
 
         The operator must establish that this object is private. A match is a candidate,
@@ -5991,11 +5992,73 @@ class ASMToolsManager(AssessmentCapabilities):
                 result = json.loads(await self.check_test_identity(name, **check))
                 if not result["authenticated"]:
                     return json.dumps({"verdict": "blocked", "reason": f"Session expired for {name}"})
-        return await self.compare_requests(
+        raw = await self.compare_requests(
             {"method": "GET", "url": url, "identity": owner_identity},
             {"method": "GET", "url": url, "identity": other_identity},
             interest_fields=[object_field], use_auth_session=False, hypothesis_id=hypothesis_id,
+            coverage_cell_id=coverage_cell_id,
         )
+        result = json.loads(raw)
+        fields = result.get("interest_fields") or {}
+        baseline_value = (fields.get("baseline") or {}).get(object_field)
+        mutant_value = (fields.get("mutant") or {}).get(object_field)
+        matched_private_object = (
+            baseline_value not in (None, "")
+            and mutant_value == baseline_value
+            and int((result.get("status") or {}).get("baseline") or 0) in range(200, 300)
+            and int((result.get("status") or {}).get("mutant") or 0) in range(200, 300)
+        )
+        if not matched_private_object:
+            return raw
+
+        result["verdict"] = "LIKELY_IMPACT"
+        result["signals"] = list(
+            dict.fromkeys(
+                [
+                    *(result.get("signals") or []),
+                    "verified_cross_identity_object_match",
+                ]
+            )
+        )
+        result["guidance"] = (
+            "A distinct verified identity received the owner's matched object field. "
+            "This is a proof candidate, not a finding; complete the structured proof "
+            "and independent verification chain."
+        )
+        if coverage_cell_id and not result.get("proof_escalation"):
+            from app.services.agent.engagement_brain import engagement_brain_from_dict
+            from app.services.agent.signal_escalation import queue_signal_escalation
+
+            brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            mutant = result.get("mutant") or {}
+            trace = mutant.get("trace") or {}
+            escalation = queue_signal_escalation(
+                brain,
+                verdict=result["verdict"],
+                signals=result["signals"],
+                evidence_ids=[
+                    str((result.get("baseline") or {}).get("evidence_id") or ""),
+                    str(mutant.get("evidence_id") or ""),
+                ],
+                target=url,
+                source_tool="test_authorization_boundary",
+                coverage_cell_id=coverage_cell_id,
+                hypothesis_id=hypothesis_id or str(trace.get("hypothesis_id") or ""),
+                operation_id=str(trace.get("operation_id") or ""),
+                identity=other_identity,
+                tenant=str(trace.get("tenant") or ""),
+                parameter=str(trace.get("parameter") or ""),
+                test_type=str(trace.get("test_type") or "authorization"),
+            )
+            if escalation:
+                result["proof_escalation"] = escalation
+                result["next_action"] = (
+                    "Complete the structured authorization proof before submitting "
+                    "a finding candidate."
+                )
+                self._engagement_brain = brain.to_dict()
+                result["engagement_brain"] = self._engagement_brain
+        return json.dumps(result, indent=2)[:_tool_output_max_chars()]
 
     def _resolve_request_cookies(self, headers, cookies, use_auth_session, url: str = ""):
         # Compatibility helper; the live transport uses the jar itself for redirects.
@@ -7920,6 +7983,7 @@ class ASMToolsManager(AssessmentCapabilities):
             "coverage",
             "coverage_cells",
             "proof_escalations",
+            "verification_receipts",
         ):
             live_value = getattr(live_brain, field_name, None)
             if live_value:
@@ -7998,6 +8062,7 @@ class ASMToolsManager(AssessmentCapabilities):
                 max_parallel=max_parallel,
             )
             brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            _checkpoint_task_graph()
         out = {
             "commander": pantheon_line("orchestrator"),
             "mission": result.mission[:2000],

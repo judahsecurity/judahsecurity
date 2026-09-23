@@ -426,7 +426,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **register_test_identity**: Register a named operator-provided test session (name, target, cookies/headers/storage_state, role, tenant).
 - **list_test_identities**: List configured identities without secrets.
 - **check_test_identity**: Check identity against its known endpoint (identity, url, field, expected).
-- **test_authorization_boundary**: Replay a known private test object as owner and second identity (url, owner_identity, other_identity, object_field, hypothesis_id).
+- **test_authorization_boundary**: Replay a known private test object as owner and a distinct verified identity (url, owner_identity, other_identity, object_field, hypothesis_id, coverage_cell_id). A matched owner field visible to the second identity automatically queues an authorization proof escalation; a denial closes no finding by itself.
 
 - **record_surface_coverage**: Close one leased coverage cell and update its surface summary. Args: path, status, method, reason, hypothesis_id, finding_title, host, identity, tenant, test_type, parameter, evidence_id, operation_id, coverage_cell_id, coverage_lease_id, capture_id, candidate_id, proof_run_id, verifier_run_id, finding_id. `tested_clean` requires live HTTP/browser evidence. Prefer the directive's coverage_cell_id + coverage_lease_id; dimensions are inherited and checked. Record separate cells for each identity, parameter, and methodology exercised.
 

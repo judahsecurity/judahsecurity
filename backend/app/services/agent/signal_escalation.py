@@ -67,6 +67,7 @@ def _strategy(
     if (
         "interest_field_deltas" in signal_blob
         or "auth" in signal_blob
+        or "cross_identity" in signal_blob
         or "owner" in signal_blob
         or "tenant" in signal_blob
     ):
