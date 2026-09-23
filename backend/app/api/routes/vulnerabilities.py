@@ -1815,50 +1815,42 @@ def write_finding_risk_assessment(
 
 
 class SeverityBackfillRequest(BaseModel):
-    only_missing: bool = True  # skip findings already evaluated
-    include_closed: bool = False
-
-
-def _run_severity_backfill(organization_id: Optional[int], only_missing: bool, include_closed: bool) -> None:
-    from app.db.database import SessionLocal
-    from app.services.scoring_pipeline import evaluate_severity
-
-    db = SessionLocal()
-    try:
-        q = db.query(Vulnerability.id).join(Asset)
-        if organization_id is not None:
-            q = q.filter(Asset.organization_id == organization_id)
-        if only_missing:
-            q = q.filter(Vulnerability.sev_status.is_(None))
-        if not include_closed:
-            q = q.filter(Vulnerability.status.in_([VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS]))
-        ids = [row[0] for row in q.all()]
-    finally:
-        db.close()
-    done = sum(1 for vid in ids if evaluate_severity(vid))
-    logger.info("Severity backfill: evaluated %d/%d findings (org=%s)", done, len(ids), organization_id)
+    only_missing: bool = True  # only findings never evaluated
 
 
 @router.post("/severity-evaluation/run")
 def run_severity_evaluation(
     payload: SeverityBackfillRequest,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_analyst),
 ):
-    """Evaluate severity for every finding in the organization (background)."""
+    """Queue findings for the severity worker's next run.
+
+    ``only_missing`` queues findings never evaluated; otherwise every open
+    finding in the organization is re-scored.
+    """
+    from sqlalchemy import update as sa_update
+    from app.services.severity_dirty import mark_all_open
+
     org_id = None if current_user.is_superuser else current_user.organization_id
     if org_id is None and not current_user.is_superuser:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No organization")
-    q = db.query(func.count(Vulnerability.id)).join(Asset)
-    if org_id is not None:
-        q = q.filter(Asset.organization_id == org_id)
     if payload.only_missing:
-        q = q.filter(Vulnerability.sev_status.is_(None))
-    if not payload.include_closed:
-        q = q.filter(Vulnerability.status.in_([VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS]))
-    queued = q.scalar() or 0
-    background_tasks.add_task(_run_severity_backfill, org_id, payload.only_missing, payload.include_closed)
+        ids = db.query(Vulnerability.id).join(Asset).filter(
+            Vulnerability.sev_status.is_(None),
+            Vulnerability.status.in_([VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS]),
+        )
+        if org_id is not None:
+            ids = ids.filter(Asset.organization_id == org_id)
+        id_list = [r[0] for r in ids.all()]
+        if id_list:
+            db.execute(sa_update(Vulnerability.__table__)
+                       .where(Vulnerability.__table__.c.id.in_(id_list))
+                       .values(sev_dirty=True, sev_dirty_at=datetime.utcnow()))
+        queued = len(id_list)
+    else:
+        queued = mark_all_open(db, org_id)
+    db.commit()
     return {"queued": queued}
 
 

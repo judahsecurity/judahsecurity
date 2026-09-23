@@ -27,7 +27,6 @@ Architecture
               ▼                         ▼
     Delphi enrichment (fast)    Delphi enrichment (fast)
     Oracle OPES scoring         Oracle OPES scoring
-    Severity evaluation         Severity evaluation
     Retry w/ backoff on         Retry w/ backoff on
     transient failures          transient failures
               │
@@ -291,13 +290,11 @@ class ScoringPipeline:
                     self._errors += 1
 
             finally:
+                # Severity is re-scored by the severity worker: Oracle's
+                # writes mark the finding dirty (app.services.severity_dirty).
+                self._cleanup(item.vuln_id)
                 if db is not None:
                     db.close()
-                # ── 3. Severity evaluation ─────────────────────────────────
-                # Runs whatever Oracle did: findings Oracle cannot analyse (or
-                # while it is down) are still scored from platform evidence.
-                evaluate_severity(item.vuln_id)
-                self._cleanup(item.vuln_id)
                 self._q.task_done()
 
     def _handle_transient(self, item: _ScoringItem, exc: Exception) -> None:
@@ -360,37 +357,6 @@ class ScoringPipeline:
                 "dead_letter_count": len(self._dead_letters),
                 "dead_letter_recent": self._dead_letters[-10:],
             }
-
-
-def evaluate_severity(vuln_id: int) -> bool:
-    """Run the severity evaluation for one finding in its own session.
-    Never raises; returns True when the finding was evaluated."""
-    from app.db.database import SessionLocal  # type: ignore[import]
-    from app.models.vulnerability import Vulnerability  # type: ignore[import]
-    from app.services.severity_evaluation import evaluate_finding  # type: ignore[import]
-
-    db = SessionLocal()
-    try:
-        vuln = db.query(Vulnerability).filter(Vulnerability.id == vuln_id).first()
-        if vuln is None:
-            return False
-        view = evaluate_finding(db, vuln)
-        db.commit()
-        # Optionally ask the gap agent to estimate what the rules could not.
-        from app.services import severity_agent  # type: ignore[import]
-        if (
-            severity_agent.auto_enabled()
-            and view.get("status") == "needs_analyst"
-            and not (vuln.metadata_ or {}).get("severity_eval", {}).get("agent_run_at")
-        ):
-            severity_agent.submit(vuln_id)
-        return True
-    except Exception as exc:  # noqa: BLE001
-        db.rollback()
-        logger.warning("ScoringPipeline: severity evaluation failed for vuln %s: %s", vuln_id, exc)
-        return False
-    finally:
-        db.close()
 
 
 # ── Singleton ─────────────────────────────────────────────────────────────────

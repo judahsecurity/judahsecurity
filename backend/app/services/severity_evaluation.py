@@ -109,6 +109,9 @@ class FindingContext:
     business_app_name: str = ""
     business_app_criticality: Optional[int] = None  # 1 (most critical) – 4
 
+    nuclei_templates: int = 0  # public Nuclei templates for the CVE (live intel)
+    intel_sig: str = ""  # signature of the live intel merged in
+
 
 # ── Factors ───────────────────────────────────────────────────────────────────
 
@@ -376,6 +379,8 @@ def ease_of_discovery(ctx: FindingContext) -> Factor:
     if tier == "version_detectable":
         return _f(4, "Automated Tools Available", "Vulnerable version visible remotely to scanners")
     detector = (ctx.detected_by or "").lower()
+    if ctx.nuclei_templates and tier != "credentialed_only":
+        return _f(4, "Automated Tools Available", f"Public Nuclei template{'s' if ctx.nuclei_templates > 1 else ''} for this CVE")
     if detector in EXTERNAL_AUTOMATED or ctx.template_id:
         what = f"template {ctx.template_id}" if ctx.template_id else detector
         return _f(4, "Automated Tools Available", f"Found from outside by an automated scanner ({what}), so attacker tooling can too")
@@ -513,13 +518,24 @@ def build_context(db: Session, vuln: Any) -> FindingContext:
         published_cvss=vuln.cvss_score,
         reconciled_cvss=recon.get("correct_score") or None,
         cvss_vector=recon.get("correct_vector") or vuln.cvss_vector or "",
-        exploitation=oracle.get("exploitation_evidence") or {},
+        exploitation=dict(oracle.get("exploitation_evidence") or {}),
         attack_path=oracle.get("attack_path_class") or "",
         attacker_capability=oracle.get("attacker_capability") or contextual.get("required_capability") or "",
         exploit_complexity=oracle.get("exploit_complexity") or "",
         remote_triggerability=oracle.get("remote_triggerability") or "",
         preconditions=_preconditions(oracle),
     )
+
+    # Live exploitation intel (KEV lists, exploit index, Nuclei) from the
+    # local feed caches, so new exploitation re-scores without waiting for
+    # Oracle to re-enrich.
+    if ctx.cve_id:
+        from app.services.severity_intel import intel_signature, live_intel, merge_evidence
+
+        intel = live_intel(ctx.cve_id)
+        ctx.exploitation = merge_evidence(ctx.exploitation, intel)
+        ctx.nuclei_templates = int(intel.get("nuclei_template_count") or 0)
+        ctx.intel_sig = intel_signature(intel)
 
     asset = db.query(Asset).filter(Asset.id == vuln.asset_id).first()
     if asset is not None:
@@ -604,6 +620,7 @@ def evaluate_finding(db: Session, vuln: Any) -> Dict[str, Any]:
     meta["severity_eval"] = result
     vuln.metadata_ = meta
     flag_modified(vuln, "metadata_")
+    vuln.sev_intel_sig = ctx.intel_sig or None
     return apply_effective(db, vuln, ctx.organization_name or None)
 
 
@@ -628,3 +645,61 @@ def _apply_agent_proposals(result: Dict[str, Any]) -> None:
             "confidence": p.get("confidence"),
             "assumed": {"score": f["score"], "rating": f["rating"], "reason": f["reason"]},
         }
+
+
+# ── Scheduled re-evaluation (severity worker) ─────────────────────────────────
+
+def evaluate_by_id(session_factory, vuln_id: int) -> bool:
+    """Re-evaluate one finding in its own session and clear its dirty flag
+    unless it changed again meanwhile. Never raises."""
+    from app.models.vulnerability import Vulnerability
+    from app.services.severity_dirty import clear_dirty
+
+    started = datetime.utcnow()
+    db = session_factory()
+    try:
+        vuln = db.query(Vulnerability).filter(Vulnerability.id == vuln_id).first()
+        if vuln is None:
+            return False
+        view = evaluate_finding(db, vuln)
+        db.flush()
+        clear_dirty(db, [vuln_id], started)
+        db.commit()
+    except Exception as exc:  # noqa: BLE001
+        db.rollback()
+        logger.warning("Severity evaluation failed for vuln %s: %s", vuln_id, exc)
+        return False
+    finally:
+        db.close()
+
+    # Optionally ask the gap agent to estimate what the rules could not.
+    from app.services import severity_agent
+
+    if severity_agent.auto_enabled() and view.get("status") == "needs_analyst":
+        meta = (vuln.metadata_ or {}).get("severity_eval") or {}
+        if not meta.get("agent_run_at"):
+            severity_agent.submit(vuln_id)
+    return True
+
+
+def run_dirty_batch(session_factory, limit: int = 500) -> Dict[str, int]:
+    """Re-evaluate up to ``limit`` open findings whose inputs changed."""
+    from app.models.vulnerability import Vulnerability, VulnerabilityStatus
+
+    db = session_factory()
+    try:
+        ids = [
+            row[0]
+            for row in db.query(Vulnerability.id)
+            .filter(
+                Vulnerability.sev_dirty.is_(True),
+                Vulnerability.status.in_([VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS]),
+            )
+            .order_by(Vulnerability.sev_dirty_at.asc().nullsfirst(), Vulnerability.id)
+            .limit(limit)
+            .all()
+        ]
+    finally:
+        db.close()
+    ok = sum(1 for vid in ids if evaluate_by_id(session_factory, vid))
+    return {"selected": len(ids), "evaluated": ok, "failed": len(ids) - ok}

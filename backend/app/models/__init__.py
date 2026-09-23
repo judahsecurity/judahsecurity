@@ -144,3 +144,9 @@ __all__ = [
     "WizIntegration",
     "ScriptLanguage",
 ]
+
+# Mark findings for severity re-evaluation whenever a scoring input changes,
+# in every process that writes through the ORM.
+from app.services.severity_dirty import register as _register_severity_dirty  # noqa: E402
+
+_register_severity_dirty()

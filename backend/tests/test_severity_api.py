@@ -73,8 +73,11 @@ def client(monkeypatch):
 
 
 def test_analyst_flow(client):
-    # Backfill evaluates every open finding.
+    # "Evaluate severity" queues the findings; the severity worker scores them.
     assert client.post("/vulnerabilities/severity-evaluation/run", json={"only_missing": True}).json()["queued"] == 2
+    import app.db.database as database
+    from app.workers.severity_worker import tick
+    assert tick(database.SessionLocal)["evaluated"] == 2
     summary = client.get("/vulnerabilities/severity-evaluation/summary").json()
     assert summary["triage"]["needs_analyst"] == 2 and summary["triage"]["not_evaluated"] == 0
 

@@ -630,6 +630,11 @@ def apply_oracle_migrations():
         "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS sev_status VARCHAR(20)",
         "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS sev_pending INTEGER",
         "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS sev_evaluated_at TIMESTAMP",
+        # Existing findings start dirty, so the severity worker backfills them.
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS sev_dirty BOOLEAN NOT NULL DEFAULT TRUE",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS sev_dirty_at TIMESTAMP",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS sev_intel_sig VARCHAR(16)",
+        "CREATE INDEX IF NOT EXISTS ix_vuln_sev_dirty ON vulnerabilities (sev_dirty) WHERE sev_dirty",
         "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS business_app_id INTEGER REFERENCES business_applications(id) ON DELETE SET NULL",
         "ALTER TABLE assets ADD COLUMN IF NOT EXISTS business_app_id INTEGER REFERENCES business_applications(id) ON DELETE SET NULL",
         "CREATE INDEX IF NOT EXISTS ix_vuln_sev_score  ON vulnerabilities (sev_score)",

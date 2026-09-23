@@ -27,6 +27,10 @@ DEBUG=false
 # are scored; analysts still confirm every proposal. Off by default.
 SEVERITY_AGENT_AUTO=false
 SEVERITY_AGENT_WORKERS=2
+# Severity worker: how often it re-scores findings whose inputs changed, and
+# how often it re-scores every open finding regardless.
+SEVERITY_EVAL_INTERVAL_SECONDS=60
+SEVERITY_FULL_SWEEP_HOURS=24
 
 # Frontend
 # When running behind the bundled nginx + Let's Encrypt (recommended), leave

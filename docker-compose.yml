@@ -436,6 +436,40 @@ services:
     networks:
       - asm_network
 
+  # Severity evaluation. Re-scores findings (Likelihood × Impact) whenever a
+  # scoring input changes — finding, asset, hosting/IP inventory, business
+  # application, Oracle/Delphi enrichment or live exploitation intel — and runs
+  # a full sweep daily. Reads the intel refresher's feed caches.
+  severity-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: asm_severity_worker
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-asm_user}:${POSTGRES_PASSWORD:-asm_password}@db:5432/${POSTGRES_DB:-asm_db}
+      - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-change-in-production}
+      - VULNCHECK_API_TOKEN=${VULNCHECK_API_TOKEN:-}
+      - DELPHI_CACHE_DIR=${DELPHI_CACHE_DIR:-/app/data/delphi_cache}
+      - SEVERITY_EVAL_INTERVAL_SECONDS=${SEVERITY_EVAL_INTERVAL_SECONDS:-60}
+      - SEVERITY_FULL_SWEEP_HOURS=${SEVERITY_FULL_SWEEP_HOURS:-24}
+      - SEVERITY_AGENT_AUTO=${SEVERITY_AGENT_AUTO:-false}
+      - SEVERITY_AGENT_WORKERS=${SEVERITY_AGENT_WORKERS:-2}
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["python", "-m", "app.workers.severity_worker"]
+    healthcheck:
+      test: ["CMD-SHELL", "grep -aq 'app.workers.severity_worker' /proc/1/cmdline"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    volumes:
+      - delphi_cache:/app/data/delphi_cache
+    networks:
+      - asm_network
+
   # Database Admin Interface (optional, for development)
   adminer:
     image: adminer:latest
