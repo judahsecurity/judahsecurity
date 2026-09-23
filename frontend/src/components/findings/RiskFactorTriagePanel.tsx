@@ -44,7 +44,7 @@ interface RealismView {
 
 interface WeightView {
   weight: number;
-  source: 'default' | 'analyst';
+  source: 'default' | 'organization' | 'analyst';
   default: number;
   by?: string;
 }
@@ -440,7 +440,7 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
                         {[4, 3, 2, 1].map((n) => (
                           <option key={n} value={String(n)}>
                             ×{n} — {labels[String(n)] ?? ''}
-                            {w && n === w.default ? ' (default)' : ''}
+                            {w && n === w.default ? (w.source === 'organization' ? ' (org default)' : ' (default)') : ''}
                           </option>
                         ))}
                         {w?.source === 'analyst' && <option value="default">Reset to default ×{w.default}</option>}

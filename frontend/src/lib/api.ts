@@ -1159,6 +1159,16 @@ class ApiClient {
     return response.data;
   }
 
+  async getSeverityWeights() {
+    const response = await this.client.get('/vulnerabilities/severity-evaluation/weights');
+    return response.data;
+  }
+
+  async setSeverityWeights(weights: Record<string, number | null>) {
+    const response = await this.client.put('/vulnerabilities/severity-evaluation/weights', { weights });
+    return response.data;
+  }
+
   async listBusinessApps(q?: string, limit = 25) {
     const response = await this.client.get('/business-apps', { params: { q: q || undefined, limit } });
     return response.data;

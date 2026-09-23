@@ -69,6 +69,7 @@ def client(monkeypatch):
     app.dependency_overrides[get_db] = db_override
     app.dependency_overrides[deps.get_current_active_user] = lambda: analyst
     app.dependency_overrides[deps.require_analyst] = lambda: analyst
+    app.dependency_overrides[deps.require_admin] = lambda: analyst
     return TestClient(app)
 
 
@@ -117,3 +118,29 @@ def test_analyst_flow(client):
 def test_cannot_link_another_orgs_app(client):
     assert client.put("/business-apps/findings/100", json={"business_app_id": 6}).status_code == 404
     assert client.put("/business-apps/assets/20", json={"business_app_id": 5}).status_code == 403
+
+
+def test_org_default_weights(client):
+    import app.db.database as database
+    from app.workers.severity_worker import tick
+
+    client.post("/vulnerabilities/severity-evaluation/run", json={"only_missing": True})
+    tick(database.SessionLocal)
+    before = client.get("/vulnerabilities/101/risk-factors").json()
+    assert before["weights"]["network_location"] == {"weight": 1, "source": "default", "default": 1}
+
+    got = client.put("/vulnerabilities/severity-evaluation/weights", json={"weights": {"network_location": 4}}).json()
+    assert got["weights"]["network_location"]["source"] == "organization"
+    assert client.get("/vulnerabilities/severity-evaluation/weights").json()["weights"]["network_location"]["weight"] == 4
+    assert client.put("/vulnerabilities/severity-evaluation/weights",
+                      json={"weights": {"network_location": 0}}).status_code == 422
+
+    # The org change queues its findings; the worker re-scores them.
+    assert tick(database.SessionLocal)["evaluated"] == 2
+    after = client.get("/vulnerabilities/101/risk-factors").json()
+    assert after["weights"]["network_location"]["source"] == "organization"
+    assert after["score"] != before["score"]
+
+    # Resetting returns to the platform default.
+    client.put("/vulnerabilities/severity-evaluation/weights", json={"weights": {"network_location": None}})
+    assert client.get("/vulnerabilities/severity-evaluation/weights").json()["weights"]["network_location"]["source"] == "default"

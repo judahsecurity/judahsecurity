@@ -585,14 +585,27 @@ SEV_FACTOR_COLUMNS = {
 
 def apply_effective(db: Session, vuln: Any, org_name: Optional[str] = None) -> Dict[str, Any]:
     """Merge automatic factors with analyst input and write the sev_* columns."""
-    meta = vuln.metadata_ if isinstance(vuln.metadata_, dict) else {}
-    if org_name is None:
-        from app.models.asset import Asset
-        from app.services.hosting_classification import organization_name
+    # Stamp first and don't autoflush mid-way: the dirty tracker recognises
+    # evaluator writes by this stamp, so scoring never re-triggers itself.
+    vuln.sev_evaluated_at = datetime.utcnow()
+    with db.no_autoflush:
+        return _apply_effective(db, vuln, org_name)
 
-        row = db.query(Asset.organization_id).filter(Asset.id == vuln.asset_id).first()
-        org_name = organization_name(db, row[0] if row else None)
-    view = merged_risk_model(meta.get("severity_eval"), meta.get("risk_overrides"), org_name)
+
+def _apply_effective(db: Session, vuln: Any, org_name: Optional[str]) -> Dict[str, Any]:
+    from app.models.asset import Asset
+    from app.models.organization import Organization
+
+    meta = vuln.metadata_ if isinstance(vuln.metadata_, dict) else {}
+    org = (
+        db.query(Organization.name, Organization.risk_weight_defaults)
+        .join(Asset, Asset.organization_id == Organization.id)
+        .filter(Asset.id == vuln.asset_id)
+        .first()
+    )
+    if org_name is None:
+        org_name = org[0] if org else ""
+    view = merged_risk_model(meta.get("severity_eval"), meta.get("risk_overrides"), org_name, org[1] if org else None)
     for key, column in SEV_FACTOR_COLUMNS.items():
         f = view["factors"].get(key)
         setattr(vuln, column, f["score"] if f else None)
@@ -609,7 +622,9 @@ def apply_effective(db: Session, vuln: Any, org_name: Optional[str] = None) -> D
 def evaluate_finding(db: Session, vuln: Any) -> Dict[str, Any]:
     """Run the rules on one finding, store the result and update columns.
     The caller commits."""
-    ctx = build_context(db, vuln)
+    vuln.sev_evaluated_at = datetime.utcnow()
+    with db.no_autoflush:
+        ctx = build_context(db, vuln)
     result = evaluate_context(ctx)
     meta = dict(vuln.metadata_ or {})
     # Keep any gap-agent proposals that still apply.

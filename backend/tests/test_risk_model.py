@@ -162,3 +162,14 @@ def test_invalid_weights_rejected():
             apply_overrides({}, {}, None, analyst="a", weights={"awareness": bad})
     with pytest.raises(ValueError):
         apply_overrides({}, {}, None, analyst="a", weights={"nope": 2})
+
+
+def test_org_default_weights_apply_unless_analyst_overrides():
+    auto = _auto()
+    view = merged_risk_model(auto, None, "Acme", {"business_impact": 4, "awareness": 9})  # 9 is ignored
+    assert view["weights"]["business_impact"] == {"weight": 4, "source": "organization", "default": 4}
+    assert view["weights"]["awareness"]["source"] == "default"
+    overrides = apply_overrides({}, {}, None, analyst="a", weights={"business_impact": 1})
+    view = merged_risk_model(auto, overrides, "Acme", {"business_impact": 4})
+    assert (view["weights"]["business_impact"]["weight"], view["weights"]["business_impact"]["source"]) == (1, "analyst")
+    assert view["weights"]["business_impact"]["default"] == 4  # reset goes back to the org default

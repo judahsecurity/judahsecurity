@@ -637,6 +637,7 @@ def apply_oracle_migrations():
         "CREATE INDEX IF NOT EXISTS ix_vuln_sev_dirty ON vulnerabilities (sev_dirty) WHERE sev_dirty",
         "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS business_app_id INTEGER REFERENCES business_applications(id) ON DELETE SET NULL",
         "ALTER TABLE assets ADD COLUMN IF NOT EXISTS business_app_id INTEGER REFERENCES business_applications(id) ON DELETE SET NULL",
+        "ALTER TABLE organizations ADD COLUMN IF NOT EXISTS risk_weight_defaults JSON",
         "CREATE INDEX IF NOT EXISTS ix_vuln_sev_score  ON vulnerabilities (sev_score)",
         "CREATE INDEX IF NOT EXISTS ix_vuln_sev_level  ON vulnerabilities (sev_level)",
         "CREATE INDEX IF NOT EXISTS ix_vuln_sev_status ON vulnerabilities (sev_status)",

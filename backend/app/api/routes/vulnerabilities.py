@@ -17,7 +17,7 @@ from app.models.asset import Asset
 from app.models.organization import Organization
 from app.models.user import User
 from app.schemas.vulnerability import VulnerabilityCreate, VulnerabilityUpdate, VulnerabilityResponse
-from app.api.deps import get_current_active_user, require_analyst
+from app.api.deps import get_current_active_user, require_admin, require_analyst
 
 logger = logging.getLogger(__name__)
 
@@ -1880,6 +1880,65 @@ def severity_evaluation_summary(
         },
         "levels": {k or "not_evaluated": v for k, v in by_level.items()},
     }
+
+
+class OrgWeightsUpdate(BaseModel):
+    # factor -> 1–4, or null to use the platform default
+    weights: Dict[str, Optional[int]] = {}
+
+
+def _org_weights_response(org) -> dict:
+    from app.services.risk_model import DEFAULT_WEIGHTS, FACTOR_KEYS, WEIGHT_LABELS, valid_org_weights
+
+    org_set = valid_org_weights(getattr(org, "risk_weight_defaults", None))
+    return {
+        "weights": {
+            k: {"weight": org_set.get(k, DEFAULT_WEIGHTS[k]), "platform_default": DEFAULT_WEIGHTS[k],
+                "source": "organization" if k in org_set else "default"}
+            for k in FACTOR_KEYS
+        },
+        "weight_labels": {str(k): v for k, v in WEIGHT_LABELS.items()},
+    }
+
+
+@router.get("/severity-evaluation/weights")
+def get_org_severity_weights(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """The organization's default weight (1–4) for each risk factor."""
+    org = db.query(Organization).filter(Organization.id == current_user.organization_id).first()
+    if org is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No organization")
+    return _org_weights_response(org)
+
+
+@router.put("/severity-evaluation/weights")
+def set_org_severity_weights(
+    payload: OrgWeightsUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_admin),
+):
+    """Set the organization's default factor weights. Findings without an
+    analyst weight for a factor are re-scored by the severity worker."""
+    from app.services.risk_model import valid_org_weights, validate_weight
+
+    org = db.query(Organization).filter(Organization.id == current_user.organization_id).first()
+    if org is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No organization")
+    current = dict(valid_org_weights(org.risk_weight_defaults))
+    try:
+        for key, weight in payload.weights.items():
+            if weight is None:
+                current.pop(key, None)
+            else:
+                validate_weight(key, int(weight))
+                current[key] = int(weight)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+    org.risk_weight_defaults = current or None  # marks the org's findings dirty
+    db.commit()
+    return _org_weights_response(org)
 
 
 class SeverityAgentBatch(BaseModel):

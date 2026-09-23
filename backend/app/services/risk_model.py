@@ -178,10 +178,29 @@ def apply_overrides(
     return out
 
 
+def valid_org_weights(org_weights: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    """The organization's valid 1–4 weight overrides (invalid entries ignored)."""
+    out: Dict[str, int] = {}
+    for key, value in (org_weights or {}).items():
+        try:
+            value = int(value)
+            validate_weight(key, value)
+        except (TypeError, ValueError):
+            continue
+        out[key] = value
+    return out
+
+
+def org_default_weights(org_weights: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    """Platform defaults with the organization's overrides applied."""
+    return {**DEFAULT_WEIGHTS, **valid_org_weights(org_weights)}
+
+
 def merged_risk_model(
     auto: Optional[Dict[str, Any]],
     overrides: Optional[Dict[str, Any]],
     org_name: Optional[str] = None,
+    org_weights: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Combine Oracle's automatic factors with analyst overrides.
 
@@ -229,13 +248,17 @@ def merged_risk_model(
             "auto": auto.get("exploit_realism"),
         }
 
+    # Finding weight = analyst's choice, else the organization's default,
+    # else the platform default.
     analyst_weights: Dict[str, Any] = overrides.get("weights") or {}
+    org_set = valid_org_weights(org_weights)
+    defaults = {**DEFAULT_WEIGHTS, **org_set}
     weights_view = {
         k: (
             {"weight": analyst_weights[k]["weight"], "source": "analyst",
-             "by": analyst_weights[k].get("by"), "at": analyst_weights[k].get("at"), "default": DEFAULT_WEIGHTS[k]}
+             "by": analyst_weights[k].get("by"), "at": analyst_weights[k].get("at"), "default": defaults[k]}
             if k in analyst_weights
-            else {"weight": DEFAULT_WEIGHTS[k], "source": "default", "default": DEFAULT_WEIGHTS[k]}
+            else {"weight": defaults[k], "source": "organization" if k in org_set else "default", "default": defaults[k]}
         )
         for k in FACTOR_KEYS
     }

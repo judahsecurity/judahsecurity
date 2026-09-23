@@ -17,7 +17,8 @@ Inputs watched:
   • business applications — criticality and name
   • netblocks — the organization's IP inventory decides hosting for all of
     its findings
-  • the organization's name — shown in the Network Location rating
+  • the organization — its name (Network Location rating) and its default
+    factor weights
 
 Registered on import from app.models, so writes from any process (API,
 scanner workers, integrations) mark findings dirty.
@@ -116,7 +117,7 @@ def _collect(session: Session):
             if obj in session.deleted or _changed(obj, NETBLOCK_INPUTS):
                 org_ids.add(obj.organization_id)
         elif isinstance(obj, Organization):
-            if _changed(obj, {"name"}) and obj.id is not None:
+            if _changed(obj, {"name", "risk_weight_defaults"}) and obj.id is not None:
                 org_ids.add(obj.id)
 
     for obj in session.new:
