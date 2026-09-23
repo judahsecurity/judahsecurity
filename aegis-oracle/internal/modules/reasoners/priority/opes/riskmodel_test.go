@@ -105,8 +105,8 @@ func TestRiskModel_DiscoverabilityOrdering(t *testing.T) {
 // Metasploit module on company-owned internet-facing infrastructure.
 func TestRiskModel_KEVMetasploitCompanyHosted(t *testing.T) {
 	in := Input{
-		CVE: &schema.CVE{ID: "CVE-2099-0002", CVSSVectors: []schema.CVSSVector{{Version: "3.1", Score: 9.8}},
-			NucleiTemplate: "x.yaml"},
+		CVE: &schema.CVE{ID: "CVE-2099-0002", NucleiTemplate: "x.yaml",
+			CVSSVectors: []schema.CVSSVector{{Version: "3.1", Score: 9.8, Vector: "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}}},
 		Asset: &schema.Asset{
 			Criticality: schema.CriticalityCritical,
 			Exposure:    schema.ExposureInternet,
@@ -159,5 +159,51 @@ func TestRiskModel_PracticalityCappedByMultiStagePath(t *testing.T) {
 	}
 	if got := easeOfExploitFactor(in).Score; got != 2 {
 		t.Errorf("ease of exploit: got %d, want 2 (multi-stage)", got)
+	}
+}
+
+// TestRiskModel_SkillLevelFollowsExploitDifficulty: skill level reflects how
+// hard the flaw is to exploit (OWASP threat-agent skill), not tool availability.
+func TestRiskModel_SkillLevelFollowsExploitDifficulty(t *testing.T) {
+	withVector := func(v string) Input {
+		return Input{CVE: &schema.CVE{ID: "CVE-2099-0004", CVSSVectors: []schema.CVSSVector{{Version: "3.1", Score: 8.0, Vector: v}}}}
+	}
+	intrinsic := func(capability schema.AttackerCapability, cx schema.ExploitComplexity, v string) Input {
+		in := withVector(v)
+		in.Intrinsic = &schema.IntrinsicAnalysis{AttackerCapability: capability, ExploitComplexity: cx}
+		in.Intrinsic.CVSSReconciliation.CorrectVector = v
+		return in
+	}
+	cases := []struct {
+		name string
+		in   Input
+		want int
+	}{
+		{"unauth, AC:L, low complexity", intrinsic(schema.AttackerUnauthenticatedNetwork, schema.ComplexityLow, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), 5},
+		{"PR:N, AC:L from CVE vector", withVector("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), 5},
+		{"PR:L, AC:L", withVector("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H"), 4},
+		{"PR:N, AC:H", withVector("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H"), 4},
+		{"PR:H, AC:H, UI:R", withVector("CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:H/I:H/A:H"), 1},
+		{"code execution + high complexity", intrinsic(schema.AttackerCodeExecution, schema.ComplexityHigh, "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H"), 1},
+	}
+	for _, c := range cases {
+		if got := skillLevelFactor(c.in); got.Score != c.want {
+			t.Errorf("%s: got %d (%s), want %d", c.name, got.Score, got.Reason, c.want)
+		}
+	}
+
+	// Tooling must not change skill level: same flaw with and without Metasploit.
+	hard := withVector("CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:H")
+	armed := withVector("CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:H")
+	armed.Exploitation.MetasploitAvailable = true
+	if a, b := skillLevelFactor(hard).Score, skillLevelFactor(armed).Score; a != b {
+		t.Errorf("Metasploit changed skill level: %d vs %d", a, b)
+	}
+
+	// A well-documented class never requires specialist skill.
+	sqli := withVector("CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:H/I:H/A:H")
+	sqli.CWEID = "CWE-89"
+	if got := skillLevelFactor(sqli).Score; got != 3 {
+		t.Errorf("SQLi floor: got %d, want 3", got)
 	}
 }

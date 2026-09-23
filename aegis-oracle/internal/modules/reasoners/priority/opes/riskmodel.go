@@ -10,7 +10,7 @@ import (
 
 // RiskModelVersion identifies the factor mapping below. Bump on any change
 // to how signals map to factor scores.
-const RiskModelVersion = "risk/v1"
+const RiskModelVersion = "risk/v2"
 
 // riskModel maps the OPES inputs onto the seven-factor Likelihood × Impact
 // model. Every factor carries a one-line reason so an analyst can see why a
@@ -159,33 +159,152 @@ func severityFactor(in Input) schema.RiskFactor {
 
 // ── Likelihood factors ───────────────────────────────────────────────────────
 
-// skillLevelFactor: 5 = no technical skill needed, 1 = specialist expertise.
+// skillLevelFactor rates the skill an attacker needs, modelled on the OWASP
+// Risk Rating "Skill level" threat-agent factor: 5 = no technical skills,
+// 1 = security penetration skills. It is driven by how intrinsically hard the
+// flaw is to exploit (CVSS AC/AT/PR/UI, required attacker position, exploit
+// complexity, attack path, blocking preconditions), not by whether exploit
+// tooling exists; tooling is scored under Ease of Exploit.
 func skillLevelFactor(in Input) schema.RiskFactor {
-	e := in.Exploitation
-	switch {
-	case e.MetasploitAvailable:
-		return schema.RiskFactor{Score: 5, Rating: "No Technical Skills", Reason: "Metasploit module available"}
-	case e.VulnCheckWeaponized:
-		return schema.RiskFactor{Score: 5, Rating: "No Technical Skills", Reason: "Weaponized exploit available (VulnCheck)"}
-	case in.DetectionConfidence == schema.ExploitConfirmed:
-		return schema.RiskFactor{Score: 5, Rating: "No Technical Skills", Reason: "Our scanner triggered it with an automated check"}
-	case e.MisconfigBreachRisk >= 7.5:
-		return schema.RiskFactor{Score: 5, Rating: "No Technical Skills", Reason: "Exposed service or misconfiguration usable with standard clients"}
-	case e.ExploitDBFound || e.VulnCheckPublicExploit || e.AttackerKBExploitability >= 4:
-		return schema.RiskFactor{Score: 4, Rating: "Some Technical Skills", Reason: "Public exploit write-up available"}
-	case e.PublicPOCFound || e.TrickestFound || hasWeaponizedPOC(in) || e.MisconfigBreachRisk > 0:
-		return schema.RiskFactor{Score: 3, Rating: "Moderate Technical Skills", Reason: "Public PoC exists but needs adapting"}
+	vector := intrinsicVector(in)
+	if vector == "" {
+		vector = bestCVSSVector(in.CVE)
 	}
+	if vector == "" && in.Intrinsic == nil {
+		switch r := in.Exploitation.MisconfigBreachRisk; {
+		case r >= 7.5:
+			return schema.RiskFactor{Score: 5, Rating: "No Technical Skills", Reason: "Exposure is usable with standard clients, no exploitation technique needed"}
+		case r > 0:
+			return schema.RiskFactor{Score: 4, Rating: "Some Technical Skills", Reason: "Misconfiguration abusable with basic security knowledge"}
+		}
+		return schema.RiskFactor{Score: 3, Rating: "Moderate Technical Skills", Reason: "No CVSS vector or exploit analysis; assumed moderate"}
+	}
+
+	// Difficulty points: higher = more skill needed. A clean
+	// unauthenticated, low-complexity network attack lands at 0 (score 5).
+	points := 1.0
+	var why []string
+	add := func(v float64, reason string) {
+		points += v
+		why = append(why, reason)
+	}
+
+	_, ac := parseAVAC(vector)
+	if ac == "H" {
+		add(1.5, "high attack complexity (AC:H)")
+	}
+	if parseAT(vector) == "P" {
+		add(1.0, "attack requirements present (AT:P)")
+	}
+	if parseUI(vector) == "R" {
+		add(0.5, "needs user interaction (UI:R)")
+	}
+
+	capability := schema.AttackerCapability("")
 	if in.Intrinsic != nil {
-		switch in.Intrinsic.AttackerCapability {
-		case schema.AttackerCodeExecution, schema.AttackerPhysical:
-			return schema.RiskFactor{Score: 1, Rating: "Security Penetration Skills", Reason: "Requires prior code execution or physical access and no public exploit"}
-		}
-		if in.Intrinsic.ExploitComplexity == schema.ComplexityHigh {
-			return schema.RiskFactor{Score: 1, Rating: "Security Penetration Skills", Reason: "High exploit complexity and no public exploit"}
+		capability = in.Intrinsic.AttackerCapability
+	}
+	switch capability {
+	case schema.AttackerUnauthenticatedNetwork:
+		add(-1.0, "unauthenticated network attack")
+	case schema.AttackerAuthenticatedLowPriv:
+		why = append(why, "needs a low-privilege account")
+	case schema.AttackerAuthenticatedHighPriv:
+		add(1.0, "needs a high-privilege account")
+	case schema.AttackerLocalUser:
+		add(1.0, "needs local access")
+	case schema.AttackerCodeExecution:
+		add(2.0, "needs existing code execution")
+	case schema.AttackerPhysical:
+		add(2.0, "needs physical access")
+	default:
+		switch parsePR(vector) {
+		case "N":
+			add(-1.0, "no privileges required (PR:N)")
+		case "L":
+			why = append(why, "low privileges required (PR:L)")
+		case "H":
+			add(1.0, "high privileges required (PR:H)")
 		}
 	}
-	return schema.RiskFactor{Score: 2, Rating: "Advanced Technical Skills", Reason: "No public exploit code; attacker must write one"}
+
+	if in.Intrinsic != nil {
+		switch in.Intrinsic.ExploitComplexity {
+		case schema.ComplexityLow:
+			add(-0.5, "low exploit complexity")
+		case schema.ComplexityHigh:
+			add(1.5, "high exploit complexity")
+		}
+		switch in.Intrinsic.AttackPathClass {
+		case schema.AttackPathLateralMovementRequired:
+			add(1.0, "requires lateral movement from a foothold")
+		case schema.AttackPathValidCredentials:
+			add(0.5, "requires valid credentials")
+		case schema.AttackPathPhishingDelivery:
+			add(0.5, "requires phishing delivery")
+		}
+		blockers := 0
+		for _, p := range in.Intrinsic.Preconditions {
+			if p.Severity == schema.PreconditionBlocker {
+				blockers++
+			}
+		}
+		if blockers > 0 {
+			add(math.Min(float64(blockers)*0.5, 1.5), fmt.Sprintf("%d blocking precondition(s)", blockers))
+		}
+	}
+
+	score := int(math.Round(5 - points))
+	if score < 1 {
+		score = 1
+	}
+	if score > 5 {
+		score = 5
+	}
+
+	// Well-documented weakness classes (SQLi, command injection, hard-coded
+	// credentials, missing auth) are taught widely; exploiting them never
+	// needs specialist skills.
+	if in.CWEID != "" && cweExploitCeiling(in.CWEID) <= 3.0 && score < 3 {
+		score = 3
+		why = append(why, in.CWEID+" is a well-documented technique")
+	}
+
+	if len(why) == 0 {
+		why = append(why, "standard exploitation, no special conditions")
+	}
+	ratings := map[int]string{
+		5: "No Technical Skills",
+		4: "Some Technical Skills",
+		3: "Moderate Technical Skills",
+		2: "Advanced Technical Skills",
+		1: "Security Penetration Skills",
+	}
+	return schema.RiskFactor{Score: score, Rating: ratings[score], Reason: strings.Join(why, "; ")}
+}
+
+// bestCVSSVector returns the vector string behind maxCVSSScore.
+func bestCVSSVector(cve *schema.CVE) string {
+	if cve == nil {
+		return ""
+	}
+	best := maxCVSSScore(cve)
+	for _, v := range cve.CVSSVectors {
+		if v.Score == best && v.Vector != "" {
+			return v.Vector
+		}
+	}
+	return ""
+}
+
+// parsePR returns the PR (Privileges Required) field from a CVSS vector.
+func parsePR(vector string) string {
+	for _, p := range strings.Split(vector, "/") {
+		if k, v, ok := strings.Cut(p, ":"); ok && k == "PR" {
+			return v
+		}
+	}
+	return ""
 }
 
 func discoveryFactor(in Input) schema.RiskFactor {
