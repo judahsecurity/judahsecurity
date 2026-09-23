@@ -62,11 +62,23 @@ class App:
         self.store, self.vulnerable, self.status_only = store, vulnerable, status_only
         self.object = {"id": 1, "marker": "before"}
         self.calls = []
+        self.coverage_cell_ids = []
 
     async def exchange(
-        self, method, url, identity, headers, body, hypothesis_id, follow_redirects
+        self,
+        method,
+        url,
+        identity,
+        headers,
+        body,
+        hypothesis_id,
+        follow_redirects,
+        coverage_cell_id="",
     ):
+        # Mirrors the real transport (_http_exchange), which receives the
+        # coverage cell for the attack step since leased cell tracing.
         self.calls.append((method, url, identity))
+        self.coverage_cell_ids.append(coverage_cell_id)
         if method == "POST":
             self.object.update(body)
         if method == "PATCH" and self.vulnerable and not self.status_only:
@@ -196,3 +208,17 @@ async def test_aliases_of_same_account_and_reflected_read_canary_are_rejected():
             plan, fixture_cell(), execute=app.exchange, registry=registry()
         )
     assert app.calls == []
+
+
+@pytest.mark.asyncio
+async def test_only_attack_step_carries_coverage_cell():
+    store = EvidenceStore()
+    app = App(store, vulnerable=True)
+    cell = dict(fixture_cell(), coverage_cell_id="cell-1")
+    receipt = await ProofEngine(store).run(
+        fixture_plan(), cell, execute=app.exchange, registry=registry()
+    )
+    # setup, attack, verify: owner steps run as other actors, so only the
+    # attacker's step is attributed to the coverage cell.
+    assert app.coverage_cell_ids == ["", "cell-1", ""]
+    assert receipt.coverage_cell_id == "cell-1"
