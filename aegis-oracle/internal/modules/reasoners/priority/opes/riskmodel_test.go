@@ -163,7 +163,7 @@ func TestRiskModel_PracticalityCappedByMultiStagePath(t *testing.T) {
 }
 
 // TestRiskModel_SkillLevelFollowsExploitDifficulty: skill level reflects how
-// hard the flaw is to exploit (OWASP threat-agent skill), not tool availability.
+// hard the flaw is to exploit (OWASP threat-agent skill), lowered by exploit tooling.
 func TestRiskModel_SkillLevelFollowsExploitDifficulty(t *testing.T) {
 	withVector := func(v string) Input {
 		return Input{CVE: &schema.CVE{ID: "CVE-2099-0004", CVSSVectors: []schema.CVSSVector{{Version: "3.1", Score: 8.0, Vector: v}}}}
@@ -192,12 +192,33 @@ func TestRiskModel_SkillLevelFollowsExploitDifficulty(t *testing.T) {
 		}
 	}
 
-	// Tooling must not change skill level: same flaw with and without Metasploit.
+	// Tooling lowers the skill bar: the same hard flaw with a Metasploit
+	// module needs no technical skill, a public PoC only moderate skill.
 	hard := withVector("CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:H")
+	if got := skillLevelFactor(hard).Score; got != 2 {
+		t.Errorf("hard flaw without tooling: got %d, want 2", got)
+	}
 	armed := withVector("CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:H")
 	armed.Exploitation.MetasploitAvailable = true
-	if a, b := skillLevelFactor(hard).Score, skillLevelFactor(armed).Score; a != b {
-		t.Errorf("Metasploit changed skill level: %d vs %d", a, b)
+	if got := skillLevelFactor(armed).Score; got != 5 {
+		t.Errorf("hard flaw with Metasploit: got %d, want 5", got)
+	}
+	poc := withVector("CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:H")
+	poc.Exploitation.PublicPOCFound = true
+	if got := skillLevelFactor(poc).Score; got != 3 {
+		t.Errorf("hard flaw with PoC: got %d, want 3", got)
+	}
+	// Tooling never lowers the score of an already-easy flaw.
+	easy := withVector("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H")
+	easy.Exploitation.PublicPOCFound = true
+	if got := skillLevelFactor(easy).Score; got != 5 {
+		t.Errorf("easy flaw with PoC: got %d, want 5", got)
+	}
+	// Tooling can't remove a code-execution prerequisite.
+	foothold := intrinsic(schema.AttackerCodeExecution, schema.ComplexityHigh, "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H")
+	foothold.Exploitation.MetasploitAvailable = true
+	if got := skillLevelFactor(foothold).Score; got != 3 {
+		t.Errorf("code-exec prerequisite with Metasploit: got %d, want 3", got)
 	}
 
 	// A well-documented class never requires specialist skill.

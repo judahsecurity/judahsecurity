@@ -10,7 +10,7 @@ import (
 
 // RiskModelVersion identifies the factor mapping below. Bump on any change
 // to how signals map to factor scores.
-const RiskModelVersion = "risk/v2"
+const RiskModelVersion = "risk/v3"
 
 // riskModel maps the OPES inputs onto the seven-factor Likelihood × Impact
 // model. Every factor carries a one-line reason so an analyst can see why a
@@ -163,8 +163,11 @@ func severityFactor(in Input) schema.RiskFactor {
 // Risk Rating "Skill level" threat-agent factor: 5 = no technical skills,
 // 1 = security penetration skills. It is driven by how intrinsically hard the
 // flaw is to exploit (CVSS AC/AT/PR/UI, required attacker position, exploit
-// complexity, attack path, blocking preconditions), not by whether exploit
-// tooling exists; tooling is scored under Ease of Exploit.
+// complexity, attack path, blocking preconditions). Exploit tooling then
+// lowers the skill bar: a Metasploit module or weaponized exploit automates
+// the hard part, so it raises the score to what the tool leaves the attacker
+// to do. Tooling cannot remove a positional requirement (existing code
+// execution or physical access), so those stay capped at Moderate.
 func skillLevelFactor(in Input) schema.RiskFactor {
 	vector := intrinsicVector(in)
 	if vector == "" {
@@ -273,6 +276,16 @@ func skillLevelFactor(in Input) schema.RiskFactor {
 	if len(why) == 0 {
 		why = append(why, "standard exploitation, no special conditions")
 	}
+
+	if floor, tool := toolingSkillFloor(in); floor > score {
+		if capability == schema.AttackerCodeExecution || capability == schema.AttackerPhysical {
+			floor = min3(floor)
+		}
+		if floor > score {
+			why = append(why, fmt.Sprintf("%s automates exploitation (difficulty alone: %d)", tool, score))
+			score = floor
+		}
+	}
 	ratings := map[int]string{
 		5: "No Technical Skills",
 		4: "Some Technical Skills",
@@ -281,6 +294,32 @@ func skillLevelFactor(in Input) schema.RiskFactor {
 		1: "Security Penetration Skills",
 	}
 	return schema.RiskFactor{Score: score, Rating: ratings[score], Reason: strings.Join(why, "; ")}
+}
+
+// toolingSkillFloor returns the skill score public exploit tooling brings a
+// finding up to, and the tool responsible.
+func toolingSkillFloor(in Input) (int, string) {
+	e := in.Exploitation
+	switch {
+	case e.MetasploitAvailable:
+		return 5, "Metasploit module"
+	case e.VulnCheckWeaponized:
+		return 5, "Weaponized exploit (VulnCheck)"
+	case in.DetectionConfidence == schema.ExploitConfirmed:
+		return 5, "Automated scanner exploit check"
+	case e.ExploitDBFound || e.VulnCheckPublicExploit || e.AttackerKBExploitability >= 4:
+		return 4, "Public exploit (Exploit-DB / VulnCheck)"
+	case e.PublicPOCFound || e.TrickestFound || hasWeaponizedPOC(in):
+		return 3, "Public PoC"
+	}
+	return 0, ""
+}
+
+func min3(v int) int {
+	if v > 3 {
+		return 3
+	}
+	return v
 }
 
 // bestCVSSVector returns the vector string behind maxCVSSScore.
