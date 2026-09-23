@@ -22,6 +22,12 @@ BACKEND_PORT=8000
 SECRET_KEY=GENERATE_WITH_openssl_rand_hex_32
 DEBUG=false
 
+# Severity evaluation gap agent (LLM). When true, findings whose risk factors
+# the rules could not measure are sent to the agent for proposals after they
+# are scored; analysts still confirm every proposal. Off by default.
+SEVERITY_AGENT_AUTO=false
+SEVERITY_AGENT_WORKERS=2
+
 # Frontend
 # When running behind the bundled nginx + Let's Encrypt (recommended), leave
 # NEXT_PUBLIC_API_URL EMPTY. The frontend will use window.location.origin in

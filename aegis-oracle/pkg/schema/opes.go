@@ -7,10 +7,10 @@ package schema
 type Priority string
 
 const (
-	PriorityCritical      Priority = "critical"
-	PriorityHigh          Priority = "high"
-	PriorityMedium        Priority = "medium"
-	PriorityLow           Priority = "low"
+	PriorityCritical     Priority = "critical"
+	PriorityHigh         Priority = "high"
+	PriorityMedium       Priority = "medium"
+	PriorityLow          Priority = "low"
 	PriorityInformational Priority = "informational"
 )
 
@@ -28,92 +28,6 @@ type OPESScore struct {
 	Dampener         string         `json:"dampener,omitempty"`
 	Override         string         `json:"override,omitempty"`
 	EvaluatorVersion string         `json:"evaluator_version"`
-
-	// RiskModel is the Likelihood × Impact breakdown computed from the same
-	// inputs. It does not change Value or Category; it exists so reviewers
-	// can see severity, discoverability and exploit practicality separately.
-	RiskModel *RiskModelScore `json:"risk_model,omitempty"`
-}
-
-// RiskFactor is one 0–4 factor of the Likelihood × Impact risk model
-// (0 = none, 4 = highest), with the reason it received that score.
-type RiskFactor struct {
-	Score  int    `json:"score"`
-	Rating string `json:"rating"`
-	Reason string `json:"reason"`
-	// Source says where the score came from: auto (measured from evidence),
-	// assumed (a default because the data was missing — an analyst should
-	// set it at triage) or analyst (set by an analyst; applied by the ASM).
-	Source string `json:"source,omitempty"`
-}
-
-// Risk factor sources.
-const (
-	FactorAuto    = "auto"
-	FactorAssumed = "assumed"
-	FactorAnalyst = "analyst"
-)
-
-// RiskFactors are the seven factors of the risk model.
-//
-// Impact: BusinessImpact, NetworkLocation, VulnerabilitySeverity.
-// Likelihood: SkillLevel (4 = no skill needed), EaseOfDiscovery,
-// EaseOfExploit, Awareness.
-type RiskFactors struct {
-	BusinessImpact        RiskFactor `json:"business_impact"`
-	NetworkLocation       RiskFactor `json:"network_location"`
-	VulnerabilitySeverity RiskFactor `json:"vulnerability_severity"`
-	SkillLevel            RiskFactor `json:"skill_level"`
-	EaseOfDiscovery       RiskFactor `json:"ease_of_discovery"`
-	EaseOfExploit         RiskFactor `json:"ease_of_exploit"`
-	Awareness             RiskFactor `json:"awareness"`
-}
-
-// Exploit realism tiers, from proven on this asset to blocked on this asset.
-const (
-	RealismConfirmed   = "confirmed"
-	RealismLikely      = "likely"
-	RealismUnverified  = "unverified"
-	RealismConditional = "conditional"
-	RealismBlocked     = "blocked"
-)
-
-// ExploitRealism is the asset-specific reality check on exploitability:
-// an exploit existing somewhere does not mean it works here. Score is 0–4
-// (4 = confirmed or likely on this asset, 0 = known paths blocked here).
-// Blocked is not a safety claim: it covers the documented paths only.
-type ExploitRealism struct {
-	Score   int      `json:"score"`
-	Tier    string   `json:"tier"`
-	Reasons []string `json:"reasons"`
-}
-
-// RiskModelScore is Risk = Impact × Likelihood. Impact and Likelihood are
-// 0–4; Risk is (Impact/4)·(Likelihood/4) as 0–100, so zero likelihood or
-// zero impact means zero risk.
-//
-// Severity, Discoverability and ExploitPracticality are the three headline
-// questions the model answers: how bad is it, how easily is it found, and
-// how practical is it to exploit in the real world (mean of skill level,
-// ease of exploit and awareness, 0–4).
-type RiskModelScore struct {
-	Score               float64  `json:"score"`
-	Level               Priority `json:"level"`
-	Impact              float64  `json:"impact"`
-	Likelihood          float64  `json:"likelihood"`
-	Severity            int      `json:"severity"`
-	Discoverability     int      `json:"discoverability"`
-	ExploitPracticality float64  `json:"exploit_practicality"`
-	// Realism answers "can the known exploit actually work against this
-	// asset?" It caps Ease of Exploit and tool-driven Skill Level, and can
-	// cap Likelihood; LikelihoodUncapped shows the value before that cap.
-	Realism            *ExploitRealism `json:"exploit_realism,omitempty"`
-	LikelihoodUncapped float64         `json:"likelihood_uncapped"`
-	// NeedsAnalyst lists factor keys scored on an assumption because the
-	// data was missing; analysts fill these in during triage.
-	NeedsAnalyst []string    `json:"needs_analyst,omitempty"`
-	Factors      RiskFactors `json:"factors"`
-	Version      string      `json:"version"`
 }
 
 // OPESComponents are the six 0–10 sub-scores that combine into the final

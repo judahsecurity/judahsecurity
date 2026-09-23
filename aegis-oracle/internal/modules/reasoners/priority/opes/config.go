@@ -7,7 +7,6 @@ type Config struct {
 	Weights   Weights
 	Dampeners Dampeners
 	Bucketing Bucketing
-	RiskModel RiskModelConfig
 }
 
 // Weights distribute influence across the six components. Must sum to
@@ -48,31 +47,6 @@ type Bucketing struct {
 	Low          float64
 }
 
-// RiskModelConfig tunes the Likelihood × Impact risk model.
-//
-// Factors are scored 0–4. Impact = BusinessImpact·w + NetworkLocation·w +
-// VulnerabilitySeverity·w (weights should sum to 1.0); Likelihood is the
-// plain mean of its four factors. Risk = (Impact/4)·(Likelihood/4)·100, so
-// 0–100. Levels are half-open: Risk ≥ Critical → critical, ≥ High → high,
-// ≥ Medium → medium, ≥ Low → low, otherwise informational.
-type RiskModelConfig struct {
-	BusinessImpactWeight        float64
-	NetworkLocationWeight       float64
-	VulnerabilitySeverityWeight float64
-
-	Critical float64
-	High     float64
-	Medium   float64
-	Low      float64
-
-	// Likelihood ceilings (0–4) applied by exploit realism. An exploit whose
-	// documented paths are blocked on this asset has no likelihood there;
-	// one that needs a foothold, credentials or a victim first cannot be as
-	// likely as one that works directly, however well known it is.
-	BlockedLikelihoodCap     float64
-	ConditionalLikelihoodCap float64
-}
-
 // DefaultConfig returns the baseline OPES configuration. These numbers
 // are calibrated against the CVE-2025-55130 golden test in opes_test.go.
 // Adjust there too when changing weights.
@@ -97,17 +71,6 @@ func DefaultConfig() Config {
 			Medium:       5.0,
 			Low:          3.0,
 		},
-		RiskModel: RiskModelConfig{
-			BusinessImpactWeight:        0.20,
-			NetworkLocationWeight:       0.10,
-			VulnerabilitySeverityWeight: 0.70,
-			Critical:                    64,
-			High:                        36,
-			Medium:                      16,
-			Low:                         4,
-			BlockedLikelihoodCap:        0,
-			ConditionalLikelihoodCap:    2.0,
-		},
 	}
 }
 
@@ -123,9 +86,6 @@ func (c Config) WithDefaults() Config {
 	}
 	if c.Bucketing == (Bucketing{}) {
 		c.Bucketing = d.Bucketing
-	}
-	if c.RiskModel == (RiskModelConfig{}) {
-		c.RiskModel = d.RiskModel
 	}
 	return c
 }

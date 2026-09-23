@@ -1,19 +1,18 @@
 """
 Likelihood × Impact risk model — analyst triage layer.
 
-Aegis Oracle scores the seven risk factors automatically and stores them in
-``metadata_["oracle"]["opes_risk_model"]``. Some factors cannot be measured
-from scan data (how important a system is to the business, who hosts it,
-whether a condition was verified by hand); Oracle marks those ``assumed``
-and lists them in ``needs_analyst``.
+The severity evaluator (app/services/severity_evaluation.py) scores the
+seven risk factors automatically and stores them in
+``metadata_["severity_eval"]``. Some factors cannot be measured from the
+evidence (how important a system is to the business, who hosts it, whether a
+condition was verified by hand); those are ``assumed`` or proposed by the
+gap agent (``agent``) and listed in ``needs_analyst``.
 
 Analysts set those factors — or override any other — during triage. Their
 input lives in ``metadata_["risk_overrides"]`` so an Oracle re-enrichment
 never wipes it, and the final score is recomputed here on read.
 
-The arithmetic mirrors ``aegis-oracle/internal/modules/reasoners/priority/
-opes/riskmodel.go`` (scoreRiskFactors); the worked examples in
-tests/test_risk_model.py pin both to the same numbers.
+tests/test_risk_model.py pins the arithmetic with worked examples.
 """
 
 from __future__ import annotations
@@ -52,7 +51,6 @@ FACTOR_RATINGS: Dict[str, Dict[int, str]] = {
 
 REALISM_TIERS = ("confirmed", "likely", "unverified", "conditional", "blocked")
 
-# Defaults match opes.DefaultConfig().RiskModel.
 WEIGHTS = {"business_impact": 0.20, "network_location": 0.10, "vulnerability_severity": 0.70}
 LEVELS = ((64.0, "critical"), (36.0, "high"), (16.0, "medium"), (4.0, "low"))
 BLOCKED_LIKELIHOOD_CAP = 0.0
@@ -188,7 +186,8 @@ def merged_risk_model(
             "auto": auto.get("exploit_realism"),
         }
 
-    needs_analyst = [k for k in FACTOR_KEYS if k in missing or factors.get(k, {}).get("source") == "assumed"]
+    # Assumed defaults and gap-agent proposals both wait on an analyst.
+    needs_analyst = [k for k in FACTOR_KEYS if k in missing or factors.get(k, {}).get("source") in ("assumed", "agent")]
     result: Dict[str, Any] = {
         "factors": factors,
         "exploit_realism": realism,

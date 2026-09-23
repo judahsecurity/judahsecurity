@@ -55,7 +55,6 @@ func buildScore(raw float64, c schema.OPESComponents, in Input, cfg Config) sche
 		Components:       c,
 		TopContributors:  explain(c, cfg),
 		EvaluatorVersion: Version,
-		RiskModel:        riskModel(in, cfg.RiskModel),
 	}
 }
 

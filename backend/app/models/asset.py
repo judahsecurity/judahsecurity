@@ -169,6 +169,8 @@ class Asset(Base):
     in_scope = Column(Boolean, default=True, index=True)  # Is this asset in scope for scanning
     is_owned = Column(Boolean, default=False, index=True)  # Is this asset confirmed owned by the org
     netblock_id = Column(Integer, ForeignKey("netblocks.id"), nullable=True)  # Associated netblock if any
+    # Business application this asset serves; findings on it inherit the link.
+    business_app_id = Column(Integer, ForeignKey("business_applications.id", ondelete="SET NULL"), nullable=True, index=True)
     
     # Hosting classification (for IPs discovered via DNS resolution)
     # This helps distinguish between owned infrastructure vs cloud-hosted ephemeral IPs

@@ -1138,6 +1138,46 @@ class ApiClient {
     return response.data;
   }
 
+  async proposeRiskFactors(vulnId: number) {
+    const response = await this.client.post(`/vulnerabilities/${vulnId}/risk-factors/propose`);
+    return response.data;
+  }
+
+  async runSeverityEvaluation(payload: { only_missing?: boolean; include_closed?: boolean } = {}) {
+    const response = await this.client.post('/vulnerabilities/severity-evaluation/run', payload);
+    return response.data as { queued: number };
+  }
+
+  async runSeverityAgentBatch(limit = 50) {
+    const response = await this.client.post('/vulnerabilities/severity-evaluation/propose', { limit });
+    return response.data as { queued: number };
+  }
+
+  async getSeverityEvaluationSummary() {
+    const response = await this.client.get('/vulnerabilities/severity-evaluation/summary');
+    return response.data;
+  }
+
+  async listBusinessApps(q?: string, limit = 25) {
+    const response = await this.client.get('/business-apps', { params: { q: q || undefined, limit } });
+    return response.data;
+  }
+
+  async syncBusinessApps() {
+    const response = await this.client.post('/business-apps/sync');
+    return response.data as { synced: number };
+  }
+
+  async linkFindingBusinessApp(vulnId: number, businessAppId: number | null) {
+    const response = await this.client.put(`/business-apps/findings/${vulnId}`, { business_app_id: businessAppId });
+    return response.data;
+  }
+
+  async linkAssetBusinessApp(assetId: number, businessAppId: number | null) {
+    const response = await this.client.put(`/business-apps/assets/${assetId}`, { business_app_id: businessAppId });
+    return response.data;
+  }
+
   async getValidationResult(vulnId: number) {
     const response = await this.client.get(`/vulnerabilities/${vulnId}/validation`);
     return response.data;

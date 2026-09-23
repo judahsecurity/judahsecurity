@@ -115,6 +115,19 @@ def check_org_access(db: Session, user: User, asset_id: int) -> bool:
     return user.organization_id == asset.organization_id
 
 
+def business_app_summary(app: Any, *, inherited: bool = False) -> dict:
+    return {
+        "id": app.id,
+        "app_id": app.app_id,
+        "name": app.name,
+        "business_criticality": app.business_criticality,
+        "criticality_level": app.criticality_level,
+        "owner": app.owner,
+        "external_url": app.external_url,
+        "inherited_from_asset": inherited,
+    }
+
+
 def build_vuln_response(
     vuln: Vulnerability,
     db: Optional[Session] = None,
@@ -275,6 +288,19 @@ def list_vulnerabilities(
         None,
         description="Filter by detector (e.g. agent, nuclei, port_scanner)",
     ),
+    risk_level: Optional[str] = Query(
+        None,
+        description="Filter by severity-evaluation level (critical/high/medium/low/informational)",
+    ),
+    triage: Optional[str] = Query(
+        None,
+        description="Filter by severity triage status: needs_analyst, triaged, incomplete, or not_evaluated",
+    ),
+    business_app_id: Optional[int] = Query(None, description="Filter by business application"),
+    sort: Optional[str] = Query(
+        None,
+        description="'risk' orders by severity-evaluation score; default orders by OPES priority",
+    ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -309,9 +335,30 @@ def list_vulnerabilities(
         query = query.filter(Vulnerability.cve_id == cve_id)
     if detected_by:
         query = query.filter(Vulnerability.detected_by == detected_by.strip())
+    if risk_level:
+        query = query.filter(Vulnerability.sev_level == risk_level.strip().lower())
+    if triage:
+        t = triage.strip().lower()
+        if t == "not_evaluated":
+            query = query.filter(Vulnerability.sev_status.is_(None))
+        else:
+            query = query.filter(Vulnerability.sev_status == t)
+    if business_app_id:
+        query = query.filter(
+            or_(
+                Vulnerability.business_app_id == business_app_id,
+                and_(Vulnerability.business_app_id.is_(None), Asset.business_app_id == business_app_id),
+            )
+        )
 
-    vulns = (
-        query.order_by(
+    if sort == "risk":
+        ordering = (
+            Vulnerability.sev_score.desc().nullslast(),
+            Vulnerability.oracle_opes_score.desc().nullslast(),
+            Vulnerability.created_at.desc(),
+        )
+    else:
+        ordering = (
             case(
                 (Vulnerability.oracle_opes_score.is_(None), 1),
                 else_=0,
@@ -320,6 +367,8 @@ def list_vulnerabilities(
             Vulnerability.severity.desc(),
             Vulnerability.created_at.desc(),
         )
+    vulns = (
+        query.order_by(*ordering)
         .offset(skip)
         .limit(limit)
         .all()
@@ -344,9 +393,22 @@ def list_vulnerabilities(
             .all()
         }
 
+    # Batch-load business applications (finding override, else the asset's).
+    from app.models.business_application import BusinessApplication
+    app_ids = {
+        v.business_app_id or (getattr(v.asset, "business_app_id", None) if v.asset else None)
+        for v in vulns
+    }
+    app_ids.discard(None)
+    apps_by_id = {}
+    if app_ids:
+        apps_by_id = {a.id: a for a in db.query(BusinessApplication).filter(BusinessApplication.id.in_(app_ids)).all()}
+
     responses = []
     for v in vulns:
         d = build_vuln_response(v, include_detection_dumps=False)
+        app = apps_by_id.get(v.business_app_id or (getattr(v.asset, "business_app_id", None) if v.asset else None))
+        d["business_app"] = business_app_summary(app, inherited=v.business_app_id is None) if app else None
         sid = d.get("screenshot_id")
         shot = shots_by_id.get(sid) if sid else None
         if shot:
@@ -1752,6 +1814,118 @@ def write_finding_risk_assessment(
     return ra
 
 
+class SeverityBackfillRequest(BaseModel):
+    only_missing: bool = True  # skip findings already evaluated
+    include_closed: bool = False
+
+
+def _run_severity_backfill(organization_id: Optional[int], only_missing: bool, include_closed: bool) -> None:
+    from app.db.database import SessionLocal
+    from app.services.scoring_pipeline import evaluate_severity
+
+    db = SessionLocal()
+    try:
+        q = db.query(Vulnerability.id).join(Asset)
+        if organization_id is not None:
+            q = q.filter(Asset.organization_id == organization_id)
+        if only_missing:
+            q = q.filter(Vulnerability.sev_status.is_(None))
+        if not include_closed:
+            q = q.filter(Vulnerability.status.in_([VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS]))
+        ids = [row[0] for row in q.all()]
+    finally:
+        db.close()
+    done = sum(1 for vid in ids if evaluate_severity(vid))
+    logger.info("Severity backfill: evaluated %d/%d findings (org=%s)", done, len(ids), organization_id)
+
+
+@router.post("/severity-evaluation/run")
+def run_severity_evaluation(
+    payload: SeverityBackfillRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Evaluate severity for every finding in the organization (background)."""
+    org_id = None if current_user.is_superuser else current_user.organization_id
+    if org_id is None and not current_user.is_superuser:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No organization")
+    q = db.query(func.count(Vulnerability.id)).join(Asset)
+    if org_id is not None:
+        q = q.filter(Asset.organization_id == org_id)
+    if payload.only_missing:
+        q = q.filter(Vulnerability.sev_status.is_(None))
+    if not payload.include_closed:
+        q = q.filter(Vulnerability.status.in_([VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS]))
+    queued = q.scalar() or 0
+    background_tasks.add_task(_run_severity_backfill, org_id, payload.only_missing, payload.include_closed)
+    return {"queued": queued}
+
+
+@router.get("/severity-evaluation/summary")
+def severity_evaluation_summary(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Open findings by triage status and risk level — drives the
+    'needs triage' queue."""
+    open_states = [VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS]
+    base = db.query(Vulnerability).join(Asset).filter(Vulnerability.status.in_(open_states))
+    if not current_user.is_superuser:
+        base = base.filter(Asset.organization_id == current_user.organization_id)
+    by_status = dict(
+        base.with_entities(Vulnerability.sev_status, func.count(Vulnerability.id)).group_by(Vulnerability.sev_status).all()
+    )
+    by_level = dict(
+        base.with_entities(Vulnerability.sev_level, func.count(Vulnerability.id)).group_by(Vulnerability.sev_level).all()
+    )
+    return {
+        "triage": {
+            "needs_analyst": by_status.get("needs_analyst", 0),
+            "triaged": by_status.get("triaged", 0),
+            "incomplete": by_status.get("incomplete", 0),
+            "not_evaluated": by_status.get(None, 0),
+        },
+        "levels": {k or "not_evaluated": v for k, v in by_level.items()},
+    }
+
+
+class SeverityAgentBatch(BaseModel):
+    limit: int = 50
+
+
+@router.post("/severity-evaluation/propose")
+def run_severity_agent_batch(
+    payload: SeverityAgentBatch,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Queue the gap agent for open findings waiting on triage that it has
+    not looked at yet (most severe first)."""
+    from app.services import severity_agent
+
+    q = (
+        db.query(Vulnerability)
+        .join(Asset)
+        .filter(
+            Vulnerability.sev_status == "needs_analyst",
+            Vulnerability.status.in_([VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS]),
+        )
+        .order_by(Vulnerability.sev_score.desc().nullslast())
+    )
+    if not current_user.is_superuser:
+        q = q.filter(Asset.organization_id == current_user.organization_id)
+    queued = 0
+    for vuln in q.limit(max(1, min(payload.limit, 500)) * 3):
+        if queued >= payload.limit:
+            break
+        if (vuln.metadata_ or {}).get("severity_eval", {}).get("agent_run_at"):
+            continue
+        if severity_agent.submit(vuln.id):
+            queued += 1
+    return {"queued": queued}
+
+
 class RiskFactorInput(BaseModel):
     score: int
     note: Optional[str] = None
@@ -1774,14 +1948,16 @@ class RiskFactorsTriage(BaseModel):
 
 
 def _risk_model_view(db: Session, vuln: Vulnerability) -> dict:
-    from app.services.hosting_classification import organization_name
-    from app.services.risk_model import merged_risk_model
+    """Severity evaluation for one finding. Evaluates on first view if the
+    finding has not been through the evaluator yet."""
+    from app.services.severity_evaluation import apply_effective, evaluate_finding
 
     meta = vuln.metadata_ or {}
-    auto = (meta.get("oracle") or {}).get("opes_risk_model")
-    asset = db.query(Asset.organization_id).filter(Asset.id == vuln.asset_id).first()
-    org_name = organization_name(db, asset[0] if asset else None)
-    return merged_risk_model(auto, meta.get("risk_overrides"), org_name)
+    if not meta.get("severity_eval"):
+        view = evaluate_finding(db, vuln)
+        db.commit()
+        return view
+    return apply_effective(db, vuln)
 
 
 @router.get("/{vuln_id}/risk-factors")
@@ -1798,6 +1974,30 @@ def get_finding_risk_factors(
     if not check_org_access(db, current_user, vuln.asset_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
     return _risk_model_view(db, vuln)
+
+
+@router.post("/{vuln_id}/risk-factors/propose")
+def propose_finding_risk_factors(
+    vuln_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Ask the gap agent to estimate this finding's unmeasured factors now."""
+    from app.services.severity_agent import propose_for_finding
+
+    vuln = db.query(Vulnerability).filter(Vulnerability.id == vuln_id).first()
+    if not vuln:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vulnerability not found")
+    if not check_org_access(db, current_user, vuln.asset_id):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+    try:
+        result = propose_for_finding(db, vuln)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Severity agent failed for vuln %s: %s", vuln_id, exc)
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                            detail="Severity agent unavailable — check the AI provider configuration.")
+    db.commit()
+    return result.get("view") or _risk_model_view(db, vuln)
 
 
 @router.put("/{vuln_id}/risk-factors")
@@ -1830,8 +2030,9 @@ def triage_finding_risk_factors(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
     vuln.metadata_ = meta
     flag_modified(vuln, "metadata_")
+    view = _risk_model_view(db, vuln)  # also writes the sev_* columns
     db.commit()
-    return _risk_model_view(db, vuln)
+    return view
 
 
 @router.post("/{vuln_id}/risk-assessment/ask")

@@ -51,11 +51,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
-from sqlalchemy.orm import Session, object_session
+from sqlalchemy.orm import Session
 
 from app.models.asset import Asset, AssetType
 from app.models.vulnerability import Vulnerability
-from app.services.hosting_classification import classify_asset_hosting
 
 logger = logging.getLogger(__name__)
 
@@ -499,22 +498,6 @@ def _build_oracle_asset(asset: Asset) -> Optional[Dict[str, Any]]:
     if asset_type_val:
         extra["asset_type"] = asset_type_val
 
-    # Hosting from the organization's IP inventory (owned netblocks, then
-    # cloud/CDN ranges) drives the risk model's Network Location factor.
-    session = object_session(asset)
-    if session is not None:
-        try:
-            hosting = classify_asset_hosting(session, asset)
-        except Exception as exc:  # noqa: BLE001 — never block enrichment on this
-            logger.debug("hosting classification failed for asset %s: %s", asset.id, exc)
-        else:
-            extra["hosting_type"] = hosting["hosting_type"]
-            extra["hosting_basis"] = hosting["basis"]
-            if hosting["hosting_provider"]:
-                extra["hosting_provider"] = hosting["hosting_provider"]
-            if hosting["organization_name"]:
-                extra["organization_name"] = hosting["organization_name"]
-
     for key, value in extra.items():
         record(f"extra.{key}", value, "asm_inventory")
 
@@ -778,7 +761,6 @@ def _build_payload(
             "opes_components": opes.get("components"),
             "opes_dampener": opes.get("dampener"),
             "opes_override": opes.get("override"),
-            "opes_risk_model": opes.get("risk_model"),
             "evaluator_version": opes.get("evaluator_version"),
             "attack_path_class": finding.get("attack_path_class"),
             "lateral_movement_potential": finding.get("lateral_movement_potential"),

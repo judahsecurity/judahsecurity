@@ -464,10 +464,6 @@ func (s *Store) UpsertFinding(ctx context.Context, f *schema.Finding) error {
 	precsJSON, _ := json.Marshal(f.PreconditionsEvaluated)
 	compsJSON, _ := json.Marshal(f.OPES.Components)
 	contribsJSON, _ := json.Marshal(f.OPES.TopContributors)
-	var riskModelJSON []byte
-	if f.OPES.RiskModel != nil {
-		riskModelJSON, _ = json.Marshal(f.OPES.RiskModel)
-	}
 	reconcileJSON, _ := json.Marshal(f.CVSSReconciliation)
 	briefJSON, _ := json.Marshal(f.AnalystBrief)
 	contextJSON, _ := json.Marshal(f.ContextualAssessment)
@@ -479,12 +475,12 @@ func (s *Store) UpsertFinding(ctx context.Context, f *schema.Finding) error {
 		 intrinsic_input_hash, asset_signals_hash, evaluator_version,
 		 preconditions_evaluated, contextual_assessment,
 		 opes_score, opes_category, opes_label, opes_components,
-		 opes_top_contributors, opes_dampener, opes_override, opes_risk_model,
+		 opes_top_contributors, opes_dampener, opes_override,
 		 confidence, priority_rationale, recommendation_text,
 		 cvss_reconciliation, analyst_brief,
 		 attack_path_class, lateral_movement_potential,
 		 status, created_at, updated_at)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,now(),now())
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,now(),now())
 		ON CONFLICT (cve_id, asset_id, intrinsic_input_hash, asset_signals_hash, evaluator_version)
 		DO NOTHING`, s.cfg.OracleSchema)
 
@@ -493,7 +489,7 @@ func (s *Store) UpsertFinding(ctx context.Context, f *schema.Finding) error {
 		f.IntrinsicInputHash, f.AssetSignalsHash, f.EvaluatorVersion,
 		precsJSON, contextJSON,
 		f.OPES.Value, string(f.OPES.Category), f.OPES.Label, compsJSON,
-		contribsJSON, f.OPES.Dampener, f.OPES.Override, riskModelJSON,
+		contribsJSON, f.OPES.Dampener, f.OPES.Override,
 		string(f.OPES.Confidence), "", f.RecommendationText,
 		reconcileJSON, briefJSON,
 		attackPath, lateralMov,
@@ -535,7 +531,7 @@ func (s *Store) GetOpenFindings(ctx context.Context, cveID, assetID string) ([]*
 		COALESCE(lateral_movement_potential, ''),
 		COALESCE(preconditions_evaluated, '[]'::jsonb),
 		COALESCE(contextual_assessment, '{}'::jsonb),
-		opes_components, opes_top_contributors, opes_risk_model
+		opes_components, opes_top_contributors
 		FROM %s.findings WHERE status = 'open'`, s.cfg.OracleSchema)
 	args := []any{}
 	n := 1
@@ -563,14 +559,14 @@ func (s *Store) GetOpenFindings(ctx context.Context, cveID, assetID string) ([]*
 		var f schema.Finding
 		var dampener, override *string
 		var reconcileRaw, briefRaw, precsRaw, contextRaw []byte
-		var compsRaw, contribsRaw, riskModelRaw []byte
+		var compsRaw, contribsRaw []byte
 		var attackPath, lateralMov string
 		err := rows.Scan(
 			&f.ID, &f.CVEID, &f.AssetID,
 			&f.OPES.Value, &f.OPES.Category, &f.OPES.Label, &dampener, &override,
 			&f.OPES.Confidence, &f.RecommendationText, &f.Status, &f.CreatedAt, &f.UpdatedAt,
 			&reconcileRaw, &briefRaw, &attackPath, &lateralMov, &precsRaw, &contextRaw,
-			&compsRaw, &contribsRaw, &riskModelRaw,
+			&compsRaw, &contribsRaw,
 		)
 		if err != nil {
 			return nil, err
@@ -589,12 +585,6 @@ func (s *Store) GetOpenFindings(ctx context.Context, cveID, assetID string) ([]*
 		_ = json.Unmarshal(contextRaw, &f.ContextualAssessment)
 		_ = json.Unmarshal(compsRaw, &f.OPES.Components)
 		_ = json.Unmarshal(contribsRaw, &f.OPES.TopContributors)
-		if len(riskModelRaw) > 0 {
-			var rm schema.RiskModelScore
-			if json.Unmarshal(riskModelRaw, &rm) == nil {
-				f.OPES.RiskModel = &rm
-			}
-		}
 		out = append(out, &f)
 	}
 	return out, rows.Err()

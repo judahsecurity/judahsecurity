@@ -61,6 +61,8 @@ import {
   Copy,
   Camera,
   Bot,
+  AlertTriangle,
+  Gauge,
 } from 'lucide-react';
 import Link from 'next/link';
 import { api, getApiErrorMessage } from '@/lib/api';
@@ -71,7 +73,11 @@ import { DemonstratedChain, type AgentDetection } from '@/components/findings/De
 import { DetectionPanel, hasScannerDetection, type ScannerDetection } from '@/components/findings/DetectionPanel';
 import { FindingWriteup } from '@/components/findings/FindingWriteup';
 import { RiskAssessmentPanel, raStatusLabel, type RiskAssessment } from '@/components/findings/RiskAssessmentPanel';
-import { RiskFactorTriagePanel } from '@/components/findings/RiskFactorTriagePanel';
+import {
+  RiskFactorTriagePanel,
+  type BusinessAppSummary,
+  type RiskFactorsView,
+} from '@/components/findings/RiskFactorTriagePanel';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
   Select,
@@ -187,6 +193,21 @@ interface Finding {
   // analysis (mode='full'), Phase-A intrinsic only (mode='intrinsic'), or
   // ASM-native non-CVE analysis (mode='generic_finding').
   oracle?: OracleEnrichment;
+  // Severity evaluation (Likelihood × Impact): effective 0–4 factor values
+  // and the analyst triage state. Reasons come from /risk-factors.
+  sev_business_impact?: number | null;
+  sev_network_location?: number | null;
+  sev_vulnerability_severity?: number | null;
+  sev_skill_level?: number | null;
+  sev_ease_of_discovery?: number | null;
+  sev_ease_of_exploit?: number | null;
+  sev_awareness?: number | null;
+  sev_exploit_realism?: string | null;
+  sev_score?: number | null;
+  sev_level?: string | null;
+  sev_status?: 'triaged' | 'needs_analyst' | 'incomplete' | null;
+  sev_pending?: number | null;
+  business_app?: BusinessAppSummary | null;
 }
 
 interface OracleEnrichment {
@@ -267,7 +288,15 @@ interface ContextualAssessment {
   missing_checks?: string[];
 }
 
-type SortMode = 'opes' | 'severity' | 'delphi' | 'recent' | 'cvss';
+type SortMode = 'opes' | 'risk' | 'severity' | 'delphi' | 'recent' | 'cvss';
+
+const RISK_LEVEL_STYLE: Record<string, string> = {
+  critical: 'bg-red-500/15 text-red-400 border-red-500/30',
+  high: 'bg-orange-500/15 text-orange-400 border-orange-500/30',
+  medium: 'bg-yellow-500/15 text-yellow-400 border-yellow-500/30',
+  low: 'bg-blue-500/15 text-blue-400 border-blue-500/30',
+  informational: 'bg-muted text-muted-foreground',
+};
 
 const opesSortRank: Record<string, number> = {
   urgent: 0,
@@ -888,6 +917,8 @@ export default function FindingsPage() {
   const [sortMode, setSortMode] = useState<SortMode>('opes');
   const [onlyKev, setOnlyKev] = useState(false);
   const [onlyAgent, setOnlyAgent] = useState(false);
+  const [onlyNeedsTriage, setOnlyNeedsTriage] = useState(false);
+  const [severityEvalBusy, setSeverityEvalBusy] = useState(false);
   const [oracleBatchBusy, setOracleBatchBusy] = useState(false);
   const [capturingScreenshot, setCapturingScreenshot] = useState(false);
   const [screenshotLightboxOpen, setScreenshotLightboxOpen] = useState(false);
@@ -1889,6 +1920,7 @@ export default function FindingsPage() {
       if (!matchesSearch) return false;
       if (onlyKev && !f.delphi?.kev) return false;
       if (onlyAgent && (f.detected_by || '').toLowerCase() !== 'agent') return false;
+      if (onlyNeedsTriage && f.sev_status === 'triaged') return false;
       return true;
     })
     .sort((a, b) => {
@@ -1899,6 +1931,11 @@ export default function FindingsPage() {
         const aScore = a.oracle?.opes_score ?? -1;
         const bScore = b.oracle?.opes_score ?? -1;
         if (aScore !== bScore) return bScore - aScore;
+      }
+      if (sortMode === 'risk') {
+        const aS = a.sev_score ?? -1;
+        const bS = b.sev_score ?? -1;
+        if (aS !== bS) return bS - aS;
       }
       if (sortMode === 'delphi') {
         const aRansom = isRansomwareKev(a.delphi?.kev) ? 0 : 1;
@@ -1936,6 +1973,39 @@ export default function FindingsPage() {
   const kevCount = findings.filter((f) => f.delphi?.kev).length;
   const ransomwareCount = findings.filter((f) => isRansomwareKev(f.delphi?.kev)).length;
   const agentCount = findings.filter((f) => (f.detected_by || '').toLowerCase() === 'agent').length;
+  const needsTriageCount = findings.filter((f) => f.sev_status !== 'triaged').length;
+
+  // Keep the table row in step with the triage panel after a save.
+  const applyRiskView = (findingId: number, view: RiskFactorsView, businessApp?: BusinessAppSummary | null) => {
+    const patch: Partial<Finding> = {
+      sev_score: view.score ?? null,
+      sev_level: view.level ?? null,
+      sev_status: view.status,
+      sev_pending: view.needs_analyst.length,
+      sev_exploit_realism: view.exploit_realism?.tier ?? null,
+    };
+    for (const [key, f] of Object.entries(view.factors)) {
+      (patch as Record<string, unknown>)[`sev_${key}`] = f.score;
+    }
+    if (businessApp !== undefined) patch.business_app = businessApp;
+    setFindings((prev) => prev.map((f) => (f.id === findingId ? { ...f, ...patch } : f)));
+    setSelectedFinding((prev) => (prev && prev.id === findingId ? { ...prev, ...patch } : prev));
+  };
+
+  const handleSeverityEvaluateAll = async () => {
+    setSeverityEvalBusy(true);
+    try {
+      const { queued } = await api.runSeverityEvaluation({ only_missing: false });
+      toast({
+        title: 'Severity evaluation started',
+        description: `${queued} open finding${queued === 1 ? '' : 's'} queued. Refresh in a minute to see scores.`,
+      });
+    } catch (err) {
+      toast({ title: 'Could not start severity evaluation', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setSeverityEvalBusy(false);
+    }
+  };
 
   // Priority chip counts — OPES category (falls back to scanner severity when unscored)
   const opesCounts = stats?.by_opes_category || {};
@@ -2035,6 +2105,7 @@ export default function FindingsPage() {
                     Sort: OPES priority
                   </span>
                 </SelectItem>
+                <SelectItem value="risk">Sort: Risk (L × I)</SelectItem>
                 <SelectItem value="severity">Sort: Scanner severity</SelectItem>
                 <SelectItem value="delphi">
                   <span className="flex items-center gap-2">
@@ -2063,6 +2134,25 @@ export default function FindingsPage() {
             >
               <Bot className="h-4 w-4 mr-2" />
               Agent detections {agentCount > 0 && <span className="ml-1 text-xs opacity-70">({agentCount})</span>}
+            </Button>
+            <Button
+              variant={onlyNeedsTriage ? 'default' : 'outline'}
+              size="sm"
+              onClick={() => setOnlyNeedsTriage((v) => !v)}
+              title="Show findings whose risk factors still need an analyst"
+            >
+              <AlertTriangle className="h-4 w-4 mr-2" />
+              Needs triage {needsTriageCount > 0 && <span className="ml-1 text-xs opacity-70">({needsTriageCount})</span>}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleSeverityEvaluateAll}
+              disabled={severityEvalBusy}
+              title="Re-run severity evaluation (Likelihood × Impact) on every open finding"
+            >
+              {severityEvalBusy ? <Loader2 className="h-4 w-4 mr-2 animate-spin" /> : <Gauge className="h-4 w-4 mr-2" />}
+              Evaluate severity
             </Button>
             <Button variant="outline" size="sm">
               <Filter className="h-4 w-4 mr-2" />
@@ -2223,8 +2313,10 @@ export default function FindingsPage() {
                   />
                 </TableHead>
                 <TableHead className="w-[110px]">Priority</TableHead>
+                <TableHead className="w-[110px]">Risk</TableHead>
+                <TableHead className="w-[120px]">Triage</TableHead>
                 <TableHead>Finding</TableHead>
-                <TableHead>Host</TableHead>
+                <TableHead>Host / App</TableHead>
                 <TableHead className="w-[140px]">Status</TableHead>
                 <TableHead>Assigned</TableHead>
                 <TableHead>CVSS</TableHead>
@@ -2235,7 +2327,7 @@ export default function FindingsPage() {
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={9} className="text-center py-12">
+                  <TableCell colSpan={11} className="text-center py-12">
                     <div className="flex flex-col items-center gap-2">
                       <Loader2 className="h-8 w-8 animate-spin text-primary" />
                       <p className="text-muted-foreground">Loading findings...</p>
@@ -2244,7 +2336,7 @@ export default function FindingsPage() {
                 </TableRow>
               ) : filteredFindings.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={9} className="text-center py-12">
+                  <TableCell colSpan={11} className="text-center py-12">
                     <div className="flex flex-col items-center gap-2">
                       <Shield className="h-12 w-12 text-muted-foreground/50" />
                       <p className="text-muted-foreground">
@@ -2297,6 +2389,35 @@ export default function FindingsPage() {
                       })()}
                     </TableCell>
                     <TableCell>
+                      {finding.sev_level ? (
+                        <div className="flex flex-col gap-0.5">
+                          <Badge variant="outline" className={cn('capitalize w-fit', RISK_LEVEL_STYLE[finding.sev_level])}>
+                            {finding.sev_level === 'informational' ? 'info' : finding.sev_level}
+                          </Badge>
+                          <span className="text-[10px] text-muted-foreground font-mono">
+                            {(finding.sev_score ?? 0).toFixed(1)}/100
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="text-muted-foreground text-xs">Not evaluated</span>
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      {finding.sev_status === 'triaged' ? (
+                        <Badge variant="outline" className="border-green-500/40 text-green-400">Triaged</Badge>
+                      ) : finding.sev_status ? (
+                        <Badge
+                          variant="outline"
+                          className="border-amber-500/40 text-amber-400"
+                          title="Risk factors the rules could not measure — open the finding to score them"
+                        >
+                          {finding.sev_pending ?? 0} to score
+                        </Badge>
+                      ) : (
+                        <span className="text-muted-foreground text-xs">—</span>
+                      )}
+                    </TableCell>
+                    <TableCell>
                       <div className="flex flex-col gap-1">
                         <div className="flex items-center gap-2">
                           <Shield className="h-4 w-4 text-muted-foreground shrink-0" />
@@ -2338,6 +2459,14 @@ export default function FindingsPage() {
                         </a>
                       ) : (
                         <span className="text-muted-foreground">-</span>
+                      )}
+                      {finding.business_app && (
+                        <span
+                          className="text-[11px] text-muted-foreground block truncate max-w-[220px]"
+                          title={`${finding.business_app.name}${finding.business_app.inherited_from_asset ? ' (from asset)' : ''}`}
+                        >
+                          {finding.business_app.app_id ?? ''} {finding.business_app.name}
+                        </span>
                       )}
                     </TableCell>
                     <TableCell onClick={(e) => e.stopPropagation()}>
@@ -2773,7 +2902,14 @@ export default function FindingsPage() {
 
               {/* Risk scoring triage — analysts fill in the factors Oracle
                   could not measure (business impact, hosting, verification). */}
-              {selectedFinding && <RiskFactorTriagePanel findingId={selectedFinding.id} />}
+              {selectedFinding && (
+                <RiskFactorTriagePanel
+                  findingId={selectedFinding.id}
+                  assetId={selectedFinding.asset_id}
+                  businessApp={selectedFinding.business_app ?? null}
+                  onUpdated={(view, businessApp) => applyRiskView(selectedFinding.id, view, businessApp)}
+                />
+              )}
 
               {/* Generate Nuclei Template CTA */}
               {selectedFinding && (selectedFinding.cve_id || selectedFinding.template_id) && (

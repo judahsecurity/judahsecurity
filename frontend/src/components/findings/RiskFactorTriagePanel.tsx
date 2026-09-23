@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { Loader2, AlertTriangle } from 'lucide-react';
+import { Loader2, AlertTriangle, Bot, Building2, ExternalLink } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -9,7 +9,18 @@ import { api, getApiErrorMessage } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 
-type FactorSource = 'auto' | 'assumed' | 'analyst';
+type FactorSource = 'auto' | 'assumed' | 'agent' | 'analyst';
+
+export interface BusinessAppSummary {
+  id: number;
+  app_id?: string | null;
+  name: string;
+  business_criticality?: string | null;
+  criticality_level?: number | null;
+  owner?: string | null;
+  external_url?: string | null;
+  inherited_from_asset?: boolean;
+}
 
 interface FactorView {
   score: number;
@@ -19,6 +30,7 @@ interface FactorView {
   by?: string;
   at?: string;
   auto?: { score: number; rating: string; reason: string } | null;
+  confidence?: 'high' | 'medium' | 'low' | null;
 }
 
 interface RealismView {
@@ -82,19 +94,46 @@ const LEVEL_STYLE: Record<string, string> = {
 const SOURCE_LABEL: Record<FactorSource, string> = {
   auto: 'auto',
   assumed: 'needs analyst',
+  agent: 'agent proposal',
   analyst: 'analyst',
 };
 
 // '' = leave as is, 'auto' = clear analyst value, otherwise a score.
 type Edit = { score: string; note: string };
 
-export function RiskFactorTriagePanel({ findingId }: { findingId: number }) {
+interface RiskFactorTriagePanelProps {
+  findingId: number;
+  assetId?: number;
+  businessApp?: BusinessAppSummary | null;
+  /** Called after any change so the findings table row can update. */
+  onUpdated?: (view: RiskFactorsView, businessApp?: BusinessAppSummary | null) => void;
+}
+
+export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdated }: RiskFactorTriagePanelProps) {
   const [view, setView] = useState<RiskFactorsView | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [edits, setEdits] = useState<Record<string, Edit>>({});
   const [realismEdit, setRealismEdit] = useState<Edit>({ score: '', note: '' });
+  const [asking, setAsking] = useState(false);
+  const [app, setApp] = useState<BusinessAppSummary | null>(businessApp ?? null);
+  const [appQuery, setAppQuery] = useState('');
+  const [appResults, setAppResults] = useState<BusinessAppSummary[]>([]);
+  const [linking, setLinking] = useState(false);
   const { toast } = useToast();
+
+  useEffect(() => setApp(businessApp ?? null), [findingId, businessApp]);
+
+  useEffect(() => {
+    if (appQuery.trim().length < 2) {
+      setAppResults([]);
+      return;
+    }
+    const t = setTimeout(() => {
+      api.listBusinessApps(appQuery.trim(), 10).then(setAppResults).catch(() => setAppResults([]));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [appQuery]);
 
   useEffect(() => {
     let cancelled = false;
@@ -140,7 +179,9 @@ export function RiskFactorTriagePanel({ findingId }: { findingId: number }) {
     }
     setSaving(true);
     try {
-      setView(await api.saveRiskFactors(findingId, payload));
+      const next = await api.saveRiskFactors(findingId, payload);
+      setView(next);
+      onUpdated?.(next);
       setEdits({});
       setRealismEdit({ score: '', note: '' });
       toast({ title: 'Risk factors saved' });
@@ -148,6 +189,48 @@ export function RiskFactorTriagePanel({ findingId }: { findingId: number }) {
       toast({ title: 'Could not save risk factors', description: getApiErrorMessage(err), variant: 'destructive' });
     } finally {
       setSaving(false);
+    }
+  };
+
+  const askAgent = async () => {
+    setAsking(true);
+    try {
+      const next = await api.proposeRiskFactors(findingId);
+      setView(next);
+      onUpdated?.(next);
+      toast({ title: 'Agent proposals ready', description: 'Review each proposal, then accept or correct it.' });
+    } catch (err) {
+      toast({ title: 'Severity agent unavailable', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setAsking(false);
+    }
+  };
+
+  const link = async (target: 'finding' | 'asset', appId: number | null) => {
+    setLinking(true);
+    try {
+      const res =
+        target === 'asset' && assetId
+          ? await api.linkAssetBusinessApp(assetId, appId)
+          : await api.linkFindingBusinessApp(findingId, appId);
+      const linked: BusinessAppSummary | null = res.business_app ?? null;
+      setApp(linked);
+      setAppQuery('');
+      setAppResults([]);
+      const next = await api.getRiskFactors(findingId);
+      setView(next);
+      onUpdated?.(next, linked);
+      toast({
+        title: appId ? 'Business application linked' : 'Business application cleared',
+        description:
+          target === 'asset' && res.findings_updated !== undefined
+            ? `${res.findings_updated} open finding(s) on this asset re-evaluated.`
+            : undefined,
+      });
+    } catch (err) {
+      toast({ title: 'Could not link business application', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setLinking(false);
     }
   };
 
@@ -170,6 +253,66 @@ export function RiskFactorTriagePanel({ findingId }: { findingId: number }) {
         )}
         {view.status === 'triaged' && (
           <Badge variant="outline" className="border-green-500/40 text-green-400">Triaged</Badge>
+        )}
+        {view.needs_analyst.length > 0 && (
+          <Button size="sm" variant="outline" className="ml-auto h-7 text-xs" disabled={asking} onClick={askAgent}>
+            {asking ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Bot className="h-3.5 w-3.5 mr-1" />}
+            Ask agent to estimate
+          </Button>
+        )}
+      </div>
+
+      <div className="rounded-md border p-2 space-y-1.5">
+        <div className="flex items-center gap-2 text-xs flex-wrap">
+          <Building2 className="h-3.5 w-3.5 text-muted-foreground" />
+          <span className="font-medium">Business application</span>
+          {app ? (
+            <>
+              <span className="font-mono">{app.app_id}</span>
+              <span>{app.name}</span>
+              {app.business_criticality && <span className="text-muted-foreground">· {app.business_criticality}</span>}
+              {app.inherited_from_asset && <span className="text-muted-foreground">(from asset)</span>}
+              {app.external_url && (
+                <a href={app.external_url} target="_blank" rel="noopener noreferrer" className="text-primary">
+                  <ExternalLink className="h-3 w-3" />
+                </a>
+              )}
+              {!app.inherited_from_asset && (
+                <Button size="sm" variant="ghost" className="h-6 text-xs" disabled={linking} onClick={() => link('finding', null)}>
+                  Clear
+                </Button>
+              )}
+            </>
+          ) : (
+            <span className="text-amber-400">not linked</span>
+          )}
+        </div>
+        <Input
+          className="h-8 text-xs"
+          placeholder="Search by application id (e.g. APM0001234) or name"
+          value={appQuery}
+          onChange={(e) => setAppQuery(e.target.value)}
+        />
+        {appResults.length > 0 && (
+          <div className="rounded-md border divide-y max-h-48 overflow-y-auto">
+            {appResults.map((a) => (
+              <div key={a.id} className="flex items-center gap-2 p-1.5 text-xs">
+                <span className="font-mono shrink-0">{a.app_id}</span>
+                <span className="truncate">{a.name}</span>
+                {a.business_criticality && <span className="text-muted-foreground shrink-0">{a.business_criticality}</span>}
+                <div className="ml-auto flex gap-1 shrink-0">
+                  <Button size="sm" variant="outline" className="h-6 text-xs" disabled={linking} onClick={() => link('finding', a.id)}>
+                    This finding
+                  </Button>
+                  {assetId && (
+                    <Button size="sm" variant="outline" className="h-6 text-xs" disabled={linking} onClick={() => link('asset', a.id)}>
+                      Whole asset
+                    </Button>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
         )}
       </div>
       {view.impact !== undefined && (
@@ -210,12 +353,24 @@ export function RiskFactorTriagePanel({ findingId }: { findingId: number }) {
                         className={cn(
                           'text-[10px] px-1.5 py-0',
                           f.source === 'assumed' && 'border-amber-500/40 text-amber-400',
+                          f.source === 'agent' && 'border-purple-500/40 text-purple-400',
                           f.source === 'analyst' && 'border-blue-500/40 text-blue-400',
                         )}
                       >
                         {SOURCE_LABEL[f.source]}
+                        {f.source === 'agent' && f.confidence ? ` · ${f.confidence} confidence` : ''}
                         {f.source === 'analyst' && f.by ? ` · ${f.by}` : ''}
                       </Badge>
+                      {f.source === 'agent' && edit.score === '' && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          className="h-6 text-xs"
+                          onClick={() => setEdit(key, { score: String(f.score), note: `Accepted agent proposal: ${f.reason}` })}
+                        >
+                          Accept
+                        </Button>
+                      )}
                     </>
                   ) : (
                     <span className="text-amber-400">not scored</span>

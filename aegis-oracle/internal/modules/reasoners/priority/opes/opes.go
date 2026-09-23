@@ -19,7 +19,7 @@ import (
 
 // Version is the OPES evaluator version. Bump on any logic change so
 // findings can be re-evaluated and old scores marked superseded.
-const Version = "opes/v2.1"
+const Version = "opes/v2"
 
 // Input bundles everything OPES needs to compute a score. All fields
 // are owned by upstream pipeline stages — OPES does not fetch anything.

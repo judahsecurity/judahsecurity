@@ -29,6 +29,7 @@ from app.models.cloudflare_integration import CloudflareWafIntegration  # noqa: 
 from app.models.custom_nuclei_template import CustomNucleiTemplate  # noqa: F401 — ensure table is created
 from app.api.routes import auth, users, organizations, assets, vulnerabilities, scans, discovery, nuclei, ports, screenshots, external_discovery, waybackurls, netblocks, labels, scan_schedules, scan_profiles, tools, sni_discovery, scan_config, acquisitions, oracle, agent
 from app.api.routes import integrations
+from app.api.routes import business_apps as business_apps_router
 from app.api.routes import scoring as scoring_router
 from app.api.routes import posture as posture_router
 from app.api.routes import threat_intel as threat_intel_router
@@ -158,6 +159,7 @@ app.include_router(users.router, prefix=settings.API_PREFIX)
 app.include_router(organizations.router, prefix=settings.API_PREFIX)
 app.include_router(assets.router, prefix=settings.API_PREFIX)
 app.include_router(vulnerabilities.router, prefix=settings.API_PREFIX)
+app.include_router(business_apps_router.router, prefix=settings.API_PREFIX)
 app.include_router(scans.router, prefix=settings.API_PREFIX)
 app.include_router(discovery.router, prefix=settings.API_PREFIX)
 app.include_router(nuclei.router, prefix=settings.API_PREFIX)
@@ -565,7 +567,6 @@ def apply_oracle_migrations():
         "CREATE INDEX IF NOT EXISTS oracle_findings_cve_idx ON oracle.findings (cve_id)",
         "ALTER TABLE oracle.cve_intrinsic_analyses ADD COLUMN IF NOT EXISTS intrinsic_context jsonb NOT NULL DEFAULT '{}'",
         "ALTER TABLE oracle.findings ADD COLUMN IF NOT EXISTS contextual_assessment jsonb NOT NULL DEFAULT '{}'",
-        "ALTER TABLE oracle.findings ADD COLUMN IF NOT EXISTS opes_risk_model jsonb",
 
         # Verification tasks
         """CREATE TABLE IF NOT EXISTS oracle.verification_tasks (
@@ -614,6 +615,28 @@ def apply_oracle_migrations():
         "CREATE INDEX IF NOT EXISTS ix_vuln_oracle_opes_category ON vulnerabilities (oracle_opes_category)",
         "CREATE INDEX IF NOT EXISTS ix_vuln_oracle_mode          ON vulnerabilities (oracle_mode)",
         "CREATE INDEX IF NOT EXISTS ix_vuln_oracle_enriched_at   ON vulnerabilities (oracle_enriched_at)",
+
+        # ── Severity evaluation (Likelihood × Impact) on findings ─────────────
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS sev_business_impact INTEGER",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS sev_network_location INTEGER",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS sev_vulnerability_severity INTEGER",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS sev_skill_level INTEGER",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS sev_ease_of_discovery INTEGER",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS sev_ease_of_exploit INTEGER",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS sev_awareness INTEGER",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS sev_exploit_realism VARCHAR(20)",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS sev_score FLOAT",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS sev_level VARCHAR(20)",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS sev_status VARCHAR(20)",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS sev_pending INTEGER",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS sev_evaluated_at TIMESTAMP",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS business_app_id INTEGER REFERENCES business_applications(id) ON DELETE SET NULL",
+        "ALTER TABLE assets ADD COLUMN IF NOT EXISTS business_app_id INTEGER REFERENCES business_applications(id) ON DELETE SET NULL",
+        "CREATE INDEX IF NOT EXISTS ix_vuln_sev_score  ON vulnerabilities (sev_score)",
+        "CREATE INDEX IF NOT EXISTS ix_vuln_sev_level  ON vulnerabilities (sev_level)",
+        "CREATE INDEX IF NOT EXISTS ix_vuln_sev_status ON vulnerabilities (sev_status)",
+        "CREATE INDEX IF NOT EXISTS ix_vuln_business_app ON vulnerabilities (business_app_id)",
+        "CREATE INDEX IF NOT EXISTS ix_assets_business_app ON assets (business_app_id)",
 
         # ── Jira integration schema migrations ────────────────────────────────
         "ALTER TABLE jira_integrations ADD COLUMN IF NOT EXISTS auto_create_enabled       BOOLEAN NOT NULL DEFAULT FALSE",
