@@ -373,3 +373,32 @@ func TestRiskModel_NeedsAnalyst(t *testing.T) {
 		t.Errorf("severity source: got %q, want auto", rm.Factors.VulnerabilitySeverity.Source)
 	}
 }
+
+// TestRiskModel_NetworkLocationFromIPInventory: hosting comes from the org's
+// IP inventory classification and the rating carries the org's name.
+func TestRiskModel_NetworkLocationFromIPInventory(t *testing.T) {
+	asset := func(extra map[string]string) *schema.Asset {
+		return &schema.Asset{Exposure: schema.ExposureInternet, Signals: schema.AssetSignals{Extra: extra}}
+	}
+	owned := networkLocationFactor(asset(map[string]string{
+		"hosting_type": "owned", "organization_name": "Acme",
+		"hosting_basis": "203.0.113.10 is in Acme's IP inventory",
+	}))
+	if owned.Score != 4 || owned.Rating != "Acme Hosted" || owned.Reason != "203.0.113.10 is in Acme's IP inventory" || owned.Source == schema.FactorAssumed {
+		t.Errorf("owned: %+v", owned)
+	}
+	third := networkLocationFactor(asset(map[string]string{
+		"hosting_type": "third_party", "hosting_basis": "198.51.100.7 not in any of Acme's 3 owned netblock(s)",
+	}))
+	if third.Score != 2 || third.Rating != "Third Party Hosted" {
+		t.Errorf("third party: %+v", third)
+	}
+	internal := networkLocationFactor(asset(map[string]string{"hosting_type": "internal"}))
+	if internal.Score != 1 {
+		t.Errorf("internal: %+v", internal)
+	}
+	unknown := networkLocationFactor(asset(map[string]string{"hosting_type": "unknown"}))
+	if unknown.Score != 4 || unknown.Source != schema.FactorAssumed || unknown.Rating != "Organization Hosted" {
+		t.Errorf("unknown: %+v", unknown)
+	}
+}

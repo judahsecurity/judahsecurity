@@ -29,7 +29,8 @@ FACTOR_KEYS = IMPACT_FACTORS + LIKELIHOOD_FACTORS
 # Ratings per factor, 0–4, as on the scoring sheet (0 = none).
 FACTOR_RATINGS: Dict[str, Dict[int, str]] = {
     "business_impact": {4: "Critical", 3: "High", 2: "Medium", 1: "Low", 0: "None"},
-    "network_location": {4: "Company Hosted", 2: "Third Party Hosted", 1: "Internal Only", 0: "Segmented Network"},
+    # 4 is shown as "<Org> Hosted" for the organization being assessed.
+    "network_location": {4: "Organization Hosted", 2: "Third Party Hosted", 1: "Internal Only", 0: "Segmented Network"},
     "vulnerability_severity": {4: "Critical", 3: "High", 2: "Medium", 1: "Low", 0: "Informational"},
     "skill_level": {
         4: "No Technical Skills",
@@ -56,6 +57,17 @@ WEIGHTS = {"business_impact": 0.20, "network_location": 0.10, "vulnerability_sev
 LEVELS = ((64.0, "critical"), (36.0, "high"), (16.0, "medium"), (4.0, "low"))
 BLOCKED_LIKELIHOOD_CAP = 0.0
 CONDITIONAL_LIKELIHOOD_CAP = 2.0
+
+
+def org_hosted_rating(org_name: Optional[str]) -> str:
+    """Network Location 4 label, e.g. "Acme Hosted" (mirrors OrgHostedRating in Go)."""
+    return f"{(org_name or '').strip() or 'Organization'} Hosted"
+
+
+def factor_ratings(org_name: Optional[str] = None) -> Dict[str, Dict[int, str]]:
+    ratings = {k: dict(v) for k, v in FACTOR_RATINGS.items()}
+    ratings["network_location"][4] = org_hosted_rating(org_name)
+    return ratings
 
 
 def score_factors(scores: Dict[str, int], realism_tier: Optional[str] = None) -> Dict[str, Any]:
@@ -125,7 +137,11 @@ def apply_overrides(
     return out
 
 
-def merged_risk_model(auto: Optional[Dict[str, Any]], overrides: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+def merged_risk_model(
+    auto: Optional[Dict[str, Any]],
+    overrides: Optional[Dict[str, Any]],
+    org_name: Optional[str] = None,
+) -> Dict[str, Any]:
     """Combine Oracle's automatic factors with analyst overrides.
 
     Returns every factor with its effective score and source, the factors
@@ -138,6 +154,7 @@ def merged_risk_model(auto: Optional[Dict[str, Any]], overrides: Optional[Dict[s
     auto_factors: Dict[str, Any] = auto.get("factors") or {}
     analyst_factors: Dict[str, Any] = overrides.get("factors") or {}
     needs_auto = set(auto.get("needs_analyst") or [])
+    ratings = factor_ratings(org_name)
 
     factors: Dict[str, Dict[str, Any]] = {}
     missing: List[str] = []
@@ -147,7 +164,7 @@ def merged_risk_model(auto: Optional[Dict[str, Any]], overrides: Optional[Dict[s
         if o is not None:
             factors[key] = {
                 "score": o["score"],
-                "rating": FACTOR_RATINGS[key].get(o["score"], ""),
+                "rating": ratings[key].get(o["score"], ""),
                 "reason": o.get("note") or "Set by analyst",
                 "source": "analyst",
                 "by": o.get("by"),
@@ -176,7 +193,7 @@ def merged_risk_model(auto: Optional[Dict[str, Any]], overrides: Optional[Dict[s
         "factors": factors,
         "exploit_realism": realism,
         "needs_analyst": needs_analyst,
-        "ratings": {k: {str(s): r for s, r in v.items()} for k, v in FACTOR_RATINGS.items()},
+        "ratings": {k: {str(s): r for s, r in v.items()} for k, v in ratings.items()},
         "auto_version": auto.get("version"),
     }
     if missing:

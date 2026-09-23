@@ -1773,12 +1773,15 @@ class RiskFactorsTriage(BaseModel):
     exploit_realism: Optional[RealismInput] = None
 
 
-def _risk_model_view(vuln: Vulnerability) -> dict:
+def _risk_model_view(db: Session, vuln: Vulnerability) -> dict:
+    from app.services.hosting_classification import organization_name
     from app.services.risk_model import merged_risk_model
 
     meta = vuln.metadata_ or {}
     auto = (meta.get("oracle") or {}).get("opes_risk_model")
-    return merged_risk_model(auto, meta.get("risk_overrides"))
+    asset = db.query(Asset.organization_id).filter(Asset.id == vuln.asset_id).first()
+    org_name = organization_name(db, asset[0] if asset else None)
+    return merged_risk_model(auto, meta.get("risk_overrides"), org_name)
 
 
 @router.get("/{vuln_id}/risk-factors")
@@ -1794,7 +1797,7 @@ def get_finding_risk_factors(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Vulnerability not found")
     if not check_org_access(db, current_user, vuln.asset_id):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
-    return _risk_model_view(vuln)
+    return _risk_model_view(db, vuln)
 
 
 @router.put("/{vuln_id}/risk-factors")
@@ -1828,7 +1831,7 @@ def triage_finding_risk_factors(
     vuln.metadata_ = meta
     flag_modified(vuln, "metadata_")
     db.commit()
-    return _risk_model_view(vuln)
+    return _risk_model_view(db, vuln)
 
 
 @router.post("/{vuln_id}/risk-assessment/ask")

@@ -10,7 +10,7 @@ import (
 
 // RiskModelVersion identifies the factor mapping below. Bump on any change
 // to how signals map to factor scores.
-const RiskModelVersion = "risk/v6"
+const RiskModelVersion = "risk/v7"
 
 // riskModel maps the OPES inputs onto the seven-factor Likelihood × Impact
 // model. Every factor is scored 0–4 (0 = none, 4 = highest), Impact and
@@ -129,13 +129,26 @@ func businessImpactFactor(a *schema.Asset) schema.RiskFactor {
 	return schema.RiskFactor{Score: 2, Rating: "Medium", Source: schema.FactorAssumed, Reason: "Asset criticality not set; assumed medium"}
 }
 
-// networkLocationFactor distinguishes company-hosted from third-party-hosted
-// internet exposure using the ASM's hosting_type (owned, cloud, cdn,
-// third_party, unknown), which arrives in signals.extra.
+// networkLocationFactor distinguishes assets hosted by the organization
+// from third-party-hosted ones. The ASM classifies hosting from the
+// organization's IP inventory (owned netblocks first, then cloud/CDN ranges)
+// and sends it in signals.extra: hosting_type (owned, third_party, internal,
+// unknown), hosting_basis (why), hosting_provider and organization_name.
 func networkLocationFactor(a *schema.Asset) schema.RiskFactor {
 	if a == nil {
 		return schema.RiskFactor{Score: 2, Rating: "Unknown", Source: schema.FactorAssumed, Reason: "No asset context; exposure unknown"}
 	}
+	extra := a.Signals.Extra
+	hosting := strings.ToLower(strings.TrimSpace(extra["hosting_type"]))
+	basis := extra["hosting_basis"]
+	orgHosted := OrgHostedRating(extra["organization_name"])
+	because := func(fallback string) string {
+		if basis != "" {
+			return basis
+		}
+		return fallback
+	}
+
 	exposure := a.Exposure
 	if exposure == "" || exposure == schema.ExposureUnknown {
 		if n := a.Signals.Network; n != nil && n.InternetFacing != nil {
@@ -146,29 +159,42 @@ func networkLocationFactor(a *schema.Asset) schema.RiskFactor {
 			}
 		}
 	}
+	if hosting == "internal" || hosting == "private" {
+		exposure = schema.ExposureInternal
+	}
+
 	switch exposure {
 	case schema.ExposureIsolated:
 		return schema.RiskFactor{Score: 0, Rating: "Segmented Network", Reason: "Asset is isolated / air-gapped"}
 	case schema.ExposureInternal:
-		return schema.RiskFactor{Score: 1, Rating: "Internal Only", Reason: "Asset is not internet-facing"}
+		return schema.RiskFactor{Score: 1, Rating: "Internal Only", Reason: because("Asset is not internet-facing")}
 	case schema.ExposureInternet:
-		hosting := strings.ToLower(strings.TrimSpace(a.Signals.Extra["hosting_type"]))
 		switch hosting {
 		case "cloud", "cdn", "third_party":
-			provider := a.Signals.Extra["hosting_provider"]
+			provider := extra["hosting_provider"]
 			if provider == "" {
 				provider = hosting
 			}
 			return schema.RiskFactor{Score: 2, Rating: "Third Party Hosted",
-				Reason: fmt.Sprintf("Internet-facing on third-party infrastructure (%s)", provider)}
+				Reason: because(fmt.Sprintf("Internet-facing on third-party infrastructure (%s)", provider))}
 		case "owned":
-			return schema.RiskFactor{Score: 4, Rating: "Company Hosted",
-				Reason: "Internet-facing on company-owned infrastructure"}
+			return schema.RiskFactor{Score: 4, Rating: orgHosted,
+				Reason: because("Internet-facing on the organization's own infrastructure")}
 		}
-		return schema.RiskFactor{Score: 4, Rating: "Company Hosted",
-			Source: schema.FactorAssumed, Reason: "Internet-facing; hosting not classified, assumed company-hosted"}
+		return schema.RiskFactor{Score: 4, Rating: orgHosted, Source: schema.FactorAssumed,
+			Reason: because("Internet-facing; hosting not classified") + "; assumed organization-hosted until confirmed"}
 	}
 	return schema.RiskFactor{Score: 2, Rating: "Unknown", Source: schema.FactorAssumed, Reason: "Exposure unknown"}
+}
+
+// OrgHostedRating is the Network Location 4 rating label: "<Org> Hosted",
+// or "Organization Hosted" when the organization's name is not known.
+func OrgHostedRating(org string) string {
+	org = strings.TrimSpace(org)
+	if org == "" {
+		org = "Organization"
+	}
+	return org + " Hosted"
 }
 
 func severityFactor(in Input) schema.RiskFactor {

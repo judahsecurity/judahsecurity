@@ -9,6 +9,7 @@ import pytest
 
 from app.services.risk_model import (
     FACTOR_KEYS,
+    org_hosted_rating,
     apply_overrides,
     merged_risk_model,
     score_factors,
@@ -120,3 +121,12 @@ def test_invalid_scores_rejected():
         apply_overrides({}, {"nope": {"score": 1}}, None, analyst="a")
     with pytest.raises(ValueError):
         apply_overrides({}, {}, {"tier": "maybe"}, analyst="a")
+
+
+def test_network_location_rating_uses_org_name():
+    assert org_hosted_rating("Acme") == "Acme Hosted"
+    assert org_hosted_rating("") == "Organization Hosted"
+    overrides = apply_overrides({}, {"network_location": {"score": 4, "note": "in our /24"}}, None, analyst="a")
+    view = merged_risk_model(_auto(), overrides, "Acme")
+    assert view["ratings"]["network_location"]["4"] == "Acme Hosted"
+    assert view["factors"]["network_location"]["rating"] == "Acme Hosted"
