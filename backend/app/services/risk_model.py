@@ -51,7 +51,21 @@ FACTOR_RATINGS: Dict[str, Dict[int, str]] = {
 
 REALISM_TIERS = ("confirmed", "likely", "unverified", "conditional", "blocked")
 
-WEIGHTS = {"business_impact": 0.20, "network_location": 0.10, "vulnerability_severity": 0.70}
+# Per-factor weights, 1–4, chosen by the analyst per finding during triage.
+# Impact and Likelihood are weighted averages, so they stay on the 0–4 scale.
+# Defaults approximate the scoring sheet's 70/20/10 impact split with whole
+# numbers (Severity 4 : Business 2 : Network 1 ≈ 57/29/14) and weight the
+# likelihood factors equally.
+WEIGHT_LABELS: Dict[int, str] = {1: "Low", 2: "Standard", 3: "High", 4: "Highest"}
+DEFAULT_WEIGHTS: Dict[str, int] = {
+    "business_impact": 2,
+    "network_location": 1,
+    "vulnerability_severity": 4,
+    "skill_level": 2,
+    "ease_of_discovery": 2,
+    "ease_of_exploit": 2,
+    "awareness": 2,
+}
 LEVELS = ((64.0, "critical"), (36.0, "high"), (16.0, "medium"), (4.0, "low"))
 BLOCKED_LIKELIHOOD_CAP = 0.0
 CONDITIONAL_LIKELIHOOD_CAP = 2.0
@@ -68,10 +82,21 @@ def factor_ratings(org_name: Optional[str] = None) -> Dict[str, Dict[int, str]]:
     return ratings
 
 
-def score_factors(scores: Dict[str, int], realism_tier: Optional[str] = None) -> Dict[str, Any]:
-    """Risk = (Impact/4)·(Likelihood/4)·100 from seven 0–4 factor scores."""
-    impact = sum(scores[k] * WEIGHTS[k] for k in IMPACT_FACTORS)
-    uncapped = sum(scores[k] for k in LIKELIHOOD_FACTORS) / 4
+def _weighted_mean(scores: Dict[str, int], weights: Dict[str, int], keys) -> float:
+    total = sum(weights[k] for k in keys)
+    return sum(scores[k] * weights[k] for k in keys) / total
+
+
+def score_factors(
+    scores: Dict[str, int],
+    realism_tier: Optional[str] = None,
+    weights: Optional[Dict[str, int]] = None,
+) -> Dict[str, Any]:
+    """Risk = (Impact/4)·(Likelihood/4)·100 from seven 0–4 factor scores,
+    each side a weighted average using 1–4 weights."""
+    w = {**DEFAULT_WEIGHTS, **(weights or {})}
+    impact = _weighted_mean(scores, w, IMPACT_FACTORS)
+    uncapped = _weighted_mean(scores, w, LIKELIHOOD_FACTORS)
     likelihood = uncapped
     if realism_tier == "blocked":
         likelihood = min(likelihood, BLOCKED_LIKELIHOOD_CAP)
@@ -92,6 +117,13 @@ def score_factors(scores: Dict[str, int], realism_tier: Optional[str] = None) ->
     }
 
 
+def validate_weight(key: str, weight: int) -> None:
+    if key not in FACTOR_KEYS:
+        raise ValueError(f"unknown risk factor {key!r}")
+    if weight not in WEIGHT_LABELS:
+        raise ValueError(f"{key}: weight {weight} not allowed; use 1–4")
+
+
 def validate_override(key: str, score: int) -> None:
     if key not in FACTOR_KEYS:
         raise ValueError(f"unknown risk factor {key!r}")
@@ -106,12 +138,14 @@ def apply_overrides(
     realism: Optional[Dict[str, Any]],
     *,
     analyst: str,
+    weights: Optional[Dict[str, Optional[int]]] = None,
 ) -> Dict[str, Any]:
     """Merge a triage submission into the stored overrides.
 
     ``factors`` maps factor key → ``{"score": int, "note": str}``, or None to
     clear the analyst value and fall back to the automatic score.
     ``realism`` is ``{"tier": str, "note": str}`` or None to clear.
+    ``weights`` maps factor key → 1–4, or None to go back to the default.
     """
     out = dict(overrides or {})
     stored = dict(out.get("factors") or {})
@@ -124,6 +158,15 @@ def apply_overrides(
         validate_override(key, score)
         stored[key] = {"score": score, "note": (value.get("note") or "").strip(), "by": analyst, "at": now}
     out["factors"] = stored
+    stored_weights = dict(out.get("weights") or {})
+    for key, weight in (weights or {}).items():
+        if weight is None:
+            stored_weights.pop(key, None)
+            continue
+        weight = int(weight)
+        validate_weight(key, weight)
+        stored_weights[key] = {"weight": weight, "by": analyst, "at": now}
+    out["weights"] = stored_weights
     if realism is not None:
         if realism.get("tier") is None:
             out.pop("exploit_realism", None)
@@ -186,6 +229,17 @@ def merged_risk_model(
             "auto": auto.get("exploit_realism"),
         }
 
+    analyst_weights: Dict[str, Any] = overrides.get("weights") or {}
+    weights_view = {
+        k: (
+            {"weight": analyst_weights[k]["weight"], "source": "analyst",
+             "by": analyst_weights[k].get("by"), "at": analyst_weights[k].get("at"), "default": DEFAULT_WEIGHTS[k]}
+            if k in analyst_weights
+            else {"weight": DEFAULT_WEIGHTS[k], "source": "default", "default": DEFAULT_WEIGHTS[k]}
+        )
+        for k in FACTOR_KEYS
+    }
+
     # Assumed defaults and gap-agent proposals both wait on an analyst.
     needs_analyst = [k for k in FACTOR_KEYS if k in missing or factors.get(k, {}).get("source") in ("assumed", "agent")]
     result: Dict[str, Any] = {
@@ -193,6 +247,8 @@ def merged_risk_model(
         "exploit_realism": realism,
         "needs_analyst": needs_analyst,
         "ratings": {k: {str(s): r for s, r in v.items()} for k, v in ratings.items()},
+        "weights": weights_view,
+        "weight_labels": {str(k): v for k, v in WEIGHT_LABELS.items()},
         "auto_version": auto.get("version"),
     }
     if missing:
@@ -202,6 +258,10 @@ def merged_risk_model(
     # Oracle already applies realism caps to Ease of Exploit and the Skill
     # Level tooling floor; an analyst realism override only moves the
     # likelihood cap, since analyst factor scores are taken as given.
-    result.update(score_factors({k: int(v["score"]) for k, v in factors.items()}, (realism or {}).get("tier")))
+    result.update(score_factors(
+        {k: int(v["score"]) for k, v in factors.items()},
+        (realism or {}).get("tier"),
+        {k: v["weight"] for k, v in weights_view.items()},
+    ))
     result["status"] = "triaged" if not needs_analyst else "needs_analyst"
     return result

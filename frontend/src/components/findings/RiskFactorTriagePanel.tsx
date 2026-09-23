@@ -42,9 +42,18 @@ interface RealismView {
   auto?: { tier: string } | null;
 }
 
+interface WeightView {
+  weight: number;
+  source: 'default' | 'analyst';
+  default: number;
+  by?: string;
+}
+
 export interface RiskFactorsView {
   status: 'triaged' | 'needs_analyst' | 'incomplete';
   factors: Record<string, FactorView>;
+  weights?: Record<string, WeightView>;
+  weight_labels?: Record<string, string>;
   exploit_realism?: RealismView | null;
   needs_analyst: string[];
   ratings: Record<string, Record<string, string>>;
@@ -115,6 +124,8 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
   const [saving, setSaving] = useState(false);
   const [edits, setEdits] = useState<Record<string, Edit>>({});
   const [realismEdit, setRealismEdit] = useState<Edit>({ score: '', note: '' });
+  // '' = keep, 'default' = back to the default weight, '1'–'4' = new weight.
+  const [weightEdits, setWeightEdits] = useState<Record<string, string>>({});
   const [asking, setAsking] = useState(false);
   const [app, setApp] = useState<BusinessAppSummary | null>(businessApp ?? null);
   const [appQuery, setAppQuery] = useState('');
@@ -140,6 +151,7 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
     setLoading(true);
     setEdits({});
     setRealismEdit({ score: '', note: '' });
+    setWeightEdits({});
     api
       .getRiskFactors(findingId)
       .then((v) => !cancelled && setView(v))
@@ -159,7 +171,10 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
   }
   if (!view) return null;
 
-  const dirty = Object.values(edits).some((e) => e.score !== '') || realismEdit.score !== '';
+  const dirty =
+    Object.values(edits).some((e) => e.score !== '') ||
+    realismEdit.score !== '' ||
+    Object.values(weightEdits).some((w) => w !== '');
 
   const setEdit = (key: string, patch: Partial<Edit>) =>
     setEdits((prev) => ({ ...prev, [key]: { ...(prev[key] ?? { score: '', note: '' }), ...patch } }));
@@ -170,7 +185,12 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
       if (e.score === '') continue;
       factors[key] = e.score === 'auto' ? null : { score: Number(e.score), note: e.note };
     }
-    const payload: Parameters<typeof api.saveRiskFactors>[1] = { factors };
+    const weights: Record<string, number | null> = {};
+    for (const [key, w] of Object.entries(weightEdits)) {
+      if (w === '') continue;
+      weights[key] = w === 'default' ? null : Number(w);
+    }
+    const payload: Parameters<typeof api.saveRiskFactors>[1] = { factors, weights };
     if (realismEdit.score !== '') {
       payload.exploit_realism = {
         tier: realismEdit.score === 'auto' ? null : realismEdit.score,
@@ -184,6 +204,7 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
       onUpdated?.(next);
       setEdits({});
       setRealismEdit({ score: '', note: '' });
+      setWeightEdits({});
       toast({ title: 'Risk factors saved' });
     } catch (err) {
       toast({ title: 'Could not save risk factors', description: getApiErrorMessage(err), variant: 'destructive' });
@@ -318,6 +339,7 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
       {view.impact !== undefined && (
         <p className="text-xs text-muted-foreground">
           Impact {view.impact.toFixed(2)}/4 × Likelihood {view.likelihood?.toFixed(2)}/4
+          <span className="opacity-70"> (weighted averages of the factors below)</span>
           {view.likelihood_uncapped !== undefined && view.likelihood !== undefined && view.likelihood_uncapped > view.likelihood && (
             <span className="text-yellow-400"> (capped from {view.likelihood_uncapped.toFixed(2)} by exploit realism)</span>
           )}
@@ -397,6 +419,34 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
                     ))}
                     {f?.source === 'analyst' && <option value="auto">Use automatic score</option>}
                   </select>
+                  {(() => {
+                    const w = view.weights?.[key];
+                    const labels = view.weight_labels ?? {};
+                    return (
+                      <select
+                        aria-label={`${label} weight`}
+                        title="How much this factor counts on this finding"
+                        className={cn(
+                          'h-8 rounded-md border bg-background px-2 text-xs shrink-0',
+                          w?.source === 'analyst' && 'border-blue-500/40 text-blue-400',
+                        )}
+                        value={weightEdits[key] ?? ''}
+                        onChange={(e) => setWeightEdits((prev) => ({ ...prev, [key]: e.target.value }))}
+                      >
+                        <option value="">
+                          Weight ×{w?.weight ?? '?'}
+                          {w?.source === 'analyst' ? ' (set)' : ''}
+                        </option>
+                        {[4, 3, 2, 1].map((n) => (
+                          <option key={n} value={String(n)}>
+                            ×{n} — {labels[String(n)] ?? ''}
+                            {w && n === w.default ? ' (default)' : ''}
+                          </option>
+                        ))}
+                        {w?.source === 'analyst' && <option value="default">Reset to default ×{w.default}</option>}
+                      </select>
+                    );
+                  })()}
                   {edit.score !== '' && edit.score !== 'auto' && (
                     <Input
                       className="h-8 text-xs"

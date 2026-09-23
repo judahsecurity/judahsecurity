@@ -73,7 +73,7 @@ def test_cve_2025_55130_uses_reconciled_cvss_and_is_conditional():
     assert (sev["score"], sev["reason"]) == (3, "CVSS 7.1 (reconciled; published 9.1)")
     assert r["factors"]["skill_level"]["score"] == 2
     assert r["exploit_realism"]["tier"] == "conditional"
-    assert _score(r)["score"] == pytest.approx(38.75)
+    assert _score(r)["score"] == pytest.approx(39.29, abs=0.01)
     assert "network_location" in r["needs_analyst"]
 
 

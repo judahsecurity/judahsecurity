@@ -1942,9 +1942,12 @@ class RiskFactorsTriage(BaseModel):
     ``factors`` maps a factor key to ``{score, note}``; a null value clears
     the analyst score so the automatic one applies again. ``exploit_realism``
     sets the realism tier after manual verification (null tier clears it).
+    ``weights`` sets how much each factor counts on this finding (1–4).
     """
     factors: Dict[str, Optional[RiskFactorInput]] = {}
     exploit_realism: Optional[RealismInput] = None
+    # Per-factor weight 1–4 for this finding; null restores the default.
+    weights: Dict[str, Optional[int]] = {}
 
 
 def _risk_model_view(db: Session, vuln: Vulnerability) -> dict:
@@ -2025,6 +2028,7 @@ def triage_finding_risk_factors(
             {k: (v.model_dump() if v is not None else None) for k, v in payload.factors.items()},
             payload.exploit_realism.model_dump() if payload.exploit_realism is not None else None,
             analyst=current_user.email or current_user.username or "unknown",
+            weights=payload.weights,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
