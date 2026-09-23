@@ -35,8 +35,8 @@ type OPESScore struct {
 	RiskModel *RiskModelScore `json:"risk_model,omitempty"`
 }
 
-// RiskFactor is one 1–5 factor of the Likelihood × Impact risk model
-// (Network Location may be 0), with the reason it received that score.
+// RiskFactor is one 0–4 factor of the Likelihood × Impact risk model
+// (0 = none, 4 = highest), with the reason it received that score.
 type RiskFactor struct {
 	Score  int    `json:"score"`
 	Rating string `json:"rating"`
@@ -46,7 +46,7 @@ type RiskFactor struct {
 // RiskFactors are the seven factors of the risk model.
 //
 // Impact: BusinessImpact, NetworkLocation, VulnerabilitySeverity.
-// Likelihood: SkillLevel (5 = no skill needed), EaseOfDiscovery,
+// Likelihood: SkillLevel (4 = no skill needed), EaseOfDiscovery,
 // EaseOfExploit, Awareness.
 type RiskFactors struct {
 	BusinessImpact        RiskFactor `json:"business_impact"`
@@ -68,8 +68,8 @@ const (
 )
 
 // ExploitRealism is the asset-specific reality check on exploitability:
-// an exploit existing somewhere does not mean it works here. Score is 1–5
-// (5 = confirmed on this asset, 1 = known paths blocked on this asset).
+// an exploit existing somewhere does not mean it works here. Score is 0–4
+// (4 = confirmed or likely on this asset, 0 = known paths blocked here).
 // Blocked is not a safety claim: it covers the documented paths only.
 type ExploitRealism struct {
 	Score   int      `json:"score"`
@@ -77,12 +77,14 @@ type ExploitRealism struct {
 	Reasons []string `json:"reasons"`
 }
 
-// RiskModelScore is Risk = Impact × Likelihood on a 0–25 scale.
+// RiskModelScore is Risk = Impact × Likelihood. Impact and Likelihood are
+// 0–4; Risk is (Impact/4)·(Likelihood/4) as 0–100, so zero likelihood or
+// zero impact means zero risk.
 //
 // Severity, Discoverability and ExploitPracticality are the three headline
 // questions the model answers: how bad is it, how easily is it found, and
 // how practical is it to exploit in the real world (mean of skill level,
-// ease of exploit and awareness, 1–5).
+// ease of exploit and awareness, 0–4).
 type RiskModelScore struct {
 	Score               float64  `json:"score"`
 	Level               Priority `json:"level"`

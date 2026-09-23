@@ -20,9 +20,10 @@ func factors(bi, nl, vs, skill, disc, exploit, aware int) schema.RiskFactors {
 	}
 }
 
-// TestRiskModel_DocumentedScenarios pins the arithmetic to the worked
-// examples in the Custom Risk Severity Model documentation.
-func TestRiskModel_DocumentedScenarios(t *testing.T) {
+// TestRiskModel_WorkedExamples pins the arithmetic: factors 0–4,
+// Impact = 0.2·BI + 0.1·NL + 0.7·VS, Likelihood = mean of four,
+// Risk = (Impact/4)·(Likelihood/4)·100.
+func TestRiskModel_WorkedExamples(t *testing.T) {
 	cases := []struct {
 		name               string
 		f                  schema.RiskFactors
@@ -30,13 +31,13 @@ func TestRiskModel_DocumentedScenarios(t *testing.T) {
 		risk               float64
 		level              schema.Priority
 	}{
-		{"calculation example", factors(4, 5, 4, 4, 5, 4, 3), 4.1, 4.0, 16.4, schema.PriorityCritical},
-		{"1: company-hosted SQLi", factors(5, 5, 4, 3, 4, 4, 3), 4.3, 3.5, 15.05, schema.PriorityHigh},
-		{"lowest LOW", factors(1, 0, 1, 2, 1, 1, 1), 0.9, 1.25, 1.13, schema.PriorityLow},
-		{"2: internal XSS in dev", factors(2, 1, 3, 3, 3, 3, 2), 2.6, 2.75, 7.15, schema.PriorityMedium},
-		{"3: third-party, actively exploited", factors(4, 3, 4, 4, 5, 5, 5), 3.9, 4.75, 18.53, schema.PriorityCritical},
-		{"4: critical on segmented network", factors(5, 0, 5, 5, 5, 5, 5), 4.5, 5.0, 22.5, schema.PriorityCritical},
-		{"minimum possible", factors(1, 0, 1, 1, 1, 1, 1), 0.9, 1.0, 0.9, schema.PriorityInformational},
+		{"company-hosted SQLi", factors(4, 4, 3, 2, 4, 4, 4), 3.3, 3.5, 72.19, schema.PriorityCritical},
+		{"critical RCE on segmented network", factors(4, 0, 4, 4, 4, 4, 4), 3.6, 4.0, 90.0, schema.PriorityCritical},
+		{"third-party-hosted XSS", factors(3, 2, 2, 3, 4, 3, 4), 2.2, 3.5, 48.13, schema.PriorityHigh},
+		{"internal XSS in dev", factors(1, 1, 2, 2, 3, 3, 2), 1.7, 2.5, 26.56, schema.PriorityMedium},
+		{"low-severity, hard to exploit", factors(1, 2, 1, 1, 2, 1, 4), 1.1, 2.0, 13.75, schema.PriorityLow},
+		{"barely anything", factors(1, 0, 1, 1, 1, 0, 0), 0.9, 0.5, 2.81, schema.PriorityInformational},
+		{"no likelihood means no risk", factors(4, 4, 4, 0, 0, 0, 0), 4.0, 0, 0, schema.PriorityInformational},
 	}
 	cfg := DefaultConfig().RiskModel
 	for _, tc := range cases {
@@ -56,6 +57,12 @@ func TestRiskModel_DocumentedScenarios(t *testing.T) {
 			}
 		})
 	}
+
+	// Blocked realism zeroes likelihood even when every factor is maxed.
+	blocked := &schema.ExploitRealism{Tier: schema.RealismBlocked}
+	if got := scoreRiskFactors(factors(4, 4, 4, 4, 4, 4, 4), blocked, cfg); got.Score != 0 || got.Level != schema.PriorityInformational {
+		t.Errorf("blocked: got %.2f %s, want 0 informational", got.Score, got.Level)
+	}
 }
 
 // TestRiskModel_DiscoverabilityOrdering: a vulnerability automated scanners
@@ -73,8 +80,8 @@ func TestRiskModel_DiscoverabilityOrdering(t *testing.T) {
 		in    Input
 		score int
 	}{
-		{"nuclei template", nuclei, 5},
-		{"remote scanner signature", remote, 5},
+		{"nuclei template", nuclei, 4},
+		{"remote scanner signature", remote, 4},
 		{"version fingerprint", version, 4},
 		{"manual testing", manual, 3},
 		{"credentialed only", credentialed, 2},
@@ -116,12 +123,12 @@ func TestRiskModel_KEVMetasploitCompanyHosted(t *testing.T) {
 	}
 	rm := Compute(in, DefaultConfig()).RiskModel
 	f := rm.Factors
-	if f.BusinessImpact.Score != 5 || f.NetworkLocation.Score != 5 || f.VulnerabilitySeverity.Score != 5 {
+	if f.BusinessImpact.Score != 4 || f.NetworkLocation.Score != 4 || f.VulnerabilitySeverity.Score != 4 {
 		t.Errorf("impact factors: %+v", f)
 	}
 	// Version match only: the Metasploit module is not yet shown to work
 	// on this asset, so Ease of Exploit is held at 3 pending verification.
-	if f.SkillLevel.Score != 5 || f.EaseOfDiscovery.Score != 5 || f.EaseOfExploit.Score != 3 || f.Awareness.Score != 5 {
+	if f.SkillLevel.Score != 4 || f.EaseOfDiscovery.Score != 4 || f.EaseOfExploit.Score != 3 || f.Awareness.Score != 4 {
 		t.Errorf("likelihood factors: %+v", f)
 	}
 	if rm.Realism == nil || rm.Realism.Tier != schema.RealismUnverified {
@@ -140,10 +147,10 @@ func TestRiskModel_NetworkLocationHosting(t *testing.T) {
 		a    *schema.Asset
 		want int
 	}{
-		{asset(schema.ExposureInternet, "owned"), 5},
-		{asset(schema.ExposureInternet, "cloud"), 3},
-		{asset(schema.ExposureInternet, "third_party"), 3},
-		{asset(schema.ExposureInternet, ""), 5},
+		{asset(schema.ExposureInternet, "owned"), 4},
+		{asset(schema.ExposureInternet, "cloud"), 2},
+		{asset(schema.ExposureInternet, "third_party"), 2},
+		{asset(schema.ExposureInternet, ""), 4},
 		{asset(schema.ExposureInternal, "owned"), 1},
 		{asset(schema.ExposureIsolated, ""), 0},
 	}
@@ -184,10 +191,10 @@ func TestRiskModel_SkillLevelFollowsExploitDifficulty(t *testing.T) {
 		in   Input
 		want int
 	}{
-		{"unauth, AC:L, low complexity", intrinsic(schema.AttackerUnauthenticatedNetwork, schema.ComplexityLow, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), 5},
-		{"PR:N, AC:L from CVE vector", withVector("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), 5},
-		{"PR:L, AC:L", withVector("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H"), 4},
-		{"PR:N, AC:H", withVector("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H"), 4},
+		{"unauth, AC:L, low complexity", intrinsic(schema.AttackerUnauthenticatedNetwork, schema.ComplexityLow, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), 4},
+		{"PR:N, AC:L from CVE vector", withVector("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), 4},
+		{"PR:L, AC:L", withVector("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:H"), 3},
+		{"PR:N, AC:H", withVector("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:H"), 3},
 		{"PR:H, AC:H, UI:R", withVector("CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:H/I:H/A:H"), 1},
 		{"code execution + high complexity", intrinsic(schema.AttackerCodeExecution, schema.ComplexityHigh, "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H"), 1},
 	}
@@ -200,37 +207,37 @@ func TestRiskModel_SkillLevelFollowsExploitDifficulty(t *testing.T) {
 	// Tooling lowers the skill bar: the same hard flaw with a Metasploit
 	// module needs no technical skill, a public PoC only moderate skill.
 	hard := withVector("CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:H")
-	if got := skillLevelFactor(hard, nil).Score; got != 2 {
-		t.Errorf("hard flaw without tooling: got %d, want 2", got)
+	if got := skillLevelFactor(hard, nil).Score; got != 1 {
+		t.Errorf("hard flaw without tooling: got %d, want 1", got)
 	}
 	armed := withVector("CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:H")
 	armed.Exploitation.MetasploitAvailable = true
-	if got := skillLevelFactor(armed, nil).Score; got != 5 {
-		t.Errorf("hard flaw with Metasploit: got %d, want 5", got)
+	if got := skillLevelFactor(armed, nil).Score; got != 4 {
+		t.Errorf("hard flaw with Metasploit: got %d, want 4", got)
 	}
 	poc := withVector("CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:H")
 	poc.Exploitation.PublicPOCFound = true
-	if got := skillLevelFactor(poc, nil).Score; got != 3 {
-		t.Errorf("hard flaw with PoC: got %d, want 3", got)
+	if got := skillLevelFactor(poc, nil).Score; got != 2 {
+		t.Errorf("hard flaw with PoC: got %d, want 2", got)
 	}
 	// Tooling never lowers the score of an already-easy flaw.
 	easy := withVector("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H")
 	easy.Exploitation.PublicPOCFound = true
-	if got := skillLevelFactor(easy, nil).Score; got != 5 {
-		t.Errorf("easy flaw with PoC: got %d, want 5", got)
+	if got := skillLevelFactor(easy, nil).Score; got != 4 {
+		t.Errorf("easy flaw with PoC: got %d, want 4", got)
 	}
 	// Tooling can't remove a code-execution prerequisite.
 	foothold := intrinsic(schema.AttackerCodeExecution, schema.ComplexityHigh, "CVSS:3.1/AV:L/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:H")
 	foothold.Exploitation.MetasploitAvailable = true
-	if got := skillLevelFactor(foothold, nil).Score; got != 3 {
-		t.Errorf("code-exec prerequisite with Metasploit: got %d, want 3", got)
+	if got := skillLevelFactor(foothold, nil).Score; got != 2 {
+		t.Errorf("code-exec prerequisite with Metasploit: got %d, want 2", got)
 	}
 
 	// A well-documented class never requires specialist skill.
 	sqli := withVector("CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:H/I:H/A:H")
 	sqli.CWEID = "CWE-89"
-	if got := skillLevelFactor(sqli, nil).Score; got != 3 {
-		t.Errorf("SQLi floor: got %d, want 3", got)
+	if got := skillLevelFactor(sqli, nil).Score; got != 2 {
+		t.Errorf("SQLi floor: got %d, want 2", got)
 	}
 }
 
@@ -279,13 +286,13 @@ func TestRiskModel_ExploitRealism(t *testing.T) {
 		ease      int
 		maxLikely float64
 	}{
-		{"confirmed", confirmed, schema.RealismConfirmed, 5, 5},
-		{"likely", likely, schema.RealismLikely, 4, 5},
-		{"unverified", unverified, schema.RealismUnverified, 3, 5},
-		{"conditional", conditional, schema.RealismConditional, 2, 3.0},
-		{"blocked", blocked, schema.RealismBlocked, 1, 2.0},
+		{"confirmed", confirmed, schema.RealismConfirmed, 4, 4},
+		{"likely", likely, schema.RealismLikely, 4, 4},
+		{"unverified", unverified, schema.RealismUnverified, 3, 4},
+		{"conditional", conditional, schema.RealismConditional, 2, 2.0},
+		{"blocked", blocked, schema.RealismBlocked, 0, 0},
 	}
-	prev := 26.0
+	prev := 101.0
 	for _, c := range cases {
 		rm := Compute(c.in, DefaultConfig()).RiskModel
 		if rm.Realism == nil || rm.Realism.Tier != c.tier {
@@ -306,10 +313,10 @@ func TestRiskModel_ExploitRealism(t *testing.T) {
 			c.name, rm.Score, rm.Level, rm.Likelihood, rm.LikelihoodUncapped, rm.Factors.EaseOfExploit.Score, rm.Factors.SkillLevel.Score)
 	}
 
-	// Blocked: a KEV + Metasploit bug must not stay Critical when its
-	// required condition is absent on this asset.
-	if rm := Compute(blocked, DefaultConfig()).RiskModel; rm.Level == schema.PriorityCritical {
-		t.Errorf("blocked KEV+Metasploit still critical: %.2f", rm.Score)
+	// Blocked: a KEV + Metasploit bug has no likelihood on this asset
+	// when its required condition is absent.
+	if rm := Compute(blocked, DefaultConfig()).RiskModel; rm.Score != 0 || rm.Level != schema.PriorityInformational {
+		t.Errorf("blocked KEV+Metasploit: got %.2f %s, want 0 informational", rm.Score, rm.Level)
 	}
 }
 

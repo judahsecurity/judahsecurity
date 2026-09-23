@@ -431,7 +431,7 @@ const RISK_FACTOR_LABELS: [keyof RiskModelScore['factors'], string][] = [
   ['business_impact', 'Business Impact'],
   ['network_location', 'Network Location'],
   ['ease_of_discovery', 'Ease of Discovery'],
-  ['skill_level', 'Skill Level (5 = none needed)'],
+  ['skill_level', 'Skill Level (4 = none needed)'],
   ['ease_of_exploit', 'Ease of Exploit'],
   ['awareness', 'Awareness'],
 ];
@@ -440,20 +440,20 @@ function RiskModelPanel({ rm }: { rm: RiskModelScore }) {
   return (
     <section>
       <h4 className="text-sm font-semibold mb-2">
-        Risk Model <span className="text-xs font-normal text-muted-foreground">Impact {rm.impact.toFixed(2)} × Likelihood {rm.likelihood.toFixed(2)} = {rm.score.toFixed(1)}</span>
+        Risk Model <span className="text-xs font-normal text-muted-foreground">Impact {rm.impact.toFixed(2)}/4 × Likelihood {rm.likelihood.toFixed(2)}/4 = {rm.score.toFixed(1)}/100</span>
       </h4>
       <div className="grid grid-cols-3 gap-2 text-center mb-2">
         <div className="rounded-lg border p-2">
           <div className="text-xs text-muted-foreground">Severity</div>
-          <div className="text-lg font-bold">{rm.severity}/5</div>
+          <div className="text-lg font-bold">{rm.severity}/4</div>
         </div>
         <div className="rounded-lg border p-2">
           <div className="text-xs text-muted-foreground">How easily found</div>
-          <div className="text-lg font-bold">{rm.discoverability}/5</div>
+          <div className="text-lg font-bold">{rm.discoverability}/4</div>
         </div>
         <div className="rounded-lg border p-2">
           <div className="text-xs text-muted-foreground">Real-world practicality</div>
-          <div className="text-lg font-bold">{rm.exploit_practicality.toFixed(1)}/5</div>
+          <div className="text-lg font-bold">{rm.exploit_practicality.toFixed(1)}/4</div>
         </div>
       </div>
       {rm.exploit_realism && (
@@ -461,7 +461,7 @@ function RiskModelPanel({ rm }: { rm: RiskModelScore }) {
           <div className="text-xs">
             <span className="text-muted-foreground">Realistic on this asset: </span>
             <span className="font-semibold">{rm.exploit_realism.tier}</span>
-            <span className="text-muted-foreground"> ({rm.exploit_realism.score}/5)</span>
+            <span className="text-muted-foreground"> ({rm.exploit_realism.score}/4)</span>
             {rm.likelihood_uncapped > rm.likelihood && (
               <span className="text-yellow-400"> · likelihood capped {rm.likelihood_uncapped.toFixed(2)} → {rm.likelihood.toFixed(2)}</span>
             )}

@@ -10,10 +10,12 @@ import (
 
 // RiskModelVersion identifies the factor mapping below. Bump on any change
 // to how signals map to factor scores.
-const RiskModelVersion = "risk/v4"
+const RiskModelVersion = "risk/v5"
 
 // riskModel maps the OPES inputs onto the seven-factor Likelihood × Impact
-// model. Every factor carries a one-line reason so an analyst can see why a
+// model. Every factor is scored 0–4 (0 = none, 4 = highest), Impact and
+// Likelihood are normalised to 0–1, and Risk = Impact × Likelihood is
+// reported as 0–100, so no likelihood means no risk. Every factor carries a one-line reason so an analyst can see why a
 // finding scored the way it did. It never changes the OPES value.
 func riskModel(in Input, cfg RiskModelConfig) *schema.RiskModelScore {
 	realism := exploitRealism(in)
@@ -46,12 +48,13 @@ func scoreRiskFactors(f schema.RiskFactors, realism *schema.ExploitRealism, cfg 
 			likelihood = math.Min(likelihood, cfg.ConditionalLikelihoodCap)
 		}
 	}
-	risk := impact * likelihood
+	// Both sides normalised to 0–1 (factors max out at 4), so Risk is the
+	// fraction of worst case: 0 likelihood or 0 impact → 0 risk.
+	risk := (impact / 4) * (likelihood / 4) * 100
 	practicality := float64(f.SkillLevel.Score+f.EaseOfExploit.Score+f.Awareness.Score) / 3
 
-	// Mirrors the workbook: IF(>=16,CRITICAL,IF(>=11,HIGH,IF(>=6,MEDIUM,
-	// IF(>=1,LOW,"N/A")))). Below 1 is only reachable on a segmented network
-	// with every other factor at 1, and maps to informational.
+	// Bands are squares: Critical ≥ 64 means Impact and Likelihood both
+	// around 0.8, High ≥ 36 ≈ 0.6, Medium ≥ 16 ≈ 0.4, Low ≥ 4 ≈ 0.2.
 	level := schema.PriorityInformational
 	switch {
 	case risk >= cfg.Critical:
@@ -60,7 +63,7 @@ func scoreRiskFactors(f schema.RiskFactors, realism *schema.ExploitRealism, cfg 
 		level = schema.PriorityHigh
 	case risk >= cfg.Medium:
 		level = schema.PriorityMedium
-	case risk >= 1:
+	case risk >= cfg.Low:
 		level = schema.PriorityLow
 	}
 
@@ -83,19 +86,19 @@ func scoreRiskFactors(f schema.RiskFactors, realism *schema.ExploitRealism, cfg 
 
 func businessImpactFactor(a *schema.Asset) schema.RiskFactor {
 	if a == nil {
-		return schema.RiskFactor{Score: 3, Rating: "Medium", Reason: "No asset context; assumed standard business operations"}
+		return schema.RiskFactor{Score: 2, Rating: "Medium", Reason: "No asset context; assumed standard business operations"}
 	}
 	switch a.Criticality {
 	case schema.CriticalityCritical:
-		return schema.RiskFactor{Score: 5, Rating: "Critical", Reason: "Asset classified critical (revenue or critical operations)"}
+		return schema.RiskFactor{Score: 4, Rating: "Critical", Reason: "Asset classified critical (revenue or critical operations)"}
 	case schema.CriticalityHigh:
-		return schema.RiskFactor{Score: 4, Rating: "High", Reason: "Asset classified high (important business function)"}
+		return schema.RiskFactor{Score: 3, Rating: "High", Reason: "Asset classified high (important business function)"}
 	case schema.CriticalityLow:
-		return schema.RiskFactor{Score: 2, Rating: "Low", Reason: "Asset classified low (minimal business disruption)"}
+		return schema.RiskFactor{Score: 1, Rating: "Low", Reason: "Asset classified low (minimal business disruption)"}
 	case schema.CriticalityMedium:
-		return schema.RiskFactor{Score: 3, Rating: "Medium", Reason: "Asset classified medium (standard business operations)"}
+		return schema.RiskFactor{Score: 2, Rating: "Medium", Reason: "Asset classified medium (standard business operations)"}
 	}
-	return schema.RiskFactor{Score: 3, Rating: "Medium", Reason: "Asset criticality not set; assumed medium"}
+	return schema.RiskFactor{Score: 2, Rating: "Medium", Reason: "Asset criticality not set; assumed medium"}
 }
 
 // networkLocationFactor distinguishes company-hosted from third-party-hosted
@@ -103,7 +106,7 @@ func businessImpactFactor(a *schema.Asset) schema.RiskFactor {
 // third_party, unknown), which arrives in signals.extra.
 func networkLocationFactor(a *schema.Asset) schema.RiskFactor {
 	if a == nil {
-		return schema.RiskFactor{Score: 3, Rating: "Unknown", Reason: "No asset context; exposure unknown"}
+		return schema.RiskFactor{Score: 2, Rating: "Unknown", Reason: "No asset context; exposure unknown"}
 	}
 	exposure := a.Exposure
 	if exposure == "" || exposure == schema.ExposureUnknown {
@@ -128,29 +131,29 @@ func networkLocationFactor(a *schema.Asset) schema.RiskFactor {
 			if provider == "" {
 				provider = hosting
 			}
-			return schema.RiskFactor{Score: 3, Rating: "Third Party Hosted (Internet-Facing)",
+			return schema.RiskFactor{Score: 2, Rating: "Third Party Hosted",
 				Reason: fmt.Sprintf("Internet-facing on third-party infrastructure (%s)", provider)}
 		case "owned":
-			return schema.RiskFactor{Score: 5, Rating: "Company Hosted (Internet-Facing)",
+			return schema.RiskFactor{Score: 4, Rating: "Company Hosted",
 				Reason: "Internet-facing on company-owned infrastructure"}
 		}
-		return schema.RiskFactor{Score: 5, Rating: "Company Hosted (Internet-Facing)",
+		return schema.RiskFactor{Score: 4, Rating: "Company Hosted",
 			Reason: "Internet-facing; hosting not classified, assumed company-hosted"}
 	}
-	return schema.RiskFactor{Score: 3, Rating: "Unknown", Reason: "Exposure unknown"}
+	return schema.RiskFactor{Score: 2, Rating: "Unknown", Reason: "Exposure unknown"}
 }
 
 func severityFactor(in Input) schema.RiskFactor {
 	cvss := maxCVSSScore(in.CVE)
 	switch {
 	case cvss >= 9.0:
-		return schema.RiskFactor{Score: 5, Rating: "Critical", Reason: fmt.Sprintf("CVSS %.1f", cvss)}
+		return schema.RiskFactor{Score: 4, Rating: "Critical", Reason: fmt.Sprintf("CVSS %.1f", cvss)}
 	case cvss >= 7.0:
-		return schema.RiskFactor{Score: 4, Rating: "High", Reason: fmt.Sprintf("CVSS %.1f", cvss)}
+		return schema.RiskFactor{Score: 3, Rating: "High", Reason: fmt.Sprintf("CVSS %.1f", cvss)}
 	case cvss >= 4.0:
-		return schema.RiskFactor{Score: 3, Rating: "Medium", Reason: fmt.Sprintf("CVSS %.1f", cvss)}
+		return schema.RiskFactor{Score: 2, Rating: "Medium", Reason: fmt.Sprintf("CVSS %.1f", cvss)}
 	case cvss > 0:
-		return schema.RiskFactor{Score: 2, Rating: "Low", Reason: fmt.Sprintf("CVSS %.1f", cvss)}
+		return schema.RiskFactor{Score: 1, Rating: "Low", Reason: fmt.Sprintf("CVSS %.1f", cvss)}
 	}
 	// No CVSS: non-CVE findings (misconfigurations, exposed services) are
 	// rated by their breach-intelligence class instead.
@@ -161,26 +164,27 @@ func severityFactor(in Input) schema.RiskFactor {
 		}
 		switch {
 		case r >= 8.5:
-			return schema.RiskFactor{Score: 5, Rating: "Critical", Reason: fmt.Sprintf("No CVSS; %s leads to full compromise in breach data", class)}
+			return schema.RiskFactor{Score: 4, Rating: "Critical", Reason: fmt.Sprintf("No CVSS; %s leads to full compromise in breach data", class)}
 		case r >= 7.5:
-			return schema.RiskFactor{Score: 4, Rating: "High", Reason: fmt.Sprintf("No CVSS; %s exposes significant data or access", class)}
+			return schema.RiskFactor{Score: 3, Rating: "High", Reason: fmt.Sprintf("No CVSS; %s exposes significant data or access", class)}
 		}
-		return schema.RiskFactor{Score: 3, Rating: "Medium", Reason: fmt.Sprintf("No CVSS; %s has limited impact", class)}
+		return schema.RiskFactor{Score: 2, Rating: "Medium", Reason: fmt.Sprintf("No CVSS; %s has limited impact", class)}
 	}
-	return schema.RiskFactor{Score: 3, Rating: "Medium", Reason: "No CVSS score available; assumed medium"}
+	return schema.RiskFactor{Score: 2, Rating: "Medium", Reason: "No CVSS score available; assumed medium"}
 }
 
 // ── Likelihood factors ───────────────────────────────────────────────────────
 
 // skillLevelFactor rates the skill an attacker needs, modelled on the OWASP
-// Risk Rating "Skill level" threat-agent factor: 5 = no technical skills,
-// 1 = security penetration skills. It is driven by how intrinsically hard the
+// Risk Rating "Skill level" threat-agent factor: 4 = no technical skills,
+// 3 = some technical skills, 2 = advanced computer user, 1 = security
+// penetration skills. It is driven by how intrinsically hard the
 // flaw is to exploit (CVSS AC/AT/PR/UI, required attacker position, exploit
 // complexity, attack path, blocking preconditions). Exploit tooling then
 // lowers the skill bar: a Metasploit module or weaponized exploit automates
 // the hard part, so it raises the score to what the tool leaves the attacker
 // to do. Tooling cannot remove a positional requirement (existing code
-// execution or physical access), so those stay capped at Moderate.
+// execution or physical access), so those stay capped at Advanced User.
 func skillLevelFactor(in Input, realism *schema.ExploitRealism) schema.RiskFactor {
 	vector := intrinsicVector(in)
 	if vector == "" {
@@ -189,15 +193,15 @@ func skillLevelFactor(in Input, realism *schema.ExploitRealism) schema.RiskFacto
 	if vector == "" && in.Intrinsic == nil {
 		switch r := in.Exploitation.MisconfigBreachRisk; {
 		case r >= 7.5:
-			return schema.RiskFactor{Score: 5, Rating: "No Technical Skills", Reason: "Exposure is usable with standard clients, no exploitation technique needed"}
+			return schema.RiskFactor{Score: 4, Rating: "No Technical Skills", Reason: "Exposure is usable with standard clients, no exploitation technique needed"}
 		case r > 0:
-			return schema.RiskFactor{Score: 4, Rating: "Some Technical Skills", Reason: "Misconfiguration abusable with basic security knowledge"}
+			return schema.RiskFactor{Score: 3, Rating: "Some Technical Skills", Reason: "Misconfiguration abusable with basic security knowledge"}
 		}
-		return schema.RiskFactor{Score: 3, Rating: "Moderate Technical Skills", Reason: "No CVSS vector or exploit analysis; assumed moderate"}
+		return schema.RiskFactor{Score: 2, Rating: "Advanced Computer User", Reason: "No CVSS vector or exploit analysis; assumed advanced user"}
 	}
 
 	// Difficulty points: higher = more skill needed. A clean
-	// unauthenticated, low-complexity network attack lands at 0 (score 5).
+	// unauthenticated, low-complexity network attack lands at 0 (score 4).
 	points := 1.0
 	var why []string
 	add := func(v float64, reason string) {
@@ -270,19 +274,19 @@ func skillLevelFactor(in Input, realism *schema.ExploitRealism) schema.RiskFacto
 		}
 	}
 
-	score := int(math.Round(5 - points))
+	score := int(math.Round(4 - points))
 	if score < 1 {
 		score = 1
 	}
-	if score > 5 {
-		score = 5
+	if score > 4 {
+		score = 4
 	}
 
 	// Well-documented weakness classes (SQLi, command injection, hard-coded
 	// credentials, missing auth) are taught widely; exploiting them never
 	// needs specialist skills.
-	if in.CWEID != "" && cweExploitCeiling(in.CWEID) <= 3.0 && score < 3 {
-		score = 3
+	if in.CWEID != "" && cweExploitCeiling(in.CWEID) <= 3.0 && score < 2 {
+		score = 2
 		why = append(why, in.CWEID+" is a well-documented technique")
 	}
 
@@ -292,7 +296,7 @@ func skillLevelFactor(in Input, realism *schema.ExploitRealism) schema.RiskFacto
 
 	if floor, tool := toolingSkillFloor(in); floor > score {
 		if capability == schema.AttackerCodeExecution || capability == schema.AttackerPhysical {
-			floor = min3(floor)
+			floor = minInt(floor, 2)
 		}
 		// A tool only lowers the bar if it can realistically be used here.
 		if realism != nil && floor > realism.Score {
@@ -303,14 +307,15 @@ func skillLevelFactor(in Input, realism *schema.ExploitRealism) schema.RiskFacto
 			score = floor
 		}
 	}
-	ratings := map[int]string{
-		5: "No Technical Skills",
-		4: "Some Technical Skills",
-		3: "Moderate Technical Skills",
-		2: "Advanced Technical Skills",
-		1: "Security Penetration Skills",
-	}
-	return schema.RiskFactor{Score: score, Rating: ratings[score], Reason: strings.Join(why, "; ")}
+	return schema.RiskFactor{Score: score, Rating: skillRatings[score], Reason: strings.Join(why, "; ")}
+}
+
+var skillRatings = map[int]string{
+	4: "No Technical Skills",
+	3: "Some Technical Skills",
+	2: "Advanced Computer User",
+	1: "Security Penetration Skills",
+	0: "Not Feasible",
 }
 
 // toolingSkillFloor returns the skill score public exploit tooling brings a
@@ -319,24 +324,24 @@ func toolingSkillFloor(in Input) (int, string) {
 	e := in.Exploitation
 	switch {
 	case e.MetasploitAvailable:
-		return 5, "Metasploit module"
+		return 4, "Metasploit module"
 	case e.VulnCheckWeaponized:
-		return 5, "Weaponized exploit (VulnCheck)"
+		return 4, "Weaponized exploit (VulnCheck)"
 	case in.DetectionConfidence == schema.ExploitConfirmed:
-		return 5, "Automated scanner exploit check"
+		return 4, "Automated scanner exploit check"
 	case e.ExploitDBFound || e.VulnCheckPublicExploit || e.AttackerKBExploitability >= 4:
-		return 4, "Public exploit (Exploit-DB / VulnCheck)"
+		return 3, "Public exploit (Exploit-DB / VulnCheck)"
 	case e.PublicPOCFound || e.TrickestFound || hasWeaponizedPOC(in):
-		return 3, "Public PoC"
+		return 2, "Public PoC"
 	}
 	return 0, ""
 }
 
-func min3(v int) int {
-	if v > 3 {
-		return 3
+func minInt(a, b int) int {
+	if a < b {
+		return a
 	}
-	return v
+	return b
 }
 
 // bestCVSSVector returns the vector string behind maxCVSSScore.
@@ -367,10 +372,10 @@ func discoveryFactor(in Input) schema.RiskFactor {
 	e := in.Exploitation
 	switch e.AttackerDiscoverabilityTier {
 	case "mass_scanned":
-		return schema.RiskFactor{Score: 5, Rating: "Visible/Published", Reason: fmt.Sprintf("Mass-scanned in the wild (%d OTX pulses)", e.OTXPulseCount)}
+		return schema.RiskFactor{Score: 4, Rating: "Automated Tools Available", Reason: fmt.Sprintf("Mass-scanned in the wild (%d OTX pulses)", e.OTXPulseCount)}
 	case "remote_exploit":
 		if in.CVE != nil {
-			return schema.RiskFactor{Score: 5, Rating: "Visible/Published", Reason: "Public CVE with remote scanner signatures (Nuclei / Tenable remote)"}
+			return schema.RiskFactor{Score: 4, Rating: "Automated Tools Available", Reason: "Public CVE with remote scanner signatures (Nuclei / Tenable remote)"}
 		}
 		return schema.RiskFactor{Score: 4, Rating: "Automated Tools Available", Reason: "Remote scanner signatures detect it"}
 	case "version_detectable":
@@ -379,7 +384,7 @@ func discoveryFactor(in Input) schema.RiskFactor {
 		return schema.RiskFactor{Score: 2, Rating: "Difficult", Reason: "Only detectable with credentials or an agent; external attacker is blind"}
 	}
 	if hasNucleiTemplate(in) {
-		return schema.RiskFactor{Score: 5, Rating: "Visible/Published", Reason: "Public CVE with a Nuclei template"}
+		return schema.RiskFactor{Score: 4, Rating: "Automated Tools Available", Reason: "Public CVE with a Nuclei template"}
 	}
 	switch in.DetectionConfidence {
 	case schema.ExploitConfirmed, schema.EndpointConfirmed:
@@ -401,9 +406,9 @@ func easeOfExploitFactor(in Input, realism *schema.ExploitRealism) schema.RiskFa
 	var f schema.RiskFactor
 	switch {
 	case in.DetectionConfidence == schema.ExploitConfirmed:
-		f = schema.RiskFactor{Score: 5, Rating: "Simple/Scripted", Reason: "Exploit confirmed against this asset by an automated check"}
+		f = schema.RiskFactor{Score: 4, Rating: "Automated Tools Available", Reason: "Exploit confirmed against this asset by an automated check"}
 	case e.MisconfigBreachRisk >= 7.5:
-		f = schema.RiskFactor{Score: 5, Rating: "Simple/Scripted", Reason: "Exposure is directly usable (no exploit needed)"}
+		f = schema.RiskFactor{Score: 4, Rating: "Automated Tools Available", Reason: "Exposure is directly usable (no exploit needed)"}
 	case e.MetasploitAvailable || e.VulnCheckWeaponized:
 		f = schema.RiskFactor{Score: 4, Rating: "Automated Tools Available", Reason: "Metasploit module or weaponized exploit available"}
 	case e.ExploitDBFound || e.VulnCheckPublicExploit || e.PublicPOCFound || e.TrickestFound || hasWeaponizedPOC(in) || e.MisconfigBreachRisk > 0:
@@ -411,7 +416,7 @@ func easeOfExploitFactor(in Input, realism *schema.ExploitRealism) schema.RiskFa
 	case in.Intrinsic != nil && in.Intrinsic.ExploitComplexity != schema.ComplexityHigh:
 		f = schema.RiskFactor{Score: 2, Rating: "Difficult", Reason: "No public exploit; working exploit must be built"}
 	default:
-		f = schema.RiskFactor{Score: 1, Rating: "Theoretical", Reason: "No known working exploit"}
+		f = schema.RiskFactor{Score: 1, Rating: "Practically Impossible", Reason: "No known working exploit"}
 	}
 
 	// Having an exploit is not the same as it working here: cap by what
@@ -424,38 +429,45 @@ func easeOfExploitFactor(in Input, realism *schema.ExploitRealism) schema.RiskFa
 }
 
 var easeRatings = map[int]string{
-	5: "Simple/Scripted",
 	4: "Automated Tools Available",
 	3: "Easy",
 	2: "Difficult",
-	1: "Theoretical",
+	1: "Practically Impossible",
+	0: "Not Exploitable Here",
 }
 
+// awarenessFactor follows the OWASP awareness scale: 4 = public knowledge,
+// 3 = obvious, 2 = hidden, 1 = unknown. The reason names the strongest
+// public signal (KEV, ransomware, breach data) so active exploitation
+// stays visible even though it shares the top score.
 func awarenessFactor(in Input) schema.RiskFactor {
 	e := in.Exploitation
+	public := func(reason string) schema.RiskFactor {
+		return schema.RiskFactor{Score: 4, Rating: "Public Knowledge", Reason: reason}
+	}
 	for _, src := range e.InKEVSources {
 		if src == "cisa_kev" {
-			return schema.RiskFactor{Score: 5, Rating: "Active Exploitation", Reason: "Listed in CISA KEV"}
+			return public("Listed in CISA KEV (actively exploited)")
 		}
 	}
 	switch {
 	case len(e.InKEVSources) > 0:
-		return schema.RiskFactor{Score: 5, Rating: "Active Exploitation", Reason: "Listed in " + strings.Join(e.InKEVSources, ", ")}
+		return public("Listed in " + strings.Join(e.InKEVSources, ", ") + " (actively exploited)")
 	case e.RansomwareAssociated || e.VulnCheckRansomwareCount > 0:
-		return schema.RiskFactor{Score: 5, Rating: "Active Exploitation", Reason: "Used by ransomware operators"}
+		return public("Used by ransomware operators")
 	case e.BreachConfirmed || e.FireLinked || e.MandiantMTrends || e.CrowdStrikeGTR:
-		return schema.RiskFactor{Score: 5, Rating: "Active Exploitation", Reason: "Linked to confirmed breaches"}
+		return public("Linked to confirmed breaches")
 	case e.ENISAExploited || e.VulnCheckReportedExploited || e.ZeroDayConfirmed || len(e.ObservationSources) > 0 ||
 		e.VulnCheckThreatActorCount > 0 || e.VulnCheckBotnetCount > 0:
-		return schema.RiskFactor{Score: 5, Rating: "Active Exploitation", Reason: "Exploitation observed in the wild"}
-	case e.MisconfigBreachRisk >= 9.0:
-		return schema.RiskFactor{Score: 5, Rating: "Active Exploitation", Reason: "Exposure class is mass-exploited in breach data"}
+		return public("Exploitation observed in the wild")
 	case e.OTXActiveCampaign || e.AttackerKBValue >= 4 || e.CISASSVCDecision == "Immediate" || e.CISASSVCDecision == "Out-of-Cycle" || e.MetasploitAvailable:
-		return schema.RiskFactor{Score: 4, Rating: "High", Reason: "Widespread security-community attention"}
+		return public("Widespread security-community attention")
+	case in.CVE != nil:
+		return public("Publicly disclosed CVE")
 	case e.MisconfigBreachRisk >= 7.5:
-		return schema.RiskFactor{Score: 4, Rating: "High", Reason: "Exposure class is well known to attackers"}
-	case in.CVE != nil || e.MisconfigBreachRisk > 0:
-		return schema.RiskFactor{Score: 3, Rating: "Moderate", Reason: "Publicly disclosed, no widespread attention"}
+		return public("Exposure class is well known to attackers")
+	case e.MisconfigBreachRisk > 0:
+		return schema.RiskFactor{Score: 3, Rating: "Obvious", Reason: "Exposure is visible to anyone who looks"}
 	}
 	return schema.RiskFactor{Score: 1, Rating: "Unknown", Reason: "No public disclosure (internal discovery)"}
 }
@@ -467,13 +479,13 @@ func round2(v float64) float64 { return math.Round(v*100) / 100 }
 // evaluations, what our scanner confirmed, how the attacker must reach it,
 // and controls in front of it. The most restrictive finding wins.
 //
-//	confirmed   5  exploit or vulnerable code path proven on this asset
+//	confirmed   4  exploit or vulnerable code path proven on this asset
 //	likely      4  feature confirmed live / prerequisites met, nothing in the way
 //	unverified  3  only the version matched; exploit may not apply (backport,
 //	               feature disabled, config) — needs verification
 //	conditional 2  needs something first: foothold, credentials, a victim,
 //	               adjacent/local access, or getting past auth or a WAF
-//	blocked     1  a required prerequisite is not met on this asset, so the
+//	blocked     0  a required prerequisite is not met on this asset, so the
 //	               documented exploit paths do not work here today
 func exploitRealism(in Input) *schema.ExploitRealism {
 	var blocked, conditional, verified []string
@@ -548,10 +560,10 @@ func exploitRealism(in Input) *schema.ExploitRealism {
 	switch {
 	case in.DetectionConfidence == schema.ExploitConfirmed:
 		// Proven beats inferred: the exploit fired against this asset.
-		return &schema.ExploitRealism{Score: 5, Tier: schema.RealismConfirmed,
+		return &schema.ExploitRealism{Score: 4, Tier: schema.RealismConfirmed,
 			Reasons: []string{"exploit or vulnerable code path confirmed on this asset by our scanner"}}
 	case len(blocked) > 0:
-		return &schema.ExploitRealism{Score: 1, Tier: schema.RealismBlocked,
+		return &schema.ExploitRealism{Score: 0, Tier: schema.RealismBlocked,
 			Reasons: append(blocked, "documented exploit paths do not work here today; not a guarantee against other paths")}
 	case len(conditional) > 0:
 		return &schema.ExploitRealism{Score: 2, Tier: schema.RealismConditional, Reasons: conditional}

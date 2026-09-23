@@ -50,10 +50,11 @@ type Bucketing struct {
 
 // RiskModelConfig tunes the Likelihood × Impact risk model.
 //
-// Impact = BusinessImpact·w + NetworkLocation·w + VulnerabilitySeverity·w
-// (weights should sum to 1.0). Likelihood is the plain mean of its four
-// factors. Levels are half-open: Risk ≥ Critical → critical, ≥ High → high,
-// ≥ Medium → medium, otherwise low.
+// Factors are scored 0–4. Impact = BusinessImpact·w + NetworkLocation·w +
+// VulnerabilitySeverity·w (weights should sum to 1.0); Likelihood is the
+// plain mean of its four factors. Risk = (Impact/4)·(Likelihood/4)·100, so
+// 0–100. Levels are half-open: Risk ≥ Critical → critical, ≥ High → high,
+// ≥ Medium → medium, ≥ Low → low, otherwise informational.
 type RiskModelConfig struct {
 	BusinessImpactWeight        float64
 	NetworkLocationWeight       float64
@@ -62,11 +63,12 @@ type RiskModelConfig struct {
 	Critical float64
 	High     float64
 	Medium   float64
+	Low      float64
 
-	// Likelihood ceilings applied by exploit realism. An exploit whose
-	// documented paths are blocked on this asset, or that needs a foothold,
-	// credentials or a victim first, cannot be as likely as one that works
-	// directly, however well known or weaponized it is.
+	// Likelihood ceilings (0–4) applied by exploit realism. An exploit whose
+	// documented paths are blocked on this asset has no likelihood there;
+	// one that needs a foothold, credentials or a victim first cannot be as
+	// likely as one that works directly, however well known it is.
 	BlockedLikelihoodCap     float64
 	ConditionalLikelihoodCap float64
 }
@@ -99,11 +101,12 @@ func DefaultConfig() Config {
 			BusinessImpactWeight:        0.20,
 			NetworkLocationWeight:       0.10,
 			VulnerabilitySeverityWeight: 0.70,
-			Critical:                    16,
-			High:                        11,
-			Medium:                      6,
-			BlockedLikelihoodCap:        2.0,
-			ConditionalLikelihoodCap:    3.0,
+			Critical:                    64,
+			High:                        36,
+			Medium:                      16,
+			Low:                         4,
+			BlockedLikelihoodCap:        0,
+			ConditionalLikelihoodCap:    2.0,
 		},
 	}
 }
