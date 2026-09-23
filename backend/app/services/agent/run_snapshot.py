@@ -22,7 +22,111 @@ logger = logging.getLogger(__name__)
 _DIR = Path.home() / ".aegis" / "sessions"
 _SAFE = re.compile(r"[^a-zA-Z0-9._-]+")
 _MAX_SNAPSHOT_BYTES = 2_000_000
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
+
+
+def _recover_brain_after_restart(brain: Any) -> Any:
+    """Quarantine interrupted leases and requeue unfinished proof verification."""
+    if not isinstance(brain, dict):
+        return brain
+    recovered = 0
+    graph = brain.get("task_graph") or {}
+    nodes = graph.get("nodes") or {}
+    if isinstance(nodes, dict):
+        for node in nodes.values():
+            if not isinstance(node, dict) or node.get("status") != "running":
+                continue
+            node.update(
+                status="blocked",
+                recovery_required=True,
+                blocked_reason=(
+                    "Backend restarted during an execution lease; reconcile durable "
+                    "evidence before retrying"
+                ),
+                last_failure="execution interrupted by backend restart",
+                lease_id="",
+                lease_owner="",
+                lease_started_at=0.0,
+                lease_deadline=0.0,
+            )
+            recovered += 1
+
+    for cell in brain.get("coverage_cells") or []:
+        if not isinstance(cell, dict) or cell.get("status") != "leased":
+            continue
+        cell.update(
+            status="inconclusive",
+            reason="Backend restarted before the coverage lease produced a terminal receipt",
+            lease_id="",
+            lease_owner="",
+            lease_started_at=0.0,
+            lease_deadline=0.0,
+            task_lease_id="",
+        )
+        recovered += 1
+
+    candidates = {
+        str(row.get("id") or ""): row
+        for row in (brain.get("candidates") or [])
+        if isinstance(row, dict) and row.get("id")
+    }
+    durable_receipts = {
+        str(row.get("candidate_id") or ""): row
+        for row in (brain.get("verification_receipts") or {}).values()
+        if isinstance(row, dict) and row.get("candidate_id")
+    }
+    for candidate_id, candidate in candidates.items():
+        if candidate.get("status") != "confirmed":
+            continue
+        receipt = durable_receipts.get(candidate_id) or {}
+        receipt_is_complete = (
+            receipt.get("verdict") == "confirmed"
+            and receipt.get("run_id") == candidate.get("verifier_run_id")
+            and receipt.get("revision") == candidate.get("revision")
+            and receipt.get("nonce") == candidate.get("nonce")
+            and receipt.get("nonce_observed") is True
+            and bool(receipt.get("evidence_ids"))
+        )
+        if receipt_is_complete:
+            continue
+        candidate.update(
+            status="pending",
+            verifier_run_id="",
+            verified_at="",
+            verifier_evidence="",
+            verifier_summary=(
+                "Restart recovery: durable verifier receipt was incomplete; reverify"
+            ),
+        )
+        for cell in brain.get("coverage_cells") or []:
+            if isinstance(cell, dict) and cell.get("candidate_id") == candidate_id:
+                cell["verifier_run_id"] = ""
+                if cell.get("status") != "finding":
+                    cell["status"] = "in_focus"
+        recovered += 1
+    for escalation in brain.get("proof_escalations") or []:
+        if not isinstance(escalation, dict) or escalation.get("status") != "verifying":
+            continue
+        candidate = candidates.get(str(escalation.get("candidate_id") or "")) or {}
+        candidate_status = str(candidate.get("status") or "")
+        if candidate_status == "confirmed":
+            escalation["status"] = "confirmed"
+        elif candidate_status == "refuted":
+            escalation["status"] = "refuted"
+        else:
+            escalation.update(
+                status="pending",
+                recovery_reason="Verifier execution was interrupted by backend restart",
+            )
+        recovered += 1
+
+    if recovered:
+        notes = list(brain.get("notes") or [])
+        note = f"Recovered {recovered} interrupted lease/proof record(s) after restart."
+        if note not in notes:
+            notes.append(note)
+        brain["notes"] = notes[-200:]
+    return brain
 
 
 def _path(organization_id: int, session_id: str) -> Path:
@@ -105,7 +209,7 @@ def load_run_snapshot(
         if not isinstance(data, dict):
             return {}
         version = data.get("schema_version", 1)
-        if version not in (1, _SCHEMA_VERSION):
+        if version not in (1, 2, _SCHEMA_VERSION):
             return {}
         # Legacy snapshots may contain bearer tokens and cookies. They are not
         # execution authority after a process restart.
@@ -115,6 +219,7 @@ def load_run_snapshot(
         if isinstance(brain, dict) and brain.get("credentials"):
             brain["credentials"] = []
             data["reauthentication_required"] = True
+        data["engagement_brain"] = _recover_brain_after_restart(brain)
         return data
     except Exception:
         logger.debug("run snapshot load skipped", exc_info=True)

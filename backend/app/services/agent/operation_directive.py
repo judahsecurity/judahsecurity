@@ -38,6 +38,9 @@ class OperationDirective:
     lease_id: str = ""
     coverage_cell_id: str = ""
     coverage_lease_id: str = ""
+    proof_escalation_id: str = ""
+    proof_strategy: str = ""
+    proof_requirements: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -80,6 +83,12 @@ class OperationDirective:
                 "\nTrace every replay/compare/candidate/coverage update with coverage_cell_id="
                 f"{self.coverage_cell_id}. When closing it, also pass coverage_lease_id="
                 f"{self.coverage_lease_id}."
+            )
+        if self.proof_escalation_id:
+            block += (
+                f"\nPROOF ESCALATION {self.proof_escalation_id}: strategy="
+                f"{self.proof_strategy}. This signal is not a finding. Next proof bar: "
+                + "; ".join(self.proof_requirements[:4])
             )
         if self.rewrite_note:
             block = f"{block}\n\n{self.rewrite_note}"
@@ -139,6 +148,23 @@ def directives_from_hypotheses(
         coverage_lease_id = str(
             getattr(coverage_lease, "id", "")
             or (coverage_lease.get("id", "") if isinstance(coverage_lease, dict) else "")
+        )
+        coverage_cell = next(
+            (
+                cell
+                for cell in (getattr(brain, "coverage_cells", None) or [])
+                if cell.get("id") == coverage_cell_id
+            ),
+            {},
+        )
+        proof_escalation_id = str(coverage_cell.get("proof_escalation_id") or "")
+        proof_escalation = next(
+            (
+                row
+                for row in (getattr(brain, "proof_escalations", None) or [])
+                if row.get("id") == proof_escalation_id
+            ),
+            {},
         )
         matched = [h for h in open_hyps if getattr(h, "specialist", None) == name]
         if leased_hypothesis_id:
@@ -228,6 +254,9 @@ def directives_from_hypotheses(
             lease_id=lease_id,
             coverage_cell_id=coverage_cell_id,
             coverage_lease_id=coverage_lease_id,
+            proof_escalation_id=proof_escalation_id,
+            proof_strategy=str(proof_escalation.get("strategy") or ""),
+            proof_requirements=list(proof_escalation.get("requirements") or []),
         )
         try:
             from app.services.agent.penetration_task_graph import format_executor_slice

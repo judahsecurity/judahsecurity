@@ -265,6 +265,8 @@ def migrate_coverage_cells(
                 },
             },
         )
+        if raw.get("proof_escalation_id") and raw.get("specialist"):
+            normalized["specialist"] = _text(raw.get("specialist"))
         # Recompute old or missing IDs so equivalent legacy cells coalesce.
         put(_merge_cell(normalized, raw))
 
@@ -622,6 +624,7 @@ def claim_coverage_cell_leases(
                 0
                 if hypothesis_id and cell.get("hypothesis_id") == hypothesis_id
                 else 1,
+                0 if cell.get("proof_escalation_id") else 1,
                 int(cell.get("attempts") or 0),
                 cell.get("surface_key", ""),
                 cell.get("identity", ""),
@@ -687,6 +690,19 @@ def release_coverage_cell_lease(
         # publication can close the cell; a hunter's signal remains in focus.
         if _text(verdict).lower() == "killed" and ids:
             cell["status"] = "tested_clean"
+            escalation_id = _text(cell.get("proof_escalation_id"))
+            if escalation_id:
+                for escalation in getattr(brain, "proof_escalations", None) or []:
+                    if escalation.get("id") == escalation_id:
+                        escalation.update(
+                            status="refuted",
+                            refuted_by="evidence_backed_specialist_control",
+                            evidence_ids=list(
+                                dict.fromkeys(
+                                    [*(escalation.get("evidence_ids") or []), *ids]
+                                )
+                            ),
+                        )
         elif _text(verdict).lower() == "proven":
             cell["status"] = "in_focus"
         else:
@@ -727,6 +743,7 @@ def trace_for_cell(brain: Any, cell_id: str) -> dict[str, Any]:
             "test_type",
             "candidate_id",
             "proof_run_id",
+            "proof_escalation_id",
             "verifier_run_id",
             "finding_id",
         )

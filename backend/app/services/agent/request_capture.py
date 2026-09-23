@@ -34,6 +34,7 @@ class RequestCaptureStore:
         test_type="",
         candidate_id="",
         proof_run_id="",
+        proof_escalation_id="",
         verifier_run_id="",
         finding_id="",
     ):
@@ -94,6 +95,7 @@ class RequestCaptureStore:
                 "test_type": str(test_type or ""),
                 "candidate_id": str(candidate_id or ""),
                 "proof_run_id": str(proof_run_id or ""),
+                "proof_escalation_id": str(proof_escalation_id or ""),
                 "verifier_run_id": str(verifier_run_id or ""),
                 "finding_id": str(finding_id or ""),
                 "request": deepcopy(spec),

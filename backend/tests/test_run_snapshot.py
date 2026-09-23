@@ -20,6 +20,37 @@ def test_snapshot_is_atomic_redacted_and_restart_safe(tmp_path, monkeypatch):
                     }
                 }
             },
+            "coverage_cells": [
+                {
+                    "id": "cell-1",
+                    "status": "leased",
+                    "lease_id": "coverage-lease",
+                    "lease_owner": "api_authz",
+                    "lease_deadline": 9999999999.0,
+                    "task_lease_id": "lease-1",
+                }
+            ],
+            "candidates": [
+                {"id": "candidate-1", "status": "pending"},
+                {
+                    "id": "candidate-without-receipt",
+                    "status": "confirmed",
+                    "revision": 1,
+                    "nonce": "nonce-missing",
+                    "verifier_run_id": "verify-missing",
+                    "verified_at": "2026-09-23T00:00:00+00:00",
+                },
+            ],
+            "proof_escalations": [
+                {
+                    "id": "proof-1",
+                    "status": "verifying",
+                    "candidate_id": "candidate-1",
+                }
+            ],
+            "verification_receipts": {
+                "iv:test": {"candidate_id": "confirmed-1", "run_id": "verify-1"}
+            },
             "credentials": [
                 {"username": "owner", "secret": "owner-secret", "secret_type": "password"}
             ],
@@ -38,8 +69,23 @@ def test_snapshot_is_atomic_redacted_and_restart_safe(tmp_path, monkeypatch):
     path = run_snapshot._path(42, "assessment")
     raw = path.read_text()
 
-    assert restored["schema_version"] == 2
-    assert restored["engagement_brain"]["task_graph"]["nodes"]["h1"]["lease_id"] == "lease-1"
+    assert restored["schema_version"] == 3
+    task = restored["engagement_brain"]["task_graph"]["nodes"]["h1"]
+    assert task["status"] == "blocked"
+    assert task["recovery_required"] is True
+    assert task["lease_id"] == ""
+    cell = restored["engagement_brain"]["coverage_cells"][0]
+    assert cell["status"] == "inconclusive"
+    assert cell["lease_id"] == ""
+    assert restored["engagement_brain"]["proof_escalations"][0]["status"] == "pending"
+    assert restored["engagement_brain"]["verification_receipts"]["iv:test"]["run_id"] == "verify-1"
+    recovered_candidate = next(
+        row
+        for row in restored["engagement_brain"]["candidates"]
+        if row["id"] == "candidate-without-receipt"
+    )
+    assert recovered_candidate["status"] == "pending"
+    assert recovered_candidate["verifier_run_id"] == ""
     assert restored["engagement_brain"]["credentials"] == []
     assert restored["reauthentication_required"] is True
     assert "auth_session" not in restored

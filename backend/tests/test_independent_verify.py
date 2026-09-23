@@ -22,8 +22,10 @@ from app.services.agent.independent_verify import (
     check_verify_receipt,
     finding_publish_allowed,
     ingest_report_findings,
+    publication_invariants,
     record_verify_receipt,
     submit_candidate,
+    verify_receipt_key,
 )
 
 _AGENT_DIR = Path(__file__).resolve().parents[1] / "app" / "services" / "agent"
@@ -167,6 +169,81 @@ def test_info_findings_skip_gate():
         tm, title="Missing header", target="https://app.example.com", severity="info"
     )
     assert ok is True
+
+
+def _confirmed_candidate() -> FindingCandidate:
+    return FindingCandidate(
+        id="candidate-1",
+        title="IDOR /api/orders/1",
+        description="Attacker reads the owner's controlled order",
+        severity="high",
+        target="https://app.example.com/api/orders/1",
+        status="confirmed",
+        nonce="nonce-1",
+        verifier_run_id="verify-1",
+        evidence_ids=["evidence-1"],
+        verified_at="2026-09-23T00:00:00+00:00",
+    )
+
+
+def test_publication_invariants_reject_duplicate_or_mismatched_verifier_trace():
+    brain = EngagementBrain(target="https://app.example.com")
+    candidate = _confirmed_candidate()
+    receipt = {
+        "title": candidate.title,
+        "target": candidate.target,
+        "candidate_id": candidate.id,
+        "revision": candidate.revision,
+        "run_id": candidate.verifier_run_id,
+        "nonce": candidate.nonce,
+        "nonce_observed": True,
+        "evidence_ids": ["evidence-1"],
+    }
+    assert publication_invariants(brain, candidate, receipt)[0] is True
+
+    receipt["run_id"] = "different-verifier"
+    assert publication_invariants(brain, candidate, receipt)[0] is False
+    receipt["run_id"] = candidate.verifier_run_id
+    candidate.finding_id = "finding-7"
+    ok, why = publication_invariants(brain, candidate, receipt)
+    assert ok is False
+    assert "already published" in why
+
+
+def test_durable_verify_receipt_rehydrates_after_restart(monkeypatch):
+    brain = EngagementBrain(target="https://app.example.com")
+    candidate = _confirmed_candidate()
+    brain.candidates = [candidate.to_dict()]
+    key = verify_receipt_key(candidate.title, candidate.target)
+    brain.verification_receipts[key] = {
+        "title": candidate.title,
+        "target": candidate.target,
+        "verdict": "confirmed",
+        "candidate_id": candidate.id,
+        "nonce": candidate.nonce,
+        "nonce_observed": True,
+        "evidence_ids": ["evidence-1"],
+        "run_id": candidate.verifier_run_id,
+        "revision": candidate.revision,
+    }
+    manager = SimpleNamespace(
+        _engagement_brain=brain.to_dict(),
+        _verify_receipts={},
+    )
+    store = SimpleNamespace(validate=lambda *args, **kwargs: (True, ""))
+    monkeypatch.setattr(
+        "app.services.agent.evidence_store.evidence_store",
+        lambda _manager: store,
+    )
+
+    ok, why = check_verify_receipt(
+        manager._verify_receipts,
+        title=candidate.title,
+        target=candidate.target,
+        tools_manager=manager,
+    )
+    assert ok is True, why
+    assert manager._verify_receipts[key]["run_id"] == candidate.verifier_run_id
 
 
 def test_apply_verdict_requires_active_verifier_execution():

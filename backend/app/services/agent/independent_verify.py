@@ -43,6 +43,7 @@ class FindingCandidate:
     capture_id: str = ""
     evidence_ids: List[str] = field(default_factory=list)
     proof_run_id: str = ""
+    proof_escalation_id: str = ""
     verifier_run_id: str = ""
     finding_id: str = ""
     nonce: str = ""
@@ -137,9 +138,16 @@ def check_verify_receipt(
     target: str,
     tools_manager: Any = None,
 ) -> tuple[bool, str]:
-    store = store or {}
+    store = store if store is not None else {}
     key = verify_receipt_key(title, target)
     receipt = store.get(key)
+    brain = _brain(tools_manager) if tools_manager is not None else None
+    if not receipt and brain is not None:
+        durable = (getattr(brain, "verification_receipts", None) or {}).get(key)
+        if isinstance(durable, dict):
+            receipt = dict(durable)
+            store[key] = receipt
+            tools_manager._verify_receipts = store
     if not receipt:
         return False, (
             "INDEPENDENT VERIFY GATE: medium+ findings require independent_verify → "
@@ -154,9 +162,12 @@ def check_verify_receipt(
         )
     if tools_manager is None:
         return False, "Execution evidence store required"
-    candidate = _candidate(_brain(tools_manager), receipt.get("candidate_id", ""))
+    candidate = _candidate(brain, receipt.get("candidate_id", ""))
     if not candidate or candidate.status != "confirmed" or candidate.revision != receipt.get("revision"):
         return False, "Candidate changed or was refuted; reverify before publication"
+    ok, why = publication_invariants(brain, candidate, receipt)
+    if not ok:
+        return False, why
     from app.services.agent.evidence_store import evidence_store
     evidence_target = candidate.target
     if receipt.get('workflow_run_id'):
@@ -172,6 +183,87 @@ def check_verify_receipt(
         revision=candidate.revision, run_id=receipt.get("run_id", ""), target=evidence_target,
     )
     return (True, f"verify_ok:{key}") if ok else (False, why)
+
+
+def publication_invariants(
+    brain: Any,
+    candidate: FindingCandidate,
+    receipt: Dict[str, Any],
+) -> tuple[bool, str]:
+    """Require one internally consistent request→proof→verify publication chain."""
+    if candidate.finding_id:
+        return False, f"Candidate already published as finding {candidate.finding_id}"
+    if not candidate.verified_at or not candidate.verifier_run_id:
+        return False, "Candidate is missing durable verifier execution metadata"
+    if receipt.get("candidate_id") != candidate.id:
+        return False, "Verification receipt belongs to another candidate"
+    if (
+        str(receipt.get("title") or "").strip() != candidate.title.strip()
+        or str(receipt.get("target") or "").strip() != candidate.target.strip()
+    ):
+        return False, "Verification receipt claim does not match the candidate"
+    if receipt.get("run_id") != candidate.verifier_run_id:
+        return False, "Verification receipt and candidate verifier runs differ"
+    if not receipt.get("nonce_observed") or receipt.get("nonce") != candidate.nonce:
+        return False, "Verifier nonce was not observed for this candidate revision"
+    receipt_evidence = {
+        str(value) for value in (receipt.get("evidence_ids") or []) if value
+    }
+    if not receipt_evidence or not receipt_evidence.issubset(set(candidate.evidence_ids)):
+        return False, "Verification evidence is not linked to the confirmed candidate"
+
+    if candidate.coverage_cell_id:
+        cell = next(
+            (
+                row
+                for row in (getattr(brain, "coverage_cells", None) or [])
+                if row.get("id") == candidate.coverage_cell_id
+            ),
+            None,
+        )
+        if not cell:
+            return False, "Confirmed candidate references a missing coverage cell"
+        if cell.get("candidate_id") != candidate.id:
+            return False, "Coverage cell is linked to another candidate"
+        if cell.get("status") not in ("in_focus", "finding"):
+            return False, "Coverage cell is not in a publishable state"
+        if cell.get("verifier_run_id") != candidate.verifier_run_id:
+            return False, "Coverage cell verifier trace does not match the candidate"
+        if (
+            candidate.proof_escalation_id
+            and cell.get("proof_escalation_id") != candidate.proof_escalation_id
+        ):
+            return False, "Coverage cell proof escalation does not match the candidate"
+        for field_name in (
+            "operation_id",
+            "identity",
+            "tenant",
+            "parameter",
+            "test_type",
+        ):
+            expected = str(getattr(candidate, field_name, "") or "")
+            observed = str(cell.get(field_name) or "")
+            if expected and observed and expected != observed:
+                return False, f"Coverage cell {field_name} does not match the candidate"
+
+    if candidate.proof_escalation_id:
+        escalation = next(
+            (
+                row
+                for row in (getattr(brain, "proof_escalations", None) or [])
+                if row.get("id") == candidate.proof_escalation_id
+            ),
+            None,
+        )
+        if not escalation:
+            return False, "Confirmed candidate references a missing proof escalation"
+        if escalation.get("status") not in ("confirmed", "published"):
+            return False, "Proof escalation has not been independently confirmed"
+        if escalation.get("candidate_id") != candidate.id:
+            return False, "Proof escalation is linked to another candidate"
+        if escalation.get("verifier_run_id") != candidate.verifier_run_id:
+            return False, "Proof escalation verifier trace does not match the candidate"
+    return True, "publication_trace_ok"
 
 
 def parse_verdict_from_text(text: str) -> str:
@@ -256,6 +348,8 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         f"Coverage cell: {candidate.coverage_cell_id or '—'}  operation={candidate.operation_id or '—'} "
         f"identity={candidate.identity or '—'} tenant={candidate.tenant or '—'} "
         f"parameter={candidate.parameter or '—'} test={candidate.test_type or '—'}\n"
+        f"Proof escalation: {candidate.proof_escalation_id or '—'}  "
+        f"proof run={candidate.proof_run_id or '—'}\n"
         f"Claimed request: {candidate.claimed_request or '—'}\n"
         f"Finder evidence (untrusted):\n{(candidate.evidence or '')[:2500]}\n"
         f"Description (untrusted):\n{(candidate.description or '')[:1500]}\n\n"
@@ -461,11 +555,20 @@ def apply_verdict(
                 cell.update(status="in_focus", reason="Confirmed candidate awaits publication")
             else:
                 cell.update(status="inconclusive", reason="Independent verification was inconclusive")
-    tools_manager._engagement_brain = brain.to_dict()
+    if cand.proof_escalation_id:
+        from app.services.agent.signal_escalation import apply_verifier_result
 
+        apply_verifier_result(
+            brain,
+            cand.proof_escalation_id,
+            verdict=verdict,
+            verifier_run_id=run.id,
+        )
     if not hasattr(tools_manager, "_verify_receipts") or tools_manager._verify_receipts is None:
         tools_manager._verify_receipts = {}
-    tools_manager._verify_receipts.pop(verify_receipt_key(cand.title, cand.target), None)
+    receipt_key = verify_receipt_key(cand.title, cand.target)
+    tools_manager._verify_receipts.pop(receipt_key, None)
+    brain.verification_receipts.pop(receipt_key, None)
     if verdict == "confirmed":
         record_verify_receipt(
             tools_manager._verify_receipts,
@@ -481,7 +584,11 @@ def apply_verdict(
             revision=cand.revision,
         )
         if (proof or {}).get("kind") == "workflow":
-            tools_manager._verify_receipts[verify_receipt_key(cand.title, cand.target)]["workflow_run_id"] = proof["run_id"]
+            tools_manager._verify_receipts[receipt_key]["workflow_run_id"] = proof["run_id"]
+        brain.verification_receipts[receipt_key] = dict(
+            tools_manager._verify_receipts[receipt_key]
+        )
+    tools_manager._engagement_brain = brain.to_dict()
     return cand
 
 
@@ -506,7 +613,17 @@ def submit_candidate(
     capture_id: str = "",
     evidence_ids: Optional[List[str]] = None,
     proof_run_id: str = "",
+    proof_escalation_id: str = "",
 ) -> FindingCandidate:
+    if coverage_cell_id and not proof_escalation_id:
+        proof_escalation_id = next(
+            (
+                str(cell.get("proof_escalation_id") or "")
+                for cell in (getattr(brain, "coverage_cells", None) or [])
+                if cell.get("id") == coverage_cell_id
+            ),
+            "",
+        )
     cid = candidate_id(title, target, coverage_cell_id)
     existing = []
     for raw in getattr(brain, "candidates", None) or []:
@@ -527,12 +644,16 @@ def submit_candidate(
                     c.status = "pending"
                     c.nonce = new_nonce()
                     c.verifier_evidence = c.verifier_summary = c.verified_at = ""
+                    brain.verification_receipts.pop(
+                        verify_receipt_key(c.title, c.target), None
+                    )
                 for name, value in (
                     ("hypothesis_id", hypothesis_id), ("threat_id", threat_id),
                     ("specialist", specialist), ("operation_id", operation_id),
                     ("identity", identity), ("tenant", tenant), ("parameter", parameter),
                     ("test_type", test_type), ("coverage_cell_id", coverage_cell_id),
                     ("capture_id", capture_id), ("proof_run_id", proof_run_id),
+                    ("proof_escalation_id", proof_escalation_id),
                 ):
                     if value:
                         setattr(c, name, value)
@@ -543,6 +664,15 @@ def submit_candidate(
                     for cell in getattr(brain, "coverage_cells", None) or []:
                         if cell.get("id") == c.coverage_cell_id:
                             cell["candidate_id"] = c.id
+                if c.proof_escalation_id:
+                    from app.services.agent.signal_escalation import bind_candidate
+
+                    bind_candidate(
+                        brain,
+                        c.proof_escalation_id,
+                        candidate_id=c.id,
+                        proof_run_id=c.proof_run_id,
+                    )
                 brain.candidates = [c.to_dict() if (r.get("id") if isinstance(r, dict) else r.id) == cid
                                     else (r if isinstance(r, dict) else r.to_dict()) for r in brain.candidates]
                 return c
@@ -566,6 +696,7 @@ def submit_candidate(
         capture_id=capture_id,
         evidence_ids=list(dict.fromkeys(evidence_ids or [])),
         proof_run_id=proof_run_id,
+        proof_escalation_id=proof_escalation_id,
         nonce=new_nonce(),
         status="pending",
     )
@@ -575,6 +706,15 @@ def submit_candidate(
         for cell in getattr(brain, "coverage_cells", None) or []:
             if cell.get("id") == cand.coverage_cell_id:
                 cell["candidate_id"] = cand.id
+    if cand.proof_escalation_id:
+        from app.services.agent.signal_escalation import bind_candidate
+
+        bind_candidate(
+            brain,
+            cand.proof_escalation_id,
+            candidate_id=cand.id,
+            proof_run_id=cand.proof_run_id,
+        )
     return cand
 
 

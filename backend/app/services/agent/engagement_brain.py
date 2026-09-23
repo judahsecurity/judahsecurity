@@ -113,6 +113,8 @@ class EngagementBrain:
     candidates: List[Dict[str, Any]] = field(default_factory=list)
     coverage: List[Dict[str, Any]] = field(default_factory=list)
     coverage_cells: List[Dict[str, Any]] = field(default_factory=list)
+    proof_escalations: List[Dict[str, Any]] = field(default_factory=list)
+    verification_receipts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     task_graph: Dict[str, Any] = field(default_factory=dict)
     pending_risk_assessments: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -137,6 +139,8 @@ class EngagementBrain:
             "candidates": list(self.candidates or []),
             "coverage": list(self.coverage or []),
             "coverage_cells": list(self.coverage_cells or []),
+            "proof_escalations": list(self.proof_escalations or []),
+            "verification_receipts": dict(self.verification_receipts or {}),
             "task_graph": dict(self.task_graph or {}),
             "pending_risk_assessments": list(self.pending_risk_assessments or []),
         }
@@ -4013,7 +4017,12 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
         cell_status = str(cell.get("status") or "untested")
         cell_counts[cell_status] = cell_counts.get(cell_status, 0) + 1
     open_cells = [cell for cell in cells if cell.get("status") not in CELL_TERMINAL]
-    ready = len(open_cells) == 0
+    pending_proofs = [
+        row
+        for row in (brain.proof_escalations or [])
+        if isinstance(row, dict) and row.get("status") in ("pending", "verifying")
+    ]
+    ready = len(open_cells) == 0 and len(pending_proofs) == 0
     return {
         "denominator": denom_n,
         "finding": len(buckets["finding"]),
@@ -4027,6 +4036,8 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
         "open_cell_count": len(open_cells),
         "open_cells": open_cells[:50],
         "coverage_cells": cells[:100],
+        "pending_proof_escalation_count": len(pending_proofs),
+        "pending_proof_escalations": pending_proofs[:20],
         "tested_clean_rows": buckets["tested_clean"][:20],
         "skipped_rows": buckets["skipped"][:20],
         "finding_rows": buckets["finding"][:20],

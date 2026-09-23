@@ -416,7 +416,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 
 - **assess_finding_risk**: Marcus RA on a published finding. Score the demonstrated packet only — do not live-retest, do not invent writes/IMDS/RCE. Args: **finding_id** (required to persist), **assessment** (JSON: verdict confirm|downgrade|upgrade|keep_open, confirmed_severity, why_this_severity, why_not_higher, why_not_lower, cvss_score, cvss_vector, demonstrated[{{asset,result}}], not_demonstrated[{{target,outcome}}], control_failures[{{control,failure}}], business_risk, remediation_sequence[{{when,action,done_when}}], retest_criteria[], ticket_title, ra_note, sla now|this_week|follow_up, cwes). Critical requires demonstrated write/RCE/cloud credential theft. Non-blind SSRF with IMDS blocked is High. If the tool returns RA IMPROVE, fix the gaps and retry once.
 
-- **submit_finding_candidate**: Hunters queue a medium+ finding for independent verification. Args: title (required), description, severity, target, evidence, evidence_ids, hypothesis_id, coverage_cell_id, capture_id, proof_run_id, threat_id, claimed_request, specialist. Preserve the leased coverage_cell_id so request → evidence → candidate → finding remains traceable. Does NOT publish. Follow with independent_verify; create_finding only after confirmed.
+- **submit_finding_candidate**: Hunters queue a medium+ finding for independent verification. Args: title (required), description, severity, target, evidence, evidence_ids, hypothesis_id, coverage_cell_id, capture_id, proof_run_id, proof_escalation_id, threat_id, claimed_request, specialist. Preserve the leased coverage_cell_id/proof_escalation_id so request → evidence → proof → candidate → finding remains traceable. Does NOT publish. Follow with independent_verify; create_finding only after confirmed.
 
 - **independent_verify**: Spawn a fresh verifier agent (Deborah) per pending candidate. No hunter transcript. Optional candidate_id to verify one. Returns verdicts.
 
@@ -426,11 +426,11 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **register_test_identity**: Register a named operator-provided test session (name, target, cookies/headers/storage_state, role, tenant).
 - **list_test_identities**: List configured identities without secrets.
 - **check_test_identity**: Check identity against its known endpoint (identity, url, field, expected).
-- **test_authorization_boundary**: Replay a known private test object as owner and second identity (url, owner_identity, other_identity, object_field, hypothesis_id).
+- **test_authorization_boundary**: Replay a known private test object as owner and a distinct verified identity (url, owner_identity, other_identity, object_field, hypothesis_id, coverage_cell_id). A matched owner field visible to the second identity automatically queues an authorization proof escalation; a denial closes no finding by itself.
 
 - **record_surface_coverage**: Close one leased coverage cell and update its surface summary. Args: path, status, method, reason, hypothesis_id, finding_title, host, identity, tenant, test_type, parameter, evidence_id, operation_id, coverage_cell_id, coverage_lease_id, capture_id, candidate_id, proof_run_id, verifier_run_id, finding_id. `tested_clean` requires live HTTP/browser evidence. Prefer the directive's coverage_cell_id + coverage_lease_id; dimensions are inherited and checked. Record separate cells for each identity, parameter, and methodology exercised.
 
-- **get_coverage**: Return the focus-area + takes_input coverage denominator and untested rows. Complete is blocked while untested remain or candidates are pending.
+- **get_coverage**: Return the cell-level denominator, untested rows, and pending proof escalations. Complete is blocked while cells or proof jobs remain open, or candidates are pending.
 - **execute_llm_red_team**: Run AI/LLM red team security scan against chatbot/agent endpoints. Tests prompt injection, jailbreak, data exfiltration, SSRF, system prompt leakage, excessive agency, tool_enumeration (tools = attack surface; params = injection points), hallucination, harmful content. Auto-discovers chatbot API endpoints. Args: **target_url** (required), categories (optional comma-separated: prompt_injection,jailbreak,data_exfiltration,ssrf_tool_abuse,system_prompt_leakage,excessive_agency,tool_enumeration,hallucination,harmful_content), endpoint_url (optional — direct chatbot API URL if known), message_field (optional — JSON field name, default "message"), max_payloads (optional int). Example: execute_llm_red_team(target_url="https://example.com"), execute_llm_red_team(target_url="https://example.com", endpoint_url="https://example.com/api/chat", categories="tool_enumeration,excessive_agency"). Findings are auto-created in the platform.
 
 ### Auto Tool Selection
@@ -584,9 +584,10 @@ These tools implement specialized offensive test workflows and require the explo
   pass **false** for missing-[Authorize] / unauth writes / email-change / auth-header skip —
   forced false on Settings/SaveSettings, reset_email, and no-header vs Bearer aegis-invalid
   when Authorization is absent),
-  hypothesis_id (optional — auto-annotates engagement brain).
+  hypothesis_id and coverage_cell_id (optional — preserve the leased work identity).
   ``json`` is an alias for a JSON body (dict or list); Content-Type is set if missing.
   Verdicts: LIKELY_IMPACT | MUTANT_BYPASS_CANDIDATE | NO_MATERIAL_DIFF | MUTANT_DENIED | NEEDS_INTERPRETATION.
+  Strong candidate verdicts automatically queue a structured proof escalation and route the next specialist; the signal itself is never a finding.
   Example: compare_requests(baseline={{"method":"GET","url":"https://a.app/api/me"}}, mutant={{"method":"GET","url":"https://a.app/api/me","headers":{{"Host":"b.app"}}}})
   Unauth settings write: compare_requests(use_auth_session=false,
   baseline={{"method":"POST","url":"https://app/api/TaskAdmin/UpdateTask"}},
