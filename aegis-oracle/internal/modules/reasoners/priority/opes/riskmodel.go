@@ -10,7 +10,7 @@ import (
 
 // RiskModelVersion identifies the factor mapping below. Bump on any change
 // to how signals map to factor scores.
-const RiskModelVersion = "risk/v7"
+const RiskModelVersion = "risk/v8"
 
 // riskModel maps the OPES inputs onto the seven-factor Likelihood × Impact
 // model. Every factor is scored 0–4 (0 = none, 4 = highest), Impact and
@@ -197,17 +197,30 @@ func OrgHostedRating(org string) string {
 	return org + " Hosted"
 }
 
+// severityFactor rates CVSS severity, preferring Oracle's reconciled CVSS
+// (the score it judged correct after comparing NVD, vendor and other
+// sources) over the highest published score.
 func severityFactor(in Input) schema.RiskFactor {
 	cvss := maxCVSSScore(in.CVE)
+	label := "CVSS %.1f"
+	if in.Intrinsic != nil && in.Intrinsic.CVSSReconciliation.CorrectScore > 0 {
+		reconciled := in.Intrinsic.CVSSReconciliation.CorrectScore
+		if reconciled != cvss && cvss > 0 {
+			label = fmt.Sprintf("CVSS %%.1f (reconciled; highest published %.1f)", cvss)
+		} else {
+			label = "CVSS %.1f (reconciled)"
+		}
+		cvss = reconciled
+	}
 	switch {
 	case cvss >= 9.0:
-		return schema.RiskFactor{Score: 4, Rating: "Critical", Reason: fmt.Sprintf("CVSS %.1f", cvss)}
+		return schema.RiskFactor{Score: 4, Rating: "Critical", Reason: fmt.Sprintf(label, cvss)}
 	case cvss >= 7.0:
-		return schema.RiskFactor{Score: 3, Rating: "High", Reason: fmt.Sprintf("CVSS %.1f", cvss)}
+		return schema.RiskFactor{Score: 3, Rating: "High", Reason: fmt.Sprintf(label, cvss)}
 	case cvss >= 4.0:
-		return schema.RiskFactor{Score: 2, Rating: "Medium", Reason: fmt.Sprintf("CVSS %.1f", cvss)}
+		return schema.RiskFactor{Score: 2, Rating: "Medium", Reason: fmt.Sprintf(label, cvss)}
 	case cvss > 0:
-		return schema.RiskFactor{Score: 1, Rating: "Low", Reason: fmt.Sprintf("CVSS %.1f", cvss)}
+		return schema.RiskFactor{Score: 1, Rating: "Low", Reason: fmt.Sprintf(label, cvss)}
 	}
 	// No CVSS: non-CVE findings (misconfigurations, exposed services) are
 	// rated by their breach-intelligence class instead.

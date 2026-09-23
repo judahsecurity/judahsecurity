@@ -402,3 +402,16 @@ func TestRiskModel_NetworkLocationFromIPInventory(t *testing.T) {
 		t.Errorf("unknown: %+v", unknown)
 	}
 }
+
+// TestRiskModel_SeverityUsesReconciledCVSS: CVE-2025-55130 is published at
+// 9.1 by NVD (AV:N) but reconciled to 7.1 (AV:L, needs in-process code
+// execution); severity must follow the reconciled score.
+func TestRiskModel_SeverityUsesReconciledCVSS(t *testing.T) {
+	f := severityFactor(cve202555130Input())
+	if f.Score != 3 || f.Rating != "High" {
+		t.Errorf("severity: got %d %s (%s), want 3 High", f.Score, f.Rating, f.Reason)
+	}
+	if f.Reason != "CVSS 7.1 (reconciled; highest published 9.1)" {
+		t.Errorf("reason: %q", f.Reason)
+	}
+}
