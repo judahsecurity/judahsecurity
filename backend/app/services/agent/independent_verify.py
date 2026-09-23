@@ -43,6 +43,7 @@ class FindingCandidate:
     capture_id: str = ""
     evidence_ids: List[str] = field(default_factory=list)
     proof_run_id: str = ""
+    proof_escalation_id: str = ""
     verifier_run_id: str = ""
     finding_id: str = ""
     nonce: str = ""
@@ -256,6 +257,8 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         f"Coverage cell: {candidate.coverage_cell_id or '—'}  operation={candidate.operation_id or '—'} "
         f"identity={candidate.identity or '—'} tenant={candidate.tenant or '—'} "
         f"parameter={candidate.parameter or '—'} test={candidate.test_type or '—'}\n"
+        f"Proof escalation: {candidate.proof_escalation_id or '—'}  "
+        f"proof run={candidate.proof_run_id or '—'}\n"
         f"Claimed request: {candidate.claimed_request or '—'}\n"
         f"Finder evidence (untrusted):\n{(candidate.evidence or '')[:2500]}\n"
         f"Description (untrusted):\n{(candidate.description or '')[:1500]}\n\n"
@@ -461,6 +464,15 @@ def apply_verdict(
                 cell.update(status="in_focus", reason="Confirmed candidate awaits publication")
             else:
                 cell.update(status="inconclusive", reason="Independent verification was inconclusive")
+    if cand.proof_escalation_id:
+        from app.services.agent.signal_escalation import apply_verifier_result
+
+        apply_verifier_result(
+            brain,
+            cand.proof_escalation_id,
+            verdict=verdict,
+            verifier_run_id=run.id,
+        )
     tools_manager._engagement_brain = brain.to_dict()
 
     if not hasattr(tools_manager, "_verify_receipts") or tools_manager._verify_receipts is None:
@@ -506,7 +518,17 @@ def submit_candidate(
     capture_id: str = "",
     evidence_ids: Optional[List[str]] = None,
     proof_run_id: str = "",
+    proof_escalation_id: str = "",
 ) -> FindingCandidate:
+    if coverage_cell_id and not proof_escalation_id:
+        proof_escalation_id = next(
+            (
+                str(cell.get("proof_escalation_id") or "")
+                for cell in (getattr(brain, "coverage_cells", None) or [])
+                if cell.get("id") == coverage_cell_id
+            ),
+            "",
+        )
     cid = candidate_id(title, target, coverage_cell_id)
     existing = []
     for raw in getattr(brain, "candidates", None) or []:
@@ -533,6 +555,7 @@ def submit_candidate(
                     ("identity", identity), ("tenant", tenant), ("parameter", parameter),
                     ("test_type", test_type), ("coverage_cell_id", coverage_cell_id),
                     ("capture_id", capture_id), ("proof_run_id", proof_run_id),
+                    ("proof_escalation_id", proof_escalation_id),
                 ):
                     if value:
                         setattr(c, name, value)
@@ -543,6 +566,15 @@ def submit_candidate(
                     for cell in getattr(brain, "coverage_cells", None) or []:
                         if cell.get("id") == c.coverage_cell_id:
                             cell["candidate_id"] = c.id
+                if c.proof_escalation_id:
+                    from app.services.agent.signal_escalation import bind_candidate
+
+                    bind_candidate(
+                        brain,
+                        c.proof_escalation_id,
+                        candidate_id=c.id,
+                        proof_run_id=c.proof_run_id,
+                    )
                 brain.candidates = [c.to_dict() if (r.get("id") if isinstance(r, dict) else r.id) == cid
                                     else (r if isinstance(r, dict) else r.to_dict()) for r in brain.candidates]
                 return c
@@ -566,6 +598,7 @@ def submit_candidate(
         capture_id=capture_id,
         evidence_ids=list(dict.fromkeys(evidence_ids or [])),
         proof_run_id=proof_run_id,
+        proof_escalation_id=proof_escalation_id,
         nonce=new_nonce(),
         status="pending",
     )
@@ -575,6 +608,15 @@ def submit_candidate(
         for cell in getattr(brain, "coverage_cells", None) or []:
             if cell.get("id") == cand.coverage_cell_id:
                 cell["candidate_id"] = cand.id
+    if cand.proof_escalation_id:
+        from app.services.agent.signal_escalation import bind_candidate
+
+        bind_candidate(
+            brain,
+            cand.proof_escalation_id,
+            candidate_id=cand.id,
+            proof_run_id=cand.proof_run_id,
+        )
     return cand
 
 

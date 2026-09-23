@@ -2312,7 +2312,9 @@ class ASMToolsManager(AssessmentCapabilities):
                     for key in (
                         "coverage_cell_id", "operation_id", "hypothesis_id", "identity",
                         "tenant", "parameter", "test_type", "capture_id", "evidence_ids",
-                        "proof_run_id", "verifier_run_id",
+                        "proof_run_id",
+                        "proof_escalation_id",
+                        "verifier_run_id",
                     )
                 }
                 trace_metadata["candidate_id"] = verified.id
@@ -2485,6 +2487,13 @@ class ASMToolsManager(AssessmentCapabilities):
                             and candidate_row.get("id") == verified.id
                         ):
                             candidate_row["finding_id"] = str(vuln.id)
+                    if verified.proof_escalation_id:
+                        for escalation in brain.proof_escalations:
+                            if escalation.get("id") == verified.proof_escalation_id:
+                                escalation.update(
+                                    status="published",
+                                    finding_id=str(vuln.id),
+                                )
                 record_surface_coverage(
                     brain,
                     path=target or target_clean,
@@ -6123,6 +6132,7 @@ class ASMToolsManager(AssessmentCapabilities):
                                                   tenant=trace.get("tenant", ""),
                                                   parameter=trace.get("parameter", ""),
                                                   test_type=trace.get("test_type", ""),
+                                                  proof_escalation_id=trace.get("proof_escalation_id", ""),
                                                   success=resp.status_code < 400)
         capture = None
         if (identity not in (None, "anonymous") and not hypothesis_id and not run
@@ -6135,7 +6145,8 @@ class ASMToolsManager(AssessmentCapabilities):
                 coverage_cell_id=coverage_cell_id,
                 tenant=trace.get("tenant", ""),
                 parameter=trace.get("parameter", ""),
-                test_type=trace.get("test_type", ""))
+                test_type=trace.get("test_type", ""),
+                proof_escalation_id=trace.get("proof_escalation_id", ""))
         from app.services.agent.evidence_store import redact_artifact
         public = redact_artifact(exchange)
         public["response"].pop("body", None)
@@ -6314,7 +6325,10 @@ class ASMToolsManager(AssessmentCapabilities):
                 cookies=b["cookies"],
                 identity=b.get("identity"),
                 hypothesis_id=hypothesis_id or "",
-                coverage_cell_id=coverage_cell_id,
+                # The exact coverage cell belongs to the mutant under test.
+                # Keep the control linked by hypothesis without mislabeling its
+                # endpoint or identity as execution of the mutant cell.
+                coverage_cell_id="",
                 use_auth_session=use_auth_session,
                 timeout=timeout,
                 follow_redirects=False,
@@ -6462,6 +6476,39 @@ class ASMToolsManager(AssessmentCapabilities):
                 "Only independent verification can confirm a finding. Untested mutations stay open."
             ),
         }
+
+        evidence_ids = [
+            str(base_ex.get("evidence_id") or ""),
+            str(mut_ex.get("evidence_id") or ""),
+        ]
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.signal_escalation import queue_signal_escalation
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        trace = mut_ex.get("trace") or {}
+        escalation = queue_signal_escalation(
+            brain,
+            verdict=verdict,
+            signals=signals,
+            evidence_ids=evidence_ids,
+            target=m["url"],
+            source_tool="compare_requests",
+            coverage_cell_id=coverage_cell_id,
+            hypothesis_id=hypothesis_id or str(trace.get("hypothesis_id") or ""),
+            operation_id=str(trace.get("operation_id") or ""),
+            identity=str(m.get("identity") or trace.get("identity") or "anonymous"),
+            tenant=str(trace.get("tenant") or ""),
+            parameter=str(trace.get("parameter") or ""),
+            test_type=str(trace.get("test_type") or ""),
+            proof=proof or {},
+        )
+        if escalation:
+            out["proof_escalation"] = escalation
+            out["next_action"] = (
+                "Complete the structured proof escalation before submitting a candidate; "
+                "the differential signal alone cannot publish a finding."
+            )
+            self._engagement_brain = brain.to_dict()
 
         # Annotate engagement brain if present on the tool manager
         if hypothesis_id:
@@ -7046,6 +7093,7 @@ class ASMToolsManager(AssessmentCapabilities):
         capture_id: str = "",
         evidence_ids: Optional[List[str]] = None,
         proof_run_id: str = "",
+        proof_escalation_id: str = "",
     ) -> str:
         """Queue a medium+ finding for independent verification. Hunters must not create_finding."""
         from app.services.agent.engagement_brain import engagement_brain_from_dict
@@ -7086,6 +7134,15 @@ class ASMToolsManager(AssessmentCapabilities):
                     {"error": "Coverage cell does not belong to this hypothesis"}, indent=2
                 )
             hypothesis_id = hypothesis_id or str(trace.get("hypothesis_id") or "")
+            if not proof_escalation_id:
+                proof_escalation_id = next(
+                    (
+                        str(cell.get("proof_escalation_id") or "")
+                        for cell in brain.coverage_cells
+                        if cell.get("id") == coverage_cell_id
+                    ),
+                    "",
+                )
         cand = submit_candidate(
             brain,
             title=title or "",
@@ -7106,6 +7163,7 @@ class ASMToolsManager(AssessmentCapabilities):
             capture_id=capture_id or "",
             evidence_ids=evidence_ids or [],
             proof_run_id=proof_run_id or "",
+            proof_escalation_id=proof_escalation_id or "",
         )
         self._engagement_brain = brain.to_dict()
         return json.dumps(
@@ -7620,6 +7678,17 @@ class ASMToolsManager(AssessmentCapabilities):
                 if n not in ("finding_judge", "independent_verifier", "risk_assessor")
             ]
 
+        if mode != "recon":
+            pending_proof_specialists = [
+                str(row.get("specialist") or "")
+                for row in (brain.proof_escalations or [])
+                if isinstance(row, dict) and row.get("status") == "pending"
+            ]
+            for specialist_name in pending_proof_specialists:
+                if specialist_name and specialist_name not in (chosen or []):
+                    chosen = list(chosen or []) + [specialist_name]
+            chosen = list(chosen or [])[:8]
+
         from app.services.agent.risk_assessment import pending_ra_rows
         pending_ra = pending_ra_rows(brain)
         if pending_ra and "risk_assessor" not in (chosen or []):
@@ -7628,6 +7697,15 @@ class ASMToolsManager(AssessmentCapabilities):
         if not mission or not str(mission).strip():
             if brain.hypotheses:
                 mission = mission_from_hypotheses(brain)
+            elif any(
+                isinstance(row, dict) and row.get("status") == "pending"
+                for row in (brain.proof_escalations or [])
+            ):
+                mission = (
+                    "Resolve the pending structured proof escalation against its matched "
+                    "negative control. A signal is not a finding; satisfy or refute the "
+                    "directive's proof requirements with fresh evidence."
+                )
             elif cmap and cmap.target:
                 mission = mission_from_capability_map(cmap)
             else:
@@ -7651,6 +7729,8 @@ class ASMToolsManager(AssessmentCapabilities):
         if not target_list and cmap and cmap.target:
             target_list = [cmap.target]
             target_list.extend(cmap.pages_visited[:5])
+        elif not target_list and brain.target:
+            target_list = [brain.target]
 
         # Resolve the specialists' LLM the same provider-aware way the main loop
         # does (honors AI_PROVIDER / per-org config, wraps with credit fallback),
@@ -7839,6 +7919,7 @@ class ASMToolsManager(AssessmentCapabilities):
             "candidates",
             "coverage",
             "coverage_cells",
+            "proof_escalations",
         ):
             live_value = getattr(live_brain, field_name, None)
             if live_value:
