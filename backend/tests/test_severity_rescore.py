@@ -18,6 +18,7 @@ from app.models.netblock import Netblock  # noqa: E402
 from app.models.organization import Organization  # noqa: E402
 from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus  # noqa: E402
 from app.services import severity_intel  # noqa: E402
+from app.services import severity_agent  # noqa: E402
 from app.services.severity_evaluation import run_dirty_batch  # noqa: E402
 from app.services.severity_intel import mark_intel_changes  # noqa: E402
 from app.workers.severity_worker import full_sweep, tick  # noqa: E402
@@ -142,15 +143,42 @@ def test_change_during_evaluation_is_not_lost(Session):
     assert _get(Session).sev_dirty is True
 
 
-def test_closed_findings_wait_and_worker_sweeps(Session):
+def test_closed_findings_are_backfilled_and_worker_sweeps(Session):
     s = Session()
     s.query(Vulnerability).get(100).status = VulnerabilityStatus.RESOLVED
     s.commit()
     s.close()
-    assert tick(Session)["selected"] == 0
+    assert tick(Session)["evaluated"] == 1
+    assert _get(Session).sev_score is not None
     s = Session()
     s.query(Vulnerability).get(100).status = VulnerabilityStatus.OPEN  # reopened
     s.commit()
     s.close()
     assert tick(Session)["evaluated"] == 1
     assert full_sweep(Session) == 1 and _get(Session).sev_dirty is True
+
+
+def test_first_run_scores_open_and_resolved_findings(Session):
+    s = Session()
+    s.add(Vulnerability(id=101, title="Resolved issue", severity=Severity.LOW, asset_id=10,
+                        status=VulnerabilityStatus.RESOLVED, detected_by="nuclei", metadata_={}))
+    s.commit()
+    s.close()
+
+    assert tick(Session) == {"selected": 2, "evaluated": 2, "failed": 0}
+    s = Session()
+    rows = s.query(Vulnerability).filter(Vulnerability.id.in_([100, 101])).all()
+    assert all(v.sev_score is not None and v.sev_dirty is False for v in rows)
+    s.close()
+    assert full_sweep(Session) == 2
+
+
+def test_auto_agent_reads_state_before_session_close(Session, monkeypatch):
+    submitted = []
+    monkeypatch.setattr(severity_agent, "auto_enabled", lambda: True)
+    monkeypatch.setattr(severity_agent, "submit", lambda vuln_id: submitted.append(vuln_id))
+
+    result = _drain(Session)
+    assert result == {"selected": 1, "evaluated": 1, "failed": 0}
+    assert _get(Session).sev_dirty is False
+    assert submitted == [100]
