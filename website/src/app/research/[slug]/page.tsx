@@ -7,7 +7,7 @@ import { MDXContent } from '@/components/mdx-content'
 import type { Metadata } from 'next'
 
 interface Props {
-  params: { slug: string }
+  params: Promise<{ slug: string }>
 }
 
 const TYPE_COLORS: Record<string, string> = {
@@ -23,13 +23,15 @@ export async function generateStaticParams() {
 }
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
-  const item = getResearchBySlug(params.slug)
+  const { slug } = await params
+  const item = getResearchBySlug(slug)
   if (!item) return {}
   return { title: item.title, description: item.excerpt }
 }
 
-export default function ResearchDetailPage({ params }: Props) {
-  const item = getResearchBySlug(params.slug)
+export default async function ResearchDetailPage({ params }: Props) {
+  const { slug } = await params
+  const item = getResearchBySlug(slug)
   if (!item) notFound()
 
   return (

@@ -6,7 +6,7 @@ import { cn, formatDate } from '@/lib/utils'
 import type { Metadata } from 'next'
 
 interface Props {
-  params: { id: string }
+  params: Promise<{ id: string }>
 }
 
 export async function generateStaticParams() {
@@ -14,7 +14,8 @@ export async function generateStaticParams() {
 }
 
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
-  const tool = getToolById(params.id)
+  const { id } = await params
+  const tool = getToolById(id)
   if (!tool) return {}
   return {
     title: `${tool.name} Review`,
@@ -22,8 +23,9 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   }
 }
 
-export default function ToolDetailPage({ params }: Props) {
-  const tool = getToolById(params.id)
+export default async function ToolDetailPage({ params }: Props) {
+  const { id } = await params
+  const tool = getToolById(id)
   if (!tool) notFound()
 
   const relatedTools = TOOLS.filter(

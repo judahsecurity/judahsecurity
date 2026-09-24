@@ -9,13 +9,13 @@ export const metadata: Metadata = {
 
 const BLOG_CATEGORIES = ['All', 'Tool Review', 'Research', 'Tutorials', 'News']
 
-export default function BlogPage({
+export default async function BlogPage({
   searchParams,
 }: {
-  searchParams: { category?: string }
+  searchParams: Promise<{ category?: string }>
 }) {
   const allPosts = getAllPosts()
-  const activeCategory = searchParams.category
+  const { category: activeCategory } = await searchParams
 
   const posts = activeCategory && activeCategory !== 'All'
     ? allPosts.filter((p) => p.category === activeCategory)
