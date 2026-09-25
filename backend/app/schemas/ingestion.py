@@ -24,7 +24,7 @@ class AgentType(str, Enum):
 class IngestionBatchRequest(BaseModel):
     """Batch submission of findings from an external agent."""
 
-    agent_id: str = Field(..., description="Unique agent identifier")
+    agent_id: str = Field(..., max_length=255, description="Unique agent identifier")
     agent_type: AgentType = Field(default=AgentType.AEGIS_VANGUARD)
     agent_version: Optional[str] = Field(None, description="Agent software version")
 

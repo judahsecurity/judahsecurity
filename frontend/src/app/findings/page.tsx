@@ -142,6 +142,36 @@ interface DelphiEnrichment {
 
 interface Finding {
   id: number;
+  finding_key?: string;
+  affected_targets?: Array<{
+    id: number;
+    asset_id: number;
+    value: string | null;
+    asset_type: string | null;
+    port: number | null;
+    protocol: string | null;
+    service_name: string | null;
+    url: string | null;
+    verification: string;
+    last_seen: string;
+  }>;
+  identifiers?: Array<{ kind: string; value: string }>;
+  observations?: Array<{
+    id: number;
+    source: string;
+    source_instance: string;
+    source_record_id: string | null;
+    rule_id: string | null;
+    title: string | null;
+    severity: string | null;
+    confidence: string | null;
+    description: string | null;
+    target_ids: number[];
+    evidence_items: Array<{ id: number; target_id: number | null; kind: string; value: string; observed_at: string | null }>;
+    first_seen: string;
+    last_seen: string;
+    seen_count: number;
+  }>;
   title: string;
   name?: string;
   template_id: string;
@@ -208,6 +238,24 @@ interface Finding {
   sev_status?: 'triaged' | 'needs_analyst' | 'incomplete' | null;
   sev_pending?: number | null;
   business_app?: BusinessAppSummary | null;
+}
+
+function findingKey(finding: Pick<Finding, 'id' | 'finding_key'>): string {
+  return finding.finding_key || `F-${String(finding.id).padStart(6, '0')}`;
+}
+
+function findingSummary(description?: string): string {
+  if (!description) return 'Review the evidence and affected asset to assess this finding.';
+  const firstParagraph = description.split(/\n\s*\n/)[0] || description;
+  const summary = firstParagraph.replace(/\*\*/g, '').replace(/\s+/g, ' ').trim();
+  return summary.length > 320 ? `${summary.slice(0, 317)}...` : summary;
+}
+
+function mentionedIpCount(description?: string): number {
+  const addresses = (description || '').match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g) || [];
+  return new Set(addresses.filter((address) =>
+    address.split('.').every((octet) => Number(octet) <= 255)
+  )).size;
 }
 
 interface OracleEnrichment {
@@ -697,7 +745,7 @@ function OracleEnrichmentPanel({
         {/* Recommendation narrative — section-headed, monospace so the
             ATTACK PATH / EVIDENCE / NEXT STEPS structure stays legible. */}
         {oracle.recommendation_text && (
-          <details className="text-xs" open>
+          <details className="text-xs">
             <summary className="text-muted-foreground cursor-pointer hover:text-foreground">
               Recommendation narrative
             </summary>
@@ -905,8 +953,11 @@ export default function FindingsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [idSearchResult, setIdSearchResult] = useState<Finding | null>(null);
   const [selectedSeverity, setSelectedSeverity] = useState<Severity | null>(null);
   const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
+  const [activeFindingTab, setActiveFindingTab] = useState<'overview' | 'risk' | 'evidence' | 'remediation'>('overview');
+  const findingSheetRef = useRef<HTMLDivElement>(null);
   const [stats, setStats] = useState<any>(null);
   const [remediationData, setRemediationData] = useState<any>(null);
   const [loadingRemediation, setLoadingRemediation] = useState(false);
@@ -1364,6 +1415,8 @@ export default function FindingsPage() {
   // Handle finding selection
   const handleSelectFinding = (finding: Finding) => {
     setSelectedFinding(finding);
+    setActiveFindingTab('overview');
+    findingSheetRef.current?.scrollTo({ top: 0 });
     setScreenshotLightboxOpen(false);
     fetchRemediation(finding.id);
     api.getVulnerability(finding.id)
@@ -1409,14 +1462,6 @@ export default function FindingsPage() {
     } finally {
       setUpdatingStatus(false);
     }
-  };
-
-  // Handle inline status change from table dropdown
-  const handleInlineStatusChange = async (findingId: number, newStatus: string, e?: React.MouseEvent) => {
-    if (e) {
-      e.stopPropagation();
-    }
-    await handleStatusChange(findingId, newStatus);
   };
 
     // ── Finding validation (native detector / steps replay) ─────────────────────
@@ -1824,6 +1869,22 @@ export default function FindingsPage() {
     }).catch(() => {});
   }, [selectedSeverity, onlyAgent]);
 
+  // The table is paged. Resolve a complete finding key through the API so
+  // analysts can find older records by ID as well.
+  useEffect(() => {
+    const match = searchQuery.trim().match(/^F-(\d{6,})$/i);
+    const id = match ? Number(match[1]) : null;
+    if (id === null || !Number.isSafeInteger(id)) {
+      setIdSearchResult(null);
+      return;
+    }
+    let active = true;
+    api.getVulnerability(id)
+      .then((finding) => { if (active) setIdSearchResult(finding as Finding); })
+      .catch(() => { if (active) setIdSearchResult(null); });
+    return () => { active = false; };
+  }, [searchQuery]);
+
   const handleSearch = (query: string) => {
     setSearchQuery(query);
   };
@@ -1878,6 +1939,7 @@ export default function FindingsPage() {
 
     downloadCSV(
       filteredFindings.map((f) => ({
+        finding_id: findingKey(f),
         title: f.title || f.name || '',
         severity: f.severity,
         host: f.host || '',
@@ -1908,10 +1970,15 @@ export default function FindingsPage() {
   };
 
   // Filter findings by search query
-  const filteredFindings = findings
+  const searchPool = idSearchResult && !findings.some((f) => f.id === idSearchResult.id)
+    ? [idSearchResult, ...findings]
+    : findings;
+  const filteredFindings = searchPool
     .filter((f) => {
       const searchLower = searchQuery.toLowerCase();
       const matchesSearch =
+        findingKey(f).toLowerCase().includes(searchLower) ||
+        String(f.id).includes(searchLower) ||
         (f.title || f.name || '').toLowerCase().includes(searchLower) ||
         (f.host || '').toLowerCase().includes(searchLower) ||
         (f.template_id || '').toLowerCase().includes(searchLower) ||
@@ -2086,7 +2153,7 @@ export default function FindingsPage() {
           <div className="relative flex-1 min-w-[250px] max-w-md">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
-              placeholder="Search findings by title, host, CVE, template..."
+              placeholder="Search F-000123, title, host, CVE..."
               value={searchQuery}
               onChange={(e) => handleSearch(e.target.value)}
               className="pl-10 bg-secondary/50 border-border"
@@ -2301,7 +2368,8 @@ export default function FindingsPage() {
         )}
 
         {/* Findings Table */}
-        <Card>
+        <Card className="overflow-hidden">
+          <div className="overflow-x-auto">
           <Table>
             <TableHeader>
               <TableRow>
@@ -2312,22 +2380,19 @@ export default function FindingsPage() {
                     aria-label="Select all"
                   />
                 </TableHead>
-                <TableHead className="w-[110px]">Priority</TableHead>
-                <TableHead className="w-[110px]">Risk</TableHead>
-                <TableHead className="w-[120px]">Triage</TableHead>
-                <TableHead>Finding</TableHead>
-                <TableHead>Host / App</TableHead>
-                <TableHead className="w-[140px]">Status</TableHead>
-                <TableHead>Assigned</TableHead>
-                <TableHead>CVSS</TableHead>
-                <TableHead>Detected</TableHead>
+                <TableHead className="w-[125px]" title="OPES exploit priority; scanner severity when OPES is unavailable">Exploit priority</TableHead>
+                <TableHead className="w-[150px]" title="Likelihood × impact score and analyst triage state">Risk / triage</TableHead>
+                <TableHead className="min-w-[300px]">Finding</TableHead>
+                <TableHead>Asset / app</TableHead>
+                <TableHead className="w-[150px]">Status / owner</TableHead>
+                <TableHead>Last seen</TableHead>
                 <TableHead className="w-[50px]"></TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={11} className="text-center py-12">
+                  <TableCell colSpan={8} className="text-center py-12">
                     <div className="flex flex-col items-center gap-2">
                       <Loader2 className="h-8 w-8 animate-spin text-primary" />
                       <p className="text-muted-foreground">Loading findings...</p>
@@ -2336,7 +2401,7 @@ export default function FindingsPage() {
                 </TableRow>
               ) : filteredFindings.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={11} className="text-center py-12">
+                  <TableCell colSpan={8} className="text-center py-12">
                     <div className="flex flex-col items-center gap-2">
                       <Shield className="h-12 w-12 text-muted-foreground/50" />
                       <p className="text-muted-foreground">
@@ -2368,20 +2433,17 @@ export default function FindingsPage() {
                       {(() => {
                         const priority = effectivePriority(finding);
                         const label = priorityBadgeLabel(priority);
-                        const scanner = (finding.severity || '').toLowerCase();
-                        const diverges =
-                          Boolean(finding.oracle?.opes_category) &&
-                          scanner &&
-                          scanner !== label &&
-                          !(scanner === 'info' && label === 'info');
                         return (
-                          <div className="flex flex-col gap-0.5">
-                            <Badge className={getSeverityBadgeClass(label === 'info' ? 'info' : label)}>
+                          <div className="flex flex-col items-start gap-1">
+                            <Badge
+                              title={finding.oracle?.opes_category ? 'OPES priority' : 'Scanner severity'}
+                              className={getSeverityBadgeClass(label === 'info' ? 'info' : label)}
+                            >
                               {label}
                             </Badge>
-                            {diverges && (
-                              <span className="text-[10px] text-muted-foreground truncate">
-                                Scanner: {finding.severity}
+                            {finding.oracle?.opes_score != null && (
+                              <span className="text-xs font-mono text-muted-foreground">
+                                {finding.oracle.opes_score.toFixed(1)} OPES
                               </span>
                             )}
                           </div>
@@ -2390,160 +2452,52 @@ export default function FindingsPage() {
                     </TableCell>
                     <TableCell>
                       {finding.sev_level ? (
-                        <div className="flex flex-col gap-0.5">
-                          <Badge variant="outline" className={cn('capitalize w-fit', RISK_LEVEL_STYLE[finding.sev_level])}>
-                            {finding.sev_level === 'informational' ? 'info' : finding.sev_level}
+                        <div className="flex flex-col items-start gap-1">
+                          <Badge variant="outline" className={cn('capitalize', RISK_LEVEL_STYLE[finding.sev_level])}>
+                            {finding.sev_level === 'informational' ? 'info' : finding.sev_level} · {(finding.sev_score ?? 0).toFixed(1)}
                           </Badge>
-                          <span className="text-[10px] text-muted-foreground font-mono">
-                            {(finding.sev_score ?? 0).toFixed(1)}/100
-                          </span>
+                          {finding.sev_status === 'triaged' ? (
+                            <span className="text-xs text-green-400">Triaged</span>
+                          ) : finding.sev_status ? (
+                            <span className="text-xs text-amber-400">{finding.sev_pending ?? 0} to score</span>
+                          ) : null}
                         </div>
                       ) : (
-                        <span className="text-muted-foreground text-xs">Not evaluated</span>
+                        <span className="text-xs text-muted-foreground">Not evaluated</span>
                       )}
                     </TableCell>
                     <TableCell>
-                      {finding.sev_status === 'triaged' ? (
-                        <Badge variant="outline" className="border-green-500/40 text-green-400">Triaged</Badge>
-                      ) : finding.sev_status ? (
-                        <Badge
-                          variant="outline"
-                          className="border-amber-500/40 text-amber-400"
-                          title="Risk factors the rules could not measure — open the finding to score them"
-                        >
-                          {finding.sev_pending ?? 0} to score
-                        </Badge>
-                      ) : (
-                        <span className="text-muted-foreground text-xs">—</span>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex flex-col gap-1">
-                        <div className="flex items-center gap-2">
-                          <Shield className="h-4 w-4 text-muted-foreground shrink-0" />
-                          <span className="font-medium line-clamp-1">
-                            {finding.title || finding.name || finding.template_id}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-2 flex-wrap">
-                          {finding.cve_id && (
-                            <span className="text-xs text-primary font-mono">{finding.cve_id}</span>
-                          )}
-                          <OracleBadge oracle={finding.oracle} compact />
-                          <DelphiBadges delphi={finding.delphi} compact />
-                          {(finding.detected_by || '').toLowerCase() === 'agent' && (
-                            <Badge
-                              variant="outline"
-                              className="text-[10px] text-orange-400 border-orange-500/30 bg-orange-500/10"
-                            >
-                              Agent
-                              {finding.agent_detection?.step_count
-                                ? ` · ${finding.agent_detection.step_count} steps`
-                                : ''}
-                            </Badge>
-                          )}
-                        </div>
+                      <div className="max-w-[520px] space-y-1">
+                        <span className="text-xs font-mono text-muted-foreground">{findingKey(finding)}</span>
+                        <p className="font-medium leading-snug line-clamp-2">
+                          {finding.title || finding.name || finding.template_id}
+                        </p>
+                        {(finding.cve_id || finding.delphi?.kev) && (
+                          <div className="flex items-center gap-2">
+                            {finding.cve_id && <span className="text-xs font-mono text-primary">{finding.cve_id}</span>}
+                            {finding.delphi?.kev && <Badge variant="outline" className="text-[10px] text-red-400 border-red-500/30">KEV</Badge>}
+                          </div>
+                        )}
                       </div>
                     </TableCell>
                     <TableCell>
-                      {finding.host ? (
-                        <a
-                          href={`https://${finding.host}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-primary hover:underline flex items-center gap-1"
-                          onClick={(e) => e.stopPropagation()}
-                        >
-                          <span className="truncate max-w-[200px]">{finding.host}</span>
-                          <ExternalLink className="h-3 w-3 shrink-0" />
-                        </a>
-                      ) : (
-                        <span className="text-muted-foreground">-</span>
-                      )}
+                      <span className="font-mono text-xs break-all">{finding.host || 'Unlinked'}</span>
                       {finding.business_app && (
-                        <span
-                          className="text-[11px] text-muted-foreground block truncate max-w-[220px]"
-                          title={`${finding.business_app.name}${finding.business_app.inherited_from_asset ? ' (from asset)' : ''}`}
-                        >
-                          {finding.business_app.app_id ?? ''} {finding.business_app.name}
+                        <span className="mt-1 block max-w-[200px] truncate text-xs text-muted-foreground" title={finding.business_app.name}>
+                          {finding.business_app.app_id} {finding.business_app.name}
                         </span>
-                      )}
-                    </TableCell>
-                    <TableCell onClick={(e) => e.stopPropagation()}>
-                      <Select
-                        value={finding.status || 'open'}
-                        onValueChange={(value) => handleInlineStatusChange(finding.id, value)}
-                      >
-                        <SelectTrigger className="h-8 w-[130px] text-xs">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="open">
-                            <span className="flex items-center gap-2">
-                              <span className="w-2 h-2 rounded-full bg-red-500" />
-                              Open
-                            </span>
-                          </SelectItem>
-                          <SelectItem value="in_progress">
-                            <span className="flex items-center gap-2">
-                              <span className="w-2 h-2 rounded-full bg-yellow-500" />
-                              In Progress
-                            </span>
-                          </SelectItem>
-                          <SelectItem value="resolved">
-                            <span className="flex items-center gap-2">
-                              <span className="w-2 h-2 rounded-full bg-green-500" />
-                              Resolved
-                            </span>
-                          </SelectItem>
-                          <SelectItem value="mitigated">
-                            <span className="flex items-center gap-2">
-                              <span className="w-2 h-2 rounded-full bg-cyan-500" />
-                              Mitigated
-                            </span>
-                          </SelectItem>
-                          <SelectItem value="accepted">
-                            <span className="flex items-center gap-2">
-                              <span className="w-2 h-2 rounded-full bg-blue-500" />
-                              Risk Accepted
-                            </span>
-                          </SelectItem>
-                          <SelectItem value="false_positive">
-                            <span className="flex items-center gap-2">
-                              <span className="w-2 h-2 rounded-full bg-gray-500" />
-                              False Positive
-                            </span>
-                          </SelectItem>
-                        </SelectContent>
-                      </Select>
-                    </TableCell>
-                    <TableCell>
-                      {finding.assigned_to ? (
-                        <span className="text-sm flex items-center gap-1">
-                          <User className="h-3 w-3" />
-                          {finding.assigned_to}
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground text-sm">-</span>
                       )}
                     </TableCell>
                     <TableCell>
-                      {finding.cvss_score ? (
-                        <span className={cn(
-                          'font-mono font-medium',
-                          finding.cvss_score >= 9 ? 'text-red-400' :
-                          finding.cvss_score >= 7 ? 'text-orange-400' :
-                          finding.cvss_score >= 4 ? 'text-yellow-400' :
-                          'text-green-400'
-                        )}>
-                          {finding.cvss_score.toFixed(1)}
+                      <div className="flex flex-col items-start gap-1">
+                        {getStatusBadge(finding.status || 'open')}
+                        <span className="max-w-[150px] truncate text-xs text-muted-foreground">
+                          {finding.assigned_to || 'Unassigned'}
                         </span>
-                      ) : (
-                        <span className="text-muted-foreground">-</span>
-                      )}
+                      </div>
                     </TableCell>
                     <TableCell className="text-muted-foreground text-sm">
-                      {formatDate(finding.first_detected || finding.created_at)}
+                      {formatDate(finding.last_detected || finding.first_detected || finding.created_at)}
                     </TableCell>
                     <TableCell>
                       <ChevronRight className="h-4 w-4 text-muted-foreground" />
@@ -2553,6 +2507,7 @@ export default function FindingsPage() {
               )}
             </TableBody>
           </Table>
+          </div>
         </Card>
 
         {/* Finding Detail Flyout */}
@@ -2563,11 +2518,24 @@ export default function FindingsPage() {
           }}
         >
           <SheetContent
+            ref={findingSheetRef}
             side="right"
             className="w-full sm:max-w-xl lg:max-w-2xl xl:max-w-3xl overflow-y-auto"
           >
             <SheetHeader>
-              <div className="flex items-center gap-2 flex-wrap pr-8">
+              <div className="flex items-center gap-2 flex-wrap pr-8 text-left">
+                {selectedFinding && (
+                  <button
+                    type="button"
+                    className="font-mono text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+                    onClick={() => navigator.clipboard.writeText(findingKey(selectedFinding))
+                      .then(() => toast({ title: 'Finding ID copied' }))
+                      .catch(() => toast({ title: 'Could not copy finding ID', variant: 'destructive' }))}
+                    title="Copy finding ID"
+                  >
+                    {findingKey(selectedFinding)} <Copy className="h-3 w-3" />
+                  </button>
+                )}
                 {(() => {
                   const priority = selectedFinding
                     ? effectivePriority(selectedFinding)
@@ -2581,66 +2549,69 @@ export default function FindingsPage() {
                     </Badge>
                   );
                 })()}
-                {selectedFinding?.oracle?.opes_category &&
-                  selectedFinding.severity &&
-                  selectedFinding.severity.toLowerCase() !==
-                    priorityBadgeLabel(effectivePriority(selectedFinding)) && (
-                    <Badge variant="outline" className="text-muted-foreground">
-                      Scanner: {selectedFinding.severity}
-                    </Badge>
-                  )}
                 {selectedFinding?.status && getStatusBadge(selectedFinding.status)}
-                {selectedFinding?.cvss_score && (
-                  <Badge variant="outline" className="font-mono">
-                    CVSS: {selectedFinding.cvss_score.toFixed(1)}
-                  </Badge>
-                )}
-                {raStatusLabel(selectedFinding?.risk_assessment) && (
-                  <Badge variant="outline">
-                    {raStatusLabel(selectedFinding?.risk_assessment)}
-                  </Badge>
-                )}
               </div>
-              <div className="flex items-center justify-between mt-2 gap-2 pr-8">
-                <SheetTitle className="text-xl text-left">
+              <div className="mt-2 pr-8">
+                <SheetTitle className="text-xl leading-snug text-left">
                   {selectedFinding?.title || selectedFinding?.name || selectedFinding?.template_id}
                 </SheetTitle>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="border-[#0052CC]/40 hover:bg-[#0052CC]/15 text-[#4C9AFF]"
-                    onClick={() => selectedFinding && openJiraDialog(selectedFinding)}
-                  >
-                    <Ticket className="h-4 w-4 mr-1.5" />
-                    Jira
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="border-[#81B5A1]/40 hover:bg-[#81B5A1]/15 text-[#81B5A1]"
-                    onClick={() => selectedFinding && openServiceNowDialog(selectedFinding)}
-                  >
-                    <Shield className="h-4 w-4 mr-1.5" />
-                    ServiceNow
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="border-[#494649]/40 hover:bg-[#494649]/20 text-foreground"
-                    onClick={() => selectedFinding && openHackerOneDialog(selectedFinding)}
-                  >
-                    <Bug className="h-4 w-4 mr-1.5" />
-                    HackerOne
-                  </Button>
-                </div>
               </div>
               <SheetDescription className="text-left">
-                Complete finding details and remediation information
+                Linked asset: {selectedFinding?.host || 'none'}
               </SheetDescription>
             </SheetHeader>
 
+            <nav className="sticky top-0 z-10 -mx-6 border-b border-border bg-background/95 px-6 py-3 backdrop-blur" aria-label="Finding details">
+              <div className="flex gap-1 overflow-x-auto">
+                {(['overview', 'risk', 'evidence', 'remediation'] as const).map((tab) => (
+                  <button
+                    key={tab}
+                    type="button"
+                    onClick={() => {
+                      setActiveFindingTab(tab);
+                      findingSheetRef.current?.scrollTo({ top: 0 });
+                    }}
+                    aria-current={activeFindingTab === tab ? 'page' : undefined}
+                    className={cn(
+                      'rounded-md px-3 py-2 text-sm font-medium capitalize whitespace-nowrap',
+                      activeFindingTab === tab
+                        ? 'bg-primary text-primary-foreground'
+                        : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+                    )}
+                  >
+                    {tab}
+                  </button>
+                ))}
+              </div>
+            </nav>
+
             <div className="space-y-6 py-4">
+              <div hidden={activeFindingTab !== 'overview'} className="space-y-6">
+              <section className="rounded-lg border border-border bg-muted/20 p-4 space-y-2">
+                <h3 className="text-sm font-semibold">Summary</h3>
+                <p className="text-sm leading-relaxed text-muted-foreground">
+                  {findingSummary(selectedFinding?.description)}
+                </p>
+                {mentionedIpCount(selectedFinding?.description) > 1 && (selectedFinding?.affected_targets?.length || 0) <= 1 && (
+                  <p className="text-xs text-amber-400">
+                    The description mentions {mentionedIpCount(selectedFinding?.description)} IP addresses. This record links to one asset; confirm the scope in Evidence.
+                  </p>
+                )}
+              </section>
+              {(selectedFinding?.affected_targets?.length || 0) > 0 && (
+                <section className="rounded-lg border border-border p-4 space-y-2">
+                  <h3 className="text-sm font-semibold">Reported targets</h3>
+                  <div className="grid gap-1.5 sm:grid-cols-2">
+                    {selectedFinding?.affected_targets?.map((target) => (
+                      <div key={target.id} className="rounded border border-border/60 px-2 py-1.5 text-xs font-mono break-all">
+                        {target.value || `Asset ${target.asset_id}`}
+                        {target.port != null && <span className="text-muted-foreground">:{target.port}{target.protocol ? `/${target.protocol}` : ''}</span>}
+                        {target.service_name && <span className="ml-1 text-muted-foreground">{target.service_name}</span>}
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
               {/* Quick Info Grid */}
               <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                 <div className="flex items-start gap-2">
@@ -2648,26 +2619,10 @@ export default function FindingsPage() {
                   <div>
                     <p className="text-xs text-muted-foreground">Host</p>
                     {selectedFinding?.host ? (
-                      <a
-                        href={`https://${selectedFinding.host}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-sm text-primary hover:underline flex items-center gap-1"
-                      >
-                        {selectedFinding.host}
-                        <ExternalLink className="h-3 w-3" />
-                      </a>
+                      <p className="text-sm font-mono break-all">{selectedFinding.host}</p>
                     ) : (
                       <p className="text-sm text-muted-foreground">-</p>
                     )}
-                  </div>
-                </div>
-
-                <div className="flex items-start gap-2">
-                  <FileCode className="h-4 w-4 text-muted-foreground mt-0.5" />
-                  <div>
-                    <p className="text-xs text-muted-foreground">Template ID</p>
-                    <p className="text-sm font-mono">{selectedFinding?.template_id || '-'}</p>
                   </div>
                 </div>
 
@@ -2715,41 +2670,11 @@ export default function FindingsPage() {
                   </div>
                 )}
 
-                {selectedFinding?.cvss_vector && (
-                  <div className="flex items-start gap-2">
-                    <Shield className="h-4 w-4 text-muted-foreground mt-0.5" />
-                    <div>
-                      <p className="text-xs text-muted-foreground">CVSS Vector</p>
-                      <p className="text-sm font-mono text-xs">{selectedFinding.cvss_vector}</p>
-                    </div>
-                  </div>
-                )}
-
                 <div className="flex items-start gap-2">
                   <User className="h-4 w-4 text-muted-foreground mt-0.5" />
-                  <div className="flex-1">
-                    <p className="text-xs text-muted-foreground mb-1">Assigned To</p>
-                    <div className="flex items-center gap-2">
-                      <Input
-                        placeholder="Enter email or name..."
-                        defaultValue={selectedFinding?.assigned_to || ''}
-                        className="h-8 text-sm"
-                        onBlur={(e) => {
-                          if (selectedFinding && e.target.value !== (selectedFinding.assigned_to || '')) {
-                            handleAssignFinding(selectedFinding.id, e.target.value);
-                          }
-                        }}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') {
-                            const input = e.target as HTMLInputElement;
-                            if (selectedFinding && input.value !== (selectedFinding.assigned_to || '')) {
-                              handleAssignFinding(selectedFinding.id, input.value);
-                            }
-                            input.blur();
-                          }
-                        }}
-                      />
-                    </div>
+                  <div>
+                    <p className="text-xs text-muted-foreground">Assigned to</p>
+                    <p className="text-sm">{selectedFinding?.assigned_to || 'Unassigned'}</p>
                   </div>
                 </div>
               </div>
@@ -2773,8 +2698,16 @@ export default function FindingsPage() {
                   </div>
                 )}
               </div>
+              </div>
 
               {/* Delphi enrichment panel */}
+              <div hidden={activeFindingTab !== 'risk'} className="space-y-6">
+              <section className="grid gap-3 rounded-lg border border-border p-4 sm:grid-cols-3">
+                <div><p className="text-xs text-muted-foreground">Scanner severity</p><p className="text-sm capitalize">{selectedFinding?.severity || 'Unknown'}</p></div>
+                <div><p className="text-xs text-muted-foreground">CVSS</p><p className="text-sm font-mono">{selectedFinding?.cvss_score != null ? selectedFinding.cvss_score.toFixed(1) : 'Not scored'}</p></div>
+                <div><p className="text-xs text-muted-foreground">Analyst assessment</p><p className="text-sm">{raStatusLabel(selectedFinding?.risk_assessment) || 'Pending'}</p></div>
+                {selectedFinding?.cvss_vector && <p className="break-all text-xs font-mono text-muted-foreground sm:col-span-3">{selectedFinding.cvss_vector}</p>}
+              </section>
               {selectedFinding?.delphi &&
                 (selectedFinding.delphi.kev ||
                   selectedFinding.delphi.epss ||
@@ -2899,7 +2832,6 @@ export default function FindingsPage() {
                   );
                 }}
               />
-
               {/* Risk scoring triage — analysts fill in the factors Oracle
                   could not measure (business impact, hosting, verification). */}
               {selectedFinding && (
@@ -2911,7 +2843,10 @@ export default function FindingsPage() {
                 />
               )}
 
+              </div>
+
               {/* Generate Nuclei Template CTA */}
+              <div hidden={activeFindingTab !== 'evidence'} className="space-y-6">
               {selectedFinding && (selectedFinding.cve_id || selectedFinding.template_id) && (
                 <div className="flex items-center gap-2 p-2.5 rounded-lg border border-purple-500/20 bg-purple-500/5">
                   <FileCode className="h-4 w-4 text-purple-400 shrink-0" />
@@ -3035,7 +2970,7 @@ export default function FindingsPage() {
                 assets={selectedFinding?.agent_detection?.assets}
                 host={selectedFinding?.host}
                 affectedComponent={selectedFinding?.affected_component}
-                recommendation={selectedFinding?.remediation}
+                recommendation={undefined}
                 references={
                   selectedFinding?.agent_detection?.references?.length
                     ? selectedFinding.agent_detection.references
@@ -3043,13 +2978,66 @@ export default function FindingsPage() {
                 }
                 notDemonstrated={selectedFinding?.agent_detection?.not_demonstrated}
               />
+              </div>
 
+              <div hidden={activeFindingTab !== 'risk'} className="space-y-6">
               <RiskAssessmentPanel
                 assessment={selectedFinding?.risk_assessment}
                 asking={askingMarcus}
                 onAskMarcus={handleAskMarcus}
               />
+              </div>
 
+              <div hidden={activeFindingTab !== 'evidence'} className="space-y-6">
+              {(selectedFinding?.observations?.length || 0) > 0 && (
+                <section className="space-y-2">
+                  <h3 className="text-sm font-semibold">Source observations</h3>
+                  <p className="text-xs text-muted-foreground">Each source record is tracked separately from this finding.</p>
+                  <div className="space-y-2">
+                    {selectedFinding?.observations?.map((observation) => (
+                      <details key={observation.id} className="rounded-lg border border-border p-3 text-sm">
+                        <summary className="cursor-pointer list-none flex flex-wrap items-center gap-x-2 gap-y-1">
+                          <span className="font-medium">{observation.source}</span>
+                          {observation.rule_id && <code className="text-xs text-muted-foreground">{observation.rule_id}</code>}
+                          <span className="text-xs text-muted-foreground ml-auto">Last seen {formatDate(observation.last_seen)}</span>
+                        </summary>
+                        <div className="mt-3 space-y-1.5 text-xs text-muted-foreground break-all">
+                          {observation.source_record_id && <p>Source ID: <code>{observation.source_record_id}</code></p>}
+                          {observation.target_ids.length > 0 && (
+                            <div className="flex flex-wrap gap-1">
+                              {selectedFinding?.affected_targets
+                                ?.filter((target) => observation.target_ids.includes(target.id))
+                                .map((target) => (
+                                  <Badge key={target.id} variant="outline" className="font-mono text-xs">
+                                    {target.value || `Asset ${target.asset_id}`}{target.port != null ? `:${target.port}` : ''}
+                                  </Badge>
+                                ))}
+                            </div>
+                          )}
+                          <p>Seen {observation.seen_count} {observation.seen_count === 1 ? 'time' : 'times'} since {formatDate(observation.first_seen)}</p>
+                          {observation.description && <p className="whitespace-pre-wrap">{observation.description}</p>}
+                          {observation.evidence_items.map((item) => (
+                            <div key={item.id} className="rounded bg-muted/40 p-2">
+                              <p className="font-medium">
+                                {item.kind}
+                                {item.target_id != null && (
+                                  <span className="ml-2 font-normal">
+                                    {(() => {
+                                      const target = selectedFinding?.affected_targets?.find((entry) => entry.id === item.target_id);
+                                      return target ? `${target.value || `Asset ${target.asset_id}`}${target.port != null ? `:${target.port}` : ''}` : '';
+                                    })()}
+                                  </span>
+                                )}
+                              </p>
+                              <pre className="whitespace-pre-wrap break-all">{item.value}</pre>
+                            </div>
+                          ))}
+                        </div>
+                      </details>
+                    ))}
+                  </div>
+                </section>
+              )}
               {hasScannerDetection(selectedFinding?.detection) && (
                 <DetectionPanel detection={selectedFinding?.detection} />
               )}
@@ -3086,8 +3074,11 @@ export default function FindingsPage() {
                   </div>
                 </div>
               )}
+              </div>
 
               {/* Structured playbook — narrative recommendation is in FindingWriteup */}
+              <div hidden={activeFindingTab !== 'remediation'} className="space-y-6">
+              <FindingWriteup recommendation={selectedFinding?.remediation} />
               {(loadingRemediation ||
                 remediationData?.has_playbook ||
                 remediationData?.cwe ||
@@ -3121,77 +3112,61 @@ export default function FindingsPage() {
               </div>
               )}
 
-              {/* Status Actions */}
-              <div className="space-y-2 pt-4 border-t border-border">
-                <p className="text-sm font-medium flex items-center gap-2">
-                  <Activity className="h-4 w-4" />
-                  Update Status
-                </p>
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    size="sm"
-                    variant={selectedFinding?.status === 'open' ? 'default' : 'outline'}
-                    onClick={() => selectedFinding && handleStatusChange(selectedFinding.id, 'open')}
-                    disabled={updatingStatus || selectedFinding?.status === 'open'}
-                    className="flex-1 min-w-[120px]"
-                  >
-                    {updatingStatus ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-                    Open
+              {/* Workflow actions */}
+              <section className="space-y-3 border-t border-border pt-4">
+                <h3 className="text-sm font-semibold">Workflow</h3>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="space-y-1">
+                    <label className="text-xs text-muted-foreground" htmlFor="finding-status">Status</label>
+                    <Select
+                      value={selectedFinding?.status || 'open'}
+                      onValueChange={(value) => selectedFinding && handleStatusChange(selectedFinding.id, value)}
+                      disabled={updatingStatus}
+                    >
+                      <SelectTrigger id="finding-status"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="open">Open</SelectItem>
+                        <SelectItem value="in_progress">In progress</SelectItem>
+                        <SelectItem value="resolved">Resolved</SelectItem>
+                        <SelectItem value="mitigated">Mitigated</SelectItem>
+                        <SelectItem value="accepted">Risk accepted</SelectItem>
+                        <SelectItem value="false_positive">False positive</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-1">
+                    <p className="text-xs text-muted-foreground">Assigned to</p>
+                    <Input
+                      key={selectedFinding?.id}
+                      placeholder="Name or email"
+                      defaultValue={selectedFinding?.assigned_to || ''}
+                      onBlur={(e) => {
+                        if (selectedFinding && e.target.value !== (selectedFinding.assigned_to || '')) {
+                          handleAssignFinding(selectedFinding.id, e.target.value);
+                        }
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') e.currentTarget.blur();
+                      }}
+                    />
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2 pt-2">
+                  <Button size="sm" variant="outline" onClick={() => selectedFinding && openJiraDialog(selectedFinding)}>
+                    <Ticket className="mr-1.5 h-4 w-4" /> Jira
                   </Button>
-                  <Button
-                    size="sm"
-                    variant={selectedFinding?.status === 'in_progress' ? 'default' : 'outline'}
-                    onClick={() => selectedFinding && handleStatusChange(selectedFinding.id, 'in_progress')}
-                    disabled={updatingStatus || selectedFinding?.status === 'in_progress'}
-                    className="flex-1 min-w-[120px] border-yellow-600/30 hover:bg-yellow-600/20"
-                  >
-                    {updatingStatus ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-                    In Progress
+                  <Button size="sm" variant="outline" onClick={() => selectedFinding && openServiceNowDialog(selectedFinding)}>
+                    <Shield className="mr-1.5 h-4 w-4" /> ServiceNow
                   </Button>
-                  <Button
-                    size="sm"
-                    variant={selectedFinding?.status === 'resolved' ? 'default' : 'outline'}
-                    onClick={() => selectedFinding && handleStatusChange(selectedFinding.id, 'resolved')}
-                    disabled={updatingStatus || selectedFinding?.status === 'resolved'}
-                    className="flex-1 min-w-[120px] border-green-600/30 hover:bg-green-600/20"
-                  >
-                    {updatingStatus ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-                    Resolved
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant={selectedFinding?.status === 'mitigated' ? 'default' : 'outline'}
-                    onClick={() => selectedFinding && handleStatusChange(selectedFinding.id, 'mitigated')}
-                    disabled={updatingStatus || selectedFinding?.status === 'mitigated'}
-                    className="flex-1 min-w-[120px] border-cyan-600/30 hover:bg-cyan-600/20"
-                  >
-                    {updatingStatus ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-                    Mitigated
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant={selectedFinding?.status === 'accepted' ? 'default' : 'outline'}
-                    onClick={() => selectedFinding && handleStatusChange(selectedFinding.id, 'accepted')}
-                    disabled={updatingStatus || selectedFinding?.status === 'accepted'}
-                    className="flex-1 min-w-[120px] border-blue-600/30 hover:bg-blue-600/20"
-                  >
-                    {updatingStatus ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-                    Accept Risk
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant={selectedFinding?.status === 'false_positive' ? 'default' : 'outline'}
-                    onClick={() => selectedFinding && handleStatusChange(selectedFinding.id, 'false_positive')}
-                    disabled={updatingStatus || selectedFinding?.status === 'false_positive'}
-                    className="flex-1 min-w-[120px] border-gray-600/30 hover:bg-gray-600/20"
-                  >
-                    {updatingStatus ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-                    False Positive
+                  <Button size="sm" variant="outline" onClick={() => selectedFinding && openHackerOneDialog(selectedFinding)}>
+                    <Bug className="mr-1.5 h-4 w-4" /> HackerOne
                   </Button>
                 </div>
+              </section>
               </div>
 
               {/* Validate with agent */}
+              <div hidden={activeFindingTab !== 'evidence'} className="space-y-6">
               <div className="space-y-3 pt-4 border-t border-border">
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-sm font-medium flex items-center gap-2">
@@ -3431,6 +3406,7 @@ export default function FindingsPage() {
                   </div>
                 </div>
               )}
+              </div>
             </div>
           </SheetContent>
         </Sheet>

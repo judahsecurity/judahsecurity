@@ -133,12 +133,92 @@ def build_vuln_response(
     db: Optional[Session] = None,
     *,
     include_detection_dumps: bool = True,
+    include_provenance: bool = False,
 ) -> dict:
     """Build vulnerability response with computed fields. Ensures required fields are never None."""
     d = {k: v for k, v in vuln.__dict__.items() if k != "_sa_instance_state" and k != "metadata_"}
+    d["finding_key"] = vuln.finding_key
     d["name"] = vuln.title
     d["host"] = vuln.asset.value if vuln.asset else None
     d["organization_id"] = vuln.asset.organization_id if vuln.asset else None
+    if include_provenance and db is not None and vuln.asset is not None:
+        from app.models.finding_provenance import (
+            FindingEvidence, FindingIdentifier, FindingObservation,
+            FindingObservationTarget, FindingTarget,
+        )
+
+        org_id = vuln.asset.organization_id
+        targets = (
+            db.query(FindingTarget)
+            .options(joinedload(FindingTarget.asset))
+            .filter(FindingTarget.vulnerability_id == vuln.id, FindingTarget.organization_id == org_id)
+            .order_by(FindingTarget.id)
+            .all()
+        )
+        d["affected_targets"] = [
+            {
+                "id": target.id,
+                "asset_id": target.asset_id,
+                "value": target.asset.value if target.asset else None,
+                "asset_type": target.asset.asset_type.value if target.asset else None,
+                "port": target.port,
+                "protocol": target.protocol,
+                "service_name": target.service_name,
+                "url": target.url,
+                "verification": target.verification,
+                "first_seen": target.first_seen,
+                "last_seen": target.last_seen,
+            }
+            for target in targets if target.asset and target.asset.organization_id == org_id
+        ]
+        identifiers = db.query(FindingIdentifier).filter_by(vulnerability_id=vuln.id).order_by(FindingIdentifier.id).all()
+        d["identifiers"] = [{"kind": item.kind, "value": item.value} for item in identifiers]
+        observations = (
+            db.query(FindingObservation)
+            .filter(FindingObservation.vulnerability_id == vuln.id, FindingObservation.organization_id == org_id)
+            .order_by(FindingObservation.last_seen.desc())
+            .limit(50)
+            .all()
+        )
+        observation_ids = [item.id for item in observations]
+        target_ids = {item["id"] for item in d["affected_targets"]}
+        observation_targets: dict[int, list[int]] = {item.id: [] for item in observations}
+        evidence_by_observation: dict[int, list[dict]] = {item.id: [] for item in observations}
+        if observation_ids:
+            for link in db.query(FindingObservationTarget).filter(
+                FindingObservationTarget.observation_id.in_(observation_ids)
+            ).all():
+                if link.target_id in target_ids:
+                    observation_targets[link.observation_id].append(link.target_id)
+            for item in db.query(FindingEvidence).filter(
+                FindingEvidence.observation_id.in_(observation_ids)
+            ).order_by(FindingEvidence.id).all():
+                if item.target_id is not None and item.target_id not in target_ids:
+                    continue
+                evidence_by_observation[item.observation_id].append({
+                    "id": item.id, "target_id": item.target_id,
+                    "kind": item.kind, "value": item.value,
+                    "observed_at": item.observed_at,
+                })
+        d["observations"] = [
+            {
+                "id": observation.id,
+                "source": observation.source,
+                "source_instance": observation.source_instance,
+                "source_record_id": observation.source_record_id,
+                "rule_id": observation.rule_id,
+                "title": observation.title,
+                "severity": observation.severity,
+                "confidence": observation.confidence,
+                "description": observation.description,
+                "target_ids": observation_targets[observation.id],
+                "evidence_items": evidence_by_observation[observation.id],
+                "first_seen": observation.first_seen,
+                "last_seen": observation.last_seen,
+                "seen_count": observation.seen_count,
+            }
+            for observation in observations
+        ]
 
     # Latest asset screenshot for analyst visual context on the findings page
     screenshot_id = getattr(vuln.asset, "latest_screenshot_id", None) if vuln.asset else None
@@ -520,7 +600,7 @@ def get_vulnerability(
             detail="Access denied"
         )
     
-    return build_vuln_response(vuln, db=db)
+    return build_vuln_response(vuln, db=db, include_provenance=True)
 
 
 @router.put("/{vuln_id}", response_model=VulnerabilityResponse)
@@ -2204,14 +2284,6 @@ def create_finding_detection_feedback(
             logger.warning(f"Detection pattern evaluation failed: {e}")
 
     return feedback_to_dict(feedback)
-
-
-
-
-
-
-
-
 
 
 

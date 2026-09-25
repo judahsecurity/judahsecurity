@@ -14,9 +14,10 @@ This allows consistent handling of results from any scanner:
 """
 
 from datetime import datetime
-from typing import Optional, List, Dict, Any, Union
+import re
+from typing import Optional, List, Dict, Any, Union, Literal
 from enum import Enum
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ResultType(str, Enum):
@@ -62,6 +63,49 @@ class ConfidenceLevel(str, Enum):
 # Unified Finding Schema
 # =============================================================================
 
+class AffectedTarget(BaseModel):
+    """One affected asset or endpoint. Submit one item for each IP/port pair."""
+
+    asset_value: str = Field(..., min_length=1, max_length=500)
+    asset_type: Optional[Literal["domain", "subdomain", "ip_address", "ip_range", "url", "cloud_resource", "api_endpoint", "other"]] = None
+    port: Optional[int] = Field(None, ge=1, le=65535)
+    protocol: Optional[str] = Field(None, max_length=10)
+    service_name: Optional[str] = Field(None, max_length=100)
+    url: Optional[str] = Field(None, max_length=2048)
+
+    @field_validator("asset_value")
+    @classmethod
+    def one_asset_per_value(cls, value: str) -> str:
+        value = value.strip()
+        if not value or any(separator in value for separator in (",", "\n", "\r")):
+            raise ValueError("asset_value must identify one asset; use another affected_targets item")
+        return value
+
+
+class FindingEvidenceItem(BaseModel):
+    """One proof item, separate from narrative and target identifiers."""
+
+    kind: str = Field(..., min_length=1, max_length=30)
+    value: str = Field(..., min_length=1)
+    observed_at: Optional[datetime] = None
+    target: Optional[AffectedTarget] = Field(None, description="Exact target this proof supports, if narrower than the source record")
+
+
+class FindingIdentifierItem(BaseModel):
+    """One issue identifier, such as a CVE or CWE."""
+
+    kind: str = Field(..., min_length=1, max_length=20)
+    value: str = Field(..., min_length=1, max_length=255)
+
+    @field_validator("value")
+    @classmethod
+    def one_identifier_per_value(cls, value: str) -> str:
+        value = value.strip()
+        if not value or any(separator in value for separator in (",", ";", "\n", "\r")):
+            raise ValueError("identifier value must be atomic; use another identifiers item")
+        return value
+
+
 class UnifiedFinding(BaseModel):
     """
     Unified finding schema for any ASM scan result.
@@ -71,9 +115,9 @@ class UnifiedFinding(BaseModel):
     """
     
     # Core identification
-    id: Optional[str] = Field(None, description="Unique finding ID (generated if not provided)")
+    id: Optional[str] = Field(None, max_length=500, description="Stable native source record ID, distinct from the platform finding ID")
     type: ResultType = Field(..., description="Type of finding")
-    source: str = Field(..., description="Tool/source that discovered this (e.g., 'naabu', 'nuclei', 'crtsh')")
+    source: str = Field(..., max_length=100, description="Tool/source that discovered this (e.g., 'naabu', 'nuclei', 'crtsh')")
     
     # Target information
     target: str = Field(..., description="Original target (domain, IP, CIDR)")
@@ -82,6 +126,9 @@ class UnifiedFinding(BaseModel):
     port: Optional[int] = Field(None, description="Port number (for port/service findings)")
     protocol: Optional[str] = Field(None, description="Protocol (tcp/udp)")
     url: Optional[str] = Field(None, description="Full URL (for web findings)")
+    affected_targets: List[AffectedTarget] = Field(default_factory=list, max_length=1000, description="Atomic affected asset/endpoint records")
+    evidence_items: List[FindingEvidenceItem] = Field(default_factory=list, max_length=1000, description="Atomic source proof items")
+    identifiers: List[FindingIdentifierItem] = Field(default_factory=list, max_length=100, description="Additional atomic issue identifiers")
     
     # Finding details
     title: Optional[str] = Field(None, description="Human-readable title")
@@ -94,6 +141,17 @@ class UnifiedFinding(BaseModel):
     cwe_id: Optional[str] = Field(None, description="CWE identifier")
     cvss_score: Optional[float] = Field(None, ge=0, le=10, description="CVSS score")
     template_id: Optional[str] = Field(None, description="Scanner template ID (e.g., Nuclei template)")
+
+    @field_validator("cve_id", "cwe_id")
+    @classmethod
+    def one_standard_identifier(cls, value: Optional[str], info) -> Optional[str]:
+        if value is None:
+            return None
+        value = value.strip().upper()
+        pattern = r"CVE-\d{4}-\d{4,}" if info.field_name == "cve_id" else r"CWE-\d+"
+        if not re.fullmatch(pattern, value):
+            raise ValueError(f"{info.field_name} must contain one identifier; use identifiers for additional values")
+        return value
     
     # Service/technology fields
     service_name: Optional[str] = Field(None, description="Service name (e.g., 'ssh', 'http')")
@@ -452,4 +510,3 @@ class ASMExportFormat(BaseModel):
             type_breakdown=scan_result.get_type_breakdown(),
             source_breakdown=source_breakdown,
         )
-
