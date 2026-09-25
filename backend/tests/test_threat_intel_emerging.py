@@ -197,6 +197,32 @@ def test_parse_intel_date_rfc3339nano():
     assert _parse_intel_date("2026-08-26") is not None
 
 
+@pytest.mark.asyncio
+async def test_euvd_uses_exploitation_date_in_window():
+    from app.api.routes.threat_intel import _entry_in_window, _fetch_euvd
+
+    class _Response:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def json(self):
+            return [{
+                "id": "EUVD-2026-56844",
+                "aliases": "CVE-2026-71362\nGHSA-example",
+                "datePublished": "Aug 11, 2026, 5:52:48 PM",
+                "exploitedSince": "Sep 24, 2026, 12:00:00 AM",
+            }]
+
+    class _Client:
+        async def get(self, *_args, **_kwargs):
+            return _Response()
+
+    rows = await _fetch_euvd(_Client(), datetime(2026, 8, 25, tzinfo=timezone.utc))
+    assert len(rows) == 1
+    assert rows[0]["cve_id"] == "CVE-2026-71362"
+    assert _entry_in_window(rows[0], datetime(2026, 8, 25, tzinfo=timezone.utc), days=30)
+
+
 def test_merge_keeps_vulncheck_when_cisa_is_recent():
     from datetime import timedelta
     from app.api.routes.threat_intel import _entry_in_window, _merge_intel_sources
