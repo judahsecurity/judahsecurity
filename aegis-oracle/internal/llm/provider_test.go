@@ -2,10 +2,12 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 
+	"github.com/your-org/aegis-oracle/internal/modules/reasoners/intrinsic/prompts"
 	"github.com/your-org/aegis-oracle/pkg/module"
 )
 
@@ -67,4 +69,46 @@ func containsAll(s string, needles ...string) bool {
 		}
 	}
 	return true
+}
+
+func TestOpenAISchemaMakesIntrinsicOptionalsNullable(t *testing.T) {
+	var original map[string]any
+	if err := json.Unmarshal([]byte(prompts.V1OutputSchema), &original); err != nil {
+		t.Fatal(err)
+	}
+	converted, strict := openAISchema(original)
+	if !strict {
+		t.Fatal("intrinsic analysis schema should support strict output")
+	}
+	root := converted.(map[string]any)
+	if _, ok := root["$schema"]; ok {
+		t.Fatal("OpenAI schema must omit the JSON Schema draft declaration")
+	}
+	brief := root["properties"].(map[string]any)["analyst_brief"].(map[string]any)
+	required := brief["required"].([]string)
+	if !strings.Contains(strings.Join(required, ","), "not_affected_if") {
+		t.Fatal("optional analyst brief field must be in required")
+	}
+	optional := brief["properties"].(map[string]any)["not_affected_if"].(map[string]any)
+	types := optional["type"].([]string)
+	if len(types) != 2 || types[0] != "string" || types[1] != "null" {
+		t.Fatalf("optional field must accept null, got %v", types)
+	}
+	if _, ok := original["$schema"]; !ok {
+		t.Fatal("conversion mutated the provider-neutral schema")
+	}
+}
+
+func TestOpenAISchemaLeavesOpenAgentObjectsNonStrict(t *testing.T) {
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"action":    map[string]any{"type": "string"},
+			"tool_args": map[string]any{"type": "object"},
+		},
+	}
+	_, strict := openAISchema(schema)
+	if strict {
+		t.Fatal("open tool arguments cannot use strict structured output")
+	}
 }
