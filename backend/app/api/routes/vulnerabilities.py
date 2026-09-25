@@ -6,7 +6,7 @@ import os
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, case, func, or_
 
@@ -1993,12 +1993,12 @@ class RiskFactorsTriage(BaseModel):
     ``factors`` maps a factor key to ``{score, note}``; a null value clears
     the analyst score so the automatic one applies again. ``exploit_realism``
     sets the realism tier after manual verification (null tier clears it).
-    ``weights`` sets how much each factor counts on this finding (1–4).
+    Factor weights are managed at the organization level, outside triage.
     """
+    model_config = ConfigDict(extra="forbid")
+
     factors: Dict[str, Optional[RiskFactorInput]] = {}
     exploit_realism: Optional[RealismInput] = None
-    # Per-factor weight 1–4 for this finding; null restores the default.
-    weights: Dict[str, Optional[int]] = {}
 
 
 def _risk_model_view(db: Session, vuln: Vulnerability) -> dict:
@@ -2079,7 +2079,6 @@ def triage_finding_risk_factors(
             {k: (v.model_dump() if v is not None else None) for k, v in payload.factors.items()},
             payload.exploit_realism.model_dump() if payload.exploit_realism is not None else None,
             analyst=current_user.email or current_user.username or "unknown",
-            weights=payload.weights,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))

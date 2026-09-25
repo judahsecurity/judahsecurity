@@ -1132,7 +1132,6 @@ class ApiClient {
     payload: {
       factors: Record<string, { score: number; note?: string } | null>;
       exploit_realism?: { tier: string | null; note?: string };
-      weights?: Record<string, number | null>;
     },
   ) {
     const response = await this.client.put(`/vulnerabilities/${vulnId}/risk-factors`, payload);
