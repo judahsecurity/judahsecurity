@@ -406,18 +406,18 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
                 )}
                 <div className="flex gap-2">
                   <select
-                    aria-label={`${label} score`}
+                    aria-label={`${label} rating`}
                     className="h-8 rounded-md border bg-background px-2 text-xs"
                     value={edit.score}
                     onChange={(e) => setEdit(key, { score: e.target.value })}
                   >
-                    <option value="">{needs ? 'Select…' : 'Keep'}</option>
+                    <option value="">{needs ? 'Select rating…' : 'Keep rating'}</option>
                     {options.map(([score, rating]) => (
                       <option key={score} value={score}>
-                        {score} — {rating}
+                        {rating}
                       </option>
                     ))}
-                    {f?.source === 'analyst' && <option value="auto">Use automatic score</option>}
+                    {f?.source === 'analyst' && <option value="auto">Use automatic rating</option>}
                   </select>
                   {(() => {
                     const w = view.weights?.[key];
