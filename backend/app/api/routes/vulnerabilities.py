@@ -294,7 +294,7 @@ def list_vulnerabilities(
     ),
     triage: Optional[str] = Query(
         None,
-        description="Filter by severity triage status: needs_analyst, triaged, incomplete, or not_evaluated",
+        description="Filter by severity triage status: pending, needs_analyst, triaged, incomplete, or not_evaluated",
     ),
     business_app_id: Optional[int] = Query(None, description="Filter by business application"),
     sort: Optional[str] = Query(
@@ -339,7 +339,12 @@ def list_vulnerabilities(
         query = query.filter(Vulnerability.sev_level == risk_level.strip().lower())
     if triage:
         t = triage.strip().lower()
-        if t == "not_evaluated":
+        if t == "pending":
+            query = query.filter(
+                Vulnerability.status.in_([VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS]),
+                or_(Vulnerability.sev_status.is_(None), Vulnerability.sev_status != "triaged"),
+            )
+        elif t == "not_evaluated":
             query = query.filter(Vulnerability.sev_status.is_(None))
         else:
             query = query.filter(Vulnerability.sev_status == t)
@@ -1862,7 +1867,9 @@ def severity_evaluation_summary(
     """Open findings by triage status and risk level — drives the
     'needs triage' queue."""
     open_states = [VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS]
-    base = db.query(Vulnerability).join(Asset).filter(Vulnerability.status.in_(open_states))
+    base = db.query(Vulnerability).join(Asset).filter(
+        Vulnerability.status.in_(open_states), Asset.in_scope.is_(True)
+    )
     if not current_user.is_superuser:
         base = base.filter(Asset.organization_id == current_user.organization_id)
     by_status = dict(
@@ -2213,8 +2220,6 @@ def create_finding_detection_feedback(
             logger.warning(f"Detection pattern evaluation failed: {e}")
 
     return feedback_to_dict(feedback)
-
-
 
 
 

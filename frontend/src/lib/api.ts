@@ -975,6 +975,7 @@ class ApiClient {
     opes_category?: string;
     detected_by?: string;
     sort?: 'risk';
+    triage?: 'pending';
     skip?: number; 
     limit?: number;
   }) {

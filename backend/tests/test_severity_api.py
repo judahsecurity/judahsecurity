@@ -21,7 +21,7 @@ from app.models.netblock import Netblock  # noqa: E402
 from app.models.organization import Organization  # noqa: E402
 from app.models.screenshot import Screenshot  # noqa: E402
 from app.models.user import User  # noqa: E402
-from app.models.vulnerability import Severity, Vulnerability  # noqa: E402
+from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus  # noqa: E402
 
 
 @pytest.fixture()
@@ -85,6 +85,7 @@ def test_analyst_flow(client):
     # The table shows the fields and filters to the triage queue.
     rows = client.get("/vulnerabilities/", params={"triage": "needs_analyst", "sort": "risk"}).json()
     assert len(rows) == 2
+    assert len(client.get("/vulnerabilities/", params={"triage": "pending"}).json()) == 2
     row = next(r for r in rows if r["id"] == 100)
     assert row["sev_network_location"] == 4 and row["sev_status"] == "needs_analyst" and row["sev_pending"] >= 1
 
@@ -103,6 +104,7 @@ def test_analyst_flow(client):
     view = client.put("/vulnerabilities/100/risk-factors",
                       json={"factors": {k: {"score": 3, "note": "checked"} for k in left}}).json()
     assert view["status"] == "triaged"
+    assert len(client.get("/vulnerabilities/", params={"triage": "pending"}).json()) == 1
     # Analyst weights a factor for this finding; the stored score follows.
     before = view["score"]
     view = client.put("/vulnerabilities/100/risk-factors", json={"weights": {"network_location": 4}}).json()
@@ -113,6 +115,12 @@ def test_analyst_flow(client):
     assert [r["id"] for r in rows] == [100]
     assert rows[0]["sev_score"] == pytest.approx(view["score"])
     assert rows[0]["business_app"]["app_id"] == "APM0001234" and rows[0]["business_app"]["inherited_from_asset"]
+
+    db = database.SessionLocal()
+    db.query(Vulnerability).filter(Vulnerability.id == 101).one().status = VulnerabilityStatus.RESOLVED
+    db.commit()
+    db.close()
+    assert client.get("/vulnerabilities/", params={"triage": "pending"}).json() == []
 
 
 def test_cannot_link_another_orgs_app(client):
