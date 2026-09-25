@@ -414,7 +414,7 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
                     <option value="">{needs ? 'Select rating…' : 'Keep rating'}</option>
                     {options.map(([score, rating]) => (
                       <option key={score} value={score}>
-                        {rating}
+                        {rating} ({score})
                       </option>
                     ))}
                     {f?.source === 'analyst' && <option value="auto">Use automatic rating</option>}
