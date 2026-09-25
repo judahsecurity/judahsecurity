@@ -14,6 +14,12 @@ interface OrgWeight {
   source: 'organization' | 'default';
 }
 
+const IMPACT_BASE_WEIGHTS: Record<string, number> = {
+  business_impact: 2,
+  network_location: 1,
+  vulnerability_severity: 7,
+};
+
 const GROUPS: { title: string; keys: [string, string][] }[] = [
   {
     title: 'Impact',
@@ -81,8 +87,9 @@ export function SeverityWeightsCard() {
   };
 
   const shareOf = (keys: [string, string][]) => {
-    const total = keys.reduce((sum, [k]) => sum + (current(k) ?? 0), 0) || 1;
-    return (k: string) => Math.round(((current(k) ?? 0) / total) * 100);
+    const effective = (k: string) => (current(k) ?? 0) * (IMPACT_BASE_WEIGHTS[k] ?? 1);
+    const total = keys.reduce((sum, [k]) => sum + effective(k), 0) || 1;
+    return (k: string) => Math.round((effective(k) / total) * 100);
   };
 
   return (
@@ -94,7 +101,8 @@ export function SeverityWeightsCard() {
         </CardTitle>
         <CardDescription>
           How much each factor counts in Risk = Likelihood × Impact for your organization. Analysts can still
-          change a factor&apos;s weight on an individual finding during triage.
+          change a factor&apos;s weight on an individual finding during triage. Standard weights preserve the
+          impact baseline: 70% vulnerability severity, 20% business impact, 10% network location.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">

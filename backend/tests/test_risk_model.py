@@ -1,7 +1,7 @@
 """Risk model triage layer: arithmetic, weights, analyst overrides.
 
-Worked examples use the default weights (Severity 4, Business Impact 2,
-Network Location 1; likelihood factors 2 each).
+Worked examples use the sheet's 70/20/10 impact baseline with Standard (2)
+selectors; likelihood factors also start at Standard (2).
 """
 
 import pytest
@@ -22,12 +22,12 @@ def _f(bi, nl, vs, skill, disc, exploit, aware):
 @pytest.mark.parametrize(
     "scores, risk, level",
     [
-        (_f(4, 4, 3, 2, 4, 4, 4), 75.0, "critical"),
-        (_f(4, 0, 4, 4, 4, 4, 4), 85.71, "critical"),
-        (_f(3, 2, 2, 3, 4, 3, 4), 50.0, "high"),
-        (_f(1, 1, 2, 2, 3, 3, 2), 24.55, "medium"),
-        (_f(1, 2, 1, 1, 2, 1, 4), 14.29, "low"),
-        (_f(1, 0, 1, 1, 1, 0, 0), 2.68, "informational"),
+        (_f(4, 4, 3, 2, 4, 4, 4), 72.19, "critical"),
+        (_f(4, 0, 4, 4, 4, 4, 4), 90.0, "critical"),
+        (_f(3, 2, 2, 3, 4, 3, 4), 48.13, "high"),
+        (_f(1, 1, 2, 2, 3, 3, 2), 26.56, "medium"),
+        (_f(1, 2, 1, 1, 2, 1, 4), 13.75, "low"),
+        (_f(1, 0, 1, 1, 1, 0, 0), 2.81, "informational"),
         (_f(4, 4, 4, 0, 0, 0, 0), 0.0, "informational"),
     ],
 )
@@ -40,8 +40,18 @@ def test_worked_examples(scores, risk, level):
 def test_realism_caps_likelihood():
     maxed = _f(4, 4, 4, 4, 4, 4, 4)
     assert score_factors(maxed, "blocked")["score"] == 0
+    assert score_factors(_f(0, 0, 0, 4, 4, 4, 4))["score"] == 0
     assert score_factors(maxed, "conditional")["likelihood"] == 2.0
     assert score_factors(maxed, "conditional")["likelihood_uncapped"] == 4.0
+
+
+def test_default_impact_split_matches_sheet():
+    scores = _f(0, 0, 0, 4, 4, 4, 4)
+    for key, expected in (("business_impact", 0.2), ("network_location", 0.1),
+                          ("vulnerability_severity", 0.7)):
+        scores[key] = 4
+        assert score_factors(scores)["impact"] == pytest.approx(4 * expected)
+        scores[key] = 0
 
 
 def _auto(**overrides):
@@ -85,8 +95,8 @@ def test_assumed_factors_need_analyst_until_set():
     assert bi["source"] == "analyst" and bi["score"] == 1 and bi["rating"] == "Low"
     assert bi["reason"] == "Marketing microsite, no customer data"
     assert bi["auto"]["score"] == 2  # automatic value kept for comparison
-    # Impact (2·1 + 1·2 + 4·4)/7 = 2.857; likelihood 3.75 → 66.96 critical
-    assert view["score"] == pytest.approx(66.96)
+    # Impact 0.2·1 + 0.1·2 + 0.7·4 = 3.2; likelihood 3.75 → 75 critical.
+    assert view["score"] == pytest.approx(75.0)
 
 
 def test_clearing_an_override_restores_auto():
@@ -101,6 +111,21 @@ def test_analyst_realism_verification():
     view = merged_risk_model(_auto(), overrides)
     assert view["exploit_realism"]["source"] == "analyst"
     assert view["score"] == 0 and view["level"] == "informational"
+
+
+def test_realism_override_recomputes_auto_exploit_factor():
+    auto = _auto(ease_of_exploit={"score": 0, "rating": "Not Exploitable Here",
+                                  "reason": "PoC, but blocked on this asset", "source": "auto",
+                                  "uncapped": {"score": 3, "rating": "Easy", "reason": "PoC", "source": "auto"}})
+    auto["exploit_realism"] = {"score": 0, "tier": "blocked", "reasons": ["module disabled"]}
+    confirmed = apply_overrides({}, {}, {"tier": "confirmed", "note": "module enabled"}, analyst="a")
+    view = merged_risk_model(auto, confirmed)
+    assert view["factors"]["ease_of_exploit"]["score"] == 3
+    assert view["factors"]["ease_of_exploit"]["rating"] == "Easy"
+    assert view["score"] > 0
+
+    manual = apply_overrides(confirmed, {"ease_of_exploit": {"score": 1, "note": "manual test"}}, None, analyst="a")
+    assert merged_risk_model(auto, manual)["factors"]["ease_of_exploit"]["score"] == 1
 
 
 def test_missing_oracle_output_is_incomplete():
@@ -138,9 +163,9 @@ def test_weights_change_the_score():
     weighted = score_factors(scores, weights={"business_impact": 4, "vulnerability_severity": 1, "ease_of_exploit": 4})
     assert weighted["impact"] < base["impact"]  # low business impact now dominates
     assert weighted["likelihood"] < base["likelihood"]
-    # Equal weights reduce to plain means.
+    # Equal selectors preserve the impact baseline and equalize likelihood.
     equal = score_factors(scores, weights={k: 3 for k in FACTOR_KEYS})
-    assert equal["impact"] == pytest.approx(3.0) and equal["likelihood"] == pytest.approx(2.5)
+    assert equal["impact"] == pytest.approx(3.4) and equal["likelihood"] == pytest.approx(2.5)
 
 
 def test_analyst_weights_are_stored_and_reset():

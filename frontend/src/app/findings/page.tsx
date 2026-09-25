@@ -918,6 +918,7 @@ export default function FindingsPage() {
   const [onlyKev, setOnlyKev] = useState(false);
   const [onlyAgent, setOnlyAgent] = useState(false);
   const [onlyNeedsTriage, setOnlyNeedsTriage] = useState(false);
+  const [severitySummary, setSeveritySummary] = useState<{ triage: { needs_analyst: number; incomplete: number; not_evaluated: number } } | null>(null);
   const [severityEvalBusy, setSeverityEvalBusy] = useState(false);
   const [oracleBatchBusy, setOracleBatchBusy] = useState(false);
   const [capturingScreenshot, setCapturingScreenshot] = useState(false);
@@ -1787,20 +1788,24 @@ export default function FindingsPage() {
     setError(null);
     try {
       // Fetch findings and summary in parallel
-      const [findingsData, summaryData] = await Promise.all([
+      const [findingsData, summaryData, severityData] = await Promise.all([
         api.getFindings({
           // Top chips filter by OPES priority score (scanner severity as unscored fallback)
           opes_category: selectedSeverity || undefined,
           detected_by: onlyAgent ? 'agent' : undefined,
+          sort: sortMode === 'risk' ? 'risk' : undefined,
+          triage: onlyNeedsTriage ? 'pending' : undefined,
           limit: 100,
         }),
         api.getFindingsSummary(),
+        api.getSeverityEvaluationSummary().catch(() => null),
       ]);
 
       // Handle both array and paginated responses
       const items = Array.isArray(findingsData) ? findingsData : (findingsData.items || []);
       setFindings(items);
       setStats(summaryData);
+      setSeveritySummary(severityData);
     } catch (err: any) {
       console.error('Failed to fetch findings:', err);
       // Provide more specific error message
@@ -1818,11 +1823,14 @@ export default function FindingsPage() {
 
   useEffect(() => {
     fetchData();
+  }, [selectedSeverity, onlyAgent, onlyNeedsTriage, sortMode]);
+
+  useEffect(() => {
     // Grab the first org for template generation
     api.getOrganizations().then((orgs: any[]) => {
       if (orgs?.length) setFirstOrgId(orgs[0].id);
     }).catch(() => {});
-  }, [selectedSeverity, onlyAgent]);
+  }, []);
 
   const handleSearch = (query: string) => {
     setSearchQuery(query);
@@ -1920,7 +1928,6 @@ export default function FindingsPage() {
       if (!matchesSearch) return false;
       if (onlyKev && !f.delphi?.kev) return false;
       if (onlyAgent && (f.detected_by || '').toLowerCase() !== 'agent') return false;
-      if (onlyNeedsTriage && f.sev_status === 'triaged') return false;
       return true;
     })
     .sort((a, b) => {
@@ -1973,7 +1980,9 @@ export default function FindingsPage() {
   const kevCount = findings.filter((f) => f.delphi?.kev).length;
   const ransomwareCount = findings.filter((f) => isRansomwareKev(f.delphi?.kev)).length;
   const agentCount = findings.filter((f) => (f.detected_by || '').toLowerCase() === 'agent').length;
-  const needsTriageCount = findings.filter((f) => f.sev_status !== 'triaged').length;
+  const needsTriageCount = severitySummary
+    ? severitySummary.triage.needs_analyst + severitySummary.triage.incomplete + severitySummary.triage.not_evaluated
+    : findings.filter((f) => f.sev_status !== 'triaged').length;
 
   // Keep the table row in step with the triage panel after a save.
   const applyRiskView = (findingId: number, view: RiskFactorsView, businessApp?: BusinessAppSummary | null) => {
@@ -1988,8 +1997,11 @@ export default function FindingsPage() {
       (patch as Record<string, unknown>)[`sev_${key}`] = f.score;
     }
     if (businessApp !== undefined) patch.business_app = businessApp;
-    setFindings((prev) => prev.map((f) => (f.id === findingId ? { ...f, ...patch } : f)));
+    setFindings((prev) => prev
+      .filter((f) => !(onlyNeedsTriage && f.id === findingId && view.status === 'triaged'))
+      .map((f) => (f.id === findingId ? { ...f, ...patch } : f)));
     setSelectedFinding((prev) => (prev && prev.id === findingId ? { ...prev, ...patch } : prev));
+    api.getSeverityEvaluationSummary().then(setSeveritySummary).catch(() => {});
   };
 
   const handleSeverityEvaluateAll = async () => {

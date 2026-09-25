@@ -256,6 +256,7 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
   };
 
   const realism = view.exploit_realism;
+  const hasFactorGaps = view.needs_analyst.some((key) => key !== 'exploit_realism');
 
   return (
     <div className="rounded-lg border p-3 space-y-3">
@@ -269,13 +270,13 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
         {view.needs_analyst.length > 0 && (
           <Badge variant="outline" className="border-amber-500/40 text-amber-400">
             <AlertTriangle className="h-3 w-3 mr-1" />
-            {view.needs_analyst.length} factor{view.needs_analyst.length > 1 ? 's' : ''} need triage
+            {view.needs_analyst.length} item{view.needs_analyst.length > 1 ? 's' : ''} need triage
           </Badge>
         )}
         {view.status === 'triaged' && (
           <Badge variant="outline" className="border-green-500/40 text-green-400">Triaged</Badge>
         )}
-        {view.needs_analyst.length > 0 && (
+        {hasFactorGaps && (
           <Button size="sm" variant="outline" className="ml-auto h-7 text-xs" disabled={asking} onClick={askAgent}>
             {asking ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Bot className="h-3.5 w-3.5 mr-1" />}
             Ask agent to estimate
@@ -339,7 +340,7 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
       {view.impact !== undefined && (
         <p className="text-xs text-muted-foreground">
           Impact {view.impact.toFixed(2)}/4 × Likelihood {view.likelihood?.toFixed(2)}/4
-          <span className="opacity-70"> (weighted averages of the factors below)</span>
+          <span className="opacity-70"> (impact starts at 70% severity, 20% business, 10% location; weights adjust each share)</span>
           {view.likelihood_uncapped !== undefined && view.likelihood !== undefined && view.likelihood_uncapped > view.likelihood && (
             <span className="text-yellow-400"> (capped from {view.likelihood_uncapped.toFixed(2)} by exploit realism)</span>
           )}
@@ -464,7 +465,8 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
 
       <div className="space-y-1.5">
         <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Exploit Realism</p>
-        <div className="rounded-md border p-2 space-y-1.5">
+        <div className={cn('rounded-md border p-2 space-y-1.5',
+          view.needs_analyst.includes('exploit_realism') && 'border-amber-500/50')}>
           <div className="flex items-center gap-2 text-xs flex-wrap">
             <span className="font-medium capitalize">{realism?.tier ?? 'unknown'}</span>
             {realism?.source === 'analyst' && (
@@ -476,6 +478,9 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
           {realism?.reasons?.map((r, i) => (
             <p key={i} className="text-xs text-muted-foreground">• {r}</p>
           ))}
+          {view.needs_analyst.includes('exploit_realism') && (
+            <p className="text-xs text-amber-400">Conflicting evidence needs analyst verification.</p>
+          )}
           <div className="flex gap-2">
             <select
               aria-label="Exploit realism"

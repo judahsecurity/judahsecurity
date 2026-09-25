@@ -21,7 +21,7 @@ from app.models.netblock import Netblock  # noqa: E402
 from app.models.organization import Organization  # noqa: E402
 from app.models.screenshot import Screenshot  # noqa: E402
 from app.models.user import User  # noqa: E402
-from app.models.vulnerability import Severity, Vulnerability  # noqa: E402
+from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus  # noqa: E402
 
 
 @pytest.fixture()
@@ -85,6 +85,7 @@ def test_analyst_flow(client):
     # The table shows the fields and filters to the triage queue.
     rows = client.get("/vulnerabilities/", params={"triage": "needs_analyst", "sort": "risk"}).json()
     assert len(rows) == 2
+    assert len(client.get("/vulnerabilities/", params={"triage": "pending"}).json()) == 2
     row = next(r for r in rows if r["id"] == 100)
     assert row["sev_network_location"] == 4 and row["sev_status"] == "needs_analyst" and row["sev_pending"] >= 1
 
@@ -103,6 +104,7 @@ def test_analyst_flow(client):
     view = client.put("/vulnerabilities/100/risk-factors",
                       json={"factors": {k: {"score": 3, "note": "checked"} for k in left}}).json()
     assert view["status"] == "triaged"
+    assert len(client.get("/vulnerabilities/", params={"triage": "pending"}).json()) == 1
     # Analyst weights a factor for this finding; the stored score follows.
     before = view["score"]
     view = client.put("/vulnerabilities/100/risk-factors", json={"weights": {"network_location": 4}}).json()
@@ -114,10 +116,44 @@ def test_analyst_flow(client):
     assert rows[0]["sev_score"] == pytest.approx(view["score"])
     assert rows[0]["business_app"]["app_id"] == "APM0001234" and rows[0]["business_app"]["inherited_from_asset"]
 
+    db = database.SessionLocal()
+    db.query(Vulnerability).filter(Vulnerability.id == 101).one().status = VulnerabilityStatus.RESOLVED
+    db.commit()
+    db.close()
+    assert client.get("/vulnerabilities/", params={"triage": "pending"}).json() == []
+
 
 def test_cannot_link_another_orgs_app(client):
     assert client.put("/business-apps/findings/100", json={"business_app_id": 6}).status_code == 404
     assert client.put("/business-apps/assets/20", json={"business_app_id": 5}).status_code == 403
+
+
+def test_realism_override_refreshes_capped_exploit_factor(client):
+    import app.db.database as database
+
+    db = database.SessionLocal()
+    vuln = db.query(Vulnerability).filter(Vulnerability.id == 100).one()
+    vuln.cve_id = "CVE-2099-0001"
+    vuln.cvss_score = 9.8
+    vuln.metadata_ = {"oracle": {
+        "exploitation_evidence": {"public_poc_found": True},
+        "preconditions_evaluated": [{
+            "precondition": {"id": "module", "description": "module enabled", "severity": "blocker"},
+            "status": "unsatisfied",
+        }],
+    }}
+    db.commit()
+    db.close()
+
+    before = client.get("/vulnerabilities/100/risk-factors").json()
+    assert before["exploit_realism"]["tier"] == "blocked"
+    assert before["factors"]["ease_of_exploit"]["score"] == 0
+
+    after = client.put("/vulnerabilities/100/risk-factors", json={
+        "exploit_realism": {"tier": "confirmed", "note": "module enabled in manual verification"},
+    }).json()
+    assert after["factors"]["ease_of_exploit"]["score"] == 3
+    assert after["score"] > 0
 
 
 def test_org_default_weights(client):
@@ -127,7 +163,7 @@ def test_org_default_weights(client):
     client.post("/vulnerabilities/severity-evaluation/run", json={"only_missing": True})
     tick(database.SessionLocal)
     before = client.get("/vulnerabilities/101/risk-factors").json()
-    assert before["weights"]["network_location"] == {"weight": 1, "source": "default", "default": 1}
+    assert before["weights"]["network_location"] == {"weight": 2, "source": "default", "default": 2}
 
     got = client.put("/vulnerabilities/severity-evaluation/weights", json={"weights": {"network_location": 4}}).json()
     assert got["weights"]["network_location"]["source"] == "organization"
