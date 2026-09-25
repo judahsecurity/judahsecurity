@@ -17,7 +17,7 @@ from datetime import datetime
 import re
 from typing import Optional, List, Dict, Any, Union, Literal
 from enum import Enum
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class ResultType(str, Enum):
@@ -152,6 +152,23 @@ class UnifiedFinding(BaseModel):
         if not re.fullmatch(pattern, value):
             raise ValueError(f"{info.field_name} must contain one identifier; use identifiers for additional values")
         return value
+
+    @model_validator(mode="after")
+    def evidence_targets_are_reported(self):
+        if self.affected_targets:
+            def key(target: AffectedTarget):
+                return (
+                    target.asset_value,
+                    target.port,
+                    (target.protocol or ("tcp" if target.port else "")).lower(),
+                    target.url,
+                )
+
+            reported = {key(target) for target in self.affected_targets}
+            for item in self.evidence_items:
+                if item.target and key(item.target) not in reported:
+                    raise ValueError("evidence target must match one affected_targets endpoint")
+        return self
     
     # Service/technology fields
     service_name: Optional[str] = Field(None, description="Service name (e.g., 'ssh', 'http')")

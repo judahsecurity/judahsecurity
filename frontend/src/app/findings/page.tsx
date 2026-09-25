@@ -143,34 +143,21 @@ interface DelphiEnrichment {
 interface Finding {
   id: number;
   finding_key?: string;
-  affected_targets?: Array<{
+  target_value?: string | null;
+  target_asset_type?: string | null;
+  target_port?: number | null;
+  target_protocol?: string | null;
+  target_service_name?: string | null;
+  target_url?: string | null;
+  target_verification?: string | null;
+  source_record_id?: string | null;
+  evidence_items?: Array<{
     id: number;
-    asset_id: number;
-    value: string | null;
-    asset_type: string | null;
-    port: number | null;
-    protocol: string | null;
-    service_name: string | null;
-    url: string | null;
-    verification: string;
-    last_seen: string;
-  }>;
-  identifiers?: Array<{ kind: string; value: string }>;
-  observations?: Array<{
-    id: number;
+    kind: string;
+    value: string;
+    observed_at: string | null;
     source: string;
-    source_instance: string;
     source_record_id: string | null;
-    rule_id: string | null;
-    title: string | null;
-    severity: string | null;
-    confidence: string | null;
-    description: string | null;
-    target_ids: number[];
-    evidence_items: Array<{ id: number; target_id: number | null; kind: string; value: string; observed_at: string | null }>;
-    first_seen: string;
-    last_seen: string;
-    seen_count: number;
   }>;
   title: string;
   name?: string;
@@ -1981,6 +1968,8 @@ export default function FindingsPage() {
         String(f.id).includes(searchLower) ||
         (f.title || f.name || '').toLowerCase().includes(searchLower) ||
         (f.host || '').toLowerCase().includes(searchLower) ||
+        (f.target_value || '').toLowerCase().includes(searchLower) ||
+        (f.target_port != null && `${f.target_value || f.host}:${f.target_port}`.toLowerCase().includes(searchLower)) ||
         (f.template_id || '').toLowerCase().includes(searchLower) ||
         (f.description || '').toLowerCase().includes(searchLower) ||
         (f.cve_id || '').toLowerCase().includes(searchLower);
@@ -2383,7 +2372,7 @@ export default function FindingsPage() {
                 <TableHead className="w-[125px]" title="OPES exploit priority; scanner severity when OPES is unavailable">Exploit priority</TableHead>
                 <TableHead className="w-[150px]" title="Likelihood × impact score and analyst triage state">Risk / triage</TableHead>
                 <TableHead className="min-w-[300px]">Finding</TableHead>
-                <TableHead>Asset / app</TableHead>
+                <TableHead>Target / app</TableHead>
                 <TableHead className="w-[150px]">Status / owner</TableHead>
                 <TableHead>Last seen</TableHead>
                 <TableHead className="w-[50px]"></TableHead>
@@ -2481,7 +2470,14 @@ export default function FindingsPage() {
                       </div>
                     </TableCell>
                     <TableCell>
-                      <span className="font-mono text-xs break-all">{finding.host || 'Unlinked'}</span>
+                      <span className="font-mono text-xs break-all">
+                        {finding.target_value || finding.host || 'Unlinked'}
+                        {finding.target_port != null && `:${finding.target_port}`}
+                        {finding.target_protocol && `/${finding.target_protocol}`}
+                      </span>
+                      {finding.target_service_name && (
+                        <span className="mt-1 block text-xs text-muted-foreground">{finding.target_service_name}</span>
+                      )}
                       {finding.business_app && (
                         <span className="mt-1 block max-w-[200px] truncate text-xs text-muted-foreground" title={finding.business_app.name}>
                           {finding.business_app.app_id} {finding.business_app.name}
@@ -2592,26 +2588,29 @@ export default function FindingsPage() {
                 <p className="text-sm leading-relaxed text-muted-foreground">
                   {findingSummary(selectedFinding?.description)}
                 </p>
-                {mentionedIpCount(selectedFinding?.description) > 1 && (selectedFinding?.affected_targets?.length || 0) <= 1 && (
+                {mentionedIpCount(selectedFinding?.description) > 1 && (
                   <p className="text-xs text-amber-400">
-                    The description mentions {mentionedIpCount(selectedFinding?.description)} IP addresses. This record links to one asset; confirm the scope in Evidence.
+                    This legacy description mentions several IPs. This finding applies only to the target below; review the other endpoints separately.
                   </p>
                 )}
               </section>
-              {(selectedFinding?.affected_targets?.length || 0) > 0 && (
-                <section className="rounded-lg border border-border p-4 space-y-2">
-                  <h3 className="text-sm font-semibold">Reported targets</h3>
-                  <div className="grid gap-1.5 sm:grid-cols-2">
-                    {selectedFinding?.affected_targets?.map((target) => (
-                      <div key={target.id} className="rounded border border-border/60 px-2 py-1.5 text-xs font-mono break-all">
-                        {target.value || `Asset ${target.asset_id}`}
-                        {target.port != null && <span className="text-muted-foreground">:{target.port}{target.protocol ? `/${target.protocol}` : ''}</span>}
-                        {target.service_name && <span className="ml-1 text-muted-foreground">{target.service_name}</span>}
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              )}
+              <section className="rounded-lg border border-border p-4 space-y-2">
+                <h3 className="text-sm font-semibold">Target</h3>
+                <p className="text-sm font-mono break-all">
+                  {selectedFinding?.target_value || selectedFinding?.host || 'Unknown asset'}
+                  {selectedFinding?.target_port != null && <span>:{selectedFinding.target_port}</span>}
+                  {selectedFinding?.target_protocol && <span className="text-muted-foreground">/{selectedFinding.target_protocol}</span>}
+                </p>
+                {selectedFinding?.target_service_name && (
+                  <p className="text-xs text-muted-foreground">Service: {selectedFinding.target_service_name}</p>
+                )}
+                {selectedFinding?.target_url && (
+                  <p className="text-xs font-mono break-all text-muted-foreground">{selectedFinding.target_url}</p>
+                )}
+                <p className="text-xs text-muted-foreground">
+                  {selectedFinding?.target_verification === 'confirmed' ? 'Confirmed endpoint' : 'Reported endpoint'}
+                </p>
+              </section>
               {/* Quick Info Grid */}
               <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                 <div className="flex items-start gap-2">
@@ -2967,8 +2966,6 @@ export default function FindingsPage() {
               <FindingWriteup
                 description={selectedFinding?.description}
                 impact={selectedFinding?.impact}
-                assets={selectedFinding?.agent_detection?.assets}
-                host={selectedFinding?.host}
                 affectedComponent={selectedFinding?.affected_component}
                 recommendation={undefined}
                 references={
@@ -2989,51 +2986,20 @@ export default function FindingsPage() {
               </div>
 
               <div hidden={activeFindingTab !== 'evidence'} className="space-y-6">
-              {(selectedFinding?.observations?.length || 0) > 0 && (
+              {(selectedFinding?.evidence_items?.length || 0) > 0 && (
                 <section className="space-y-2">
-                  <h3 className="text-sm font-semibold">Source observations</h3>
-                  <p className="text-xs text-muted-foreground">Each source record is tracked separately from this finding.</p>
+                  <h3 className="text-sm font-semibold">Structured evidence</h3>
                   <div className="space-y-2">
-                    {selectedFinding?.observations?.map((observation) => (
-                      <details key={observation.id} className="rounded-lg border border-border p-3 text-sm">
-                        <summary className="cursor-pointer list-none flex flex-wrap items-center gap-x-2 gap-y-1">
-                          <span className="font-medium">{observation.source}</span>
-                          {observation.rule_id && <code className="text-xs text-muted-foreground">{observation.rule_id}</code>}
-                          <span className="text-xs text-muted-foreground ml-auto">Last seen {formatDate(observation.last_seen)}</span>
-                        </summary>
-                        <div className="mt-3 space-y-1.5 text-xs text-muted-foreground break-all">
-                          {observation.source_record_id && <p>Source ID: <code>{observation.source_record_id}</code></p>}
-                          {observation.target_ids.length > 0 && (
-                            <div className="flex flex-wrap gap-1">
-                              {selectedFinding?.affected_targets
-                                ?.filter((target) => observation.target_ids.includes(target.id))
-                                .map((target) => (
-                                  <Badge key={target.id} variant="outline" className="font-mono text-xs">
-                                    {target.value || `Asset ${target.asset_id}`}{target.port != null ? `:${target.port}` : ''}
-                                  </Badge>
-                                ))}
-                            </div>
-                          )}
-                          <p>Seen {observation.seen_count} {observation.seen_count === 1 ? 'time' : 'times'} since {formatDate(observation.first_seen)}</p>
-                          {observation.description && <p className="whitespace-pre-wrap">{observation.description}</p>}
-                          {observation.evidence_items.map((item) => (
-                            <div key={item.id} className="rounded bg-muted/40 p-2">
-                              <p className="font-medium">
-                                {item.kind}
-                                {item.target_id != null && (
-                                  <span className="ml-2 font-normal">
-                                    {(() => {
-                                      const target = selectedFinding?.affected_targets?.find((entry) => entry.id === item.target_id);
-                                      return target ? `${target.value || `Asset ${target.asset_id}`}${target.port != null ? `:${target.port}` : ''}` : '';
-                                    })()}
-                                  </span>
-                                )}
-                              </p>
-                              <pre className="whitespace-pre-wrap break-all">{item.value}</pre>
-                            </div>
-                          ))}
+                    {selectedFinding?.evidence_items?.map((item) => (
+                      <div key={item.id} className="rounded-lg border border-border p-3 text-sm">
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                          <span className="font-medium text-foreground capitalize">{item.kind}</span>
+                          <span>{item.source}</span>
+                          {item.source_record_id && <code>{item.source_record_id}</code>}
+                          {item.observed_at && <span className="ml-auto">{formatDate(item.observed_at)}</span>}
                         </div>
-                      </details>
+                        <pre className="mt-2 whitespace-pre-wrap break-all text-xs">{item.value}</pre>
+                      </div>
                     ))}
                   </div>
                 </section>

@@ -18,7 +18,7 @@ from app.models.scan_profile import ScanProfile, DEFAULT_PROFILES
 from app.models.netblock import Netblock  # Import to ensure table creation
 from app.models.finding_exception import FindingException  # Required for Vulnerability relationship resolution
 from app.models.finding_provenance import (  # noqa: F401 — provenance tables
-    FindingTarget, FindingObservation, FindingObservationTarget, FindingEvidence, FindingIdentifier,
+    FindingObservation, FindingEvidence, FindingIdentifier,
 )
 from app.models.jira_integration import JiraIntegration, JiraTicket  # noqa: F401 — ensure tables are created
 from app.models.servicenow_integration import ServiceNowIntegration, ServiceNowDelivery  # noqa: F401 — ensure tables are created

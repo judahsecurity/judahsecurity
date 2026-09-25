@@ -7,9 +7,7 @@ from app.models.asset import Asset, AssetType, AssetStatus
 from app.models.sitemap_entry import SitemapEntry
 from app.models.finding_exception import FindingException, ExceptionType, ExceptionStatus
 from app.models.vulnerability import Vulnerability, Severity, VulnerabilityStatus
-from app.models.finding_provenance import (
-    FindingTarget, FindingObservation, FindingObservationTarget, FindingEvidence, FindingIdentifier,
-)
+from app.models.finding_provenance import FindingObservation, FindingEvidence, FindingIdentifier
 from app.models.finding_validation import (
     FindingValidation,
     ValidationStatus,
@@ -81,9 +79,7 @@ __all__ = [
     "Vulnerability",
     "Severity",
     "VulnerabilityStatus",
-    "FindingTarget",
     "FindingObservation",
-    "FindingObservationTarget",
     "FindingEvidence",
     "FindingIdentifier",
     "FindingValidation",
