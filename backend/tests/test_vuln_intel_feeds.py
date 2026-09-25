@@ -173,3 +173,32 @@ def test_vulncheck_cache_only_skips_network(monkeypatch, tmp_path):
 
     monkeypatch.setattr("app.services.vuln_intel_feeds._http_get_json", _fail)
     assert fetch_vulncheck_kev("token", cache_only=True) == {}
+
+
+def test_parallel_cache_reads_keep_the_configured_directory(monkeypatch, tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from app.services.vuln_intel_feeds import read_json_cache, write_json_cache
+
+    monkeypatch.setenv("DELPHI_CACHE_DIR", str(tmp_path))
+    payload = {"vulnerabilities": [{"cveID": "CVE-2026-1234"}]}
+    write_json_cache("cisa_kev.json", payload)
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        results = list(pool.map(lambda _: read_json_cache("cisa_kev.json"), range(128)))
+
+    assert results == [payload] * 128
+
+
+def test_cache_read_does_not_require_write_probe(monkeypatch, tmp_path):
+    from app.services import vuln_intel_feeds
+
+    monkeypatch.setenv("DELPHI_CACHE_DIR", str(tmp_path))
+    payload = {"rows": [{"cveID": "CVE-2026-5678"}]}
+    (tmp_path / "enisa_eukev.json").write_text(json.dumps(payload))
+
+    def no_write_probe():
+        raise AssertionError("cache reads must not probe write access")
+
+    monkeypatch.setattr(vuln_intel_feeds, "_cache_dir", no_write_probe)
+
+    assert vuln_intel_feeds.read_json_cache("enisa_eukev.json") == payload

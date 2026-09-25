@@ -19,6 +19,7 @@ import io
 import json
 import logging
 import os
+import tempfile
 import threading
 import time
 import urllib.error
@@ -48,10 +49,11 @@ def _cache_dir() -> str:
     path = os.environ.get("DELPHI_CACHE_DIR") or "/tmp/delphi_cache"
     try:
         os.makedirs(path, exist_ok=True)
-        probe = os.path.join(path, ".write_test")
-        with open(probe, "w", encoding="utf-8") as fh:
-            fh.write("ok")
-        os.remove(probe)
+        # Feed requests read several caches concurrently. A fixed probe name
+        # lets one request delete another's probe and falsely select /tmp.
+        fd, probe = tempfile.mkstemp(prefix=".write_test.", dir=path)
+        os.close(fd)
+        os.unlink(probe)
         return path
     except OSError:
         fallback = "/tmp/delphi_cache"
@@ -115,13 +117,17 @@ def write_json_cache(filename: str, payload: Any) -> str:
 
 
 def read_json_cache(filename: str) -> Any:
-    path = os.path.join(_cache_dir(), filename)
-    if not os.path.exists(path):
-        return None
-    try:
-        return _read_json(path)
-    except Exception:
-        return None
+    # Reading must not depend on write permission or race with a write probe.
+    configured = os.environ.get("DELPHI_CACHE_DIR") or "/tmp/delphi_cache"
+    paths = [os.path.join(configured, filename)]
+    if configured != "/tmp/delphi_cache":
+        paths.append(os.path.join("/tmp/delphi_cache", filename))
+    for path in paths:
+        try:
+            return _read_json(path)
+        except Exception:
+            continue
+    return None
 
 
 def fetch_cisa_kev_catalog(*, force: bool = False, refresh_hours: int = 24) -> List[Dict[str, Any]]:
