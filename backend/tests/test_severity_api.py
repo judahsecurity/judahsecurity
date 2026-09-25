@@ -103,11 +103,10 @@ def test_analyst_flow(client):
     view = client.put("/vulnerabilities/100/risk-factors",
                       json={"factors": {k: {"score": 3, "note": "checked"} for k in left}}).json()
     assert view["status"] == "triaged"
-    # Analyst weights a factor for this finding; the stored score follows.
-    before = view["score"]
-    view = client.put("/vulnerabilities/100/risk-factors", json={"weights": {"network_location": 4}}).json()
-    assert view["weights"]["network_location"]["weight"] == 4 and view["score"] != before
-    assert client.put("/vulnerabilities/100/risk-factors", json={"weights": {"awareness": 7}}).status_code == 422
+    # Analysts choose ratings on findings; weights are only changed in organization settings.
+    assert client.put("/vulnerabilities/100/risk-factors",
+                      json={"weights": {"network_location": 4}}).status_code == 422
+    assert client.get("/vulnerabilities/100/risk-factors").json()["score"] == view["score"]
 
     rows = client.get("/vulnerabilities/", params={"triage": "triaged"}).json()
     assert [r["id"] for r in rows] == [100]
