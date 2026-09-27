@@ -456,7 +456,7 @@ services:
       - SEVERITY_AGENT_AUTO=${SEVERITY_AGENT_AUTO:-false}
       - SEVERITY_AGENT_WORKERS=${SEVERITY_AGENT_WORKERS:-2}
     depends_on:
-      db:
+      backend:
         condition: service_healthy
     command: ["python", "-m", "app.workers.severity_worker"]
     healthcheck:

@@ -55,16 +55,19 @@ rollback() {
   mapfile -t available < <(sudo docker compose config --services)
   build_services=()
   run_services=()
-  for service in backend scanner intel-refresher frontend aegis-oracle; do
+  for service in backend scanner intel-refresher severity-worker frontend aegis-oracle; do
     if printf '%s\n' "${available[@]}" | grep -qx "$service"; then
       build_services+=("$service")
     fi
   done
-  for service in oast-worker backend scanner scheduler intel-refresher frontend aegis-oracle neo4j nginx; do
+  for service in oast-worker backend scanner scheduler intel-refresher severity-worker frontend aegis-oracle neo4j nginx; do
     if printf '%s\n' "${available[@]}" | grep -qx "$service"; then
       run_services+=("$service")
     fi
   done
+  if ! printf '%s\n' "${available[@]}" | grep -qx severity-worker; then
+    sudo docker rm -f asm_severity_worker 2>/dev/null || true
+  fi
   sudo docker compose build "${build_services[@]}"
   sudo docker compose up -d "${run_services[@]}"
   # Nginx resolves Compose service names when its configuration is loaded.
@@ -103,10 +106,10 @@ find backups -type f -name 'pre-deploy-*.sql.gz' -mtime +14 -delete
 
 echo "[4/7] Building images"
 # scanner and scheduler intentionally share SCANNER_IMAGE; build it once.
-sudo docker compose build backend scanner intel-refresher frontend aegis-oracle
+sudo docker compose build backend scanner intel-refresher severity-worker frontend aegis-oracle
 
 echo "[5/7] Starting services"
-sudo docker compose up -d oast-worker backend scanner scheduler intel-refresher frontend aegis-oracle neo4j nginx
+sudo docker compose up -d oast-worker backend scanner scheduler intel-refresher severity-worker frontend aegis-oracle neo4j nginx
 # Re-resolve backend and frontend service names after Compose recreates them.
 sudo docker compose restart nginx
 

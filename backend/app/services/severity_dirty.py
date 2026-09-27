@@ -185,6 +185,16 @@ def mark_all_open(db: Session, organization_id: int | None = None) -> int:
     return result.rowcount or 0
 
 
+def mark_all_findings(db: Session) -> int:
+    """Queue every finding for a full sweep, including closed findings."""
+    from app.models.vulnerability import Vulnerability
+
+    result = db.execute(
+        update(Vulnerability.__table__).values(sev_dirty=True, sev_dirty_at=datetime.utcnow())
+    )
+    return result.rowcount or 0
+
+
 def clear_dirty(db: Session, vuln_ids: Iterable[int], started: datetime) -> None:
     """Clear the flag unless the finding changed again after ``started``."""
     from app.models.vulnerability import Vulnerability

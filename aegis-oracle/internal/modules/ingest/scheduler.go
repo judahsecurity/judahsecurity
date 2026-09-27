@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -42,18 +43,18 @@ type SchedulerStore interface {
 
 // SchedulerIntervals controls how often each background sync job runs.
 type SchedulerIntervals struct {
-	NVDDelta      time.Duration // default: 1h   — recently-modified CVE delta from NVD
-	CISAKEV       time.Duration // default: 6h   — full CISA KEV catalogue refresh
-	EPSS          time.Duration // default: 12h  — EPSS score refresh for recent CVEs
+	NVDDelta       time.Duration // default: 1h   — recently-modified CVE delta from NVD
+	CISAKEV        time.Duration // default: 6h   — full CISA KEV catalogue refresh
+	EPSS           time.Duration // default: 12h  — EPSS score refresh for recent CVEs
 	AnalyzePending time.Duration // default: 15m  — auto Phase-A analysis of unanalyzed CVEs
 }
 
 // DefaultIntervals returns conservative production-ready intervals.
 func DefaultIntervals() SchedulerIntervals {
 	return SchedulerIntervals{
-		NVDDelta:      time.Hour,
-		CISAKEV:       6 * time.Hour,
-		EPSS:          12 * time.Hour,
+		NVDDelta:       time.Hour,
+		CISAKEV:        6 * time.Hour,
+		EPSS:           12 * time.Hour,
 		AnalyzePending: 15 * time.Minute,
 	}
 }
@@ -167,15 +168,9 @@ func (s *Scheduler) syncNVDDelta(ctx context.Context) error {
 	var ingested int
 
 	for {
-		url := fmt.Sprintf(
-			"%s?lastModStartDate=%s&lastModEndDate=%s&resultsPerPage=%d&startIndex=%d",
-			nvdCVEsURL,
-			start.Format("2006-01-02T15:04:05.000+00:00"),
-			end.Format("2006-01-02T15:04:05.000+00:00"),
-			pageSize, startIdx,
-		)
+		requestURL := nvdDeltaURL(start, end, pageSize, startIdx)
 
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, requestURL, nil)
 		if err != nil {
 			return fmt.Errorf("nvd delta: build request: %w", err)
 		}
@@ -240,6 +235,15 @@ func (s *Scheduler) syncNVDDelta(ctx context.Context) error {
 		)
 	}
 	return nil
+}
+
+func nvdDeltaURL(start, end time.Time, pageSize, startIdx int) string {
+	params := url.Values{}
+	params.Set("lastModStartDate", start.Format("2006-01-02T15:04:05.000+00:00"))
+	params.Set("lastModEndDate", end.Format("2006-01-02T15:04:05.000+00:00"))
+	params.Set("resultsPerPage", fmt.Sprint(pageSize))
+	params.Set("startIndex", fmt.Sprint(startIdx))
+	return nvdCVEsURL + "?" + params.Encode()
 }
 
 // ─────────────────────────── CISA KEV sync ──────────────────────────────────

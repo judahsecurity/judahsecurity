@@ -4,7 +4,7 @@ import pytest
 
 from test_severity_api import client  # noqa: F401 — isolated SQLite/API fixture
 from app.api.routes import oracle
-from app.models.vulnerability import Vulnerability
+from app.models.vulnerability import Vulnerability, VulnerabilityStatus
 from app.services.oracle_enrichment_service import OracleUnavailable
 
 SIGNAL = "components.mesop_ai_sandbox.enabled"
@@ -144,7 +144,8 @@ def test_cross_organization_and_viewer_writes_are_rejected(client):
     assert client.put("/oracle/applicability/100", json={"observations": [_observation()]}).status_code == 403
 
 
-def test_expired_block_is_revisited_by_worker_without_input_change(client):
+@pytest.mark.parametrize("status", [VulnerabilityStatus.OPEN, VulnerabilityStatus.RESOLVED])
+def test_expired_block_is_revisited_by_worker_without_input_change(client, status):
     from app.db.database import SessionLocal
     from app.services.severity_evaluation import EVALUATOR_VERSION, run_dirty_batch
     _seed()
@@ -156,6 +157,7 @@ def test_expired_block_is_revisited_by_worker_without_input_change(client):
         meta["oracle"]["contextual_assessment"]["preconditions"][0]["evidence"] = [{"valid_until": expired}]
         meta["severity_eval"] = {"version": EVALUATOR_VERSION, "evidence_valid_until": expired}
         v.metadata_, v.sev_dirty, v.sev_score = meta, False, 0
+        v.status = status
         # Assignment from a fresh dict ensures SQLAlchemy sees the update.
         from sqlalchemy.orm.attributes import flag_modified
         flag_modified(v, "metadata_")

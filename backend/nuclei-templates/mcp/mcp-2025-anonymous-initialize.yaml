@@ -1,0 +1,37 @@
+id: mcp-2025-anonymous-initialize
+
+info:
+  name: MCP - Anonymous Legacy Initialization
+  author: judahsecurity
+  severity: info
+  description: |
+    A legacy Streamable HTTP MCP endpoint accepted initialize without credentials.
+    Initialization alone does not prove that tools/list, tools/call, or resources/read
+    are available anonymously. Follow up with a protocol-aware authorization check.
+  reference:
+    - https://modelcontextprotocol.io/specification/2025-11-25/basic/transports
+  tags: mcp,exposure,discovery
+
+http:
+  - method: POST
+    path:
+      - "{{RootURL}}/mcp"
+      - "{{RootURL}}/api/mcp"
+      - "{{BaseURL}}"
+    headers:
+      Content-Type: application/json
+      Accept: application/json, text/event-stream
+    body: |
+      {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"judah-mcp-exposure-check","version":"1.0"}}}
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: regex
+        part: body
+        condition: and
+        regex:
+          - '"jsonrpc"\s*:\s*"2\.0"'
+          - '"serverInfo"\s*:\s*\{'
+          - '"protocolVersion"\s*:\s*"20[0-9]{2}-[0-9]{2}-[0-9]{2}"'

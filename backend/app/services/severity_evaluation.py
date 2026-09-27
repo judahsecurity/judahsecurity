@@ -694,7 +694,7 @@ def _apply_agent_proposals(result: Dict[str, Any]) -> None:
 def evaluate_by_id(session_factory, vuln_id: int) -> bool:
     """Re-evaluate one finding in its own session and clear its dirty flag
     unless it changed again meanwhile. Never raises."""
-    from app.models.vulnerability import Vulnerability
+    from app.models.vulnerability import Vulnerability, VulnerabilityStatus
     from app.services.severity_dirty import clear_dirty
 
     started = datetime.utcnow()
@@ -704,8 +704,13 @@ def evaluate_by_id(session_factory, vuln_id: int) -> bool:
         if vuln is None:
             return False
         view = evaluate_finding(db, vuln)
-        pending_factors = any(k in FACTOR_KEYS for k in view.get("needs_analyst", []))
-        agent_already_ran = bool((vuln.metadata_ or {}).get("severity_eval", {}).get("agent_run_at"))
+        # Commit expires ORM attributes and close detaches the finding.
+        # Closed findings and asset-evidence gaps do not need factor proposals.
+        agent_needed = (
+            vuln.status in (VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS)
+            and any(k in FACTOR_KEYS for k in view.get("needs_analyst", []))
+            and not ((vuln.metadata_ or {}).get("severity_eval") or {}).get("agent_run_at")
+        )
         db.flush()
         clear_dirty(db, [vuln_id], started)
         db.commit()
@@ -717,16 +722,20 @@ def evaluate_by_id(session_factory, vuln_id: int) -> bool:
         db.close()
 
     # Optionally ask the gap agent to estimate what the rules could not.
-    from app.services import severity_agent
+    if agent_needed:
+        try:
+            from app.services import severity_agent
 
-    if severity_agent.auto_enabled() and pending_factors and not agent_already_ran:
-        severity_agent.submit(vuln_id)
+            if severity_agent.auto_enabled():
+                severity_agent.submit(vuln_id)
+        except Exception as exc:  # noqa: BLE001 — the score is already committed
+            logger.warning("Severity agent submission failed for vuln %s: %s", vuln_id, exc)
     return True
 
 
 def run_dirty_batch(session_factory, limit: int = 500) -> Dict[str, int]:
-    """Re-evaluate open findings with changed inputs or an older scoring model."""
-    from app.models.vulnerability import Vulnerability, VulnerabilityStatus
+    """Re-evaluate findings in any status with changed inputs or an older model."""
+    from app.models.vulnerability import Vulnerability
 
     db = session_factory()
     try:
@@ -738,7 +747,6 @@ def run_dirty_batch(session_factory, limit: int = 500) -> Dict[str, int]:
             .filter(
                 or_(Vulnerability.sev_dirty.is_(True), version.is_(None), version != EVALUATOR_VERSION,
                     expiry <= datetime.now(timezone.utc).isoformat()),
-                Vulnerability.status.in_([VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS]),
             )
             .order_by(Vulnerability.sev_dirty_at.asc().nullsfirst(), Vulnerability.id)
             .limit(limit)
