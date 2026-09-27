@@ -101,6 +101,12 @@ backup="backups/pre-deploy-$(date -u +%Y%m%dT%H%M%SZ)-${previous_ref:0:12}.sql.g
 sudo docker exec asm_database sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' | gzip > "$backup"
 find backups -type f -name 'pre-deploy-*.sql.gz' -mtime +14 -delete
 
+# The new backend selects endpoint columns immediately after startup. Apply
+# this additive, repeatable migration after backup and before replacing it.
+sudo docker exec -i asm_database sh -c \
+  'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+  < db/migrations/add_finding_provenance.sql
+
 echo "[4/7] Building images"
 # scanner and scheduler intentionally share SCANNER_IMAGE; build it once.
 sudo docker compose build backend scanner intel-refresher frontend aegis-oracle

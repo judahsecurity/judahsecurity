@@ -133,12 +133,52 @@ def build_vuln_response(
     db: Optional[Session] = None,
     *,
     include_detection_dumps: bool = True,
+    include_provenance: bool = False,
 ) -> dict:
     """Build vulnerability response with computed fields. Ensures required fields are never None."""
     d = {k: v for k, v in vuln.__dict__.items() if k != "_sa_instance_state" and k != "metadata_"}
+    d["finding_key"] = vuln.finding_key
     d["name"] = vuln.title
     d["host"] = vuln.asset.value if vuln.asset else None
     d["organization_id"] = vuln.asset.organization_id if vuln.asset else None
+    d["target_value"] = vuln.asset.value if vuln.asset else None
+    d["target_asset_type"] = vuln.asset.asset_type.value if vuln.asset else None
+    d["evidence_items"] = []
+    d["source_record_id"] = None
+    if include_provenance and db is not None and vuln.asset is not None:
+        from app.models.finding_provenance import FindingEvidence, FindingObservation
+
+        observation_query = db.query(FindingObservation).filter(
+            FindingObservation.vulnerability_id == vuln.id,
+            FindingObservation.organization_id == vuln.asset.organization_id,
+        )
+        observations = (
+            observation_query
+            .order_by(FindingObservation.last_seen.desc())
+            .limit(50)
+            .all()
+        )
+        if observations:
+            d["source_record_id"] = observations[0].source_record_id
+            by_id = {item.id: item for item in observations}
+            evidence = (
+                db.query(FindingEvidence)
+                .filter(FindingEvidence.observation_id.in_(by_id))
+                .order_by(FindingEvidence.id)
+                .limit(100)
+                .all()
+            )
+            d["evidence_items"] = [
+                {
+                    "id": item.id,
+                    "kind": item.kind,
+                    "value": item.value,
+                    "observed_at": item.observed_at,
+                    "source": by_id[item.observation_id].source,
+                    "source_record_id": by_id[item.observation_id].source_record_id,
+                }
+                for item in evidence
+            ]
 
     # Latest asset screenshot for analyst visual context on the findings page
     screenshot_id = getattr(vuln.asset, "latest_screenshot_id", None) if vuln.asset else None
@@ -520,7 +560,7 @@ def get_vulnerability(
             detail="Access denied"
         )
     
-    return build_vuln_response(vuln, db=db)
+    return build_vuln_response(vuln, db=db, include_provenance=True)
 
 
 @router.put("/{vuln_id}", response_model=VulnerabilityResponse)
@@ -2204,16 +2244,6 @@ def create_finding_detection_feedback(
             logger.warning(f"Detection pattern evaluation failed: {e}")
 
     return feedback_to_dict(feedback)
-
-
-
-
-
-
-
-
-
-
 
 
 

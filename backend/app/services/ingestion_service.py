@@ -6,12 +6,14 @@ and maps them into the ASM platform's data model (Assets, PortServices, Vulnerab
 """
 
 import hashlib
+import ipaddress
 import logging
 import secrets
 import time
 import uuid
 from datetime import datetime, timedelta
 from typing import Optional, List, Tuple
+from urllib.parse import urlsplit
 
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
@@ -19,6 +21,10 @@ from sqlalchemy import and_
 from app.models.asset import Asset, AssetType, AssetStatus
 from app.models.port_service import PortService, Protocol, PortState
 from app.models.vulnerability import Vulnerability, Severity as VulnSeverity, VulnerabilityStatus
+from app.models.finding_provenance import FindingObservation
+from app.services.finding_provenance_service import (
+    endpoint_values, record_finding_sighting, safe_endpoint_url, source_record_key,
+)
 from app.models.agent_api_key import AgentAPIKey
 from app.schemas.unified_results import UnifiedFinding, ResultType, Severity
 from app.schemas.ingestion import (
@@ -75,13 +81,27 @@ def _find_or_create_asset(
     finding: UnifiedFinding,
 ) -> Asset:
     """Find an existing asset or create a new one from a finding."""
-    value = finding.host or finding.ip or finding.url or finding.target
+    value = (finding.affected_targets[0].asset_value if finding.affected_targets
+             else finding.host or finding.ip or finding.url or finding.target)
     asset_type = RESULT_TYPE_TO_ASSET_TYPE.get(finding.type, AssetType.OTHER)
 
     if finding.type in (ResultType.DOMAIN, ResultType.SUBDOMAIN):
         asset_type = AssetType.SUBDOMAIN if "." in value and value.count(".") > 1 else AssetType.DOMAIN
     elif finding.type == ResultType.IP_ADDRESS:
         asset_type = AssetType.IP_ADDRESS
+    elif finding.type in (ResultType.VULNERABILITY, ResultType.TAKEOVER):
+        if finding.affected_targets and finding.affected_targets[0].asset_type:
+            asset_type = AssetType[finding.affected_targets[0].asset_type.upper()]
+        else:
+            try:
+                if "/" in value:
+                    ipaddress.ip_network(value, strict=False)
+                    asset_type = AssetType.IP_RANGE
+                else:
+                    ipaddress.ip_address(value)
+                    asset_type = AssetType.IP_ADDRESS
+            except ValueError:
+                asset_type = AssetType.URL if urlsplit(value).scheme else AssetType.SUBDOMAIN
 
     existing = (
         db.query(Asset)
@@ -92,6 +112,10 @@ def _find_or_create_asset(
         )
         .first()
     )
+    if existing is None:
+        # Legacy inventory may classify an anchor differently (for example an
+        # IP-range asset stored as its base IP). Reuse it within this tenant.
+        existing = db.query(Asset).filter_by(organization_id=org_id, value=value).first()
     if existing:
         existing.last_seen = datetime.utcnow()
         if finding.ip and not existing.ip_address:
@@ -173,6 +197,7 @@ def _upsert_vulnerability(
     db: Session,
     asset: Asset,
     finding: UnifiedFinding,
+    source_instance: str = "",
 ) -> Tuple[Optional[Vulnerability], str, Optional[str]]:
     """
     Create or update a vulnerability record.
@@ -184,7 +209,28 @@ def _upsert_vulnerability(
     if finding.type != ResultType.VULNERABILITY:
         return None, "skipped", None
 
-    filters = [Vulnerability.asset_id == asset.id]
+    port, protocol, service, url = endpoint_values(finding, asset)
+
+    # Native source identity is the most reliable rediscovery match. Keep it
+    # scoped to tenant, source instance, and asset so other tools cannot claim it.
+    existing = None
+    if finding.id:
+        previous = db.query(FindingObservation).filter_by(
+            organization_id=asset.organization_id,
+            source=finding.source.strip().lower(),
+            source_instance=source_instance.strip(),
+            source_record_key=source_record_key(finding),
+        ).first()
+        if previous:
+            existing = db.query(Vulnerability).filter_by(id=previous.vulnerability_id).first()
+
+    filters = [
+        Vulnerability.asset_id == asset.id,
+        Vulnerability.detected_by == finding.source,
+        Vulnerability.target_port == port,
+        Vulnerability.target_protocol == protocol,
+        Vulnerability.target_url == url,
+    ]
     if finding.template_id:
         filters.append(Vulnerability.template_id == finding.template_id)
     elif finding.cve_id:
@@ -192,7 +238,8 @@ def _upsert_vulnerability(
     else:
         filters.append(Vulnerability.title == (finding.title or "Unknown"))
 
-    existing = db.query(Vulnerability).filter(and_(*filters)).first()
+    if existing is None:
+        existing = db.query(Vulnerability).filter(and_(*filters)).first()
     if existing:
         old_status = existing.status
         existing.last_detected = datetime.utcnow()
@@ -210,11 +257,16 @@ def _upsert_vulnerability(
         cwe_id=finding.cwe_id,
         references=finding.references or [],
         asset_id=asset.id,
+        target_port=port,
+        target_protocol=protocol,
+        target_service_name=service,
+        target_url=url,
+        target_verification="reported",
         detected_by=finding.source,
         template_id=finding.template_id,
         status=VulnerabilityStatus.OPEN,
         tags=finding.tags or [],
-        evidence=finding.url,
+        evidence=None,
         first_detected=datetime.utcnow(),
         last_detected=datetime.utcnow(),
     )
@@ -328,6 +380,39 @@ def _enrich_third_party(asset: Asset, finding: UnifiedFinding):
     asset.metadata_ = meta
 
 
+def _expanded_findings(request: IngestionBatchRequest):
+    """Expand one multi-endpoint source report into independent findings."""
+    for idx, finding in enumerate(request.findings):
+        if finding.type not in (ResultType.VULNERABILITY, ResultType.TAKEOVER) or not finding.affected_targets:
+            yield idx, finding
+            continue
+        seen: set[tuple] = set()
+        for target in finding.affected_targets:
+            protocol = (target.protocol or ("tcp" if target.port else "")).lower()
+            identity = (target.asset_value, target.port, protocol, safe_endpoint_url(target.url))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            evidence = []
+            for item in finding.evidence_items:
+                if item.target is None:
+                    evidence.append(item)
+                    continue
+                item_protocol = (item.target.protocol or ("tcp" if item.target.port else "")).lower()
+                item_identity = (
+                    item.target.asset_value, item.target.port, item_protocol,
+                    safe_endpoint_url(item.target.url),
+                )
+                if item_identity == identity:
+                    evidence.append(item)
+            yield idx, finding.model_copy(update={
+                "target": target.asset_value, "host": None, "ip": None,
+                "port": target.port, "protocol": protocol or None,
+                "service_name": target.service_name, "url": target.url,
+                "affected_targets": [target], "evidence_items": evidence,
+            })
+
+
 def process_ingestion_batch(
     db: Session,
     request: IngestionBatchRequest,
@@ -341,12 +426,15 @@ def process_ingestion_batch(
     # Track reactivated findings so we can sync their Jira tickets after commit.
     reactivations: List[Tuple[int, str]] = []  # (vuln_id, old_status_value)
 
-    for idx, finding in enumerate(request.findings):
+    for idx, finding in _expanded_findings(request):
+        savepoint = db.begin_nested()
         try:
             finding.organization_id = organization_id
             asset = _find_or_create_asset(db, organization_id, finding)
             status = "created"
             finding_id = None
+            old_st = None
+            vuln = None
 
             if finding.type == ResultType.PORT:
                 ps, ps_status = _upsert_port_service(db, asset, finding)
@@ -354,19 +442,25 @@ def process_ingestion_batch(
                 finding_id = ps.id if ps else None
 
             elif finding.type == ResultType.VULNERABILITY:
-                vuln, v_status, old_st = _upsert_vulnerability(db, asset, finding)
+                vuln, v_status, old_st = _upsert_vulnerability(db, asset, finding, request.agent_id)
                 status = v_status
                 finding_id = vuln.id if vuln else None
-                if v_status == "reactivated" and vuln and old_st:
-                    reactivations.append((vuln.id, old_st))
+                if vuln:
+                    record_finding_sighting(
+                        db, organization_id=organization_id, vulnerability=vuln,
+                        asset=asset, finding=finding, source_instance=request.agent_id,
+                    )
 
             elif finding.type == ResultType.TAKEOVER:
                 _enrich_takeover(asset, finding)
-                vuln, v_status, old_st = _upsert_vulnerability(db, asset, finding)
+                vuln, v_status, old_st = _upsert_vulnerability(db, asset, finding, request.agent_id)
                 status = v_status
                 finding_id = vuln.id if vuln else None
-                if v_status == "reactivated" and vuln and old_st:
-                    reactivations.append((vuln.id, old_st))
+                if vuln:
+                    record_finding_sighting(
+                        db, organization_id=organization_id, vulnerability=vuln,
+                        asset=asset, finding=finding, source_instance=request.agent_id,
+                    )
 
             elif finding.type == ResultType.TLS_ANALYSIS:
                 _enrich_tls(asset, finding)
@@ -387,6 +481,9 @@ def process_ingestion_batch(
             elif finding.type in (ResultType.DOMAIN, ResultType.SUBDOMAIN, ResultType.IP_ADDRESS, ResultType.IP_RANGE, ResultType.URL):
                 pass  # asset creation above is sufficient
 
+            savepoint.commit()
+            if status == "reactivated" and vuln and old_st:
+                reactivations.append((vuln.id, old_st))
             if status == "created":
                 created += 1
             elif status in ("updated", "reactivated"):
@@ -402,6 +499,7 @@ def process_ingestion_batch(
             ))
 
         except Exception as e:
+            savepoint.rollback()
             errors += 1
             logger.warning(f"Ingestion error at index {idx}: {e}")
             results.append(IngestionFindingResult(

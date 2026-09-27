@@ -120,6 +120,8 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
   const [appQuery, setAppQuery] = useState('');
   const [appResults, setAppResults] = useState<BusinessAppSummary[]>([]);
   const [linking, setLinking] = useState(false);
+  const [showAppSearch, setShowAppSearch] = useState(false);
+  const [showAllFactors, setShowAllFactors] = useState(false);
   const { toast } = useToast();
 
   useEffect(() => setApp(businessApp ?? null), [findingId, businessApp]);
@@ -140,6 +142,8 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
     setLoading(true);
     setEdits({});
     setRealismEdit({ score: '', note: '' });
+    setShowAppSearch(false);
+    setShowAllFactors(false);
     api
       .getRiskFactors(findingId)
       .then((v) => !cancelled && setView(v))
@@ -219,6 +223,7 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
       setApp(linked);
       setAppQuery('');
       setAppResults([]);
+      setShowAppSearch(false);
       const next = await api.getRiskFactors(findingId);
       setView(next);
       onUpdated?.(next, linked);
@@ -288,33 +293,46 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
           ) : (
             <span className="text-amber-400">not linked</span>
           )}
+          <Button
+            size="sm"
+            variant="ghost"
+            className="ml-auto h-7 text-xs"
+            aria-expanded={showAppSearch}
+            onClick={() => setShowAppSearch((value) => !value)}
+          >
+            {showAppSearch ? 'Done' : app ? 'Change application' : 'Link application'}
+          </Button>
         </div>
-        <Input
-          className="h-8 text-xs"
-          placeholder="Search by application id (e.g. APM0001234) or name"
-          value={appQuery}
-          onChange={(e) => setAppQuery(e.target.value)}
-        />
-        {appResults.length > 0 && (
-          <div className="rounded-md border divide-y max-h-48 overflow-y-auto">
-            {appResults.map((a) => (
-              <div key={a.id} className="flex items-center gap-2 p-1.5 text-xs">
-                <span className="font-mono shrink-0">{a.app_id}</span>
-                <span className="truncate">{a.name}</span>
-                {a.business_criticality && <span className="text-muted-foreground shrink-0">{a.business_criticality}</span>}
-                <div className="ml-auto flex gap-1 shrink-0">
-                  <Button size="sm" variant="outline" className="h-6 text-xs" disabled={linking} onClick={() => link('finding', a.id)}>
-                    This finding
-                  </Button>
-                  {assetId && (
-                    <Button size="sm" variant="outline" className="h-6 text-xs" disabled={linking} onClick={() => link('asset', a.id)}>
-                      Whole asset
-                    </Button>
-                  )}
-                </div>
+        {showAppSearch && (
+          <>
+            <Input
+              className="h-8 text-xs"
+              placeholder="Search by application id (e.g. APM0001234) or name"
+              value={appQuery}
+              onChange={(e) => setAppQuery(e.target.value)}
+            />
+            {appResults.length > 0 && (
+              <div className="rounded-md border divide-y max-h-48 overflow-y-auto">
+                {appResults.map((a) => (
+                  <div key={a.id} className="flex items-center gap-2 p-1.5 text-xs">
+                    <span className="font-mono shrink-0">{a.app_id}</span>
+                    <span className="truncate">{a.name}</span>
+                    {a.business_criticality && <span className="text-muted-foreground shrink-0">{a.business_criticality}</span>}
+                    <div className="ml-auto flex gap-1 shrink-0">
+                      <Button size="sm" variant="outline" className="h-6 text-xs" disabled={linking} onClick={() => link('finding', a.id)}>
+                        This finding
+                      </Button>
+                      {assetId && (
+                        <Button size="sm" variant="outline" className="h-6 text-xs" disabled={linking} onClick={() => link('asset', a.id)}>
+                          Whole asset
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
+            )}
+          </>
         )}
       </div>
       {view.impact !== undefined && (
@@ -331,11 +349,29 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
           No automatic scoring for this finding yet — score the missing factors below, or run Oracle analysis.
         </p>
       )}
+      {!showAllFactors && realism && !view.needs_analyst.includes('exploit_realism') && (
+        <p className="text-xs text-muted-foreground">Exploit realism: <span className="capitalize">{realism.tier}</span></p>
+      )}
 
-      {GROUPS.map((group) => (
-        <div key={group.title} className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2 border-t pt-2">
+        <p className="text-xs text-muted-foreground">
+          {showAllFactors ? 'All scoring factors' : view.needs_analyst.length > 0
+            ? 'Factors needing analyst input'
+            : 'No factors need analyst input'}
+        </p>
+        <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setShowAllFactors((value) => !value)}>
+          {showAllFactors ? 'Show pending only' : 'Show all factors'}
+        </Button>
+      </div>
+
+      {GROUPS.map((group) => {
+        const visibleKeys = group.keys.filter(([key]) =>
+          showAllFactors || view.needs_analyst.includes(key) || (edits[key]?.score ?? '') !== ''
+        );
+        if (visibleKeys.length === 0) return null;
+        return <div key={group.title} className="space-y-1.5">
           <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{group.title}</p>
-          {group.keys.map(([key, label]) => {
+          {visibleKeys.map(([key, label]) => {
             const f = view.factors[key];
             const needs = view.needs_analyst.includes(key);
             const edit = edits[key] ?? { score: '', note: '' };
@@ -412,9 +448,10 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
               </div>
             );
           })}
-        </div>
-      ))}
+        </div>;
+      })}
 
+      {(showAllFactors || view.needs_analyst.includes('exploit_realism') || realismEdit.score !== '') && (
       <div className="space-y-1.5">
         <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Exploit Realism</p>
         <div className="rounded-md border p-2 space-y-1.5">
@@ -455,6 +492,7 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
           </div>
         </div>
       </div>
+      )}
 
       <div className="flex justify-end">
         <Button size="sm" disabled={!dirty || saving} onClick={save}>
