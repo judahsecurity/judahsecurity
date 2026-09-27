@@ -125,12 +125,14 @@ func runAnalyze(args []string) int {
 		}
 	}
 
-	preconditions := contextual.Evaluate(&intrinsic, &asset)
+	assessment := contextual.Assess(&intrinsic, &asset, time.Now().UTC())
+	preconditions := assessment.Preconditions
 	score := opes.Compute(opes.Input{
 		CVE:           cvePtr,
 		Intrinsic:     &intrinsic,
 		Asset:         &asset,
 		Preconditions: preconditions,
+		Contextual:    &assessment,
 		Exploitation:  exploitation,
 		Now:           time.Now().UTC(),
 	}, opes.DefaultConfig())
@@ -142,6 +144,7 @@ func runAnalyze(args []string) int {
 		EvaluatedAt:            time.Now().UTC(),
 		OPES:                   score,
 		PreconditionsEvaluated: preconditions,
+		ContextualAssessment:   assessment,
 		CVSSReconciliation:     intrinsic.CVSSReconciliation,
 		Recommendation:         recommendation(intrinsic, score, preconditions),
 		VerificationTasks:      buildVerificationTasks(asset.ID, preconditions),
@@ -163,15 +166,16 @@ func runAnalyze(args []string) int {
 }
 
 type analyzeOutput struct {
-	CVEID                  string                     `json:"cve_id"`
-	AssetID                string                     `json:"asset_id"`
-	EvaluatorVersion       string                     `json:"evaluator_version"`
-	EvaluatedAt            time.Time                  `json:"evaluated_at"`
-	OPES                   schema.OPESScore           `json:"opes"`
-	PreconditionsEvaluated schema.PreconditionEvalSet `json:"preconditions_evaluated"`
-	CVSSReconciliation     schema.CVSSReconciliation  `json:"cvss_reconciliation"`
-	Recommendation         string                     `json:"recommendation"`
-	VerificationTasks      []schema.VerificationTask  `json:"verification_tasks,omitempty"`
+	CVEID                  string                      `json:"cve_id"`
+	AssetID                string                      `json:"asset_id"`
+	EvaluatorVersion       string                      `json:"evaluator_version"`
+	EvaluatedAt            time.Time                   `json:"evaluated_at"`
+	OPES                   schema.OPESScore            `json:"opes"`
+	PreconditionsEvaluated schema.PreconditionEvalSet  `json:"preconditions_evaluated"`
+	ContextualAssessment   schema.ContextualAssessment `json:"contextual_assessment"`
+	CVSSReconciliation     schema.CVSSReconciliation   `json:"cvss_reconciliation"`
+	Recommendation         string                      `json:"recommendation"`
+	VerificationTasks      []schema.VerificationTask   `json:"verification_tasks,omitempty"`
 }
 
 func recommendation(intrinsic schema.IntrinsicAnalysis, score schema.OPESScore, set schema.PreconditionEvalSet) string {

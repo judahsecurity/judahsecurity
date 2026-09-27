@@ -285,6 +285,8 @@ def merged_risk_model(
 
     # Assumed defaults and gap-agent proposals both wait on an analyst.
     needs_analyst = [k for k in FACTOR_KEYS if k in missing or factors.get(k, {}).get("source") in ("assumed", "agent")]
+    if (realism or {}).get("needs_analyst"):
+        needs_analyst.append("exploit_realism")
     result: Dict[str, Any] = {
         "factors": factors,
         "exploit_realism": realism,

@@ -37,7 +37,7 @@ from app.services.risk_model import FACTOR_KEYS, FACTOR_RATINGS, is_valid_factor
 
 logger = logging.getLogger(__name__)
 
-EVALUATOR_VERSION = "sev/v2"
+EVALUATOR_VERSION = "sev/v4-applicability"
 
 # ── Finding context ───────────────────────────────────────────────────────────
 
@@ -97,6 +97,8 @@ class FindingContext:
     exploit_complexity: str = ""
     remote_triggerability: str = ""
     preconditions: List[Precond] = field(default_factory=list)
+    contextual_assessment: Dict[str, Any] = field(default_factory=dict)
+    evidence_valid_until: Optional[str] = None
 
     asset_criticality: str = ""
     exposure: str = ""  # internet | internal | isolated | ""
@@ -199,6 +201,7 @@ def exploit_realism(ctx: FindingContext) -> Dict[str, Any]:
     blocked: List[str] = []
     conditional: List[str] = []
     verified: List[str] = []
+    unknown: List[str] = []
 
     for p in ctx.preconditions:
         if not p.blocker:
@@ -208,6 +211,18 @@ def exploit_realism(ctx: FindingContext) -> Dict[str, Any]:
             blocked.append(f"required condition not met: {desc}")
         elif p.status == "satisfied":
             verified.append(f"required condition met: {desc}")
+        else:
+            unknown.append(f"verify required condition: {desc}")
+    context = ctx.contextual_assessment
+    if context:
+        # Oracle evaluates AND within a path and OR between paths. Flattening
+        # prerequisites would let an unused alternate path block a viable one.
+        state = context.get("state")
+        blocked = [context.get("summary") or "documented exploit paths are blocked"] if state == "documented_path_blocked" else []
+        verified = [context.get("summary") or "all conditions for a documented path are met"] if state == "conditions_met" else []
+        unknown = [] if state in ("conditions_met", "documented_path_blocked") else (
+            context.get("missing_checks") or [context.get("summary") or "verify the affected component and its attack path"]
+        )
     if ctx.exposure == "isolated":
         blocked.append("asset is isolated / air-gapped")
 
@@ -238,16 +253,21 @@ def exploit_realism(ctx: FindingContext) -> Dict[str, Any]:
         if ctx.waf:
             conditional.append(f"unauthenticated exploit, but a WAF ({ctx.waf}) sits in front")
 
-    if ctx.detection_confidence == "exploit_confirmed" or ctx.validation_verdict == "confirmed":
-        why = "exploit or vulnerable code path confirmed on this asset"
-        why += " by validation" if ctx.validation_verdict == "confirmed" else " by our scanner"
-        return {"score": 4, "tier": "confirmed", "reasons": [why]}
+    if blocked and ctx.detection_confidence == "exploit_confirmed":
+        return {"score": 2, "tier": "conditional", "needs_analyst": True,
+                "reasons": ["Exploit proof conflicts with an unmet condition; verify the current deployment."] + blocked}
     if blocked:
         return {"score": 0, "tier": "blocked",
                 "reasons": blocked + ["documented exploit paths do not work here today; not a guarantee against other paths"]}
+    if ctx.detection_confidence == "exploit_confirmed":
+        return {"score": 4, "tier": "confirmed", "reasons": ["exploit confirmed on this asset by our scanner"]}
     if conditional:
-        return {"score": 2, "tier": "conditional", "reasons": conditional}
-    if ctx.detection_confidence == "endpoint_confirmed" or verified:
+        return {"score": 2, "tier": "conditional", "reasons": conditional + unknown,
+                "needs_analyst": bool(unknown), "missing_checks": unknown}
+    if unknown:
+        return {"score": 3, "tier": "unverified", "reasons": unknown,
+                "needs_analyst": True, "missing_checks": unknown}
+    if verified or (not ctx.cve_id and ctx.detection_confidence == "endpoint_confirmed"):
         reasons = (["vulnerable feature confirmed live on this asset"] if ctx.detection_confidence == "endpoint_confirmed" else []) + verified
         return {"score": 4, "tier": "likely", "reasons": reasons}
     if float(ctx.exploitation.get("misconfig_breach_risk") or 0) > 0 and not ctx.cve_id:
@@ -255,9 +275,10 @@ def exploit_realism(ctx: FindingContext) -> Dict[str, Any]:
     if ctx.detected_by in EXTERNAL_AUTOMATED and not ctx.cve_id:
         return {"score": 4, "tier": "likely", "reasons": [f"issue observed directly on this asset by {ctx.detected_by}"]}
     if ctx.detection_confidence == "version_only":
-        return {"score": 3, "tier": "unverified",
+        return {"score": 3, "tier": "unverified", "needs_analyst": True,
                 "reasons": ["no asset evidence that the exploit applies (version match only); verify before treating as exploitable"]}
-    return {"score": 3, "tier": "unverified", "reasons": ["no asset evidence either way; verify before treating as exploitable"]}
+    return {"score": 3, "tier": "unverified", "needs_analyst": bool(ctx.cve_id),
+            "reasons": ["verify the affected component, activation, and attacker input path; a version or endpoint match alone is insufficient"]}
 
 
 SKILL_RATINGS = FACTOR_RATINGS["skill_level"]
@@ -393,7 +414,7 @@ EASE_RATINGS = FACTOR_RATINGS["ease_of_exploit"]
 def ease_of_exploit(ctx: FindingContext, realism: Dict[str, Any]) -> Factor:
     e = ctx.exploitation
     risk = float(e.get("misconfig_breach_risk") or 0)
-    if ctx.detection_confidence == "exploit_confirmed" or ctx.validation_verdict == "confirmed":
+    if ctx.detection_confidence == "exploit_confirmed":
         f = _f(4, EASE_RATINGS[4], "Exploit confirmed against this asset")
     elif risk >= 7.5:
         f = _f(4, EASE_RATINGS[4], "Exposure is directly usable (no exploit needed)")
@@ -465,6 +486,7 @@ def evaluate_context(ctx: FindingContext) -> Dict[str, Any]:
         "exploit_realism": realism,
         "needs_analyst": [k for k in FACTOR_KEYS if factors[k]["source"] == "assumed"],
         "version": EVALUATOR_VERSION,
+        "evidence_valid_until": ctx.evidence_valid_until,
         "evaluated_at": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -482,9 +504,10 @@ def _preconditions(oracle: Dict[str, Any]) -> List[Precond]:
             blocker=p.get("severity") == "blocker",
             status=str(e.get("status") or ""),
         ))
-    if out:
-        return out
+    evaluated_ids = {p.id for p in out}
     for p in oracle.get("preconditions") or []:  # intrinsic-only payload
+        if str(p.get("id") or "") in evaluated_ids:
+            continue
         out.append(Precond(id=str(p.get("id") or ""), description=str(p.get("description") or ""),
                            blocker=p.get("severity") == "blocker", status=""))
     return out
@@ -496,6 +519,12 @@ def build_context(db: Session, vuln: Any) -> FindingContext:
 
     meta = vuln.metadata_ if isinstance(vuln.metadata_, dict) else {}
     oracle = meta.get("oracle") or {}
+    from app.services.applicability_evidence import evidence_deadline, invalidate_local_assessment
+    deadline = evidence_deadline(oracle)
+    if deadline and deadline <= datetime.now(timezone.utc):
+        invalidate_local_assessment(vuln, "Asset evidence expired; refresh the observation and rerun Oracle.")
+        oracle = (vuln.metadata_ or {}).get("oracle") or {}
+        deadline = None
     recon = oracle.get("cvss_reconciliation") or {}
     contextual = oracle.get("contextual_assessment") or {}
 
@@ -518,6 +547,8 @@ def build_context(db: Session, vuln: Any) -> FindingContext:
         exploit_complexity=oracle.get("exploit_complexity") or "",
         remote_triggerability=oracle.get("remote_triggerability") or "",
         preconditions=_preconditions(oracle),
+        contextual_assessment=oracle.get("contextual_assessment") or {},
+        evidence_valid_until=deadline.isoformat() if deadline else None,
     )
 
     # Live exploitation intel (KEV lists, exploit index, Nuclei) from the
@@ -674,10 +705,10 @@ def evaluate_by_id(session_factory, vuln_id: int) -> bool:
             return False
         view = evaluate_finding(db, vuln)
         # Commit expires ORM attributes and close detaches the finding.
-        # Closed findings are scored but do not need gap-agent proposals.
+        # Closed findings and asset-evidence gaps do not need factor proposals.
         agent_needed = (
             vuln.status in (VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS)
-            and view.get("status") == "needs_analyst"
+            and any(k in FACTOR_KEYS for k in view.get("needs_analyst", []))
             and not ((vuln.metadata_ or {}).get("severity_eval") or {}).get("agent_run_at")
         )
         db.flush()
@@ -709,11 +740,13 @@ def run_dirty_batch(session_factory, limit: int = 500) -> Dict[str, int]:
     db = session_factory()
     try:
         version = Vulnerability.metadata_["severity_eval"]["version"].as_string()
+        expiry = Vulnerability.metadata_["severity_eval"]["evidence_valid_until"].as_string()
         ids = [
             row[0]
             for row in db.query(Vulnerability.id)
             .filter(
-                or_(Vulnerability.sev_dirty.is_(True), version.is_(None), version != EVALUATOR_VERSION),
+                or_(Vulnerability.sev_dirty.is_(True), version.is_(None), version != EVALUATOR_VERSION,
+                    expiry <= datetime.now(timezone.utc).isoformat()),
             )
             .order_by(Vulnerability.sev_dirty_at.asc().nullsfirst(), Vulnerability.id)
             .limit(limit)

@@ -66,8 +66,29 @@ func Assess(intrinsic *schema.IntrinsicAnalysis, asset *schema.Asset, assessedAt
 	}
 	assessment.Paths = assessPaths(context.ExploitPaths, out)
 	assessment.Transitions = assessTransitions(context.Transitions, asset, assessedAt)
+	for i := range assessment.Paths {
+		path := &assessment.Paths[i]
+		for _, transition := range assessment.Transitions {
+			if len(transition.Transition.PathIDs) > 0 && !containsID(transition.Transition.PathIDs, path.Path.ID) {
+				continue
+			}
+			if transition.Status == schema.PreconditionUnsatisfied {
+				path.Status, path.Reason = schema.PreconditionUnsatisfied, transition.Reason
+				path.BlockingCondition = transition.Transition.Description
+				break
+			}
+			if transition.Status != schema.PreconditionSatisfied && path.Status == schema.PreconditionSatisfied {
+				path.Status, path.Reason = schema.PreconditionUnknown, transition.Reason
+			}
+		}
+	}
 	assessment.MissingChecks = missingChecks(out, assessment.Transitions)
-	assessment.State, assessment.Summary = assessmentState(assessment.Paths, out, assessment.Transitions)
+	for _, path := range assessment.Paths {
+		if len(path.Path.PreconditionIDs) == 0 {
+			assessment.MissingChecks = append(assessment.MissingChecks, "Research component activation and attacker input prerequisites for "+path.Path.Name)
+		}
+	}
+	assessment.State, assessment.Summary = assessmentState(assessment.Paths, out)
 	return assessment
 }
 
@@ -147,6 +168,12 @@ func matches(p schema.Precondition, value string) (bool, bool, string) {
 		}
 		return false, true, "signal empty"
 	case "version_lte":
+		// The comparator below supports plain numeric versions only. An
+		// unparseable package string must not become a mitigating observation.
+		versionPattern := regexp.MustCompile(`^v?[0-9]+(\.[0-9]+)*$`)
+		if !versionPattern.MatchString(value) || !versionPattern.MatchString(p.MatchValue) {
+			return false, false, "version format needs explicit verification"
+		}
 		if compareVersions(value, p.MatchValue) <= 0 {
 			return true, true, "version " + value + " <= " + p.MatchValue
 		}
@@ -171,7 +198,9 @@ func assessPaths(paths []schema.ExploitPath, evals schema.PreconditionEvalSet) [
 	if len(paths) == 0 && len(evals) > 0 {
 		ids := make([]string, 0, len(evals))
 		for _, eval := range evals {
-			ids = append(ids, eval.Precondition.ID)
+			if eval.Precondition.Severity != schema.PreconditionContributing {
+				ids = append(ids, eval.Precondition.ID)
+			}
 		}
 		paths = []schema.ExploitPath{{ID: "documented-path", Name: "Documented exploit path", PreconditionIDs: ids}}
 	}
@@ -179,6 +208,10 @@ func assessPaths(paths []schema.ExploitPath, evals schema.PreconditionEvalSet) [
 	results := make([]schema.PathAssessment, 0, len(paths))
 	for _, path := range paths {
 		result := schema.PathAssessment{Path: path, Status: schema.PreconditionSatisfied, Reason: "all documented prerequisites are met"}
+		if len(path.PreconditionIDs) == 0 {
+			result.Status = schema.PreconditionUnknown
+			result.Reason = "this path has no verifiable prerequisites; vulnerability research is required"
+		}
 		for _, prerequisiteID := range path.PreconditionIDs {
 			eval, found := findEval(evals, prerequisiteID)
 			if !found || eval.Status == schema.PreconditionUnknown {
@@ -243,7 +276,10 @@ func signalStatus(path string, asset *schema.Asset, assessedAt time.Time) (schem
 	if strings.EqualFold(value, "false") || value == "0" || strings.EqualFold(value, "denied") {
 		return schema.PreconditionUnsatisfied, evidence
 	}
-	return schema.PreconditionSatisfied, evidence
+	if strings.EqualFold(value, "true") || value == "1" || strings.EqualFold(value, "allowed") {
+		return schema.PreconditionSatisfied, evidence
+	}
+	return schema.PreconditionUnknown, evidence
 }
 
 func missingChecks(evals schema.PreconditionEvalSet, transitions []schema.AttackTransitionAssessment) []string {
@@ -276,7 +312,7 @@ func missingChecks(evals schema.PreconditionEvalSet, transitions []schema.Attack
 	return checks
 }
 
-func assessmentState(paths []schema.PathAssessment, evals schema.PreconditionEvalSet, transitions []schema.AttackTransitionAssessment) (schema.ContextualAssessmentState, string) {
+func assessmentState(paths []schema.PathAssessment, evals schema.PreconditionEvalSet) (schema.ContextualAssessmentState, string) {
 	if len(paths) == 0 && len(evals) == 0 {
 		return schema.ContextNeedsEvidence, "no asset-specific exploit prerequisites have been evaluated"
 	}
@@ -292,14 +328,6 @@ func assessmentState(paths []schema.PathAssessment, evals schema.PreconditionEva
 		}
 	}
 	if met > 0 {
-		for _, transition := range transitions {
-			if transition.Status == schema.PreconditionUnknown {
-				return schema.ContextNeedsEvidence, "a documented path is locally plausible, but required attacker access or capability still needs evidence"
-			}
-			if transition.Status == schema.PreconditionUnsatisfied {
-				return schema.ContextDocumentedPathBlock, "a required transition in the documented exploit chain is blocked; alternate paths are not ruled out"
-			}
-		}
 		return schema.ContextConditionsMet, "at least one documented exploit path has all required conditions met"
 	}
 	if unknown > 0 {
@@ -309,6 +337,15 @@ func assessmentState(paths []schema.PathAssessment, evals schema.PreconditionEva
 		return schema.ContextDocumentedPathBlock, "all currently documented exploit paths are blocked; alternate paths are not ruled out"
 	}
 	return schema.ContextConditional, "asset-specific exploitability is conditional"
+}
+
+func containsID(ids []string, id string) bool {
+	for _, candidate := range ids {
+		if candidate == id {
+			return true
+		}
+	}
+	return false
 }
 
 // compareVersions does a loose dotted-number comparison: "1.2.3" vs "1.2.10".

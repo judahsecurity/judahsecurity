@@ -2006,7 +2006,10 @@ def _risk_model_view(db: Session, vuln: Vulnerability) -> dict:
     from app.services.severity_evaluation import EVALUATOR_VERSION, apply_effective, evaluate_finding
 
     meta = vuln.metadata_ or {}
-    if (meta.get("severity_eval") or {}).get("version") != EVALUATOR_VERSION:
+    from app.services.applicability_evidence import evidence_deadline
+    from datetime import timezone
+    deadline = evidence_deadline(meta.get("oracle") or {})
+    if (meta.get("severity_eval") or {}).get("version") != EVALUATOR_VERSION or (deadline and deadline <= datetime.now(timezone.utc)):
         view = evaluate_finding(db, vuln)
         db.commit()
         return view
@@ -2203,7 +2206,6 @@ def create_finding_detection_feedback(
             logger.warning(f"Detection pattern evaluation failed: {e}")
 
     return feedback_to_dict(feedback)
-
 
 
 

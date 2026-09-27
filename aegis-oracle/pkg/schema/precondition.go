@@ -28,6 +28,7 @@ type Precondition struct {
 	MatchKind          string               `json:"match_kind" yaml:"match_kind"` // 'regex' | 'equals' | 'contains' | 'version_lte' | 'present'
 	MatchValue         string               `json:"match_value,omitempty" yaml:"match_value,omitempty"`
 	VerificationMethod string               `json:"verification_method" yaml:"verification_method"`
+	SourceReference    string               `json:"source_reference,omitempty" yaml:"source_reference,omitempty"`
 	Severity           PreconditionSeverity `json:"severity" yaml:"severity"`
 	// PathIDs scopes this prerequisite to one or more documented exploit
 	// paths. A failed prerequisite blocks those paths, not every possible path.

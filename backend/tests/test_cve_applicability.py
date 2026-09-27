@@ -71,7 +71,7 @@ def test_cve_2026_1293_applicable_to_clearpath_fingerprint():
         products=products,
         affected_products=[{"vendor": "yoast", "product": "wordpress-seo"}],
     )
-    assert match["verdict"] == "applicable"
+    assert match["verdict"] == "version_match"
     assert match["product_present"] is True
     yoast = next(h for h in match["hits"] if h["product"] == "yoast seo")
     assert yoast["in_range"] is True
@@ -86,7 +86,7 @@ def test_patched_yoast_is_not_applicable():
         intel_text=CVE_1293_INTEL,
         products=products,
     )
-    assert match["verdict"] == "not_applicable"
+    assert match["verdict"] == "version_outside_range"
     yoast = next(h for h in match["hits"] if h["product"] == "yoast seo")
     assert yoast["in_range"] is False
 

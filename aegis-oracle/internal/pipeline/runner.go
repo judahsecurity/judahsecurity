@@ -99,6 +99,7 @@ func (r *Runner) Run(ctx context.Context, cveID, assetID string, refs []intrinsi
 		Intrinsic:     analysis,
 		Asset:         asset,
 		Preconditions: preconditions,
+		Contextual:    &contextualAssessment,
 		Exploitation:  exploitation,
 		Now:           assessedAt,
 	}, r.opesConf)
@@ -143,6 +144,7 @@ func (r *Runner) RunWithObjects(
 		Intrinsic:     analysis,
 		Asset:         asset,
 		Preconditions: preconditions,
+		Contextual:    &contextualAssessment,
 		Exploitation:  exploitation,
 		Now:           assessedAt,
 	}, r.opesConf)

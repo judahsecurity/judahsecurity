@@ -563,6 +563,7 @@ func analyzeGenericFinding(v schema.GenericVulnerability, asset *schema.Asset, c
 		Intrinsic:           analysis,
 		Asset:               asset,
 		Preconditions:       preconditions,
+		Contextual:          &contextualAssessment,
 		Exploitation:        exploitation,
 		Now:                 assessedAt,
 		CWEID:               v.CWEID,

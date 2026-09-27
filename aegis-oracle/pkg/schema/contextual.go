@@ -35,7 +35,7 @@ func (e EvidenceObservation) FreshnessAt(now time.Time) EvidenceFreshness {
 	if e.Freshness == EvidenceError || e.Freshness == EvidenceUnsupported {
 		return e.Freshness
 	}
-	if e.ObservedAt.Time.IsZero() {
+	if e.ObservedAt.Time.IsZero() || e.ObservedAt.Time.After(now) {
 		return EvidenceUnknown
 	}
 	if e.Freshness == EvidenceStale || (!e.ValidUntil.Time.IsZero() && now.After(e.ValidUntil.Time)) {
@@ -72,15 +72,16 @@ type ExploitPath struct {
 // AttackTransition keeps network access separate from the capability needed
 // to turn that access into attacker progress.
 type AttackTransition struct {
-	ID                  string `json:"id"`
-	Description         string `json:"description,omitempty"`
-	FromPosition        string `json:"from_position,omitempty"`
-	Target              string `json:"target,omitempty"`
-	AccessRequired      string `json:"access_required,omitempty"`
-	CapabilityRequired  string `json:"capability_required,omitempty"`
-	ResultingCapability string `json:"resulting_capability,omitempty"`
-	AccessSignal        string `json:"access_signal,omitempty"`
-	CapabilitySignal    string `json:"capability_signal,omitempty"`
+	PathIDs             []string `json:"path_ids,omitempty"`
+	ID                  string   `json:"id"`
+	Description         string   `json:"description,omitempty"`
+	FromPosition        string   `json:"from_position,omitempty"`
+	Target              string   `json:"target,omitempty"`
+	AccessRequired      string   `json:"access_required,omitempty"`
+	CapabilityRequired  string   `json:"capability_required,omitempty"`
+	ResultingCapability string   `json:"resulting_capability,omitempty"`
+	AccessSignal        string   `json:"access_signal,omitempty"`
+	CapabilitySignal    string   `json:"capability_signal,omitempty"`
 }
 
 type PathAssessment struct {

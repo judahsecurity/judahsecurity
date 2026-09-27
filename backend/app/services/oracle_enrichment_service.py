@@ -55,6 +55,7 @@ from sqlalchemy.orm import Session
 
 from app.models.asset import Asset, AssetType
 from app.models.vulnerability import Vulnerability
+from app.services.applicability_evidence import evidence_deadline, oracle_asset_with_observations
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +127,7 @@ def enrich_vulnerability(db: Session, vuln: Vulnerability, *, force: bool = Fals
     `force=False` and the existing enrichment is within `ENRICH_TTL_HOURS`,
     returns the cached payload without an HTTP call.
     """
-    oracle_asset = _build_oracle_asset(vuln.asset) if vuln.asset is not None else None
+    oracle_asset = oracle_asset_with_observations(vuln, _build_oracle_asset(vuln.asset) if vuln.asset is not None else None)
     context_hash = _context_hash(vuln, oracle_asset)
     if not force:
         cached = _existing_fresh_payload(vuln, context_hash=context_hash)
@@ -261,9 +262,12 @@ def _existing_fresh_payload(
     payload = get_oracle_payload(vuln)
     if not payload:
         return None
+    deadline = evidence_deadline(payload)
+    if deadline and deadline <= datetime.now(timezone.utc):
+        return None
     expected_context_hash = context_hash or _context_hash(
         vuln,
-        _build_oracle_asset(vuln.asset) if vuln.asset is not None else None,
+        oracle_asset_with_observations(vuln, _build_oracle_asset(vuln.asset) if vuln.asset is not None else None),
     )
     if not payload.get("context_hash") or payload.get("context_hash") != expected_context_hash:
         return None
@@ -800,6 +804,15 @@ def _build_payload(
 
 
 def _persist(db: Session, vuln: Vulnerability, payload: Dict[str, Any]) -> Dict[str, Any]:
+    # A collector or analyst may update observations while Oracle is running.
+    # Do not publish an assessment of superseded inputs or overwrite their JSON.
+    if payload.get("context_hash"):
+        db.refresh(vuln, with_for_update=True)
+        if vuln.asset:
+            db.refresh(vuln.asset)
+        current_asset = oracle_asset_with_observations(vuln, _build_oracle_asset(vuln.asset) if vuln.asset else None)
+        if payload["context_hash"] != _context_hash(vuln, current_asset):
+            raise OracleInputError("Asset evidence changed during analysis; rerun Oracle with the latest observations")
     meta = dict(vuln.metadata_) if isinstance(vuln.metadata_, dict) else {}
     meta["oracle"] = payload
     vuln.metadata_ = meta

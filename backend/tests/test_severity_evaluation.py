@@ -46,8 +46,8 @@ def test_kev_metasploit_org_hosted_is_critical():
     "overrides, tier, ease, max_likelihood",
     [
         ({"detection_confidence": "exploit_confirmed"}, "confirmed", 4, 4),
-        ({"validation_verdict": "confirmed"}, "confirmed", 4, 4),
-        ({"detection_confidence": "endpoint_confirmed"}, "likely", 4, 4),
+        ({"validation_verdict": "confirmed"}, "unverified", 3, 4),
+        ({"detection_confidence": "endpoint_confirmed"}, "unverified", 3, 4),
         ({"attack_path": "lateral_movement_required"}, "conditional", 2, 2),
         ({"preconditions": [Precond("mod", "module enabled", True, "unsatisfied")]}, "blocked", 1, 0),
     ],
@@ -79,7 +79,8 @@ def test_cve_2025_55130_uses_reconciled_cvss_and_is_conditional():
 
 def test_skill_level_difficulty_then_tooling():
     hard = "CVSS:3.1/AV:N/AC:H/PR:H/UI:N/S:U/C:H/I:H/A:H"
-    base = dict(cve_id="CVE-2099-0004", published_cvss=8.0, cvss_vector=hard, detection_confidence="endpoint_confirmed")
+    base = dict(cve_id="CVE-2099-0004", published_cvss=8.0, cvss_vector=hard,
+                contextual_assessment={"state": "conditions_met"})
     assert evaluate_context(FindingContext(**base))["factors"]["skill_level"]["score"] == 1
     armed = evaluate_context(FindingContext(**base, exploitation={"metasploit_available": True}))
     assert armed["factors"]["skill_level"]["score"] == 4

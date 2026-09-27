@@ -3910,15 +3910,15 @@ class ASMToolsManager(AssessmentCapabilities):
                     intel_text=intel,
                     products=[prod],
                 )
-                if m.get("verdict") == "applicable":
+                if m.get("verdict") == "version_match":
                     applicable.append(m)
             blocks.append(f"### {prod.get('name')} {prod.get('version')}\n{intel[:1800]}\n")
         if applicable:
-            blocks.append("VERDICT: applicable")
+            blocks.append("VERDICT: version_match")
             for m in applicable:
                 blocks.append(f"- {m.get('cve_id')} on {m.get('hits')}")
             blocks.append(
-                "File create_finding for each applicable CVE (quote version evidence + range)."
+                "Record each candidate as version-only evidence, with component and runtime prerequisites unverified."
             )
         else:
             blocks.append(
