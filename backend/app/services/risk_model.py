@@ -25,18 +25,17 @@ IMPACT_FACTORS = ("business_impact", "network_location", "vulnerability_severity
 LIKELIHOOD_FACTORS = ("skill_level", "ease_of_discovery", "ease_of_exploit", "awareness")
 FACTOR_KEYS = IMPACT_FACTORS + LIKELIHOOD_FACTORS
 
-# Ratings per factor, 0–4, as on the scoring sheet (0 = none).
+# Whole-number ratings from the scoring sheet; Network Location uses 2 or 4.
 FACTOR_RATINGS: Dict[str, Dict[int, str]] = {
-    "business_impact": {4: "Critical", 3: "High", 2: "Medium", 1: "Low", 0: "None"},
+    "business_impact": {4: "Critical", 3: "High", 2: "Medium", 1: "Low"},
     # 4 is shown as "<Org> Hosted" for the organization being assessed.
-    "network_location": {4: "Organization Hosted", 2: "Third Party Hosted", 1: "Internal Only", 0: "Segmented Network"},
-    "vulnerability_severity": {4: "Critical", 3: "High", 2: "Medium", 1: "Low", 0: "Informational"},
+    "network_location": {4: "Organization Hosted", 2: "Third Party Hosted"},
+    "vulnerability_severity": {4: "Critical", 3: "High", 2: "Medium", 1: "Low"},
     "skill_level": {
         4: "No Technical Skills",
         3: "Some Technical Skills",
         2: "Advanced Computer User",
         1: "Security Penetration Skills",
-        0: "Not Feasible",
     },
     "ease_of_discovery": {4: "Automated Tools Available", 3: "Easy", 2: "Difficult", 1: "Practically Impossible"},
     "ease_of_exploit": {
@@ -44,15 +43,14 @@ FACTOR_RATINGS: Dict[str, Dict[int, str]] = {
         3: "Easy",
         2: "Difficult",
         1: "Practically Impossible",
-        0: "Not Exploitable Here",
     },
     "awareness": {4: "Public Knowledge", 3: "Obvious", 2: "Hidden", 1: "Unknown"},
 }
 
 REALISM_TIERS = ("confirmed", "likely", "unverified", "conditional", "blocked")
 
-# Per-factor weights, 1–4, chosen by the analyst per finding during triage.
-# Impact and Likelihood are weighted averages, so they stay on the 0–4 scale.
+# Per-factor weights, 1–4, configured in organization settings.
+# Impact and uncapped Likelihood are weighted averages on the 1–4 scale.
 # Defaults approximate the scoring sheet's 70/20/10 impact split with whole
 # numbers (Severity 4 : Business 2 : Network 1 ≈ 57/29/14) and weight the
 # likelihood factors equally.
@@ -92,8 +90,10 @@ def score_factors(
     realism_tier: Optional[str] = None,
     weights: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
-    """Risk = (Impact/4)·(Likelihood/4)·100 from seven 0–4 factor scores,
+    """Risk = (Impact/4)·(Likelihood/4)·100 from seven 1–4 factor scores,
     each side a weighted average using 1–4 weights."""
+    for key in FACTOR_KEYS:
+        validate_override(key, scores[key])
     w = {**DEFAULT_WEIGHTS, **(weights or {})}
     impact = _weighted_mean(scores, w, IMPACT_FACTORS)
     uncapped = _weighted_mean(scores, w, LIKELIHOOD_FACTORS)
@@ -124,10 +124,14 @@ def validate_weight(key: str, weight: int) -> None:
         raise ValueError(f"{key}: weight {weight} not allowed; use 1–4")
 
 
+def is_valid_factor_score(key: str, score: Any) -> bool:
+    return type(score) is int and score in FACTOR_RATINGS.get(key, {})
+
+
 def validate_override(key: str, score: int) -> None:
     if key not in FACTOR_KEYS:
         raise ValueError(f"unknown risk factor {key!r}")
-    if score not in FACTOR_RATINGS[key]:
+    if not is_valid_factor_score(key, score):
         allowed = ", ".join(f"{s} ({r})" for s, r in sorted(FACTOR_RATINGS[key].items(), reverse=True))
         raise ValueError(f"{key}: score {score} not allowed; use one of {allowed}")
 
@@ -154,7 +158,7 @@ def apply_overrides(
         if value is None:
             stored.pop(key, None)
             continue
-        score = int(value["score"])
+        score = value["score"]
         validate_override(key, score)
         stored[key] = {"score": score, "note": (value.get("note") or "").strip(), "by": analyst, "at": now}
     out["factors"] = stored
@@ -220,7 +224,16 @@ def merged_risk_model(
     missing: List[str] = []
     for key in FACTOR_KEYS:
         a = auto_factors.get(key)
+        if not isinstance(a, dict) or not is_valid_factor_score(key, a.get("score")):
+            a = None
+        else:
+            a = {**a, "rating": ratings[key][a["score"]]}
         o = analyst_factors.get(key)
+        invalid_override = o is not None and (
+            not isinstance(o, dict) or not is_valid_factor_score(key, o.get("score"))
+        )
+        if invalid_override:
+            o = None
         if o is not None:
             factors[key] = {
                 "score": o["score"],
@@ -233,6 +246,13 @@ def merged_risk_model(
             }
         elif a is not None:
             factors[key] = {**a, "source": a.get("source") or ("assumed" if key in needs_auto else "auto")}
+            if invalid_override:
+                # Retain the old submission for audit, but require a current rating.
+                factors[key]["source"] = "assumed"
+                factors[key]["reason"] = (
+                    "Saved analyst rating is outside the current rating scale; select a rating. "
+                    + (a.get("reason") or "")
+                )
         else:
             missing.append(key)
 
@@ -282,7 +302,7 @@ def merged_risk_model(
     # Level tooling floor; an analyst realism override only moves the
     # likelihood cap, since analyst factor scores are taken as given.
     result.update(score_factors(
-        {k: int(v["score"]) for k, v in factors.items()},
+        {k: v["score"] for k, v in factors.items()},
         (realism or {}).get("tier"),
         {k: v["weight"] for k, v in weights_view.items()},
     ))

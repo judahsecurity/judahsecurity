@@ -2,8 +2,9 @@
 Severity worker — the scheduled job that keeps sev_score current.
 
 Every SEVERITY_EVAL_INTERVAL_SECONDS it re-evaluates the open findings
-marked dirty (a scoring input changed — see app.services.severity_dirty),
-in batches, until none are left. Every SEVERITY_FULL_SWEEP_HOURS it marks
+marked dirty (a scoring input changed — see app.services.severity_dirty)
+or scored by an older evaluator version, in batches, until none are left.
+Every SEVERITY_FULL_SWEEP_HOURS it marks
 every open finding dirty, to pick up anything changed outside the ORM (bulk
 SQL, imports) or evidence that ages (exploit intel, KEV listings).
 """

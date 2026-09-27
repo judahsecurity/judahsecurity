@@ -27,17 +27,17 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
-from app.services.risk_model import FACTOR_RATINGS, validate_override
+from app.services.risk_model import FACTOR_RATINGS, is_valid_factor_score, validate_override
 
 logger = logging.getLogger(__name__)
 
 FACTOR_GUIDE = {
     "business_impact": "Impact on the organization's business if exploited: 4 revenue-generating or critical operations, "
-                       "3 important business function, 2 standard operations, 1 minimal impact, 0 none.",
-    "network_location": "Where the asset is hosted: 4 on the organization's own infrastructure and internet-facing, "
-                        "2 internet-facing on third-party infrastructure (cloud, SaaS, vendor), 1 internal only, 0 segmented.",
+                       "3 important business function, 2 standard operations, 1 minimal impact.",
+    "network_location": "Where the asset is hosted: 4 on the organization's own infrastructure, "
+                        "2 on third-party infrastructure (cloud, SaaS, vendor).",
     "vulnerability_severity": "Technical impact: 4 remote code execution / full compromise, 3 significant data exposure or "
-                              "privilege escalation, 2 limited exposure or DoS, 1 minimal, 0 none.",
+                              "privilege escalation, 2 limited exposure or DoS, 1 minimal.",
     "skill_level": "Skill needed to exploit (OWASP): 4 none (point-and-click), 3 some technical skills, "
                    "2 advanced computer user, 1 security penetration skills.",
     "ease_of_discovery": "How easily an attacker finds it: 4 automated tools, 3 easy with effort, 2 difficult, 1 practically impossible.",
@@ -125,17 +125,19 @@ def _parse(text: str) -> Dict[str, Any]:
 def propose_for_finding(db: Session, vuln: Any, *, llm: Any = None) -> Dict[str, Any]:
     """Ask the LLM for the finding's assumed factors, store valid proposals,
     re-apply the effective score. The caller commits."""
-    from app.services.severity_evaluation import _apply_agent_proposals, apply_effective, evaluate_finding
+    from app.services.severity_evaluation import EVALUATOR_VERSION, _apply_agent_proposals, apply_effective, evaluate_finding
 
     meta = vuln.metadata_ if isinstance(vuln.metadata_, dict) else {}
-    if not meta.get("severity_eval"):
+    if (meta.get("severity_eval") or {}).get("version") != EVALUATOR_VERSION:
         evaluate_finding(db, vuln)
         meta = vuln.metadata_
     sev = dict(meta["severity_eval"])
     gaps = [k for k, f in (sev.get("factors") or {}).items() if f.get("source") in ("assumed", "agent")]
     # Analyst-set factors are settled; don't ask about them.
     analyst = ((meta.get("risk_overrides") or {}).get("factors") or {})
-    gaps = [k for k in gaps if k not in analyst]
+    gaps = [k for k in gaps if not (
+        isinstance(analyst.get(k), dict) and is_valid_factor_score(k, analyst[k].get("score"))
+    )]
     if not gaps:
         return {"proposed": {}, "skipped": "no factors need an estimate"}
 
@@ -155,11 +157,12 @@ def propose_for_finding(db: Session, vuln: Any, *, llm: Any = None) -> Dict[str,
     proposals: Dict[str, Any] = {}
     for key in gaps:
         p = raw.get(key) or {}
+        if not isinstance(p, dict):
+            continue
         score = p.get("score")
         if score is None:
             continue
         try:
-            score = int(score)
             validate_override(key, score)
         except (TypeError, ValueError):
             logger.info("Severity agent: discarded invalid %s=%r for vuln %s", key, score, vuln.id)

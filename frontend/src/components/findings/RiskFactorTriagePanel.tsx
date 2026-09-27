@@ -332,6 +332,9 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
         </p>
       )}
 
+      <p className="text-xs text-muted-foreground">
+        Select a rating scored 1–4 for each factor. Network Location uses 2 or 4.
+      </p>
       {GROUPS.map((group) => (
         <div key={group.title} className="space-y-1.5">
           <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{group.title}</p>

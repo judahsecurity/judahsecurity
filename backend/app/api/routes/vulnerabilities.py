@@ -6,7 +6,7 @@ import os
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Query
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, case, func, or_
 
@@ -1978,7 +1978,7 @@ def run_severity_agent_batch(
 
 
 class RiskFactorInput(BaseModel):
-    score: int
+    score: int = Field(strict=True, ge=1, le=4)
     note: Optional[str] = None
 
 
@@ -2002,12 +2002,11 @@ class RiskFactorsTriage(BaseModel):
 
 
 def _risk_model_view(db: Session, vuln: Vulnerability) -> dict:
-    """Severity evaluation for one finding. Evaluates on first view if the
-    finding has not been through the evaluator yet."""
-    from app.services.severity_evaluation import apply_effective, evaluate_finding
+    """Evaluate missing or outdated scoring data before returning a finding."""
+    from app.services.severity_evaluation import EVALUATOR_VERSION, apply_effective, evaluate_finding
 
     meta = vuln.metadata_ or {}
-    if not meta.get("severity_eval"):
+    if (meta.get("severity_eval") or {}).get("version") != EVALUATOR_VERSION:
         view = evaluate_finding(db, vuln)
         db.commit()
         return view
