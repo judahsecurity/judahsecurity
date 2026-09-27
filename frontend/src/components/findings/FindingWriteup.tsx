@@ -3,6 +3,7 @@
 import type { ReactNode } from 'react';
 import { ExternalLink } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { FindingProse } from './FindingProse';
 
 interface FindingWriteupProps {
   description?: string | null;
@@ -32,11 +33,7 @@ function WriteupSection({
 }
 
 function Prose({ text }: { text: string }) {
-  return (
-    <p className="text-sm text-muted-foreground whitespace-pre-wrap leading-relaxed">
-      {text}
-    </p>
-  );
+  return <FindingProse text={text} />;
 }
 
 function assetHref(value: string): string {

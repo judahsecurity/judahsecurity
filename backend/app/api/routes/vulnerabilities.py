@@ -18,6 +18,8 @@ from app.models.organization import Organization
 from app.models.user import User
 from app.schemas.vulnerability import VulnerabilityCreate, VulnerabilityUpdate, VulnerabilityResponse
 from app.api.deps import get_current_active_user, require_admin, require_analyst
+from app.schemas.finding_triage import FindingTriageWrite
+from app.services.finding_triage import asset_mentions, record_decision, target_host, triage_state
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +141,13 @@ def build_vuln_response(
     d["name"] = vuln.title
     d["host"] = vuln.asset.value if vuln.asset else None
     d["organization_id"] = vuln.asset.organization_id if vuln.asset else None
+    if include_detection_dumps:
+        d["analyst_triage"] = triage_state(vuln)
+        if db is not None:
+            from app.models.business_application import BusinessApplication
+            app_id = vuln.business_app_id or (getattr(vuln.asset, "business_app_id", None) if vuln.asset else None)
+            app = db.query(BusinessApplication).filter(BusinessApplication.id == app_id).first() if app_id else None
+            d["business_app"] = business_app_summary(app, inherited=vuln.business_app_id is None) if app else None
 
     # Latest asset screenshot for analyst visual context on the findings page
     screenshot_id = getattr(vuln.asset, "latest_screenshot_id", None) if vuln.asset else None
@@ -521,6 +530,61 @@ def get_vulnerability(
         )
     
     return build_vuln_response(vuln, db=db)
+
+
+def _review_finding(db, current_user, vuln_id, *, lock=False):
+    query = db.query(Vulnerability).filter(Vulnerability.id == vuln_id)
+    if lock:
+        query = query.with_for_update()
+    vuln = query.first()
+    if not vuln:
+        raise HTTPException(status_code=404, detail="Vulnerability not found")
+    if not check_org_access(db, current_user, vuln.asset_id):
+        raise HTTPException(status_code=403, detail="Access denied")
+    return vuln
+
+
+@router.get("/{vuln_id}/triage")
+def get_finding_triage(vuln_id: int, db: Session = Depends(get_db),
+                       current_user: User = Depends(get_current_active_user)):
+    return triage_state(_review_finding(db, current_user, vuln_id))
+
+
+@router.put("/{vuln_id}/triage")
+def save_finding_triage(vuln_id: int, payload: FindingTriageWrite,
+                        db: Session = Depends(get_db), current_user: User = Depends(require_analyst)):
+    vuln = _review_finding(db, current_user, vuln_id, lock=True)
+    try:
+        vuln.metadata_ = record_decision(vuln, payload.model_dump(), current_user)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    db.commit()
+    db.refresh(vuln)
+    return triage_state(vuln)
+
+
+@router.get("/{vuln_id}/asset-context")
+def finding_asset_context(vuln_id: int, db: Session = Depends(get_db),
+                           current_user: User = Depends(get_current_active_user)):
+    vuln = _review_finding(db, current_user, vuln_id)
+    mentions = asset_mentions(vuln)
+    values = set(mentions) | {target_host(value) for value in mentions}
+    matches = db.query(Asset).filter(
+        Asset.organization_id == vuln.asset.organization_id,
+        Asset.value.in_(values),
+    ).all() if values else []
+    rows = [{"value": vuln.asset.value, "asset_id": vuln.asset_id, "relationship": "linked"}]
+    for mention in mentions:
+        if mention == vuln.asset.value:
+            continue
+        exact = [asset for asset in matches if asset.value == mention]
+        host_matches = [asset for asset in matches if asset.value == target_host(mention)]
+        candidates = exact or host_matches
+        rows.append({"value": mention,
+                     "asset_id": candidates[0].id if len(candidates) == 1 else None,
+                     "relationship": "mentioned"})
+    return {"assets": rows}
 
 
 @router.put("/{vuln_id}", response_model=VulnerabilityResponse)
@@ -2203,7 +2267,6 @@ def create_finding_detection_feedback(
             logger.warning(f"Detection pattern evaluation failed: {e}")
 
     return feedback_to_dict(feedback)
-
 
 
 

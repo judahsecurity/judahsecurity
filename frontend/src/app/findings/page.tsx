@@ -59,7 +59,6 @@ import {
   ShieldOff,
   Bug,
   Copy,
-  Camera,
   Bot,
   AlertTriangle,
   Gauge,
@@ -69,9 +68,9 @@ import { api, getApiErrorMessage } from '@/lib/api';
 import { useToast } from '@/hooks/use-toast';
 import { formatDate, downloadCSV, cn } from '@/lib/utils';
 import { RemediationPanel } from '@/components/remediation/RemediationPanel';
-import { DemonstratedChain, type AgentDetection } from '@/components/findings/DemonstratedChain';
-import { DetectionPanel, hasScannerDetection, type ScannerDetection } from '@/components/findings/DetectionPanel';
-import { FindingWriteup } from '@/components/findings/FindingWriteup';
+import { type AgentDetection } from '@/components/findings/DemonstratedChain';
+import { type ScannerDetection } from '@/components/findings/DetectionPanel';
+import { FindingDetailWorkspace } from '@/components/findings/FindingDetailWorkspace';
 import { RiskAssessmentPanel, raStatusLabel, type RiskAssessment } from '@/components/findings/RiskAssessmentPanel';
 import {
   RiskFactorTriagePanel,
@@ -86,6 +85,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 import { JiraProjectPicker } from '@/components/integrations/JiraProjectPicker';
 
 type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info';
@@ -920,8 +920,7 @@ export default function FindingsPage() {
   const [onlyNeedsTriage, setOnlyNeedsTriage] = useState(false);
   const [severityEvalBusy, setSeverityEvalBusy] = useState(false);
   const [oracleBatchBusy, setOracleBatchBusy] = useState(false);
-  const [capturingScreenshot, setCapturingScreenshot] = useState(false);
-  const [screenshotLightboxOpen, setScreenshotLightboxOpen] = useState(false);
+  const findingReviewDirty = useRef(false);
   const { toast } = useToast();
 
   // Generate Nuclei Template state
@@ -1310,71 +1309,21 @@ export default function FindingsPage() {
     setRemediationData(null);
     try {
       const data = await api.getRemediationForFinding(findingId);
-      setRemediationData(data);
+      if (openFindingIdRef.current === findingId) setRemediationData(data);
     } catch (err) {
       console.error('Failed to fetch remediation:', err);
       // Silently fail - will show fallback remediation
     } finally {
-      setLoadingRemediation(false);
-    }
-  };
-
-  const handleCaptureFindingScreenshot = async () => {
-    if (!selectedFinding?.asset_id) {
-      toast({
-        title: 'No asset linked',
-        description: 'This finding has no asset to screenshot.',
-        variant: 'destructive',
-      });
-      return;
-    }
-    setCapturingScreenshot(true);
-    try {
-      const shot = await api.captureScreenshot(selectedFinding.asset_id);
-      if (shot?.status === 'success' && shot?.id) {
-        const updated = {
-          ...selectedFinding,
-          screenshot_id: shot.id,
-          screenshot_page_title: shot.page_title ?? null,
-          screenshot_captured_at: shot.captured_at ?? null,
-        };
-        setSelectedFinding(updated);
-        setFindings((prev) =>
-          prev.map((f) => (f.id === selectedFinding.id ? { ...f, ...updated } : f)),
-        );
-        toast({ title: 'Screenshot captured', description: 'Saved and linked to this asset.' });
-      } else {
-        toast({
-          title: 'Screenshot failed',
-          description: shot?.error_message || 'Capture completed but no image was saved.',
-          variant: 'destructive',
-        });
-      }
-    } catch (err) {
-      toast({
-        title: 'Screenshot failed',
-        description: getApiErrorMessage(err, 'Could not capture screenshot. Check Playwright/EyeWitness status.'),
-        variant: 'destructive',
-      });
-    } finally {
-      setCapturingScreenshot(false);
+      if (openFindingIdRef.current === findingId) setLoadingRemediation(false);
     }
   };
 
   // Handle finding selection
   const handleSelectFinding = (finding: Finding) => {
+    openFindingIdRef.current = finding.id;
     setSelectedFinding(finding);
-    setScreenshotLightboxOpen(false);
     fetchRemediation(finding.id);
-    api.getVulnerability(finding.id)
-      .then((full) => {
-        setSelectedFinding((prev) =>
-          prev?.id === finding.id ? { ...prev, ...full } : prev,
-        );
-      })
-      .catch(() => {
-        /* list payload is enough to render the sheet */
-      });
+    // FindingDetailWorkspace loads the full record and review version together.
   };
 
   // Handle status change
@@ -2559,12 +2508,16 @@ export default function FindingsPage() {
         <Sheet
           open={!!selectedFinding}
           onOpenChange={(open) => {
-            if (!open) setSelectedFinding(null);
+            if (!open) {
+              if (findingReviewDirty.current && !window.confirm('Discard unsaved analyst review changes?')) return;
+              findingReviewDirty.current = false;
+              setSelectedFinding(null);
+            }
           }}
         >
           <SheetContent
             side="right"
-            className="w-full sm:max-w-xl lg:max-w-2xl xl:max-w-3xl overflow-y-auto"
+            className="w-full sm:max-w-[96vw] xl:max-w-6xl overflow-y-auto"
           >
             <SheetHeader>
               <div className="flex items-center gap-2 flex-wrap pr-8">
@@ -2577,7 +2530,7 @@ export default function FindingsPage() {
                   return (
                     <Badge className={getSeverityBadgeClass(label === 'info' ? 'info' : label)}>
                       {label}
-                      {score != null ? ` · ${score.toFixed(1)}` : ''}
+                      {score != null ? ` · OPES ${score.toFixed(1)}` : ''}
                     </Badge>
                   );
                 })()}
@@ -2590,7 +2543,7 @@ export default function FindingsPage() {
                     </Badge>
                   )}
                 {selectedFinding?.status && getStatusBadge(selectedFinding.status)}
-                {selectedFinding?.cvss_score && (
+                {selectedFinding?.cvss_score != null && (
                   <Badge variant="outline" className="font-mono">
                     CVSS: {selectedFinding.cvss_score.toFixed(1)}
                   </Badge>
@@ -2601,65 +2554,52 @@ export default function FindingsPage() {
                   </Badge>
                 )}
               </div>
-              <div className="flex items-center justify-between mt-2 gap-2 pr-8">
+              <div className="flex items-start justify-between mt-2 gap-3 pr-8 flex-wrap">
                 <SheetTitle className="text-xl text-left">
                   {selectedFinding?.title || selectedFinding?.name || selectedFinding?.template_id}
                 </SheetTitle>
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="border-[#0052CC]/40 hover:bg-[#0052CC]/15 text-[#4C9AFF]"
-                    onClick={() => selectedFinding && openJiraDialog(selectedFinding)}
-                  >
-                    <Ticket className="h-4 w-4 mr-1.5" />
-                    Jira
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="border-[#81B5A1]/40 hover:bg-[#81B5A1]/15 text-[#81B5A1]"
-                    onClick={() => selectedFinding && openServiceNowDialog(selectedFinding)}
-                  >
-                    <Shield className="h-4 w-4 mr-1.5" />
-                    ServiceNow
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="border-[#494649]/40 hover:bg-[#494649]/20 text-foreground"
-                    onClick={() => selectedFinding && openHackerOneDialog(selectedFinding)}
-                  >
-                    <Bug className="h-4 w-4 mr-1.5" />
-                    HackerOne
-                  </Button>
-                </div>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild><Button size="sm" variant="outline" className="shrink-0"><Ticket className="mr-2 h-4 w-4" />Create / link ticket</Button></DropdownMenuTrigger>
+                  <DropdownMenuContent align="end">
+                    <DropdownMenuItem onSelect={() => selectedFinding && openJiraDialog(selectedFinding)}>Jira</DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => selectedFinding && openServiceNowDialog(selectedFinding)}>ServiceNow</DropdownMenuItem>
+                    <DropdownMenuItem onSelect={() => selectedFinding && openHackerOneDialog(selectedFinding)}>HackerOne</DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
               </div>
               <SheetDescription className="text-left">
-                Complete finding details and remediation information
+                Review the finding, inspect its evidence, and record analyst decisions.
               </SheetDescription>
             </SheetHeader>
 
-            <div className="space-y-6 py-4">
+            {selectedFinding && <FindingDetailWorkspace
+              key={selectedFinding.id}
+              finding={selectedFinding}
+              onDirtyChange={(dirty) => { findingReviewDirty.current = dirty; }}
+              onRefreshFinding={(full) => {
+                setSelectedFinding((previous) => previous?.id === full.id ? { ...previous, ...full } : previous);
+                setFindings((previous) => previous.map((item) => item.id === full.id ? { ...item, ...full } : item));
+              }}
+              onOpenFinding={async (id) => {
+                if (findingReviewDirty.current && !window.confirm('Leave this finding and discard unsaved review changes?')) return;
+                try {
+                  const full = await api.getVulnerability(id);
+                  findingReviewDirty.current = false;
+                  handleSelectFinding(full);
+                } catch (error) { toast({ title: 'Could not load finding', description: getApiErrorMessage(error), variant: 'destructive' }); }
+              }}
+              metadata={<>
               {/* Quick Info Grid */}
-              <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+              <div className="grid gap-3">
                 <div className="flex items-start gap-2">
                   <Target className="h-4 w-4 text-muted-foreground mt-0.5" />
                   <div>
                     <p className="text-xs text-muted-foreground">Host</p>
-                    {selectedFinding?.host ? (
-                      <a
-                        href={`https://${selectedFinding.host}`}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-sm text-primary hover:underline flex items-center gap-1"
-                      >
-                        {selectedFinding.host}
-                        <ExternalLink className="h-3 w-3" />
-                      </a>
-                    ) : (
-                      <p className="text-sm text-muted-foreground">-</p>
-                    )}
+                    {selectedFinding?.asset_id ? (
+                      <Link href={`/assets/${selectedFinding.asset_id}`} target="_blank" rel="noopener noreferrer" className="text-sm text-primary hover:underline break-all">
+                        {selectedFinding.host || `Asset ${selectedFinding.asset_id}`} ↗
+                      </Link>
+                    ) : <p className="text-sm break-all">{selectedFinding?.host || 'No linked asset'}</p>}
                   </div>
                 </div>
 
@@ -2773,8 +2713,8 @@ export default function FindingsPage() {
                   </div>
                 )}
               </div>
-
-              {/* Delphi enrichment panel */}
+              </>}
+              overview={<>
               {selectedFinding?.delphi &&
                 (selectedFinding.delphi.kev ||
                   selectedFinding.delphi.epss ||
@@ -2899,194 +2839,18 @@ export default function FindingsPage() {
                   );
                 }}
               />
-
-              {/* Risk scoring triage — analysts fill in the factors Oracle
-                  could not measure (business impact, hosting, verification). */}
-              {selectedFinding && (
-                <RiskFactorTriagePanel
-                  findingId={selectedFinding.id}
-                  assetId={selectedFinding.asset_id}
-                  businessApp={selectedFinding.business_app ?? null}
-                  onUpdated={(view, businessApp) => applyRiskView(selectedFinding.id, view, businessApp)}
-                />
-              )}
-
-              {/* Generate Nuclei Template CTA */}
-              {selectedFinding && (selectedFinding.cve_id || selectedFinding.template_id) && (
-                <div className="flex items-center gap-2 p-2.5 rounded-lg border border-purple-500/20 bg-purple-500/5">
-                  <FileCode className="h-4 w-4 text-purple-400 shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs text-purple-300 font-medium">Detection Coverage</p>
-                    <p className="text-xs text-muted-foreground">
-                      Generate or manage a custom Nuclei template for this finding
-                    </p>
-                  </div>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    className="shrink-0 text-xs border-purple-500/30 text-purple-300 hover:bg-purple-500/10 gap-1"
-                    onClick={() => {
-                      setGenerateTemplateCveId(selectedFinding?.cve_id || '');
-                      setGenerateTemplateEvidence(selectedFinding?.evidence || selectedFinding?.matched_at || '');
-                      setGenerateTemplateOpen(true);
-                    }}
-                  >
-                    <Sparkles className="h-3 w-3" />
-                    Generate Template
-                  </Button>
-                </div>
-              )}
-
-              {/* Asset screenshot — visual context for analyst triage */}
-              {selectedFinding?.asset_id && (
-                <div className="space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <p className="text-sm font-medium flex items-center gap-2">
-                      <Camera className="h-4 w-4" />
-                      Asset Screenshot
-                    </p>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-7 text-xs"
-                      onClick={handleCaptureFindingScreenshot}
-                      disabled={capturingScreenshot}
-                    >
-                      {capturingScreenshot ? (
-                        <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
-                      ) : (
-                        <Camera className="h-3.5 w-3.5 mr-1.5" />
-                      )}
-                      {capturingScreenshot
-                        ? 'Capturing...'
-                        : selectedFinding.screenshot_id
-                          ? 'Recapture'
-                          : 'Capture'}
-                    </Button>
-                  </div>
-                  {selectedFinding.screenshot_id ? (
-                    <div className="rounded-lg border border-border bg-secondary/30 overflow-hidden">
-                      <button
-                        type="button"
-                        className="block w-full text-left"
-                        onClick={() => setScreenshotLightboxOpen(true)}
-                      >
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img
-                          src={api.getScreenshotImageUrl(selectedFinding.screenshot_id)}
-                          alt={
-                            selectedFinding.screenshot_page_title ||
-                            `Screenshot of ${selectedFinding.host || 'asset'}`
-                          }
-                          className="w-full max-h-64 object-cover object-top hover:opacity-95 transition-opacity"
-                        />
-                      </button>
-                      <div className="px-3 py-2 flex items-center justify-between gap-2 text-xs text-muted-foreground border-t border-border/60">
-                        <span className="truncate">
-                          {selectedFinding.screenshot_page_title || selectedFinding.host || 'Web asset'}
-                        </span>
-                        <div className="flex items-center gap-2 shrink-0">
-                          {selectedFinding.screenshot_captured_at && (
-                            <span>{formatDate(selectedFinding.screenshot_captured_at)}</span>
-                          )}
-                          <a
-                            href={api.getScreenshotImageUrl(selectedFinding.screenshot_id)}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="text-primary hover:underline inline-flex items-center gap-1"
-                          >
-                            Open
-                            <ExternalLink className="h-3 w-3" />
-                          </a>
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="rounded-lg border border-dashed border-border p-4 text-center space-y-1">
-                      <p className="text-sm text-muted-foreground">
-                        No screenshot for this asset yet.
-                      </p>
-                      <p className="text-xs text-muted-foreground">
-                        Capture one to help validate what the host looks like during analysis.
-                      </p>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Matched At — scanner detections only, and only when Detection has no Match URL */}
-              {selectedFinding?.matched_at &&
-                (selectedFinding.detected_by || '').toLowerCase() !== 'agent' &&
-                !selectedFinding?.detection?.match && (
-                <div className="space-y-2">
-                  <p className="text-sm font-medium flex items-center gap-2">
-                    <Target className="h-4 w-4" />
-                    Matched At
-                  </p>
-                  <div className="p-3 bg-secondary/50 rounded-lg">
-                    <code className="text-sm break-all">{selectedFinding.matched_at}</code>
-                  </div>
-                </div>
-              )}
-
-              <FindingWriteup
-                description={selectedFinding?.description}
-                impact={selectedFinding?.impact}
-                assets={selectedFinding?.agent_detection?.assets}
-                host={selectedFinding?.host}
-                affectedComponent={selectedFinding?.affected_component}
-                recommendation={selectedFinding?.remediation}
-                references={
-                  selectedFinding?.agent_detection?.references?.length
-                    ? selectedFinding.agent_detection.references
-                    : selectedFinding?.references || selectedFinding?.reference
-                }
-                notDemonstrated={selectedFinding?.agent_detection?.not_demonstrated}
-              />
-
-              <RiskAssessmentPanel
-                assessment={selectedFinding?.risk_assessment}
-                asking={askingMarcus}
-                onAskMarcus={handleAskMarcus}
-              />
-
-              {hasScannerDetection(selectedFinding?.detection) && (
-                <DetectionPanel detection={selectedFinding?.detection} />
-              )}
-
-              {(selectedFinding?.detected_by === 'agent' || selectedFinding?.agent_detection) && (
-                <DemonstratedChain detection={selectedFinding?.agent_detection} />
-              )}
-
-              {/* Evidence — skip Nuclei auto-evidence when Detection already shows request/cURL/match */}
-              {selectedFinding?.evidence &&
-                selectedFinding.evidence !== selectedFinding.matched_at &&
-                !(
-                  hasScannerDetection(selectedFinding.detection) &&
-                  /^(Nuclei template |Matched at:)/.test(selectedFinding.evidence.trim())
-                ) && (
-                <div className="space-y-2">
-                  <p className="text-sm font-medium">Evidence</p>
-                  <div className="p-3 bg-secondary/50 rounded-lg overflow-x-auto">
-                    <pre className="text-sm font-mono whitespace-pre-wrap break-all">
-                      {selectedFinding.evidence}
-                    </pre>
-                  </div>
-                </div>
-              )}
-
-              {/* Proof of Concept */}
-              {selectedFinding?.proof_of_concept && (
-                <div className="space-y-2">
-                  <p className="text-sm font-medium">Proof of Concept</p>
-                  <div className="p-3 bg-secondary/50 rounded-lg overflow-x-auto">
-                    <pre className="text-sm font-mono whitespace-pre-wrap break-all">
-                      {selectedFinding.proof_of_concept}
-                    </pre>
-                  </div>
-                </div>
-              )}
-
+              </>}
+              riskTriage={(reloadReview, onDirtyChange) => <RiskFactorTriagePanel
+                findingId={selectedFinding.id}
+                assetId={selectedFinding.asset_id}
+                businessApp={selectedFinding.business_app ?? null}
+                onDirtyChange={onDirtyChange}
+                onUpdated={(view, businessApp) => {
+                  applyRiskView(selectedFinding.id, view, businessApp);
+                  void reloadReview();
+                }}
+              />}
+              remediation={<>
               {/* Structured playbook — narrative recommendation is in FindingWriteup */}
               {(loadingRemediation ||
                 remediationData?.has_playbook ||
@@ -3120,77 +2884,40 @@ export default function FindingsPage() {
                 )}
               </div>
               )}
-
-              {/* Status Actions */}
-              <div className="space-y-2 pt-4 border-t border-border">
-                <p className="text-sm font-medium flex items-center gap-2">
-                  <Activity className="h-4 w-4" />
-                  Update Status
-                </p>
-                <div className="flex flex-wrap gap-2">
+              {/* Generate Nuclei Template CTA */}
+              {selectedFinding && (selectedFinding.cve_id || selectedFinding.template_id) && (
+                <div className="flex items-center gap-2 p-2.5 rounded-lg border border-purple-500/20 bg-purple-500/5">
+                  <FileCode className="h-4 w-4 text-purple-400 shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs text-purple-300 font-medium">Detection Coverage</p>
+                    <p className="text-xs text-muted-foreground">
+                      Generate or manage a custom Nuclei template for this finding
+                    </p>
+                  </div>
                   <Button
                     size="sm"
-                    variant={selectedFinding?.status === 'open' ? 'default' : 'outline'}
-                    onClick={() => selectedFinding && handleStatusChange(selectedFinding.id, 'open')}
-                    disabled={updatingStatus || selectedFinding?.status === 'open'}
-                    className="flex-1 min-w-[120px]"
+                    variant="outline"
+                    className="shrink-0 text-xs border-purple-500/30 text-purple-300 hover:bg-purple-500/10 gap-1"
+                    onClick={() => {
+                      setGenerateTemplateCveId(selectedFinding?.cve_id || '');
+                      setGenerateTemplateEvidence(selectedFinding?.evidence || selectedFinding?.matched_at || '');
+                      setGenerateTemplateOpen(true);
+                    }}
                   >
-                    {updatingStatus ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-                    Open
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant={selectedFinding?.status === 'in_progress' ? 'default' : 'outline'}
-                    onClick={() => selectedFinding && handleStatusChange(selectedFinding.id, 'in_progress')}
-                    disabled={updatingStatus || selectedFinding?.status === 'in_progress'}
-                    className="flex-1 min-w-[120px] border-yellow-600/30 hover:bg-yellow-600/20"
-                  >
-                    {updatingStatus ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-                    In Progress
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant={selectedFinding?.status === 'resolved' ? 'default' : 'outline'}
-                    onClick={() => selectedFinding && handleStatusChange(selectedFinding.id, 'resolved')}
-                    disabled={updatingStatus || selectedFinding?.status === 'resolved'}
-                    className="flex-1 min-w-[120px] border-green-600/30 hover:bg-green-600/20"
-                  >
-                    {updatingStatus ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-                    Resolved
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant={selectedFinding?.status === 'mitigated' ? 'default' : 'outline'}
-                    onClick={() => selectedFinding && handleStatusChange(selectedFinding.id, 'mitigated')}
-                    disabled={updatingStatus || selectedFinding?.status === 'mitigated'}
-                    className="flex-1 min-w-[120px] border-cyan-600/30 hover:bg-cyan-600/20"
-                  >
-                    {updatingStatus ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-                    Mitigated
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant={selectedFinding?.status === 'accepted' ? 'default' : 'outline'}
-                    onClick={() => selectedFinding && handleStatusChange(selectedFinding.id, 'accepted')}
-                    disabled={updatingStatus || selectedFinding?.status === 'accepted'}
-                    className="flex-1 min-w-[120px] border-blue-600/30 hover:bg-blue-600/20"
-                  >
-                    {updatingStatus ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-                    Accept Risk
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant={selectedFinding?.status === 'false_positive' ? 'default' : 'outline'}
-                    onClick={() => selectedFinding && handleStatusChange(selectedFinding.id, 'false_positive')}
-                    disabled={updatingStatus || selectedFinding?.status === 'false_positive'}
-                    className="flex-1 min-w-[120px] border-gray-600/30 hover:bg-gray-600/20"
-                  >
-                    {updatingStatus ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : null}
-                    False Positive
+                    <Sparkles className="h-3 w-3" />
+                    Generate Template
                   </Button>
                 </div>
-              </div>
-
+              )}
+              </>}
+              assessment={
+              <RiskAssessmentPanel
+                assessment={selectedFinding?.risk_assessment}
+                asking={askingMarcus}
+                onAskMarcus={handleAskMarcus}
+              />
+              }
+              validation={<>
               {/* Validate with agent */}
               <div className="space-y-3 pt-4 border-t border-border">
                 <div className="flex items-center justify-between gap-2">
@@ -3276,8 +3003,9 @@ export default function FindingsPage() {
                 )}
 
                 {validationResult?.status === 'failed' && (
-                  <div className="text-sm text-red-400">
-                    Validation failed{validationResult?.error ? `: ${validationResult.error}` : '.'}
+                  <div className="space-y-2 text-sm text-amber-600 dark:text-amber-400">
+                    <p>Validation could not complete. No new conclusion was produced.</p>
+                    {validationResult.error && <details><summary className="cursor-pointer">Technical details</summary><pre className="mt-2 whitespace-pre-wrap break-words text-xs">{validationResult.error}</pre></details>}
                   </div>
                 )}
 
@@ -3414,48 +3142,15 @@ export default function FindingsPage() {
                   </div>
                 )}
               </div>
-
-              {/* Tags */}
-              {selectedFinding?.tags && selectedFinding.tags.length > 0 && (
-                <div className="space-y-2">
-                  <p className="text-sm font-medium flex items-center gap-2">
-                    <Tag className="h-4 w-4" />
-                    Tags
-                  </p>
-                  <div className="flex flex-wrap gap-1">
-                    {selectedFinding.tags.map((tag, i) => (
-                      <Badge key={i} variant="secondary" className="text-xs">
-                        {tag}
-                      </Badge>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
+              </>}
+              statusActions={<label className="block space-y-1 text-xs text-muted-foreground">Finding status
+                  <select aria-label="Finding remediation status" value={selectedFinding?.status || 'open'} disabled={updatingStatus} className="w-full rounded-md border border-input bg-background p-2 text-sm text-foreground" onChange={(event) => selectedFinding && handleStatusChange(selectedFinding.id, event.target.value)}>
+                    {Object.entries(statusConfig).map(([value, config]) => <option key={value} value={value}>{config.label}</option>)}
+                  </select>
+                </label>}
+            />}
           </SheetContent>
         </Sheet>
-
-        {/* Screenshot lightbox */}
-        <Dialog open={screenshotLightboxOpen} onOpenChange={setScreenshotLightboxOpen}>
-          <DialogContent className="max-w-4xl p-2 sm:p-4">
-            <DialogHeader>
-              <DialogTitle className="text-base">
-                {selectedFinding?.screenshot_page_title || selectedFinding?.host || 'Asset screenshot'}
-              </DialogTitle>
-              <DialogDescription>
-                Visual context for analyst review
-              </DialogDescription>
-            </DialogHeader>
-            {selectedFinding?.screenshot_id && (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img
-                src={api.getScreenshotImageUrl(selectedFinding.screenshot_id)}
-                alt={selectedFinding.screenshot_page_title || selectedFinding.host || 'Screenshot'}
-                className="w-full max-h-[75vh] object-contain rounded-md"
-              />
-            )}
-          </DialogContent>
-        </Dialog>
 
         {/* Bulk Assignment Dialog */}
         <Dialog open={assignDialogOpen} onOpenChange={setAssignDialogOpen}>
