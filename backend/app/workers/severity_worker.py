@@ -1,11 +1,11 @@
 """
 Severity worker — the scheduled job that keeps sev_score current.
 
-Every SEVERITY_EVAL_INTERVAL_SECONDS it re-evaluates the open findings
+Every SEVERITY_EVAL_INTERVAL_SECONDS it re-evaluates findings
 marked dirty (a scoring input changed — see app.services.severity_dirty)
-or scored by an older evaluator version, in batches, until none are left.
-Every SEVERITY_FULL_SWEEP_HOURS it marks
-every open finding dirty, to pick up anything changed outside the ORM (bulk
+or scored by an older evaluator version, in all statuses and in batches,
+until none are left. Every SEVERITY_FULL_SWEEP_HOURS it marks every finding
+dirty, to pick up anything changed outside the ORM (bulk
 SQL, imports) or evidence that ages (exploit intel, KEV listings).
 """
 
@@ -52,11 +52,11 @@ def tick(session_factory) -> Dict[str, Any]:
 
 
 def full_sweep(session_factory) -> int:
-    from app.services.severity_dirty import mark_all_open
+    from app.services.severity_dirty import mark_all_findings
 
     db = session_factory()
     try:
-        n = mark_all_open(db)
+        n = mark_all_findings(db)
         db.commit()
         return n
     finally:
@@ -86,7 +86,7 @@ def main() -> None:
     while not _shutdown.is_set():
         try:
             if time.monotonic() - last_sweep >= sweep_every:
-                logger.info("Severity full sweep: %d open findings queued", full_sweep(SessionLocal))
+                logger.info("Severity full sweep: %d findings queued", full_sweep(SessionLocal))
                 last_sweep = time.monotonic()
             totals = tick(SessionLocal)
             if totals["selected"]:

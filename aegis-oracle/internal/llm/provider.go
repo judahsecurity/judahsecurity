@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -330,6 +331,7 @@ func (o *openAIProvider) CompleteJSON(ctx context.Context, req module.JSONReques
 		messages = append(messages, map[string]any{"role": "system", "content": req.System})
 	}
 	messages = append(messages, map[string]any{"role": "user", "content": req.User})
+	schema, strict := openAISchema(req.Schema)
 
 	body := map[string]any{
 		"model":      model,
@@ -339,8 +341,8 @@ func (o *openAIProvider) CompleteJSON(ctx context.Context, req module.JSONReques
 			"type": "json_schema",
 			"json_schema": map[string]any{
 				"name":   "analysis",
-				"strict": true,
-				"schema": req.Schema,
+				"strict": strict,
+				"schema": schema,
 			},
 		},
 	}
@@ -379,6 +381,83 @@ func (o *openAIProvider) CompleteJSON(ctx context.Context, req module.JSONReques
 			Output: or.Usage.CompletionTokens,
 		},
 	}, nil
+}
+
+// openAISchema adapts a closed JSON Schema to OpenAI's strict structured-output
+// subset without changing the schema used by other providers. OpenAI requires
+// every property to appear in required; formerly optional properties accept
+// null so the model need not invent a value. Schemas with open objects (such as
+// the agent's tool_args) cannot be represented strictly and use non-strict mode.
+func openAISchema(original any) (any, bool) {
+	encoded, err := json.Marshal(original)
+	if err != nil {
+		return original, false
+	}
+	var schema any
+	if err := json.Unmarshal(encoded, &schema); err != nil {
+		return original, false
+	}
+	if root, ok := schema.(map[string]any); ok {
+		delete(root, "$schema")
+	}
+	if !normalizeOpenAISchema(schema) {
+		return original, false
+	}
+	return schema, true
+}
+
+func normalizeOpenAISchema(value any) bool {
+	node, ok := value.(map[string]any)
+	if !ok {
+		return true
+	}
+	typeName, _ := node["type"].(string)
+	if typeName == "object" {
+		properties, ok := node["properties"].(map[string]any)
+		if !ok || len(properties) == 0 {
+			return false
+		}
+		required := make(map[string]bool)
+		if entries, ok := node["required"].([]any); ok {
+			for _, entry := range entries {
+				if name, ok := entry.(string); ok {
+					required[name] = true
+				}
+			}
+		}
+		keys := make([]string, 0, len(properties))
+		for key := range properties {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			property, ok := properties[key].(map[string]any)
+			if !ok || !normalizeOpenAISchema(property) {
+				return false
+			}
+			if !required[key] && !makeOpenAINullable(property) {
+				return false
+			}
+		}
+		node["required"] = keys
+		node["additionalProperties"] = false
+	}
+	if items, exists := node["items"]; exists && !normalizeOpenAISchema(items) {
+		return false
+	}
+	return true
+}
+
+func makeOpenAINullable(property map[string]any) bool {
+	typeName, ok := property["type"].(string)
+	if !ok {
+		return false
+	}
+	property["type"] = []string{typeName, "null"}
+	if entries, ok := property["enum"].([]any); ok {
+		property["enum"] = append(entries, nil)
+	}
+	return true
 }
 
 func (o *openAIProvider) post(ctx context.Context, path string, body any) ([]byte, error) {
