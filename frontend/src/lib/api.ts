@@ -2726,6 +2726,17 @@ class ApiClient {
     return response.data;
   }
 
+  async getApplicabilityEvidence(vulnId: number): Promise<any> {
+    return (await this.client.get(`/oracle/applicability/${vulnId}`)).data;
+  }
+
+  async saveApplicabilityEvidence(vulnId: number, observations: Array<{
+    signal_path: string; value: string | null; method: string;
+    reference: string; note: string; observed_at: string; valid_for_hours: number;
+  }>): Promise<any> {
+    return (await this.client.put(`/oracle/applicability/${vulnId}`, { observations }, { timeout: 180000 })).data;
+  }
+
   // Trigger Oracle enrichment for a single ASM vulnerability. Picks the
   // strongest path automatically (full /analyze when the vulnerability
   // has an asset, /cve/{id} intrinsic otherwise).

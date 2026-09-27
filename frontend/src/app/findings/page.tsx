@@ -78,6 +78,7 @@ import {
   type BusinessAppSummary,
   type RiskFactorsView,
 } from '@/components/findings/RiskFactorTriagePanel';
+import { ApplicabilityEvidencePanel } from '@/components/findings/ApplicabilityEvidencePanel';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
   Select,
@@ -2903,7 +2904,21 @@ export default function FindingsPage() {
               {/* Risk scoring triage — analysts fill in the factors Oracle
                   could not measure (business impact, hosting, verification). */}
               {selectedFinding && (
+                <ApplicabilityEvidencePanel
+                  key={selectedFinding.id}
+                  findingId={selectedFinding.id}
+                  refreshKey={selectedFinding.oracle?.enriched_at}
+                  onUpdated={(oracle, risk) => {
+                    const id = selectedFinding.id;
+                    setSelectedFinding(prev => prev && prev.id === id ? { ...prev, oracle } : prev);
+                    setFindings(prev => prev.map(f => f.id === id ? { ...f, oracle } : f));
+                    applyRiskView(id, risk);
+                  }}
+                />
+              )}
+              {selectedFinding && (
                 <RiskFactorTriagePanel
+                  key={`${selectedFinding.id}:${selectedFinding.oracle?.enriched_at}:${selectedFinding.oracle?.analysis_status}`}
                   findingId={selectedFinding.id}
                   assetId={selectedFinding.asset_id}
                   businessApp={selectedFinding.business_app ?? null}

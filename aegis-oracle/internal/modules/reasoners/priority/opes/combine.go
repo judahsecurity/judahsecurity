@@ -28,7 +28,7 @@ func combine(in Input, c schema.OPESComponents, cfg Config) schema.OPESScore {
 		}
 		score := buildScore(raw, c, in, cfg)
 		score.Category = schema.PriorityCritical
-		score.Label = "Actively Exploited"
+		score.Label = applicabilityLabel(in, "Actively Exploited", true)
 		score.Override = "kev_floor"
 		return score
 	}
@@ -47,6 +47,7 @@ func buildScore(raw float64, c schema.OPESComponents, in Input, cfg Config) sche
 	raw = clamp(raw, 0, 10)
 	rounded := math.Round(raw*10) / 10
 	cat, label := bucketize(rounded, cfg)
+	label = applicabilityLabel(in, label, false)
 	return schema.OPESScore{
 		Value:            rounded,
 		Category:         cat,
@@ -55,6 +56,26 @@ func buildScore(raw float64, c schema.OPESComponents, in Input, cfg Config) sche
 		Components:       c,
 		TopContributors:  explain(c, cfg),
 		EvaluatorVersion: Version,
+	}
+}
+
+// The priority number includes global intelligence. Its label must not turn
+// missing local evidence into an assertion of exploitability on this asset.
+func applicabilityLabel(in Input, fallback string, globalExploitation bool) string {
+	if in.Contextual == nil {
+		return fallback
+	}
+	prefix := ""
+	if globalExploitation {
+		prefix = "Known exploitation reported; "
+	}
+	switch in.Contextual.State {
+	case schema.ContextConditionsMet:
+		return prefix + "documented exploit conditions met"
+	case schema.ContextDocumentedPathBlock:
+		return prefix + "documented paths blocked on this asset"
+	default:
+		return prefix + "applicability unverified; asset evidence needed"
 	}
 }
 
@@ -75,6 +96,9 @@ func bucketize(v float64, cfg Config) (schema.Priority, string) {
 
 func deriveConfidence(in Input) schema.Confidence {
 	if in.Intrinsic == nil {
+		return schema.ConfidenceLow
+	}
+	if in.Contextual != nil && in.Contextual.State == schema.ContextNeedsEvidence {
 		return schema.ConfidenceLow
 	}
 	if in.Preconditions.AnyBlocker(schema.PreconditionUnknown) {

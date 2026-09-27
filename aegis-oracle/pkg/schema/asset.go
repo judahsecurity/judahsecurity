@@ -64,6 +64,10 @@ type AssetSignals struct {
 	FS             *FSSignals                       `json:"fs,omitempty"`
 	Components     []ComponentObservation           `json:"components,omitempty"`
 	SignalEvidence map[string][]EvidenceObservation `json:"signal_evidence,omitempty"`
+	// ObservedSignals contains explicit, finding-scoped observations supplied
+	// by an analyst or an authenticated collector. Unknown/retracted values
+	// intentionally shadow inventory guesses; freshness is checked by Phase B.
+	ObservedSignals map[string]EvidenceObservation `json:"observed_signals,omitempty"`
 
 	Extra map[string]string `json:"extra,omitempty"`
 }
@@ -310,6 +314,12 @@ func (s AssetSignals) Lookup(path string) (string, bool) {
 // LookupWithEvidence returns the signal value together with observations that
 // establish its provenance and freshness.
 func (s AssetSignals) LookupWithEvidence(path string) (string, []EvidenceObservation, bool) {
+	if observation, ok := s.ObservedSignals[path]; ok {
+		if observation.SignalPath != path {
+			return "", nil, false
+		}
+		return observation.Value, []EvidenceObservation{observation}, true
+	}
 	value, ok := s.Lookup(path)
 	if !ok {
 		return "", s.SignalEvidence[path], false

@@ -12,7 +12,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from app.api import deps  # noqa: E402
-from app.api.routes import business_apps, vulnerabilities  # noqa: E402
+from app.api.routes import business_apps, vulnerabilities, oracle  # noqa: E402
 from app.db.database import Base, get_db  # noqa: E402
 import app.models  # noqa: E402,F401
 from app.models.asset import Asset, AssetType  # noqa: E402
@@ -22,6 +22,8 @@ from app.models.organization import Organization  # noqa: E402
 from app.models.screenshot import Screenshot  # noqa: E402
 from app.models.user import User  # noqa: E402
 from app.models.vulnerability import Severity, Vulnerability  # noqa: E402
+from app.models.technology import Technology, asset_technologies  # noqa: E402
+from app.models.port_service import PortService  # noqa: E402
 
 
 @pytest.fixture()
@@ -30,6 +32,7 @@ def client(monkeypatch):
     Base.metadata.create_all(engine, tables=[
         Organization.__table__, Netblock.__table__, BusinessApplication.__table__, Asset.__table__,
         Vulnerability.__table__, Screenshot.__table__,
+        Technology.__table__, asset_technologies, PortService.__table__,
     ])
     Session = sessionmaker(bind=engine)
     import app.db.database as database
@@ -57,6 +60,7 @@ def client(monkeypatch):
     app = FastAPI()
     app.include_router(vulnerabilities.router)
     app.include_router(business_apps.router)
+    app.include_router(oracle.router)
 
     def db_override():
         db = Session()

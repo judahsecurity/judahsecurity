@@ -40,6 +40,7 @@ interface RealismView {
   source?: 'analyst';
   by?: string;
   auto?: { tier: string } | null;
+  needs_analyst?: boolean;
 }
 
 export interface RiskFactorsView {
@@ -78,7 +79,7 @@ const GROUPS: { title: string; keys: [string, string][] }[] = [
 const REALISM_TIERS: [string, string][] = [
   ['confirmed', 'Confirmed — exploit proven on this asset'],
   ['likely', 'Likely — feature live, conditions met'],
-  ['unverified', 'Unverified — version match only'],
+  ['unverified', 'Unverified — required asset evidence missing'],
   ['conditional', 'Conditional — needs foothold / creds / victim'],
   ['blocked', 'Blocked — required condition not met here'],
 ];
@@ -250,13 +251,13 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
         {view.needs_analyst.length > 0 && (
           <Badge variant="outline" className="border-amber-500/40 text-amber-400">
             <AlertTriangle className="h-3 w-3 mr-1" />
-            {view.needs_analyst.length} factor{view.needs_analyst.length > 1 ? 's' : ''} need triage
+            {view.needs_analyst.length} item{view.needs_analyst.length > 1 ? 's' : ''} need triage
           </Badge>
         )}
         {view.status === 'triaged' && (
           <Badge variant="outline" className="border-green-500/40 text-green-400">Triaged</Badge>
         )}
-        {view.needs_analyst.length > 0 && (
+        {view.needs_analyst.some(key => key in view.factors) && (
           <Button size="sm" variant="outline" className="ml-auto h-7 text-xs" disabled={asking} onClick={askAgent}>
             {asking ? <Loader2 className="h-3.5 w-3.5 mr-1 animate-spin" /> : <Bot className="h-3.5 w-3.5 mr-1" />}
             Ask agent to estimate

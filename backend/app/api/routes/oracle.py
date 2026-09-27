@@ -12,14 +12,15 @@ directly to Oracle's JSON API through the ASM auth layer.
 
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Literal, Optional
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_active_user, get_current_user
+from app.api.deps import get_current_active_user, get_current_user, require_analyst
 from app.db.database import get_db
 from app.models.user import User
 from app.models.vulnerability import Vulnerability
@@ -177,6 +178,117 @@ async def oracle_cve_lookup(
 
 
 # ─────────────────────────── ASM enrichment ────────────────────────────────
+
+class ApplicabilityObservationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    signal_path: str = Field(min_length=1, max_length=200)
+    value: Optional[str] = Field(default=None, max_length=2000)
+    method: Literal["deployment_config", "runtime_inventory", "source_review", "network_policy", "owner_attestation"]
+    reference: str = Field(min_length=1, max_length=2000)
+    note: str = Field(min_length=1, max_length=4000)
+    observed_at: datetime
+    valid_for_hours: int = Field(default=24, ge=1, le=168, strict=True)
+
+
+class ApplicabilityEvidenceInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    observations: List[ApplicabilityObservationInput] = Field(min_length=1, max_length=50)
+
+
+def _scoped_finding(db: Session, vuln_id: int, user: User, *, for_update: bool = False) -> Vulnerability:
+    query = db.query(Vulnerability).filter(Vulnerability.id == vuln_id)
+    vuln = (query.with_for_update() if for_update else query).first()
+    if not vuln:
+        raise HTTPException(status_code=404, detail="Vulnerability not found")
+    if not user.is_superuser and (not vuln.asset or vuln.asset.organization_id != user.organization_id):
+        raise HTTPException(status_code=403, detail="Not authorised for this vulnerability")
+    return vuln
+
+
+@router.get("/applicability/{vuln_id}")
+def get_applicability_evidence(
+    vuln_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_active_user),
+) -> Dict[str, Any]:
+    from app.services.applicability_evidence import evidence_view
+    return evidence_view(_scoped_finding(db, vuln_id, current_user))
+
+
+@router.put("/applicability/{vuln_id}")
+def save_applicability_evidence(
+    vuln_id: int, body: ApplicabilityEvidenceInput,
+    db: Session = Depends(get_db), current_user: User = Depends(require_analyst),
+) -> Dict[str, Any]:
+    """Save observed facts, then recompute Oracle and severity independently.
+
+    No scanner execution occurs. Collectors can use this same authenticated,
+    organization-scoped contract after collecting evidence in their own scope.
+    """
+    from app.services.applicability_evidence import (
+        evidence_view, finding_observations, invalidate_local_assessment, verification_checks,
+    )
+    from app.services.severity_evaluation import evaluate_finding
+
+    vuln = _scoped_finding(db, vuln_id, current_user, for_update=True)
+    oracle = (vuln.metadata_ or {}).get("oracle") or {}
+    checks = verification_checks(oracle)
+    allowed = {c["signal_path"] for c in checks}
+    now = datetime.now(timezone.utc)
+    signals = dict(finding_observations(vuln))
+    updates = []
+    seen = set()
+    for item in body.observations:
+        if item.signal_path not in allowed or item.signal_path in seen:
+            raise HTTPException(status_code=422, detail="Signal must identify one unique check in this finding's Oracle analysis")
+        seen.add(item.signal_path)
+        if not item.reference.strip() or not item.note.strip():
+            raise HTTPException(status_code=422, detail="Evidence reference and observation note are required")
+        observed = item.observed_at
+        if observed.tzinfo is None:
+            raise HTTPException(status_code=422, detail="observed_at must include a timezone")
+        observed = observed.astimezone(timezone.utc)
+        expiry = observed + timedelta(hours=item.valid_for_hours)
+        if observed > now or expiry <= now:
+            raise HTTPException(status_code=422, detail="Observation must be current, within its validity period, and not in the future")
+        if item.value is not None and not item.value.strip():
+            raise HTTPException(status_code=422, detail="Provide an observed value, or null to withdraw the observation")
+        boolean_check = any(c["signal_path"] == item.signal_path and c.get("match_kind") == "equals"
+                            and str(c.get("match_value")).lower() in ("true", "false") for c in checks)
+        if item.value is not None and boolean_check and item.value.strip().lower() not in ("true", "false"):
+            raise HTTPException(status_code=422, detail="This condition requires a true/false observation; use null for unknown")
+        observation = {
+            "signal_path": item.signal_path, "value": item.value.strip() if item.value is not None else "",
+            "freshness": "fresh" if item.value is not None else "unknown",
+            "source": f"analyst:{item.method}", "scope": f"asm-{vuln.asset_id}",
+            "collected_by": current_user.username, "reference": item.reference.strip(), "note": item.note.strip(),
+            "observed_at": observed.isoformat(), "valid_until": expiry.isoformat(), "recorded_at": now.isoformat(),
+        }
+        signals[item.signal_path] = observation
+        updates.append(observation)
+    meta = dict(vuln.metadata_ or {})
+    previous = meta.get("applicability_evidence") or {}
+    meta["applicability_evidence"] = {
+        "asset_id": vuln.asset_id, "cve_id": vuln.cve_id or "", "signals": signals,
+        "history": [*(previous.get("history") or []), *updates][-200:],
+    }
+    vuln.metadata_ = meta
+    invalidate_local_assessment(vuln, "Asset evidence changed; Oracle reevaluation is required.")
+    evaluate_finding(db, vuln)
+    db.commit()  # Evidence survives an Oracle outage; old conclusions have been withdrawn.
+    pending_oracle = dict((vuln.metadata_ or {}).get("oracle") or {})
+    error = None
+    try:
+        payload = enrich_vulnerability(db, vuln, force=True)
+        if payload.get("analysis_status") == "failed" or not payload.get("contextual_assessment"):
+            error = payload.get("analysis_error") or "Oracle has not completed the asset-specific assessment"
+            meta = dict(vuln.metadata_ or {})
+            meta["oracle"] = pending_oracle
+            vuln.metadata_ = meta
+    except (OracleUnavailable, OracleInputError) as exc:
+        error = str(exc)
+    view = evaluate_finding(db, vuln)
+    db.commit()
+    return {**evidence_view(vuln), "oracle": (vuln.metadata_ or {}).get("oracle"), "risk": view, "refresh_error": error}
 
 
 class EnrichBatchRequest(BaseModel):

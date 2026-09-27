@@ -1,8 +1,7 @@
-"""CVE applicability from a passive homepage fingerprint.
+"""Candidate CVE matching from a partial passive homepage fingerprint.
 
-Glasswing's cheap path for a named CVE (or versioned plugins): look up what
-the CVE affects, GET the URL like a browser, compare product+version. That
-verdict is a finding when the live version is in range — not leftover Nuclei.
+Product/version matches identify findings for verification. Component
+activation and attacker reachability require separate deployment evidence.
 """
 
 from __future__ import annotations
@@ -209,8 +208,8 @@ def last_cve_check_output(state: Optional[Dict[str, Any]] = None) -> str:
 
 def last_cve_verdict(state: Optional[Dict[str, Any]] = None) -> str:
     out = last_cve_check_output(state).lower()
-    if "verdict: applicable" in out:
-        return "applicable"
+    if "verdict: version_match" in out or "verdict: applicable" in out:
+        return "version_match"  # historical traces used the broader name
     if "verdict: not_applicable" in out:
         return "not_applicable"
     if cve_check_ran(state):
@@ -251,7 +250,7 @@ def validate_finding_submitted(state: Optional[Dict[str, Any]] = None) -> bool:
 
 def applicability_pending_finding(state: Optional[Dict[str, Any]] = None) -> bool:
     """True when the check said applicable and a finding has not been published."""
-    if last_cve_verdict(state) != "applicable":
+    if last_cve_verdict(state) != "version_match":
         return False
     return not create_finding_succeeded(state)
 
@@ -360,12 +359,12 @@ def applicability_finding_fields(state: Optional[Dict[str, Any]] = None) -> Dict
     m = re.search(r"-\s*(.+?)\s+(\d[\d.]*)\s+[→-]+\s+IN RANGE", out, re.I)
     if m:
         product, version = m.group(1).strip(), m.group(2)
-    title = f"{cve_id} applicable — {product} {version} in published affected range".strip()
+    title = f"{cve_id} version match — {product} {version}; applicability needs verification".strip()
     description = (
         f"Passive homepage fingerprint places live {product} {version} inside the "
-        f"published affected range for {cve_id}. This is Glasswing version-in-range "
-        "applicability, not a working exploit payload. Auth preconditions from intel "
-        "apply (Contributor+ stored XSS is Medium, not RCE)."
+        f"published affected range for {cve_id}. The affected component, deployment "
+        "mode and attacker input path still need verification. This observation "
+        "does not establish exploitability or rule out additional prerequisites."
     )
     return {
         "title": title,
@@ -375,8 +374,8 @@ def applicability_finding_fields(state: Optional[Dict[str, Any]] = None) -> Dict
         "evidence": (out or "")[:2500],
         "cve_id": cve_id,
         "remediation": (
-            "Upgrade the affected component past the fixed release in the CVE advisory. "
-            "For Yoast SEO CVE-2026-1293 that is 26.9+."
+            "Verify the advisory's component and runtime prerequisites against the deployed application. "
+            "Apply the vendor fix and verify removal of affected copied or vendored code."
         ),
     }
 
@@ -387,7 +386,7 @@ def cve_applicability_writeup_forced_step(
     """After an applicable check: force validate_finding then create_finding."""
     if not is_cve_applicability_question(state):
         return None
-    if last_cve_verdict(state) != "applicable":
+    if last_cve_verdict(state) != "version_match":
         return None
     fields = applicability_finding_fields(state)
     if not validate_finding_submitted(state):
@@ -403,7 +402,7 @@ def cve_applicability_writeup_forced_step(
                 "remediation": fields["remediation"],
             },
             "thought": (
-                "Named CVE is version-applicable. Solomon gate first: validate_finding "
+                "Named CVE has a candidate version match. Solomon gate first: validate_finding "
                 "then create_finding. Do not WPScan or fireteam."
             ),
         }
@@ -419,8 +418,8 @@ def cve_applicability_writeup_forced_step(
                 "cve_id": fields["cve_id"],
                 "remediation": fields["remediation"],
                 "not_demonstrated": (
-                    "No exploit payload, no Contributor login, no WPScan. "
-                    "Proof is live product+version inside the published range."
+                    "Affected component activation, required access, attacker input path, "
+                    "and exploitation have not been established. Evidence is a version match only."
                 ),
             },
             "thought": (
@@ -437,7 +436,7 @@ def cve_applicability_should_complete(state: Optional[Dict[str, Any]] = None) ->
         return False
     if not cve_check_ran(state):
         return False
-    if last_cve_verdict(state) == "applicable":
+    if last_cve_verdict(state) == "version_match":
         return create_finding_succeeded(state)
     return True
 
@@ -457,7 +456,6 @@ def match_cve_to_stack(
     for p in affected_products or []:
         if isinstance(p, dict):
             names_from_intel.append(str(p.get("product") or p.get("name") or ""))
-            names_from_intel.append(str(p.get("vendor") or ""))
         else:
             names_from_intel.append(str(p))
     # Also scrape product names from prose
@@ -492,14 +490,14 @@ def match_cve_to_stack(
     if not products:
         verdict = "unknown"
     elif not product_present:
-        verdict = "not_applicable"
+        verdict = "unknown"  # Partial fingerprints cannot prove product absence.
     else:
         ranged = [h for h in hits if h.get("in_range") is True]
         out_of = [h for h in hits if h.get("in_range") is False]
         if ranged:
-            verdict = "applicable"
-        elif out_of and not ranged:
-            verdict = "not_applicable"
+            verdict = "version_match"
+        elif out_of and len(out_of) == len(hits):
+            verdict = "version_outside_range"
         elif product_present and not spec:
             verdict = "product_present_version_unknown"
         else:
@@ -545,19 +543,20 @@ def format_applicability_report(
             if h.get("evidence"):
                 lines.append(f"    evidence: {h['evidence']}")
         lines.append("")
-        if verdict == "applicable":
+        if verdict == "version_match":
             lines.append(
-                "This is a finding: live product+version is inside the published "
-                "affected range. Quote the evidence and the range. Note auth "
-                "preconditions from intel (Contributor+ XSS is Medium, not RCE). "
-                "Do NOT require a working exploit payload. Next: validate_finding "
-                "then create_finding with the same title/target. Then complete. "
-                "Do not WPScan, Interceptor, or fireteam."
+                "Candidate finding: observed product+version matches the published range. "
+                "Record it as version-only evidence. The vulnerable component, deployment "
+                "mode and attacker input path require verification using Oracle's prerequisite "
+                "checklist, source/image inventory, route map and ingress/auth configuration. "
+                "Do not claim the host is exploitable from this match. Validate and record the "
+                "candidate with those limitations, then complete this passive check."
             )
-        elif verdict == "not_applicable":
+        elif verdict == "version_outside_range":
             lines.append(
-                "Not applicable: the affected product is absent, or the live "
-                "version is outside the affected range."
+                "The observed version is outside the parsed range. This conclusion covers "
+                "that observation only; unobserved instances and copied vulnerable code still "
+                "require deployment inventory. Do not declare the whole host unaffected."
             )
         else:
             lines.append(

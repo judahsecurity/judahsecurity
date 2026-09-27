@@ -216,7 +216,7 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
                     "title": "Named CVE not checked against the live homepage",
                     "next": "check_cve_applicability — lookup the CVE, GET the URL, compare product+version",
                 })
-            elif last_cve_verdict(state) == "applicable":
+            elif last_cve_verdict(state) == "version_match":
                 if not validate_finding_submitted(state):
                     missing.append({
                         "id": "cve_validate",
@@ -607,4 +607,3 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
     except Exception:
         pass
     return None
-

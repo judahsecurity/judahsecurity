@@ -12,9 +12,9 @@
 package prompts
 
 // V1Version is the prompt version recorded on outputs produced with V1.
-// Bumped to intrinsic.v6 — adds practical workflow, explicit alternate exploit
-// paths, and access-versus-capability transitions for contextual evaluation.
-const V1Version = "intrinsic.v6"
+// Bumped to intrinsic.v7 — requires precise component/deployment checks and
+// scopes transitions to the documented paths they actually constrain.
+const V1Version = "intrinsic.v7"
 
 // V1 is the production prompt for Phase A intrinsic analysis.
 //
@@ -118,6 +118,7 @@ Return ONLY a JSON object — no prose before or after — matching:
       "match_kind":           "regex" | "equals" | "contains" | "version_lte" | "present",
       "match_value":          "...",
       "verification_method":  "exact human steps to verify on the asset",
+      "source_reference":     "provided vendor advisory or patch/source URL supporting this prerequisite; empty if unavailable",
       "severity":             "blocker" | "contributing",
       "path_ids":             ["ids of exploit paths requiring this condition"]
     }
@@ -141,7 +142,8 @@ Return ONLY a JSON object — no prose before or after — matching:
       "capability_required":   "attacker capability required in addition to access",
       "resulting_capability":  "capability after successful exploitation",
       "access_signal":         "canonical signal path that can establish access",
-      "capability_signal":     "canonical signal path that can establish required capability"
+      "capability_signal":     "canonical signal path that can establish required capability",
+      "path_ids":              ["ids of paths requiring this transition; empty for all paths"]
     }
   ],
   "cvss_reconciliation": {
@@ -178,6 +180,28 @@ Return ONLY a JSON object — no prose before or after — matching:
 }
 
 # Authoring rules for attack_path_class and lateral_movement_potential
+
+- Identify the precise vulnerable component, entry point, and deployment mode
+  from vendor advisories and patch/source references. A product/CPE/version
+  match does not establish that an optional test server, plugin, handler, or
+  sandbox is enabled. Do not generalize an optional-component flaw to every
+  application using the parent framework.
+- Cite the supplied advisory or patch/source supporting each prerequisite in
+  source_reference. Do not invent references or turn assumptions into facts.
+- Every exploit path must list non-empty, verifiable prerequisite IDs covering
+  component activation and attacker-controlled input reaching the affected
+  entry point. For each prerequisite, give a concrete non-executing collection
+  method (deployed image/source, entry point, route map, ingress/auth policy,
+  runtime configuration) in verification_method. A homepage fingerprint or a
+  missing process/HTTP 404 alone cannot prove component absence.
+- Use component names specific to the vulnerable subsystem (for example
+  mesop_ai_sandbox), not just the parent package. For copied or vendored code,
+  explain that changing the dependency version may leave that code deployed.
+- Each transition may include path_ids; omitted/empty means required for every
+  documented path. Scope branch-specific transitions to their path IDs.
+- Keep global KEV, exploit availability and CVSS separate from local evidence.
+  Execution inherits the service's privileges; do not assume root access,
+  container escape or lateral movement without additional conditions.
 
 - Describe every documented alternative path separately. A disabled HTTP
   listener may block the HTTP path while HTTPS or another management plane
@@ -557,7 +581,7 @@ const V1OutputSchema = `{
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id","description","verification_signal","match_kind","verification_method","severity"],
+        "required": ["id","description","verification_signal","match_kind","verification_method","source_reference","severity"],
         "properties": {
           "id":                  { "type": "string" },
           "description":         { "type": "string" },
@@ -565,6 +589,7 @@ const V1OutputSchema = `{
           "match_kind":          { "type": "string", "enum": ["regex","equals","contains","version_lte","present"] },
           "match_value":         { "type": "string" },
           "verification_method": { "type": "string" },
+          "source_reference":    { "type": "string" },
           "severity":            { "type": "string", "enum": ["blocker","contributing"] },
           "path_ids":            { "type": "array", "items": { "type": "string" } }
         }
@@ -590,8 +615,9 @@ const V1OutputSchema = `{
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id","description","from_position","target","access_required","capability_required","resulting_capability","access_signal","capability_signal"],
+        "required": ["id","description","from_position","target","access_required","capability_required","resulting_capability","access_signal","capability_signal","path_ids"],
         "properties": {
+          "path_ids":             { "type": "array", "items": { "type": "string" } },
           "id":                   { "type": "string" },
           "description":          { "type": "string" },
           "from_position":        { "type": "string" },
