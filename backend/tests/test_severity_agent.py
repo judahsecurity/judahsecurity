@@ -75,3 +75,29 @@ def test_packet_marks_finding_as_untrusted_data(db):  # noqa: F811
     packet = build_packet(db, v, ["business_impact"])
     assert packet.startswith("<finding>") and "</finding>" in packet
     assert "allowed_scores" in packet
+
+
+@pytest.mark.parametrize("bad", [0, 5, 1.5, 2.0, True, "2"])
+def test_agent_does_not_coerce_invalid_ratings(db, bad):  # noqa: F811
+    v, _ = _finding(db)
+    evaluate_finding(db, v)
+    result = propose_for_finding(db, v, llm=FakeLLM({"business_impact": {"score": bad}}))
+    assert result["proposed"] == {}
+    assert result["view"]["factors"]["business_impact"]["score"] == 2
+    assert "business_impact" in result["view"]["needs_analyst"]
+
+
+def test_legacy_agent_proposal_and_analyst_rating_do_not_bypass_current_scale(db):  # noqa: F811
+    v, _ = _finding(db)
+    evaluate_finding(db, v)
+    meta = dict(v.metadata_)
+    meta["severity_eval"]["agent_proposals"] = {"business_impact": {"score": 0, "rating": "None"}}
+    meta["risk_overrides"] = {"factors": {"business_impact": {"score": 0}}}
+    v.metadata_ = meta
+    view = evaluate_finding(db, v)
+    assert view["factors"]["business_impact"]["score"] == 2
+    assert "business_impact" in view["needs_analyst"]
+    result = propose_for_finding(db, v, llm=FakeLLM({"business_impact": {"score": 3}}))
+    assert "business_impact" in result["asked"]
+    assert result["view"]["factors"]["business_impact"]["score"] == 3
+    assert "business_impact" in result["view"]["needs_analyst"]

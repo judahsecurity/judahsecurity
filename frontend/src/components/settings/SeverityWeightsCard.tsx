@@ -34,8 +34,7 @@ const GROUPS: { title: string; keys: [string, string][] }[] = [
   },
 ];
 
-/** Organization-wide default weight (1–4) for each severity factor. Analysts
- *  can still change a factor's weight on an individual finding. */
+/** Organization-wide default weight (1–4) for each severity factor. */
 export function SeverityWeightsCard() {
   const [weights, setWeights] = useState<Record<string, OrgWeight> | null>(null);
   const [labels, setLabels] = useState<Record<string, string>>({});
@@ -93,8 +92,8 @@ export function SeverityWeightsCard() {
           Severity Scoring Weights
         </CardTitle>
         <CardDescription>
-          How much each factor counts in Risk = Likelihood × Impact for your organization. Analysts can still
-          change a factor&apos;s weight on an individual finding during triage.
+          How much each factor counts in Risk = Likelihood × Impact for your organization. These weights apply
+          automatically during finding triage.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">

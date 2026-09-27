@@ -103,11 +103,10 @@ def test_analyst_flow(client):
     view = client.put("/vulnerabilities/100/risk-factors",
                       json={"factors": {k: {"score": 3, "note": "checked"} for k in left}}).json()
     assert view["status"] == "triaged"
-    # Analyst weights a factor for this finding; the stored score follows.
-    before = view["score"]
-    view = client.put("/vulnerabilities/100/risk-factors", json={"weights": {"network_location": 4}}).json()
-    assert view["weights"]["network_location"]["weight"] == 4 and view["score"] != before
-    assert client.put("/vulnerabilities/100/risk-factors", json={"weights": {"awareness": 7}}).status_code == 422
+    # Analysts choose ratings on findings; weights are only changed in organization settings.
+    assert client.put("/vulnerabilities/100/risk-factors",
+                      json={"weights": {"network_location": 4}}).status_code == 422
+    assert client.get("/vulnerabilities/100/risk-factors").json()["score"] == view["score"]
 
     rows = client.get("/vulnerabilities/", params={"triage": "triaged"}).json()
     assert [r["id"] for r in rows] == [100]
@@ -118,6 +117,58 @@ def test_analyst_flow(client):
 def test_cannot_link_another_orgs_app(client):
     assert client.put("/business-apps/findings/100", json={"business_app_id": 6}).status_code == 404
     assert client.put("/business-apps/assets/20", json={"business_app_id": 5}).status_code == 403
+
+
+def test_rating_options_and_saved_values_match_the_sheet(client):
+    view = client.get("/vulnerabilities/100/risk-factors").json()
+    for key, options in view["ratings"].items():
+        assert set(options) == ({"2", "4"} if key == "network_location" else {"1", "2", "3", "4"})
+        for score, rating in options.items():
+            res = client.put("/vulnerabilities/100/risk-factors", json={"factors": {key: {"score": int(score)}}})
+            assert res.status_code == 200
+            factor = res.json()["factors"][key]
+            assert (factor["score"], factor["rating"]) == (int(score), rating)
+
+
+@pytest.mark.parametrize("bad", [0, -1, 5, 1.5, 2.0, True, False, "2", None])
+def test_invalid_factor_scores_are_rejected_without_changing_the_finding(client, bad):
+    before = client.get("/vulnerabilities/100/risk-factors").json()
+    for key in before["ratings"]:
+        res = client.put("/vulnerabilities/100/risk-factors", json={"factors": {key: {"score": bad}}})
+        assert res.status_code == 422
+    assert client.get("/vulnerabilities/100/risk-factors").json() == before
+
+
+def test_network_rating_only_accepts_hosting_choices(client):
+    for bad in (1, 3):
+        assert client.put("/vulnerabilities/100/risk-factors",
+                          json={"factors": {"network_location": {"score": bad}}}).status_code == 422
+
+
+def test_opening_old_evaluation_refreshes_the_rating_scale(client):
+    import app.db.database as database
+    from app.services.severity_evaluation import EVALUATOR_VERSION
+
+    client.get("/vulnerabilities/100/risk-factors")
+    with database.SessionLocal() as db:
+        v = db.get(Vulnerability, 100)
+        meta = dict(v.metadata_)
+        meta["severity_eval"] = {**meta["severity_eval"], "version": "sev/v1", "factors": {
+            **meta["severity_eval"]["factors"], "vulnerability_severity": {"score": 0, "rating": "Informational"},
+        }}
+        meta["risk_overrides"] = {"factors": {"network_location": {"score": 1, "note": "Internal only"}}}
+        v.metadata_ = meta
+        db.commit()
+
+    view = client.get("/vulnerabilities/100/risk-factors").json()
+    assert view["auto_version"] == EVALUATOR_VERSION
+    assert view["factors"]["vulnerability_severity"]["score"] == 3
+    assert view["factors"]["network_location"]["score"] == 4
+    assert "network_location" in view["needs_analyst"]
+    with database.SessionLocal() as db:
+        v = db.get(Vulnerability, 100)
+        assert v.sev_vulnerability_severity == 3 and v.sev_network_location == 4
+        assert v.metadata_["risk_overrides"]["factors"]["network_location"]["score"] == 1
 
 
 def test_org_default_weights(client):

@@ -241,7 +241,13 @@ def _parse_enisa_date(date_str: str) -> datetime | None:
     raw = (date_str or "").strip()
     if not raw:
         return None
-    for fmt in ("%Y/%m/%d", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S%z", "%Y-%m-%dT%H:%M:%S"):
+    for fmt in (
+        "%Y/%m/%d",
+        "%Y-%m-%d",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S",
+        "%b %d, %Y, %I:%M:%S %p",  # EUVD exploitedSince/datePublished
+    ):
         try:
             dt = datetime.strptime(raw.replace("Z", "+0000"), fmt) if "%z" in fmt else datetime.strptime(raw, fmt)
             if dt.tzinfo is None:
@@ -361,11 +367,11 @@ async def _fetch_euvd(
             if not cves:
                 continue
             date_str = (
-                item.get("datePublished")
+                item.get("exploitedSince")
+                or item.get("datePublished")
                 or item.get("dateUpdated")
                 or item.get("dateAdded")
                 or item.get("published")
-                or item.get("exploitedSince")
                 or ""
             )
             date_str = str(date_str).strip()

@@ -1,8 +1,8 @@
-"""Severity evaluation rules (Likelihood × Impact, factors 0–4)."""
+"""Severity evaluation rules (Likelihood × Impact, factors 1–4)."""
 
 import pytest
 
-from app.services.risk_model import score_factors
+from app.services.risk_model import FACTOR_RATINGS, score_factors
 from app.services.severity_evaluation import (
     FindingContext,
     Precond,
@@ -49,7 +49,7 @@ def test_kev_metasploit_org_hosted_is_critical():
         ({"validation_verdict": "confirmed"}, "confirmed", 4, 4),
         ({"detection_confidence": "endpoint_confirmed"}, "likely", 4, 4),
         ({"attack_path": "lateral_movement_required"}, "conditional", 2, 2),
-        ({"preconditions": [Precond("mod", "module enabled", True, "unsatisfied")]}, "blocked", 0, 0),
+        ({"preconditions": [Precond("mod", "module enabled", True, "unsatisfied")]}, "blocked", 1, 0),
     ],
 )
 def test_exploit_realism_tiers(overrides, tier, ease, max_likelihood):
@@ -127,3 +127,26 @@ def test_business_app_criticality_drives_business_impact():
 def test_nothing_known_is_all_flagged():
     r = evaluate_context(FindingContext(title="Something"))
     assert set(r["needs_analyst"]) >= {"business_impact", "network_location", "vulnerability_severity", "skill_level"}
+
+
+@pytest.mark.parametrize("severity", ["critical", "high", "medium", "low", "info", "informational", ""])
+@pytest.mark.parametrize("exposure", ["internet", "internal", "isolated", ""])
+def test_automatic_ratings_stay_on_the_sheet(severity, exposure):
+    r = evaluate_context(FindingContext(scanner_severity=severity, exposure=exposure))
+    for key, factor in r["factors"].items():
+        assert type(factor["score"]) is int
+        assert factor["score"] in FACTOR_RATINGS[key]
+        assert factor["rating"] == FACTOR_RATINGS[key][factor["score"]]
+    if severity in ("info", "informational"):
+        assert r["factors"]["vulnerability_severity"]["score"] == 1
+    if exposure == "isolated":
+        assert r["factors"]["ease_of_exploit"]["score"] == 1
+        assert _score(r)["score"] == 0
+
+
+@pytest.mark.parametrize("exposure", ["internet", "internal", "isolated"])
+@pytest.mark.parametrize("hosting, expected", [("owned", 4), ("third_party", 2), ("internal", 4), ("", 4)])
+def test_network_rating_uses_hosting_ownership(exposure, hosting, expected):
+    f = evaluate_context(FindingContext(exposure=exposure, hosting_type=hosting))["factors"]["network_location"]
+    assert f["score"] == expected
+    assert f["source"] == ("auto" if hosting in ("owned", "third_party") else "assumed")

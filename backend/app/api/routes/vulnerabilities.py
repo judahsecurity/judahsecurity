@@ -6,7 +6,7 @@ import os
 from typing import Any, Dict, List, Optional
 from datetime import datetime, timedelta
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import and_, case, func, or_
 
@@ -1978,7 +1978,7 @@ def run_severity_agent_batch(
 
 
 class RiskFactorInput(BaseModel):
-    score: int
+    score: int = Field(strict=True, ge=1, le=4)
     note: Optional[str] = None
 
 
@@ -1993,21 +1993,20 @@ class RiskFactorsTriage(BaseModel):
     ``factors`` maps a factor key to ``{score, note}``; a null value clears
     the analyst score so the automatic one applies again. ``exploit_realism``
     sets the realism tier after manual verification (null tier clears it).
-    ``weights`` sets how much each factor counts on this finding (1–4).
+    Factor weights are managed at the organization level, outside triage.
     """
+    model_config = ConfigDict(extra="forbid")
+
     factors: Dict[str, Optional[RiskFactorInput]] = {}
     exploit_realism: Optional[RealismInput] = None
-    # Per-factor weight 1–4 for this finding; null restores the default.
-    weights: Dict[str, Optional[int]] = {}
 
 
 def _risk_model_view(db: Session, vuln: Vulnerability) -> dict:
-    """Severity evaluation for one finding. Evaluates on first view if the
-    finding has not been through the evaluator yet."""
-    from app.services.severity_evaluation import apply_effective, evaluate_finding
+    """Evaluate missing or outdated scoring data before returning a finding."""
+    from app.services.severity_evaluation import EVALUATOR_VERSION, apply_effective, evaluate_finding
 
     meta = vuln.metadata_ or {}
-    if not meta.get("severity_eval"):
+    if (meta.get("severity_eval") or {}).get("version") != EVALUATOR_VERSION:
         view = evaluate_finding(db, vuln)
         db.commit()
         return view
@@ -2079,7 +2078,6 @@ def triage_finding_risk_factors(
             {k: (v.model_dump() if v is not None else None) for k, v in payload.factors.items()},
             payload.exploit_realism.model_dump() if payload.exploit_realism is not None else None,
             analyst=current_user.email or current_user.username or "unknown",
-            weights=payload.weights,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))

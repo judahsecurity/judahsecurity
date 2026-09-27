@@ -8,6 +8,7 @@ import pytest
 
 from app.services.risk_model import (
     FACTOR_KEYS,
+    FACTOR_RATINGS,
     org_hosted_rating,
     apply_overrides,
     merged_risk_model,
@@ -23,12 +24,12 @@ def _f(bi, nl, vs, skill, disc, exploit, aware):
     "scores, risk, level",
     [
         (_f(4, 4, 3, 2, 4, 4, 4), 75.0, "critical"),
-        (_f(4, 0, 4, 4, 4, 4, 4), 85.71, "critical"),
+        (_f(4, 2, 4, 4, 4, 4, 4), 92.86, "critical"),
         (_f(3, 2, 2, 3, 4, 3, 4), 50.0, "high"),
-        (_f(1, 1, 2, 2, 3, 3, 2), 24.55, "medium"),
+        (_f(1, 2, 2, 2, 3, 3, 2), 26.79, "medium"),
         (_f(1, 2, 1, 1, 2, 1, 4), 14.29, "low"),
-        (_f(1, 0, 1, 1, 1, 0, 0), 2.68, "informational"),
-        (_f(4, 4, 4, 0, 0, 0, 0), 0.0, "informational"),
+        (_f(1, 2, 1, 1, 1, 1, 1), 7.14, "low"),
+        (_f(4, 4, 4, 1, 1, 1, 1), 25.0, "medium"),
     ],
 )
 def test_worked_examples(scores, risk, level):
@@ -113,7 +114,7 @@ def test_missing_oracle_output_is_incomplete():
 
 def test_invalid_scores_rejected():
     with pytest.raises(ValueError):
-        apply_overrides({}, {"network_location": {"score": 3}}, None, analyst="a")  # sheet has 4/2/1/0
+        apply_overrides({}, {"network_location": {"score": 3}}, None, analyst="a")  # sheet has 4/2
     with pytest.raises(ValueError):
         apply_overrides({}, {"awareness": {"score": 5}}, None, analyst="a")
     with pytest.raises(ValueError):
@@ -129,6 +130,40 @@ def test_network_location_rating_uses_org_name():
     view = merged_risk_model(_auto(), overrides, "Acme")
     assert view["ratings"]["network_location"]["4"] == "Acme Hosted"
     assert view["factors"]["network_location"]["rating"] == "Acme Hosted"
+
+
+def test_rating_choices_match_the_scoring_sheet():
+    for key, ratings in FACTOR_RATINGS.items():
+        assert set(ratings) == ({2, 4} if key == "network_location" else {1, 2, 3, 4})
+
+
+@pytest.mark.parametrize("bad", [0, -1, 5, 2.5, 2.0, True, False, "2", None])
+def test_factor_ratings_are_strict_integers(bad):
+    for key in FACTOR_KEYS:
+        with pytest.raises(ValueError):
+            apply_overrides({}, {key: {"score": bad}}, None, analyst="a")
+        with pytest.raises(ValueError):
+            score_factors({**_f(2, 2, 2, 2, 2, 2, 2), key: bad})
+
+
+def test_invalid_saved_analyst_rating_requires_review_without_losing_audit():
+    stored = {"factors": {"business_impact": {"score": 0, "note": "old scale", "by": "a"}}}
+    view = merged_risk_model(_auto(business_impact={"score": 4, "source": "auto", "reason": "Critical asset"}), stored)
+    factor = view["factors"]["business_impact"]
+    assert (factor["score"], factor["rating"], factor["source"]) == (4, "Critical", "assumed")
+    assert "Saved analyst rating" in factor["reason"]
+    assert "business_impact" in view["needs_analyst"]
+    assert stored["factors"]["business_impact"]["score"] == 0
+    updated = apply_overrides(stored, {"business_impact": {"score": 1}}, None, analyst="a")
+    assert "business_impact" not in merged_risk_model(_auto(), updated)["needs_analyst"]
+
+
+def test_invalid_cached_auto_rating_is_not_returned_or_scored():
+    view = merged_risk_model(_auto(ease_of_exploit={"score": 0, "rating": "Not Exploitable Here"}), None)
+    assert view["status"] == "incomplete"
+    assert "ease_of_exploit" not in view["factors"]
+    assert "ease_of_exploit" in view["needs_analyst"]
+    assert "score" not in view
 
 
 def test_weights_change_the_score():
