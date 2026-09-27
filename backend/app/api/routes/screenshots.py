@@ -19,6 +19,7 @@ from sqlalchemy import func, and_, or_
 from app.api.deps import get_db, get_current_active_user, get_current_user_optional, require_analyst, require_admin
 from app.models.user import User
 from app.models.asset import Asset, AssetType, AssetStatus
+from app.services.finding_triage import validate_capture_url
 from app.models.scan import Scan, ScanType, ScanStatus
 from app.models.screenshot import Screenshot, ScreenshotStatus, ScreenshotSchedule
 from app.schemas.screenshot import (
@@ -137,6 +138,7 @@ def get_eyewitness_status(
 async def capture_asset_screenshot(
     asset_id: int,
     timeout: int = Query(default=30, ge=5, le=120),
+    url: Optional[str] = Query(default=None, max_length=2048),
     db: Session = Depends(get_db),
     current_user: User = Depends(require_analyst)
 ):
@@ -155,14 +157,19 @@ async def capture_asset_screenshot(
     
     # Check asset type
     web_types = [AssetType.DOMAIN, AssetType.SUBDOMAIN, AssetType.URL]
-    if asset.asset_type not in web_types:
+    if asset.asset_type not in web_types and not (url and asset.asset_type == AssetType.IP_ADDRESS):
         raise HTTPException(
             status_code=400, 
             detail=f"Asset type {asset.asset_type.value} cannot be screenshotted"
         )
     
     # Prefer live_url from HTTP probe when available (more accurate endpoint)
-    if getattr(asset, "live_url", None):
+    if url:
+        try:
+            url = validate_capture_url(url, asset.value, getattr(asset, "live_url", None))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    elif getattr(asset, "live_url", None):
         url = asset.live_url
     elif asset.asset_type in [AssetType.DOMAIN, AssetType.SUBDOMAIN]:
         url = f"https://{asset.value}"
@@ -904,7 +911,6 @@ async def run_schedule_now(
     db.commit()
     
     return result
-
 
 
 

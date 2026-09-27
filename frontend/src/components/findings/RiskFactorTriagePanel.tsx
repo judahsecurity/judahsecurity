@@ -105,11 +105,12 @@ interface RiskFactorTriagePanelProps {
   findingId: number;
   assetId?: number;
   businessApp?: BusinessAppSummary | null;
+  onDirtyChange?: (dirty: boolean) => void;
   /** Called after any change so the findings table row can update. */
   onUpdated?: (view: RiskFactorsView, businessApp?: BusinessAppSummary | null) => void;
 }
 
-export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdated }: RiskFactorTriagePanelProps) {
+export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdated, onDirtyChange }: RiskFactorTriagePanelProps) {
   const [view, setView] = useState<RiskFactorsView | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -150,6 +151,11 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
     };
   }, [findingId]);
 
+  const dirty =
+    Object.values(edits).some((e) => e.score !== '' || e.note !== '') ||
+    realismEdit.score !== '' || realismEdit.note !== '';
+  useEffect(() => { onDirtyChange?.(dirty || saving || linking || asking); }, [dirty, saving, linking, asking, onDirtyChange]);
+
   if (loading) {
     return (
       <div className="flex items-center gap-2 text-xs text-muted-foreground p-3">
@@ -158,10 +164,6 @@ export function RiskFactorTriagePanel({ findingId, assetId, businessApp, onUpdat
     );
   }
   if (!view) return null;
-
-  const dirty =
-    Object.values(edits).some((e) => e.score !== '') ||
-    realismEdit.score !== '';
 
   const setEdit = (key: string, patch: Partial<Edit>) =>
     setEdits((prev) => ({ ...prev, [key]: { ...(prev[key] ?? { score: '', note: '' }), ...patch } }));

@@ -195,3 +195,76 @@ def test_org_default_weights(client):
     # Resetting returns to the platform default.
     client.put("/vulnerabilities/severity-evaluation/weights", json={"weights": {"network_location": None}})
     assert client.get("/vulnerabilities/severity-evaluation/weights").json()["weights"]["network_location"]["source"] == "default"
+
+
+def test_finding_detail_preserves_business_application_context(client):
+    assert client.put("/business-apps/assets/10", json={"business_app_id": 5}).status_code == 200
+    detail = client.get("/vulnerabilities/100").json()
+    assert detail["business_app"]["app_id"] == "APM0001234"
+    assert detail["business_app"]["inherited_from_asset"] is True
+    assert detail["analyst_triage"]["pending"] == 4
+
+
+def test_analyst_review_persists_and_rejects_stale_writes(client):
+    detail = client.get("/vulnerabilities/100").json()
+    review = detail["analyst_triage"]
+    payload = {
+        "task_id": "evidence", "expected_revision": review["revision"],
+        "evidence_version": review["evidence_version"], "state": "reviewed", "decision": "confirm",
+        "rationale": "Compared the recorded service response", "correction": "",
+        "evidence_references": ["Finding #100: recorded response"],
+    }
+    result = client.put("/vulnerabilities/100/triage", json=payload)
+    assert result.status_code == 200, result.text
+    saved = client.get("/vulnerabilities/100/triage").json()
+    assert saved["revision"] == review["revision"] + 1
+    assert saved["pending"] == 3
+    assert saved["history"][0]["reviewer_id"] == 1
+    assert client.get("/vulnerabilities/100").json()["status"] == detail["status"]
+    assert client.put("/vulnerabilities/100/triage", json=payload).status_code == 409
+    payload["expected_revision"] = saved["revision"]
+    assert client.put("/vulnerabilities/100/risk-factors", json={"factors": {"business_impact": {"score": 4}}}).status_code == 200
+    assert client.put("/vulnerabilities/100/triage", json=payload).status_code == 409
+
+
+def test_review_and_asset_context_respect_organization_access(client):
+    import app.db.database as database
+    with database.SessionLocal() as db:
+        db.add(Vulnerability(id=200, title="Other organization finding", severity=Severity.HIGH, asset_id=20, metadata_={}))
+        db.commit()
+    for suffix in ("triage", "asset-context"):
+        assert client.get(f"/vulnerabilities/200/{suffix}").status_code == 403
+        assert client.get(f"/vulnerabilities/999/{suffix}").status_code == 404
+    review = client.get("/vulnerabilities/100/triage").json()
+    payload = {"task_id": "evidence", "expected_revision": review["revision"],
+               "evidence_version": review["evidence_version"], "state": "draft"}
+    assert client.put("/vulnerabilities/200/triage", json=payload).status_code == 403
+    assert client.put("/vulnerabilities/100/triage", json={**payload, "reviewer_id": 99}).status_code == 422
+
+
+def test_viewer_can_read_review_but_cannot_save(client):
+    from app.models.user import UserRole
+    viewer = client.app.dependency_overrides[deps.get_current_active_user]()
+    viewer.role = UserRole.VIEWER
+    del client.app.dependency_overrides[deps.require_analyst]
+    review = client.get("/vulnerabilities/100/triage").json()
+    payload = {"task_id": "evidence", "expected_revision": review["revision"],
+               "evidence_version": review["evidence_version"], "state": "draft"}
+    assert client.put("/vulnerabilities/100/triage", json=payload).status_code == 403
+    assert client.get("/vulnerabilities/100/triage").json()["revision"] == review["revision"]
+
+
+def test_mentioned_asset_links_stay_in_the_findings_organization(client):
+    import app.db.database as database
+    with database.SessionLocal() as db:
+        db.add(Asset(id=30, name="192.0.2.30", value="192.0.2.30", asset_type=AssetType.IP_ADDRESS, organization_id=1))
+        db.add(Asset(id=40, name="192.0.2.30", value="192.0.2.30", asset_type=AssetType.IP_ADDRESS, organization_id=2))
+        db.get(Vulnerability, 100).description = "Endpoints: 192.0.2.30 and 192.0.2.99"
+        db.commit()
+    response = client.get("/vulnerabilities/100/asset-context")
+    assert response.status_code == 200
+    rows = response.json()["assets"]
+    assert rows[0] == {"value": "portal.acme.com", "asset_id": 10, "relationship": "linked"}
+    assert {"value": "192.0.2.30", "asset_id": 30, "relationship": "mentioned"} in rows
+    assert {"value": "192.0.2.99", "asset_id": None, "relationship": "mentioned"} in rows
+    assert not any(row["asset_id"] == 40 for row in rows)
