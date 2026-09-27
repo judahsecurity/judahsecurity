@@ -1,0 +1,39 @@
+id: mcp-2026-anonymous-tools-list
+
+info:
+  name: MCP - Anonymous Tool Catalog
+  author: judahsecurity
+  severity: info
+  description: |
+    A public MCP endpoint returned a tools/list catalog without credentials.
+    Public discovery can be intentional. This result does not establish that
+    any tool can be invoked or that private data is accessible.
+  reference:
+    - https://modelcontextprotocol.io/specification/2026-07-28/server/tools
+  tags: mcp,exposure,discovery
+
+http:
+  - method: POST
+    path:
+      - "{{RootURL}}/mcp"
+      - "{{RootURL}}/api/mcp"
+      - "{{BaseURL}}"
+    headers:
+      Content-Type: application/json
+      Accept: application/json, text/event-stream
+      MCP-Protocol-Version: "2026-07-28"
+      Mcp-Method: tools/list
+    body: |
+      {"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"judah-mcp-exposure-check","version":"1.0"},"io.modelcontextprotocol/clientCapabilities":{}}}}
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: regex
+        part: body
+        condition: and
+        regex:
+          - '"jsonrpc"\s*:\s*"2\.0"'
+          - '"result"\s*:\s*\{'
+          - '"tools"\s*:\s*\['

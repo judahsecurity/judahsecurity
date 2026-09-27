@@ -1,0 +1,45 @@
+id: mcp-2026-sensitive-tool-catalog
+
+info:
+  name: MCP - Sensitive Tools in Anonymous Catalog
+  author: judahsecurity
+  severity: medium
+  description: |
+    An anonymous MCP tools/list response advertises a tool whose name suggests
+    command execution, database access, bulk export, or a state-changing action.
+    This is a review candidate only; tools/call authorization and impact have not
+    been verified. Confirm with an assessor-owned canary before raising severity.
+  reference:
+    - https://modelcontextprotocol.io/specification/2026-07-28/server/tools
+    - https://pluto.security/blog/wide-open-hundreds-of-mcps-exposing-root-shells-production-data-and-citizen-records-one-call-away/
+  tags: mcp,exposure,review
+
+http:
+  - method: POST
+    path:
+      - "{{RootURL}}/mcp"
+      - "{{RootURL}}/api/mcp"
+      - "{{BaseURL}}"
+    headers:
+      Content-Type: application/json
+      Accept: application/json, text/event-stream
+      MCP-Protocol-Version: "2026-07-28"
+      Mcp-Method: tools/list
+    body: |
+      {"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"judah-mcp-exposure-check","version":"1.0"},"io.modelcontextprotocol/clientCapabilities":{}}}}
+    matchers-condition: and
+    matchers:
+      - type: status
+        status:
+          - 200
+      - type: regex
+        part: body
+        condition: and
+        regex:
+          - '"jsonrpc"\s*:\s*"2\.0"'
+          - '"result"\s*:\s*\{'
+          - '"tools"\s*:\s*\['
+      - type: regex
+        part: body
+        regex:
+          - '(?i)"name"\s*:\s*"(?:exec|execute[_-]?(?:command|shell|sql)|run[_-]?(?:command|shell|sql)|shell|query[_-]?database|download[_-]?report|export[_-][^"\\]*|update[_-][^"\\]*|delete[_-][^"\\]*|process[_-]?payment|refund[_-][^"\\]*)"'
