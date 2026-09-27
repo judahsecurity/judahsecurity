@@ -193,7 +193,7 @@ interface Finding {
   // analysis (mode='full'), Phase-A intrinsic only (mode='intrinsic'), or
   // ASM-native non-CVE analysis (mode='generic_finding').
   oracle?: OracleEnrichment;
-  // Severity evaluation (Likelihood × Impact): effective 0–4 factor values
+  // Severity evaluation (Likelihood × Impact): effective 1–4 factor values
   // and the analyst triage state. Reasons come from /risk-factors.
   sev_business_impact?: number | null;
   sev_network_location?: number | null;

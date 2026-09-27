@@ -6,7 +6,7 @@ Oracle analysed it. Oracle stays the exploitability engine (OPES plus the
 evidence it gathers: KEV, exploit intel, preconditions, reachability); this
 module turns that evidence — plus what the platform itself knows about the
 finding, the asset, the organization's IP inventory and the business
-application — into seven 0–4 factors and a risk score.
+application — into seven 1–4 factors and a risk score.
 
 Every factor carries a reason and a source:
 
@@ -29,14 +29,15 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 from sqlalchemy.orm.attributes import flag_modified
 
-from app.services.risk_model import FACTOR_KEYS, merged_risk_model
+from app.services.risk_model import FACTOR_KEYS, FACTOR_RATINGS, is_valid_factor_score, merged_risk_model
 
 logger = logging.getLogger(__name__)
 
-EVALUATOR_VERSION = "sev/v1"
+EVALUATOR_VERSION = "sev/v2"
 
 # ── Finding context ───────────────────────────────────────────────────────────
 
@@ -60,7 +61,7 @@ WELL_DOCUMENTED_CWES = {
     "CWE-22", "CWE-23",
 }
 
-SEVERITY_SCORE = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0, "informational": 0}
+SEVERITY_SCORE = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 1, "informational": 1}
 
 
 @dataclass
@@ -156,21 +157,13 @@ def org_hosted_rating(org_name: str) -> str:
 def network_location(ctx: FindingContext) -> Factor:
     hosting = (ctx.hosting_type or "").lower()
     basis = ctx.hosting_basis
-    exposure = ctx.exposure
-    if hosting in ("internal", "private"):
-        exposure = "internal"
-    if exposure == "isolated":
-        return _f(0, "Segmented Network", "Asset is isolated / air-gapped")
-    if exposure == "internal":
-        return _f(1, "Internal Only", basis or "Asset is not internet-facing")
-    if exposure == "internet":
-        if hosting in ("third_party", "cloud", "cdn"):
-            return _f(2, "Third Party Hosted", basis or f"Internet-facing on third-party infrastructure ({ctx.hosting_provider or hosting})")
-        if hosting == "owned":
-            return _f(4, org_hosted_rating(ctx.organization_name), basis or "Internet-facing on the organization's own infrastructure")
-        return _f(4, org_hosted_rating(ctx.organization_name),
-                  (basis or "Internet-facing; hosting not classified") + "; assumed organization-hosted until confirmed", "assumed")
-    return _f(2, "Unknown", "Exposure unknown", "assumed")
+    # The sheet rates hosting ownership; exposure is handled by exploit realism.
+    if hosting in ("third_party", "cloud", "cdn"):
+        return _f(2, "Third Party Hosted", basis or f"Hosted on third-party infrastructure ({ctx.hosting_provider or hosting})")
+    if hosting == "owned":
+        return _f(4, org_hosted_rating(ctx.organization_name), basis or "Hosted on the organization's own infrastructure")
+    return _f(4, org_hosted_rating(ctx.organization_name),
+              (basis or "Hosting ownership not classified") + "; assumed organization-hosted until confirmed", "assumed")
 
 
 def vulnerability_severity(ctx: FindingContext) -> Factor:
@@ -196,7 +189,7 @@ def vulnerability_severity(ctx: FindingContext) -> Factor:
     sev = (ctx.scanner_severity or "").lower()
     if sev in SEVERITY_SCORE:
         score = SEVERITY_SCORE[sev]
-        rating = {4: "Critical", 3: "High", 2: "Medium", 1: "Low", 0: "Informational"}[score]
+        rating = FACTOR_RATINGS["vulnerability_severity"][score]
         return _f(score, rating, f"No CVSS; rated {sev} by {ctx.detected_by or 'the scanner'}")
     return _f(2, "Medium", "No CVSS or scanner severity; assumed medium", "assumed")
 
@@ -267,8 +260,7 @@ def exploit_realism(ctx: FindingContext) -> Dict[str, Any]:
     return {"score": 3, "tier": "unverified", "reasons": ["no asset evidence either way; verify before treating as exploitable"]}
 
 
-SKILL_RATINGS = {4: "No Technical Skills", 3: "Some Technical Skills", 2: "Advanced Computer User",
-                 1: "Security Penetration Skills", 0: "Not Feasible"}
+SKILL_RATINGS = FACTOR_RATINGS["skill_level"]
 
 
 def _tooling_floor(ctx: FindingContext) -> Tuple[int, str]:
@@ -395,7 +387,7 @@ def ease_of_discovery(ctx: FindingContext) -> Factor:
     return _f(3, "Easy", "No discoverability data; assumed detectable with effort", "assumed")
 
 
-EASE_RATINGS = {4: "Automated Tools Available", 3: "Easy", 2: "Difficult", 1: "Practically Impossible", 0: "Not Exploitable Here"}
+EASE_RATINGS = FACTOR_RATINGS["ease_of_exploit"]
 
 
 def ease_of_exploit(ctx: FindingContext, realism: Dict[str, Any]) -> Factor:
@@ -415,8 +407,10 @@ def ease_of_exploit(ctx: FindingContext, realism: Dict[str, Any]) -> Factor:
         f = _f(3, EASE_RATINGS[3], f"Issue reproduced by {ctx.detected_by}; abuse follows directly from the finding")
     else:
         f = _f(1, EASE_RATINGS[1], "No known working exploit")
-    if f["score"] > realism["score"]:
-        f = _f(realism["score"], EASE_RATINGS[realism["score"]],
+    # A blocked path caps overall likelihood at zero, but factor ratings stay 1–4.
+    factor_cap = max(1, realism["score"])
+    if f["score"] > factor_cap:
+        f = _f(factor_cap, EASE_RATINGS[factor_cap],
                f"{f['reason']}, but on this asset: {'; '.join(realism['reasons'])}")
     return f
 
@@ -652,9 +646,11 @@ def _apply_agent_proposals(result: Dict[str, Any]) -> None:
         f = result["factors"].get(key)
         if f is None or f["source"] != "assumed":
             continue  # evidence now exists; the proposal no longer applies
+        if not isinstance(p, dict) or not is_valid_factor_score(key, p.get("score")):
+            continue  # discard legacy or malformed proposals without rounding them
         result["factors"][key] = {
-            "score": int(p["score"]),
-            "rating": p.get("rating") or f["rating"],
+            "score": p["score"],
+            "rating": FACTOR_RATINGS[key][p["score"]],
             "reason": p.get("rationale") or "Proposed by severity agent",
             "source": "agent",
             "confidence": p.get("confidence"),
@@ -698,16 +694,17 @@ def evaluate_by_id(session_factory, vuln_id: int) -> bool:
 
 
 def run_dirty_batch(session_factory, limit: int = 500) -> Dict[str, int]:
-    """Re-evaluate up to ``limit`` open findings whose inputs changed."""
+    """Re-evaluate open findings with changed inputs or an older scoring model."""
     from app.models.vulnerability import Vulnerability, VulnerabilityStatus
 
     db = session_factory()
     try:
+        version = Vulnerability.metadata_["severity_eval"]["version"].as_string()
         ids = [
             row[0]
             for row in db.query(Vulnerability.id)
             .filter(
-                Vulnerability.sev_dirty.is_(True),
+                or_(Vulnerability.sev_dirty.is_(True), version.is_(None), version != EVALUATOR_VERSION),
                 Vulnerability.status.in_([VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS]),
             )
             .order_by(Vulnerability.sev_dirty_at.asc().nullsfirst(), Vulnerability.id)

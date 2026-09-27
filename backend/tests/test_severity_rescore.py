@@ -67,6 +67,27 @@ def test_new_findings_start_dirty_and_get_scored(Session):
     assert _drain(Session)["selected"] == 0  # evaluation doesn't re-dirty itself
 
 
+def test_worker_refreshes_old_scoring_versions_even_when_not_dirty(Session):
+    from app.services.severity_evaluation import EVALUATOR_VERSION
+
+    _drain(Session)
+    with Session() as db:
+        v = db.get(Vulnerability, 100)
+        meta = dict(v.metadata_)
+        meta["severity_eval"] = {**meta["severity_eval"], "version": "sev/v1"}
+        db.query(Vulnerability).filter_by(id=100).update({
+            Vulnerability.metadata_: meta, Vulnerability.sev_dirty: False,
+            Vulnerability.sev_ease_of_exploit: 0,
+        })
+        db.commit()
+    assert _get(Session).sev_dirty is False
+    assert _drain(Session) == {"selected": 1, "evaluated": 1, "failed": 0}
+    refreshed = _get(Session)
+    assert refreshed.metadata_["severity_eval"]["version"] == EVALUATOR_VERSION
+    assert 1 <= refreshed.sev_ease_of_exploit <= 4
+    assert _drain(Session)["selected"] == 0
+
+
 def test_third_party_to_org_hosted_rescores(Session):
     _drain(Session)
     before = _get(Session)
