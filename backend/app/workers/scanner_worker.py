@@ -57,14 +57,14 @@ import ipaddress
 import re
 
 
-def trigger_graph_sync(organization_id: int) -> None:
+def trigger_graph_sync(organization_id: int, asset_values: list[str] | None = None) -> None:
     """
-    Trigger a background graph sync after scan completion.
-    This is non-blocking and failures are logged but not raised.
+    Run a best-effort graph sync after scan completion.
+    Failures are logged but do not change the scan result.
     """
     try:
         from app.services.graph_service import sync_organization_background
-        result = sync_organization_background(organization_id)
+        result = sync_organization_background(organization_id, asset_values=asset_values)
         if result.get("error"):
             logger.debug(f"Graph sync skipped: {result['error']}")
         elif result.get("synced", 0) > 0:
@@ -7411,7 +7411,21 @@ class ScannerWorker:
                 scan.results = build_results_summary(result)
             db.commit()
 
-            trigger_graph_sync(organization_id)
+            from urllib.parse import urlparse
+            source_urls = (
+                [p.source_js for p in result.paths]
+                + [s.source_js for s in result.secrets]
+                + list(result.script_hashes)
+            )
+            js_hosts = sorted({urlparse(url).netloc for url in source_urls if urlparse(url).netloc})
+            trigger_graph_sync(organization_id, asset_values=js_hosts)
+            try:
+                from app.services.graph_service import get_graph_service
+                graph = get_graph_service()
+                if graph.connect():
+                    graph.sync_jsluice_paths(organization_id, result.paths, result.script_hashes)
+            except Exception as exc:
+                logger.debug("jsluice graph evidence sync skipped: %s", exc)
 
         except Exception as e:
             logger.error(f"jsluice scan {scan_id} failed: {e}", exc_info=True)

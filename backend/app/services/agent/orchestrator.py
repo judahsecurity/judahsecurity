@@ -2504,6 +2504,8 @@ class AgentOrchestrator:
                 finding_type="actionable",
                 severity="medium",
                 description=finding_text,
+                organization_id=state.get("organization_id"),
+                target=merged_target.primary_target,
             )
         for vuln in (analysis.extracted_info.vulnerabilities or []):
             evograph.record_finding(
@@ -2512,6 +2514,8 @@ class AgentOrchestrator:
                 finding_type="vulnerability",
                 severity="high",
                 description=vuln,
+                organization_id=state.get("organization_id"),
+                target=merged_target.primary_target,
             )
         
         updates: Dict[str, Any] = {

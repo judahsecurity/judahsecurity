@@ -21,6 +21,7 @@ Relationships:
 import logging
 from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
+from urllib.parse import urlparse
 
 from app.core.config import settings
 
@@ -145,12 +146,19 @@ def record_finding(
     finding_type: str,
     severity: str,
     description: str,
+    organization_id: Optional[int] = None,
+    target: Optional[str] = None,
 ) -> None:
-    """Record a ChainFinding linked to the step that produced it."""
+    """Record a finding and link it to an exact asset in the same organization."""
     driver = _get_driver()
     if not driver:
         return
     try:
+        target_value = str(target or "").strip()[:500]
+        parsed = urlparse(target_value)
+        targets = [target_value] if target_value else []
+        if parsed.scheme in {"http", "https"} and parsed.hostname:
+            targets.append(parsed.hostname.lower())
         with driver.session() as s:
             s.run(
                 """
@@ -163,10 +171,16 @@ def record_finding(
                     created_at:   $ts
                 })
                 MERGE (step)-[:PRODUCED]->(f)
+                WITH f
+                OPTIONAL MATCH (a:Asset {organization_id: $org})
+                WHERE a.value IN $targets
+                FOREACH (_ IN CASE WHEN a IS NULL THEN [] ELSE [1] END |
+                    MERGE (f)-[:ABOUT_ASSET]->(a))
                 """,
                 sid=session_id, iter=iteration,
                 ftype=finding_type, sev=severity,
                 desc=(description or "")[:500], ts=_now_iso(),
+                org=organization_id or -1, targets=targets,
             )
     except Exception as e:
         logger.debug(f"EvoGraph record_finding error: {e}")

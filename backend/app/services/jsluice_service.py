@@ -38,6 +38,8 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from app.services.graph_identity import canonical_script_url
+
 logger = logging.getLogger(__name__)
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -77,6 +79,7 @@ class JSluiceResult:
     secrets_found: int = 0
     paths: list[JSluicePath] = field(default_factory=list)
     secrets: list[JSluiceSecret] = field(default_factory=list)
+    script_hashes: dict[str, str] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     duration_seconds: float = 0.0
 
@@ -241,18 +244,23 @@ async def run_jsluice_scan(
                 try:
                     fetched = await _fetch(client, url)
                     if not fetched:
-                        return [], []
+                        return [], [], None, None
                     final_url, body = fetched
-                    return await _analyze_js_body(final_url, body)
+                    paths, secrets = await _analyze_js_body(final_url, body)
+                    return paths, secrets, final_url, hashlib.sha256(body.encode()).hexdigest()
                 except Exception as exc:
                     result.errors.append(f"{url}: {exc}")
-                    return [], []
+                    return [], [], None, None
 
         chunks = await asyncio.gather(*(_process(u) for u in work_urls))
 
-    for paths, secrets in chunks:
+    for paths, secrets, final_url, content_hash in chunks:
         result.paths.extend(paths)
         result.secrets.extend(secrets)
+        if final_url and content_hash:
+            safe_url = canonical_script_url(final_url)
+            if safe_url:
+                result.script_hashes[safe_url] = content_hash
 
     result.js_files_analyzed = len(work_urls)
     result.paths_found = len(result.paths)
@@ -275,8 +283,12 @@ def build_results_summary(result: JSluiceResult) -> dict:
     Includes every JS file analyzed, all extracted paths/params, and all
     discovered secrets so analysts can audit the full scan inventory.
     """
-    # Deduplicated JS file list across all path source_js entries
-    js_files_list = sorted({p.source_js for p in result.paths if p.source_js})
+    # Include scripts that produced only secrets or no extractable result.
+    js_files_list = sorted({url for raw in (
+        [p.source_js for p in result.paths]
+        + [s.source_js for s in result.secrets]
+        + list(result.script_hashes)
+    ) if (url := canonical_script_url(raw))})
 
     all_paths = [
         {
@@ -317,6 +329,7 @@ def build_results_summary(result: JSluiceResult) -> dict:
         "errors": result.errors[:20],
         # Full inventories (capped to keep JSON column manageable)
         "js_files": js_files_list[:500],
+        "js_content_hashes": dict(list(sorted(result.script_hashes.items()))[:500]),
         "jsluice_paths": [p for p in all_paths if p["has_params"]][:200],
         "jsluice_all_paths": all_paths[:1000],
         "secrets": secrets_list[:500],
@@ -396,9 +409,16 @@ def persist_jsluice_findings(
     for p in result.paths:
         hostname = urlparse(p.source_js).netloc or p.source_js
         _by_host_endpoints[hostname].add(p.url[:500])
-        _by_host_js[hostname].add(p.source_js[:500])
+        safe_js = canonical_script_url(p.source_js)
+        if safe_js:
+            _by_host_js[hostname].add(safe_js[:500])
         for param in p.query_params + p.body_params:
             _by_host_params[hostname].add(str(param))
+
+    for js_url in [s.source_js for s in result.secrets] + list(result.script_hashes):
+        safe_js = canonical_script_url(js_url)
+        if safe_js:
+            _by_host_js[urlparse(safe_js).netloc].add(safe_js[:500])
 
     for hostname in set(list(_by_host_endpoints) + list(_by_host_js)):
         a = _get_or_create_asset(hostname)

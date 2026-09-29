@@ -1268,71 +1268,39 @@ class ASMToolsManager(AssessmentCapabilities):
             db.close()
     
     # Cypher keywords that are allowed in read-only queries
-    _CYPHER_READ_KEYWORDS = {"MATCH", "WHERE", "RETURN", "WITH", "OPTIONAL", "ORDER", "BY",
-                              "LIMIT", "SKIP", "UNWIND", "AS", "AND", "OR", "NOT", "IN",
-                              "IS", "NULL", "TRUE", "FALSE", "DISTINCT", "COUNT", "COLLECT",
-                              "EXISTS", "CASE", "WHEN", "THEN", "ELSE", "END", "DESC", "ASC",
-                              "CONTAINS", "STARTS", "ENDS", "CALL", "YIELD", "UNION", "ALL"}
-    _CYPHER_WRITE_KEYWORDS = {"CREATE", "DELETE", "DETACH", "SET", "REMOVE", "MERGE",
-                               "DROP", "FOREACH", "LOAD", "CSV"}
-
     async def query_graph(
         self,
-        cypher: Optional[str] = None,
-        params: Optional[Dict[str, Any]] = None,
-        limit: int = 50,
-        # Accept common LLM argument name variations
-        cypher_query: Optional[str] = None,
-        query: Optional[str] = None,
+        kind: str = "",
+        value: str = "",
+        limit: int = 25,
         **kwargs: Any,
     ) -> str:
         """
-        Run a READ-ONLY Cypher query against the Neo4j attack surface graph.
-
-        Use this to understand relationships: Domain → Subdomain → IP → Port → Service
-        → Technology → Vulnerability → CVE. Always include a filter on organization_id
-        for tenant safety (use $org_id in your WHERE clause).
-
-        Write operations (CREATE, DELETE, SET, MERGE, REMOVE, DROP) are blocked.
+        Run a tenant-scoped, bounded lookup against the attack surface graph.
 
         Args:
-            cypher: Cypher query string. Must filter by organization_id, e.g.
-                    WHERE a.organization_id = $org_id
-            params: Optional query parameters (org_id is added automatically from context)
-            limit: Max rows to return (default 50)
+            kind: asset, port, service, technology, endpoint, script, finding, memory, source_file, source_route, package, or search
+            value: Exact port number or text to match in the selected kind
+            limit: Maximum rows (1-50)
 
         Returns:
             JSON string of query results
         """
-        cypher = cypher or cypher_query or query or kwargs.get("cypher_string", "")
-        if not cypher:
-            return json.dumps({"error": "No Cypher query provided. Pass the query as the 'cypher' argument."})
+        if kwargs or not kind:
+            return json.dumps({"error": "Use kind and value; free-form Cypher is unavailable to the agent."})
         user_id, org_id = get_tenant_context()
         if not org_id:
             return json.dumps({"error": "No organization context. Set organization for this session."})
-
-        # Security: block write operations to prevent Cypher injection
-        cypher_upper = cypher.upper()
-        for keyword in self._CYPHER_WRITE_KEYWORDS:
-            # Check for the keyword as a standalone word (not part of a property name)
-            if _re.search(r'\b' + keyword + r'\b', cypher_upper):
-                return json.dumps({
-                    "error": f"Write operation '{keyword}' is not allowed. query_graph is read-only. "
-                             f"Use MATCH ... RETURN queries only."
-                })
 
         try:
             from app.services.graph_service import get_graph_service
             graph = get_graph_service()
             if not graph.connect():
                 return json.dumps({"error": "Neo4j graph not available."})
-
-            merged = dict(params or {})
-            merged["org_id"] = org_id
-            if "LIMIT" not in cypher_upper:
-                cypher = cypher.rstrip() + f" LIMIT {limit}"
-            results = graph.query(cypher, merged)
-            return json.dumps(results[:limit], default=str)
+            results = graph.lookup_for_agent(org_id, kind, value, limit)
+            return json.dumps(results, default=str)
+        except ValueError as e:
+            return json.dumps({"error": str(e)})
         except Exception as e:
             logger.exception("query_graph failed")
             return json.dumps({"error": str(e)})

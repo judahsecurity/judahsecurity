@@ -10,6 +10,7 @@ Also keeps Asset nodes for API compatibility (get_asset_relationships, get_attac
 
 import hashlib
 import logging
+import re
 from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 from urllib.parse import urlparse
@@ -25,6 +26,7 @@ from app.models.asset import Asset, AssetType
 from app.models.vulnerability import Vulnerability
 from app.models.port_service import PortService
 from app.models.technology import Technology
+from app.services.graph_identity import canonical_script_url, script_key
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,10 @@ class GraphService:
     
     def connect(self) -> bool:
         """Connect to Neo4j database."""
+        if self._connected and self.driver:
+            return True
+        if not settings.NEO4J_URI:
+            return False
         try:
             self.driver = GraphDatabase.driver(
                 settings.NEO4J_URI,
@@ -60,10 +66,16 @@ class GraphService:
         except ServiceUnavailable as e:
             logger.warning(f"Neo4j not available: {e}")
             self._connected = False
+            if self.driver:
+                self.driver.close()
+                self.driver = None
             return False
         except Exception as e:
             logger.error(f"Failed to connect to Neo4j: {e}")
             self._connected = False
+            if self.driver:
+                self.driver.close()
+                self.driver = None
             return False
     
     def close(self):
@@ -107,7 +119,9 @@ class GraphService:
                 "CREATE CONSTRAINT ip_address IF NOT EXISTS FOR (i:IP) REQUIRE i.address IS UNIQUE",
                 "CREATE CONSTRAINT port_id IF NOT EXISTS FOR (p:Port) REQUIRE p.port_id IS UNIQUE",
                 "CREATE CONSTRAINT service_name IF NOT EXISTS FOR (s:Service) REQUIRE s.name IS UNIQUE",
+                "CREATE CONSTRAINT service_observation_id IF NOT EXISTS FOR (s:ServiceObservation) REQUIRE s.port_id IS UNIQUE",
                 "CREATE CONSTRAINT tech_name IF NOT EXISTS FOR (t:Technology) REQUIRE t.name IS UNIQUE",
+                "CREATE CONSTRAINT js_resource_id IF NOT EXISTS FOR (j:JSResource) REQUIRE j.script_id IS UNIQUE",
                 # Vulnerability nodes
                 "CREATE CONSTRAINT vulnerability_id IF NOT EXISTS FOR (v:Vulnerability) REQUIRE v.vuln_id IS UNIQUE",
                 "CREATE CONSTRAINT cve_id IF NOT EXISTS FOR (c:CVE) REQUIRE c.cve_id IS UNIQUE",
@@ -157,6 +171,10 @@ class GraphService:
                 # Web application layer
                 "CREATE INDEX baseurl_org IF NOT EXISTS FOR (b:BaseURL) ON (b.organization_id)",
                 "CREATE INDEX endpoint_org IF NOT EXISTS FOR (e:Endpoint) ON (e.organization_id)",
+                "CREATE TEXT INDEX endpoint_path_text IF NOT EXISTS FOR (e:Endpoint) ON (e.path)",
+                "CREATE INDEX js_resource_org IF NOT EXISTS FOR (j:JSResource) ON (j.organization_id)",
+                "CREATE INDEX js_resource_url IF NOT EXISTS FOR (j:JSResource) ON (j.url)",
+                "CREATE TEXT INDEX js_resource_url_text IF NOT EXISTS FOR (j:JSResource) ON (j.url)",
                 "CREATE INDEX parameter_org IF NOT EXISTS FOR (p:Parameter) ON (p.organization_id)",
                 # Discovery provenance layer
                 "CREATE INDEX discovery_source_org IF NOT EXISTS FOR (ds:DiscoverySource) ON (ds.organization_id)",
@@ -164,6 +182,7 @@ class GraphService:
                 "CREATE INDEX hosting_provider_name_idx IF NOT EXISTS FOR (h:HostingProvider) ON (h.name)",
                 "CREATE INDEX cert_org IF NOT EXISTS FOR (c:Certificate) ON (c.organization_id)",
                 "CREATE INDEX ip_internet_facing IF NOT EXISTS FOR (i:IP) ON (i.is_internet_facing)",
+                "CREATE FULLTEXT INDEX graph_knowledge_text IF NOT EXISTS FOR (n:JSResource|Endpoint|SourceFile|Vulnerability) ON EACH [n.url, n.path, n.title]",
             ]
             
             for index in indexes:
@@ -174,7 +193,7 @@ class GraphService:
         
         logger.info("Neo4j schema initialized with full relationship chain support")
     
-    def sync_organization(self, organization_id: int):
+    def sync_organization(self, organization_id: int, asset_values: list[str] | None = None):
         """
         Sync all assets from an organization to the graph.
         
@@ -205,13 +224,16 @@ class GraphService:
         db = SessionLocal()
         try:
             # Get all assets with related data so sync has ports, tech, vulns, endpoints
-            assets = db.query(Asset).options(
+            query = db.query(Asset).options(
                 selectinload(Asset.port_services),
                 selectinload(Asset.technologies),
                 selectinload(Asset.vulnerabilities),
             ).filter(
                 Asset.organization_id == organization_id
-            ).all()
+            )
+            if asset_values is not None:
+                query = query.filter(Asset.value.in_(asset_values))
+            assets = query.all()
             
             synced = 0
             
@@ -220,7 +242,8 @@ class GraphService:
                     self._sync_asset(session, asset, organization_id)
                     synced += 1
                 # RedAmon-style: logical links between subdomains on same IP
-                self._create_same_ip_links(session, organization_id)
+                if asset_values is None:
+                    self._create_same_ip_links(session, organization_id)
             
             logger.info(f"Synced {synced} assets for organization {organization_id}")
             return {"synced": synced, "error": None}
@@ -411,13 +434,19 @@ class GraphService:
             session.run("""
                 MATCH (p:Port {port_id: $port_id})
                 MERGE (s:Service {name: $service_name})
-                SET s.version = $version,
-                    s.banner = $banner,
-                    s.product = $product,
-                    s.cpe = $cpe
+                REMOVE s.version, s.banner, s.product, s.cpe
+                MERGE (o:ServiceObservation {port_id: $port_id})
+                SET o.organization_id = $org_id,
+                    o.version = $version,
+                    o.banner = $banner,
+                    o.product = $product,
+                    o.cpe = $cpe
+                MERGE (p)-[:HAS_SERVICE_OBSERVATION]->(o)
+                MERGE (o)-[:IDENTIFIES]->(s)
                 MERGE (p)-[:RUNS_SERVICE]->(s)
             """, {
                 "port_id": ps.id,
+                "org_id": org_id,
                 "service_name": service_name,
                 "version": ps.service_version,
                 "banner": ps.banner,
@@ -619,6 +648,8 @@ class GraphService:
                 "org_id": org_id,
             })
 
+        self._sync_js_resources(session, asset, org_id)
+
         # ===== 11. DISCOVERY PROVENANCE: DiscoverySource nodes + DISCOVERED_VIA edges =====
         # Sync the discovery_chain JSON as a graph so we can visualize HOW each asset was found.
         # Each step in the chain becomes a DiscoverySource node linked by DISCOVERED_VIA.
@@ -796,6 +827,104 @@ class GraphService:
         # ===== 16. F5 REACHABILITY: VIP IP FORWARDS_TO pool-member IP =====
         self._sync_f5_forwards_to(session, asset, org_id, ip_addresses)
 
+    def _sync_js_resources(self, session, asset: Asset, org_id: int) -> None:
+        """Link observed JS URLs to the asset, endpoints and finding evidence."""
+        value = str(getattr(asset, "value", "") or "")
+        base = getattr(asset, "live_url", None) or (
+            value if value.startswith(("http://", "https://")) else f"https://{value}/"
+        )
+        raw_urls = list(getattr(asset, "js_files", None) or [])[:1000]
+        vulnerabilities = getattr(asset, "vulnerabilities", None) or []
+        for vuln in vulnerabilities:
+            meta = getattr(vuln, "metadata_", None) or {}
+            if isinstance(meta, dict) and meta.get("source_js"):
+                raw_urls.append(meta["source_js"])
+
+        urls = {url for raw in raw_urls if (url := canonical_script_url(raw, base))}
+        if not urls:
+            return
+        rows = [{"id": script_key(org_id, url), "url": url} for url in sorted(urls)]
+        session.run("""
+            MATCH (a:Asset {asset_id: $asset_id, organization_id: $org_id})
+            UNWIND $rows AS row
+            MERGE (j:JSResource {script_id: row.id})
+            ON CREATE SET j.first_seen = datetime()
+            SET j.organization_id = $org_id,
+                j.url = row.url,
+                j.last_seen = datetime(),
+                j.source = 'asset.js_files'
+            MERGE (a)-[:LOADS_SCRIPT]->(j)
+        """, {"asset_id": asset.id, "org_id": org_id, "rows": rows})
+
+        evidence_rows = []
+        for vuln in vulnerabilities:
+            meta = getattr(vuln, "metadata_", None) or {}
+            if not isinstance(meta, dict):
+                continue
+            url = canonical_script_url(meta.get("source_js"), base)
+            if url:
+                evidence_rows.append({
+                    "script_id": script_key(org_id, url),
+                    "vuln_id": vuln.id,
+                    "path": str(meta.get("url") or "")[:2000],
+                    "method": str(meta.get("method") or "GET")[:16],
+                })
+        if evidence_rows:
+            session.run("""
+                MATCH (a:Asset {asset_id: $asset_id, organization_id: $org_id})
+                UNWIND $rows AS row
+                MATCH (a)-[:LOADS_SCRIPT]->(j:JSResource {script_id: row.script_id})
+                MATCH (a)-[:HAS_VULNERABILITY]->(v:Vulnerability {vuln_id: row.vuln_id})
+                MERGE (v)-[:EVIDENCED_BY]->(j)
+                WITH a, j, row
+                MATCH (a)-[:HAS_ENDPOINT]->(e:Endpoint {path: row.path})
+                MERGE (j)-[r:REFERENCES_ENDPOINT {method: row.method}]->(e)
+                SET r.source = 'jsluice'
+            """, {"asset_id": asset.id, "org_id": org_id, "rows": evidence_rows})
+
+    def sync_jsluice_paths(
+        self, organization_id: int, paths: list, script_hashes: dict | None = None
+    ) -> int:
+        """Attach every extracted path to the JS file that supplied it."""
+        rows = []
+        for path in paths[:1000]:
+            url = canonical_script_url(getattr(path, "source_js", None))
+            raw_path = getattr(path, "url", None)
+            if not url or not isinstance(raw_path, str) or not raw_path.strip():
+                continue
+            rows.append({
+                "script_id": script_key(organization_id, url),
+                "path": raw_path[:500],
+                "method": str(getattr(path, "method", None) or "GET")[:16],
+                "call_type": str(getattr(path, "url_type", None) or "")[:100],
+            })
+        hash_rows = []
+        for raw_url, content_hash in (script_hashes or {}).items():
+            url = canonical_script_url(raw_url)
+            if url and re.fullmatch(r"[0-9a-f]{64}", str(content_hash)):
+                hash_rows.append({"script_id": script_key(organization_id, url),
+                                  "sha256": content_hash})
+        if not rows and not hash_rows:
+            return 0
+        with self.session() as session:
+            if hash_rows:
+                session.run("""
+                    UNWIND $rows AS row
+                    MATCH (j:JSResource {script_id: row.script_id, organization_id: $org_id})
+                    SET j.content_sha256 = row.sha256, j.last_analyzed = datetime()
+                """, {"org_id": organization_id, "rows": hash_rows})
+            if rows:
+                session.run("""
+                    UNWIND $rows AS row
+                    MATCH (j:JSResource {script_id: row.script_id, organization_id: $org_id})
+                    MATCH (a:Asset {organization_id: $org_id})-[:LOADS_SCRIPT]->(j)
+                    MATCH (a)-[:HAS_ENDPOINT]->(e:Endpoint {path: row.path})
+                    MERGE (j)-[r:REFERENCES_ENDPOINT {method: row.method}]->(e)
+                    SET r.source = 'jsluice', r.call_type = row.call_type,
+                        r.last_seen = datetime()
+                """, {"org_id": organization_id, "rows": rows})
+        return len(rows)
+
     def _sync_f5_forwards_to(self, session, asset: Asset, org_id: int, ip_addresses: list) -> None:
         """Create FORWARDS_TO edges from F5 VIP metadata or member reachable-via fields."""
         meta = getattr(asset, "metadata_", None) or {}
@@ -934,6 +1063,132 @@ class GraphService:
         with self.session() as session:
             result = session.run(cypher, params or {})
             return [record.data() for record in result]
+
+    def lookup_for_agent(
+        self, organization_id: int, kind: str, value: str, limit: int = 25
+    ) -> List[Dict]:
+        """Bounded graph lookups; agent-supplied text is always a parameter."""
+        queries = {
+            "asset": """
+                MATCH (a:Asset {organization_id: $org_id})
+                WHERE a.value CONTAINS $value
+                RETURN a.asset_id AS asset_id, a.value AS asset,
+                       a.asset_type AS type, a.last_seen AS last_seen
+                LIMIT $limit
+            """,
+            "port": """
+                MATCH (a:Asset {organization_id: $org_id})-[:HAS_PORT]->(p:Port {port: $port})
+                OPTIONAL MATCH (p)-[:RUNS_SERVICE]->(s:Service)
+                OPTIONAL MATCH (p)-[:HAS_SERVICE_OBSERVATION]->(o:ServiceObservation)
+                RETURN a.value AS asset, p.port AS port, p.protocol AS protocol,
+                       p.state AS state, s.name AS service, o.version AS version,
+                       o.product AS product, a.last_seen AS last_seen
+                LIMIT $limit
+            """,
+            "service": """
+                MATCH (a:Asset {organization_id: $org_id})-[:HAS_PORT]->(p:Port)-[:RUNS_SERVICE]->(s:Service)
+                WHERE s.name CONTAINS $value
+                OPTIONAL MATCH (p)-[:HAS_SERVICE_OBSERVATION]->(o:ServiceObservation)
+                RETURN a.value AS asset, p.port AS port, p.protocol AS protocol,
+                       s.name AS service, o.version AS version, o.product AS product,
+                       a.last_seen AS last_seen
+                LIMIT $limit
+            """,
+            "technology": """
+                MATCH (a:Asset {organization_id: $org_id})-[:USES_TECHNOLOGY]->(t:Technology)
+                WHERE t.name CONTAINS $value
+                RETURN a.value AS asset, t.name AS technology, t.cpe AS cpe,
+                       a.last_seen AS last_seen
+                LIMIT $limit
+            """,
+            "endpoint": """
+                MATCH (a:Asset {organization_id: $org_id})-[:HAS_ENDPOINT]->(e:Endpoint)
+                WHERE e.path CONTAINS $value
+                WITH a, e LIMIT $limit
+                OPTIONAL MATCH (j:JSResource)-[:REFERENCES_ENDPOINT]->(e)
+                RETURN a.value AS asset, e.path AS path, e.source AS source,
+                       collect(DISTINCT j.url)[..5] AS scripts, a.last_seen AS last_seen
+            """,
+            "script": """
+                MATCH (a:Asset {organization_id: $org_id})-[:LOADS_SCRIPT]->(j:JSResource)
+                WHERE j.url CONTAINS $value
+                WITH a, j LIMIT $limit
+                OPTIONAL MATCH (j)-[:REFERENCES_ENDPOINT]->(e:Endpoint)
+                OPTIONAL MATCH (j)-[:MAPS_TO_SOURCE]->(f:SourceFile)
+                RETURN a.value AS asset, j.url AS script,
+                       j.last_seen AS last_seen, collect(DISTINCT e.path)[..10] AS paths,
+                       collect(DISTINCT f.path)[..5] AS source_files
+            """,
+            "finding": """
+                MATCH (a:Asset {organization_id: $org_id})-[:HAS_VULNERABILITY]->(v:Vulnerability)
+                WHERE v.title CONTAINS $value
+                WITH a, v LIMIT $limit
+                OPTIONAL MATCH (v)-[:EVIDENCED_BY]->(j:JSResource)
+                RETURN a.value AS asset, v.vuln_id AS finding_id,
+                       v.title AS title, v.severity AS severity,
+                       collect(DISTINCT j.url)[..5] AS scripts
+            """,
+            "memory": """
+                MATCH (a:Asset {organization_id: $org_id})<-[:ABOUT_ASSET]-(f:ChainFinding)
+                WHERE a.value CONTAINS $value
+                RETURN a.value AS asset, f.finding_type AS type,
+                       f.severity AS severity, f.description AS finding,
+                       f.created_at AS recorded_at
+                ORDER BY f.created_at DESC LIMIT $limit
+            """,
+            "source_file": """
+                MATCH (c:SourceCommit {organization_id: $org_id})-[:CONTAINS_FILE]->(f:SourceFile)
+                WHERE f.path CONTAINS $value
+                WITH c, f ORDER BY c.ingested_at DESC LIMIT $limit
+                OPTIONAL MATCH (f)-[:DECLARES]->(s:CodeSymbol)
+                OPTIONAL MATCH (f)-[:USES_PACKAGE]->(p:PackageVersion)
+                RETURN f.repository AS repository, c.sha AS commit,
+                       f.path AS path, f.sha256 AS sha256,
+                       collect(DISTINCT s.name)[..20] AS symbols,
+                       collect(DISTINCT p.package_key)[..20] AS packages
+            """,
+            "package": """
+                MATCH (f:SourceFile {organization_id: $org_id})-[:USES_PACKAGE]->(p:PackageVersion)
+                WHERE p.name CONTAINS $value
+                RETURN f.repository AS repository, f.commit AS commit,
+                       f.path AS source_file, p.name AS package,
+                       p.version AS version
+                LIMIT $limit
+            """,
+            "source_route": """
+                MATCH (c:SourceCommit {organization_id: $org_id})-[:CONTAINS_FILE]->(f:SourceFile)-[:IMPLEMENTS_ROUTE]->(r:SourceRoute)
+                WHERE r.path CONTAINS $value
+                RETURN r.path AS path, r.method AS method, f.path AS source_file,
+                       f.repository AS repository, c.sha AS commit
+                ORDER BY c.ingested_at DESC LIMIT $limit
+            """,
+            "search": """
+                CALL db.index.fulltext.queryNodes('graph_knowledge_text', $search)
+                YIELD node, score
+                WHERE node.organization_id = $org_id
+                RETURN labels(node) AS types,
+                       coalesce(node.url, node.path, node.title) AS matched_text,
+                       node.last_seen AS last_seen, node.commit AS commit,
+                       score
+                LIMIT $limit
+            """,
+        }
+        if kind not in queries:
+            raise ValueError(f"Unknown graph lookup kind: {kind}")
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("Graph lookup value is required")
+        params = {"org_id": organization_id, "value": value.strip()[:500],
+                  "limit": max(1, min(int(limit), 50))}
+        if kind == "search":
+            terms = re.findall(r"[A-Za-z0-9_]+", value)[:8]
+            if not terms:
+                raise ValueError("Search needs letters or numbers")
+            params["search"] = " AND ".join(terms)
+        if kind == "port":
+            params["port"] = int(value)
+            if not 0 < params["port"] <= 65535:
+                raise ValueError("Port must be between 1 and 65535")
+        return self.query(queries[kind], params)
     
     def get_attack_paths(
         self,
@@ -1326,9 +1581,8 @@ def get_graph_service() -> GraphService:
     global _graph_service
     if _graph_service is None:
         _graph_service = GraphService()
-        _graph_service.connect()
-        if _graph_service._connected:
-            _graph_service.initialize_schema()
+    if not _graph_service._connected and _graph_service.connect():
+        _graph_service.initialize_schema()
     return _graph_service
 
 
@@ -1348,7 +1602,9 @@ def sync_asset_to_graph(asset_id: int, organization_id: int) -> bool:
         
         db = SessionLocal()
         try:
-            asset = db.query(Asset).filter(Asset.id == asset_id).first()
+            asset = db.query(Asset).filter(
+                Asset.id == asset_id, Asset.organization_id == organization_id
+            ).first()
             if not asset:
                 return False
             
@@ -1364,7 +1620,9 @@ def sync_asset_to_graph(asset_id: int, organization_id: int) -> bool:
         return False
 
 
-def sync_organization_background(organization_id: int) -> dict:
+def sync_organization_background(
+    organization_id: int, asset_values: list[str] | None = None
+) -> dict:
     """
     Sync all assets for an organization to the graph.
     
@@ -1376,7 +1634,7 @@ def sync_organization_background(organization_id: int) -> dict:
         if not graph._connected:
             return {"synced": 0, "error": "Neo4j not connected"}
         
-        return graph.sync_organization(organization_id)
+        return graph.sync_organization(organization_id, asset_values=asset_values)
     except Exception as e:
         logger.error(f"Background graph sync error: {e}")
         return {"synced": 0, "error": str(e)}
