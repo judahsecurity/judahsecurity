@@ -151,10 +151,14 @@ async def sync_organization_graph(
     try:
         graph = get_graph_service()
         result = graph.sync_organization(org_id)
+        if result.get("error"):
+            raise HTTPException(status_code=500, detail=result["error"])
         return {
             "assets_synced": result.get("synced", 0),
-            "error": result.get("error"),
+            "error": None,
         }
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Graph sync error: {e}")
         raise HTTPException(status_code=500, detail=str(e))

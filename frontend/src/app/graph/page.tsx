@@ -169,6 +169,7 @@ export default function GraphPage() {
     setSyncing(true);
     try {
       const result = await api.syncGraph(orgId);
+      if (result.error) throw new Error(result.error);
       toast({
         title: 'Graph Synced',
         description: `Synced ${result.assets_synced || 0} assets to Neo4j`,
@@ -191,7 +192,7 @@ export default function GraphPage() {
     } catch (error: any) {
       toast({
         title: 'Sync Failed',
-        description: error?.response?.data?.detail || 'Failed to sync graph data',
+        description: error?.response?.data?.detail || error?.message || 'Failed to sync graph data',
         variant: 'destructive',
       });
     } finally {
@@ -212,7 +213,7 @@ export default function GraphPage() {
       const nodes: GraphNode[] = data.nodes?.map((n: any) => ({
         id: n.id || n.element_id,
         label: graphNodeLabel(n),
-        type: mapNeo4jLabelsToType(n.labels),
+        type: mapNeo4jLabelsToType(n.labels, n.properties?.asset_type),
         properties: n.properties,
       })) || [];
       
@@ -271,7 +272,7 @@ export default function GraphPage() {
         const nodes: GraphNode[] = data.paths[0].nodes?.map((n: any) => ({
           id: n.id || n.element_id,
           label: graphNodeLabel(n),
-          type: mapNeo4jLabelsToType(n.labels),
+          type: mapNeo4jLabelsToType(n.labels, n.properties?.asset_type),
           properties: n.properties,
         })) || [];
         
@@ -342,7 +343,7 @@ export default function GraphPage() {
       const nodes: GraphNode[] = (data.nodes || []).map((n: any) => ({
         id: n.id || n.element_id,
         label: graphNodeLabel(n),
-        type: mapNeo4jLabelsToType(n.labels),
+        type: mapNeo4jLabelsToType(n.labels, n.properties?.asset_type),
         properties: n.properties,
       }));
       const links = (data.relationships || []).map((r: any) => ({
@@ -378,7 +379,7 @@ export default function GraphPage() {
       properties.port || node.labels?.[0] || 'Unknown');
   };
 
-  const mapNeo4jLabelsToType = (labels: string[] = []): GraphNode['type'] => {
+  const mapNeo4jLabelsToType = (labels: string[] = [], assetType?: string): GraphNode['type'] => {
     const mapping: Record<string, GraphNode['type']> = {
       Domain: 'domain',
       Subdomain: 'subdomain',
@@ -408,6 +409,11 @@ export default function GraphPage() {
     for (const label of labels) {
       if (mapping[label]) return mapping[label];
     }
+    if (assetType === 'SUBDOMAIN') return 'subdomain';
+    if (assetType === 'IP_ADDRESS') return 'ip';
+    if (assetType === 'PORT') return 'port';
+    if (assetType === 'SERVICE') return 'service';
+    if (assetType === 'URL' || assetType === 'API_ENDPOINT') return 'endpoint';
     return 'domain';
   };
 
