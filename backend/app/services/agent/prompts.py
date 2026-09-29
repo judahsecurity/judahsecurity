@@ -309,7 +309,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **query_vulnerabilities**: Query vulnerabilities. Args: severity (string or list, e.g. "critical" or ["critical","high"]), status, cve_id, limit
 - **query_ports**: Query open ports and services
 - **query_technologies**: Query detected technologies
-- **query_graph**: Run a Cypher query against the Neo4j graph. Args: **cypher** (required, the Cypher query string), params (optional dict), limit (default 50). Example: query_graph(cypher="MATCH (a:Asset) WHERE a.organization_id = $org_id RETURN a.value LIMIT 10"). The tool auto-injects $org_id from context, so always use WHERE a.organization_id = $org_id.
+- **query_graph**: Search the organization-scoped Neo4j graph. Args: **kind** (asset, port, service, technology, endpoint, script, finding, memory, source_file, source_route, package, or search), **value** (port number or text), limit (default 25). Example: query_graph(kind="port", value="443"). Use `search` for fuzzy text, then a specific kind to expand relevant relationships. `memory` returns prior agent findings linked to an exact asset; `source_route` describes repository code, while `endpoint` describes a discovered live path. Do not supply Cypher.
 - **analyze_attack_surface**: Get attack surface summary
 - **rank_attack_surface**: Rank known assets by likely testing value using stored ASM data. Args: target (optional substring/domain), limit (default 20). Use before validation to prioritize APIs, auth, admin, upload, risky ports, known vulns, and high-value technologies.
 - **get_asset_details**: Get detailed info about an asset. Args: **asset_id** (integer, required — get from query_assets first). Example: get_asset_details(asset_id=42)

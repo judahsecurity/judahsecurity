@@ -247,7 +247,9 @@ AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
 # Neo4j Graph Database (optional - for asset relationship modeling)
 # =============================================================================
 
-# Enable with: docker compose --profile graph up -d
+# Enable with: COMPOSE_PROFILES=graph docker compose up -d
+# The backend also needs the Bolt URI; starting the profile alone is not enough.
+NEO4J_URI=bolt://neo4j:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=neo4j_password
 NEO4J_HTTP_PORT=7474

@@ -20,6 +20,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/graph", tags=["Graph"])
 
 
+def _resolve_graph_org(current_user: User, requested_org: Optional[int]) -> Optional[int]:
+    """A requested organization must be one the caller may access."""
+    if (requested_org is not None and not current_user.is_superuser
+            and requested_org != current_user.organization_id):
+        raise HTTPException(status_code=403, detail="Organization access denied")
+    return requested_org if requested_org is not None else current_user.organization_id
+
+
 # =============================================================================
 # RESPONSE MODELS
 # =============================================================================
@@ -70,7 +78,7 @@ class SyncResult(BaseModel):
 # =============================================================================
 
 @router.get("/status")
-async def get_graph_status():
+async def get_graph_status(current_user: User = Depends(get_current_user)):
     """
     Check if the graph database is available.
     """
@@ -86,19 +94,31 @@ async def get_graph_status():
             connected = bool(result)
             
             if connected:
-                # Get counts
-                node_result = graph.query("MATCH (n) RETURN count(n) AS count")
+                # Tenant users see only graph entities in their organization.
+                org_id = current_user.organization_id
+                if current_user.is_superuser:
+                    node_query = "MATCH (n) RETURN count(n) AS count"
+                    rel_query = "MATCH ()-[r]->() RETURN count(r) AS count"
+                    params = {}
+                elif org_id:
+                    node_query = "MATCH (n) WHERE n.organization_id = $org_id RETURN count(n) AS count"
+                    rel_query = "MATCH (n)-[r]->() WHERE n.organization_id = $org_id RETURN count(r) AS count"
+                    params = {"org_id": org_id}
+                else:
+                    node_query = rel_query = None
+                    params = {}
+                node_result = graph.query(node_query, params) if node_query else []
                 if node_result:
                     node_count = node_result[0].get("count", 0)
-                
-                rel_result = graph.query("MATCH ()-[r]->() RETURN count(r) AS count")
+
+                rel_result = graph.query(rel_query, params) if rel_query else []
                 if rel_result:
                     relationship_count = rel_result[0].get("count", 0)
         
         return {
             "connected": connected,
             "enabled": bool(settings.NEO4J_URI),
-            "uri": settings.NEO4J_URI if connected else None,
+            "uri": settings.NEO4J_URI if connected and current_user.is_superuser else None,
             "node_count": node_count,
             "relationship_count": relationship_count,
         }
@@ -122,7 +142,7 @@ async def sync_organization_graph(
     ports, and technologies in the organization. Requires an organization
     to be specified (query param or your default org).
     """
-    org_id = organization_id or (current_user.organization_id if hasattr(current_user, 'organization_id') else None)
+    org_id = _resolve_graph_org(current_user, organization_id)
     if org_id is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -144,6 +164,7 @@ async def sync_organization_graph(
 async def get_asset_relationships(
     asset_id: int,
     depth: int = Query(default=2, ge=1, le=5),
+    organization_id: Optional[int] = Query(None),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -151,9 +172,10 @@ async def get_asset_relationships(
     
     Returns nodes and relationships suitable for graph visualization.
     """
+    org_id = _resolve_graph_org(current_user, organization_id)
     try:
         graph = get_graph_service()
-        result = graph.get_asset_relationships(asset_id, depth)
+        result = graph.get_asset_relationships(asset_id, depth, org_id)
         
         # Transform to frontend format
         nodes = []
@@ -210,7 +232,9 @@ async def get_attack_paths(
         organization_id: Filter by organization
         max_paths: Maximum number of paths to return
     """
-    org_id = organization_id or (current_user.organization_id if hasattr(current_user, 'organization_id') else None)
+    org_id = _resolve_graph_org(current_user, organization_id)
+    if not (source_id and target_id) and org_id is None:
+        raise HTTPException(status_code=400, detail="Select an organization for attack paths")
     
     try:
         graph = get_graph_service()
@@ -220,22 +244,27 @@ async def get_attack_paths(
             # Find paths between specific assets (graph stores asset_id, not id)
             query = """
             MATCH path = shortestPath((source:Asset {asset_id: $source_id})-[*1..6]-(target:Asset {asset_id: $target_id}))
+            WHERE source.organization_id IS NOT NULL
+              AND source.organization_id = target.organization_id
+              AND ($org_id IS NULL OR source.organization_id = $org_id)
+              AND all(n IN nodes(path) WHERE
+                  n.organization_id IS NULL OR n.organization_id = source.organization_id)
             RETURN path
             LIMIT $max_paths
             """
-            params = {"source_id": source_id, "target_id": target_id, "max_paths": max_paths}
+            params = {"source_id": source_id, "target_id": target_id,
+                      "org_id": org_id, "max_paths": max_paths}
         else:
             # Find paths to vulnerable assets
             query = """
-            MATCH path = (entry:Asset)-[*1..4]->(vuln:Vulnerability)
+            MATCH path = (entry:Asset {organization_id: $org_id})-[*1..4]->(vuln:Vulnerability)
             WHERE vuln.severity IN ['critical', 'high']
+              AND all(n IN nodes(path) WHERE
+                  n.organization_id IS NULL OR n.organization_id = $org_id)
             RETURN path
             LIMIT $max_paths
             """
-            params = {"max_paths": max_paths}
-            if org_id:
-                query = query.replace("MATCH path", "MATCH path = (entry:Asset {organization_id: $org_id})")
-                params["org_id"] = org_id
+            params = {"org_id": org_id, "max_paths": max_paths}
         
         results = graph.query(query, params)
         
@@ -349,7 +378,7 @@ async def get_discovery_tree(
     (HostingProvider), what ASN it belongs to, and which subdomains share
     its TLS certificate via SAN expansion.
     """
-    org_id = organization_id or (current_user.organization_id if hasattr(current_user, "organization_id") else None)
+    org_id = _resolve_graph_org(current_user, organization_id)
     if not org_id:
         raise HTTPException(status_code=400, detail="User must belong to an organization")
     try:
@@ -395,7 +424,7 @@ async def get_shared_infrastructure(
     Useful for answering: "What else is on this IP / network?" and
     identifying shared-infrastructure blast radius.
     """
-    org_id = organization_id or (current_user.organization_id if hasattr(current_user, "organization_id") else None)
+    org_id = _resolve_graph_org(current_user, organization_id)
     if not org_id:
         raise HTTPException(status_code=400, detail="User must belong to an organization")
     try:
@@ -419,7 +448,7 @@ async def get_cert_expansion(
     Traverses SIGNED_BY -> Certificate -> ALSO_COVERS to surface shadow IT
     and related assets discovered via certificate transparency.
     """
-    org_id = organization_id or (current_user.organization_id if hasattr(current_user, "organization_id") else None)
+    org_id = _resolve_graph_org(current_user, organization_id)
     if not org_id:
         raise HTTPException(status_code=400, detail="User must belong to an organization")
     try:
@@ -442,7 +471,7 @@ async def get_discovery_sources(
     Answers: "How many assets did subfinder vs whoxy vs certspotter find?"
     Falls back to PostgreSQL when Neo4j is unavailable.
     """
-    org_id = organization_id or (current_user.organization_id if hasattr(current_user, "organization_id") else None)
+    org_id = _resolve_graph_org(current_user, organization_id)
     if not org_id:
         raise HTTPException(status_code=400, detail="User must belong to an organization")
     try:
@@ -496,7 +525,7 @@ async def get_assets_by_technology(
     - All Apache servers (version-specific vulnerabilities)
     - All jQuery instances (client-side risks)
     """
-    org_id = organization_id or (current_user.organization_id if hasattr(current_user, 'organization_id') else None)
+    org_id = _resolve_graph_org(current_user, organization_id)
     
     try:
         graph = get_graph_service()
@@ -580,7 +609,7 @@ async def get_assets_by_port(
     - All assets with RDP (port 3389) exposed
     - All assets with database ports exposed
     """
-    org_id = organization_id or (current_user.organization_id if hasattr(current_user, 'organization_id') else None)
+    org_id = _resolve_graph_org(current_user, organization_id)
     
     try:
         graph = get_graph_service()
@@ -667,7 +696,7 @@ async def get_attack_surface_overview(
     - Attack vectors (risky ports, vulnerable technologies)
     - Risk distribution
     """
-    org_id = organization_id or (current_user.organization_id if hasattr(current_user, 'organization_id') else None)
+    org_id = _resolve_graph_org(current_user, organization_id)
     
     try:
         graph = get_graph_service()
@@ -838,7 +867,7 @@ async def get_assets_by_technology_fallback(
     from sqlalchemy import func
     from sqlalchemy.orm import Session
     
-    org_id = organization_id or (current_user.organization_id if hasattr(current_user, 'organization_id') else None)
+    org_id = _resolve_graph_org(current_user, organization_id)
     
     db = SessionLocal()
     try:
@@ -938,7 +967,7 @@ async def get_assets_by_port_fallback(
     from app.models.port_service import PortService
     from sqlalchemy import func
     
-    org_id = organization_id or (current_user.organization_id if hasattr(current_user, 'organization_id') else None)
+    org_id = _resolve_graph_org(current_user, organization_id)
     
     db = SessionLocal()
     try:
@@ -1047,7 +1076,7 @@ async def get_attack_surface_overview_fallback(
     from app.models.vulnerability import Vulnerability
     from sqlalchemy import func, and_
     
-    org_id = organization_id or (current_user.organization_id if hasattr(current_user, 'organization_id') else None)
+    org_id = _resolve_graph_org(current_user, organization_id)
     
     db = SessionLocal()
     try:
