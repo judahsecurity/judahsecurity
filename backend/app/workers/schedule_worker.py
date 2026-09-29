@@ -56,6 +56,22 @@ ICS_PORT_SCAN_TYPES = {
     "ics_full_discovery",
 }
 
+# These handlers can occupy a worker for days on an organization-wide target
+# list. Queue bounded jobs, and wait for the batch to finish before scheduling
+# another full pass.
+TARGET_BATCH_SIZES = {
+    "login_portal": 200,
+    "port_scan": 100,
+    "ics_full_discovery": 100,
+}
+
+
+def split_target_batches(targets: list[str], batch_size: int) -> list[list[str]]:
+    """Partition a target set into complete, bounded scheduled jobs."""
+    ordered_targets = sorted(set(targets))
+    batch_size = max(1, batch_size)
+    return [ordered_targets[index:index + batch_size] for index in range(0, len(ordered_targets), batch_size)]
+
 
 def due_schedule_claim_statement(schedule_id: int, now: datetime):
     """Build the atomic PostgreSQL claim used by competing schedule workers."""
@@ -218,6 +234,22 @@ class ScheduleWorker:
     async def run_schedule(self, db: Session, schedule: ScanSchedule):
         """Run a single schedule by creating a scan job."""
         logger.info(f"Running schedule: {schedule.name} (ID: {schedule.id})")
+
+        if schedule.scan_type in TARGET_BATCH_SIZES:
+            outstanding = db.query(Scan.id).filter(
+                Scan.organization_id == schedule.organization_id,
+                Scan.status.in_((ScanStatus.PENDING, ScanStatus.RUNNING)),
+                Scan.config["triggered_by_schedule"].as_integer() == schedule.id,
+            ).first()
+            if outstanding:
+                logger.info(
+                    "Schedule %s waiting for pending/running scan %s before creating another batch",
+                    schedule.id,
+                    outstanding[0],
+                )
+                schedule.next_run_at = schedule.calculate_next_run()
+                db.commit()
+                return
         
         # Get targets from various sources
         targets = []
@@ -362,7 +394,7 @@ class ScheduleWorker:
             "schedule_name": schedule.name,
             "schedule_scan_type": schedule.scan_type,
         }
-        
+
         # ParamSpider batch rotation: archive mining can't cover thousands of
         # domains in a single run, so rotate through the attack surface in
         # batches across successive scheduled runs. State (offset) is persisted
@@ -425,36 +457,56 @@ class ScheduleWorker:
                 if not config.get("nuclei_tags") and not config.get("tags"):
                     config["nuclei_tags"] = ["ics", "scada"]
         
-        # Create the scan
-        scan = Scan(
-            name=f"[Scheduled] {schedule.name}",
-            scan_type=scan_type,
-            organization_id=schedule.organization_id,
-            targets=targets,
-            config=config,
-            started_by="scheduler",
-            status=ScanStatus.PENDING,
-        )
-        
-        db.add(scan)
+        target_batches = [targets]
+        if schedule.scan_type in TARGET_BATCH_SIZES:
+            batch_size = max(1, int(config.get("max_targets_per_scan") or TARGET_BATCH_SIZES[schedule.scan_type]))
+            target_batches = split_target_batches(targets, batch_size)
+            logger.info(
+                "Schedule %s queued %s target batches of up to %s targets",
+                schedule.id,
+                len(target_batches),
+                batch_size,
+            )
+
+        scans = []
+        for index, batch in enumerate(target_batches, start=1):
+            batch_config = dict(config)
+            if len(target_batches) > 1:
+                batch_config["batch_index"] = index
+                batch_config["batch_count"] = len(target_batches)
+            scan = Scan(
+                name=f"[Scheduled] {schedule.name}" + (
+                    f" ({index}/{len(target_batches)})" if len(target_batches) > 1 else ""
+                ),
+                scan_type=scan_type,
+                organization_id=schedule.organization_id,
+                targets=batch,
+                config=batch_config,
+                started_by="scheduler",
+                status=ScanStatus.PENDING,
+            )
+            db.add(scan)
+            scans.append(scan)
+
         db.flush()
         
         # Update schedule
         schedule.last_run_at = datetime.now(timezone.utc)
-        schedule.last_scan_id = scan.id
+        schedule.last_scan_id = scans[-1].id
         schedule.run_count += 1
         schedule.consecutive_failures = 0
         schedule.last_error = None
         schedule.next_run_at = schedule.calculate_next_run()
         
         db.commit()
-        db.refresh(scan)
-        
-        # Send to SQS for processing (if SQS is configured)
-        if send_scan_to_sqs(scan):
-            logger.info(f"Created scan {scan.id} for schedule {schedule.name}, {len(targets)} targets (sent to SQS)")
-        else:
-            logger.info(f"Created scan {scan.id} for schedule {schedule.name}, {len(targets)} targets (database polling)")
+
+        # Each scan is durable before its SQS notification. Database polling
+        # still picks it up if a notification cannot be delivered.
+        for scan in scans:
+            if send_scan_to_sqs(scan):
+                logger.info("Created scan %s for schedule %s, %s targets (sent to SQS)", scan.id, schedule.name, len(scan.targets))
+            else:
+                logger.info("Created scan %s for schedule %s, %s targets (database polling)", scan.id, schedule.name, len(scan.targets))
 
     async def _run_tester_process_schedule(self, db: Session, schedule: ScanSchedule, targets: list):
         """Observe→assess→fireteam hunt, not a Nuclei Scan row."""

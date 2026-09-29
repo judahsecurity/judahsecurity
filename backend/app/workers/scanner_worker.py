@@ -18,7 +18,7 @@ from typing import Optional
 
 import boto3
 from botocore.exceptions import ClientError
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, or_
 from sqlalchemy.orm import sessionmaker
 
 # Add app to path
@@ -187,6 +187,7 @@ class ScannerWorker:
         global scan_semaphore
         install_process_tracking()
         self.active_scan_tasks: dict[int, asyncio.Task] = {}
+        self.claimed_scan_ids: set[int] = set()
         
         # Database connection
         if DATABASE_URL:
@@ -284,6 +285,10 @@ class ScannerWorker:
                             for scan in scans
                             if scan.status == ScanStatus.CANCELLED
                             or (scan.config or {}).get("cancel_requested")
+                            or (
+                                scan.id in self.claimed_scan_ids
+                                and scan.status in (ScanStatus.PENDING, ScanStatus.FAILED)
+                            )
                         ]
                     except Exception as exc:
                         logger.error("Cancellation monitor database error: %s", exc)
@@ -301,6 +306,29 @@ class ScannerWorker:
                     )
                     task.cancel()
             await asyncio.sleep(0.5)
+
+    async def _heartbeat_active_scans(self) -> None:
+        """Keep the database lease fresh while this worker owns running scans."""
+        while not shutdown_requested:
+            scan_ids = list(self.claimed_scan_ids)
+            if scan_ids:
+                db = self.get_db_session()
+                if db:
+                    try:
+                        db.query(Scan).filter(
+                            Scan.id.in_(scan_ids),
+                            Scan.status == ScanStatus.RUNNING,
+                        ).update(
+                            {Scan.updated_at: datetime.utcnow()},
+                            synchronize_session=False,
+                        )
+                        db.commit()
+                    except Exception as exc:
+                        db.rollback()
+                        logger.error("Scan heartbeat database error: %s", exc)
+                    finally:
+                        db.close()
+            await asyncio.sleep(30)
     
     async def poll_for_jobs(self):
         """Poll for scan jobs from SQS and database (hybrid approach).
@@ -588,25 +616,36 @@ class ScannerWorker:
             db.close()
     
     def _mark_scan_running(self, scan_id: int) -> bool:
-        """Mark a scan as RUNNING immediately. Returns True if successful."""
+        """Atomically claim a pending scan so two workers cannot run it."""
         db = self.get_db_session()
         if not db:
             logger.error(f"Scan {scan_id}: No database connection to mark RUNNING")
             return False
         try:
-            scan = db.query(Scan).filter(Scan.id == scan_id).first()
-            if scan and scan.status == ScanStatus.PENDING:
-                scan.status = ScanStatus.RUNNING
-                scan.started_at = datetime.utcnow()
+            now = datetime.utcnow()
+            claimed = db.query(Scan).filter(
+                Scan.id == scan_id,
+                Scan.status == ScanStatus.PENDING,
+            ).update(
+                {
+                    Scan.status: ScanStatus.RUNNING,
+                    Scan.started_at: now,
+                    Scan.updated_at: now,
+                },
+                synchronize_session=False,
+            )
+            if claimed:
                 db.commit()
+                self.claimed_scan_ids.add(scan_id)
                 logger.info(f"Scan {scan_id} marked as RUNNING")
                 return True
-            elif scan:
+            db.rollback()
+            scan = db.query(Scan).filter(Scan.id == scan_id).first()
+            if scan:
                 logger.warning(f"Scan {scan_id} already has status {scan.status.value}, skipping")
                 return False
-            else:
-                logger.error(f"Scan {scan_id} not found in database")
-                return False
+            logger.error(f"Scan {scan_id} not found in database")
+            return False
         except Exception as e:
             logger.error(f"Failed to mark scan {scan_id} as RUNNING: {e}")
             db.rollback()
@@ -634,41 +673,14 @@ class ScannerWorker:
         finally:
             db.close()
 
-    def _recover_stuck_scan_if_needed(self, scan_id: int):
-        """
-        If scan is RUNNING and has been for a while (e.g. worker crashed), reset to PENDING
-        so the next poll can retry it. Uses a 10-minute threshold to avoid resetting active scans.
-        """
-        from datetime import timedelta
-        STUCK_THRESHOLD_MINUTES = 10
-        db = self.get_db_session()
-        if not db:
-            return
-        try:
-            scan = db.query(Scan).filter(Scan.id == scan_id).first()
-            if not scan or scan.status != ScanStatus.RUNNING:
-                return
-            threshold = datetime.utcnow() - timedelta(minutes=STUCK_THRESHOLD_MINUTES)
-            if scan.started_at and scan.started_at < threshold:
-                old_started = scan.started_at
-                scan.status = ScanStatus.PENDING
-                scan.started_at = None
-                scan.error_message = ((scan.error_message or "")[:200] + " [Reset: was RUNNING >10m]")[:500]
-                db.commit()
-                logger.info(f"Scan {scan_id} reset to PENDING (was RUNNING since {old_started})")
-        except Exception as e:
-            logger.debug(f"Could not recover stuck scan {scan_id}: {e}")
-            db.rollback()
-        finally:
-            db.close()
-    
     async def recover_stale_scans(self) -> int:
         """
         Detect and recover scans that are stuck in RUNNING status.
         
         Scans are considered stale if they:
         - Have been RUNNING for more than STALE_SCAN_THRESHOLD_MINUTES
-        - Are not currently being processed by this worker (not in active_scans)
+        - Have had no heartbeat or database update during that interval
+        - Are not currently being processed by this worker
         
         Stale scans are reset to PENDING to be retried.
         
@@ -686,16 +698,18 @@ class ScannerWorker:
             from datetime import timedelta
             threshold = datetime.utcnow() - timedelta(minutes=STALE_SCAN_THRESHOLD_MINUTES)
             
-            # Find scans RUNNING longer than the threshold. Include ones still in
-            # active_scans — previously we skipped those, so a hung nuclei
-            # subprocess held a worker slot forever and the queue wedged.
+            # Lock rows so a heartbeat from another worker cannot race recovery.
             stale_scans = db.query(Scan).filter(
                 Scan.status == ScanStatus.RUNNING,
                 Scan.started_at < threshold,
-            ).all()
+                or_(Scan.updated_at < threshold, Scan.updated_at.is_(None)),
+            ).with_for_update(skip_locked=True).all()
             
             recovered_count = 0
+            failed_count = 0
             for scan in stale_scans:
+                if scan.id in active_scans or scan.id in self.claimed_scan_ids:
+                    continue
                 # Reset to PENDING so it will be retried
                 old_error = scan.error_message or ""
                 scan.status = ScanStatus.PENDING
@@ -703,7 +717,7 @@ class ScannerWorker:
                 scan.error_message = f"Recovered from stale RUNNING state after {STALE_SCAN_THRESHOLD_MINUTES}+ minutes. Previous error: {old_error[:200]}"
                 
                 # Track retry count in config
-                config = scan.config or {}
+                config = dict(scan.config or {})
                 retry_count = config.get('_retry_count', 0) + 1
                 config['_retry_count'] = retry_count
                 config['_last_recovery'] = datetime.utcnow().isoformat()
@@ -715,13 +729,14 @@ class ScannerWorker:
                     scan.error_message = f"Failed after {retry_count} automatic recovery attempts. Manual investigation required."
                     scan.completed_at = datetime.utcnow()
                     logger.warning(f"Scan {scan.id} failed after {retry_count} recovery attempts")
+                    failed_count += 1
                 else:
                     logger.info(f"Recovered stale scan {scan.id} (attempt {retry_count})")
                     recovered_count += 1
             
-            if stale_scans:
+            if recovered_count or failed_count:
                 db.commit()
-                logger.info(f"Recovered {recovered_count} stale scans, {len(stale_scans) - recovered_count} marked as failed")
+                logger.info(f"Recovered {recovered_count} stale scans, {failed_count} marked as failed")
             
             return recovered_count
             
@@ -869,8 +884,6 @@ class ScannerWorker:
             # CRITICAL: Mark scan as RUNNING immediately to prevent re-polling
             if scan_id and not self._mark_scan_running(scan_id):
                 logger.warning(f"Scan {scan_id} could not be marked RUNNING, skipping")
-                # If scan is stuck RUNNING (e.g. worker crashed), reset to PENDING so it can be retried
-                self._recover_stuck_scan_if_needed(scan_id)
                 # IMPORTANT: Delete the SQS message even when skipping to prevent infinite reprocessing
                 self._delete_sqs_message_safe(message_id, receipt_handle, is_db_message, scan_id)
                 return
@@ -6836,6 +6849,7 @@ class ScannerWorker:
             if scan_id:
                 self._preserve_cancelled_status(scan_id)
                 discard_scan_processes(scan_id)
+                self.claimed_scan_ids.discard(scan_id)
                 active_scans.discard(scan_id)
                 if self.active_scan_tasks.get(scan_id) is asyncio.current_task():
                     self.active_scan_tasks.pop(scan_id, None)
@@ -7883,6 +7897,7 @@ class ScannerWorker:
         
         pending_tasks = set()
         cancellation_monitor = asyncio.create_task(self._monitor_cancellations())
+        heartbeat_monitor = asyncio.create_task(self._heartbeat_active_scans())
         last_stale_check = datetime.utcnow()
         STALE_CHECK_INTERVAL = 300  # Check for stale scans every 5 minutes
         
@@ -7906,6 +7921,9 @@ class ScannerWorker:
                         logger.error(f"Error during periodic stale scan recovery: {e}")
                     last_stale_check = datetime.utcnow()
                 
+                if len(active_scans) >= MAX_CONCURRENT_SCANS:
+                    await asyncio.sleep(1)
+                    continue
                 messages = await self.poll_for_jobs()
                 
                 # Create tasks for each message
@@ -7920,6 +7938,15 @@ class ScannerWorker:
                         body = json.loads(message.get('Body', '{}'))
                         scan_id = body.get('scan_id')
                         if scan_id:
+                            if scan_id in active_scans:
+                                message_id = message.get('MessageId')
+                                self._delete_sqs_message_safe(
+                                    message_id,
+                                    message.get('ReceiptHandle'),
+                                    bool(message_id and message_id.startswith('db-')),
+                                    scan_id,
+                                )
+                                continue
                             active_scans.add(scan_id)
                             logger.info(f"Starting processing for scan {scan_id}")
                     except Exception:
@@ -7951,7 +7978,8 @@ class ScannerWorker:
             await asyncio.gather(*pending_tasks, return_exceptions=True)
 
         cancellation_monitor.cancel()
-        await asyncio.gather(cancellation_monitor, return_exceptions=True)
+        heartbeat_monitor.cancel()
+        await asyncio.gather(cancellation_monitor, heartbeat_monitor, return_exceptions=True)
         
         logger.info("Scanner worker shutting down...")
 
