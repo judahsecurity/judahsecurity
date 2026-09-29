@@ -7,8 +7,10 @@ with a tiny allowlist (json/re/httpx/...) and DNS/host scope enforcement.
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -200,13 +202,13 @@ def validate_probe_source(source: str) -> List[str]:
     return uniq
 
 
-def run_custom_probe(
+def _prepare_probe(
     source: str,
     *,
     allowed_hosts: Sequence[str],
     timeout_sec: float = DEFAULT_TIMEOUT_SEC,
-) -> dict[str, Any]:
-    """Validate and run the probe. Never raises into the agent loop."""
+) -> tuple[list[str], float, str, dict[str, str]] | dict[str, Any]:
+    """Validate scope and source before either probe runner starts a process."""
     hosts = _normalize_hosts(allowed_hosts)
     if not hosts:
         return {
@@ -234,6 +236,20 @@ def run_custom_probe(
         "HTTPS_PROXY": "",
         "ALL_PROXY": "",
     }
+    return hosts, timeout_sec, script, env
+
+
+def run_custom_probe(
+    source: str,
+    *,
+    allowed_hosts: Sequence[str],
+    timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+) -> dict[str, Any]:
+    """Synchronous runner for direct callers; the agent uses the async runner."""
+    prepared = _prepare_probe(source, allowed_hosts=allowed_hosts, timeout_sec=timeout_sec)
+    if isinstance(prepared, dict):
+        return prepared
+    hosts, timeout_sec, script, env = prepared
     try:
         with tempfile.NamedTemporaryFile("w", suffix="_probe.py", delete=False) as fh:
             fh.write(script)
@@ -264,5 +280,79 @@ def run_custom_probe(
         "exit_code": proc.returncode,
         "stdout": stdout,
         "stderr": stderr,
+        "allowed_hosts": hosts,
+    }
+
+
+async def _kill_probe_process(process: asyncio.subprocess.Process | None) -> None:
+    if process is None:
+        return
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        elif process.returncode is None:
+            process.kill()
+    except ProcessLookupError:
+        pass
+    except OSError:
+        if process.returncode is None:
+            process.kill()
+    if process.returncode is None:
+        try:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            pass
+
+
+async def run_custom_probe_async(
+    source: str,
+    *,
+    allowed_hosts: Sequence[str],
+    timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+) -> dict[str, Any]:
+    """Run the agent's probe without blocking cancellation of its turn."""
+    prepared = _prepare_probe(source, allowed_hosts=allowed_hosts, timeout_sec=timeout_sec)
+    if isinstance(prepared, dict):
+        return prepared
+    hosts, timeout_sec, script, env = prepared
+    path = None
+    process = None
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix="_probe.py", delete=False) as fh:
+            fh.write(script)
+            path = fh.name
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, "-I", path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=tempfile.gettempdir(),
+            start_new_session=(os.name == "posix"),
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=timeout_sec + 2,
+            )
+        except asyncio.TimeoutError:
+            await _kill_probe_process(process)
+            return {"ok": False, "error": f"probe timed out after {timeout_sec}s",
+                    "allowed_hosts": hosts}
+    except asyncio.CancelledError:
+        await asyncio.shield(_kill_probe_process(process))
+        raise
+    except OSError as exc:
+        await _kill_probe_process(process)
+        return {"ok": False, "error": f"failed to start sandbox: {exc}"}
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    return {
+        "ok": process.returncode == 0,
+        "exit_code": process.returncode,
+        "stdout": stdout.decode("utf-8", errors="replace")[:MAX_OUTPUT_CHARS],
+        "stderr": stderr.decode("utf-8", errors="replace")[:2000],
         "allowed_hosts": hosts,
     }

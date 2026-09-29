@@ -418,7 +418,7 @@ export function TrustBoundaryMap({
   }, []);
 
   const stepHint = useMemo(() => {
-    if (!steps.length) return 'awaiting first action';
+    if (!steps.length) return 'awaiting first attack-chain step';
     const last = steps[steps.length - 1];
     const phase = (last.properties?.phase || 'recon').replace(/_/g, ' ');
     return `${phase} · ${last.label}`;

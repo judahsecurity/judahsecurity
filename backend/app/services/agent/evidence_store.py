@@ -49,6 +49,47 @@ def origin(url: str) -> tuple[str, str, int]:
     return p.scheme, p.hostname.lower(), p.port or (443 if p.scheme == "https" else 80)
 
 
+def purge_session_evidence(organization_id: int, session_id: str) -> None:
+    """Remove persisted artifacts when the owning conversation is deleted."""
+    directory = (os.environ.get("AEGIS_EVIDENCE_DIR") or "").strip()
+    if not directory:
+        return
+    namespace = hashlib.sha256(f"{organization_id}:{session_id}".encode()).hexdigest()[:32]
+    root = Path(directory) / namespace
+    if root.is_dir():
+        for artifact in root.glob("*.json"):
+            artifact.unlink(missing_ok=True)
+        root.rmdir()
+
+
+def prune_expired_evidence() -> int:
+    """Delete expired artifacts from inactive sessions on shared storage."""
+    directory = (os.environ.get("AEGIS_EVIDENCE_DIR") or "").strip()
+    if not directory:
+        return 0
+    root = Path(directory)
+    if not root.is_dir():
+        return 0
+    retention = max(3600, int(os.environ.get("AEGIS_EVIDENCE_RETENTION_SECONDS", "86400")))
+    cutoff = time.time() - retention
+    removed = 0
+    for namespace in root.iterdir():
+        if namespace.is_symlink() or not namespace.is_dir():
+            continue
+        for artifact in namespace.glob("*.json"):
+            try:
+                if not artifact.is_symlink() and artifact.stat().st_mtime < cutoff:
+                    artifact.unlink(missing_ok=True)
+                    removed += 1
+            except OSError:
+                continue
+        try:
+            namespace.rmdir()
+        except OSError:
+            pass
+    return removed
+
+
 class _RecordsView(Mapping):
     """Read-only snapshots; consumers cannot mutate the execution-owned ledger."""
 
@@ -102,6 +143,7 @@ class EvidenceStore:
         self.total_bytes = 0
         self.max_bytes = 64 * 1024 * 1024
         self._lock = threading.RLock()
+        self._historical_ids: set[str] = set()
         self._load_persisted()
 
     def _root(self) -> Path | None:
@@ -136,13 +178,17 @@ class EvidenceStore:
             return None
         return record if self._valid_record(record, artifact_id) else None
 
-    def _remember(self, record: dict) -> None:
+    def _remember(self, record: dict, *, historical: bool = False) -> None:
         artifact_id = record["id"]
         previous = self._records.pop(artifact_id, None)
         if previous:
             self.total_bytes -= int(previous.get("size_bytes") or 0)
         self._records[artifact_id] = deepcopy(record)
         self.total_bytes += int(record.get("size_bytes") or 0)
+        if historical:
+            self._historical_ids.add(artifact_id)
+        else:
+            self._historical_ids.discard(artifact_id)
 
     def _get_record(self, artifact_id: str) -> dict | None:
         artifact_id = str(artifact_id or "")
@@ -157,7 +203,11 @@ class EvidenceStore:
             for candidate in candidates:
                 record = self._load_file(candidate, artifact_id)
                 if record is not None:
-                    self._remember(record)
+                    self._remember(record, historical=True)
+                    while len(self._records) > self.max_records or self.total_bytes > self.max_bytes:
+                        removed_id, removed = self._records.popitem(last=False)
+                        self.total_bytes -= int(removed.get("size_bytes") or 0)
+                        self._historical_ids.discard(removed_id)
                     return record
         return None
 
@@ -183,10 +233,11 @@ class EvidenceStore:
                 continue
             loaded.append(record)
         for record in sorted(loaded, key=lambda item: item["created_at"]):
-            self._remember(record)
+            self._remember(record, historical=True)
         while len(self._records) > self.max_records or self.total_bytes > self.max_bytes:
-            _, removed = self._records.popitem(last=False)
+            removed_id, removed = self._records.popitem(last=False)
             self.total_bytes -= int(removed.get("size_bytes") or 0)
+            self._historical_ids.discard(removed_id)
 
     def _delete_persisted(self, artifact_id: str) -> None:
         path = self._persisted_path(artifact_id)
@@ -196,16 +247,20 @@ class EvidenceStore:
             except OSError:
                 pass
 
-    def clear(self) -> None:
+    def clear(self, *, memory_only: bool = False) -> None:
         """Erase session evidence from memory and configured private persistence."""
         with self._lock:
             for artifact_id in list(self.records):
-                self._delete_persisted(artifact_id)
+                if not memory_only:
+                    self._delete_persisted(artifact_id)
                 removed = self._records.pop(artifact_id, None)
                 if removed:
                     self.total_bytes -= int(removed.get("size_bytes") or 0)
+            self._historical_ids.clear()
             root = self._root()
-            if root:
+            if root and not memory_only:
+                for artifact in (root / self.namespace).glob("*.json"):
+                    artifact.unlink(missing_ok=True)
                 try:
                     (root / self.namespace).rmdir()
                 except OSError:
@@ -276,19 +331,44 @@ class EvidenceStore:
             while len(self.records) > self.max_records or self.total_bytes > self.max_bytes:
                 removed_id, removed = self._records.popitem(last=False)
                 self.total_bytes -= removed["size_bytes"]
+                self._historical_ids.discard(removed_id)
                 self._delete_persisted(removed_id)
             root = self._root()
             if root:
+                from app.services.agent.observability import redact_string
+
                 root = root / self.namespace
                 root.mkdir(parents=True, exist_ok=True, mode=0o700)
                 path = root / f"{artifact_id}.json"
                 temporary = root / f".{artifact_id}.{uuid.uuid4().hex}.tmp"
+                persisted_record = deepcopy(record)
+                if target:
+                    try:
+                        scheme, host, port = origin(target)
+                        persisted_record["target"] = f"{scheme}://{host}:{port}"
+                    except ValueError:
+                        persisted_record["target"] = redact_string(target)
+                persisted_record["identity"] = redact_string(identity)
                 fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
                 with os.fdopen(fd, "w") as stream:
-                    json.dump(record, stream, default=str)
+                    json.dump(persisted_record, stream, default=str)
                     stream.flush()
                     os.fsync(stream.fileno())
                 os.replace(temporary, path)
+        if kind == "http_exchange":
+            from app.services.agent.action_ledger import active_run_id, append_action
+
+            request = clean.get("request", {}) if isinstance(clean, dict) else {}
+            response = clean.get("response", {}) if isinstance(clean, dict) else {}
+            append_action(
+                active_run_id.get(), artifact_id, "completed", "http_exchange",
+                target=target,
+                detail=(
+                    f"{request.get('method', 'HTTP')} status={response.get('status', 'unknown')} "
+                    f"bytes={response.get('length', 'unknown')}"
+                ),
+                evidence_ids=[artifact_id],
+            )
         return artifact_id
 
     def read(self, artifact_id: str, offset: int = 0, limit: int = 6000) -> dict:
@@ -322,6 +402,8 @@ class EvidenceStore:
         has_callback = False
         target_path_seen = False
         for artifact_id in ids:
+            if artifact_id in self._historical_ids:
+                return False, "Fresh verifier execution artifacts are required"
             row = self.records.get(artifact_id)
             if (
                 not row

@@ -1097,15 +1097,22 @@ def test_evidence_rehydrates_within_same_session_namespace(tmp_path, monkeypatch
         artifact_id = first.record(
             "oob_poll",
             {"interactions": [{"protocol": "dns"}]},
-            target="https://app.test/fetch",
+            target="https://app.test/fetch?token=secret-token",
             success=True,
         )
     finally:
         verification_run.reset(token)
 
+    persisted_path = tmp_path / namespace / f"{artifact_id}.json"
+    assert "secret-token" not in persisted_path.read_text()
+
     restarted = EvidenceStore(namespace=namespace)
     assert restarted.records[artifact_id]["payload"]["interactions"][0]["protocol"] == "dns"
     assert restarted.read(artifact_id)["run_id"] == "run-1"
+    assert not restarted.validate(
+        [artifact_id], candidate_id="candidate-1", revision=2,
+        run_id="run-1", target="https://app.test/fetch",
+    )[0]
 
 
 def test_evidence_rejects_tampered_persisted_artifact(tmp_path, monkeypatch):
@@ -1122,6 +1129,22 @@ def test_evidence_rejects_tampered_persisted_artifact(tmp_path, monkeypatch):
 
     restarted = EvidenceStore(namespace=namespace)
     assert artifact_id not in restarted.records
+
+
+def test_inactive_session_evidence_expires_on_cleanup(tmp_path, monkeypatch):
+    from app.services.agent.evidence_store import prune_expired_evidence
+
+    monkeypatch.setenv("AEGIS_EVIDENCE_DIR", str(tmp_path))
+    old_dir = tmp_path / "old-session"
+    old_dir.mkdir()
+    old_file = old_dir / "artifact.json"
+    old_file.write_text("{}")
+    stale = time.time() - 90000
+    import os
+
+    os.utime(old_file, (stale, stale))
+    assert prune_expired_evidence() == 1
+    assert not old_file.exists()
 
 
 def test_session_runtime_is_lru_bounded(manager):

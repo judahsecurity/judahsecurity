@@ -12,10 +12,10 @@ import time
 MAX_MANAGER_SESSIONS = 256
 
 
-def _dispose(bucket):
+def _dispose(bucket, *, memory_only=False):
     store = bucket.get("_evidence_store") if isinstance(bucket, dict) else None
     if store is not None and hasattr(store, "clear"):
-        store.clear()
+        store.clear(memory_only=memory_only)
 
 
 def clear_session_runtime(obj, organization_id, session_id) -> bool:
@@ -50,7 +50,7 @@ class SessionValue:
             while len(runtime) > MAX_MANAGER_SESSIONS and stale:
                 old_key, old_bucket = stale.pop(0)
                 runtime.pop(old_key, None)
-                _dispose(old_bucket)
+                _dispose(old_bucket, memory_only=True)
         return bucket
 
     def __get__(self, obj, owner=None):

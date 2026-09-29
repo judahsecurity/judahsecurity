@@ -8,12 +8,12 @@ import sys
 from pathlib import Path
 
 
-def _chown_tree(path: Path, uid: int, gid: int) -> None:
+def _chown_tree(path: Path, uid: int, gid: int, *, recursive: bool = True) -> None:
     try:
         os.chown(path, uid, gid)
     except OSError:
         return
-    for child in path.rglob("*"):
+    for child in path.rglob("*") if recursive else ():
         try:
             os.chown(child, uid, gid)
         except OSError:
@@ -25,9 +25,10 @@ def main() -> None:
         sys.stderr.write("docker-entrypoint: missing command\n")
         sys.exit(1)
 
+    evidence_directory = Path(os.environ.get("AEGIS_EVIDENCE_DIR") or "/app/data/evidence")
     writable_directories = {
         Path(os.environ.get("DELPHI_CACHE_DIR") or "/app/data/delphi_cache"),
-        Path(os.environ.get("AEGIS_EVIDENCE_DIR") or "/app/data/evidence"),
+        evidence_directory,
         Path(
             os.environ.get("AEGIS_INTERACTSH_STATE_DIR")
             or "/app/data/interactsh"
@@ -43,7 +44,8 @@ def main() -> None:
         try:
             user = pwd.getpwnam("appuser")
             for directory in writable_directories:
-                _chown_tree(directory, user.pw_uid, user.pw_gid)
+                _chown_tree(directory, user.pw_uid, user.pw_gid,
+                            recursive=directory != evidence_directory)
             os.initgroups("appuser", user.pw_gid)
             os.setgid(user.pw_gid)
             os.setuid(user.pw_uid)

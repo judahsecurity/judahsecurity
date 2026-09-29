@@ -31,6 +31,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { useRouter } from 'next/navigation';
 import { AttackScenarioPanel, ChainData } from '@/components/agent/AttackScenarioPanel';
 import { EngagementReplay, ReplayStep, TokenUsage } from '@/components/agent/EngagementReplay';
+import { RunLedgerPanel, AgentRunLedger } from '@/components/agent/RunLedgerPanel';
 import {
   CapabilityMapPanel,
   CapabilityMapState,
@@ -700,6 +701,9 @@ function AgentPageContent() {
   const [showHistory, setShowHistory] = useState(false);
   const [chainData, setChainData] = useState<ChainData | null>(null);
   const [engagementReplay, setEngagementReplay] = useState<ReplayStep[]>([]);
+  const [runLedger, setRunLedger] = useState<AgentRunLedger | null>(null);
+  const [ledgerError, setLedgerError] = useState(false);
+  const [agentRequestTimeoutMs, setAgentRequestTimeoutMs] = useState(60 * 60_000);
   const [replayUsage, setReplayUsage] = useState<TokenUsage | null>(null);
   const [replayCost, setReplayCost] = useState<number | null>(null);
   const [scenarioCollapsed, setScenarioCollapsed] = useState(false);
@@ -756,6 +760,31 @@ function AgentPageContent() {
   useEffect(() => { scrollToBottom(); }, [messages, liveSteps]);
   useEffect(() => { liveStepsRef.current = liveSteps; }, [liveSteps]);
 
+  useEffect(() => {
+    if (!sessionId) return;
+    let active = true;
+    let failures = 0;
+    const refresh = () => {
+      api.getAgentRunLedger(sessionId)
+        .then((value: AgentRunLedger) => {
+          if (!active) return;
+          failures = 0;
+          setLedgerError(false);
+          setRunLedger(value);
+        })
+        .catch(() => {
+          if (!active) return;
+          failures += 1;
+          // A new session may briefly return 404 before the first message is saved.
+          if (loading && failures >= 2) setLedgerError(true);
+        });
+    };
+    refresh();
+    if (!loading) return () => { active = false; };
+    const timer = setInterval(refresh, 5000);
+    return () => { active = false; clearInterval(timer); };
+  }, [sessionId, loading]);
+
   const hasInFlightTool = () => {
     if (toolInFlightRef.current) return true;
     const steps = liveStepsRef.current;
@@ -770,11 +799,14 @@ function AgentPageContent() {
   // ── Agent status + playbooks + conversations ───────────────────
   useEffect(() => {
     api.getAgentStatus()
-      .then((data: { available?: boolean; hint?: string; price_limit_usd?: number }) => {
+      .then((data: { available?: boolean; hint?: string; price_limit_usd?: number; request_timeout_seconds?: number }) => {
         setAgentAvailable(data?.available ?? false);
         setAgentStatusHint(data?.hint ?? null);
         if (typeof data?.price_limit_usd === 'number' && data.price_limit_usd > 0) {
           setSpendLimit(data.price_limit_usd);
+        }
+        if (typeof data?.request_timeout_seconds === 'number' && data.request_timeout_seconds > 0) {
+          setAgentRequestTimeoutMs(data.request_timeout_seconds * 1000);
         }
       })
       .catch((err: unknown) => {
@@ -985,7 +1017,7 @@ function AgentPageContent() {
   // hard wall-clock ceiling — never idle-timeout mid-tool. Idle applies only
   // when there is no running tool_start in the live step stream.
   const AGENT_IDLE_TIMEOUT_MS = 20 * 60_000;
-  const AGENT_HARD_TIMEOUT_MS = 90 * 60_000;
+  const AGENT_HARD_TIMEOUT_MS = agentRequestTimeoutMs + 5 * 60_000;
 
   useEffect(() => {
     // Don't timeout while waiting on operator tool confirmation / phase approval.
@@ -1001,13 +1033,14 @@ function AgentPageContent() {
           if (now - startedAt < AGENT_HARD_TIMEOUT_MS) return;
           setLoading(false); setLiveSteps([]);
           toolInFlightRef.current = false;
+          if (sessionId) api.getAgentRunLedger(sessionId).then(setRunLedger).catch(() => {});
           toast({
             variant: 'destructive',
             title: 'Timeout',
-            description: 'Agent tool still running after 90 minutes — check backend logs.',
+            description: 'The page stopped waiting. Review Work performed for saved actions and the run status.',
           });
           appendAgentMessage({
-            answer: 'Error: Agent tool exceeded 90-minute hard limit. The backend may still be working — check logs before retrying.',
+            answer: 'The page stopped waiting after the configured run limit. Review Work performed for saved actions and the run status.',
           });
           return;
         }
@@ -1015,13 +1048,14 @@ function AgentPageContent() {
         if (now - startedAt < AGENT_IDLE_TIMEOUT_MS) return;
         setLoading(false); setLiveSteps([]);
         toolInFlightRef.current = false;
+        if (sessionId) api.getAgentRunLedger(sessionId).then(setRunLedger).catch(() => {});
         toast({
           variant: 'destructive',
           title: 'Timeout',
-          description: 'No agent activity for 20 minutes with no running tool.',
+          description: 'No live update for 20 minutes. Review Work performed for the saved run status.',
         });
         appendAgentMessage({
-          answer: 'Error: No agent activity for 20 minutes. If a tool was supposed to be running, check backend logs — the UI may have lost the tool_start event.',
+          answer: 'No live update for 20 minutes. Review Work performed for saved actions and the run status.',
         });
       }, 15_000);
     } else if (loadingTimeoutRef.current) {
@@ -1029,7 +1063,7 @@ function AgentPageContent() {
     }
     return () => { if (loadingTimeoutRef.current) clearInterval(loadingTimeoutRef.current); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loading, pendingConfirmation]);
+  }, [loading, pendingConfirmation, agentRequestTimeoutMs, sessionId]);
 
   // ── Message helpers ───────────────────────────────────────────
   const appendAgentMessage = (payload: {
@@ -1104,7 +1138,7 @@ function AgentPageContent() {
   };
 
   const pollAgentConversation = async (sid: string) => {
-    const deadline = Date.now() + 90 * 60_000;
+    const deadline = Date.now() + agentRequestTimeoutMs + 5 * 60_000;
     while (Date.now() < deadline) {
       if (stopRequestedRef.current) return null;
       await new Promise((r) => setTimeout(r, 2500));
@@ -1118,7 +1152,7 @@ function AgentPageContent() {
         /* keep polling — conversation row may lag the insert */
       }
     }
-    throw new Error('Agent is still running after 90 minutes. Reopen this chat from history later.');
+    throw new Error('The agent passed its configured run limit. Review Work performed for saved actions.');
   };
 
   const handleSend = async () => {
@@ -1357,6 +1391,7 @@ function AgentPageContent() {
       setEngagementReplay((data.engagement_replay as ReplayStep[]) || []);
       setReplayUsage((data.token_usage as TokenUsage) || null);
       setReplayCost(typeof data.cost_usd === 'number' ? data.cost_usd : null);
+      api.getAgentRunLedger(sid).then(setRunLedger).catch(() => setRunLedger(null));
       api.getAgentSessionChain(sid, true).then(setChainData).catch(() => setChainData(null));
     } catch {
       toast({ variant: 'destructive', title: 'Error', description: 'Could not load conversation' });
@@ -1375,6 +1410,7 @@ function AgentPageContent() {
 
   const startNewConversation = () => {
     setMessages([]); setPendingAnswer(false); setLiveSteps([]); setShowHistory(false); setChainData(null);
+    setRunLedger(null);
     setEngagementReplay([]); setReplayUsage(null); setReplayCost(null);
     setShowModifyInput(false); setModifyInput('');
     setLiveCost(null); setPendingLoadSessionId(null);
@@ -2035,6 +2071,17 @@ function AgentPageContent() {
                   </CardContent>
                 </Card>
 
+                {runLedger?.run_id && (
+                  <div className="mt-4 w-full">
+                    <RunLedgerPanel run={runLedger} />
+                  </div>
+                )}
+                {ledgerError && loading && (
+                  <p className="mt-3 text-xs text-amber-400" role="status">
+                    The work record is unavailable right now. The assessment may still be running; check the server and database logs.
+                  </p>
+                )}
+
                 {engagementReplay.length > 0 && (
                   <div className="mt-4 w-full">
                     <EngagementReplay
@@ -2059,6 +2106,7 @@ function AgentPageContent() {
                 {showScenario && (
                   <AttackScenarioPanel
                     chainData={chainData} loading={loading}
+                    recordedActions={runLedger?.coverage?.actions || 0}
                     collapsed={scenarioCollapsed}
                     onToggleCollapse={() => setScenarioCollapsed(!scenarioCollapsed)}
                   />

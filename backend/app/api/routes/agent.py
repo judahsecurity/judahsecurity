@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import uuid
+from datetime import datetime
 from typing import Optional, Literal, List
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
 from pydantic import BaseModel, field_validator, Field
@@ -22,6 +23,7 @@ from app.models.user import User
 from app.models.organization import Organization
 from app.models.agent_conversation import AgentConversation
 from app.services.agent.orchestrator import get_agent_orchestrator
+from app.services.agent.state import InvokeResponse
 from app.services.agent.playbooks import build_initial_objective, list_playbooks
 from app.services.agent import evograph
 from app.core.config import settings
@@ -34,6 +36,25 @@ router = APIRouter(prefix="/agent", tags=["Agent"])
 def _run_timeout_s() -> int:
     """Wall-clock cap for one invoke. Never below 1h — nginx 60s must not win."""
     return max(int(settings.AGENT_REQUEST_TIMEOUT_SECONDS), 3600)
+
+
+def _timeout_result(session_id: str, org_id: int, user_id: int) -> InvokeResponse:
+    """Build a user-facing partial report from receipts after an outer cutoff."""
+    from app.services.agent.action_ledger import finish_run, latest_run, partial_report
+
+    db = SessionLocal()
+    try:
+        run = latest_run(db, session_id=session_id,
+                         organization_id=org_id, user_id=user_id)
+    finally:
+        db.close()
+    if run:
+        finish_run(run["run_id"], "timeout", "Outer request time limit")
+    answer = partial_report(run["run_id"], "external time limit") if run else (
+        "The agent reached its time limit before a tool action was recorded. "
+        "Review the run ledger before continuing."
+    )
+    return InvokeResponse(answer=answer, task_complete=True)
 
 
 # =============================================================================
@@ -366,23 +387,23 @@ async def query_agent(
     async def _run_rest_query() -> None:
         from app.services.agent.run_control import register_run
 
-        orch = await get_agent_orchestrator()
         timeout_s = _run_timeout_s()
-        invoke_task = asyncio.create_task(
-            orch.invoke(
-                question=question,
-                user_id=str(user_id),
-                organization_id=org_id,
-                session_id=session_id,
-                initial_todos=todos,
-                mode=mode,
-                max_iterations=settings.AGENT_WS_MAX_ITERATIONS,
-                load_session_id=load_session_id,
-                price_limit_usd=price_limit_usd,
-            )
-        )
-        register_run(session_id, invoke_task)
         try:
+            orch = await get_agent_orchestrator(initialize=False)
+            invoke_task = asyncio.create_task(
+                orch.invoke(
+                    question=question,
+                    user_id=str(user_id),
+                    organization_id=org_id,
+                    session_id=session_id,
+                    initial_todos=todos,
+                    mode=mode,
+                    max_iterations=settings.AGENT_WS_MAX_ITERATIONS,
+                    load_session_id=load_session_id,
+                    price_limit_usd=price_limit_usd,
+                )
+            )
+            register_run(session_id, invoke_task)
             result = await asyncio.wait_for(invoke_task, timeout=timeout_s)
         except asyncio.TimeoutError:
             logger.warning(
@@ -390,15 +411,9 @@ async def query_agent(
                 timeout_s,
                 session_id,
             )
-            _save_conversation(
-                None,
-                session_id,
-                user_id,
-                org_id,
-                "agent",
-                f"The agent took longer than {timeout_s // 60} minutes and stopped.",
-                mode=mode,
-            )
+            timeout_result = _timeout_result(session_id, org_id, user_id)
+            _save_conversation(None, session_id, user_id, org_id, "agent",
+                               timeout_result.answer, timeout_result, mode=mode)
             return
         except Exception:
             logger.exception("Background REST agent query failed session=%s", session_id)
@@ -408,7 +423,8 @@ async def query_agent(
                 user_id,
                 org_id,
                 "agent",
-                "Agent run failed. Check backend logs.",
+                "Agent failed before it could return a report. Check the run ledger "
+                "for completed actions and backend logs for the failure.",
                 mode=mode,
             )
             return
@@ -676,6 +692,7 @@ async def get_agent_status():
         "resilient_fallback": True,
         "hint": hint,
         "max_iterations": settings.AGENT_MAX_ITERATIONS if available else None,
+        "request_timeout_seconds": _run_timeout_s(),
         "features": {
             "attack_surface_analysis": True,
             "vulnerability_queries": True,
@@ -770,6 +787,32 @@ async def get_conversation(
     }
 
 
+@router.get("/conversations/{session_id}/ledger")
+async def get_conversation_ledger(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Return persisted run receipts while a hunt is active or after it ends."""
+    conv = db.query(AgentConversation).filter(
+        AgentConversation.session_id == session_id,
+        AgentConversation.user_id == current_user.id,
+    ).first()
+    from app.services.agent.action_ledger import latest_run
+
+    org_id = conv.organization_id if conv else _resolve_agent_organization_id(current_user, db)
+    if not org_id:
+        raise HTTPException(status_code=404, detail="Run not found")
+    run = latest_run(
+        db, session_id=session_id,
+        organization_id=org_id, user_id=current_user.id,
+    )
+    if not conv and not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return run or {"run_id": None, "status": "not_started", "actions": [],
+          "coverage": {"actions": 0, "by_status": {}, "published_findings": 0}}
+
+
 @router.delete("/conversations/{session_id}")
 async def delete_conversation(
     session_id: str,
@@ -788,8 +831,44 @@ async def delete_conversation(
     if not conv:
         raise HTTPException(status_code=404, detail="Conversation not found")
 
+    from app.services.agent.run_control import has_running_task
+    if has_running_task(session_id):
+        raise HTTPException(status_code=409, detail="Stop the active assessment before deleting its work record")
+
+    from app.models.agent_run_ledger import AgentActionReceipt, AgentHypothesisCoverage, AgentRunLedger
+
+    active_record = db.query(AgentRunLedger).filter(
+        AgentRunLedger.session_id == session_id,
+        AgentRunLedger.organization_id == conv.organization_id,
+        AgentRunLedger.user_id == current_user.id,
+        AgentRunLedger.status == "running",
+        AgentRunLedger.ended_at.is_(None),
+    ).first()
+    if active_record and (active_record.deadline_at is None or
+                          active_record.deadline_at > datetime.utcnow()):
+        raise HTTPException(status_code=409, detail="Stop the active assessment before deleting its work record")
+
+    run_ids = [row.id for row in db.query(AgentRunLedger.id).filter(
+        AgentRunLedger.session_id == session_id,
+        AgentRunLedger.organization_id == conv.organization_id,
+        AgentRunLedger.user_id == current_user.id,
+    ).all()]
+    if run_ids:
+        db.query(AgentActionReceipt).filter(AgentActionReceipt.run_id.in_(run_ids)).delete(synchronize_session=False)
+        db.query(AgentHypothesisCoverage).filter(AgentHypothesisCoverage.run_id.in_(run_ids)).delete(synchronize_session=False)
+        db.query(AgentRunLedger).filter(AgentRunLedger.id.in_(run_ids)).delete(synchronize_session=False)
     db.delete(conv)
     db.commit()
+    from app.services.agent.evidence_store import purge_session_evidence
+    from app.services.agent.session_runtime import clear_session_runtime
+    from importlib import import_module
+
+    purge_session_evidence(conv.organization_id, session_id)
+    agent_module = import_module("app.services.agent.orchestrator")
+    active_orchestrator = getattr(agent_module, "_orchestrator", None)
+    manager = getattr(active_orchestrator, "tool_manager", None)
+    if manager is not None:
+        clear_session_runtime(manager, conv.organization_id, session_id)
     return {"ok": True}
 
 
@@ -1084,6 +1163,11 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                     if objective:
                         question = objective
 
+                # Persist the session before invoking so the authenticated
+                # ledger endpoint can show live receipts during a WebSocket run.
+                _save_conversation(None, session_id, user_id, org_id,
+                                   "user", question, mode=mode)
+
                 async def _run_query(
                     q=question,
                     todos=initial_todos,
@@ -1092,7 +1176,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                     limit=price_limit_usd,
                 ):
                     try:
-                        orchestrator = await get_agent_orchestrator()
+                        orchestrator = await get_agent_orchestrator(initialize=False)
                         result = await asyncio.wait_for(
                             orchestrator.invoke(
                                 question=q,
@@ -1108,19 +1192,13 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                             ),
                             timeout=_run_timeout_s(),
                         )
-                        await finish_result(result, save_user_question=q, mode=run_mode)
+                        await finish_result(result, mode=run_mode)
                     except asyncio.CancelledError:
                         await emit_cancelled()
                     except asyncio.TimeoutError:
                         logger.warning(f"WS agent query timed out after {_run_timeout_s()}s for session {session_id}")
-                        await websocket.send_json({
-                            "type": "error",
-                            "message": (
-                                f"The agent hit the {_run_timeout_s() // 60}-minute run cap. "
-                                "The hunt did not finish — reopen this chat from history or start a new one. "
-                                "Do not treat this as a clean bill of health."
-                            ),
-                        })
+                        await finish_result(_timeout_result(session_id, org_id, user_id),
+                                            mode=run_mode)
                     except Exception as e:
                         logger.error(f"WS agent query error for session {session_id}: {e}")
                         await websocket.send_json({"type": "error", "message": f"Agent error: {e}"})

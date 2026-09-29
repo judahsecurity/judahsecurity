@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
@@ -304,6 +305,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "test_saml_sso",
             "test_credential_spray",
             "execute_hydra",
+            "execute_brutus",
             "execute_jwt",
             "compare_requests",
             "mutate_captured_request",
@@ -342,6 +344,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_browser",
             "test_credential_spray",
             "execute_hydra",
+            "execute_brutus",
             "add_engagement_credential",
             "queue_finding_followups",
             "update_hypothesis",
@@ -354,8 +357,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         system_prompt_suffix=(
             "Tiny lists only (defaults / known product creds). Grafana: admin:prom-operator "
             "(kube-prometheus-stack), then admin:admin / admin:grafana. CouchDB: admin:admin, "
-            "admin:password, couchdb:couchdb (nuclei couchdb-default-login). Always hydra -f / "
-            "exit on success. "
+            "admin:password, couchdb:couchdb (nuclei couchdb-default-login). Prefer "
+            "execute_brutus validation; use hydra -f only as a fallback. Never select mass "
+            "mode unless the user explicitly requested mass brute forcing. "
             "On hit: add_engagement_credential + queue_finding_followups(vuln_type='default_login') "
             "+ validate_finding before submit_finding_candidate. Login is a foothold — coverage proves "
             "privileged APIs. Never invent credentials; no rockyou. "
@@ -1175,7 +1179,13 @@ async def _run_specialist(
     while iteration < max_iter:
         iteration += 1
         try:
-            response = await llm.ainvoke(messages)
+            from app.services.agent.orchestrator import _ledger_llm_call
+
+            response = await _ledger_llm_call(
+                llm, messages, kind="agent_specialist_model",
+                target=target_list[0] if target_list else "",
+                phase=profile.name,
+            )
         except Exception as exc:
             logger.warning("fireteam %s: LLM failure: %s", profile.name, exc)
             report.error = f"LLM error: {exc}"
@@ -1341,8 +1351,10 @@ async def run_fireteam(
     progress_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
     directives: Optional[Dict[str, Any]] = None,
     llm_for_specialist: Optional[Callable[[SpecialistProfile], Any]] = None,
+    member_timeout_sec: float = 600.0,
+    wave_timeout_sec: float = 1200.0,
 ) -> FireteamResult:
-    """Run a fireteam in parallel and return the merged result.
+    """Run a bounded fireteam and return completed and interrupted receipts.
 
     ``specialists`` may contain either string names from :data:`DEFAULT_SPECIALISTS`
     or fully custom :class:`SpecialistProfile` instances (for ad-hoc missions).
@@ -1368,8 +1380,30 @@ async def run_fireteam(
     targets_list = [t for t in targets if t]
     sem = asyncio.Semaphore(max(1, max_parallel))
 
+    def _interrupted_report(p: SpecialistProfile, reason: str) -> SpecialistReport:
+        directive = directives.get(p.name)
+        hypothesis_ids = list(getattr(directive, "hypothesis_ids", None) or [])
+        return SpecialistReport(
+            specialist=p.name,
+            role=f"{p.epithet}: {p.role}",
+            mission=mission,
+            summary=f"Execution interrupted: {reason}. Reconcile tool effects before retrying.",
+            error=reason,
+            verdict="blocked",
+            rewrite_hint="execution_timeout",
+            hypothesis_ids=hypothesis_ids,
+            assigned_hypothesis_id=hypothesis_ids[0] if len(hypothesis_ids) == 1 else "",
+            lease_id=str(getattr(directive, "lease_id", "") or ""),
+        )
+
     async def _run(p: SpecialistProfile) -> SpecialistReport:
         async with sem:
+            from app.services.agent.action_ledger import active_run_id, append_action
+
+            action_id = uuid.uuid4().hex
+            run_id = active_run_id.get()
+            append_action(run_id, action_id, "started", f"specialist:{p.name}",
+                          target=targets_list[0] if targets_list else "")
             label = f"{p.epithet} ({p.name})" if p.epithet else p.name
             if progress_callback:
                 try:
@@ -1383,22 +1417,89 @@ async def run_fireteam(
                 except Exception:
                     logger.warning("llm_for_specialist failed for %s; using default", p.name, exc_info=True)
                     spec_llm = llm
-            rep = await _run_specialist(
+            member_task = asyncio.create_task(_run_specialist(
                 p,
                 mission,
                 targets_list,
                 spec_llm,
                 tools_manager,
                 directive=directives.get(p.name),
-            )
+            ))
+            try:
+                done, _ = await asyncio.wait(
+                    {member_task}, timeout=max(0.01, member_timeout_sec)
+                )
+                if done:
+                    rep = member_task.result()
+                else:
+                    member_task.cancel()
+                    member_task.add_done_callback(_log_late_failure)
+                    rep = _interrupted_report(
+                        p, f"specialist timed out after {member_timeout_sec:g}s"
+                    )
+            except asyncio.CancelledError:
+                member_task.cancel()
+                member_task.add_done_callback(_log_late_failure)
+                append_action(run_id, action_id, "interrupted", f"specialist:{p.name}",
+                              target=targets_list[0] if targets_list else "",
+                              detail="specialist cancelled")
+                raise
+            except Exception as exc:
+                logger.exception("Fireteam specialist %s failed", p.name)
+                rep = _interrupted_report(p, f"specialist failed: {exc}")
             if progress_callback:
                 try:
-                    await progress_callback(label, "done")
+                    await progress_callback(label, "error" if rep.error else "done")
                 except Exception:
                     pass
+            append_action(
+                run_id, action_id,
+                "interrupted" if rep.rewrite_hint == "execution_timeout" else
+                "failed" if rep.error else "completed",
+                f"specialist:{p.name}", target=targets_list[0] if targets_list else "",
+                detail=rep.error or rep.verdict or "",
+            )
             return rep
 
-    reports = await asyncio.gather(*( _run(p) for p in resolved ))
+    def _log_late_failure(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            logger.exception("Fireteam task failed after its deadline")
+
+    tasks = [asyncio.create_task(_run(p)) for p in resolved]
+    try:
+        _, pending = await asyncio.wait(
+            tasks, timeout=max(0.01, wave_timeout_sec)
+        )
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+            task.add_done_callback(_log_late_failure)
+        raise
+    for task in pending:
+        task.cancel()
+        task.add_done_callback(_log_late_failure)
+
+    reports = []
+    for profile, task in zip(resolved, tasks):
+        if task in pending:
+            reports.append(_interrupted_report(
+                profile, f"fireteam wave timed out after {wave_timeout_sec:g}s"
+            ))
+            if progress_callback:
+                try:
+                    label = f"{profile.epithet} ({profile.name})" if profile.epithet else profile.name
+                    await progress_callback(label, "timeout")
+                except Exception:
+                    pass
+        else:
+            try:
+                reports.append(task.result())
+            except BaseException as exc:
+                reports.append(_interrupted_report(profile, f"specialist failed: {exc}"))
 
     merged = _merge_reports(mission, reports)
 

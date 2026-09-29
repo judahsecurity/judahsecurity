@@ -17,6 +17,7 @@ from pathlib import Path
 
 async def assess(args, orchestrator=None):
     session_id = uuid.uuid4().hex
+    real_runtime = orchestrator is None
     if orchestrator is None:
         backend = Path(__file__).resolve().parents[2] / "backend"
         sys.path.insert(0, str(backend))
@@ -70,6 +71,8 @@ async def assess(args, orchestrator=None):
         "Report blocked and untested coverage honestly. Do not bypass any proof gate."
     )
     response = None
+    run_ledgers = []
+    ledger_export_error = None
     for turn in range(max(1, args.max_turns)):
         response = await orchestrator.invoke(
             question=prompt
@@ -82,6 +85,22 @@ async def assess(args, orchestrator=None):
             max_iterations=args.max_iterations,
             price_limit_usd=args.price_limit_usd,
         )
+        if real_runtime:
+            try:
+                from app.db.database import SessionLocal
+                from app.services.agent.action_ledger import latest_run
+
+                with SessionLocal() as db:
+                    run = latest_run(
+                        db, session_id=session_id,
+                        organization_id=args.organization_id, user_id=args.user_id,
+                    )
+                if not run:
+                    raise RuntimeError("Agent run produced no durable ledger row")
+                run_ledgers.append(run)
+            except Exception as exc:
+                ledger_export_error = f"{type(exc).__name__}: {exc}"
+                break
         if (
             response.task_complete
             or response.error
@@ -89,26 +108,39 @@ async def assess(args, orchestrator=None):
             or getattr(response, "awaiting_approval", False)
         ):
             break
+    from .agent_eval import summarize_run_ledgers
+
+    ledger_metrics = summarize_run_ledgers(run_ledgers)
     summary = {
         "session_id": session_id,
+        "target": args.target,
+        "scope": args.scope or args.target,
+        "max_turns": args.max_turns,
+        "max_iterations": args.max_iterations,
+        "price_limit_usd": args.price_limit_usd,
         "complete": bool(response and response.task_complete),
         "error": response.error if response else "No response",
         "turns": turn + 1,
         "cost_usd": getattr(response, "cost_usd", None),
         "token_usage": getattr(response, "token_usage", None),
         "oast": oast_status,
+        "ledger_metrics": ledger_metrics,
+        "ledger_export_error": ledger_export_error,
     }
     output = (
         Path(os.environ.get("AEGIS_FINDINGS_SINK", "findings.jsonl")).resolve().parent
     )
     output.mkdir(parents=True, exist_ok=True)
     (output / "product_assessment.json").write_text(json.dumps(summary, indent=2))
+    (output / "agent_ledger.json").write_text(json.dumps(run_ledgers, indent=2))
     usage = summary.get("token_usage") or {}
     trace = {
         "summary": {"estimated_cost_usd": summary.get("cost_usd"), "tokens": usage}
     }
     (output / f"trace_{session_id}.json").write_text(json.dumps(trace, indent=2))
-    return 0 if summary["complete"] and not summary["error"] else 3
+    return 0 if summary["complete"] and not summary["error"] and (
+        not real_runtime or ledger_metrics["receipt_complete"]
+    ) else 3
 
 
 def main(argv=None):

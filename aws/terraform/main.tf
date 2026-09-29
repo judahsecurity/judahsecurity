@@ -114,6 +114,10 @@ data "aws_caller_identity" "current" {}
 # VPC and Networking
 # =============================================================================
 
+locals {
+  private_subnet_cidrs = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+}
+
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "~> 5.0"
@@ -122,7 +126,7 @@ module "vpc" {
   cidr = "10.0.0.0/16"
   
   azs             = slice(data.aws_availability_zones.available.names, 0, 3)
-  private_subnets = ["10.0.1.0/24", "10.0.2.0/24", "10.0.3.0/24"]
+  private_subnets = local.private_subnet_cidrs
   public_subnets  = ["10.0.101.0/24", "10.0.102.0/24", "10.0.103.0/24"]
   
   enable_nat_gateway     = true
@@ -536,9 +540,65 @@ resource "aws_iam_role_policy" "ecs_task" {
           "secretsmanager:GetSecretValue"
         ]
         Resource = aws_secretsmanager_secret.app_secrets.arn
+      },
+      {
+        Effect = "Allow"
+        Action = ["elasticfilesystem:ClientMount", "elasticfilesystem:ClientWrite"]
+        Resource = aws_efs_file_system.agent_evidence.arn
+        Condition = {
+          StringEquals = {
+            "elasticfilesystem:AccessPointArn" = aws_efs_access_point.agent_evidence.arn
+          }
+        }
       }
     ]
   })
+}
+
+# Durable, tenant-namespaced agent evidence shared by replacement Fargate tasks.
+resource "aws_security_group" "agent_evidence" {
+  name        = "${var.project_name}-agent-evidence-sg"
+  description = "NFS for API task evidence storage"
+  vpc_id      = module.vpc.vpc_id
+
+  ingress {
+    description     = "NFS from API tasks"
+    from_port       = 2049
+    to_port         = 2049
+    protocol        = "tcp"
+    security_groups = [aws_security_group.api.id]
+  }
+}
+
+resource "aws_efs_file_system" "agent_evidence" {
+  creation_token = "${var.project_name}-agent-evidence"
+  encrypted      = true
+  tags = { Name = "${var.project_name}-agent-evidence" }
+}
+
+resource "aws_efs_mount_target" "agent_evidence" {
+  count           = length(local.private_subnet_cidrs)
+  file_system_id  = aws_efs_file_system.agent_evidence.id
+  subnet_id       = module.vpc.private_subnets[count.index]
+  security_groups = [aws_security_group.agent_evidence.id]
+}
+
+resource "aws_efs_access_point" "agent_evidence" {
+  file_system_id = aws_efs_file_system.agent_evidence.id
+
+  posix_user {
+    uid = 1000
+    gid = 1000
+  }
+
+  root_directory {
+    path = "/agent-evidence"
+    creation_info {
+      owner_uid   = 1000
+      owner_gid   = 1000
+      permissions = "0700"
+    }
+  }
 }
 
 # =============================================================================
@@ -707,6 +767,22 @@ resource "aws_ecs_task_definition" "api" {
         {
           name  = "SQS_QUEUE_URL"
           value = aws_sqs_queue.scan_jobs.url
+        },
+        {
+          name  = "AEGIS_EVIDENCE_DIR"
+          value = "/app/data/evidence"
+        },
+        {
+          name  = "AEGIS_EVIDENCE_RETENTION_SECONDS"
+          value = "86400"
+        }
+      ]
+
+      mountPoints = [
+        {
+          sourceVolume  = "agent-evidence"
+          containerPath = "/app/data/evidence"
+          readOnly      = false
         }
       ]
       
@@ -743,6 +819,19 @@ resource "aws_ecs_task_definition" "api" {
       }
     }
   ])
+
+  volume {
+    name = "agent-evidence"
+    efs_volume_configuration {
+      file_system_id     = aws_efs_file_system.agent_evidence.id
+      root_directory     = "/"
+      transit_encryption = "ENABLED"
+      authorization_config {
+        access_point_id = aws_efs_access_point.agent_evidence.id
+        iam             = "ENABLED"
+      }
+    }
+  }
   
   tags = {
     Name = "${var.project_name}-api"
@@ -777,7 +866,7 @@ resource "aws_ecs_service" "api" {
     minimum_healthy_percent = 100
   }
   
-  depends_on = [aws_lb_listener.http_direct]
+  depends_on = [aws_lb_listener.http_direct, aws_efs_mount_target.agent_evidence]
   
   tags = {
     Name = "${var.project_name}-api"
@@ -1066,10 +1155,6 @@ output "sqs_queue_url" {
   description = "SQS queue URL for scan jobs"
   value       = aws_sqs_queue.scan_jobs.url
 }
-
-
-
-
 
 
 

@@ -29,6 +29,7 @@ import os
 import re
 import time
 import uuid
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
@@ -138,6 +139,7 @@ class WorkerRecord:
     url: str
     status: str = "queued"  # queued|running|completed|failed|cancelled
     brief: str = ""
+    observations: List[Dict[str, str]] = field(default_factory=list)
     error: Optional[str] = None
     started_at: float = field(default_factory=time.time)
     finished_at: Optional[float] = None
@@ -148,6 +150,9 @@ class WorkerRecord:
 # session_id → worker_id → record
 _registry: Dict[str, Dict[str, WorkerRecord]] = {}
 _reg_lock = asyncio.Lock()
+_capture_context: ContextVar[tuple[str, List[Dict[str, str]]] | None] = ContextVar(
+    "recon_capture_context", default=None,
+)
 
 
 def _normalize_url(url: str) -> str:
@@ -171,6 +176,40 @@ def _host_from_url(url: str) -> str:
         return urlparse(url).netloc or url
     except Exception:
         return url
+
+
+def extract_recon_urls(kind: str, brief: str, target: str) -> List[str]:
+    """Return bounded, same-origin crawl discoveries for deterministic ingestion.
+
+    Worker briefs may contain error text or third-party URLs. Only the two
+    URL-discovery workers are eligible, and only URLs on the worker's exact
+    origin are promoted into the capability map.
+    """
+    if kind not in {"katana_urls", "ferox_dirs"}:
+        return []
+    origin = urlparse(_normalize_url(target))
+    if not origin.hostname:
+        return []
+    seen: set[str] = set()
+    urls: List[str] = []
+    for raw in re.findall(r"https?://[^\s\"'<>]+", brief or ""):
+        candidate = raw.rstrip("),.;]}")
+        parsed = urlparse(candidate)
+        if (
+            parsed.scheme != origin.scheme
+            or parsed.netloc.lower() != origin.netloc.lower()
+            or parsed.username
+            or parsed.password
+        ):
+            continue
+        normalized = parsed._replace(netloc=parsed.netloc.lower(), fragment="").geturl()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        urls.append(normalized)
+        if len(urls) >= 200:
+            break
+    return urls
 
 
 async def _emit(thought: str) -> None:
@@ -216,7 +255,29 @@ async def _run_mcp(
         ) or None
     except Exception:
         pass
-    return await tools_manager.execute(tool_name, {"args": args})
+    result = await tools_manager.execute(tool_name, {"args": args})
+    capture = _capture_context.get()
+    if capture and tool_name in ("execute_katana", "execute_feroxbuster"):
+        target, observations = capture
+        kind = "katana_urls" if tool_name == "execute_katana" else "ferox_dirs"
+        discovered = result.get("observations")
+        if not isinstance(discovered, list):
+            discovered = [
+                {"type": "HTTP_ENDPOINT", "target": item, "source": tool_name}
+                for item in extract_recon_urls(kind, str(result.get("output") or ""), target)
+            ]
+        candidate_text = "\n".join(
+            str(item.get("target") or "") for item in discovered
+            if isinstance(item, dict) and item.get("type") == "HTTP_ENDPOINT"
+        )
+        seen = {item.get("target") for item in observations}
+        for url in extract_recon_urls(kind, candidate_text, target):
+            if url in seen or len(observations) >= 200:
+                continue
+            seen.add(url)
+            observations.append({"type": "HTTP_ENDPOINT", "target": url,
+                                 "source": tool_name})
+    return result
 
 
 async def _worker_body(
@@ -389,10 +450,16 @@ async def spawn_workers(
             bucket[wid] = rec
 
             async def _run(record: WorkerRecord = rec, k: str = kind) -> None:
-                record.status = "running"
-                await _emit(f"Recon stream [{k}] started on {target}")
+                from app.services.agent.action_ledger import active_run_id, append_action
+
+                run_id = active_run_id.get()
+                observations: List[Dict[str, str]] = []
+                capture_token = _capture_context.set((target, observations))
                 timeout = float(_KIND_TIMEOUT_SEC.get(k, 120.0))
                 try:
+                    append_action(run_id, record.id, "started", f"recon_worker:{k}", target=target)
+                    record.status = "running"
+                    await _emit(f"Recon stream [{k}] started on {target}")
                     brief = await asyncio.wait_for(
                         _worker_body(
                             k,
@@ -405,6 +472,7 @@ async def spawn_workers(
                         timeout=timeout,
                     )
                     record.brief = brief
+                    record.observations = observations[:200]
                     record.status = "completed"
                     await _emit(f"Recon stream [{k}] completed")
                 except asyncio.TimeoutError:
@@ -412,6 +480,10 @@ async def spawn_workers(
                     record.error = f"timeout after {timeout}s"
                     record.brief = f"[recon_worker:{k}] FAILED: timeout after {timeout}s"
                     await _emit(f"Recon stream [{k}] timed out")
+                except asyncio.CancelledError:
+                    record.status = "cancelled"
+                    record.error = "cancelled"
+                    raise
                 except Exception as e:
                     record.status = "failed"
                     record.error = str(e)[:300]
@@ -419,7 +491,15 @@ async def spawn_workers(
                     logger.warning("recon worker %s failed: %s", k, e)
                     await _emit(f"Recon stream [{k}] failed: {str(e)[:120]}")
                 finally:
+                    _capture_context.reset(capture_token)
                     record.finished_at = time.time()
+                    append_action(
+                        run_id, record.id,
+                        "completed" if record.status == "completed" else
+                        "interrupted" if record.status == "cancelled" else "failed",
+                        f"recon_worker:{k}", target=target,
+                        detail=record.error or "",
+                    )
 
             rec.task = asyncio.create_task(_run())
             spawned.append(
@@ -476,6 +556,10 @@ async def drain_completed(
                         "kind": rec.kind,
                         "status": rec.status,
                         "brief": rec.brief,
+                        "observations": rec.observations if rec.status == "completed" else [],
+                        "urls": ([item["target"] for item in rec.observations]
+                                 if rec.observations else extract_recon_urls(rec.kind, rec.brief, rec.url))
+                        if rec.status == "completed" else [],
                         "url": rec.url,
                         "error": rec.error,
                     }

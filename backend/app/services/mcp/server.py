@@ -8,6 +8,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import signal
 import shlex
 import subprocess
 import time
@@ -1673,6 +1675,7 @@ class MCPServer:
         timeout: int = 300,
         max_output_chars: int = 2_000_000,
         success_exit_codes: Optional[set] = None,
+        capture_discovery_urls: bool = False,
     ) -> Dict[str, Any]:
         """Run a shell command and return the result. Kills process on timeout; caps output size.
 
@@ -1681,21 +1684,84 @@ class MCPServer:
         """
         ok_codes = success_exit_codes or {0}
         process = None
+
+        async def drain_discovery(stream):
+            """Bound memory while retaining endpoint observations past output truncation."""
+            preview = bytearray()
+            tail = b""
+            total = 0
+            urls: list[str] = []
+            seen: set[str] = set()
+            while chunk := await stream.read(65536):
+                total += len(chunk)
+                if len(preview) < max_output_chars:
+                    preview.extend(chunk[: max_output_chars - len(preview)])
+                searchable = tail + chunk
+                for match in re.finditer(rb"https?://[^\s\"'<>]{1,2048}", searchable):
+                    url = match.group().decode("utf-8", errors="ignore").rstrip("),.;]}")
+                    if url not in seen and len(urls) < 1000:
+                        seen.add(url)
+                        urls.append(url)
+                tail = searchable[-2048:]
+            return bytes(preview), total, urls
+
+        async def drain_stderr(stream):
+            preview = bytearray()
+            while chunk := await stream.read(65536):
+                if len(preview) < max_output_chars:
+                    preview.extend(chunk[: max_output_chars - len(preview)])
+            return bytes(preview)
+
+        async def kill_process() -> None:
+            if process is None:
+                return
+            try:
+                if os.name == "posix":
+                    # Scanners may spawn child processes. The command gets its
+                    # own session so a cancelled agent turn can stop the group.
+                    os.killpg(process.pid, signal.SIGKILL)
+                elif process.returncode is None:
+                    process.kill()
+            except ProcessLookupError:
+                pass
+            except Exception:
+                try:
+                    if process.returncode is None:
+                        process.kill()
+                except ProcessLookupError:
+                    pass
+            if process.returncode is None:
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    logger.warning("Scanner process did not reap after termination")
+
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=(os.name == "posix"),
             )
             start = time.monotonic()
             try:
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(),
-                    timeout=timeout,
-                )
+                if capture_discovery_urls:
+                    (stdout, stdout_bytes, discovered), stderr, _ = await asyncio.wait_for(
+                        asyncio.gather(
+                            drain_discovery(process.stdout),
+                            drain_stderr(process.stderr),
+                            process.wait(),
+                        ),
+                        timeout=timeout,
+                    )
+                else:
+                    stdout, stderr = await asyncio.wait_for(
+                        process.communicate(), timeout=timeout,
+                    )
+                    stdout_bytes = len(stdout)
+                    discovered = []
             except asyncio.TimeoutError:
-                process.kill()
-                await process.wait()
+                await kill_process()
                 logger.warning(f"MCP command timed out after {timeout}s: {command[:3]}...")
                 return {
                     "success": False,
@@ -1706,20 +1772,26 @@ class MCPServer:
             elapsed = time.monotonic() - start
             out_str = stdout.decode("utf-8", errors="ignore")
             err_str = stderr.decode("utf-8", errors="ignore")
-            if len(out_str) > max_output_chars:
-                out_str = out_str[:max_output_chars] + f"\n\n... (truncated, {len(stdout)} bytes total)"
+            if stdout_bytes > len(stdout) or len(out_str) > max_output_chars:
+                out_str = out_str[:max_output_chars] + f"\n\n... (truncated, {stdout_bytes} bytes total)"
             if len(err_str) > max_output_chars:
                 err_str = err_str[:max_output_chars] + "\n\n... (stderr truncated)"
             rc = process.returncode
             ok = rc in ok_codes
             if rc not in ok_codes and err_str:
                 logger.debug(f"MCP command finished in {elapsed:.1f}s exit={rc}: {command[0]}")
-            return {
+            result = {
                 "success": ok,
                 "output": out_str,
                 "error": None if ok else (err_str or f"exit {rc}"),
                 "exit_code": rc,
             }
+            if capture_discovery_urls:
+                result["observations"] = [
+                    {"type": "HTTP_ENDPOINT", "target": url, "source": command[0]}
+                    for url in discovered
+                ]
+            return result
         except FileNotFoundError as e:
             return {
                 "success": False,
@@ -1727,13 +1799,11 @@ class MCPServer:
                 "error": f"Command not found: {e}",
                 "exit_code": -1,
             }
+        except asyncio.CancelledError:
+            await asyncio.shield(kill_process())
+            raise
         except Exception as e:
-            if process and process.returncode is None:
-                try:
-                    process.kill()
-                    await process.wait()
-                except Exception:
-                    pass
+            await kill_process()
             return {
                 "success": False,
                 "output": "",
@@ -1812,7 +1882,7 @@ class MCPServer:
     
     async def _execute_katana(self, args: str) -> Dict[str, Any]:
         cmd = ["katana"] + self._parse_args(args)
-        return await self._run_command(cmd, timeout=600)
+        return await self._run_command(cmd, timeout=600, capture_discovery_urls=True)
     
     # Blocked URL patterns for SSRF prevention
     _BLOCKED_CURL_PATTERNS = [
@@ -2344,7 +2414,7 @@ class MCPServer:
 
     async def _execute_feroxbuster(self, args: str) -> Dict[str, Any]:
         cmd = ["feroxbuster"] + self._parse_args(args)
-        return await self._run_command(cmd, timeout=600)
+        return await self._run_command(cmd, timeout=600, capture_discovery_urls=True)
 
     async def _feroxbuster_help(self) -> Dict[str, Any]:
         return await self._run_command(["feroxbuster", "--help"], timeout=MCP_HELP_TIMEOUT)

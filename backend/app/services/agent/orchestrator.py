@@ -11,6 +11,7 @@ import logging
 import re
 import time
 import asyncio
+import uuid
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Callable, Awaitable
 
@@ -198,6 +199,29 @@ def redact_tool_args(tool_args):
     return out
 
 
+async def _ledger_llm_call(llm, messages, *, kind: str, target: str = "",
+                           phase: str = "", timeout: float | None = None):
+    """Show model planning, analysis, and reporting even before a tool runs."""
+    from app.services.agent.action_ledger import active_run_id, append_action
+
+    run_id = active_run_id.get()
+    action_id = uuid.uuid4().hex
+    append_action(run_id, action_id, "started", kind, target=target, phase=phase)
+    try:
+        call = llm.ainvoke(messages)
+        response = await asyncio.wait_for(call, timeout=timeout) if timeout else await call
+    except asyncio.CancelledError:
+        append_action(run_id, action_id, "interrupted", kind, target=target,
+                      phase=phase, detail="Model call cancelled")
+        raise
+    except Exception as exc:
+        append_action(run_id, action_id, "failed", kind, target=target,
+                      phase=phase, detail=type(exc).__name__)
+        raise
+    append_action(run_id, action_id, "completed", kind, target=target, phase=phase)
+    return response
+
+
 class AgentOrchestrator:
     """
     ReAct-style agent orchestrator for security analysis.
@@ -221,13 +245,18 @@ class AgentOrchestrator:
         self.tool_manager: Optional[ASMToolsManager] = None
         self.graph = None
         self._initialized = False
+        self._initialize_lock = asyncio.Lock()
         self._provider = None
     
     async def initialize(self) -> None:
         """Initialize all components asynchronously."""
-        if self._initialized:
-            logger.warning("Orchestrator already initialized")
-            return
+        async with self._initialize_lock:
+            if self._initialized:
+                return
+            await self._initialize_unlocked()
+
+    async def _initialize_unlocked(self) -> None:
+        """Build the shared runtime once while the initialization lock is held."""
         
         logger.info("Initializing AgentOrchestrator...")
         
@@ -489,6 +518,10 @@ class AgentOrchestrator:
         state (which isn't populated on resume paths).
         """
         budget = getattr(settings, "AGENT_TURN_BUDGET_SECONDS", 0) or 0
+        hard_cap = getattr(settings, "AGENT_REQUEST_TIMEOUT_SECONDS", 3600) or 3600
+        reserve = getattr(settings, "AGENT_FINAL_REPORT_RESERVE_SECONDS", 90) or 90
+        if budget > 0:
+            budget = min(budget, max(1, hard_cap - reserve))
         if budget > 0:
             _turn_deadline_var.set(time.monotonic() + float(budget))
         else:
@@ -622,7 +655,12 @@ class AgentOrchestrator:
                 from app.services.agent.assessment_kickoff import run_assessment_kickoff
                 from app.services.interceptor_service import queue_early_pentester_crawl
                 from app.services.agent import recon_workers
+                from app.services.agent.action_ledger import active_run_id, append_action
 
+                kickoff_action_id = uuid.uuid4().hex
+                append_action(active_run_id.get(), kickoff_action_id, "started",
+                              "assessment_kickoff", target=seed)
+                queue_action_id = uuid.uuid4().hex
                 kickoff_coro = run_assessment_kickoff(seed)
                 acr_seed = False
                 cve_only = False
@@ -646,6 +684,8 @@ class AgentOrchestrator:
                     kickoff = await asyncio.wait_for(kickoff_coro, timeout=28.0)
                     queued, streams = {}, []
                 else:
+                    append_action(active_run_id.get(), queue_action_id, "started",
+                                  "queue_early_interceptor", target=seed)
                     queue_coro = queue_early_pentester_crawl(
                         seed,
                         session_id=session_id,
@@ -668,9 +708,25 @@ class AgentOrchestrator:
                 if isinstance(kickoff, Exception):
                     logger.warning("assessment kickoff failed: %s", kickoff)
                     kickoff = {}
+                append_action(
+                    active_run_id.get(), kickoff_action_id,
+                    "completed" if isinstance(kickoff, dict) and kickoff.get("success") else "failed",
+                    "assessment_kickoff", target=seed,
+                    detail="root_status=" + str((kickoff or {}).get("root_status") or "unknown")
+                    if isinstance(kickoff, dict) else "no kickoff result",
+                )
                 if isinstance(queued, Exception):
                     logger.warning("early interceptor queue failed: %s", queued)
                     queued = {}
+                if not acr_seed and not cve_only:
+                    append_action(
+                        active_run_id.get(), queue_action_id,
+                        "completed" if isinstance(queued, dict) and queued.get("job_id") else "failed",
+                        "queue_early_interceptor", target=seed,
+                        detail="queued" if isinstance(queued, dict) and queued.get("job_id")
+                        else str((queued or {}).get("note") or "queue unavailable")
+                        if isinstance(queued, dict) else "queue unavailable",
+                    )
                 if isinstance(streams, Exception):
                     logger.warning("early recon streams failed: %s", streams)
                     streams = []
@@ -1065,6 +1121,31 @@ class AgentOrchestrator:
                 ))],
             }
 
+        # A blocked task graph can make the model dispatch the same empty wave
+        # forever. Close a repeatedly idle campaign with an explicit partial
+        # report, once independent recon streams have also stopped.
+        recent_dispatches = (state.get("execution_trace") or [])[-2:]
+        if len(recent_dispatches) == 2 and all(
+            step.get("tool_name") == "fireteam_dispatch"
+            and "no_ready_hypothesis" in str(step.get("tool_output") or "")
+            for step in recent_dispatches
+        ):
+            from app.services.agent import recon_workers
+
+            workers = await recon_workers.list_workers(session_id)
+            if not any(worker.get("status") in ("queued", "running") for worker in workers):
+                return {
+                    "task_complete": True,
+                    "completion_reason": (
+                        "No schedulable hypotheses after repeated dispatch; "
+                        "blocked and untested work remains"
+                    ),
+                    "messages": [AIMessage(content=(
+                        "The task graph has no leaseable hypotheses. "
+                        "Closing this run with a partial coverage report."
+                    ))],
+                }
+
         limit_usd = price_limit_usd(get_price_limit(session_id) or state.get("price_limit_usd"))
         if over_budget(state.get("token_usage"), limit_usd):
             spent = float((state.get("token_usage") or {}).get("cost_usd") or 0)
@@ -1130,6 +1211,8 @@ class AgentOrchestrator:
         # (non-blocking collect; soft 1.5s join so fast httpx/waf results land early).
         drained_briefs: List[str] = list(state.get("recon_worker_briefs") or [])
         drain_trace_extra: list = []
+        recon_map_update = None
+        recon_brain_update = None
         try:
             from app.services.agent import recon_workers
 
@@ -1138,10 +1221,13 @@ class AgentOrchestrator:
                 str(session_id or ""),
                 wait_sec=soft_wait,
             )
+            discovered_urls: list[str] = []
             for item in newly:
                 brief = (item.get("brief") or "").strip()
                 if not brief:
                     continue
+                if item.get("status") == "completed":
+                    discovered_urls.extend(item.get("urls") or [])
                 drained_briefs.append(brief)
                 drain_trace_extra.append(
                     ExecutionStep(
@@ -1162,6 +1248,60 @@ class AgentOrchestrator:
                     "phase": phase,
                     "thought": f"Recon stream [{item.get('kind')}] results ready",
                 })
+            if discovered_urls:
+                from app.services.agent.capability_map import ingest_passive_urls
+                from app.services.agent.engagement_brain import (
+                    engagement_brain_from_dict,
+                    seed_hypotheses_from_capability_map,
+                )
+
+                discovered_urls = list(dict.fromkeys(discovered_urls))[:400]
+                existing_map = state.get("capability_map")
+                target = (
+                    (existing_map or {}).get("target")
+                    if isinstance(existing_map, dict) else ""
+                ) or (state.get("target_info") or {}).get("primary_target") or ""
+                new_map = ingest_passive_urls(
+                    existing_map,
+                    discovered_urls,
+                    target=target,
+                    source="parallel_recon",
+                )
+                brain = engagement_brain_from_dict(state.get("engagement_brain"))
+                new_brain = seed_hypotheses_from_capability_map(
+                    brain, new_map
+                ).to_dict()
+                recon_map_update = new_map
+                recon_brain_update = new_brain
+                drain_trace_extra.append(
+                    ExecutionStep(
+                        iteration=iteration,
+                        phase=phase,
+                        thought="Parallel recon observations entered the task graph",
+                        reasoning="Deterministic URL ingestion from completed crawl workers",
+                        tool_name="recon_observation_ingest",
+                        tool_args={"source": "parallel_recon"},
+                        tool_output=f"{len(discovered_urls)} in-origin URLs ingested",
+                        success=True,
+                    ).model_dump()
+                )
+                await self._emit_status({
+                    "type": "capability_map_update",
+                    "quality_score": recon_map_update.get("quality_score"),
+                    "ready_for_attack": recon_map_update.get("ready_for_attack"),
+                    "capabilities": recon_map_update.get("capabilities", []),
+                    "ranked_hunt_queue": (recon_map_update.get("ranked_hunt_queue") or [])[:8],
+                    "authenticated": recon_map_update.get("authenticated"),
+                    "api_sample_count": len(recon_map_update.get("api_samples") or []),
+                })
+                if org_id and session_id:
+                    from app.services.agent.run_snapshot import save_run_snapshot
+
+                    save_run_snapshot(org_id, session_id, {
+                        **state,
+                        "capability_map": recon_map_update,
+                        "engagement_brain": recon_brain_update,
+                    })
         except Exception as drain_err:
             logger.debug("recon worker drain skipped: %s", drain_err)
         
@@ -1217,7 +1357,12 @@ class AgentOrchestrator:
         if not operator_steers:
             try:
                 from app.services.agent.tester_loop import forced_next_step
-                forced = forced_next_step({**state, "execution_trace": merged_trace})
+                forced = forced_next_step({
+                    **state,
+                    "execution_trace": merged_trace,
+                    "capability_map": recon_map_update or state.get("capability_map"),
+                    "engagement_brain": recon_brain_update or state.get("engagement_brain"),
+                })
             except Exception:
                 logger.exception("forced assessment step failed")
             if not forced:
@@ -1381,7 +1526,7 @@ class AgentOrchestrator:
             from app.services.agent.capability_map import format_capability_map_for_prompt
             from app.services.agent.engagement_brain import format_engagement_brain_for_prompt
             capability_map_formatted = format_capability_map_for_prompt(
-                state.get("capability_map")
+                recon_map_update or state.get("capability_map")
             )
             engagement_brain_formatted = format_engagement_brain_for_prompt(
                 state.get("engagement_brain")
@@ -1420,7 +1565,11 @@ class AgentOrchestrator:
             ]
 
             llm = self._resolve_llm(state, LLMTask.REASONING)
-            response = await llm.ainvoke(messages)
+            response = await _ledger_llm_call(
+                llm, messages, kind="agent_plan",
+                target=(state.get("target_info") or {}).get("primary_target") or "",
+                phase=phase,
+            )
             from app.services.agent.observability import model_id, record_llm_usage
             step_usage = record_llm_usage(
                 state, response, task=LLMTask.REASONING, model=model_id(llm),
@@ -1520,6 +1669,9 @@ class AgentOrchestrator:
         }
         if drain_trace_extra or compacted_brief:
             updates["execution_trace"] = merged_trace
+        if recon_map_update is not None:
+            updates["capability_map"] = recon_map_update
+            updates["engagement_brain"] = recon_brain_update
 
         
         # Handle actions
@@ -1725,6 +1877,14 @@ class AgentOrchestrator:
         phase = state.get("current_phase", "informational")
         iteration = state.get("current_iteration", 0)
 
+        def record_skip(reason: str) -> None:
+            if not tool_name:
+                return
+            from app.services.agent.action_ledger import active_run_id, append_action
+            target = (state.get("target_info") or {}).get("primary_target") or ""
+            append_action(active_run_id.get(), uuid.uuid4().hex, "skipped", tool_name,
+                          target=target, phase=phase, detail=reason)
+
         from app.services.agent.run_control import is_stop_requested
         if is_stop_requested(session_id):
             step_data["tool_output"] = "Stopped by operator."
@@ -1749,6 +1909,7 @@ class AgentOrchestrator:
                 step_data["tool_output"] = blocked
                 step_data["success"] = False
                 step_data["error_message"] = "cve_applicability_only"
+                record_skip("cve_applicability_only")
                 await self._emit_status({
                     "type": "tool_complete",
                     "tool_name": tool_name,
@@ -1899,6 +2060,7 @@ class AgentOrchestrator:
                         f"Error: Tool '{tool_name}' not allowed in '{phase}' phase"
                     )
                 step_data["success"] = False
+                record_skip("phase_restriction")
                 await self._emit_status({
                     "type": "tool_complete",
                     "tool_name": tool_name,
@@ -2020,6 +2182,7 @@ class AgentOrchestrator:
             )
             step_data["success"] = False
             step_data["error_message"] = "capability_map_required"
+            record_skip("capability_map_required")
             await self._emit_status({
                 "type": "tool_complete",
                 "tool_name": tool_name,
@@ -2043,6 +2206,7 @@ class AgentOrchestrator:
                     )
                     step_data["success"] = False
                     step_data["error_message"] = "methodology_required"
+                    record_skip("methodology_required")
                     await self._emit_status({
                         "type": "tool_complete",
                         "tool_name": tool_name,
@@ -2063,6 +2227,7 @@ class AgentOrchestrator:
                     )
                     step_data["success"] = False
                     step_data["error_message"] = "methodology_incomplete"
+                    record_skip("methodology_incomplete")
                     await self._emit_status({
                         "type": "tool_complete",
                         "tool_name": tool_name,
@@ -2108,6 +2273,7 @@ class AgentOrchestrator:
                     "(loadmore / tax_query time-based SQLi).\n\n"
                     + prior_out[:8000]
                 )
+                record_skip("duplicate_wpscan_reused_prior_result")
                 await self._emit_status({
                     "type": "tool_complete",
                     "tool_name": tool_name,
@@ -2300,7 +2466,11 @@ class AgentOrchestrator:
         )
         
         llm = self._resolve_llm(state, LLMTask.OFFENSIVE)
-        response = await llm.ainvoke([HumanMessage(content=analysis_prompt)])
+        response = await _ledger_llm_call(
+            llm, [HumanMessage(content=analysis_prompt)], kind="agent_analyze",
+            target=(state.get("target_info") or {}).get("primary_target") or "",
+            phase=state.get("current_phase", "informational"),
+        )
         from app.services.agent.observability import model_id, record_llm_usage
         record_llm_usage(state, response, task=LLMTask.OFFENSIVE, model=model_id(llm))
         analysis = self._parse_analysis_response(llm_text(response.content))
@@ -2710,6 +2880,8 @@ class AgentOrchestrator:
                 "Reached the time budget for this turn — summarizing the findings "
                 "gathered so far. Ask a follow-up to continue where this left off."
             )
+        if not completion_reason and state.get("current_iteration", 0) >= state.get("max_iterations", 15):
+            completion_reason = "Iteration budget reached; reporting partial coverage"
         completion_reason = completion_reason or "Session ended"
 
         report_prompt = FINAL_REPORT_PROMPT.format(
@@ -2722,13 +2894,24 @@ class AgentOrchestrator:
             todo_list=format_todo_list(state.get("todo_list") or []),
         )
         
-        llm = self._resolve_llm(state, LLMTask.REPORT)
-        response = await llm.ainvoke([HumanMessage(content=report_prompt)])
-        from app.services.agent.observability import model_id, record_llm_usage
-        record_llm_usage(state, response, task=LLMTask.REPORT, model=model_id(llm))
+        try:
+            llm = self._resolve_llm(state, LLMTask.REPORT)
+            response = await _ledger_llm_call(
+                llm, [HumanMessage(content=report_prompt)], kind="agent_report",
+                target=(state.get("target_info") or {}).get("primary_target") or "",
+                phase=state.get("current_phase", "informational"),
+                timeout=float(getattr(settings, "AGENT_FINAL_REPORT_TIMEOUT_SECONDS", 60)),
+            )
+            from app.services.agent.observability import model_id, record_llm_usage
+            record_llm_usage(state, response, task=LLMTask.REPORT, model=model_id(llm))
+            answer = llm_text(response.content)
+        except Exception as exc:
+            logger.warning("Final report model unavailable: %s", type(exc).__name__)
+            from app.services.agent.action_ledger import active_run_id, partial_report
+            answer = partial_report(active_run_id.get(), completion_reason)
         
         return {
-            "messages": [AIMessage(content=llm_text(response.content))],
+            "messages": [AIMessage(content=answer)],
             "task_complete": True,
             "completion_reason": completion_reason,
             "token_usage": state.get("token_usage"),
@@ -2998,17 +3181,6 @@ class AgentOrchestrator:
                 (CAI /load analog).
             price_limit_usd: Per-run spend cap override (0 = unlimited).
         """
-        if not self._initialized:
-            await self.initialize()
-        
-        if not self._initialized:
-            return InvokeResponse(error="Agent not initialized - check OPENAI_API_KEY")
-        
-        _max_iterations_var.set(max_iterations)
-        self._start_turn_deadline()
-        set_autonomous_mode(mode == "agent")
-        logger.info(f"[{user_id}/{session_id}] Invoking with: {question[:100]}... (mode={mode}, max_iter={max_iterations or 'default'})")
-
         from app.services.agent.run_control import (
             clear_stop,
             queue_load_brief,
@@ -3020,37 +3192,55 @@ class AgentOrchestrator:
         if this_task is not None and this_task.cancelling():
             return self._stopped_response()
         clear_stop(session_id)
-        register_run(session_id, this_task)
-        if price_limit_usd is not None:
-            set_price_limit(session_id, float(price_limit_usd))
-        if load_session_id:
-            try:
-                from app.db.database import SessionLocal
-                from app.services.agent.session_ops import load_prior_conversation_brief
+        from app.services.agent.action_ledger import active_run_id, finish_run, start_run
 
-                db = SessionLocal()
-                try:
-                    brief = load_prior_conversation_brief(db, organization_id, load_session_id)
-                    if brief:
-                        queue_load_brief(session_id, brief)
-                finally:
-                    db.close()
-            except Exception:
-                logger.debug("prior hunt load skipped", exc_info=True)
-
-        if status_callback:
-            self.set_status_callback(status_callback)
-        
-        # EvoGraph: record chain start
-        evograph.record_chain_start(
-            session_id=session_id,
-            organization_id=organization_id,
-            user_id=user_id,
-            objective=question,
-            mode=mode,
+        from app.services.agent.tools import extract_seed_target
+        run_id = start_run(
+            session_id=session_id, organization_id=organization_id,
+            user_id=int(user_id), objective=extract_seed_target(question) or "", mode=mode,
+            budget_seconds=max(int(getattr(settings, "AGENT_REQUEST_TIMEOUT_SECONDS", 3600)), 3600),
         )
-
+        run_token = active_run_id.set(run_id)
+        register_run(session_id, this_task)
         try:
+            if not self._initialized:
+                await self.initialize()
+            if not self._initialized:
+                finish_run(run_id, "error", "Agent not initialized")
+                return InvokeResponse(error="Agent not initialized - check OPENAI_API_KEY")
+
+            _max_iterations_var.set(max_iterations)
+            self._start_turn_deadline()
+            set_autonomous_mode(mode == "agent")
+            logger.info(f"[{user_id}/{session_id}] Invoking with: {question[:100]}... (mode={mode}, max_iter={max_iterations or 'default'})")
+            if price_limit_usd is not None:
+                set_price_limit(session_id, float(price_limit_usd))
+            if load_session_id:
+                try:
+                    from app.db.database import SessionLocal
+                    from app.services.agent.session_ops import load_prior_conversation_brief
+
+                    db = SessionLocal()
+                    try:
+                        brief = load_prior_conversation_brief(db, organization_id, load_session_id)
+                        if brief:
+                            queue_load_brief(session_id, brief)
+                    finally:
+                        db.close()
+                except Exception:
+                    logger.debug("prior hunt load skipped", exc_info=True)
+
+            if status_callback:
+                self.set_status_callback(status_callback)
+
+            evograph.record_chain_start(
+                session_id=session_id,
+                organization_id=organization_id,
+                user_id=user_id,
+                objective=question,
+                mode=mode,
+            )
+
             config = {"configurable": {"thread_id": session_id}}
             input_data = {
                 "messages": [HumanMessage(content=question)],
@@ -3073,21 +3263,41 @@ class AgentOrchestrator:
                 final_phase=response.current_phase,
                 iteration_count=response.iteration_count,
             )
+            completion_reason = str(final_state.get("completion_reason") or "")
+            partial = any(phrase in completion_reason.lower() for phrase in (
+                "time budget", "spend cap", "iteration budget", "no schedulable hypotheses",
+            ))
+            finish_run(run_id, "partial" if partial else ("completed" if response.task_complete else "paused"),
+                       completion_reason)
             self._persist_palace_brain(organization_id, session_id, final_state)
 
             return response
         
         except asyncio.CancelledError:
-            logger.info(f"[{user_id}/{session_id}] Stopped by operator")
+            from app.services.agent.run_control import is_stop_requested
+            stopped = is_stop_requested(session_id)
+            logger.info("[%s/%s] %s", user_id, session_id,
+                        "Stopped by operator" if stopped else "External deadline cancelled run")
+            finish_run(run_id, "cancelled" if stopped else "timeout",
+                       "Stopped by operator" if stopped else "External deadline cancelled run")
             evograph.record_chain_end(
-                session_id=session_id, status="cancelled", outcome="Stopped by operator",
+                session_id=session_id, status="cancelled" if stopped else "timeout",
+                outcome="Stopped by operator" if stopped else "External deadline cancelled run",
             )
-            return self._stopped_response()
+            if stopped:
+                return self._stopped_response()
+            from app.services.agent.action_ledger import partial_report
+            return InvokeResponse(
+                answer=partial_report(run_id, "external time limit"),
+                task_complete=True,
+            )
         except Exception as e:
             logger.exception(f"[{user_id}/{session_id}] Error: {e}")
+            finish_run(run_id, "error", type(e).__name__)
             evograph.record_chain_end(session_id=session_id, status="error", outcome=str(e)[:300])
             return InvokeResponse(error=str(e))
         finally:
+            active_run_id.reset(run_token)
             unregister_run(session_id, this_task)
             if status_callback:
                 self.clear_status_callback()
@@ -3121,8 +3331,15 @@ class AgentOrchestrator:
 
         self._start_turn_deadline()
         from app.services.agent.run_control import clear_stop, register_run, unregister_run
+        from app.services.agent.action_ledger import active_run_id, finish_run, partial_report, start_run
         clear_stop(session_id)
         this_task = asyncio.current_task()
+        run_id = start_run(
+            session_id=session_id, organization_id=organization_id,
+            user_id=int(user_id), objective="", mode="resume",
+            budget_seconds=max(int(getattr(settings, "AGENT_REQUEST_TIMEOUT_SECONDS", 3600)), 3600),
+        )
+        run_token = active_run_id.set(run_id)
         register_run(session_id, this_task)
         if status_callback:
             self.set_status_callback(status_callback)
@@ -3140,15 +3357,27 @@ class AgentOrchestrator:
             
             final_state = await self.graph.ainvoke(update_data, config)
             self._persist_palace_brain(organization_id, session_id, final_state)
-            return self._build_response(final_state)
+            result = self._build_response(final_state)
+            reason = str(final_state.get("completion_reason") or "")
+            partial = any(phrase in reason.lower() for phrase in (
+                "time budget", "spend cap", "iteration budget", "no schedulable hypotheses",
+            ))
+            finish_run(run_id, "partial" if partial else ("completed" if result.task_complete else "paused"), reason)
+            return result
         
         except asyncio.CancelledError:
-            logger.info(f"[{user_id}/{session_id}] Stopped by operator during resume")
-            return self._stopped_response()
+            from app.services.agent.run_control import is_stop_requested
+            stopped = is_stop_requested(session_id)
+            finish_run(run_id, "cancelled" if stopped else "timeout",
+                       "Stopped by operator" if stopped else "External deadline cancelled run")
+            return self._stopped_response() if stopped else InvokeResponse(
+                answer=partial_report(run_id, "external time limit"), task_complete=True)
         except Exception as e:
             logger.error(f"[{user_id}/{session_id}] Resume error: {e}")
+            finish_run(run_id, "error", type(e).__name__)
             return InvokeResponse(error=str(e))
         finally:
+            active_run_id.reset(run_token)
             unregister_run(session_id, this_task)
             if status_callback:
                 self.clear_status_callback()
@@ -3167,8 +3396,15 @@ class AgentOrchestrator:
 
         self._start_turn_deadline()
         from app.services.agent.run_control import clear_stop, register_run, unregister_run
+        from app.services.agent.action_ledger import active_run_id, finish_run, partial_report, start_run
         clear_stop(session_id)
         this_task = asyncio.current_task()
+        run_id = start_run(
+            session_id=session_id, organization_id=organization_id,
+            user_id=int(user_id), objective="", mode="resume",
+            budget_seconds=max(int(getattr(settings, "AGENT_REQUEST_TIMEOUT_SECONDS", 3600)), 3600),
+        )
+        run_token = active_run_id.set(run_id)
         register_run(session_id, this_task)
         if status_callback:
             self.set_status_callback(status_callback)
@@ -3185,15 +3421,27 @@ class AgentOrchestrator:
             
             final_state = await self.graph.ainvoke(update_data, config)
             self._persist_palace_brain(organization_id, session_id, final_state)
-            return self._build_response(final_state)
+            result = self._build_response(final_state)
+            reason = str(final_state.get("completion_reason") or "")
+            partial = any(phrase in reason.lower() for phrase in (
+                "time budget", "spend cap", "iteration budget", "no schedulable hypotheses",
+            ))
+            finish_run(run_id, "partial" if partial else ("completed" if result.task_complete else "paused"), reason)
+            return result
         
         except asyncio.CancelledError:
-            logger.info(f"[{user_id}/{session_id}] Stopped by operator during resume")
-            return self._stopped_response()
+            from app.services.agent.run_control import is_stop_requested
+            stopped = is_stop_requested(session_id)
+            finish_run(run_id, "cancelled" if stopped else "timeout",
+                       "Stopped by operator" if stopped else "External deadline cancelled run")
+            return self._stopped_response() if stopped else InvokeResponse(
+                answer=partial_report(run_id, "external time limit"), task_complete=True)
         except Exception as e:
             logger.error(f"[{user_id}/{session_id}] Resume error: {e}")
+            finish_run(run_id, "error", type(e).__name__)
             return InvokeResponse(error=str(e))
         finally:
+            active_run_id.reset(run_token)
             unregister_run(session_id, this_task)
             if status_callback:
                 self.clear_status_callback()
@@ -3275,10 +3523,11 @@ class AgentOrchestrator:
 _orchestrator: Optional[AgentOrchestrator] = None
 
 
-async def get_agent_orchestrator() -> AgentOrchestrator:
+async def get_agent_orchestrator(*, initialize: bool = True) -> AgentOrchestrator:
     """Get or create the global agent orchestrator."""
     global _orchestrator
     if _orchestrator is None:
         _orchestrator = AgentOrchestrator()
+    if initialize and not _orchestrator._initialized:
         await _orchestrator.initialize()
     return _orchestrator

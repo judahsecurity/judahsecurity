@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import re as _re
+import signal
 from collections import deque
 from typing import List, Optional, Dict, Any
 from contextvars import ContextVar
@@ -286,6 +287,35 @@ def normalize_execute_tool_args(
 
     # Keep empty args key so MCP returns a clear missing/empty error (not KeyError)
     return {"args": ""} if tool_name.startswith("execute_") else raw
+
+
+async def _run_vulnx_binary(command: list[str], *, env: dict[str, str]) -> str | None:
+    """Use a cancellable process group for the optional local intelligence CLI."""
+    process = await asyncio.create_subprocess_exec(
+        *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        env=env, start_new_session=(os.name == "posix"),
+    )
+
+    async def terminate() -> None:
+        try:
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            elif process.returncode is None:
+                process.kill()
+        except ProcessLookupError:
+            pass
+        if process.returncode is None:
+            await asyncio.wait_for(process.wait(), timeout=5)
+
+    try:
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=30)
+        return stdout.decode("utf-8", errors="replace") if process.returncode == 0 else None
+    except asyncio.TimeoutError:
+        await terminate()
+        return None
+    except asyncio.CancelledError:
+        await asyncio.shield(terminate())
+        raise
 
 
 def _format_vulnx_search_output(raw_json: str, query: str) -> str:
@@ -629,17 +659,43 @@ class ASMToolsManager(AssessmentCapabilities):
 
     async def execute(self, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool with the given arguments."""
-        result = await self._execute_impl(tool_name, tool_args)
-        from app.services.agent.evidence_store import evidence_store
-        if tool_name != "read_evidence":
-            artifact_id = evidence_store(self).record("tool_output", result, success=result.get("success", False))
-            result.setdefault("artifact_id", artifact_id)
-        self.record_invocation(tool_name, tool_args, result)
+        from app.services.agent.action_ledger import active_run_id, append_action
+
+        run_id = active_run_id.get()
+        action_id = os.urandom(16).hex()
+        args_dict = tool_args if isinstance(tool_args, dict) else {}
+        target = args_dict.get("target") or args_dict.get("url") or current_seed_target.get() or ""
+        append_action(run_id, action_id, "started", tool_name, target=target)
         try:
-            from app.services.agent.palace_memory import remember_tool_result
-            remember_tool_result(tool_name, tool_args, result)
+            result = await self._execute_impl(tool_name, tool_args)
+            from app.services.agent.evidence_store import evidence_store
+            if tool_name != "read_evidence":
+                artifact_id = evidence_store(self).record("tool_output", result, success=result.get("success", False))
+                result.setdefault("artifact_id", artifact_id)
+            self.record_invocation(tool_name, tool_args, result)
+            try:
+                from app.services.agent.palace_memory import remember_tool_result
+                remember_tool_result(tool_name, tool_args, result)
+            except Exception as exc:
+                logger.debug("palace remember skipped: %s", exc)
+        except asyncio.CancelledError:
+            append_action(run_id, action_id, "interrupted", tool_name,
+                          target=target, detail="Tool cancelled before completion")
+            raise
         except Exception as exc:
-            logger.debug("palace remember skipped: %s", exc)
+            append_action(run_id, action_id, "failed", tool_name,
+                          target=target, detail=type(exc).__name__)
+            raise
+        published = (tool_name == "create_finding" and
+                     str(result.get("output") or "").startswith("Finding created:"))
+        completed = bool(result.get("success")) and (tool_name != "create_finding" or published)
+        referenced = result.get("evidence_ids")
+        evidence_ids = referenced if isinstance(referenced, list) else []
+        append_action(run_id, action_id, "completed" if completed else "failed",
+                      tool_name, target=target,
+                      detail="finding_published" if published else str(result.get("error") or "")[:300],
+                      evidence_ids=[*evidence_ids,
+                                    *([result["artifact_id"]] if result.get("artifact_id") else [])])
         return result
 
     async def _execute_impl(self, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
@@ -830,6 +886,30 @@ class ASMToolsManager(AssessmentCapabilities):
                         await self.map_application_traffic(capability_map["api_samples"], identity=browser_identity or "legacy", source="crawl")
                     if auth_session:
                         payload["auth_session"] = auth_session
+                    if tool_name in ("execute_katana", "execute_feroxbuster"):
+                        # Parse discovery from the complete tool output before
+                        # shortening the text sent back to the model.
+                        from app.services.agent.recon_workers import extract_recon_urls
+
+                        url_match = _re.search(
+                            r"(?:^|\s)-u(?:\s+|=)(\S+)",
+                            str(tool_args.get("args") or ""),
+                        )
+                        crawl_target = url_match.group(1) if url_match else ""
+                        kind = "katana_urls" if tool_name == "execute_katana" else "ferox_dirs"
+                        streamed = result.get("observations")
+                        if isinstance(streamed, list):
+                            candidate_text = "\n".join(
+                                str(item.get("target") or "") for item in streamed
+                                if isinstance(item, dict) and item.get("type") == "HTTP_ENDPOINT"
+                            )
+                        else:
+                            candidate_text = output
+                        payload["observations"] = [
+                            {"type": "HTTP_ENDPOINT", "target": discovered,
+                             "source": tool_name}
+                            for discovered in extract_recon_urls(kind, candidate_text, crawl_target)
+                        ]
                     if len(output) > max_chars and not augur_block:
                         from app.services.agent.evidence_store import evidence_store
                         payload["artifact_id"] = evidence_store(self).record("tool_output", {"output": output})
@@ -1863,9 +1943,7 @@ class ASMToolsManager(AssessmentCapabilities):
             sort_by: field to sort descending by (cvss_score, epss_score, cve_created_at)
         """
         import re as _re
-        import subprocess
         import shutil
-        import asyncio
 
         if not query.strip():
             return "query is required"
@@ -1888,15 +1966,12 @@ class ASMToolsManager(AssessmentCapabilities):
                     "--limit", str(limit),
                     "--sort-desc", sort_by,
                 ]
-                env = {**dict(__import__("os").environ)}
+                env = dict(os.environ)
                 if api_key:
                     env["PDCP_API_KEY"] = api_key
-                result = await asyncio.to_thread(
-                    subprocess.run,
-                    cmd, capture_output=True, text=True, timeout=30, env=env
-                )
-                if result.returncode == 0 and result.stdout.strip():
-                    return _format_vulnx_search_output(result.stdout, query)
+                output = await _run_vulnx_binary(cmd, env=env)
+                if output and output.strip():
+                    return _format_vulnx_search_output(output, query)
             except Exception:
                 pass  # fall through to HTTP API
 
@@ -3405,7 +3480,7 @@ class ASMToolsManager(AssessmentCapabilities):
         datetime, collections, urllib.parse. Hosts must be in engagement scope.
         Print results to stdout. Not a shell — no os/subprocess/sockets.
         """
-        from app.services.agent.custom_probe import run_custom_probe
+        from app.services.agent.custom_probe import run_custom_probe_async
 
         hosts: List[str] = []
         if allowed_hosts:
@@ -3419,7 +3494,7 @@ class ASMToolsManager(AssessmentCapabilities):
         if isinstance(cmap, dict) and cmap.get("target"):
             hosts.append(str(cmap.get("target")))
 
-        result = run_custom_probe(source, allowed_hosts=hosts, timeout_sec=timeout_sec)
+        result = await run_custom_probe_async(source, allowed_hosts=hosts, timeout_sec=timeout_sec)
         result["oob_allowed"] = True
         result["hint"] = (
             "In-scope hosts plus Interactsh/OAST. Never fetch 169.254.169.254 or "
@@ -7692,9 +7767,11 @@ class ASMToolsManager(AssessmentCapabilities):
         def _checkpoint_task_graph() -> None:
             """Persist leases before execution so interrupted actions stay visible."""
             try:
+                from app.services.agent.action_ledger import active_run_id, record_hypotheses
                 from app.services.agent.run_snapshot import save_run_snapshot
 
                 _user_id, organization_id = get_tenant_context()
+                record_hypotheses(active_run_id.get(), graph.snapshot())
                 save_run_snapshot(
                     organization_id,
                     current_session_id.get() or None,
@@ -7880,6 +7957,19 @@ class ASMToolsManager(AssessmentCapabilities):
         self._engagement_brain = brain.to_dict()
         _checkpoint_task_graph()
 
+        async def _fireteam_progress(label: str, status: str) -> None:
+            from app.services.agent.orchestrator import _status_callback_var
+
+            callback = _status_callback_var.get(None)
+            if callback:
+                message = callback({
+                    "type": "thinking",
+                    "phase": "execution",
+                    "thought": f"Fireteam {label}: {status}",
+                })
+                if asyncio.iscoroutine(message):
+                    await message
+
         result = await run_fireteam(
             mission=mission,
             targets=target_list,
@@ -7889,6 +7979,7 @@ class ASMToolsManager(AssessmentCapabilities):
             max_parallel=max_parallel,
             directives=directives,
             llm_for_specialist=_llm_for_profile,
+            progress_callback=_fireteam_progress,
         )
 
         from app.services.agent.auto_prompter import (
@@ -7904,6 +7995,8 @@ class ASMToolsManager(AssessmentCapabilities):
         rewrites: list = []
         for summary, report in zip(executor_summaries, result.reports):
             spawned.extend(apply_executor_summary(graph, brain, summary))
+            if summary.rewrite_hint == "execution_timeout":
+                continue
             rewrite = should_rewrite(graph, summary, report)
             if rewrite:
                 rewrites.append(rewrite)
@@ -7952,6 +8045,7 @@ class ASMToolsManager(AssessmentCapabilities):
                     max_parallel=max_parallel,
                     directives=retry_directives,
                     llm_for_specialist=_llm_for_profile,
+                    progress_callback=_fireteam_progress,
                 )
                 result.reports.extend(list(retry_result.reports))
                 result.specialists_run = list(result.specialists_run) + list(

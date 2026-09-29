@@ -60,6 +60,7 @@ export interface ChainData {
 
 interface AttackScenarioPanelProps {
   chainData: ChainData | null;
+  recordedActions?: number;
   loading?: boolean;
   collapsed?: boolean;
   onToggleCollapse?: () => void;
@@ -96,6 +97,7 @@ type ViewMode = 'map' | 'timeline' | 'graph';
 
 export function AttackScenarioPanel({
   chainData,
+  recordedActions = 0,
   loading = false,
   collapsed = false,
   onToggleCollapse,
@@ -307,8 +309,9 @@ export function AttackScenarioPanel({
         {!isEmpty && (
           <div className="flex gap-3 px-3 py-1.5 border-b text-[10px] text-muted-foreground font-mono">
             <span className="flex items-center gap-1">
-              <Target className="h-3 w-3" /> {steps.length} steps
+              <Target className="h-3 w-3" /> {steps.length} chain steps
             </span>
+            <span>{recordedActions} actions recorded</span>
             <span className="flex items-center gap-1">
               <Shield className="h-3 w-3 text-emerald-500" /> {findings.length} findings
             </span>

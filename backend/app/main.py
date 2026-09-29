@@ -1,5 +1,6 @@
 """Main FastAPI application entry point."""
 
+import asyncio
 import logging
 import os
 from fastapi import FastAPI, Request
@@ -58,6 +59,7 @@ from app.api.routes import attacks as attacks_router
 from app.models.agent_palace import AgentPalaceDrawer  # noqa: F401 — palace memory table
 from app.models.recon_job import ReconJob, ReconWorkerHeartbeat  # noqa: F401 — interceptor workers
 from app.models.sitemap_entry import SitemapEntry  # noqa: F401 — Praetorian-style app sitemap
+from app.models.agent_run_ledger import AgentRunLedger, AgentActionReceipt, AgentHypothesisCoverage  # noqa: F401 — durable agent work receipts
 from app.models.workflow import (  # noqa: F401 — ensure workflow tables are created
     Workflow,
     WorkflowVersion,
@@ -73,6 +75,20 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+_evidence_cleanup_task = None
+
+
+async def _evidence_cleanup_loop() -> None:
+    from app.services.agent.evidence_store import prune_expired_evidence
+
+    while True:
+        try:
+            removed = await asyncio.to_thread(prune_expired_evidence)
+            if removed:
+                logger.info("Pruned %s expired agent evidence artifacts", removed)
+        except Exception:
+            logger.exception("Agent evidence cleanup failed")
+        await asyncio.sleep(6 * 3600)
 
 # Create database tables
 Base.metadata.create_all(bind=engine)
@@ -321,11 +337,15 @@ async def startup_event():
 
     ensure_default_admin()
     ensure_default_scan_profiles()
+    global _evidence_cleanup_task
+    _evidence_cleanup_task = asyncio.create_task(_evidence_cleanup_loop())
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Run on application shutdown."""
+    if _evidence_cleanup_task is not None:
+        _evidence_cleanup_task.cancel()
     logger.info("Shutting down application")
 
 

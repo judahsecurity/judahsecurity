@@ -2590,6 +2590,11 @@ class ApiClient {
     return response.data;
   }
 
+  async getAgentRunLedger(sessionId: string) {
+    const response = await this.client.get(`/agent/conversations/${sessionId}/ledger`);
+    return response.data;
+  }
+
   async deleteAgentConversation(sessionId: string) {
     const response = await this.client.delete(`/agent/conversations/${sessionId}`);
     return response.data;

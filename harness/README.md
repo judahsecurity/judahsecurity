@@ -18,6 +18,13 @@ Offline **page-assessment** scoring for the in-product swarm (no LLM) lives in
 did Joshua's "how a human would start" list match the observed login/IDOR/XSS
 surface, and did auto-dispatch avoid Nuclei-first?
 
+For product-agent runs, `local_harness/product_agent.py` now exports durable
+`agent_ledger.json` receipts and `product_assessment.json` metrics. Compare two
+equal-budget output directories with `python -m local_harness.ledger_compare
+<baseline-dir> <candidate-dir>`. See
+[the rollout guide](../docs/AGENT_RELIABILITY_ROLLOUT.md) for deployment,
+ledger checks, and evaluation steps.
+
 > **Authorization:** Only scan targets you are explicitly authorized to test.
 
 ---

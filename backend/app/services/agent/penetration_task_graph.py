@@ -55,6 +55,8 @@ class TaskNode:
     last_failure: str = ""
     rewritten_test: str = ""
     parent_finding: str = ""
+    parent_hypothesis_id: str = ""
+    investigation_depth: int = 0
     evidence: str = ""
     evidence_ids: List[str] = field(default_factory=list)
     source: str = "methodology"  # methodology | map | chain | spawn
@@ -193,6 +195,8 @@ def sync_graph_from_brain(brain: Any) -> PenetrationTaskGraph:
                 methodology_id=getattr(h, "methodology_id", "") or "",
                 priority=h.priority or "high",
                 parent_finding=getattr(h, "parent_finding", "") or "",
+                parent_hypothesis_id=getattr(h, "parent_hypothesis_id", "") or "",
+                investigation_depth=int(getattr(h, "investigation_depth", 0) or 0),
                 evidence=(h.evidence or "")[:500],
                 source=getattr(h, "source", "") or "methodology",
             )
@@ -203,6 +207,12 @@ def sync_graph_from_brain(brain: Any) -> PenetrationTaskGraph:
             node.methodology_id = getattr(h, "methodology_id", "") or node.methodology_id
             node.priority = h.priority or node.priority
             node.parent_finding = getattr(h, "parent_finding", "") or node.parent_finding
+            node.parent_hypothesis_id = (
+                getattr(h, "parent_hypothesis_id", "") or node.parent_hypothesis_id
+            )
+            node.investigation_depth = int(
+                getattr(h, "investigation_depth", 0) or node.investigation_depth
+            )
             if h.evidence:
                 node.evidence = (h.evidence or "")[:500]
             node.source = getattr(h, "source", "") or node.source
@@ -257,6 +267,9 @@ def _apply_default_dependencies(graph: PenetrationTaskGraph, hyps: Sequence[Any]
                     deps.append(hid)
 
         parent = (getattr(h, "parent_finding", None) or "").strip()
+        parent_id = (getattr(h, "parent_hypothesis_id", None) or "").strip()
+        if parent_id and parent_id != h.id and parent_id not in deps:
+            deps.append(parent_id)
         if parent:
             parent_id = title_index.get(parent.lower())
             if parent_id and parent_id != h.id and parent_id not in deps:
@@ -495,8 +508,17 @@ def apply_executor_summary(
         result = rows.get(node.id)
         if not result:
             if node.status == NODE_RUNNING:
-                node.status = NODE_RETRY
-                node.last_failure = "No evidence-backed result for this hypothesis"
+                if summary.rewrite_hint == "execution_timeout":
+                    node.status = NODE_BLOCKED
+                    node.recovery_required = True
+                    node.blocked_reason = (
+                        "Specialist execution ended without a complete receipt; "
+                        "reconcile tool effects before retrying"
+                    )
+                    node.last_failure = summary.summary[:500]
+                else:
+                    node.status = NODE_RETRY
+                    node.last_failure = "No evidence-backed result for this hypothesis"
                 _release_lease(node)
             continue
         verdict = result.get("verdict")
