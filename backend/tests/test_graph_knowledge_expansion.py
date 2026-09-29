@@ -19,6 +19,7 @@ except ModuleNotFoundError:
     GraphService = None
 else:
     from app.services.graph_service import GraphService
+    from app.models.asset import AssetType
 
 
 class FakeResult:
@@ -126,6 +127,28 @@ class GraphKnowledgeTests(unittest.TestCase):
         self.assertIn("all(n IN nodes(path)", statement)
         self.assertIn("n.organization_id = center.organization_id", statement)
         self.assertEqual(params, {"asset_id": 42, "org_id": 7})
+
+    @unittest.skipIf(GraphService is None, "backend dependencies not installed")
+    def test_inventory_asset_does_not_claim_canonical_domain_identity(self):
+        class FirstWrite(Exception):
+            pass
+
+        class CaptureSession:
+            statement = ""
+
+            def run(self, statement, _params):
+                self.statement = statement
+                raise FirstWrite
+
+        asset = types.SimpleNamespace(
+            id=42, name="example.test", value="example.test",
+            asset_type=AssetType.DOMAIN, first_seen=None, root_domain=None,
+        )
+        session = CaptureSession()
+        with self.assertRaises(FirstWrite):
+            GraphService()._sync_asset(session, asset, 7)
+        self.assertIn("REMOVE a:Domain:Subdomain:IP:URL:Certificate", session.statement)
+        self.assertNotIn("SET a:Domain", session.statement)
 
 
 if __name__ == "__main__":

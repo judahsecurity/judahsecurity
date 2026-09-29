@@ -261,14 +261,14 @@ class GraphService:
         Creates the full relationship chain:
         Domain → Subdomain → IP → Port → Service → Technology → Vulnerability → CVE
         """
-        # Determine node label based on asset type
-        label = self._get_label_for_type(asset.asset_type)
-        
-        # Create or update the asset node with all relevant fields
+        # Asset is an inventory identity. Domain, Subdomain and IP below are
+        # canonical topology identities with their own uniqueness constraints.
+        # Remove legacy subtype labels before updating a previously synced
+        # Asset so a duplicate inventory row cannot violate those constraints.
         session.run("""
             MERGE (a:Asset {asset_id: $id})
-            SET a:""" + label + """,
-                a.value = $value,
+            REMOVE a:Domain:Subdomain:IP:URL:Certificate
+            SET a.value = $value,
                 a.name = $name,
                 a.asset_type = $type,
                 a.organization_id = $org_id,
@@ -328,15 +328,22 @@ class GraphService:
         )
         if root_domain and subdomain_name:
             session.run("""
+                MATCH (a:Asset {asset_id: $asset_id, organization_id: $org_id})
                 MERGE (d:Domain {organization_id: $org_id, name: $root_domain})
                 SET d.discovered_at = coalesce(d.discovered_at, datetime($first_seen))
                 MERGE (s:Subdomain {organization_id: $org_id, name: $subdomain_name})
                 SET s.status = $status
                 MERGE (d)-[:HAS_SUBDOMAIN]->(s)
+                FOREACH (_ IN CASE WHEN $asset_type = 'DOMAIN' THEN [1] ELSE [] END |
+                    MERGE (a)-[:REPRESENTS]->(d))
+                FOREACH (_ IN CASE WHEN $asset_type = 'SUBDOMAIN' THEN [1] ELSE [] END |
+                    MERGE (a)-[:REPRESENTS]->(s))
             """, {
+                "asset_id": asset.id,
                 "org_id": org_id,
                 "root_domain": root_domain,
                 "subdomain_name": subdomain_name,
+                "asset_type": asset.asset_type.value if asset.asset_type else None,
                 "first_seen": asset.first_seen.isoformat() if asset.first_seen else None,
                 "status": (asset.status.value if asset.status else "discovered"),
             })
@@ -1029,20 +1036,6 @@ class GraphService:
         except Exception as e:
             logger.debug(f"SAME_IP_AS links: {e}")
 
-    def _get_label_for_type(self, asset_type: AssetType) -> str:
-        """Get Neo4j node label for an asset type."""
-        if not asset_type:
-            return "Asset"
-        
-        label_map = {
-            AssetType.DOMAIN: "Domain",
-            AssetType.SUBDOMAIN: "Subdomain",
-            AssetType.IP_ADDRESS: "IP",
-            AssetType.URL: "URL",
-            AssetType.CERTIFICATE: "Certificate",
-        }
-        return label_map.get(asset_type, "Asset")
-    
     def query(self, cypher: str, params: Dict[str, Any] = None) -> List[Dict]:
         """
         Execute a Cypher query and return results.
