@@ -18,6 +18,8 @@ import {
   Cpu,
   Network,
   Search,
+  Route,
+  GitBranch,
 } from 'lucide-react';
 
 // Dynamically import ForceGraph2D to avoid SSR issues
@@ -33,7 +35,7 @@ const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), {
 export interface GraphNode {
   id: string;
   label: string;
-  type: 'domain' | 'subdomain' | 'ip' | 'port' | 'service' | 'technology' | 'vulnerability' | 'cve' | 'cwe' | 'discovery_source' | 'asn' | 'hosting_provider' | 'certificate';
+  type: 'domain' | 'subdomain' | 'ip' | 'port' | 'service' | 'service_observation' | 'technology' | 'vulnerability' | 'cve' | 'cwe' | 'discovery_source' | 'asn' | 'hosting_provider' | 'certificate' | 'script' | 'endpoint' | 'source_file' | 'source_route' | 'code_symbol' | 'package' | 'source_commit' | 'source_repository' | 'memory';
   properties?: Record<string, any>;
   x?: number;
   y?: number;
@@ -80,6 +82,16 @@ const NODE_COLORS: Record<string, string> = {
   asn: '#14b8a6',             // teal
   hosting_provider: '#6366f1', // indigo
   certificate: '#ec4899',     // pink
+  service_observation: '#34d399',
+  script: '#facc15',
+  endpoint: '#fb923c',
+  source_file: '#38bdf8',
+  source_route: '#2dd4bf',
+  code_symbol: '#a78bfa',
+  package: '#c084fc',
+  source_commit: '#94a3b8',
+  source_repository: '#64748b',
+  memory: '#f472b6',
 };
 
 // Node sizes by type (relative importance in the graph)
@@ -97,6 +109,16 @@ const NODE_SIZES: Record<string, number> = {
   asn: 11,
   hosting_provider: 11,
   certificate: 9,
+  service_observation: 5,
+  script: 8,
+  endpoint: 7,
+  source_file: 8,
+  source_route: 7,
+  code_symbol: 5,
+  package: 6,
+  source_commit: 9,
+  source_repository: 10,
+  memory: 8,
 };
 
 // Node icons by type
@@ -114,6 +136,16 @@ const NODE_ICONS: Record<string, React.ElementType> = {
   asn: Network,
   hosting_provider: Server,
   certificate: Shield,
+  service_observation: Server,
+  script: Cpu,
+  endpoint: Network,
+  source_file: Cpu,
+  source_route: Route,
+  code_symbol: Cpu,
+  package: Cpu,
+  source_commit: GitBranch,
+  source_repository: GitBranch,
+  memory: Shield,
 };
 
 export function GraphVisualization({
@@ -295,7 +327,7 @@ export function GraphVisualization({
       </div>
 
       {/* Legend */}
-      <div className="absolute bottom-4 left-4 z-10 bg-background/80 backdrop-blur rounded-lg p-3 max-w-[260px]">
+      <div className="absolute bottom-4 left-4 z-10 bg-background/80 backdrop-blur rounded-lg p-3 max-w-[260px] max-h-48 overflow-y-auto">
         <div className="text-xs font-semibold mb-2 text-muted-foreground uppercase tracking-wide">Legend</div>
         <div className="mb-2">
           <div className="text-xs text-muted-foreground mb-1">Infrastructure</div>
@@ -325,6 +357,17 @@ export function GraphVisualization({
             {(['discovery_source', 'asn', 'hosting_provider', 'certificate'] as const).map((type) => (
               <div key={type} className="flex items-center gap-1">
                 <div className="w-2.5 h-2.5 rounded-full border border-dashed flex-shrink-0" style={{ backgroundColor: NODE_COLORS[type], borderColor: NODE_COLORS[type] }} />
+                <span className="capitalize truncate">{type.replace('_', ' ')}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="mt-2">
+          <div className="text-xs text-muted-foreground mb-1">Web, Code &amp; Memory</div>
+          <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
+            {(['script', 'endpoint', 'source_file', 'source_route', 'package', 'memory'] as const).map((type) => (
+              <div key={type} className="flex items-center gap-1">
+                <div className="w-2.5 h-2.5 rounded-full flex-shrink-0" style={{ backgroundColor: NODE_COLORS[type] }} />
                 <span className="capitalize truncate">{type.replace('_', ' ')}</span>
               </div>
             ))}

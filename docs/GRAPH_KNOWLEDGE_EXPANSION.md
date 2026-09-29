@@ -98,3 +98,21 @@ bundle to a repository file as unverified until `MAPS_TO_SOURCE` exists.
 Track answer correctness on a small set of these questions, graph freshness
 after scans, lookup p95 latency, and agent tool calls per answer. Use Cypher
 `PROFILE` on any lookup that grows slow; add indexes for measured query paths.
+
+## Production rollout order
+
+1. Deploy the tenant-scoped graph API and organization-aware UI before adding
+   new data. Verify a user in one organization cannot retrieve another
+   organization's asset relationships or attack paths.
+2. Record the running Neo4j version and inspect constraints and indexes. Count
+   nodes by label, relationships by type, and isolated nodes per organization;
+   the total node count alone is not a coverage metric.
+3. Backfill one organization with `POST /api/v1/graph/sync`, then compare graph
+   counts with PostgreSQL assets, ports, technologies, endpoints, JS resources,
+   and findings. Check a few complete evidence chains manually.
+4. Run the source exporter and importer for each deployed commit. Automate this
+   in the release pipeline, including build-manifest/source-map bundle mappings,
+   so source links remain current after deployments.
+5. Turn on incremental graph sync from scan events and expose last successful
+   sync, failures, and lag for each source. Measure p95 lookup latency and agent
+   tool calls per answer before adding vector retrieval to Neo4j.

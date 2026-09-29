@@ -164,6 +164,7 @@ async def sync_organization_graph(
 async def get_asset_relationships(
     asset_id: int,
     depth: int = Query(default=2, ge=1, le=5),
+    organization_id: Optional[int] = Query(None),
     current_user: User = Depends(get_current_user)
 ):
     """
@@ -171,9 +172,10 @@ async def get_asset_relationships(
     
     Returns nodes and relationships suitable for graph visualization.
     """
+    org_id = _resolve_graph_org(current_user, organization_id)
     try:
         graph = get_graph_service()
-        result = graph.get_asset_relationships(asset_id, depth)
+        result = graph.get_asset_relationships(asset_id, depth, org_id)
         
         # Transform to frontend format
         nodes = []
@@ -231,6 +233,8 @@ async def get_attack_paths(
         max_paths: Maximum number of paths to return
     """
     org_id = _resolve_graph_org(current_user, organization_id)
+    if not (source_id and target_id) and org_id is None:
+        raise HTTPException(status_code=400, detail="Select an organization for attack paths")
     
     try:
         graph = get_graph_service()
@@ -240,22 +244,27 @@ async def get_attack_paths(
             # Find paths between specific assets (graph stores asset_id, not id)
             query = """
             MATCH path = shortestPath((source:Asset {asset_id: $source_id})-[*1..6]-(target:Asset {asset_id: $target_id}))
+            WHERE source.organization_id IS NOT NULL
+              AND source.organization_id = target.organization_id
+              AND ($org_id IS NULL OR source.organization_id = $org_id)
+              AND all(n IN nodes(path) WHERE
+                  n.organization_id IS NULL OR n.organization_id = source.organization_id)
             RETURN path
             LIMIT $max_paths
             """
-            params = {"source_id": source_id, "target_id": target_id, "max_paths": max_paths}
+            params = {"source_id": source_id, "target_id": target_id,
+                      "org_id": org_id, "max_paths": max_paths}
         else:
             # Find paths to vulnerable assets
             query = """
-            MATCH path = (entry:Asset)-[*1..4]->(vuln:Vulnerability)
+            MATCH path = (entry:Asset {organization_id: $org_id})-[*1..4]->(vuln:Vulnerability)
             WHERE vuln.severity IN ['critical', 'high']
+              AND all(n IN nodes(path) WHERE
+                  n.organization_id IS NULL OR n.organization_id = $org_id)
             RETURN path
             LIMIT $max_paths
             """
-            params = {"max_paths": max_paths}
-            if org_id:
-                query = query.replace("MATCH path", "MATCH path = (entry:Asset {organization_id: $org_id})")
-                params["org_id"] = org_id
+            params = {"org_id": org_id, "max_paths": max_paths}
         
         results = graph.query(query, params)
         

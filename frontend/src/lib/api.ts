@@ -2387,9 +2387,9 @@ class ApiClient {
     return response.data;
   }
 
-  async getAssetRelationships(assetId: number, depth: number = 2) {
+  async getAssetRelationships(assetId: number, depth: number = 2, organizationId?: number) {
     const response = await this.client.get(`/graph/asset/${assetId}/relationships`, {
-      params: { depth }
+      params: { depth, organization_id: organizationId }
     });
     return response.data;
   }

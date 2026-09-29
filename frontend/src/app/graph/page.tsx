@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { MainLayout } from '@/components/layout/MainLayout';
 import { Header } from '@/components/layout/Header';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
@@ -89,7 +89,37 @@ export default function GraphPage() {
   const [discoverySources, setDiscoverySources] = useState<any[]>([]);
   const [discoveryGraphData, setDiscoveryGraphData] = useState<GraphData>({ nodes: [], links: [] });
   const [discoveryLoading, setDiscoveryLoading] = useState(false);
+  const assetRequestId = useRef(0);
+  const surfaceRequestId = useRef(0);
+  const relationshipRequestId = useRef(0);
+  const discoveryRequestId = useRef(0);
+  const pathRequestId = useRef(0);
   const { toast } = useToast();
+
+  const changeOrganization = (orgId: string) => {
+    assetRequestId.current += 1;
+    surfaceRequestId.current += 1;
+    relationshipRequestId.current += 1;
+    discoveryRequestId.current += 1;
+    pathRequestId.current += 1;
+    setSelectedOrg(orgId);
+    setSelectedAssetId('');
+    setSelectedNode(null);
+    setGraphData({ nodes: [], links: [] });
+    setDiscoveryGraphData({ nodes: [], links: [] });
+    setHighlightPath([]);
+    setAttackPaths([]);
+    setAttackPathSource('');
+    setAttackPathTarget('');
+    setAttackSurface(null);
+    setTechGrouping(null);
+    setPortGrouping(null);
+    setDiscoverySources([]);
+    setAssets([]);
+    setGraphLoading(false);
+    setDiscoveryLoading(false);
+    setAttackSurfaceLoading(false);
+  };
 
   // Fetch graph status
   const fetchStatus = async () => {
@@ -116,6 +146,7 @@ export default function GraphPage() {
 
   // Fetch assets for dropdown
   const fetchAssets = async () => {
+    const requestId = ++assetRequestId.current;
     try {
       const orgId = selectedOrg !== 'all' ? parseInt(selectedOrg) : undefined;
       const data = await api.getAssets({ 
@@ -123,7 +154,9 @@ export default function GraphPage() {
         limit: 500,
         asset_type: 'domain'
       });
-      setAssets(data.items || data || []);
+      if (requestId === assetRequestId.current) {
+        setAssets(data.items || data || []);
+      }
     } catch (error) {
       console.error('Failed to fetch assets:', error);
     }
@@ -168,16 +201,18 @@ export default function GraphPage() {
 
   // Load asset relationships
   const loadAssetRelationships = async (assetId: number) => {
+    const requestId = ++relationshipRequestId.current;
     setGraphLoading(true);
     setHighlightPath([]);
     try {
-      const data = await api.getAssetRelationships(assetId, 3);
+      const orgId = selectedOrg !== 'all' ? parseInt(selectedOrg) : undefined;
+      const data = await api.getAssetRelationships(assetId, 3, orgId);
       
       // Transform to graph format
       const nodes: GraphNode[] = data.nodes?.map((n: any) => ({
         id: n.id || n.element_id,
-        label: n.properties?.value || n.properties?.name || n.labels?.[0] || 'Unknown',
-        type: mapNeo4jLabelToType(n.labels?.[0]),
+        label: graphNodeLabel(n),
+        type: mapNeo4jLabelsToType(n.labels),
         properties: n.properties,
       })) || [];
       
@@ -188,16 +223,18 @@ export default function GraphPage() {
         properties: r.properties,
       })) || [];
       
-      setGraphData({ nodes, links });
+      if (requestId === relationshipRequestId.current) setGraphData({ nodes, links });
     } catch (error: any) {
-      toast({
-        title: 'Failed to load relationships',
-        description: error?.response?.data?.detail || 'Could not fetch asset relationships',
-        variant: 'destructive',
-      });
-      setGraphData({ nodes: [], links: [] });
+      if (requestId === relationshipRequestId.current) {
+        toast({
+          title: 'Failed to load relationships',
+          description: error?.response?.data?.detail || 'Could not fetch asset relationships',
+          variant: 'destructive',
+        });
+        setGraphData({ nodes: [], links: [] });
+      }
     } finally {
-      setGraphLoading(false);
+      if (requestId === relationshipRequestId.current) setGraphLoading(false);
     }
   };
 
@@ -212,13 +249,16 @@ export default function GraphPage() {
       return;
     }
 
+    const requestId = ++pathRequestId.current;
     setGraphLoading(true);
     try {
       const data = await api.getAttackPaths({
         source_id: parseInt(attackPathSource),
         target_id: parseInt(attackPathTarget),
+        organization_id: selectedOrg !== 'all' ? parseInt(selectedOrg) : undefined,
         max_paths: 5,
       });
+      if (requestId !== pathRequestId.current) return;
       
       setAttackPaths(data.paths || []);
       
@@ -230,8 +270,8 @@ export default function GraphPage() {
         // Also update graph data to show the path
         const nodes: GraphNode[] = data.paths[0].nodes?.map((n: any) => ({
           id: n.id || n.element_id,
-          label: n.properties?.value || n.properties?.name || 'Unknown',
-          type: mapNeo4jLabelToType(n.labels?.[0]),
+          label: graphNodeLabel(n),
+          type: mapNeo4jLabelsToType(n.labels),
           properties: n.properties,
         })) || [];
         
@@ -249,18 +289,20 @@ export default function GraphPage() {
         description: `Found ${data.paths?.length || 0} potential attack paths`,
       });
     } catch (error: any) {
+      if (requestId !== pathRequestId.current) return;
       toast({
         title: 'Search Failed',
         description: error?.response?.data?.detail || 'Could not find attack paths',
         variant: 'destructive',
       });
     } finally {
-      setGraphLoading(false);
+      if (requestId === pathRequestId.current) setGraphLoading(false);
     }
   };
 
   // Fetch attack surface data (with fallback to PostgreSQL if Neo4j unavailable)
   const fetchAttackSurface = async () => {
+    const requestId = ++surfaceRequestId.current;
     setAttackSurfaceLoading(true);
     try {
       const orgId = selectedOrg !== 'all' ? parseInt(selectedOrg) : undefined;
@@ -271,31 +313,36 @@ export default function GraphPage() {
         api.getAssetsByTechnology({ organization_id: orgId }, useFallback),
         api.getAssetsByPort({ organization_id: orgId }, useFallback),
       ]);
-      setAttackSurface(overview);
-      setTechGrouping(techData);
-      setPortGrouping(portData);
+      if (requestId === surfaceRequestId.current) {
+        setAttackSurface(overview);
+        setTechGrouping(techData);
+        setPortGrouping(portData);
+      }
     } catch (error) {
       console.error('Failed to fetch attack surface:', error);
-      toast({
-        title: 'Error loading attack surface',
-        description: 'Failed to fetch grouping data. Try syncing the graph first.',
-        variant: 'destructive',
-      });
+      if (requestId === surfaceRequestId.current) {
+        toast({
+          title: 'Error loading attack surface',
+          description: 'Failed to fetch grouping data. Try syncing the graph first.',
+          variant: 'destructive',
+        });
+      }
     } finally {
-      setAttackSurfaceLoading(false);
+      if (requestId === surfaceRequestId.current) setAttackSurfaceLoading(false);
     }
   };
 
   // Load discovery provenance for an asset
   const loadDiscoveryTree = async (assetId: number) => {
+    const requestId = ++discoveryRequestId.current;
     setDiscoveryLoading(true);
     try {
       const orgId = selectedOrg !== 'all' ? parseInt(selectedOrg) : undefined;
       const data = await api.getDiscoveryTree(assetId, orgId);
       const nodes: GraphNode[] = (data.nodes || []).map((n: any) => ({
         id: n.id || n.element_id,
-        label: n.properties?.name || n.properties?.value || n.properties?.display_name || n.properties?.asn_number || n.labels?.[0] || 'Unknown',
-        type: mapNeo4jLabelToType(n.labels?.[0]),
+        label: graphNodeLabel(n),
+        type: mapNeo4jLabelsToType(n.labels),
         properties: n.properties,
       }));
       const links = (data.relationships || []).map((r: any) => ({
@@ -303,11 +350,11 @@ export default function GraphPage() {
         target: r.end_node || r.target,
         type: r.type,
       }));
-      setDiscoveryGraphData({ nodes, links });
+      if (requestId === discoveryRequestId.current) setDiscoveryGraphData({ nodes, links });
     } catch (error) {
-      console.error('Failed to load discovery tree:', error);
+      if (requestId === discoveryRequestId.current) console.error('Failed to load discovery tree:', error);
     } finally {
-      setDiscoveryLoading(false);
+      if (requestId === discoveryRequestId.current) setDiscoveryLoading(false);
     }
   };
 
@@ -323,14 +370,22 @@ export default function GraphPage() {
   };
 
   // Map Neo4j labels to our node types
-  const mapNeo4jLabelToType = (label: string): GraphNode['type'] => {
+  const graphNodeLabel = (node: any): string => {
+    const properties = node.properties || {};
+    return String(properties.value || properties.name || properties.url || properties.path ||
+      properties.title || properties.display_name || properties.asn_number ||
+      properties.package_name || properties.symbol_name || properties.sha ||
+      properties.port || node.labels?.[0] || 'Unknown');
+  };
+
+  const mapNeo4jLabelsToType = (labels: string[] = []): GraphNode['type'] => {
     const mapping: Record<string, GraphNode['type']> = {
-      Asset: 'domain',
       Domain: 'domain',
       Subdomain: 'subdomain',
       IP: 'ip',
       Port: 'port',
       Service: 'service',
+      ServiceObservation: 'service_observation',
       Technology: 'technology',
       Vulnerability: 'vulnerability',
       CVE: 'cve',
@@ -339,8 +394,21 @@ export default function GraphPage() {
       ASN: 'asn',
       HostingProvider: 'hosting_provider',
       Certificate: 'certificate',
+      JSResource: 'script',
+      Endpoint: 'endpoint',
+      SourceFile: 'source_file',
+      SourceRoute: 'source_route',
+      CodeSymbol: 'code_symbol',
+      PackageVersion: 'package',
+      SourceCommit: 'source_commit',
+      SourceRepository: 'source_repository',
+      ChainFinding: 'memory',
     };
-    return mapping[label] || 'domain';
+    // Asset also carries a more specific label, such as IP or Subdomain.
+    for (const label of labels) {
+      if (mapping[label]) return mapping[label];
+    }
+    return 'domain';
   };
 
   // Handle node click
@@ -356,15 +424,13 @@ export default function GraphPage() {
 
   // Fetch attack surface when tab changes or status is determined
   useEffect(() => {
-    if (activeTab === 'attack-surface' && !attackSurfaceLoading) {
-      if (status !== null && (!attackSurface || attackSurface.source !== (status?.connected ? 'neo4j' : 'postgresql'))) {
-        fetchAttackSurface();
-      }
+    if (activeTab === 'attack-surface' && status !== null) {
+      fetchAttackSurface();
     }
     if (activeTab === 'discovery' && status?.connected) {
       loadDiscoverySources();
     }
-  }, [activeTab, status]);
+  }, [activeTab, status?.connected, selectedOrg]);
 
   // Fetch assets when org changes
   useEffect(() => {
@@ -835,7 +901,7 @@ export default function GraphPage() {
                   </CardHeader>
                   <CardContent>
                     <div className="flex gap-4 mb-4">
-                      <Select value={selectedOrg} onValueChange={setSelectedOrg}>
+                      <Select value={selectedOrg} onValueChange={changeOrganization}>
                         <SelectTrigger className="w-[180px]">
                           <SelectValue placeholder="Organization" />
                         </SelectTrigger>
@@ -940,7 +1006,7 @@ export default function GraphPage() {
                 </CardHeader>
                 <CardContent>
                   <div className="flex gap-4">
-                    <Select value={selectedOrg} onValueChange={setSelectedOrg}>
+                    <Select value={selectedOrg} onValueChange={changeOrganization}>
                       <SelectTrigger className="w-[200px]">
                         <SelectValue placeholder="All Organizations" />
                       </SelectTrigger>

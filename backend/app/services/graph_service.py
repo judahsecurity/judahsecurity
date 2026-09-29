@@ -1250,7 +1250,8 @@ class GraphService:
     def get_asset_relationships(
         self,
         asset_id: int,
-        depth: int = 2
+        depth: int = 2,
+        organization_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Get all relationships for an asset up to a given depth.
@@ -1268,70 +1269,46 @@ class GraphService:
         if not self._connected:
             return {"nodes": [], "edges": []}
         
-        cypher = """
-            MATCH (center:Asset {asset_id: $asset_id})
-            CALL apoc.path.subgraphAll(center, {
-                maxLevel: $depth,
-                relationshipFilter: ">",
-                labelFilter: "+Asset|+Vulnerability|+Port|+Technology|+IP"
-            })
-            YIELD nodes, relationships
-            RETURN 
-                [n IN nodes | {
-                    id: id(n),
-                    labels: labels(n),
-                    properties: properties(n)
-                }] AS nodes,
-                [r IN relationships | {
-                    source: id(startNode(r)),
-                    target: id(endNode(r)),
-                    type: type(r)
-                }] AS edges
+        # Scope every path to the center asset's organization. Shared catalog
+        # nodes (for example a technology name) may have no organization_id,
+        # but traversal must never continue into another tenant's observations.
+        safe_depth = max(1, min(int(depth), 5))
+        cypher = f"""
+            MATCH path = (center:Asset {{asset_id: $asset_id}})-[*0..{safe_depth}]-(connected)
+            WHERE center.organization_id IS NOT NULL
+              AND ($org_id IS NULL OR center.organization_id = $org_id)
+              AND all(n IN nodes(path) WHERE
+                  n.organization_id IS NULL OR n.organization_id = center.organization_id)
+            RETURN path
+            LIMIT 200
         """
-        
-        try:
-            results = self.query(cypher, {"asset_id": asset_id, "depth": depth})
-            if results:
-                return results[0]
-            return {"nodes": [], "edges": []}
-        except Exception as e:
-            # APOC might not be installed - fallback: get paths and build nodes/edges in Python
-            logger.warning(f"APOC query failed, using fallback: {e}")
-            fallback_cypher = """
-                MATCH path = (center:Asset {asset_id: $asset_id})-[*1..""" + str(depth) + """]-(connected)
-                RETURN path
-                LIMIT 50
-            """
-            seen_node_ids = set()
-            seen_edges = set()
-            nodes_out = []
-            edges_out = []
-            with self.session() as session:
-                result = session.run(fallback_cypher, {"asset_id": asset_id})
-                for record in result:
-                    path = record.get("path")
-                    if path is None:
-                        continue
-                    for node in (path.nodes if hasattr(path, "nodes") else getattr(path, "__iter__", lambda: [])()):
-                        nid = getattr(node, "element_id", None) or str(id(node))
-                        if nid not in seen_node_ids:
-                            seen_node_ids.add(nid)
-                            nodes_out.append({
-                                "id": nid,
-                                "labels": list(getattr(node, "labels", [])),
-                                "properties": dict(node) if node else {},
-                            })
-                    for rel in (path.relationships if hasattr(path, "relationships") else []):
-                        sn = getattr(rel, "start_node", None)
-                        en = getattr(rel, "end_node", None)
-                        sid = getattr(sn, "element_id", None) or (str(id(sn)) if sn else "")
-                        tid = getattr(en, "element_id", None) or (str(id(en)) if en else "")
-                        rtype = getattr(rel, "type", None) or ""
-                        key = (sid, tid, rtype)
-                        if key not in seen_edges:
-                            seen_edges.add(key)
-                            edges_out.append({"source": sid, "target": tid, "type": rtype})
-            return {"nodes": nodes_out, "edges": edges_out}
+        seen_node_ids = set()
+        seen_edges = set()
+        nodes_out = []
+        edges_out = []
+        with self.session() as session:
+            result = session.run(cypher, {"asset_id": asset_id, "org_id": organization_id})
+            for record in result:
+                path = record.get("path")
+                if path is None:
+                    continue
+                for node in path.nodes:
+                    nid = node.element_id
+                    if nid not in seen_node_ids:
+                        seen_node_ids.add(nid)
+                        nodes_out.append({
+                            "id": nid,
+                            "labels": list(node.labels),
+                            "properties": dict(node),
+                        })
+                for rel in path.relationships:
+                    sid = rel.start_node.element_id
+                    tid = rel.end_node.element_id
+                    key = (sid, tid, rel.type)
+                    if key not in seen_edges:
+                        seen_edges.add(key)
+                        edges_out.append({"source": sid, "target": tid, "type": rel.type})
+        return {"nodes": nodes_out, "edges": edges_out}
     
     def get_discovery_tree(self, asset_id: int, organization_id: int) -> Dict[str, Any]:
         """

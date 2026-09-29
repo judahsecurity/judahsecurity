@@ -29,6 +29,7 @@ class FakeResult:
 class FakeSession:
     def __init__(self):
         self.calls = []
+        self.records = None
 
     def __enter__(self):
         return self
@@ -36,9 +37,9 @@ class FakeSession:
     def __exit__(self, *_args):
         return None
 
-    def run(self, statement, **params):
-        self.calls.append((statement, params))
-        return FakeResult()
+    def run(self, statement, *args, **params):
+        self.calls.append((statement, args[0] if args else params))
+        return self.records if self.records is not None else FakeResult()
 
 
 class FakeDriver:
@@ -104,6 +105,27 @@ class GraphKnowledgeTests(unittest.TestCase):
         self.assertEqual(params["limit"], 50)
         with self.assertRaises(ValueError):
             graph.lookup_for_agent(7, "arbitrary_cypher", "MATCH (n) RETURN n")
+
+    @unittest.skipIf(GraphService is None, "backend dependencies not installed")
+    def test_asset_relationship_query_scopes_every_hop(self):
+        graph = GraphService()
+        graph._connected = True
+        session = FakeSession()
+        session.records = []
+        from contextlib import contextmanager
+
+        @contextmanager
+        def fake_session():
+            yield session
+
+        graph.session = fake_session
+        self.assertEqual(graph.get_asset_relationships(42, depth=3, organization_id=7),
+                         {"nodes": [], "edges": []})
+        statement, params = session.calls[0]
+        self.assertIn("center.organization_id = $org_id", statement)
+        self.assertIn("all(n IN nodes(path)", statement)
+        self.assertIn("n.organization_id = center.organization_id", statement)
+        self.assertEqual(params, {"asset_id": 42, "org_id": 7})
 
 
 if __name__ == "__main__":
