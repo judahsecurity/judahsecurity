@@ -1842,7 +1842,7 @@ def get_finding_validation(
 
 
 class RiskAssessmentWrite(BaseModel):
-    """Analyst or agent RA payload. Validated by Marcus quality gate."""
+    """Analyst or agent RA payload. Validated by Leo quality gate."""
     assessment: Optional[dict] = None
     force: bool = False
 
@@ -1854,7 +1854,7 @@ def write_finding_risk_assessment(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_analyst),
 ):
-    """Persist a Marcus-quality risk assessment on a finding (no live retest)."""
+    """Persist a Leo-quality risk assessment on a finding (no live retest)."""
     from app.services.agent.risk_assessment import (
         attach_to_vulnerability,
         complete_payload,
@@ -2153,13 +2153,13 @@ def triage_finding_risk_factors(
 
 
 @router.post("/{vuln_id}/risk-assessment/ask")
-async def ask_marcus(
+async def ask_leo(
     vuln_id: int,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_analyst),
 ):
-    """Queue Marcus RA from the published packet. Does not retest the live host."""
+    """Queue Leo RA from the published packet. Does not retest the live host."""
     from app.services.agent.risk_assessment import attach_to_vulnerability, pending_payload
     from app.core.config import settings
     from app.services.agent.model_router import ollama_fallback_available
@@ -2194,15 +2194,15 @@ async def ask_marcus(
     db.commit()
 
     async def _run():
-        from app.services.agent.marcus_service import run_marcus_for_finding
+        from app.services.agent.leo_service import run_leo_for_finding
         try:
-            await run_marcus_for_finding(
+            await run_leo_for_finding(
                 finding_id=vuln_id,
                 user_id=current_user.id,
                 organization_id=organization_id,
             )
         except Exception:
-            logger.exception("Ask Marcus failed for finding %s", vuln_id)
+            logger.exception("Ask Leo failed for finding %s", vuln_id)
 
     background_tasks.add_task(_run)
     return {"status": "queued", "finding_id": vuln.id}

@@ -1371,7 +1371,7 @@ export default function FindingsPage() {
     // ── Finding validation (native detector / steps replay) ─────────────────────
   const [validationResult, setValidationResult] = useState<any>(null);
   const [validating, setValidating] = useState(false);
-  const [askingMarcus, setAskingMarcus] = useState(false);
+  const [askingLeo, setAskingLeo] = useState(false);
   const [detectionIssueText, setDetectionIssueText] = useState('');
   const [loggingIssue, setLoggingIssue] = useState(false);
   const [detectionFeedback, setDetectionFeedback] = useState<any>(null);
@@ -1469,7 +1469,7 @@ export default function FindingsPage() {
     }
   };
 
-  const pollMarcus = async (findingId: number) => {
+  const pollLeo = async (findingId: number) => {
     for (let i = 0; i < 90; i++) {
       await new Promise((r) => setTimeout(r, 4000));
       if (openFindingIdRef.current !== findingId) return;
@@ -1487,30 +1487,30 @@ export default function FindingsPage() {
     }
   };
 
-  const handleAskMarcus = async () => {
+  const handleAskLeo = async () => {
     if (!selectedFinding) return;
     const findingId = selectedFinding.id;
-    setAskingMarcus(true);
+    setAskingLeo(true);
     try {
-      await api.askMarcus(findingId);
+      await api.askLeo(findingId);
       setSelectedFinding((prev) =>
         prev && prev.id === findingId
           ? { ...prev, risk_assessment: { ...(prev.risk_assessment || {}), status: 'queued' } }
           : prev
       );
       toast({
-        title: 'Marcus queued',
+        title: 'Leo queued',
         description: 'Scoring the demonstrated packet. No live retest.',
       });
-      await pollMarcus(findingId);
+      await pollLeo(findingId);
     } catch (err: unknown) {
       toast({
-        title: 'Could not start Marcus',
+        title: 'Could not start Leo',
         description: getApiErrorMessage(err),
         variant: 'destructive',
       });
     } finally {
-      setAskingMarcus(false);
+      setAskingLeo(false);
     }
   };
 
@@ -2913,8 +2913,8 @@ export default function FindingsPage() {
               assessment={
               <RiskAssessmentPanel
                 assessment={selectedFinding?.risk_assessment}
-                asking={askingMarcus}
-                onAskMarcus={handleAskMarcus}
+                asking={askingLeo}
+                onAskLeo={handleAskLeo}
               />
               }
               validation={<>

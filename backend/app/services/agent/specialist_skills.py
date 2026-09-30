@@ -152,7 +152,7 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "whole catalog; do not push; do not authenticate recovered PATs against GitHub. "
         "Expired ghs_* is a leak pattern. Internal-only hosts: rotate, do not hunt. "
         "Kill only if anonymous token issuance is denied. CWE-306 / CWE-798 / CWE-540.\n"
-        "- Pasted finding review (Ask Marcus): do not re-probe live hosts unless the "
+        "- Pasted finding review (Ask Leo): do not re-probe live hosts unless the "
         "operator asks for a deny-check. Write Verdict; What is proven; What is not "
         "proven; Severity rationale; Ticket guidance; defensive retest bar.\n"
         "- CORS/Keycloak: SUBMIT if a canary Origin is reflected in ACAO AND "
@@ -178,7 +178,7 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "Joshua publishes after confirmed."
     ),
     "risk_assessor": (
-        "SKILL PACK — risk assessor (Marcus):\n"
+        "SKILL PACK — risk assessor (Leo):\n"
         "- Score published findings from the demonstrated packet. No live retest.\n"
         "- Call assess_finding_risk(finding_id, assessment JSON). Do not create_finding.\n"
         "- Required: verdict, why_this_severity, why_not_higher, why_not_lower, "

@@ -53,7 +53,7 @@ WRITEUP_RULES = (
 )
 
 REVIEW_RULES = (
-    "Unauth reset_email (Ask Marcus): keep Demonstrated High. Do not raise to "
+    "Unauth reset_email (Ask Leo): keep Demonstrated High. Do not raise to "
     "Critical unless a live mailbox takeover was demonstrated — and hunters must "
     "not complete ATO on production. Do not drop because OPTIONS is 401 or the "
     "schema claims jwtAuth. why_not_higher: no write/RCE, canary only, token not "
