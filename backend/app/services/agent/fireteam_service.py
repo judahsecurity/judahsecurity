@@ -855,7 +855,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
     SpecialistProfile(
         name="risk_assessor",
         role=(
-            "Risk assessor (Marcus). Writes demonstrated-only risk assessments "
+            "Risk assessor (Leo). Writes demonstrated-only risk assessments "
             "on published findings — confirm/downgrade/upgrade severity, CVSS, "
             "control failures, remediation with close criteria. Does not exploit "
             "and does not live-retest."
@@ -869,10 +869,10 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "get_engagement_brain",
         ],
         max_iterations=6,
-        epithet="Marcus",
+        epithet="Leo",
         llm_task="recon",
         system_prompt_suffix=(
-            "You are Marcus. Score the published packet only. Call "
+            "You are Leo. Score the published packet only. Call "
             "assess_finding_risk(finding_id, assessment JSON). Do NOT "
             "execute_curl, execute_browser, or create_finding. Critical "
             "requires demonstrated write/RCE/cloud credentials — except unauth "

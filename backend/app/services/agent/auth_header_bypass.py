@@ -33,7 +33,7 @@ WRITEUP_RULES = (
 )
 
 REVIEW_RULES = (
-    "Auth-header bypass (Ask Marcus): keep Demonstrated High. Do not drop because "
+    "Auth-header bypass (Ask Leo): keep Demonstrated High. Do not drop because "
     "no-header is 400 — that is the controller running. Do not raise to Critical "
     "on 400 alone (no dump, no write). Retest bar: missing Authorization returns "
     "401 like invalid Bearer. Do not dump records."

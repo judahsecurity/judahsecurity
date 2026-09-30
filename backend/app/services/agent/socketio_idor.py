@@ -44,7 +44,7 @@ WRITEUP_RULES = (
 )
 
 REVIEW_RULES = (
-    "Socket.IO get_stream (Ask Marcus): keep Demonstrated High. Do not drop because "
+    "Socket.IO get_stream (Ask Leo): keep Demonstrated High. Do not drop because "
     "video was not downloaded. Do not ask hunters to send null crash loops. Retest "
     "bar: anonymous get_stream 401/403 or no url_key. Do not re-fetch footage."
 )

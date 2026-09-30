@@ -2274,7 +2274,7 @@ class ASMToolsManager(AssessmentCapabilities):
         - references: vendor hardening docs and OWASP/CWE URLs
         - demonstrated_chain: JSON array of proof steps [{summary, outcome, tool, args, result}]
         - not_demonstrated: what was NOT attempted (hash cracking, data modification, lateral movement)
-        - risk_assessment: optional Marcus RA JSON (verdict, why_not_higher, CVSS, retest_criteria).
+        - risk_assessment: optional Leo RA JSON (verdict, why_not_higher, CVSS, retest_criteria).
           Medium+ findings without a passing RA stay RA-pending; call assess_finding_risk next.
           Complete is blocked while RA is pending.
         Default/weak login alone is not a finding until privileged impact is proven.
@@ -2404,7 +2404,7 @@ class ASMToolsManager(AssessmentCapabilities):
                         )
                         db.commit()
                         ra_msg = (
-                            f", RA complete (Marcus {parsed.get('verdict')} "
+                            f", RA complete (Leo {parsed.get('verdict')} "
                             f"{parsed.get('confirmed_severity')} "
                             f"CVSS {parsed.get('cvss_score')})"
                         )
@@ -2592,7 +2592,7 @@ class ASMToolsManager(AssessmentCapabilities):
         cwes: Optional[str] = None,
         **kwargs: Any,
     ) -> str:
-        """Marcus risk assessment — score a demonstrated finding. No live retest.
+        """Leo risk assessment — score a demonstrated finding. No live retest.
 
         Required for every medium+ finding after create_finding. Pass assessment
         as JSON (preferred) or flattened fields. Quality gate rejects inflation

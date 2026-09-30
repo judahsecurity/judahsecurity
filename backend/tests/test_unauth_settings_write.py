@@ -191,7 +191,7 @@ def test_proof_requires_401_and_void_200():
     )
 
 
-def test_marcus_keeps_high_rejects_critical_without_persistence():
+def test_leo_keeps_high_rejects_critical_without_persistence():
     parsed, gaps = validate_risk_assessment(_ra())
     assert gaps == [], gaps
     assert parsed["confirmed_severity"] == "high"

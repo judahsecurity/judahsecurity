@@ -1110,7 +1110,7 @@ class ApiClient {
     return response.data;
   }
 
-  async askMarcus(vulnId: number) {
+  async askLeo(vulnId: number) {
     const response = await this.client.post(`/vulnerabilities/${vulnId}/risk-assessment/ask`);
     return response.data;
   }

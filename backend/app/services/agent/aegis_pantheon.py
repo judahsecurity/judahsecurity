@@ -39,7 +39,7 @@ PANTHEON: Dict[str, tuple[str, str]] = {
     "spa_client": ("Miriam", "Song in the client — DOM XSS and hidden routes"),
     "coverage": ("Nehemiah", "Builder who finds gaps — authenticated coverage scans"),
     "finding_judge": ("Solomon", "Wisdom gate — evidence judgment before publish"),
-    "risk_assessor": ("Marcus", "Risk counsel — demonstrated-only RA after publish"),
+    "risk_assessor": ("Leo", "Risk counsel — demonstrated-only RA after publish"),
     "agent_tools": ("Isaiah", "Voice of the model — chatbot tools and unauth LLM proxies"),
     "code_sast": ("Huldah", "Prophetess of the checkout — threat-shaped SAST"),
     "independent_verifier": ("Deborah", "Second witness — independent proof of candidates"),
