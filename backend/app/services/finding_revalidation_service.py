@@ -15,9 +15,12 @@ Returns a verdict dict compatible with FindingValidation / handle_validate_findi
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import re
 import socket
+import subprocess
+import xml.etree.ElementTree as ET
 from typing import Any, Optional
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -173,6 +176,101 @@ def _probe_endpoints(endpoints: list[dict[str, Any]], timeout: float = 3.0) -> l
                 row["reachable"] = True
         results.append(row)
     return results
+
+
+def _revalidate_port_exposure(finding: dict, endpoints: list[dict[str, Any]]) -> dict[str, Any]:
+    """Use the same Nmap state check as Ports for scanner-generated findings."""
+    metadata = finding.get("metadata") or {}
+    tcp_endpoints = [ep for ep in endpoints if ep["kind"] == "tcp"]
+    if finding.get("detected_by") == "port_scanner" and metadata.get("port"):
+        host = metadata.get("scanned_ip") or finding.get("asset")
+        try:
+            port = int(metadata["port"])
+        except (TypeError, ValueError):
+            port = None
+        if host and port and 1 <= port <= 65535:
+            tcp_endpoints = [{"kind": "tcp", "host": host, "port": port}]
+    if not tcp_endpoints:
+        return _verdict_from_probes(finding, [], method="nmap_port_verify")
+
+    ep = tcp_endpoints[0]  # Port-scanner findings describe one asset/port.
+    host, port = ep["host"], ep["port"]
+    protocol = str(metadata.get("protocol") or "tcp").lower()
+    if protocol not in ("tcp", "udp"):
+        protocol = "tcp"
+    cmd = [
+        "nmap", "-Pn", "-sT" if protocol == "tcp" else "-sU",
+        "--max-retries", "2", "-T4", "-p", str(port), "-oX", "-", "--", host,
+    ]
+    try:
+        if isinstance(ipaddress.ip_address(host), ipaddress.IPv6Address):
+            cmd.insert(1, "-6")
+    except ValueError:
+        pass
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or "nmap_failed")[:200])
+        root = ET.fromstring(result.stdout)
+        state = next(
+            (p.find("state").get("state") for p in root.findall("./host/ports/port")
+             if p.get("portid") == str(port) and p.get("protocol") == protocol
+             and p.find("state") is not None),
+            "unknown",
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, ET.ParseError, RuntimeError) as exc:
+        state = "unknown"
+        error = type(exc).__name__
+    else:
+        error = None
+
+    endpoint = f"{host}:{port}/{protocol}"
+    if state == "open":
+        verdict, confidence, still_open = "confirmed", "high", True
+        reasoning = f"Nmap confirms {endpoint} is open from the scanner network."
+    elif state in ("filtered", "closed"):
+        verdict, confidence, still_open = "false_positive", "high", False
+        reasoning = f"Nmap reports {endpoint} as {state}; the claimed internet exposure is not currently confirmed."
+    else:
+        verdict, confidence, still_open = "needs_more_evidence", "low", None
+        reasoning = f"Nmap could not determine the current state of {endpoint}."
+
+    return {
+        "verdict": verdict,
+        "confidence": confidence,
+        "is_false_positive": verdict == "false_positive",
+        "still_open": still_open,
+        "logical_mismatch": False,
+        "recommended_severity": finding.get("severity") if still_open else "info",
+        "reasoning": reasoning,
+        "evidence": f"nmap_state={state}; endpoint={endpoint}",
+        "template_logic_issue": None,
+        "method": "nmap_port_verify",
+        "port_state": state,
+        "port_host": host,
+        "port": port,
+        "protocol": protocol,
+        "error": error,
+        "endpoint_count": len(tcp_endpoints),
+    }
+
+
+async def revalidate_port_exposure(finding: dict) -> Optional[dict[str, Any]]:
+    """Check the one port claimed by a network exposure finding with Nmap."""
+    detected_by = (finding.get("detected_by") or "").lower()
+    source_kind = (finding.get("source_kind") or "").lower()
+    endpoints = await asyncio.to_thread(_extract_endpoints, finding)
+    tcp_endpoints = [ep for ep in endpoints if ep["kind"] == "tcp"]
+    if detected_by != "port_scanner" and not (source_kind == "network_service" and len(tcp_endpoints) == 1):
+        return None
+    verdict = await asyncio.to_thread(_revalidate_port_exposure, finding, endpoints)
+    verdict["detected_by"] = detected_by
+    verdict["source_kind"] = source_kind
+    if detected_by != "port_scanner" and verdict["port_state"] == "open":
+        verdict["verdict"] = "needs_more_evidence"
+        verdict["confidence"] = "medium"
+        verdict["reasoning"] += " The claimed service vulnerability still needs its own reproduction evidence."
+    return verdict
 
 
 def _verdict_from_probes(
@@ -379,6 +477,9 @@ async def revalidate_finding(finding: dict) -> dict[str, Any]:
             return nuclei_verdict
 
     # 2) Port / agent / manual / generic — probe reproduction endpoints from stored steps.
+    port_verdict = await revalidate_port_exposure(finding)
+    if port_verdict:
+        return port_verdict
     endpoints = await asyncio.to_thread(_extract_endpoints, finding)
     method = {
         "network_service": "port_replay",

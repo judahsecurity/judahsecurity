@@ -1225,6 +1225,7 @@ async def scan_asset_ports(
                         "closed|filtered": PortState.CLOSED_FILTERED,
                     }
                     existing.state = state_map.get(port_result.state.lower(), PortState.OPEN)
+                    scanner_service.apply_verification_state(existing, port_result)
                     if port_result.service_name:
                         existing.service_name = port_result.service_name
                     if port_result.service_product:
@@ -1235,6 +1236,7 @@ async def scan_asset_ports(
                 else:
                     port_data = port_result.to_port_service_dict(asset_id)
                     port_service = PortService(**port_data)
+                    scanner_service.apply_verification_state(port_service, port_result)
                     db.add(port_service)
                     import_summary["ports_imported"] += 1
                     
@@ -1271,13 +1273,12 @@ def generate_port_findings(
     current_user: User = Depends(require_analyst)
 ):
     """
-    Generate security findings from open/filtered ports.
+    Generate security findings from open ports.
     
     Automatically creates findings for:
     - Critical exposures (databases, RDP, SMB, Docker)
     - High-risk services (SSH, VNC, FTP)
     - Unencrypted protocols (Telnet, HTTP, POP3, IMAP)
-    - Filtered ports on critical services
     
     Findings are deduplicated - existing open findings are updated rather than duplicated.
     """
@@ -1700,6 +1701,9 @@ async def verify_port(
                     port_record.state = PortState.FILTERED
                 elif state == "closed":
                     port_record.state = PortState.CLOSED
+
+                if state in ("filtered", "closed"):
+                    PortFindingsService.resolve_findings_for_port(db, port_record)
                 
                 port_record.last_seen = datetime.utcnow()
                 db.commit()
@@ -1844,4 +1848,3 @@ async def verify_ports_bulk(
         "scan_id": scan.id,
         "ports_queued": len(ports)
     }
-

@@ -3,7 +3,6 @@ Port findings service for creating vulnerabilities from port scan results.
 
 Automatically generates security findings for:
 - Open risky ports (SSH, RDP, databases, etc.)
-- Filtered ports that may indicate firewall issues
 - Unencrypted services (HTTP, FTP, Telnet)
 - Default/dangerous ports
 """
@@ -471,16 +470,6 @@ PORT_FINDING_RULES = [
         cwe_id="CWE-306"
     ),
     
-    # ==================== FILTERED PORTS ====================
-    PortFindingRule(
-        ports=[22, 3389, 445, 3306, 5432, 1433],
-        title="Critical Port in Filtered State",
-        description="A security-critical port is in a filtered state, which may indicate incomplete firewall rules or a partially exposed service.",
-        severity=Severity.INFO,
-        remediation="1. Review firewall rules to ensure consistent policy\n2. Verify if the service should be completely blocked or allowed\n3. Document the intended access policy for this port",
-        tags=["filtered", "firewall-review", "policy-check"],
-        states=[PortState.FILTERED, PortState.OPEN_FILTERED, PortState.CLOSED_FILTERED]
-    ),
 ]
 
 
@@ -490,7 +479,6 @@ class PortFindingsService:
     
     Generates security findings based on:
     - Open risky ports
-    - Filtered ports on critical services
     - Unencrypted services
     """
     
@@ -502,6 +490,16 @@ class PortFindingsService:
             rules: Custom finding rules (defaults to PORT_FINDING_RULES)
         """
         self.rules = rules or PORT_FINDING_RULES
+
+    @staticmethod
+    def _not_exposed(port_service: PortService) -> bool:
+        """Only a conclusive filtered/closed state withdraws exposure findings."""
+        return port_service.state in (
+            PortState.FILTERED, PortState.CLOSED,
+            PortState.OPEN_FILTERED, PortState.CLOSED_FILTERED,
+        ) or (port_service.verified and port_service.verified_state in (
+            "filtered", "closed", "open|filtered", "closed|filtered",
+        ))
     
     def create_findings_for_port(
         self,
@@ -521,6 +519,13 @@ class PortFindingsService:
             List of created Vulnerability objects
         """
         findings = []
+
+        if self._not_exposed(port_service):
+            self.resolve_findings_for_port(db, port_service)
+            db.commit()
+            return findings
+        if port_service.state != PortState.OPEN:
+            return findings
         
         for rule in self.rules:
             if self._matches_rule(port_service, rule):
@@ -620,6 +625,11 @@ class PortFindingsService:
         dedup_service = get_deduplication_service(db)
         
         for port_service in ports:
+            if self._not_exposed(port_service):
+                self.resolve_findings_for_port(db, port_service)
+                continue
+            if port_service.state != PortState.OPEN:
+                continue
             for rule in self.rules:
                 if self._matches_rule(port_service, rule):
                     # Check for existing finding on this asset
@@ -673,6 +683,8 @@ class PortFindingsService:
     
     def _matches_rule(self, port_service: PortService, rule: PortFindingRule) -> bool:
         """Check if port service matches a finding rule."""
+        if port_service.state != PortState.OPEN or self._not_exposed(port_service):
+            return False
         # Check port
         if port_service.port not in rule.ports:
             return False
@@ -682,6 +694,36 @@ class PortFindingsService:
             return False
         
         return True
+
+    @staticmethod
+    def resolve_findings_for_port(db: Session, port_service: PortService) -> int:
+        """Close scanner-generated findings when the port is not confirmed open.
+
+        The asset, protocol, and exact title prefix keep unrelated findings
+        (including manually reported vulnerabilities) untouched.
+        """
+        prefix = f"[Port {port_service.port}/{port_service.protocol.value}] "
+        findings = db.query(Vulnerability).filter(
+            Vulnerability.asset_id == port_service.asset_id,
+            Vulnerability.detected_by == "port_scanner",
+            Vulnerability.title.startswith(prefix),
+            Vulnerability.status.in_([
+                VulnerabilityStatus.OPEN,
+                VulnerabilityStatus.IN_PROGRESS,
+            ]),
+        ).all()
+        now = datetime.utcnow()
+        for finding in findings:
+            finding.status = VulnerabilityStatus.RESOLVED
+            finding.resolved_at = now
+            metadata = dict(finding.metadata_ or {})
+            metadata["port_verification"] = {
+                "state": port_service.verified_state or port_service.state.value,
+                "scanner": port_service.verification_scanner or port_service.discovered_by,
+                "verified_at": port_service.verified_at.isoformat() if port_service.verified_at else None,
+            }
+            finding.metadata_ = metadata
+        return len(findings)
     
     def _find_existing(
         self,
@@ -863,8 +905,6 @@ class PortFindingsService:
                 recommendations.append("No critical port exposures detected")
         
         return recommendations
-
-
 
 
 

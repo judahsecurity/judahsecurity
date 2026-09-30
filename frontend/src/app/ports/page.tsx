@@ -69,6 +69,16 @@ interface PortChartData {
   color: string;
 }
 
+const nonOpenStates = ['filtered', 'closed', 'open|filtered', 'closed|filtered'];
+
+const effectivePortState = (port: PortResult) =>
+  port.verified && nonOpenStates.includes(port.verified_state?.toLowerCase() || '')
+    ? port.verified_state || port.state
+    : port.state;
+
+const isNonExposedPort = (port: PortResult) =>
+  nonOpenStates.includes(effectivePortState(port)?.toLowerCase() || '');
+
 // Color palette for charts
 const CHART_COLORS = [
   '#3b82f6', // blue
@@ -326,7 +336,7 @@ export default function PortsPage() {
         service: p.service_name || '',
         product: p.service_product || '',
         version: p.service_version || '',
-        state: p.state,
+        state: effectivePortState(p),
         is_risky: p.is_risky ? 'Yes' : 'No',
         risk_reason: p.risk_reason || '',
         discovered_by: p.discovered_by || '',
@@ -482,24 +492,22 @@ export default function PortsPage() {
                 <Network className="h-5 w-5 text-green-500" />
               </div>
               <div>
-                <p className="text-2xl font-bold">{ports.filter((p) => p.state?.toUpperCase() === 'OPEN').length}</p>
+                <p className="text-2xl font-bold">{ports.filter((p) => effectivePortState(p)?.toLowerCase() === 'open').length}</p>
                 <p className="text-sm text-muted-foreground">Open Ports</p>
               </div>
             </div>
           </Card>
-          <Link href="/findings?search=filtered+port">
-            <Card className="p-4 cursor-pointer hover:border-yellow-500/40 transition-colors">
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-lg bg-yellow-500/10">
-                  <AlertTriangle className="h-5 w-5 text-yellow-500" />
-                </div>
-                <div>
-                  <p className="text-2xl font-bold">{ports.filter((p) => p.state?.toUpperCase() === 'FILTERED').length}</p>
-                  <p className="text-sm text-muted-foreground">Filtered Ports</p>
-                </div>
+          <Card className="p-4">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-lg bg-yellow-500/10">
+                <AlertTriangle className="h-5 w-5 text-yellow-500" />
               </div>
-            </Card>
-          </Link>
+              <div>
+                <p className="text-2xl font-bold">{ports.filter((p) => effectivePortState(p)?.toLowerCase() === 'filtered').length}</p>
+                <p className="text-sm text-muted-foreground">Filtered Ports</p>
+              </div>
+            </div>
+          </Card>
           <Card className="p-4">
             <div className="flex items-center gap-3">
               <div className="p-2 rounded-lg bg-blue-500/10">
@@ -536,7 +544,7 @@ export default function PortsPage() {
               </div>
               <div>
                 <p className="text-2xl font-bold">
-                  {ports.filter((p) => p.is_risky).length}
+                  {ports.filter((p) => p.is_risky && !isNonExposedPort(p)).length}
                 </p>
                 <p className="text-sm text-muted-foreground">Risky Ports</p>
               </div>
@@ -549,7 +557,7 @@ export default function PortsPage() {
               </div>
               <div>
                 <p className="text-2xl font-bold">
-                  {ports.filter((p) => [21, 22, 23, 3389, 5900, 3306, 5432, 27017, 6379].includes(p.port)).length}
+                  {ports.filter((p) => !isNonExposedPort(p) && [21, 22, 23, 3389, 5900, 3306, 5432, 27017, 6379].includes(p.port)).length}
                 </p>
                 <p className="text-sm text-muted-foreground">Critical Ports</p>
               </div>
@@ -743,7 +751,7 @@ export default function PortsPage() {
                         : '-'}
                     </TableCell>
                     <TableCell>
-                      <Badge className={getStateColor(port.state)}>{port.state}</Badge>
+                      <Badge className={getStateColor(effectivePortState(port))}>{effectivePortState(port)}</Badge>
                     </TableCell>
                     <TableCell>
                       {verifyingPorts.has(port.id) ? (
@@ -788,7 +796,7 @@ export default function PortsPage() {
                       )}
                     </TableCell>
                     <TableCell>
-                      {port.state?.toLowerCase() === 'filtered' || port.verified_state?.toLowerCase() === 'filtered' ? (
+                      {effectivePortState(port)?.toLowerCase() === 'filtered' ? (
                         <Badge className="bg-yellow-500/20 text-yellow-400" title="Port is filtered - may be behind firewall">
                           <AlertTriangle className="h-3 w-3 mr-1" />
                           Filtered
@@ -803,7 +811,9 @@ export default function PortsPage() {
                       )}
                     </TableCell>
                     <TableCell>
-                      {port.finding_id ? (
+                      {isNonExposedPort(port) ? (
+                        <span className="text-muted-foreground text-xs">-</span>
+                      ) : port.finding_id ? (
                         <Link 
                           href={`/findings?id=${port.finding_id}`}
                           className="inline-flex items-center gap-1 text-primary hover:underline text-sm"
@@ -811,15 +821,6 @@ export default function PortsPage() {
                           <Shield className="h-3 w-3" />
                           View
                           <ExternalLink className="h-3 w-3" />
-                        </Link>
-                      ) : port.state?.toLowerCase() === 'filtered' ? (
-                        <Link 
-                          href={`/findings?search=filtered+port+${port.port}`}
-                          className="inline-flex items-center gap-1 text-yellow-400 hover:underline text-sm"
-                          title="View filtered port findings"
-                        >
-                          <AlertTriangle className="h-3 w-3" />
-                          Filtered
                         </Link>
                       ) : port.is_risky ? (
                         <Link 
@@ -885,13 +886,6 @@ export default function PortsPage() {
     </MainLayout>
   );
 }
-
-
-
-
-
-
-
 
 
 

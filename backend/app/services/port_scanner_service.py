@@ -169,6 +169,21 @@ class PortScannerService:
         self.naabu_path = naabu_path
         self.masscan_path = masscan_path
         self.nmap_path = nmap_path
+
+    @staticmethod
+    def apply_verification_state(port_service: PortService, port_result: PortResult) -> None:
+        """Keep an older Nmap verdict from overriding a changed scan result."""
+        state = port_result.state.lower()
+        if port_result.scanner.lower() == "nmap":
+            port_service.verified = state in ("open", "filtered", "closed")
+            port_service.verified_state = state if port_service.verified else None
+            port_service.verified_at = datetime.utcnow() if port_service.verified else None
+            port_service.verification_scanner = "nmap" if port_service.verified else None
+        elif port_service.verified and port_service.verified_state != state:
+            port_service.verified = False
+            port_service.verified_state = None
+            port_service.verified_at = None
+            port_service.verification_scanner = None
     
     def _filter_available_nse_scripts(self, scripts: List[str]) -> tuple:
         """
@@ -1676,6 +1691,7 @@ class PortScannerService:
                                 "closed|filtered": PortState.CLOSED_FILTERED,
                             }
                             existing.state = state_map.get(port_result.state.lower(), PortState.OPEN)
+                            self.apply_verification_state(existing, port_result)
                             if scanned_ip:
                                 existing.scanned_ip = scanned_ip
                             if port_result.service_name:
@@ -1702,6 +1718,7 @@ class PortScannerService:
                             # Add scanned_ip to port data
                             port_data["scanned_ip"] = scanned_ip
                             port_service = PortService(**port_data)
+                            self.apply_verification_state(port_service, port_result)
                             db.add(port_service)
                             summary["ports_imported"] += 1
                             
@@ -1932,7 +1949,6 @@ class PortScannerService:
     def scan_sync(self, targets: List[str], scanner: ScannerType = ScannerType.NAABU, **kwargs) -> ScanResult:
         """Synchronous wrapper for scan."""
         return asyncio.run(self.scan(targets, scanner, **kwargs))
-
 
 
 
