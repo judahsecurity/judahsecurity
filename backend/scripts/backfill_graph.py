@@ -6,7 +6,12 @@ to rebuild graph evidence for assets that already have an inventory node.
 """
 
 import argparse
+import sys
 import time
+from pathlib import Path
+
+# Direct execution from /app/scripts must still import the /app/app package.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy.orm import selectinload
 
