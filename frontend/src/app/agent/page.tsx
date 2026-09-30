@@ -2106,6 +2106,7 @@ function AgentPageContent() {
                 {showScenario && (
                   <AttackScenarioPanel
                     chainData={chainData} loading={loading}
+                    runLedger={runLedger}
                     recordedActions={runLedger?.coverage?.actions || 0}
                     collapsed={scenarioCollapsed}
                     onToggleCollapse={() => setScenarioCollapsed(!scenarioCollapsed)}

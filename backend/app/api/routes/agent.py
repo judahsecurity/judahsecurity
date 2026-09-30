@@ -809,8 +809,16 @@ async def get_conversation_ledger(
     )
     if not conv and not run:
         raise HTTPException(status_code=404, detail="Run not found")
-    return run or {"run_id": None, "status": "not_started", "actions": [],
-          "coverage": {"actions": 0, "by_status": {}, "published_findings": 0}}
+    result = run or {"run_id": None, "status": "not_started", "actions": [],
+                     "coverage": {"actions": 0, "by_status": {}, "published_findings": 0}}
+    from app.services.agent.run_snapshot import load_run_snapshot
+    from app.services.agent.scenario_surface import project_scenario_surface
+
+    snapshot = load_run_snapshot(org_id, session_id)
+    result["scenario_surface"] = project_scenario_surface(
+        snapshot.get("capability_map"), snapshot.get("engagement_brain"),
+    )
+    return result
 
 
 @router.delete("/conversations/{session_id}")
