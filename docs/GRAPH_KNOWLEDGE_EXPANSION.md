@@ -49,6 +49,22 @@ instead of replaying the entire organization. Older jsluice finding metadata con
 backfill; older paths without findings need a new jsluice run for exact
 script-to-path attribution.
 
+For a large organization, run a bounded backfill from the backend container
+instead of making one long API request. The command writes one asset per
+transaction, reports progress after each batch, and resumes by skipping assets
+already represented in Neo4j. First run a small sample; then rerun without
+`--max-assets` to process the rest:
+
+```sh
+docker exec asm_backend python /app/scripts/backfill_graph.py --organization-id 1 --max-assets 20
+docker exec asm_backend python /app/scripts/backfill_graph.py --organization-id 1
+```
+
+Use `--refresh-existing` after a graph schema or evidence mapping change to
+rebuild nodes that were synced before that change. This command does not run
+the expensive same-IP sibling-link pass; run the organization sync when that
+relationship is specifically needed.
+
 ## Import source code
 
 Run the exporter from a checkout of the commit you want to index. It uses the
@@ -78,6 +94,9 @@ JSON array with `--mappings`, for example:
 `evidence` must be `source-map` or `build-manifest`, and the source path must
 exist in the manifest. A matching filename alone is not accepted. The
 organization and commit are taken from the source manifest.
+Only set `GRAPH_ORGANIZATION_ID` to an organization that owns the repository
+being indexed. Do not attach the Judah Security platform repository to a
+customer organization merely to make its source files searchable.
 
 ## Agent retrieval
 
