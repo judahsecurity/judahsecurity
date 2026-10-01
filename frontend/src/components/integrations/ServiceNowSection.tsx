@@ -103,6 +103,7 @@ export function ServiceNowSection({ selectedOrgId }: { selectedOrgId?: number })
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [pulling, setPulling] = useState(false);
+  const [syncingApps, setSyncingApps] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string; http_status?: number; table_api_ok?: boolean } | null>(null);
   const [activeTab, setActiveTab] = useState<'endpoint' | 'auto' | 'sync'>('endpoint');
@@ -186,6 +187,21 @@ export function ServiceNowSection({ selectedOrgId }: { selectedOrgId?: number })
       toast({ title: 'Pull failed', description: getApiErrorMessage(err), variant: 'destructive' });
     } finally {
       setPulling(false);
+    }
+  }
+
+  async function handleSyncApps() {
+    setSyncingApps(true);
+    try {
+      const result = await api.syncBusinessApps();
+      toast({
+        title: 'Business applications synced',
+        description: `${result.synced} applications imported from cmdb_ci_business_app.`,
+      });
+    } catch (err) {
+      toast({ title: 'Business application sync failed', description: getApiErrorMessage(err), variant: 'destructive' });
+    } finally {
+      setSyncingApps(false);
     }
   }
 
@@ -354,6 +370,10 @@ export function ServiceNowSection({ selectedOrgId }: { selectedOrgId?: number })
                   Pull statuses
                 </Button>
               )}
+              <Button size="sm" variant="outline" onClick={handleSyncApps} disabled={syncingApps}>
+                {syncingApps ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Download className="h-4 w-4 mr-2" />}
+                Sync business apps
+              </Button>
               <Button size="sm" variant="outline" onClick={openSetup}>
                 <Settings2 className="h-4 w-4 mr-2" />Edit
               </Button>
