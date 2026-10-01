@@ -431,6 +431,8 @@ def seed_parameter_coverage_cells(brain: Any, inventory: Iterable[dict[str, Any]
     carry authentication or anti-CSRF state remain in the inventory but are
     excluded from automatic injection work.
     """
+    from app.services.agent.parameter_inventory import parameter_priority
+
     existing = {row.get("id") for row in getattr(brain, "coverage_cells", []) if isinstance(row, dict)}
     for raw in inventory:
         if not isinstance(raw, dict) or raw.get("testable") is not True:
@@ -451,6 +453,7 @@ def seed_parameter_coverage_cells(brain: Any, inventory: Iterable[dict[str, Any]
                 hypothesis_id=getattr(hypothesis, "id", ""),
                 source="parameter_inventory", capture_id=raw.get("artifact_id", ""),
             )
+            cell["priority_rank"] = parameter_priority(raw, specialist)
             if cell["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
                 brain.coverage_cells.append(cell)
                 existing.add(cell["id"])
@@ -658,6 +661,7 @@ def claim_coverage_cell_leases(
                 if hypothesis_id and cell.get("hypothesis_id") == hypothesis_id
                 else 1,
                 0 if cell.get("proof_escalation_id") else 1,
+                int(cell.get("priority_rank", 2)),
                 int(cell.get("attempts") or 0),
                 cell.get("surface_key", ""),
                 cell.get("identity", ""),

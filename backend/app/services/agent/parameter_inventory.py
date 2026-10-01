@@ -177,14 +177,20 @@ def parameters_for_specialist(cmap: dict, specialist: str) -> list[dict]:
         return rows
 
     def rank(row: dict) -> tuple:
-        name = row["name"]
-        if specialist == "xss":
-            favored = bool(_XSS_HINT.search(name)) or row["value_type"] in {"search", "text", "textarea"}
-        elif specialist == "sqli":
-            favored = bool(_SQL_HINT.search(name)) or row["value_type"] == "positive_integer"
-        else:
-            favored = bool(_XSS_HINT.search(name) or _SQL_HINT.search(name))
-        observed = row["source"] in {"observed_form", "captured_api", "browser_traffic"}
-        return (not favored, not observed, row["path"], row["name"])
+        return (parameter_priority(row, specialist), row["path"], row["name"])
 
     return sorted(rows, key=rank)
+
+
+def parameter_priority(row: dict, specialist: str) -> int:
+    """Order likely sinks first without removing lower-signal observed inputs."""
+    name = str(row.get("name") or "")
+    value_type = str(row.get("value_type") or "")
+    if specialist == "xss":
+        favored = bool(_XSS_HINT.search(name)) or value_type in {"search", "text", "textarea"}
+    elif specialist == "sqli":
+        favored = bool(_SQL_HINT.search(name)) or value_type in {"positive_integer", "number"}
+    else:
+        favored = bool(_XSS_HINT.search(name) or _SQL_HINT.search(name))
+    observed = row.get("source") in {"observed_form", "captured_api", "browser_traffic"}
+    return 0 if favored and observed else 1 if favored else 2

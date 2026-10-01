@@ -99,3 +99,19 @@ def test_parameter_cells_are_leased_exactly_and_completed_cells_survive_reseed()
     assert next(c for c in brain.coverage_cells if c["id"] == closed_id)["status"] == "tested_clean"
     next_lease = claim_coverage_cell_leases(brain, ["xss"])["xss"]
     assert next_lease.coverage_cell_id != closed_id
+
+
+def test_specialist_lease_prioritizes_likely_input_but_keeps_other_inputs_open():
+    brain = EngagementBrain(target="https://app.test")
+    inventory = [
+        {"method": "GET", "host": "app.test", "path": "/api", "location": "query",
+         "name": "zzz", "identity": "anonymous", "source": "api_endpoint", "testable": True},
+        {"method": "GET", "host": "app.test", "path": "/api", "location": "query",
+         "name": "q", "identity": "anonymous", "source": "observed_form", "testable": True},
+    ]
+    seed_parameter_coverage_cells(brain, inventory)
+    lease = claim_coverage_cell_leases(brain, ["xss"])["xss"]
+    assigned = next(cell for cell in brain.coverage_cells if cell["id"] == lease.coverage_cell_id)
+    assert assigned["parameter"] == "query:q"
+    assert any(cell["parameter"] == "query:zzz" and cell["status"] == "untested"
+               for cell in brain.coverage_cells if cell["test_type"] == "xss")
