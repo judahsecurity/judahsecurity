@@ -36,6 +36,8 @@ class CapabilityMap:
     third_party: List[str] = field(default_factory=list)
     # Sample captured XHR/fetch for replay_http_request
     api_samples: List[Dict[str, Any]] = field(default_factory=list)
+    # Names and locations only; request values and credentials stay out of the map.
+    parameter_inventory: List[Dict[str, Any]] = field(default_factory=list)
 
     # Derived capability flags (tester mental model)
     has_auth: bool = False
@@ -147,6 +149,9 @@ def build_capability_map_from_dict(data: Dict[str, Any]) -> CapabilityMap:
 
 def finalize_capability_map(cmap: CapabilityMap) -> CapabilityMap:
     """Derive flags, hunt queue, and quality score from raw crawl fields."""
+    from app.services.agent.parameter_inventory import collect_parameter_inventory
+
+    cmap.parameter_inventory = collect_parameter_inventory(cmap.to_dict())
     pages_blob = " ".join(cmap.pages_visited)
     api_blob = " ".join(f"{e.get('method')} {e.get('path')}" for e in cmap.api_endpoints)
     js_blob = " ".join(cmap.js_endpoints + cmap.js_files)
@@ -189,6 +194,13 @@ def finalize_capability_map(cmap: CapabilityMap) -> CapabilityMap:
     for e in cmap.js_endpoints:
         if "?" in e or "=" in e:
             param_paths.append(e)
+    for row in cmap.parameter_inventory:
+        label = f"{row['method']} {row['path']}"
+        if row["location"] == "query":
+            label += f"?{row['name']}="
+        else:
+            label += f" {row['location']}:{row['name']}"
+        param_paths.append(label)
     cmap.param_rich_paths = list(dict.fromkeys(param_paths))[:40]
 
     caps: List[str] = []
@@ -822,6 +834,7 @@ def merge_capability_maps(
         source_maps=_uniq(list(old.source_maps) + list(new.source_maps))[:60],
         third_party=_uniq(list(old.third_party) + list(new.third_party))[:60],
         api_samples=_uniq(list(old.api_samples) + list(new.api_samples))[:60],
+        parameter_inventory=_uniq(list(old.parameter_inventory) + list(new.parameter_inventory))[:4000],
     )
     return finalize_capability_map(merged).to_dict()
 

@@ -552,6 +552,58 @@ async def test_fireteam_dispatch_executes_only_its_leased_hypothesis(
 
 
 @pytest.mark.asyncio
+async def test_fireteam_dispatch_continues_parameter_cells_after_xss_hypothesis_is_killed(
+    manager, monkeypatch
+):
+    from app.services.agent.capability_map import build_capability_map_from_dict
+    from app.services.agent.engagement_brain import engagement_brain_from_dict
+    from app.services.agent.fireteam_service import FireteamResult, SpecialistReport, ToolInvocation
+
+    manager._capability_map = build_capability_map_from_dict({
+        "target": "https://app.test/", "scope": "https://app.test",
+        "forms": [{"method": "GET", "action": "/search", "inputs": ["q", "sort"]}],
+        "pages_visited": ["https://app.test/search?q=one&sort=recent"],
+    }).to_dict()
+    synced = json.loads(await manager.sync_engagement_brain())
+    assert synced["parameter_coverage"]["xss"]["total"] >= 2
+    brain = engagement_brain_from_dict(manager._engagement_brain)
+    assert any(c.get("specialist") == "xss" and c.get("source") == "parameter_inventory"
+               for c in brain.coverage_cells)
+    for hypothesis in brain.hypotheses:
+        if hypothesis.specialist == "xss":
+            hypothesis.status = "killed"
+    brain.task_graph = {}
+    manager._engagement_brain = brain.to_dict()
+    monkeypatch.setattr(manager, "_cheap_llm", lambda: object())
+
+    async def fake_fireteam(*, mission, directives, **kwargs):
+        directive = directives["xss"]
+        assert directive.parameter_work["name"] in {"q", "sort"}
+        assert directive.coverage_cell_id
+        return FireteamResult(
+            mission=mission, specialists_run=["xss"], reports=[SpecialistReport(
+                specialist="xss", role="XSS", mission=mission,
+                summary="Assigned input did not render the canary.", verdict="killed",
+                tool_calls=[ToolInvocation(
+                    tool="compare_requests", args={"coverage_cell_id": directive.coverage_cell_id},
+                    success=True, summary="No reflection", evidence_ids=["http-clean"],
+                )],
+            )],
+        )
+
+    monkeypatch.setattr("app.services.agent.fireteam_service.run_fireteam", fake_fireteam)
+    result = json.loads(await manager.fireteam_dispatch(mission="Cover XSS inputs", specialists=["xss"]))
+    assert result["specialists_run"] == ["xss"]
+    assert "xss" not in result["task_leases"]
+    assert result["coverage_leases"]["xss"]["coverage_cell_id"]
+    assert result["parameter_coverage"]["xss"]["remaining"] > 0
+    rows = [c for c in manager._engagement_brain["coverage_cells"]
+            if c.get("specialist") == "xss" and c.get("source") == "parameter_inventory"]
+    assert any(c["status"] == "tested_clean" for c in rows)
+    assert any(c["status"] == "untested" for c in rows)
+
+
+@pytest.mark.asyncio
 async def test_fireteam_dispatch_does_not_bypass_interrupted_lease(
     manager, monkeypatch
 ):

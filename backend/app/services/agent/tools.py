@@ -443,6 +443,7 @@ class ASMToolsManager(AssessmentCapabilities):
             # Injection testing tools (pure-Python, no external binary)
             "generate_injection_payloads": self.generate_injection_payloads,
             "discover_parameters": self.discover_parameters,
+            "get_parameter_inventory": self.get_parameter_inventory,
             # Auto tool selection
             "auto_select_tools": self.auto_select_tools,
             # MCP Security Tools (delegated)
@@ -3171,6 +3172,40 @@ class ASMToolsManager(AssessmentCapabilities):
             collaborator_url=collaborator_url,
         )
         return json.dumps(result, indent=2)
+
+    async def get_parameter_inventory(
+        self,
+        specialist: str = "all",
+        offset: int = 0,
+        limit: int = 40,
+    ) -> str:
+        """Read the observed, value-free input worklist with stable pagination."""
+        from app.services.agent.parameter_inventory import (
+            collect_parameter_inventory,
+            parameters_for_specialist,
+        )
+
+        if specialist not in {"all", "xss", "sqli", "injection"}:
+            return json.dumps({"error": "specialist must be all, xss, sqli, or injection"})
+        cmap = getattr(self, "_capability_map", None) or {}
+        if not isinstance(cmap, dict):
+            cmap = {}
+        inventory = collect_parameter_inventory(cmap)
+        rows = inventory if specialist == "all" else parameters_for_specialist(cmap, specialist)
+        try:
+            start = max(0, int(offset))
+            page_size = max(1, min(100, int(limit)))
+        except (TypeError, ValueError):
+            return json.dumps({"error": "offset and limit must be integers"})
+        end = min(start + page_size, len(rows))
+        return json.dumps({
+            "specialist": specialist,
+            "total": len(rows),
+            "excluded_protected": sum(not row["testable"] for row in inventory),
+            "offset": start,
+            "next_offset": end if end < len(rows) else None,
+            "parameters": rows[start:end],
+        })
 
     async def discover_parameters(
         self,
@@ -6823,11 +6858,14 @@ class ASMToolsManager(AssessmentCapabilities):
             else engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         )
         brain = seed_hypotheses_from_capability_map(brain, cmap if isinstance(cmap, dict) else {})
+        from app.services.agent.coverage_cells import seed_parameter_coverage_cells
+        from app.services.agent.parameter_inventory import collect_parameter_inventory
+
+        seed_parameter_coverage_cells(brain, collect_parameter_inventory(cmap if isinstance(cmap, dict) else {}))
         graph = sync_graph_from_brain(brain)
         self._engagement_brain = brain.to_dict()
 
-        return json.dumps(
-            {
+        out = {
                 "phase": brain.phase,
                 "target": brain.target,
                 "open_hypotheses": [
@@ -6844,9 +6882,32 @@ class ASMToolsManager(AssessmentCapabilities):
                 "focus_areas": brain.focus_areas[:8],
                 "prompt_view": format_engagement_brain_for_prompt(self._engagement_brain),
                 "engagement_brain": self._engagement_brain,
-            },
-            indent=2,
-        )[:_tool_output_max_chars()]
+                "parameter_coverage": {
+                    name: {
+                        "total": sum(1 for c in brain.coverage_cells if c.get("source") == "parameter_inventory" and c.get("specialist") == name),
+                        "remaining": sum(1 for c in brain.coverage_cells if c.get("source") == "parameter_inventory" and c.get("specialist") == name and c.get("status") not in {"finding", "tested_clean", "skipped"}),
+                    }
+                    for name in ("xss", "sqli")
+                },
+            }
+        output_limit = _tool_output_max_chars()
+        serialized = json.dumps(out, indent=2)
+        if len(serialized) <= output_limit:
+            return serialized
+        out.pop("engagement_brain", None)
+        out.pop("prompt_view", None)
+        out["omitted_large_fields"] = ["engagement_brain", "prompt_view"]
+        serialized = json.dumps(out, indent=2)
+        if len(serialized) <= output_limit:
+            return serialized
+        return json.dumps({
+            "phase": out["phase"], "target": out["target"],
+            "suggested_specialists": out["suggested_specialists"],
+            "parameter_coverage": out["parameter_coverage"],
+            "task_graph_prompt": out["task_graph_prompt"][:2000],
+            "open_hypothesis_count": len(out["open_hypotheses"]),
+            "omitted_large_fields": ["engagement_brain", "prompt_view", "task_graph", "open_hypotheses"],
+        })
 
     async def update_hypothesis(
         self,
@@ -7848,6 +7909,7 @@ class ASMToolsManager(AssessmentCapabilities):
             specialists_from_open_hypotheses,
         )
         from app.services.agent.fireteam_service import run_fireteam
+        from app.services.agent.coverage_cells import CELL_OPEN, seed_parameter_coverage_cells
         from app.services.agent.penetration_task_graph import (
             apply_executor_summary,
             claim_task_leases,
@@ -7866,6 +7928,7 @@ class ASMToolsManager(AssessmentCapabilities):
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         if cmap:
             brain = seed_hypotheses_from_capability_map(brain, cmap.to_dict())
+            seed_parameter_coverage_cells(brain, cmap.parameter_inventory)
             self._engagement_brain = brain.to_dict()
 
         # Resolve specialists: "auto" → open hypotheses, else capability-map selection
@@ -7941,7 +8004,20 @@ class ASMToolsManager(AssessmentCapabilities):
                 if n not in ("finding_judge", "independent_verifier", "risk_assessor")
             ]
 
+        pending_parameter_specialists: set[str] = set()
         if mode != "recon":
+            pending_parameter_specialists = {
+                str(cell.get("specialist") or "")
+                for cell in (brain.coverage_cells or [])
+                if isinstance(cell, dict)
+                and cell.get("source") == "parameter_inventory"
+                and cell.get("status") in CELL_OPEN
+                and cell.get("specialist") in {"xss", "sqli"}
+            }
+            if auto:
+                for specialist_name in ("xss", "sqli"):
+                    if specialist_name in pending_parameter_specialists and specialist_name not in (chosen or []):
+                        chosen = list(chosen or []) + [specialist_name]
             pending_proof_specialists = [
                 str(row.get("specialist") or "")
                 for row in (brain.proof_escalations or [])
@@ -8036,6 +8112,7 @@ class ASMToolsManager(AssessmentCapabilities):
             for name in chosen
             if name in task_leases
             or name not in represented_specialists
+            or name in pending_parameter_specialists
             or name in judge_roles
         ]
         profiles = {name: profiles[name] for name in chosen if name in profiles}
@@ -8296,6 +8373,13 @@ class ASMToolsManager(AssessmentCapabilities):
             "coverage_leases": {
                 name: lease.to_dict() for name, lease in coverage_leases.items()
             },
+            "parameter_coverage": {
+                name: {
+                    "total": sum(1 for c in brain.coverage_cells if c.get("source") == "parameter_inventory" and c.get("specialist") == name),
+                    "remaining": sum(1 for c in brain.coverage_cells if c.get("source") == "parameter_inventory" and c.get("specialist") == name and c.get("status") not in {"finding", "tested_clean", "skipped"}),
+                }
+                for name in ("xss", "sqli")
+            },
             "specialists_run": result.specialists_run,
             "selection_mode": "auto" if auto else "explicit",
             "selection_source": selection_source,
@@ -8346,7 +8430,28 @@ class ASMToolsManager(AssessmentCapabilities):
                 for r in result.reports
             ],
         }
-        return json.dumps(out, indent=2)[:_tool_output_max_chars()]
+        output_limit = _tool_output_max_chars()
+        serialized = json.dumps(out, indent=2)
+        if len(serialized) <= output_limit:
+            return serialized
+        omitted = []
+        for key in ("engagement_brain", "task_graph", "reports", "executor_summaries", "operation_directives"):
+            out.pop(key, None)
+            omitted.append(key)
+            out["omitted_large_fields"] = omitted
+            serialized = json.dumps(out, indent=2)
+            if len(serialized) <= output_limit:
+                return serialized
+        return json.dumps({
+            "specialists_run": out["specialists_run"],
+            "selection_source": out["selection_source"],
+            "task_leases": out["task_leases"],
+            "coverage_leases": out["coverage_leases"],
+            "parameter_coverage": out["parameter_coverage"],
+            "task_graph_prompt": out["task_graph_prompt"][:2000],
+            "merged_summary": out["merged_summary"][:2000],
+            "omitted_large_fields": omitted,
+        })
 
     # ------------------------------------------------------------------
     # Email breach discovery (XposedOrNot)

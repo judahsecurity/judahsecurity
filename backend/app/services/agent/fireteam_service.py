@@ -496,6 +496,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "a named CVE. If the map is thin, run discover_parameters + arjun first."
         ),
         allowed_tools=[
+            "get_parameter_inventory",
             "discover_parameters",
             "execute_arjun",
             "execute_sqlmap",
@@ -520,7 +521,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ],
         max_iterations=12,
         system_prompt_suffix=(
-            "Start with discover_parameters + arjun on live paths if params are unknown. "
+            "Start with get_parameter_inventory; use discover_parameters + arjun on live paths if params are unknown. "
             "SQLi/XSS/SSTI/cmd as usual. Also treat url/uri/request/datasource/execute/"
             "query fields as SSRF: execute_interactsh register → plant payload_url → poll, "
             "then compare benign vs internal canary (do not use cloud-metadata/loopback if Lictor blocks). "
@@ -534,6 +535,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "params the map actually showed — not a generic injection dump."
         ),
         allowed_tools=[
+            "get_parameter_inventory",
             "execute_xsstrike",
             "execute_dalfox",
             "execute_browser",
@@ -552,8 +554,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ],
         max_iterations=10,
         system_prompt_suffix=(
-            "Only params that reflect or render (q, search, name, message, comment, "
-            "redirect). Canary first, then browser confirm. Status 200 is not XSS."
+            "Work the assigned observed input first. Use a harmless unique canary to check "
+            "reflection or rendering; if it is absent, record an evidence-backed negative for "
+            "that input. Browser-confirm execution before claiming XSS. Status 200 is not XSS."
         ),
     ),
     SpecialistProfile(
@@ -563,6 +566,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "params with canaries; escalate to sqlmap/commix only on hits."
         ),
         allowed_tools=[
+            "get_parameter_inventory",
             "discover_parameters",
             "execute_arjun",
             "execute_sqlmap",
@@ -582,7 +586,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ],
         max_iterations=10,
         system_prompt_suffix=(
-            "Login/auth fields are rank-1 even with no query params. "
+            "Work the assigned observed input first; login/auth fields are high priority. "
             "compare_requests error/boolean/time on username then password "
             "(or JSON /login body). Timing that scales with SLEEP is SUBMIT. "
             "Canary → differential. sqlmap --batch only on confirmed candidates. "
@@ -1048,7 +1052,7 @@ INSTRUCTIONS:
    Write demonstrated-compromise reports (description + impact + assets + remediation),
    not 'login worked' or template-match-only.
 7. Do not exceed {max_iter} iterations. If unsure, finish with done=true.
-8. Work only on the single leased hypothesis in the directive. Return one hypothesis_results entry for that ID; sibling tests stay open. Pass hypothesis_id to replay_http_request/compare_requests. Only independent verification marks proven.
+8. Work only on the single leased hypothesis or exact parameter coverage cell in the directive. Return one hypothesis_results entry when a hypothesis ID is leased; sibling tests stay open. Pass hypothesis_id and coverage_cell_id to replay_http_request/compare_requests when available. Only independent verification marks proven.
 9. Imagining tool output is a failure (soliloquy). If you did not call a tool, verdict=retry.
 9. save_note(category='hunt') with URL/param/hypothesis/next mutation — not raw httpx.
 

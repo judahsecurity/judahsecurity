@@ -41,7 +41,12 @@ def test_browser_observation_feeds_aegis_capability_map():
             "final_origin": "https://app.example", "final_path": "/", "status": 200,
             "forms": [{"method": "GET", "action": "https://app.example/search",
                        "fields": [{"name": "q", "control_type": "search"}]}],
-            "requests": [{"resource_type": "xhr", "method": "GET", "path": "/api/search"}],
+            "requests": [{"resource_type": "xhr", "method": "GET", "path": "/api/search",
+                          "query_keys": ["term"]}],
+            "traffic": [{"method": "POST", "path": "/api/comment", "artifact_id": "capture-9",
+                         "query_fields": [{"name": "draft", "value_type": "boolean"}],
+                         "body_fields": [{"location": "json", "path": "/comment/text",
+                                          "value_type": "string"}]}],
         },
     }
     cmap = bridge.capability_map_from_observation(observation)
@@ -49,6 +54,11 @@ def test_browser_observation_feeds_aegis_capability_map():
     assert cmap["forms"][0]["inputs"] == ["q"]
     assert cmap["api_endpoints"][0]["path"] == "/api/search"
     assert cmap["has_api"] is True
+    assert {row["name"] for row in cmap["parameter_inventory"]} >= {
+        "q", "term", "draft", "/comment/text",
+    }
+    assert next(row for row in cmap["parameter_inventory"]
+                if row["name"] == "/comment/text")["artifact_id"] == "capture-9"
 
 
 def test_scoped_operations_are_available_to_aegis_agent(monkeypatch):

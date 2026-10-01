@@ -424,6 +424,39 @@ def migrate_coverage_cells(
     return brain.coverage_cells
 
 
+def seed_parameter_coverage_cells(brain: Any, inventory: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Create one durable XSS and SQLi work item per eligible observed input.
+
+    Repeated mapping cannot reset a completed or leased cell. Parameters that
+    carry authentication or anti-CSRF state remain in the inventory but are
+    excluded from automatic injection work.
+    """
+    existing = {row.get("id") for row in getattr(brain, "coverage_cells", []) if isinstance(row, dict)}
+    for raw in inventory:
+        if not isinstance(raw, dict) or raw.get("testable") is not True:
+            continue
+        for test_type in ("xss", "sqli"):
+            specialist = test_type
+            hypothesis = next((
+                h for h in getattr(brain, "hypotheses", []) or []
+                if getattr(h, "specialist", "") == specialist
+                and getattr(h, "status", "") in ("open", "in_progress")
+            ), None)
+            cell = _new_cell(
+                brain,
+                method=raw.get("method", "GET"), path=raw.get("path", "/"),
+                host=raw.get("host", ""), identity=raw.get("identity", "anonymous"),
+                parameter=f"{raw.get('location', 'query')}:{raw.get('name', '')}",
+                test_type=test_type,
+                hypothesis_id=getattr(hypothesis, "id", ""),
+                source="parameter_inventory", capture_id=raw.get("artifact_id", ""),
+            )
+            if cell["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
+                brain.coverage_cells.append(cell)
+                existing.add(cell["id"])
+    return migrate_coverage_cells(brain)
+
+
 def record_coverage_cell(
     brain: Any,
     *,

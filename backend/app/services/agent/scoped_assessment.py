@@ -76,12 +76,17 @@ def capability_map_from_observation(observation: dict) -> dict | None:
     forms = [
         {"method": row.get("method"), "action": row.get("action"),
          "inputs": [field["name"] for field in (row.get("fields") or [])[:40]
-                    if isinstance(field, dict) and isinstance(field.get("name"), str)]}
+                    if isinstance(field, dict) and isinstance(field.get("name"), str)],
+         "fields": [
+             {"name": field["name"], "control_type": field.get("control_type", "")}
+             for field in (row.get("fields") or [])[:40]
+             if isinstance(field, dict) and isinstance(field.get("name"), str)
+         ]}
         for row in raw_forms[:60] if isinstance(row, dict)
     ]
     api_endpoints = [
         {"host": urlsplit(scope).hostname or "", "method": row.get("method", "GET"),
-         "path": row["path"]}
+         "path": row["path"], "query_keys": row.get("query_keys") or []}
         for row in (result.get("requests") or [])[:100]
         if isinstance(row, dict) and row.get("resource_type") in ("xhr", "fetch")
         and isinstance(row.get("path"), str)
@@ -100,10 +105,37 @@ def capability_map_from_observation(observation: dict) -> dict | None:
         for row in (result.get("scripts") or [])[:20]
         if isinstance(row, dict) and isinstance(row.get("path"), str)
     ]
+    parameters = []
+    for row in (result.get("requests") or [])[:100]:
+        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+            continue
+        for name in (row.get("query_keys") or [])[:20]:
+            parameters.append({
+                "method": row.get("method", "GET"), "path": row["path"],
+                "name": name, "location": "query", "source": "browser_request",
+                "identity": result.get("identity", "anonymous"),
+            })
+    for row in (result.get("traffic") or [])[:40]:
+        if not isinstance(row, dict) or not isinstance(row.get("path"), str):
+            continue
+        common = {"method": row.get("method", "GET"), "path": row["path"],
+                  "source": "browser_traffic", "identity": result.get("identity", "anonymous"),
+                  "artifact_id": row.get("artifact_id", "")}
+        for field in (row.get("query_fields") or [])[:20]:
+            if isinstance(field, dict):
+                parameters.append(common | {"name": field.get("name"),
+                                            "value_type": field.get("value_type", ""),
+                                            "location": "query"})
+        for field in (row.get("body_fields") or [])[:40]:
+            if isinstance(field, dict):
+                parameters.append(common | {"name": field.get("path"),
+                                            "value_type": field.get("value_type", ""),
+                                            "location": "body_json" if field.get("location") == "json" else "body_form"})
     cmap = CapabilityMap(
         target=str(result.get("target_template") or scope), scope=scope,
         pages_visited=pages, forms=forms, api_endpoints=api_endpoints,
         js_endpoints=js_endpoints, js_files=js_files,
+        parameter_inventory=parameters[:4000],
         notes=["Source: scoped assessment service browser observation"],
     )
     return finalize_capability_map(cmap).to_dict()

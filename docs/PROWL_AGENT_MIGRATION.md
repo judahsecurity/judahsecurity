@@ -43,6 +43,25 @@ candidate stays pending. The model never gets the verifier capability. This
 repeat action provides independent evidence; it is not yet a separate
 adversarial reasoning agent.
 
+## Parameter handoff to specialists
+
+Aegis now normalizes observed query keys, form controls, API sample bodies,
+and scoped browser traffic into a value-free parameter inventory. Each row
+identifies the HTTP method, host, path, input location, parameter name,
+identity, and capture reference where available. Request values and session
+secrets do not enter the inventory. The `get_parameter_inventory` tool pages
+through the worklist; XSS and SQLi specialists receive an exact parameter
+coverage lease in each fireteam wave.
+
+The coverage ledger creates separate XSS and SQLi cells for every eligible
+observed input. A completed cell survives a later map refresh, while other
+inputs stay open. Dispatch can continue these cells after a broad XSS or SQLi
+hypothesis is closed. A negative result needs cited HTTP evidence; a signal
+still requires independent verification before it becomes a finding. CSRF,
+session, and token fields are recorded but excluded from automatic injection
+work. Browser and crawl capture limits still bound what Aegis can discover;
+the ledger cannot claim coverage for inputs that were never observed.
+
 Confirmed service publications enter the ordinary Aegis Findings table through
 `POST /api/v1/prowl/findings`. This intake requires a service key, distinct
 hunter and verifier evidence, a supported proof recipe, asset matching, and

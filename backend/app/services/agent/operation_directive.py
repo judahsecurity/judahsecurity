@@ -38,6 +38,7 @@ class OperationDirective:
     lease_id: str = ""
     coverage_cell_id: str = ""
     coverage_lease_id: str = ""
+    parameter_work: Dict[str, str] = field(default_factory=dict)
     proof_escalation_id: str = ""
     proof_strategy: str = ""
     proof_requirements: List[str] = field(default_factory=list)
@@ -83,6 +84,17 @@ class OperationDirective:
                 "\nTrace every replay/compare/candidate/coverage update with coverage_cell_id="
                 f"{self.coverage_cell_id}. When closing it, also pass coverage_lease_id="
                 f"{self.coverage_lease_id}."
+            )
+        if self.parameter_work:
+            work = self.parameter_work
+            block += (
+                "\nAssigned observed input for this wave: "
+                f"{work.get('method', 'GET')} {work.get('host', '')}{work.get('path', '/')} "
+                f"{work.get('location', 'query')}:{work.get('name', '')} "
+                f"identity={work.get('identity', 'anonymous')}. "
+                "Test this exact input with a baseline and bounded canary, then cite the "
+                "exchange evidence when closing its coverage cell. Other inputs remain open "
+                "for later waves; get_parameter_inventory can page through the full worklist."
             )
         if self.proof_escalation_id:
             block += (
@@ -157,6 +169,19 @@ def directives_from_hypotheses(
             ),
             {},
         )
+        parameter_work: Dict[str, str] = {}
+        if coverage_cell.get("source") == "parameter_inventory":
+            location, _, parameter_name = str(coverage_cell.get("parameter") or "").partition(":")
+            if parameter_name:
+                parameter_work = {
+                    "method": str(coverage_cell.get("method") or "GET"),
+                    "host": str(coverage_cell.get("host") or ""),
+                    "path": str(coverage_cell.get("path") or "/"),
+                    "location": location,
+                    "name": parameter_name,
+                    "identity": str(coverage_cell.get("identity") or "anonymous"),
+                    "capture_id": str(coverage_cell.get("capture_id") or ""),
+                }
         proof_escalation_id = str(coverage_cell.get("proof_escalation_id") or "")
         proof_escalation = next(
             (
@@ -184,6 +209,8 @@ def directives_from_hypotheses(
             matched = matched + [
                 h for h in open_hyps if getattr(h, "specialist", None) == "injection"
             ]
+        if parameter_work and not leased_hypothesis_id:
+            matched = []
         if matched:
             h0 = matched[0]
             # Combine tests when multiple methodology cards map to one specialist
@@ -254,6 +281,7 @@ def directives_from_hypotheses(
             lease_id=lease_id,
             coverage_cell_id=coverage_cell_id,
             coverage_lease_id=coverage_lease_id,
+            parameter_work=parameter_work,
             proof_escalation_id=proof_escalation_id,
             proof_strategy=str(proof_escalation.get("strategy") or ""),
             proof_requirements=list(proof_escalation.get("requirements") or []),
