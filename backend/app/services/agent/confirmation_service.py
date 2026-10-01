@@ -66,6 +66,7 @@ def autonomous_mode_enabled() -> bool:
 
 
 READONLY_TOOLS = {
+    "scoped_assessment_status",
     "get_assessment_coverage", "map_application_traffic", "generate_authorization_matrix",
     "query_assets",
     "query_vulnerabilities",
@@ -92,6 +93,7 @@ READONLY_TOOLS = {
 # Passive / light recon: always auto-allow unless explicitly denied.
 # Prevents assessment kickoff from stalling on approve-every-httpx.
 SAFE_RECON_TOOLS = {
+    "scoped_assessment_observe",
     "execute_httpx",
     "execute_dnsx",
     "execute_wafw00f",

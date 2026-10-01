@@ -626,9 +626,26 @@ These tools implement specialized offensive test workflows and require the explo
 """
 
     tools = informational_tools
+
+    # Offered only when the private executor has been configured. An operator
+    # binds the exact-origin run to this session before the model can use it.
+    from app.core.config import settings
+    if settings.PROWL_ASSESSMENT_URL and settings.PROWL_ADMIN_TOKEN:
+        tools += """
+### Scoped assessment service (when a run is bound to this session)
+- **scoped_assessment_observe**: Evidence-backed browser/HTTP discovery within the operator's exact origin. Args: operation (browser_map, browser_crawl, browser_inspect_js, http_get, http_compare), body (service JSON, e.g. {"url":"https://target.example/","identity":"anonymous"}). The service records private traffic and returns artifact IDs.
+- **scoped_assessment_status**: Read service coverage or summary. Args: operation (coverage or assessment_summary; default summary).
+Do not put credentials or bearer tokens in tool arguments. Use the service's artifact IDs for later proof and candidate submission.
+"""
     
     if phase in ["exploitation", "post_exploitation"]:
         tools += exploitation_tools
+        if settings.PROWL_ASSESSMENT_URL and settings.PROWL_ADMIN_TOKEN:
+            tools += """
+- **scoped_assessment_probe**: Bounded proof action. Args: operation (browser_check_xss, http_query_probe, http_body_probe, http_sqli_boolean, http_authz_owner_only), body (service JSON with captured artifact ID where required).
+- **scoped_assessment_candidate**: Submit a finding candidate to the service evidence gate. Args: body with title, target, severity, hypothesis, remediation, evidence_ids. For a browser XSS or public directory index proof, also set verification_recipe to browser_xss or public_directory_index (and verification_identity for named-identity XSS). Aegis then runs a fresh server-side verifier action with a separate capability and publishes only if the service confirms the proof. Other recipes remain pending for independent review.
+- **scoped_assessment_publish**: Retry publication of a service-confirmed candidate if Aegis intake was temporarily unavailable. Args: candidate_id. The service proof gate still decides whether publication is allowed.
+"""
     
     if phase == "post_exploitation" and post_expl_enabled:
         tools += post_exploitation_tools
@@ -638,6 +655,11 @@ These tools implement specialized offensive test workflows and require the explo
 
 # Tool phase mapping
 TOOL_PHASE_MAP = {
+    "scoped_assessment_observe": ["informational", "exploitation", "post_exploitation"],
+    "scoped_assessment_status": ["informational", "exploitation", "post_exploitation"],
+    "scoped_assessment_probe": ["exploitation", "post_exploitation"],
+    "scoped_assessment_candidate": ["exploitation", "post_exploitation"],
+    "scoped_assessment_publish": ["exploitation", "post_exploitation"],
     # Informational tools - available in all phases
     "add_asset": ["informational", "exploitation", "post_exploitation"],
     "create_scan": ["informational", "exploitation", "post_exploitation"],

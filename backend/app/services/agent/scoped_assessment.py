@@ -1,0 +1,304 @@
+"""Aegis-owned session bridge to the scoped assessment execution service.
+
+The model selects an allowlisted operation. It never receives the service's
+admin, hunter, verifier, or finding-ingestion credentials.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from urllib.parse import urlsplit
+
+import httpx
+
+from app.core.config import settings
+from app.models.asset import Asset, AssetType
+from app.models.scoped_assessment_run import ScopedAssessmentRun
+
+_RUN_ID = re.compile(r"[0-9a-f]{32}\Z")
+_OPERATIONS = {
+    "browser_map": ("POST", "browser/map"),
+    "browser_crawl": ("POST", "browser/crawl"),
+    "browser_inspect_js": ("POST", "browser/inspect-js"),
+    "http_get": ("POST", "http/get"),
+    "http_compare": ("POST", "http/compare"),
+    "browser_check_xss": ("POST", "browser/check-xss"),
+    "http_query_probe": ("POST", "http/query-probe"),
+    "http_body_probe": ("POST", "http/body-probe"),
+    "http_sqli_boolean": ("POST", "http/sqli-boolean"),
+    "http_authz_owner_only": ("POST", "http/authz-owner-only"),
+    "submit_candidate": ("POST", "candidates"),
+    "coverage": ("GET", "coverage"),
+    "assessment_summary": ("GET", "assessment-summary"),
+}
+OBSERVE_OPERATIONS = frozenset({
+    "browser_map", "browser_crawl", "browser_inspect_js", "http_get", "http_compare",
+})
+PROBE_OPERATIONS = frozenset({
+    "browser_check_xss", "http_query_probe", "http_body_probe",
+    "http_sqli_boolean", "http_authz_owner_only",
+})
+
+
+def capability_map_from_observation(observation: dict) -> dict | None:
+    """Translate a service browser observation into the existing Aegis map."""
+    if observation.get("signal") not in {
+        "browser_map", "browser_crawl", "browser_inspect_js",
+    }:
+        return None
+    result = observation.get("result")
+    if not isinstance(result, dict):
+        return None
+    scope = result.get("final_origin")
+    if not isinstance(scope, str) or not scope:
+        return None
+    from app.services.agent.capability_map import CapabilityMap, finalize_capability_map
+
+    pages = []
+    if isinstance(result.get("pages"), list):
+        pages = [row["url"] for row in result["pages"][:80]
+                 if isinstance(row, dict) and isinstance(row.get("url"), str)
+                 and isinstance(row.get("status"), int) and 200 <= row["status"] < 400]
+    elif isinstance(result.get("status"), int) and 200 <= result["status"] < 400:
+        pages = [scope + str(result.get("final_path") or "/")]
+
+    raw_forms = list(result.get("forms") or [])
+    for page in (result.get("pages") or [])[:80]:
+        if isinstance(page, dict):
+            raw_forms.extend(page.get("forms") or [])
+    forms = [
+        {"method": row.get("method"), "action": row.get("action"),
+         "inputs": [field["name"] for field in (row.get("fields") or [])[:40]
+                    if isinstance(field, dict) and isinstance(field.get("name"), str)]}
+        for row in raw_forms[:60] if isinstance(row, dict)
+    ]
+    api_endpoints = [
+        {"host": urlsplit(scope).hostname or "", "method": row.get("method", "GET"),
+         "path": row["path"]}
+        for row in (result.get("requests") or [])[:100]
+        if isinstance(row, dict) and row.get("resource_type") in ("xhr", "fetch")
+        and isinstance(row.get("path"), str)
+    ]
+    inventory = result.get("surface_inventory") or {}
+    if not isinstance(inventory, dict):
+        inventory = {}
+    js_endpoints = [
+        scope + row["path"]
+        for row in (inventory.get("endpoints") or [])[:100]
+        if isinstance(row, dict) and isinstance(row.get("path"), str)
+        and "javascript_static" in (row.get("sources") or [])
+    ]
+    js_files = [
+        scope + row["path"]
+        for row in (result.get("scripts") or [])[:20]
+        if isinstance(row, dict) and isinstance(row.get("path"), str)
+    ]
+    cmap = CapabilityMap(
+        target=str(result.get("target_template") or scope), scope=scope,
+        pages_visited=pages, forms=forms, api_endpoints=api_endpoints,
+        js_endpoints=js_endpoints, js_files=js_files,
+        notes=["Source: scoped assessment service browser observation"],
+    )
+    return finalize_capability_map(cmap).to_dict()
+
+
+def _service_url() -> str:
+    value = settings.PROWL_ASSESSMENT_URL.rstrip("/")
+    parts = urlsplit(value)
+    if (parts.scheme not in ("http", "https") or not parts.hostname or
+            parts.username or parts.password or parts.path or parts.query or parts.fragment):
+        raise ValueError("PROWL_ASSESSMENT_URL must be an HTTP(S) service origin")
+    return value
+
+
+def exact_asset_origin(asset: Asset, requested_origin: str) -> str:
+    """Do not let an agent or caller expand a service run beyond one stored asset."""
+    if not asset.in_scope or asset.asset_type not in {
+        AssetType.URL, AssetType.DOMAIN, AssetType.SUBDOMAIN, AssetType.IP_ADDRESS,
+    }:
+        raise ValueError("Asset is not an in-scope web target")
+    parts = urlsplit(requested_origin)
+    if (parts.scheme not in ("http", "https") or not parts.hostname or
+            parts.username or parts.password or parts.path or parts.query or parts.fragment or
+            requested_origin != f"{parts.scheme}://{parts.netloc}"):
+        raise ValueError("Origin must be an exact HTTP(S) origin without credentials or path")
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError("Origin has an invalid port") from exc
+    if ":" in parts.hostname:
+        raise ValueError("IPv6 origins are not supported by the scoped executor")
+    default_port = 443 if parts.scheme == "https" else 80
+    canonical = f"{parts.scheme}://{parts.hostname.lower()}"
+    if port and port != default_port:
+        canonical += f":{port}"
+    value = asset.value.strip()
+    if asset.asset_type == AssetType.URL:
+        stored = urlsplit(value)
+        # The executor scopes by origin. A path-scoped URL asset does not
+        # authorize the rest of that origin.
+        if stored.path not in ("", "/") or stored.query or stored.fragment:
+            raise ValueError("A URL asset with a path cannot authorize an origin-wide run")
+        if (stored.scheme, stored.hostname, stored.port or default_port) != (
+            parts.scheme, parts.hostname, port or default_port,
+        ):
+            raise ValueError("Origin does not match the in-scope URL asset")
+    elif parts.hostname.lower().rstrip(".") != value.lower().rstrip("."):
+        raise ValueError("Origin host does not match the in-scope asset")
+    return canonical
+
+
+async def _request(method: str, path: str, token: str, body: dict | None = None) -> dict:
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(
+        base_url=_service_url(), timeout=90.0, follow_redirects=False, trust_env=False,
+    ) as client:
+        response = await client.request(method, path, headers=headers, json=body if method == "POST" else None)
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise ValueError("Assessment service returned invalid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Assessment service returned a non-object response")
+    if response.is_error:
+        raise ValueError(f"Assessment service rejected the operation ({response.status_code}): "
+                         f"{str(payload.get('error') or 'unknown error')[:300]}")
+    return payload
+
+
+async def provision_run(
+    db, *, organization_id: int, user_id: int, session_id: str, asset: Asset,
+    origin: str, identities: dict | None = None,
+    body_replay_paths: list[str] | None = None,
+    authz_expectations: list[dict] | None = None,
+) -> ScopedAssessmentRun:
+    if not settings.PROWL_ADMIN_TOKEN:
+        raise ValueError("Scoped assessment service is not configured")
+    allowed_origin = exact_asset_origin(asset, origin)
+    existing = db.query(ScopedAssessmentRun).filter_by(
+        organization_id=organization_id, session_id=session_id,
+    ).first()
+    if existing:
+        raise ValueError("This agent session already has a scoped assessment run")
+    response = await _request("POST", "/v1/runs", settings.PROWL_ADMIN_TOKEN, {
+        "organization_id": organization_id,
+        "asset_id": asset.id,
+        "allowed_origins": [allowed_origin],
+        "identities": identities or {},
+        "body_replay_paths": body_replay_paths or [],
+        "authz_expectations": authz_expectations or [],
+    })
+    run_id = response.get("run_id")
+    if (not isinstance(run_id, str) or not _RUN_ID.fullmatch(run_id) or
+            response.get("organization_id") != organization_id or
+            response.get("asset_id") != asset.id or
+            response.get("allowed_origins") != [allowed_origin] or
+            not isinstance(response.get("hunter_token"), str) or
+            not isinstance(response.get("verifier_token"), str)):
+        raise ValueError("Assessment service returned an invalid run binding")
+    binding = ScopedAssessmentRun(
+        organization_id=organization_id, user_id=user_id, session_id=session_id,
+        asset_id=asset.id, service_run_id=run_id, allowed_origin=allowed_origin,
+    )
+    binding.set_tokens(response["hunter_token"], response["verifier_token"])
+    db.add(binding)
+    db.commit()
+    db.refresh(binding)
+    return binding
+
+
+async def hunter_operation(db, *, organization_id: int, user_id: int, session_id: str,
+                           operation: str, body: dict | None = None) -> dict:
+    if operation not in _OPERATIONS:
+        raise ValueError("Unknown scoped assessment operation")
+    binding = db.query(ScopedAssessmentRun).filter_by(
+        organization_id=organization_id, user_id=user_id, session_id=session_id,
+    ).first()
+    if binding is None:
+        raise ValueError("No scoped assessment is bound to this agent session")
+    if body is not None and (not isinstance(body, dict) or len(json.dumps(body)) > 60_000):
+        raise ValueError("Assessment arguments must be a bounded JSON object")
+    method, suffix = _OPERATIONS[operation]
+    return await _request(method, f"/v1/runs/{binding.service_run_id}/{suffix}",
+                          binding.hunter_token(), body or {})
+
+
+async def verify_candidate_with_fresh_proof(
+    db, *, organization_id: int, user_id: int, session_id: str,
+    candidate_id: str, recipe: str, identity: str = "anonymous",
+) -> dict:
+    """Server-side independent replay for the two self-contained proof recipes.
+
+    The verifier uses a distinct capability and a new service action. The
+    service itself decides whether the new proof matches the hunter's proof.
+    """
+    if not _RUN_ID.fullmatch(candidate_id):
+        raise ValueError("Invalid candidate ID")
+    if recipe not in ("browser_xss", "public_directory_index"):
+        raise ValueError("Automated verifier supports browser XSS and public directory index only")
+    if not isinstance(identity, str) or not identity or len(identity) > 80:
+        raise ValueError("Invalid verifier identity")
+    binding = db.query(ScopedAssessmentRun).filter_by(
+        organization_id=organization_id, user_id=user_id, session_id=session_id,
+    ).first()
+    if binding is None:
+        raise ValueError("No scoped assessment is bound to this agent session")
+    base = f"/v1/runs/{binding.service_run_id}"
+    verifier_token = binding.verifier_token()
+    candidate = await _request("GET", f"{base}/candidates/{candidate_id}", verifier_token)
+    target = candidate.get("target")
+    if (candidate.get("run_id") != binding.service_run_id or
+            candidate.get("candidate_id") != candidate_id or
+            candidate.get("status") != "pending" or not isinstance(target, str)):
+        raise ValueError("Candidate is not pending in the bound assessment run")
+    if recipe == "browser_xss":
+        observation = await _request("POST", f"{base}/browser/check-xss", verifier_token,
+                                     {"url_template": target, "identity": identity})
+        confirmed = (observation.get("result") or {}).get("executed") is True
+    else:
+        observation = await _request("POST", f"{base}/http/get", verifier_token,
+                                     {"url": target, "identity": "anonymous"})
+        result = observation.get("result") or {}
+        confirmed = (result.get("directory_index") is True and result.get("status") == 200
+                     and result.get("truncated") is False)
+    evidence_ids = observation.get("artifact_ids") or []
+    if (observation.get("run_id") != binding.service_run_id or
+            observation.get("actor") != "verifier" or not evidence_ids):
+        raise ValueError("Verifier did not receive a fresh service observation")
+    verdict = "confirmed" if confirmed else "inconclusive"
+    verification = await _request("POST", f"{base}/candidates/{candidate_id}/verify",
+                                  verifier_token, {
+                                      "verifier_id": "aegis-deterministic-verifier",
+                                      "verdict": verdict,
+                                      "evidence_ids": [evidence_ids[0]],
+                                      "reason": ("Fresh service proof reproduced the claim"
+                                                 if confirmed else "Fresh service proof did not confirm the claim"),
+                                  })
+    publication = None
+    publication_error = None
+    if verdict == "confirmed":
+        try:
+            publication = await _request("POST", f"{base}/candidates/{candidate_id}/publish",
+                                         verifier_token, {})
+        except (ValueError, httpx.RequestError) as exc:
+            publication_error = str(exc)[:300]
+    return {"candidate_id": candidate_id, "verdict": verdict,
+            "verification_id": verification.get("verification_id"),
+            "verifier_artifact_id": evidence_ids[0], "publication": publication,
+            "publication_error": publication_error}
+
+
+async def publish_confirmed_candidate(db, *, organization_id: int, user_id: int,
+                                      session_id: str, candidate_id: str) -> dict:
+    if not isinstance(candidate_id, str) or not _RUN_ID.fullmatch(candidate_id):
+        raise ValueError("Invalid candidate ID")
+    binding = db.query(ScopedAssessmentRun).filter_by(
+        organization_id=organization_id, user_id=user_id, session_id=session_id,
+    ).first()
+    if binding is None:
+        raise ValueError("No scoped assessment is bound to this agent session")
+    return await _request(
+        "POST", f"/v1/runs/{binding.service_run_id}/candidates/{candidate_id}/publish",
+        binding.hunter_token(), {},
+    )

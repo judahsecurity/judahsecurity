@@ -585,6 +585,12 @@ class ASMToolsManager(AssessmentCapabilities):
             "record_verify_verdict": self.record_verify_verdict,
             "read_evidence": self.read_evidence,
             "run_assessment_workflow": self.run_assessment_workflow,
+            # Private scoped executor: run binding and bearer tokens stay in Aegis.
+            "scoped_assessment_observe": self.scoped_assessment_observe,
+            "scoped_assessment_probe": self.scoped_assessment_probe,
+            "scoped_assessment_candidate": self.scoped_assessment_candidate,
+            "scoped_assessment_publish": self.scoped_assessment_publish,
+            "scoped_assessment_status": self.scoped_assessment_status,
             "register_test_identity": self.register_test_identity,
             "list_test_identities": self.list_test_identities,
             "check_test_identity": self.check_test_identity,
@@ -625,6 +631,129 @@ class ASMToolsManager(AssessmentCapabilities):
     def get_tool(self, name: str) -> Optional[callable]:
         """Get a tool by name."""
         return self.tools.get(name)
+
+    async def _scoped_assessment_operation(self, operation: str, body: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        from app.services.agent.scoped_assessment import hunter_operation, capability_map_from_observation
+
+        user_id, org_id = get_tenant_context()
+        session_id = current_session_id.get()
+        if not user_id or not org_id or not session_id:
+            return {"success": False, "error": "missing_agent_session", "output": "Agent session is required"}
+        db = SessionLocal()
+        try:
+            result = await hunter_operation(
+                db, organization_id=org_id, user_id=user_id, session_id=session_id,
+                operation=operation, body=body,
+            )
+            visible = result
+            if isinstance(result.get("result"), dict):
+                detail = dict(result["result"])
+                inventory = detail.pop("surface_inventory", None)
+                specialists = detail.pop("recommended_specialists", None)
+                visible = {
+                    "run_id": result.get("run_id"), "signal": result.get("signal"),
+                    "target": result.get("target"),
+                    "artifact_ids": result.get("artifact_ids", []),
+                    "surface_inventory": inventory,
+                    "recommended_specialists": specialists,
+                    "result": detail,
+                }
+            serialized = json.dumps(visible, default=str, separators=(",", ":"))
+            payload = {
+                "success": True,
+                "output": serialized[:_tool_output_max_chars()],
+                "run_id": result.get("run_id"),
+                "candidate_id": result.get("candidate_id"),
+                "service_artifact_ids": result.get("artifact_ids", []),
+                "truncated": len(serialized) > _tool_output_max_chars(),
+            }
+            if operation in {"browser_map", "browser_crawl", "browser_inspect_js"}:
+                capability_map = capability_map_from_observation(result)
+                if capability_map:
+                    payload["capability_map"] = capability_map
+            return payload
+        except ValueError as exc:
+            return {"success": False, "error": "assessment_rejected", "output": str(exc)[:500]}
+        except Exception:
+            logger.exception("Scoped assessment operation failed")
+            return {"success": False, "error": "assessment_unavailable",
+                    "output": "Scoped assessment service is unavailable"}
+        finally:
+            db.close()
+
+    async def scoped_assessment_observe(self, operation: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        from app.services.agent.scoped_assessment import OBSERVE_OPERATIONS
+
+        if operation not in OBSERVE_OPERATIONS:
+            return {"success": False, "error": "invalid_operation", "output": "Unknown observation operation"}
+        return await self._scoped_assessment_operation(operation, body)
+
+    async def scoped_assessment_probe(self, operation: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        from app.services.agent.scoped_assessment import PROBE_OPERATIONS
+
+        if operation not in PROBE_OPERATIONS:
+            return {"success": False, "error": "invalid_operation", "output": "Unknown probe operation"}
+        return await self._scoped_assessment_operation(operation, body)
+
+    async def scoped_assessment_candidate(
+        self, body: Dict[str, Any], verification_recipe: str = "",
+        verification_identity: str = "anonymous",
+    ) -> Dict[str, Any]:
+        submitted = await self._scoped_assessment_operation("submit_candidate", body)
+        if not submitted.get("success") or not verification_recipe:
+            return submitted
+        from app.services.agent.scoped_assessment import verify_candidate_with_fresh_proof
+
+        user_id, org_id = get_tenant_context()
+        session_id = current_session_id.get()
+        db = SessionLocal()
+        try:
+            verification = await verify_candidate_with_fresh_proof(
+                db, organization_id=org_id, user_id=user_id, session_id=session_id,
+                candidate_id=submitted["candidate_id"], recipe=verification_recipe,
+                identity=verification_identity,
+            )
+            submitted["verification"] = verification
+            submitted["output"] += "\nVerification: " + json.dumps(verification)
+        except ValueError as exc:
+            submitted["verification_error"] = str(exc)[:300]
+            submitted["output"] += "\nCandidate remains pending: " + str(exc)[:300]
+        except Exception:
+            logger.exception("Scoped assessment verification failed")
+            submitted["verification_error"] = "verification_unavailable"
+            submitted["output"] += "\nCandidate remains pending: verification unavailable"
+        finally:
+            db.close()
+        return submitted
+
+    async def scoped_assessment_status(self, operation: str = "assessment_summary") -> Dict[str, Any]:
+        if operation not in ("coverage", "assessment_summary"):
+            return {"success": False, "error": "invalid_operation", "output": "Unknown status operation"}
+        return await self._scoped_assessment_operation(operation, None)
+
+    async def scoped_assessment_publish(self, candidate_id: str) -> Dict[str, Any]:
+        """Retry publication of a service-confirmed candidate after intake recovery."""
+        from app.services.agent.scoped_assessment import publish_confirmed_candidate
+
+        user_id, org_id = get_tenant_context()
+        session_id = current_session_id.get()
+        if not user_id or not org_id or not session_id:
+            return {"success": False, "error": "missing_agent_session", "output": "Agent session is required"}
+        db = SessionLocal()
+        try:
+            result = await publish_confirmed_candidate(
+                db, organization_id=org_id, user_id=user_id, session_id=session_id,
+                candidate_id=candidate_id,
+            )
+            return {"success": True, "output": json.dumps(result), "publication": result}
+        except ValueError as exc:
+            return {"success": False, "error": "publication_rejected", "output": str(exc)[:500]}
+        except Exception:
+            logger.exception("Scoped assessment publication failed")
+            return {"success": False, "error": "publication_unavailable",
+                    "output": "Scoped assessment publication is unavailable"}
+        finally:
+            db.close()
     
     def get_all_tools(self) -> Dict[str, callable]:
         """Get all registered tools."""
@@ -664,7 +793,11 @@ class ASMToolsManager(AssessmentCapabilities):
         run_id = active_run_id.get()
         action_id = os.urandom(16).hex()
         args_dict = tool_args if isinstance(tool_args, dict) else {}
-        target = args_dict.get("target") or args_dict.get("url") or current_seed_target.get() or ""
+        nested = args_dict.get("body") if tool_name.startswith("scoped_assessment_") else None
+        nested = nested if isinstance(nested, dict) else {}
+        target = (args_dict.get("target") or args_dict.get("url") or
+                  nested.get("target") or nested.get("url") or nested.get("url_template") or
+                  current_seed_target.get() or "")
         append_action(run_id, action_id, "started", tool_name, target=target)
         try:
             result = await self._execute_impl(tool_name, tool_args)
@@ -962,6 +1095,16 @@ class ASMToolsManager(AssessmentCapabilities):
                     "error": err_txt,
                 }
         
+        # Scoped tools already return the standard tool-result envelope.
+        if tool_name.startswith("scoped_assessment_"):
+            tool = self.get_tool(tool_name)
+            if tool is None:
+                return {"success": False, "output": "Unknown scoped assessment tool", "error": "unknown_tool"}
+            try:
+                return await tool(**tool_args)
+            except TypeError as exc:
+                return {"success": False, "output": str(exc)[:300], "error": "invalid_arguments"}
+
         # Regular ASM tool
         tool = self.get_tool(tool_name)
         if not tool:

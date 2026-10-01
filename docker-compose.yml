@@ -88,6 +88,7 @@ services:
       # AI Agent Configuration (optional)
       - AI_PROVIDER=${AI_PROVIDER:-anthropic}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-claude-sonnet-4-6}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
@@ -106,6 +107,9 @@ services:
       - AGENT_REQUEST_TIMEOUT_SECONDS=${AGENT_REQUEST_TIMEOUT_SECONDS:-3600}
       - AGENT_TURN_BUDGET_SECONDS=${AGENT_TURN_BUDGET_SECONDS:-1800}
       - AGENT_REST_MAX_ITERATIONS=${AGENT_REST_MAX_ITERATIONS:-15}
+      - PROWL_ASSESSMENT_URL=${PROWL_ASSESSMENT_URL:-}
+      - PROWL_ADMIN_TOKEN=${PROWL_ADMIN_TOKEN:-}
+      - PROWL_INGEST_KEY=${PROWL_INGEST_KEY:-}
       # Optional: redacted OTLP traces to a self-hosted Phoenix/Langfuse sidecar
       - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-}
       - OTEL_EXPORTER_OTLP_HEADERS=${OTEL_EXPORTER_OTLP_HEADERS:-}
@@ -272,6 +276,23 @@ services:
     depends_on:
       - nginx
     entrypoint: /bin/sh -c 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done;'
+
+  # Optional private executor for Aegis-owned agent sessions. Build the image
+  # from the scoped service repository; no Claude agent runtime is needed here.
+  prowl-assessment:
+    image: ${PROWL_ASSESSMENT_IMAGE:-prowl-browser:latest}
+    restart: unless-stopped
+    profiles:
+      - scoped-assessment
+    environment:
+      - PROWL_ADMIN_TOKEN=${PROWL_ADMIN_TOKEN:-}
+      - PROWL_INGEST_KEY=${PROWL_INGEST_KEY:-}
+      - AEGIS_API_BASE=http://backend:8000/api/v1
+      - PROWL_DATA_DIR=/data
+    volumes:
+      - prowl_assessment_data:/data
+    networks:
+      - asm_network
 
   # Scanner Worker for async scan tasks
   scanner:
@@ -626,6 +647,8 @@ networks:
     driver: bridge
 
 volumes:
+  prowl_assessment_data:
+    driver: local
   postgres_data:
     driver: local
   redis_data:
