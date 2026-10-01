@@ -634,7 +634,9 @@ These tools implement specialized offensive test workflows and require the explo
         tools += """
 ### Scoped assessment service (when a run is bound to this session)
 - **scoped_assessment_observe**: Evidence-backed browser/HTTP discovery within the operator's exact origin. Args: operation (browser_map, browser_crawl, browser_inspect_js, http_get, http_compare), body (service JSON, e.g. {"url":"https://target.example/","identity":"anonymous"}). The service records private traffic and returns artifact IDs.
-- **scoped_assessment_status**: Read service coverage or summary. Args: operation (coverage or assessment_summary; default summary).
+- **scoped_assessment_status**: Read service coverage, threat model, or assessment summary. Args: operation (coverage, threat_model_get, or assessment_summary; default summary).
+- **scoped_assessment_plan**: Maintain the service assessment plan. Args: operation threat_model_set with body {attacker, assets[], entry_points[], trust_boundaries[], assumptions[]}; coverage_create with {kind,target,hypothesis,priority:1..3,expected_operation:http_get|http_compare|browser|manual,source_artifact_id?}; coverage_update with {coverage_id,status:tested|blocked|not_applicable|needs_follow_up,evidence_ids[],reason}; or complete_assessment after the threat model and all coverage checks are done. Service validates scope and evidence.
+- **scoped_assessment_memory**: Recall bounded, redacted observations and findings from prior runs for the same organization and asset. Args: optional target URL. Historical observations are leads; obtain fresh evidence in this run before submitting a candidate.
 Do not put credentials or bearer tokens in tool arguments. Use the service's artifact IDs for later proof and candidate submission.
 """
     
@@ -643,7 +645,7 @@ Do not put credentials or bearer tokens in tool arguments. Use the service's art
         if settings.PROWL_ASSESSMENT_URL and settings.PROWL_ADMIN_TOKEN:
             tools += """
 - **scoped_assessment_probe**: Bounded proof action. Args: operation (browser_check_xss, http_query_probe, http_body_probe, http_sqli_boolean, http_authz_owner_only), body (service JSON with captured artifact ID where required).
-- **scoped_assessment_candidate**: Submit a finding candidate to the service evidence gate. Args: body with title, target, severity, hypothesis, remediation, evidence_ids. For a browser XSS or public directory index proof, also set verification_recipe to browser_xss or public_directory_index (and verification_identity for named-identity XSS). Aegis then runs a fresh server-side verifier action with a separate capability and publishes only if the service confirms the proof. Other recipes remain pending for independent review.
+- **scoped_assessment_candidate**: Submit a finding candidate to the service evidence gate. Args: body with title, target, severity, hypothesis, remediation, evidence_ids. Set verification_recipe to browser_xss, public_directory_index, numeric_sqli, or owner_only_authz only when the hunter has a matching proof artifact. For numeric_sqli and owner_only_authz, also provide verification_page_url: the in-scope page whose UI issues the observed GET. Numeric SQLi requires verification_parameter; owner-only authorization requires verification_identity set to the declared owner. Aegis captures a fresh verifier-owned browser exchange and asks the service to confirm before publishing. If that capture cannot reproduce the request, the candidate remains pending. Do not pass hunter capture IDs to the verifier.
 - **scoped_assessment_publish**: Retry publication of a service-confirmed candidate if Aegis intake was temporarily unavailable. Args: candidate_id. The service proof gate still decides whether publication is allowed.
 """
     
@@ -657,6 +659,8 @@ Do not put credentials or bearer tokens in tool arguments. Use the service's art
 TOOL_PHASE_MAP = {
     "scoped_assessment_observe": ["informational", "exploitation", "post_exploitation"],
     "scoped_assessment_status": ["informational", "exploitation", "post_exploitation"],
+    "scoped_assessment_plan": ["informational", "exploitation", "post_exploitation"],
+    "scoped_assessment_memory": ["informational", "exploitation", "post_exploitation"],
     "scoped_assessment_probe": ["exploitation", "post_exploitation"],
     "scoped_assessment_candidate": ["exploitation", "post_exploitation"],
     "scoped_assessment_publish": ["exploitation", "post_exploitation"],

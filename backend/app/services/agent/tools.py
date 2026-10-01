@@ -591,6 +591,8 @@ class ASMToolsManager(AssessmentCapabilities):
             "scoped_assessment_candidate": self.scoped_assessment_candidate,
             "scoped_assessment_publish": self.scoped_assessment_publish,
             "scoped_assessment_status": self.scoped_assessment_status,
+            "scoped_assessment_plan": self.scoped_assessment_plan,
+            "scoped_assessment_memory": self.scoped_assessment_memory,
             "register_test_identity": self.register_test_identity,
             "list_test_identities": self.list_test_identities,
             "check_test_identity": self.check_test_identity,
@@ -698,6 +700,7 @@ class ASMToolsManager(AssessmentCapabilities):
     async def scoped_assessment_candidate(
         self, body: Dict[str, Any], verification_recipe: str = "",
         verification_identity: str = "anonymous",
+        verification_page_url: str = "", verification_parameter: str = "",
     ) -> Dict[str, Any]:
         submitted = await self._scoped_assessment_operation("submit_candidate", body)
         if not submitted.get("success") or not verification_recipe:
@@ -711,7 +714,8 @@ class ASMToolsManager(AssessmentCapabilities):
             verification = await verify_candidate_with_fresh_proof(
                 db, organization_id=org_id, user_id=user_id, session_id=session_id,
                 candidate_id=submitted["candidate_id"], recipe=verification_recipe,
-                identity=verification_identity,
+                identity=verification_identity, page_url=verification_page_url,
+                parameter=verification_parameter,
             )
             submitted["verification"] = verification
             submitted["output"] += "\nVerification: " + json.dumps(verification)
@@ -727,9 +731,17 @@ class ASMToolsManager(AssessmentCapabilities):
         return submitted
 
     async def scoped_assessment_status(self, operation: str = "assessment_summary") -> Dict[str, Any]:
-        if operation not in ("coverage", "assessment_summary"):
+        if operation not in ("coverage", "assessment_summary", "threat_model_get"):
             return {"success": False, "error": "invalid_operation", "output": "Unknown status operation"}
         return await self._scoped_assessment_operation(operation, None)
+
+    async def scoped_assessment_plan(self, operation: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        if operation not in ("threat_model_set", "coverage_create", "coverage_update", "complete_assessment"):
+            return {"success": False, "error": "invalid_operation", "output": "Unknown planning operation"}
+        return await self._scoped_assessment_operation(operation, body)
+
+    async def scoped_assessment_memory(self, target: Optional[str] = None) -> Dict[str, Any]:
+        return await self._scoped_assessment_operation("memory_recall", {"target": target} if target else {})
 
     async def scoped_assessment_publish(self, candidate_id: str) -> Dict[str, Any]:
         """Retry publication of a service-confirmed candidate after intake recovery."""

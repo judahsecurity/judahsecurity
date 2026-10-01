@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import re
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlsplit
 
 import httpx
 
@@ -29,6 +29,12 @@ _OPERATIONS = {
     "http_sqli_boolean": ("POST", "http/sqli-boolean"),
     "http_authz_owner_only": ("POST", "http/authz-owner-only"),
     "submit_candidate": ("POST", "candidates"),
+    "memory_recall": ("POST", "memory/recall"),
+    "threat_model_get": ("GET", "threat-model"),
+    "threat_model_set": ("POST", "threat-model"),
+    "coverage_create": ("POST", "coverage"),
+    "coverage_update": ("POST", "coverage"),
+    "complete_assessment": ("POST", "complete-assessment"),
     "coverage": ("GET", "coverage"),
     "assessment_summary": ("GET", "assessment-summary"),
 }
@@ -220,6 +226,12 @@ async def hunter_operation(db, *, organization_id: int, user_id: int, session_id
     if body is not None and (not isinstance(body, dict) or len(json.dumps(body)) > 60_000):
         raise ValueError("Assessment arguments must be a bounded JSON object")
     method, suffix = _OPERATIONS[operation]
+    if operation == "coverage_update":
+        coverage_id = (body or {}).get("coverage_id")
+        if not isinstance(coverage_id, str) or not _RUN_ID.fullmatch(coverage_id):
+            raise ValueError("Invalid coverage ID")
+        suffix += f"/{coverage_id}"
+        body = {key: value for key, value in body.items() if key != "coverage_id"}
     return await _request(method, f"/v1/runs/{binding.service_run_id}/{suffix}",
                           binding.hunter_token(), body or {})
 
@@ -227,18 +239,25 @@ async def hunter_operation(db, *, organization_id: int, user_id: int, session_id
 async def verify_candidate_with_fresh_proof(
     db, *, organization_id: int, user_id: int, session_id: str,
     candidate_id: str, recipe: str, identity: str = "anonymous",
+    page_url: str = "", parameter: str = "",
 ) -> dict:
-    """Server-side independent replay for the two self-contained proof recipes.
+    """Server-side replay with a distinct service capability and fresh evidence.
 
     The verifier uses a distinct capability and a new service action. The
     service itself decides whether the new proof matches the hunter's proof.
     """
     if not _RUN_ID.fullmatch(candidate_id):
         raise ValueError("Invalid candidate ID")
-    if recipe not in ("browser_xss", "public_directory_index"):
-        raise ValueError("Automated verifier supports browser XSS and public directory index only")
+    if recipe not in ("browser_xss", "public_directory_index", "numeric_sqli", "owner_only_authz"):
+        raise ValueError("Unknown automated verification recipe")
     if not isinstance(identity, str) or not identity or len(identity) > 80:
         raise ValueError("Invalid verifier identity")
+    if recipe in ("numeric_sqli", "owner_only_authz"):
+        if not isinstance(page_url, str) or not page_url or len(page_url) > 2048:
+            raise ValueError("Verifier browser page URL is required for this recipe")
+        if recipe == "numeric_sqli" and (not isinstance(parameter, str) or
+                not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", parameter)):
+            raise ValueError("Numeric SQLi verification requires the observed query parameter")
     binding = db.query(ScopedAssessmentRun).filter_by(
         organization_id=organization_id, user_id=user_id, session_id=session_id,
     ).first()
@@ -252,16 +271,63 @@ async def verify_candidate_with_fresh_proof(
             candidate.get("candidate_id") != candidate_id or
             candidate.get("status") != "pending" or not isinstance(target, str)):
         raise ValueError("Candidate is not pending in the bound assessment run")
+    if page_url:
+        page_parts = urlsplit(page_url)
+        if (page_parts.scheme not in ("http", "https") or page_parts.username or
+                page_parts.password or page_parts.netloc != urlsplit(binding.allowed_origin).netloc or
+                page_parts.scheme != urlsplit(binding.allowed_origin).scheme):
+            raise ValueError("Verifier page must be within the bound origin")
     if recipe == "browser_xss":
         observation = await _request("POST", f"{base}/browser/check-xss", verifier_token,
                                      {"url_template": target, "identity": identity})
         confirmed = (observation.get("result") or {}).get("executed") is True
-    else:
+    elif recipe == "public_directory_index":
         observation = await _request("POST", f"{base}/http/get", verifier_token,
                                      {"url": target, "identity": "anonymous"})
         result = observation.get("result") or {}
         confirmed = (result.get("directory_index") is True and result.get("status") == 200
                      and result.get("truncated") is False)
+    else:
+        # A fresh browser run must produce the verifier's own private XHR/fetch
+        # capture. Hunter artifact IDs are deliberately unusable by this actor.
+        browser = await _request("POST", f"{base}/browser/inspect-js", verifier_token, {
+            "url": page_url, "identity": identity, "max_pages": 1, "max_actions": 3,
+        })
+        if browser.get("run_id") != binding.service_run_id or browser.get("actor") != "verifier":
+            raise ValueError("Verifier browser capture is not bound to this run")
+        target_parts = urlsplit(target)
+        query_keys = {key for key, _ in parse_qsl(target_parts.query, keep_blank_values=True)}
+        traffic = (browser.get("result") or {}).get("traffic") or []
+        matches = [
+            row for row in traffic if isinstance(row, dict)
+            and row.get("method") == "GET"
+            and row.get("path") == (target_parts.path or "/")
+            and set(row.get("query_keys") or []) == query_keys
+            and (recipe != "numeric_sqli" or any(
+                field.get("name") == parameter and field.get("value_type") == "positive_integer"
+                for field in (row.get("query_fields") or []) if isinstance(field, dict)
+            ))
+            and isinstance(row.get("artifact_id"), str)
+        ]
+        if len(matches) != 1:
+            raise ValueError("Fresh browser capture did not identify one matching GET request")
+        capture_id = matches[0]["artifact_id"]
+        if recipe == "numeric_sqli":
+            observation = await _request("POST", f"{base}/http/sqli-boolean", verifier_token, {
+                "artifact_id": capture_id, "parameter": parameter, "identity": identity,
+            })
+            result = observation.get("result") or {}
+            confirmed = (result.get("proof_confirmed") is True and result.get("target") == target
+                         and result.get("parameter") == parameter
+                         and result.get("captured_artifact_id") == capture_id)
+        else:
+            observation = await _request("POST", f"{base}/http/authz-owner-only", verifier_token, {
+                "artifact_id": capture_id, "owner_identity": identity,
+            })
+            result = observation.get("result") or {}
+            confirmed = (result.get("proof_confirmed") is True and result.get("target") == target
+                         and result.get("owner_identity") == identity
+                         and result.get("captured_artifact_id") == capture_id)
     evidence_ids = observation.get("artifact_ids") or []
     if (observation.get("run_id") != binding.service_run_id or
             observation.get("actor") != "verifier" or not evidence_ids):

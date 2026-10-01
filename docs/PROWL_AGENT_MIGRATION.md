@@ -24,17 +24,23 @@ origin-wide run.
 
 Use the returned `session_id` with the usual `/api/v1/agent/query` or WebSocket
 agent endpoint. The agent can call allowlisted `scoped_assessment_observe`,
-`scoped_assessment_probe`, `scoped_assessment_candidate`, and
-`scoped_assessment_status` tools. The bridge forwards only the hunter
-capability. The service enforces exact origins, named identities, per-run
+`scoped_assessment_probe`, `scoped_assessment_candidate`,
+`scoped_assessment_plan`, `scoped_assessment_memory`, and
+`scoped_assessment_status` tools. Planning covers the service threat model,
+coverage checks, and completion gate. Memory recall is limited to the same
+organization and asset and cannot serve as fresh finding proof. The bridge
+forwards only the hunter capability. The service enforces exact origins, named identities, per-run
 limits, and its evidence rules. Aegis records tool receipts and the service
 keeps the full private artifacts.
 
 For browser XSS and public directory index candidates, Aegis can run a fresh
-deterministic verifier action with the separate verifier capability and ask the
-service to confirm and publish. The model never gets that capability. Other
-candidate types remain pending until an independent verifier handles them.
-This repeat action provides independent evidence; it is not yet a separate
+deterministic verifier action with the separate verifier capability. Numeric
+SQLi and owner-only authorization candidates require an operator-scoped browser
+page that issues the relevant GET. Aegis independently captures that request
+under the verifier identity, repeats the bounded proof, and asks the service to
+confirm and publish. If the fresh capture is missing or ambiguous, the
+candidate stays pending. The model never gets the verifier capability. This
+repeat action provides independent evidence; it is not yet a separate
 adversarial reasoning agent.
 
 Confirmed service publications enter the ordinary Aegis Findings table through
@@ -61,12 +67,10 @@ require a Claude model for browser and HTTP execution.
 
 ## Remaining gates before making this the default
 
-1. Extend the Aegis-driven verifier to numeric SQLi and owner-only authorization
-   proofs. Those require a fresh browser capture by the verifier before the
-   service will accept an independent proof. Keep the verifier capability out
-   of the hunter tool registry and prompts.
-   Add an adversarial reasoning pass if the product needs independent judgment
-   beyond the current deterministic replay.
+1. Run the four proof recipes against controlled fixtures, including a browser
+   page that produces the SQLi and owner-only GET requests. Add an adversarial
+   reasoning pass if the product needs independent judgment beyond the current
+   deterministic replay.
 2. Add a UI flow for selecting an in-scope asset, exact origin, test identities,
    and rules of engagement before starting an agent session.
 3. Run the Aegis agent with an OpenAI model and an Anthropic model against the
