@@ -684,6 +684,8 @@ function AgentPageContent() {
   const [playbooks, setPlaybooks] = useState<{ id: string; name: string; description: string }[]>([]);
   const [selectedPlaybookId, setSelectedPlaybookId] = useState<string>('custom');
   const [target, setTarget] = useState('');
+  const [bodyReplayPathsText, setBodyReplayPathsText] = useState('');
+  const [ownerOnlyText, setOwnerOnlyText] = useState('');
   const [mode, setMode] = useState<'assist' | 'agent'>('agent');
   const [urlPrefilled, setUrlPrefilled] = useState(false);
   const [pendingAutostart, setPendingAutostart] = useState(false);
@@ -1161,7 +1163,6 @@ function AgentPageContent() {
     if (!usePreset && !q) return;
 
     const sid = sessionId || crypto.randomUUID();
-    if (!sessionId) setSessionId(sid);
 
     if (loading) {
       if (!q) return;
@@ -1182,6 +1183,25 @@ function AgentPageContent() {
       }
       return;
     }
+
+    const bodyReplayPaths = bodyReplayPathsText.split(/[\n,]/).map((value) => value.trim()).filter(Boolean);
+    const ownerOnlyResources = ownerOnlyText.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
+      const [resource, owner, other, ...extra] = line.split('|').map((value) => value.trim());
+      return { target: resource, owner_identity: owner, other_identity: other, valid: !extra.length && Boolean(resource && owner && other) };
+    });
+    if (bodyReplayPaths.length > 8 || ownerOnlyResources.length > 8 || ownerOnlyResources.some((row) => !row.valid)) {
+      toast({ variant: 'destructive', title: 'Invalid assessment policy',
+        description: 'Use at most eight POST paths and eight owner-only lines in URL | owner | other format.' });
+      return;
+    }
+    const assessmentPolicy = bodyReplayPaths.length || ownerOnlyResources.length
+      ? { body_replay_paths: bodyReplayPaths,
+          owner_only_resources: ownerOnlyResources.map((row) => ({
+            target: row.target, owner_identity: row.owner_identity, other_identity: row.other_identity,
+          })) }
+      : undefined;
+
+    if (!sessionId) setSessionId(sid);
 
     const displayContent = usePreset
       ? `${playbooks.find((p) => p.id === selectedPlaybookId)?.name ?? selectedPlaybookId}${target.trim() ? ` — ${target.trim()}` : ''}`
@@ -1207,6 +1227,7 @@ function AgentPageContent() {
         }
       } else {
         const wsMsg: Record<string, unknown> = { type: 'query', question: usePreset ? displayContent : q, mode };
+        if (assessmentPolicy) wsMsg.assessment_policy = assessmentPolicy;
         if (usePreset) { wsMsg.playbook_id = selectedPlaybookId; wsMsg.target = target.trim() || undefined; }
         if (pendingLoadSessionId) {
           wsMsg.load_session_id = pendingLoadSessionId;
@@ -1218,6 +1239,7 @@ function AgentPageContent() {
           const data = await api.queryAgent(usePreset ? displayContent : q, sid, {
             ...(usePreset ? { playbookId: selectedPlaybookId, target: target.trim() || undefined } : {}),
             mode,
+            assessmentPolicy,
             ...(pendingLoadSessionId ? { loadSessionId: pendingLoadSessionId } : {}),
           });
           setPendingLoadSessionId(null);
@@ -1980,6 +2002,28 @@ function AgentPageContent() {
                           className="h-7 text-xs w-40 border-dashed bg-transparent"
                         />
                       )}
+
+                      <details className="text-xs text-muted-foreground">
+                        <summary className="cursor-pointer">Assessment policy</summary>
+                        <div className="mt-2 space-y-2 w-80">
+                          <Textarea
+                            aria-label="Approved POST replay paths"
+                            placeholder="Approved POST replay paths, one per line (for example /api/search)"
+                            value={bodyReplayPathsText}
+                            onChange={(event) => setBodyReplayPathsText(event.target.value)}
+                            disabled={loading}
+                            className="text-xs min-h-16"
+                          />
+                          <Textarea
+                            aria-label="Owner-only resources"
+                            placeholder="Owner-only resource: URL | owner identity | other identity"
+                            value={ownerOnlyText}
+                            onChange={(event) => setOwnerOnlyText(event.target.value)}
+                            disabled={loading}
+                            className="text-xs min-h-16"
+                          />
+                        </div>
+                      </details>
 
                       {sessionId && (
                         <span className="ml-auto text-[10px] text-muted-foreground/50 font-mono tabular-nums">

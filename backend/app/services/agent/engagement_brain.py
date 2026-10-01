@@ -3756,8 +3756,9 @@ def denominator_surfaces(brain: EngagementBrain) -> List[Dict[str, Any]]:
         host = str(s.get("host") or "")
         key = surface_key(method, path, host)
         takes = bool(s.get("takes_input"))
+        assessment_check = bool(s.get("assessment_check"))
         in_focus = key in focus or any(path in f or f.endswith(path) for f in focus)
-        if not takes and not in_focus:
+        if not takes and not assessment_check and not in_focus:
             continue
         if key in seen:
             continue
@@ -3768,6 +3769,7 @@ def denominator_surfaces(brain: EngagementBrain) -> List[Dict[str, Any]]:
             "path": path,
             "host": host,
             "takes_input": takes,
+            "assessment_check": assessment_check,
             "in_focus": in_focus,
         })
         if len(out) >= 60:

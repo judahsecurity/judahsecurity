@@ -15,6 +15,7 @@ import json
 import logging
 import re
 from typing import Any, Optional
+from urllib.parse import urlsplit
 
 from sqlalchemy import or_
 
@@ -28,6 +29,7 @@ DRAWER_MAX_CHARS = 4000
 TOOL_MAX_CHUNKS = 3
 CONVO_MAX_CHUNKS = 2
 SEARCH_SHORTLIST = 40
+TARGET_SEARCH_WINDOW = 500
 
 _INDIRECT_PROMPT_INJECTION_RE = re.compile(
     r"(?is)\b(?:ignore|disregard|override|forget)\b.{0,80}\b(?:previous|prior|system|developer|agent)\b.{0,40}\b(?:instruction|prompt|rule)|"
@@ -160,7 +162,7 @@ _TOOL_ROOMS = {
     "get_threat_model": "methodology",
 }
 
-_WAKE_ROOMS = ("scope_roe", "methodology", "findings", "waf", "diary", "crawl")
+_WAKE_ROOMS = ("scope_roe", "methodology", "findings", "waf", "diary", "crawl", "recon", "nuclei")
 
 _L0_IDENTITY = (
     "Joshua — Judah Security ASM agent. Palace memory is verbatim and org-scoped. "
@@ -218,6 +220,24 @@ def wing_for_org(organization_id: Optional[int]) -> str:
     if organization_id is None:
         return "global"
     return f"org:{organization_id}"
+
+
+def _target_host(value: Optional[str]) -> Optional[str]:
+    """Use the exact hostname as a retrieval boundary, never a text substring."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    parsed = urlsplit(value.strip() if "://" in value else "//" + value.strip())
+    return (parsed.hostname or "").lower().rstrip(".") or None
+
+
+def _target_candidates(host: str):
+    """Use an indexed tenant predicate plus a narrow legacy target prefilter."""
+    escaped = host.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    target = AgentPalaceDrawer.target
+    patterns = [escaped, escaped + "/%", escaped + ":%"]
+    for scheme in ("http://", "https://"):
+        patterns.extend((scheme + escaped, scheme + escaped + "/%", scheme + escaped + ":%", scheme + escaped + "?%"))
+    return or_(*(target.ilike(pattern, escape="\\") for pattern in patterns))
 
 
 def room_for_tool(tool_name: str) -> str:
@@ -322,6 +342,7 @@ def search_memory(
     *,
     wing: Optional[str] = None,
     room: Optional[str] = None,
+    target: Optional[str] = None,
     limit: int = 5,
     max_chars: int = 2400,
 ) -> list[dict]:
@@ -335,6 +356,9 @@ def search_memory(
     ensure_conversations_mined(organization_id)
 
     keywords = _keywords(query)
+    host = _target_host(target)
+    if target and not host:
+        return []
     db = SessionLocal()
     try:
         tenant = or_(
@@ -346,9 +370,18 @@ def search_memory(
             q = q.filter(AgentPalaceDrawer.wing == wing)
         if room:
             q = q.filter(AgentPalaceDrawer.room == room)
+        if host:
+            q = q.filter(_target_candidates(host))
 
         shortlist: list[AgentPalaceDrawer] = []
-        if keywords:
+        if host:
+            # Rank across the asset's history, not only its 40 newest matches.
+            shortlist = (
+                q.order_by(AgentPalaceDrawer.created_at.desc())
+                .limit(TARGET_SEARCH_WINDOW)
+                .all()
+            )
+        elif keywords:
             kw_filters = []
             for kw in keywords:
                 kw_filters.append(AgentPalaceDrawer.title.ilike(f"%{kw}%"))
@@ -379,6 +412,8 @@ def search_memory(
                 and drawer.organization_id != organization_id
             ):
                 continue
+            if host and _target_host(drawer.target) != host:
+                continue
             score = 0.0
             if q_vec and drawer.embedding:
                 score = cosine(q_vec, drawer.embedding)
@@ -404,6 +439,8 @@ def search_memory(
                 "snippet": snippet,
                 "score": round(float(score), 4),
                 "source": drawer.source,
+                "source_id": drawer.source_id,
+                "session_id": drawer.session_id,
                 "tool_name": drawer.tool_name,
                 "target": drawer.target,
                 "created_at": drawer.created_at.isoformat() if drawer.created_at else "",
@@ -466,15 +503,33 @@ def wake_up(
         else:
             q = q.filter(AgentPalaceDrawer.room.in_(_WAKE_ROOMS))
 
-        drawers = q.order_by(AgentPalaceDrawer.created_at.desc()).limit(30).all()
-        if target:
-            t = target.lower()
-            drawers.sort(
-                key=lambda d: (
-                    0 if (d.target or "").lower().find(t) >= 0 else 1,
-                    0 if t in (d.content or "").lower()[:500] else 1,
-                )
+        host = _target_host(target)
+        if host:
+            target_drawers = (
+                db.query(AgentPalaceDrawer)
+                .filter(tenant, _target_candidates(host), AgentPalaceDrawer.room.in_(_WAKE_ROOMS))
+                .order_by(AgentPalaceDrawer.created_at.desc())
+                .limit(20)
+                .all()
             )
+            target_drawers = [d for d in target_drawers if _target_host(d.target) == host]
+            scope_drawers = (
+                db.query(AgentPalaceDrawer)
+                .filter(tenant, AgentPalaceDrawer.target.is_(None), AgentPalaceDrawer.room == "scope_roe")
+                .order_by(AgentPalaceDrawer.created_at.desc())
+                .limit(3)
+                .all()
+            )
+            general_drawers = (
+                q.filter(AgentPalaceDrawer.target.is_(None), AgentPalaceDrawer.room != "scope_roe")
+                .order_by(AgentPalaceDrawer.created_at.desc())
+                .limit(20)
+                .all()
+            )
+            # Rules of engagement must stay visible even with many target hits.
+            drawers = scope_drawers + target_drawers + general_drawers
+        else:
+            drawers = q.order_by(AgentPalaceDrawer.created_at.desc()).limit(30).all()
 
         rooms_seen: set[str] = set()
         facts: list[str] = []

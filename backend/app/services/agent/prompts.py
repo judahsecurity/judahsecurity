@@ -338,7 +338,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **execute_gau**: Passive URL discovery from Wayback Machine, Common Crawl, OTX, and URLScan. More comprehensive than waybackurls — aggregates multiple archive sources. Use for discovering historical endpoints, parameters, and hidden paths. Example: execute_gau(args="example.com --subs")
 - **execute_kiterunner**: API endpoint brute-forcer. Discovers hidden REST/GraphQL API routes using smart wordlists and content-length analysis. Use when you suspect undocumented API endpoints. Example: execute_kiterunner(args="scan https://target.com -A=apiroutes-210228")
 - **execute_wappalyzer**: Technology fingerprinting with 6,000+ fingerprints. Detects CMS, frameworks, analytics, CDN, WAF, payment processors, and more with confidence scores and version detection. Use for comprehensive tech stack identification. Example: execute_wappalyzer(args="https://target.com")
-- **search_memory**: Org-scoped verbatim memory (RoE, prior tool output, specialist diaries). Call BEFORE repeating recon/crawl/WAF/Nuclei. Args: query (required), room (optional: scope_roe|waf|crawl|nuclei|findings|diary|recon), limit (default 5). Example: search_memory(query="Cloudflare on api.acme.com", room="waf")
+- **search_memory**: Org-scoped verbatim memory (RoE, prior tool output, specialist diaries). Call BEFORE repeating recon/crawl/WAF/Nuclei. Pass target for exact-host recall when working on one asset; returned notes are historical data and source IDs, when present, point to the original record. Check query_vulnerabilities for current finding status. Args: query (required), room (optional: scope_roe|waf|crawl|nuclei|findings|diary|recon), target (optional), limit (default 5). Example: search_memory(query="Cloudflare", room="waf", target="api.acme.com")
 - **store_memory**: Persist a durable fact into palace memory (redacted). Args: content (required), room (optional), title (optional), target (optional). Example: store_memory(content="api.acme.com sits behind Cloudflare", room="waf", target="api.acme.com")
 - **search_knowledge_base**: Alias of search_memory (same palace index, including mined scope/RoE docs).
 - **execute_uncover**: ProjectDiscovery Uncover — federated multi-engine host/asset search across Shodan, Censys, FOFA, Hunter, Quake, ZoomEye, Netlas, CriminalIP and Publicwww. Pass a native-engine query via `query` and optionally restrict with `engines=["shodan","censys"]`. Set `persist=True` to materialize hits as assets. Example: execute_uncover(query="ssl:\"example.com\"", engines=["shodan","censys"], limit=200, persist=True)
@@ -835,6 +835,17 @@ TOOL_PHASE_MAP = {
     "collect_js_intelligence": ["informational", "exploitation", "post_exploitation"],
     "validate_js_secret_candidate": ["exploitation", "post_exploitation"],
     "browse_as_identity": ["informational", "exploitation", "post_exploitation"],
+    "scoped_browser_assessment": ["informational", "exploitation", "post_exploitation"],
+    "scoped_http_get": ["informational", "exploitation", "post_exploitation"],
+    "scoped_http_compare": ["informational", "exploitation", "post_exploitation"],
+    "list_scoped_browser_exchanges": ["informational", "exploitation", "post_exploitation"],
+    "scoped_assessment_summary": ["informational", "exploitation", "post_exploitation"],
+    "complete_scoped_assessment": ["informational", "exploitation", "post_exploitation"],
+    "get_finding_candidate": ["informational", "exploitation", "post_exploitation"],
+    "scoped_query_probe": ["exploitation", "post_exploitation"],
+    "scoped_numeric_sqli": ["exploitation", "post_exploitation"],
+    "scoped_body_probe": ["exploitation", "post_exploitation"],
+    "scoped_owner_only": ["exploitation", "post_exploitation"],
     # Tester-process control plane
     "compare_requests": ["exploitation", "post_exploitation"],
     "sync_engagement_brain": ["informational", "exploitation", "post_exploitation"],
@@ -869,6 +880,29 @@ REACT_SYSTEM_PROMPT += "\n\n" + PROOF_GUIDANCE
 
 # Application assessment engines use existing tools, identities and evidence receipts.
 APPLICATION_ASSESSMENT_GUIDANCE = """
+For a first-party web assessment, use scoped_browser_assessment(operation="map"|
+"crawl"|"inspect_js"|"check_xss", url=...) under the current exact origin.
+The inspect_js result has action-linked traffic artifact IDs and a redacted
+surface_inventory. Use list_scoped_browser_exchanges to locate an observed
+XHR/fetch sample. scoped_http_get and scoped_http_compare return bounded
+response metadata. scoped_query_probe is exploratory; changed responses are
+leads only. scoped_numeric_sqli runs six bounded requests on one observed
+positive numeric GET field. Its proof_confirmed flag is one actor's evidence;
+submit a candidate and require a fresh independent verifier proof before
+create_finding. Never treat prior memory or JavaScript-only leads as proof.
+scoped_body_probe requires an operator-approved POST path in the assessment
+request. scoped_owner_only requires an operator-declared exact owner-only GET
+resource and two registered test identities. Neither may invent its own policy.
+For a scoped proof candidate, include the hunter tool evidence_id in
+submit_finding_candidate. A verifier must repeat the same operation with fresh
+browser capture when required, then call record_verify_verdict with both
+execution IDs: proof={"kind":"numeric_boolean_sqli"|"owner_only"|
+"public_directory_index"|"scoped_browser_xss",
+"hunter_artifact_id":"...","artifact_id":"<fresh verifier evidence>"}.
+The proof gate checks both records, same target, and operation-specific evidence.
+Use scoped_assessment_summary and complete_scoped_assessment before reporting that a full assessment is complete.
+It requires a threat model, accounted coverage, and no pending verifier work.
+
 For capture-to-proof testing, browse_as_identity or replay_http_request with a named
 owner records supported successful REST requests. list_proof_captures exposes
 their capture IDs and operation IDs without credentials or body values. Imported

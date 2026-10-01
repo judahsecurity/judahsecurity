@@ -2519,6 +2519,10 @@ class ApiClient {
       mode?: 'assist' | 'agent';
       loadSessionId?: string;
       priceLimitUsd?: number;
+      assessmentPolicy?: {
+        body_replay_paths: string[];
+        owner_only_resources: { target: string; owner_identity: string; other_identity: string }[];
+      };
     }
   ) {
     const response = await this.client.post('/agent/query', {
@@ -2529,6 +2533,7 @@ class ApiClient {
       mode: options?.mode ?? 'assist',
       load_session_id: options?.loadSessionId ?? undefined,
       price_limit_usd: options?.priceLimitUsd ?? undefined,
+      assessment_policy: options?.assessmentPolicy ?? undefined,
     }, { timeout: 180000 });
     return response.data;
   }

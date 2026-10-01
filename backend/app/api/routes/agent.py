@@ -11,8 +11,9 @@ import logging
 import uuid
 from datetime import datetime
 from typing import Optional, Literal, List
+from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Query
-from pydantic import BaseModel, field_validator, Field
+from pydantic import BaseModel, field_validator, model_validator, Field
 
 from sqlalchemy.orm import Session
 
@@ -61,6 +62,39 @@ def _timeout_result(session_id: str, org_id: int, user_id: int) -> InvokeRespons
 # REQUEST/RESPONSE MODELS
 # =============================================================================
 
+class OwnerOnlyResource(BaseModel):
+    target: str = Field(max_length=2048)
+    owner_identity: str = Field(min_length=1, max_length=80)
+    other_identity: str = Field(min_length=1, max_length=80)
+
+    @model_validator(mode="after")
+    def validate_resource(self):
+        from app.services.agent.scoped_assessment.browser import origin
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+
+        parts = urlsplit(self.target)
+        path = parts.path or "/"
+        if (self.owner_identity == self.other_identity or parts.query or parts.fragment
+                or not allowed_discovery_path(path)
+                or self.target != origin(self.target) + path):
+            raise ValueError("Owner-only resource needs an exact safe path and distinct identities")
+        return self
+
+
+class AgentAssessmentPolicy(BaseModel):
+    body_replay_paths: list[str] = Field(default_factory=list, max_length=8)
+    owner_only_resources: list[OwnerOnlyResource] = Field(default_factory=list, max_length=8)
+
+    @field_validator("body_replay_paths")
+    @classmethod
+    def validate_body_paths(cls, paths: list[str]) -> list[str]:
+        for path in paths:
+            if (not path.startswith("/") or path.startswith("//") or path == "/"
+                    or len(path) > 256 or any(char in path for char in "?#\\\r\n\t ")):
+                raise ValueError("Body replay needs exact absolute paths without query values")
+        return paths
+
+
 class AgentQueryRequest(BaseModel):
     """Request to query the AI agent."""
     question: str
@@ -70,6 +104,7 @@ class AgentQueryRequest(BaseModel):
     mode: Optional[Literal["assist", "agent"]] = "assist"
     load_session_id: Optional[str] = None
     price_limit_usd: Optional[float] = None
+    assessment_policy: Optional[AgentAssessmentPolicy] = None
 
     @field_validator("question")
     @classmethod
@@ -382,6 +417,7 @@ async def query_agent(
     user_id = current_user.id
     load_session_id = request.load_session_id
     price_limit_usd = request.price_limit_usd
+    assessment_policy = request.assessment_policy.model_dump() if request.assessment_policy else None
     todos = initial_todos
 
     async def _run_rest_query() -> None:
@@ -401,6 +437,7 @@ async def query_agent(
                     max_iterations=settings.AGENT_WS_MAX_ITERATIONS,
                     load_session_id=load_session_id,
                     price_limit_usd=price_limit_usd,
+                    assessment_policy=assessment_policy,
                 )
             )
             register_run(session_id, invoke_task)
@@ -1154,6 +1191,17 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                 target = data.get("target")
                 mode = data.get("mode", "assist")
                 load_session_id = data.get("load_session_id") or None
+                assessment_policy = None
+                if data.get("assessment_policy") is not None:
+                    try:
+                        assessment_policy = AgentAssessmentPolicy.model_validate(
+                            data["assessment_policy"]
+                        ).model_dump()
+                    except Exception:
+                        await websocket.send_json({
+                            "type": "error", "message": "Invalid bounded assessment policy",
+                        })
+                        continue
                 price_limit_usd = None
                 if data.get("price_limit_usd") is not None:
                     try:
@@ -1182,6 +1230,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                     run_mode=mode,
                     load_id=load_session_id,
                     limit=price_limit_usd,
+                    policy=assessment_policy,
                 ):
                     try:
                         orchestrator = await get_agent_orchestrator(initialize=False)
@@ -1197,6 +1246,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                                 max_iterations=settings.AGENT_WS_MAX_ITERATIONS,
                                 load_session_id=load_id,
                                 price_limit_usd=limit,
+                                assessment_policy=policy,
                             ),
                             timeout=_run_timeout_s(),
                         )

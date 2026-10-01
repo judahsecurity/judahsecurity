@@ -61,6 +61,7 @@ import logging
 import os
 import random
 import re
+import secrets
 import shutil
 import time
 from dataclasses import dataclass, field
@@ -384,6 +385,9 @@ class CrawlResult:
     storage_state: Optional[Dict[str, Any]] = None
     # Sample first-party XHR for replay (method/url/headers/postData)
     api_samples: List[Dict[str, Any]] = field(default_factory=list)
+    action_checkpoints: List[Dict[str, Any]] = field(default_factory=list)
+    js_file_actions: Dict[str, str] = field(default_factory=dict)
+    js_endpoint_sources: Dict[str, Set[str]] = field(default_factory=dict)
 
 
 def _check_playwright() -> bool:
@@ -681,6 +685,23 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
     scope_apex = str(opts.get("scope") or "").strip().lower() or _apex(seed_host)
 
     result = CrawlResult(target=seed, scope=scope_apex)
+    run_ref = secrets.token_hex(4)
+    current_action_ref = f"{run_ref}-initial"
+    action_seq = 0
+
+    def _start_action(kind: str, label: str = "") -> str:
+        nonlocal current_action_ref, action_seq
+        action_seq += 1
+        current_action_ref = f"{run_ref}-action-{action_seq}"
+        return current_action_ref
+
+    def _finish_action(ref: str, kind: str, label: str, status: str,
+                       before_path: str, after_path: str) -> None:
+        if len(result.action_checkpoints) < 200:
+            result.action_checkpoints.append({
+                "ref": ref, "kind": kind, "label": label[:60], "status": status,
+                "before_path": before_path[:300], "after_path": after_path[:300],
+            })
 
     from playwright.async_api import async_playwright
 
@@ -749,7 +770,10 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                         rtype = req.resource_type
                         if rtype == "script" or url.split("?")[0].endswith(".js"):
                             if _in_scope(urlparse(url).netloc, scope_apex):
-                                result.js_files.add(url.split("?")[0])
+                                script_url = url.split("?")[0]
+                                result.js_files.add(script_url)
+                                if len(result.js_file_actions) < 120:
+                                    result.js_file_actions.setdefault(script_url, current_action_ref)
                         # Keep a small sample of XHR/fetch for replay_http_request
                         if (
                             rtype in ("xhr", "fetch")
@@ -771,6 +795,8 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                                 "method": req.method,
                                 "url": url[:500],
                                 "headers": headers,
+                                "action_ref": current_action_ref,
+                                "resource_type": rtype,
                             }
                             try:
                                 pd = req.post_data
@@ -849,14 +875,21 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                         continue
                     seen.add(norm)
 
+                    nav_ref = _start_action("navigate", url)
+                    before_path = urlparse(page.url).path or "/"
                     try:
                         # Cap per-page nav by remaining budget
                         remaining_ms = int(max(3000, (crawl_deadline - time.monotonic()) * 1000))
                         nav_timeout = min(timeout_ms, remaining_ms)
                         await page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout)
                     except Exception as e:
+                        _finish_action(nav_ref, "navigate", "", type(e).__name__,
+                                       before_path, urlparse(page.url).path or "/")
                         result.errors.append(f"nav {url[:120]}: {str(e)[:160]}")
                         continue
+
+                    _finish_action(nav_ref, "navigate", "", "completed",
+                                   before_path, urlparse(page.url).path or "/")
 
                     result.pages_visited.append(page.url)
                     page_score = _functionality_score(page.url)
@@ -872,7 +905,9 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                     # High-value pages get more safe clicks (understand functionality).
                     click_budget = DEFAULT_MAX_CLICKS + (8 if page_score >= 40 else 0)
                     try:
-                        await _drive_page(page, interact, max_clicks=click_budget)
+                        await _drive_page(page, interact, max_clicks=click_budget,
+                                          on_action_start=_start_action,
+                                          on_action_complete=_finish_action)
                     except Exception as e:
                         result.errors.append(f"interact {url[:80]}: {str(e)[:120]}")
 
@@ -925,6 +960,15 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
             "error": str(e),
             "exit_code": -1,
         }
+
+    for checkpoint in result.action_checkpoints:
+        ref = checkpoint["ref"]
+        checkpoint["request_count"] = sum(
+            sample.get("action_ref") == ref for sample in result.api_samples
+        )
+        checkpoint["scripts_added"] = sum(
+            action_ref == ref for action_ref in result.js_file_actions.values()
+        )
 
     from app.services.agent.capability_map import build_capability_map_from_crawl
 
@@ -1206,8 +1250,17 @@ async def _perform_login(page, login: Dict[str, Any], timeout_ms: int, result: "
     return ok
 
 
-async def _drive_page(page, interact: bool, max_clicks: Optional[int] = None) -> None:
+async def _drive_page(page, interact: bool, max_clicks: Optional[int] = None,
+                      on_action_start=None, on_action_complete=None) -> None:
     """Scroll to trigger lazy loads, expand disclosures, click safe controls."""
+    def start(kind: str, label: str = "") -> str:
+        return on_action_start(kind, label) if on_action_start else ""
+
+    def complete(ref: str, kind: str, label: str, status: str, before: str) -> None:
+        if on_action_complete and ref:
+            on_action_complete(ref, kind, label, status, before,
+                               urlparse(page.url).path or "/")
+
     # Move the mouse to a couple of plausible spots first — some anti-bot scripts
     # only "arm" content after they observe pointer movement.
     try:
@@ -1220,6 +1273,8 @@ async def _drive_page(page, interact: bool, max_clicks: Optional[int] = None) ->
 
     # Progressive, irregular scroll to trigger IntersectionObserver / infinite
     # scroll — a human doesn't scroll in perfectly even increments.
+    before = urlparse(page.url).path or "/"
+    scroll_ref = start("scroll")
     for _ in range(random.randint(5, 8)):
         step = random.randint(280, 620)
         try:
@@ -1229,50 +1284,73 @@ async def _drive_page(page, interact: bool, max_clicks: Optional[int] = None) ->
         await asyncio.sleep(random.uniform(0.18, 0.5))
     await page.evaluate("window.scrollTo(0, 0)")
     await asyncio.sleep(random.uniform(0.1, 0.3))
+    complete(scroll_ref, "scroll", "", "completed", before)
 
     # Expand all <details> so their content (and any lazy chunks) load.
+    before = urlparse(page.url).path or "/"
+    details_ref = start("expand_details")
     try:
-        await page.evaluate(
-            "document.querySelectorAll('details:not([open])').forEach(d => d.open = true)"
+        opened = await page.evaluate(
+            "() => { const items = [...document.querySelectorAll('details:not([open])')]; "
+            "items.forEach(d => d.open = true); return items.length; }"
         )
+        complete(details_ref, "expand_details", str(opened), "completed", before)
     except Exception:
-        pass
+        complete(details_ref, "expand_details", "", "failed", before)
 
     if not interact:
         return
 
     # Click a bounded set of *safe*, visible controls (tabs, menu items, and
     # non-destructive buttons) to surface SPA views without mutating state.
-    try:
-        handles = await page.query_selector_all(
-            "[role=tab], [role=menuitem], button, [role=button], nav a, "
-            "a[href*='login'], a[href*='demo'], a[href*='product'], a[href*='contact']"
-        )
-    except Exception:
-        handles = []
-
-    # Tester methodology: click as many safe interactive controls as we can
-    # afford so SPA routes/lazy bundles surface before attack planning.
+    # Re-query after every click: a tab or menu can reveal another control.
     click_limit = max_clicks if max_clicks is not None else DEFAULT_MAX_CLICKS
     clicked = 0
-    for h in handles[:100]:
-        if clicked >= click_limit:
-            break
+    seen_controls: Set[str] = set()
+    while clicked < click_limit and len(seen_controls) < 120:
         try:
-            if not await h.is_visible():
-                continue
-            text = ((await h.inner_text()) or "").strip()[:60]
-            if text and _DESTRUCTIVE_TEXT.search(text):
-                continue
-            # Skip real form submit buttons.
-            btype = (await h.get_attribute("type")) or ""
-            if btype.lower() == "submit":
-                continue
-            await h.click(timeout=1500, no_wait_after=True)
-            clicked += 1
-            await asyncio.sleep(random.uniform(0.15, 0.45))
+            handles = await page.query_selector_all(
+                "[role=tab], [role=menuitem], button, [role=button], nav a, "
+                "a[href*='login'], a[href*='demo'], a[href*='product'], a[href*='contact']"
+            )
         except Exception:
-            continue
+            break
+        clicked_one = False
+        for h in handles[:100]:
+            try:
+                if not await h.is_visible():
+                    continue
+                label = ((await h.inner_text()) or "").strip()[:60]
+                if label and _DESTRUCTIVE_TEXT.search(label):
+                    continue
+                if ((await h.get_attribute("type")) or "").lower() == "submit":
+                    continue
+                href = (await h.get_attribute("href")) or ""
+                if href and urlparse(urljoin(page.url, href)).netloc != urlparse(page.url).netloc:
+                    continue
+                key = "|".join((urlparse(page.url).path or "/",
+                                (await h.evaluate("e => e.tagName")) or "",
+                                (await h.get_attribute("id")) or "",
+                                (await h.get_attribute("aria-controls")) or "",
+                                href, label))
+                if key in seen_controls:
+                    continue
+                seen_controls.add(key)
+                before = urlparse(page.url).path or "/"
+                ref = start("click", label)
+                try:
+                    await h.click(timeout=1500, no_wait_after=True)
+                    clicked += 1
+                    await asyncio.sleep(random.uniform(0.15, 0.45))
+                    complete(ref, "click", label, "completed", before)
+                    clicked_one = True
+                    break
+                except Exception:
+                    complete(ref, "click", label, "failed", before)
+            except Exception:
+                continue
+        if not clicked_one:
+            break
 
 
 async def _drain_calls(page, result: CrawlResult) -> None:
@@ -1369,6 +1447,8 @@ async def _mine_js(context, result: CrawlResult, deadline: Optional[float] = Non
             if v.startswith("data:") or v.endswith((".svg", ".png", ".woff", ".css", ".jpg", ".gif")):
                 continue
             result.endpoints_from_js.add(v[:300])
+            if len(result.js_endpoint_sources) < 800:
+                result.js_endpoint_sources.setdefault(v[:300], set()).add(url)
             if len(result.endpoints_from_js) > 800:
                 break
 

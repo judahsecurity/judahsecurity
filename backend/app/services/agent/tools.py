@@ -369,14 +369,21 @@ from app.services.agent.session_runtime import SessionValue
 
 
 from app.services.agent.assessment_capabilities import AssessmentCapabilities, CAPABILITY_TOOLS
+from app.services.agent.scoped_assessment_tools import ScopedAssessmentTools
 
 
-class ASMToolsManager(AssessmentCapabilities):
+class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     """Manager for ASM platform tools accessible by the AI agent."""
     
     _proof_plans = SessionValue(dict)
     _captured_proof_plans = SessionValue(dict)
     _request_capture_store = SessionValue(lambda: None)
+    _scoped_browser_exchanges = SessionValue(dict)
+    _scoped_get_count = SessionValue(lambda: 0)
+    _scoped_post_count = SessionValue(lambda: 0)
+    _scoped_body_replay_paths = SessionValue(set)
+    _scoped_owner_expectations = SessionValue(dict)
+    _scoped_assessment_started = SessionValue(lambda: False)
     _proof_engine = SessionValue(lambda: None)
     _js_intelligence = SessionValue(lambda: None)
     _secret_validation_policy = SessionValue(dict)
@@ -3276,11 +3283,13 @@ class ASMToolsManager(AssessmentCapabilities):
         query: str,
         room: Optional[str] = None,
         limit: int = 5,
+        target: Optional[str] = None,
     ) -> str:
         """Semantic search over org-scoped verbatim palace memory.
 
         Covers RoE/scope docs, prior tool output, specialist diaries, and
-        mined knowledge. Use before repeating recon, crawl, WAF, or Nuclei.
+        mined knowledge. Pass target to restrict recall to its exact host
+        before repeating recon, crawl, WAF, or Nuclei.
         """
         from app.services.agent.palace_memory import search_memory as palace_search
 
@@ -3293,10 +3302,11 @@ class ASMToolsManager(AssessmentCapabilities):
             org_id,
             query,
             room=(room or None),
+            target=(target or None),
             limit=max(1, min(int(limit or 5), 10)),
         )
         return json.dumps(
-            {"query": query, "count": len(rows), "results": rows},
+            {"query": query, "target": target, "count": len(rows), "results": rows},
             indent=2,
         )[:_tool_output_max_chars()]
 
@@ -7430,10 +7440,37 @@ class ASMToolsManager(AssessmentCapabilities):
                 from app.services.agent.evidence_store import evidence_store
 
                 evidence = evidence_store(self).records.get(evidence_id)
-                if not evidence or evidence.get("kind") not in ("http_exchange", "browser_xss"):
+                kind = evidence.get("kind") if evidence else ""
+                if kind not in (
+                    "http_exchange", "browser_xss", "scoped_http_get",
+                    "scoped_browser_check_xss",
+                ):
                     raise ValueError("tested_clean evidence_id must reference live transport evidence")
                 if identity and evidence.get("identity") != identity:
                     raise ValueError("coverage identity does not match the cited evidence")
+                if kind.startswith("scoped_"):
+                    from urllib.parse import urlsplit
+
+                    target_parts = urlsplit(evidence["target"])
+                    expected_host = (host or target_parts.netloc).lower()
+                    if (target_parts.netloc.lower() != expected_host
+                            or (target_parts.path or "/") != (urlsplit(path).path or "/")
+                            or method.upper() != "GET"):
+                        raise ValueError("scoped evidence does not match the coverage surface")
+                    payload = evidence["payload"]
+                    if kind == "scoped_http_get":
+                        if (test_type != "directory_index" or payload.get("status") != 200
+                                or payload.get("directory_index") is not False
+                                or payload.get("truncated") is not False
+                                or payload.get("redirected") is not False):
+                            raise ValueError("scoped HTTP evidence only closes a clean directory-index check")
+                    elif (test_type not in ("xss", "reflected_xss")
+                          or payload.get("operation") != "check_xss"
+                          or payload.get("executed") is not False
+                          or payload.get("status") != 200
+                          or not payload.get("nonce")
+                          or "__PROWL_NONCE__" not in payload.get("target_template", "")):
+                        raise ValueError("scoped browser evidence only closes a clean executed XSS check")
                 if coverage_cell_id and evidence.get("coverage_cell_id") not in (
                     "", coverage_cell_id
                 ):

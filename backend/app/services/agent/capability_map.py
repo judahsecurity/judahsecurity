@@ -36,6 +36,9 @@ class CapabilityMap:
     third_party: List[str] = field(default_factory=list)
     # Sample captured XHR/fetch for replay_http_request
     api_samples: List[Dict[str, Any]] = field(default_factory=list)
+    # Action-linked browser discovery and an inventory without query/body values.
+    action_checkpoints: List[Dict[str, Any]] = field(default_factory=list)
+    surface_inventory: Dict[str, Any] = field(default_factory=dict)
 
     # Derived capability flags (tester mental model)
     has_auth: bool = False
@@ -94,6 +97,8 @@ _AI_AGENT_RE = re.compile(
 
 def build_capability_map_from_crawl(crawl: Any) -> CapabilityMap:
     """Build a CapabilityMap from a deep_crawl CrawlResult (or duck-typed)."""
+    from app.services.agent.application_surface_inventory import build_application_surface_inventory
+
     target = getattr(crawl, "target", "") or ""
     scope = getattr(crawl, "scope", "") or ""
     pages = list(getattr(crawl, "pages_visited", []) or [])
@@ -132,6 +137,8 @@ def build_capability_map_from_crawl(crawl: Any) -> CapabilityMap:
             source_maps=source_maps[:40],
             third_party=third_party[:40],
             api_samples=api_samples,
+            action_checkpoints=list(getattr(crawl, "action_checkpoints", []) or [])[:200],
+            surface_inventory=build_application_surface_inventory(crawl),
         )
     )
 
@@ -748,6 +755,28 @@ def format_capability_map_for_prompt(cmap: Optional[CapabilityMap | Dict[str, An
         lines.append("Sample APIs:")
         for e in cmap.api_endpoints[:10]:
             lines.append(f"  - {e.get('method')} {e.get('host')}{e.get('path')}")
+    inventory = cmap.surface_inventory or {}
+    endpoints = inventory.get("endpoints") or []
+    parameters = inventory.get("parameters") or []
+    if endpoints or parameters:
+        lines.append(
+            f"Browser/JS inventory: {len(endpoints)} endpoints, "
+            f"{len(parameters)} named inputs. JavaScript-only routes are leads, not live requests."
+        )
+        for row in parameters[:8]:
+            lines.append(
+                f"  - {row.get('method')} {row.get('path')} "
+                f"{row.get('location')}:{row.get('name')} "
+                f"sources={','.join(row.get('sources') or [])}"
+            )
+        for row in (inventory.get("test_suggestions") or [])[:4]:
+            lines.append(
+                f"Review lead: {row.get('kind')} {row.get('method')} "
+                f"{row.get('path')} parameter={row.get('parameter')} "
+                f"action={row.get('action_ref')}; fresh proof required."
+            )
+    if cmap.action_checkpoints:
+        lines.append(f"Browser actions recorded: {len(cmap.action_checkpoints)}")
     if cmap.forms:
         lines.append("Forms:")
         for f in cmap.forms[:6]:
@@ -791,6 +820,8 @@ def merge_capability_maps(
     new: CapabilityMap | Dict[str, Any],
 ) -> Dict[str, Any]:
     """Merge a new crawl map into session state (union of surfaces)."""
+    from app.services.agent.application_surface_inventory import merge_application_surface_inventories
+
     if isinstance(new, dict):
         new = build_capability_map_from_dict(new)
     if not existing:
@@ -822,6 +853,10 @@ def merge_capability_maps(
         source_maps=_uniq(list(old.source_maps) + list(new.source_maps))[:60],
         third_party=_uniq(list(old.third_party) + list(new.third_party))[:60],
         api_samples=_uniq(list(old.api_samples) + list(new.api_samples))[:60],
+        action_checkpoints=_uniq(list(old.action_checkpoints) + list(new.action_checkpoints))[:200],
+        surface_inventory=merge_application_surface_inventories(
+            old.surface_inventory, new.surface_inventory
+        ),
     )
     return finalize_capability_map(merged).to_dict()
 

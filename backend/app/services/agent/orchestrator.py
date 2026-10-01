@@ -3174,6 +3174,7 @@ class AgentOrchestrator:
         max_iterations: Optional[int] = None,
         load_session_id: Optional[str] = None,
         price_limit_usd: Optional[float] = None,
+        assessment_policy: Optional[Dict[str, Any]] = None,
     ) -> InvokeResponse:
         """Main entry point for agent invocation.
         
@@ -3212,6 +3213,12 @@ class AgentOrchestrator:
             if not self._initialized:
                 finish_run(run_id, "error", "Agent not initialized")
                 return InvokeResponse(error="Agent not initialized - check OPENAI_API_KEY")
+
+            # Operator policy arrives through /agent, never through a model tool.
+            # SessionValue then isolates it from other organizations and runs.
+            set_tenant_context(int(user_id), organization_id, session_id)
+            if assessment_policy is not None:
+                self.tool_manager.set_scoped_assessment_policy(assessment_policy)
 
             _max_iterations_var.set(max_iterations)
             self._start_turn_deadline()
@@ -3258,6 +3265,20 @@ class AgentOrchestrator:
             
             final_state = await self.graph.ainvoke(input_data, config)
             response = self._build_response(final_state)
+            if mode == "agent" and response.task_complete and self.tool_manager._scoped_assessment_started:
+                import json as _json
+
+                assessment = _json.loads(await self.tool_manager.scoped_assessment_summary())
+                if not assessment["complete"]:
+                    response.task_complete = False
+                    coverage = assessment["coverage"]
+                    response.answer = (response.answer or "") + (
+                        "\n\nAssessment coverage is still open: "
+                        f"{coverage['untested_count']} untested surfaces, "
+                        f"{coverage['open_cell_count']} open cells, "
+                        f"{len(assessment['pending_candidates'])} pending candidates. "
+                        "Review the threat model and scoped_assessment_summary before closing."
+                    )
 
             # EvoGraph: record chain end
             evograph.record_chain_end(

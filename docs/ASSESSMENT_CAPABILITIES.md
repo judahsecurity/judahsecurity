@@ -3,6 +3,45 @@
 For execution-owned REST capture, typed mutation/delete recipes, and their
 vulnerable/patched fixtures, see [Capture-to-proof testing](CAPTURE_TO_PROOF.md).
 
+## PROWL migration into `/agent`
+
+The Aegis agent now owns the assessment loop. The scoped browser and HTTP
+primitives in `backend/app/services/agent/scoped_assessment/` were adapted from
+the local PROWL assessment service (MIT license retained in that directory).
+They run in Aegis's existing session-scoped tool manager and evidence ledger;
+the PROWL service and Claude SDK are not needed to execute these tools. Aegis's
+model provider remains configurable through its existing agent settings.
+
+| PROWL MCP tool | Aegis `/agent` capability |
+|---|---|
+| `recall_assessment_memory` | `search_memory` plus target-specific Palace wakeup |
+| `browser_map`, `browser_crawl`, `browser_inspect_js`, `browser_check_xss` | `scoped_browser_assessment` with `operation=map`, `crawl`, `inspect_js`, `check_xss` |
+| `http_get`, `http_compare` | `scoped_http_get`, `scoped_http_compare` |
+| `http_query_probe`, `http_body_probe`, `http_sqli_boolean`, `http_authz_owner_only` | `scoped_query_probe`, `scoped_body_probe`, `scoped_numeric_sqli`, `scoped_owner_only` |
+| `submit_candidate`, `get_candidate` | `submit_finding_candidate`, `get_finding_candidate` |
+| `save_threat_model`, `get_threat_model` | `build_threat_model` / `update_threat_model`, `get_threat_model` |
+| `list_coverage`, `record_coverage`, `update_coverage` | `get_coverage`, `record_surface_coverage` (updates existing rows and cells) |
+| `assessment_summary`, `complete_assessment` | `scoped_assessment_summary`, `complete_scoped_assessment`; the orchestrator also blocks full completion while scoped coverage is open |
+| `verify_candidate`, `publish_finding` | `independent_verify` / `record_verify_verdict`, then `create_finding` after proof validation |
+
+The browser returns action-linked paths, parameter names, response hashes, and
+evidence IDs. Request values and response bodies from captured XHR/fetch calls
+remain in session-private state for bounded replay. A verifier must capture a
+fresh exchange; it cannot reuse the hunter's private exchange. Browser map,
+crawl, and JS inspection also return observed directory candidates, offline
+technology signals, specialist suggestions, and suggested coverage checks.
+Set `AEGIS_WAPPALYZER_ROOT` to a separately installed Wappalyzer engine for
+offline technology matches; the tool reports `unavailable` otherwise. Chromium
+uses Aegis's `CHROME_BIN` fallback and sandbox setting.
+
+The assessment request can supply up to eight approved POST replay paths and
+eight exact owner-only resources with two named identities. These rules are
+operator input, not agent tools. A session permits at most 40 scoped GETs and
+10 scoped POST probes. Exploratory differences remain leads. A confirmed SQLi,
+owner-only access, public directory index, or browser XSS candidate requires a
+fresh independent verifier record before Aegis permits publication. Coverage
+cannot be marked clean with an unrelated scoped receipt.
+
 This phase extends Judah's in-product tool manager, engagement brain, task graph,
 identity registry and execution evidence store. It does not launch Hadrian,
 Vespasian or Titus as external scanners. Their design concepts informed the
