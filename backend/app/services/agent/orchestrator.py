@@ -2029,11 +2029,18 @@ class AgentOrchestrator:
             recon_ready = bool(_tech) and (
                 _params_found or bool(_cmap.get("capabilities"))
             ) or _wp
+            scoped_observed = tool_name in {
+                "scoped_assessment_probe", "scoped_assessment_candidate",
+            } and any(
+                step.get("tool_name") == "scoped_assessment_observe" and step.get("success")
+                for step in (state.get("execution_trace") or [])
+                if isinstance(step, dict)
+            )
             if (
                 state.get("mode") == "agent"
                 and phase == "informational"
                 and target_phase
-                and (cmap_ready or recon_ready)
+                and (cmap_ready or recon_ready or scoped_observed)
             ):
                 logger.info(
                     "[%s] Agent mode: auto-promoting informational->%s so %s can run "
@@ -2050,11 +2057,18 @@ class AgentOrchestrator:
                 })
             else:
                 if target_phase == "exploitation" and not cmap_ready:
-                    step_data["tool_output"] = (
-                        f"Error: '{tool_name}' needs the exploitation phase. Run "
-                        "execute_deep_crawl on the target first to build the "
-                        "capability map, then retry this tool."
-                    )
+                    if tool_name.startswith("scoped_assessment_"):
+                        step_data["tool_output"] = (
+                            f"Error: '{tool_name}' needs the exploitation phase. "
+                            "Run scoped_assessment_observe on the bound origin first, "
+                            "then retry this tool."
+                        )
+                    else:
+                        step_data["tool_output"] = (
+                            f"Error: '{tool_name}' needs the exploitation phase. Run "
+                            "execute_deep_crawl on the target first to build the "
+                            "capability map, then retry this tool."
+                        )
                 else:
                     step_data["tool_output"] = (
                         f"Error: Tool '{tool_name}' not allowed in '{phase}' phase"

@@ -338,7 +338,9 @@ def rest_rows_from_capability_map(cmap: Dict[str, Any]) -> List[Dict[str, Any]]:
             path_only = path.split("?")[0]
             if not looks_like_rest(str(method), path_only):
                 continue
-            rows.append({"method": method, "path": path_only, "url": path, "source": "vespasian"})
+            rows.append({"method": method, "path": path_only, "url": path,
+                         "parameters": e.get("query_keys") or [],
+                         "status": e.get("status"), "source": "vespasian"})
         elif e and looks_like_rest("GET", str(e)):
             rows.append({"method": "GET", "path": str(e), "source": "vespasian"})
     for s in cmap.get("api_samples") or []:

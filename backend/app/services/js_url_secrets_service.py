@@ -67,7 +67,8 @@ def _safe_filename(url: str) -> str:
 
 
 def _fetch_url(
-    client: httpx.Client, url: str, max_bytes: int, timeout: float
+    client: httpx.Client, url: str, max_bytes: int, timeout: float,
+    *, same_origin_only: bool = False,
 ) -> Tuple[Optional[bytes], Optional[str], Dict[str, Any]]:
     """Fetch a JS asset. Truncated bodies are still returned for scanning.
 
@@ -76,7 +77,7 @@ def _fetch_url(
     """
     meta: Dict[str, Any] = {"truncated": False, "range_tail": False, "content_length": None}
     try:
-        with client.stream("GET", url, follow_redirects=True, timeout=timeout) as resp:
+        with client.stream("GET", url, follow_redirects=not same_origin_only, timeout=timeout) as resp:
             if resp.status_code != 200:
                 return None, f"HTTP {resp.status_code}", meta
             try:
@@ -248,6 +249,7 @@ def scan_js_urls_for_secrets(
     max_urls: int = 30,
     max_bytes: int = DEFAULT_MAX_BYTES,
     timeout: float = DEFAULT_TIMEOUT,
+    same_origin_only: bool = False,
 ) -> Dict[str, Any]:
     """
     Download each URL, write to a temp dir, run gitleaks --no-git, add regex hints per file.
@@ -285,7 +287,9 @@ def scan_js_urls_for_secrets(
         os.makedirs(files_dir, exist_ok=True)
         with httpx.Client(headers={"User-Agent": "JudahSecurity-JS-Secrets/1.0"}) as client:
             for url in parsed:
-                body, err, meta = _fetch_url(client, url, max_bytes, timeout)
+                body, err, meta = _fetch_url(
+                    client, url, max_bytes, timeout, same_origin_only=same_origin_only,
+                )
                 if err or body is None:
                     downloads.append({"url": url, "ok": False, "error": err or "empty"})
                     continue
@@ -309,6 +313,7 @@ def scan_js_urls_for_secrets(
                         "url": url,
                         "ok": True,
                         "bytes": len(body),
+                        "sha256": hashlib.sha256(body).hexdigest(),
                         "file": fname,
                         "truncated": bool(meta.get("truncated")),
                         "range_tail": bool(meta.get("range_tail")),

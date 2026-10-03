@@ -23,6 +23,8 @@ from app.db.database import get_db, SessionLocal
 from app.models.user import User
 from app.models.organization import Organization
 from app.models.agent_conversation import AgentConversation
+from app.models.asset import Asset
+from app.services.agent.prowl_service_bridge import provision_run
 from app.services.agent.orchestrator import get_agent_orchestrator
 from app.services.agent.state import InvokeResponse
 from app.services.agent.playbooks import build_initial_objective, list_playbooks
@@ -113,6 +115,22 @@ class AgentQueryRequest(BaseModel):
             raise ValueError("question must be at most 10,000 characters")
         if not v.strip():
             raise ValueError("question must not be empty")
+        return v
+
+
+class ScopedAssessmentStartRequest(BaseModel):
+    asset_id: int
+    origin: str
+    session_id: Optional[str] = None
+    identities: dict[str, dict] = Field(default_factory=dict)
+    body_replay_paths: list[str] = Field(default_factory=list)
+    authz_expectations: list[dict] = Field(default_factory=list)
+
+    @field_validator("session_id")
+    @classmethod
+    def validate_session_id(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and (not v or len(v) > 64):
+            raise ValueError("session_id must be 1 to 64 characters")
         return v
 
 
@@ -378,6 +396,51 @@ def _build_agent_response(result, session_id: str) -> AgentResponse:
 # REST ENDPOINTS
 # =============================================================================
 
+@router.post("/scoped-assessments", status_code=201)
+async def start_scoped_assessment(
+    request: ScopedAssessmentStartRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Operator provisions an exact-origin executor for an Aegis agent session."""
+    import httpx
+
+    org_id = _resolve_agent_organization_id(current_user, db)
+    if not org_id:
+        raise HTTPException(status_code=400, detail="User must belong to an organization")
+    asset = db.query(Asset).filter(Asset.id == request.asset_id, Asset.organization_id == org_id).first()
+    if asset is None:
+        raise HTTPException(status_code=404, detail="In-scope asset not found")
+    session_id = request.session_id or str(uuid.uuid4())
+    conversation = db.query(AgentConversation).filter_by(session_id=session_id).first()
+    if conversation is not None and (conversation.user_id != current_user.id or conversation.organization_id != org_id):
+        raise HTTPException(status_code=403, detail="Agent session belongs to another user or organization")
+    if conversation is None:
+        conversation = AgentConversation(
+            session_id=session_id, user_id=current_user.id, organization_id=org_id,
+            title=f"Assessment: {asset.value[:70]}", mode="agent", messages=[],
+        )
+        db.add(conversation)
+    try:
+        binding = await provision_run(
+            db, organization_id=org_id, user_id=current_user.id,
+            session_id=session_id, asset=asset, origin=request.origin,
+            identities=request.identities,
+            body_replay_paths=request.body_replay_paths,
+            authz_expectations=request.authz_expectations,
+        )
+    except httpx.RequestError:
+        db.rollback()
+        raise HTTPException(status_code=502, detail="Scoped assessment service is unavailable")
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {
+        "session_id": session_id, "run_id": binding.service_run_id,
+        "asset_id": binding.asset_id, "allowed_origin": binding.allowed_origin,
+    }
+
+
 @router.post("/query", response_model=AgentResponse)
 async def query_agent(
     request: AgentQueryRequest,
@@ -399,6 +462,9 @@ async def query_agent(
     org_id = _resolve_agent_organization_id(current_user, db)
     if not org_id:
         raise HTTPException(status_code=400, detail="User must belong to an organization to use the agent.")
+    existing = db.query(AgentConversation).filter_by(session_id=session_id).first()
+    if existing is not None and (existing.user_id != current_user.id or existing.organization_id != org_id):
+        raise HTTPException(status_code=403, detail="Agent session belongs to another user or organization")
     
     question = request.question
     initial_todos = None
@@ -960,8 +1026,9 @@ class WebSocketManager:
     def __init__(self):
         self.active_connections: dict[str, WebSocket] = {}
     
-    async def connect(self, websocket: WebSocket, session_id: str):
-        await websocket.accept()
+    async def connect(self, websocket: WebSocket, session_id: str, *, accepted: bool = False):
+        if not accepted:
+            await websocket.accept()
         self.active_connections[session_id] = websocket
     
     def disconnect(self, session_id: str):
@@ -1069,7 +1136,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
     - {"type": "error", "message": "..."}
     - {"type": "pong"}
     """
-    await ws_manager.connect(websocket, session_id)
+    await websocket.accept()
 
     try:
         await websocket.send_json({"type": "connected", "session_id": session_id})
@@ -1152,6 +1219,23 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
             await websocket.send_json({"type": "error", "message": "Authentication failed"})
             await websocket.close(code=4003)
             return
+        db = SessionLocal()
+        try:
+            existing = db.query(AgentConversation).filter_by(session_id=session_id).first()
+            session_owned = existing is None or (
+                existing.user_id == user.id and existing.organization_id == org_id
+            )
+        finally:
+            db.close()
+        if not session_owned:
+            await websocket.send_json({"type": "error", "message": "Agent session belongs to another user or organization"})
+            await websocket.close(code=4003)
+            return
+        if session_id in ws_manager.active_connections:
+            await websocket.send_json({"type": "error", "message": "Agent session already connected"})
+            await websocket.close(code=4009)
+            return
+        await ws_manager.connect(websocket, session_id, accepted=True)
         user_id = user.id
         authenticated = True
         await websocket.send_json({"type": "authenticated", "user_id": user_id})
@@ -1162,11 +1246,10 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
             
             if msg_type == "init":
                 token = data.get("token", "")
-                user, org_id = _authenticate_ws_token(token)
-                if not user or not org_id:
+                next_user, next_org_id = _authenticate_ws_token(token)
+                if not next_user or next_user.id != user_id or next_org_id != org_id:
                     await websocket.send_json({"type": "error", "message": "Authentication failed"})
                     continue
-                user_id = user.id
                 await websocket.send_json({"type": "authenticated", "user_id": user_id})
             
             elif msg_type == "query":
@@ -1412,10 +1495,12 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                 await websocket.send_json({"type": "pong"})
     
     except WebSocketDisconnect:
-        _stop_agent_session(session_id)
-        ws_manager.disconnect(session_id)
+        if ws_manager.active_connections.get(session_id) is websocket:
+            _stop_agent_session(session_id)
+            ws_manager.disconnect(session_id)
         logger.info(f"WebSocket disconnected: {session_id}")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
-        _stop_agent_session(session_id)
-        ws_manager.disconnect(session_id)
+        if ws_manager.active_connections.get(session_id) is websocket:
+            _stop_agent_session(session_id)
+            ws_manager.disconnect(session_id)

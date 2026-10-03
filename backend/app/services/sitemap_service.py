@@ -14,7 +14,7 @@ import logging
 import re
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunparse
 
 from sqlalchemy.orm import Session
 
@@ -87,6 +87,8 @@ def _asset_host(asset: Asset) -> str:
             return _normalize_host(urlparse(live).netloc)
         except Exception:
             pass
+    if str(asset.value or "").startswith(("http://", "https://")):
+        return _normalize_host(urlparse(asset.value).netloc)
     return _normalize_host(asset.value or "")
 
 
@@ -196,6 +198,101 @@ def find_asset_for_host(db: Session, organization_id: int, host: str) -> Optiona
         .filter(Asset.organization_id == organization_id, Asset.value == f"www.{host}")
         .first()
     )
+
+
+def _merge_asset_inventory(asset: Asset, cmap: Dict[str, Any]) -> None:
+    """Save value-free observations on the asset for its App Structure view."""
+    from app.services.agent.parameter_inventory import collect_parameter_inventory
+    from app.services.agent.api_fingerprint import fingerprint_from_map
+
+    origin = urlsplit(str(cmap.get("scope") or cmap.get("target") or ""))
+    if (origin.scheme not in {"http", "https"} or not origin.hostname or
+            origin.username or origin.password):
+        return
+    authority = origin.netloc.lower()
+
+    def same_origin_path(value: Any) -> str:
+        text = str(value or "")
+        if not text or len(text) > 2048:
+            return ""
+        parts = urlsplit(text)
+        if parts.scheme or parts.netloc:
+            if (parts.scheme, parts.netloc.lower()) != (origin.scheme, authority):
+                return ""
+        path = parts.path or "/"
+        if not path.startswith("/") or path.startswith("//") or len(path) > 512:
+            return ""
+        return path
+
+    def merge_strings(current: Any, incoming: Iterable[str], limit: int) -> List[str]:
+        rows = list(current or [])
+        seen = {item for item in rows if isinstance(item, str)}
+        for item in incoming:
+            if isinstance(item, str) and item and item not in seen and len(rows) < limit:
+                rows.append(item)
+                seen.add(item)
+        return rows
+
+    endpoints: List[str] = []
+    for value in (cmap.get("pages_visited") or [])[:120]:
+        path = same_origin_path(value)
+        if path:
+            endpoints.append(path)
+    for value in (cmap.get("js_endpoints") or [])[:160]:
+        path = same_origin_path(value)
+        if path:
+            endpoints.append(path)
+    for row in (cmap.get("api_endpoints") or [])[:300]:
+        if isinstance(row, str):
+            path = same_origin_path(row)
+            if path:
+                endpoints.append(path)
+            continue
+        if not isinstance(row, dict):
+            continue
+        host = str(row.get("host") or authority).lower()
+        if host != authority:
+            continue
+        path = same_origin_path(row.get("path"))
+        if path:
+            endpoints.append(path)
+    for form in (cmap.get("forms") or [])[:80]:
+        if isinstance(form, dict):
+            path = same_origin_path(form.get("action") or form.get("page"))
+            if path:
+                endpoints.append(path)
+    asset.endpoints = merge_strings(asset.endpoints, endpoints, 1000)
+
+    scripts: List[str] = []
+    for value in (cmap.get("js_files") or [])[:160]:
+        parts = urlsplit(str(value or ""))
+        path = same_origin_path(value)
+        if path and (parts.scheme, parts.netloc.lower()) == (origin.scheme, authority):
+            scripts.append(f"{origin.scheme}://{authority}{path}")
+    asset.js_files = merge_strings(asset.js_files, scripts, 500)
+    asset.parameters = merge_strings(
+        asset.parameters,
+        (row["name"] for row in collect_parameter_inventory(cmap)),
+        500,
+    )
+
+    if cmap.get("api_endpoints"):
+        report = fingerprint_from_map(cmap)
+        indicators = [
+            {"tech": str(row.get("tech") or "")[:80],
+             "confidence": str(row.get("confidence") or "")[:20]}
+            for row in (report.get("technology_indicators") or [])[:12]
+            if isinstance(row, dict) and row.get("tech")
+        ]
+        metadata = dict(asset.metadata_ or {})
+        metadata["assessment_api_fingerprint"] = {
+            "source": report.get("source"),
+            "captured_sample_count": report.get("captured_sample_count", 0),
+            "observed_api_metadata_count": report.get("observed_api_metadata_count", 0),
+            "technology_indicators": indicators,
+            "observed_at": datetime.utcnow().isoformat(),
+        }
+        asset.metadata_ = metadata
 
 
 def _upsert_rows(
@@ -342,9 +439,10 @@ def ingest_urls_for_asset(
     http_status: Optional[int] = None,
     response_title: Optional[str] = None,
     screenshot_id: Optional[int] = None,
+    asset_host_override: Optional[str] = None,
 ) -> int:
     """Upsert discovered URLs/paths onto the asset's sitemap. Caller commits."""
-    asset_host = _asset_host(asset)
+    asset_host = _normalize_host(asset_host_override or "") or _asset_host(asset)
     methods = methods or {}
     rows: List[Dict[str, Any]] = []
     seen_keys = set()
@@ -356,6 +454,7 @@ def ingest_urls_for_asset(
         item_secrets = has_secrets
         item_status = http_status
         item_title = response_title
+        item_parameters: List[str] = []
         if isinstance(item, dict):
             raw = item.get("url") or item.get("path") or item.get("value") or ""
             method = (item.get("method") or "").upper()
@@ -368,6 +467,10 @@ def ingest_urls_for_asset(
                 except (TypeError, ValueError):
                     pass
             item_title = item.get("title") or item.get("response_title") or response_title
+            item_parameters = [
+                value[:80] for value in (item.get("parameters") or [])[:80]
+                if isinstance(value, str) and re.fullmatch(r"[A-Za-z_/][A-Za-z0-9_./*\[\]-]{0,79}", value)
+            ]
         raw_s = str(raw or "").strip()
         if not raw_s:
             continue
@@ -389,6 +492,7 @@ def ingest_urls_for_asset(
             http_status=item_status,
             response_title=item_title,
             screenshot_id=screenshot_id,
+            parameters=item_parameters,
         )
         if not rec or rec["path_key"] in seen_keys:
             continue
@@ -431,7 +535,7 @@ def ingest_urls_for_asset(
                 ],
                 source=source if source != "interceptor" else "vespasian",
             )
-        for r in rows:
+        for r in ([] if source == "scoped_assessment" else rows):
             url = r.get("url") or r.get("path") or ""
             if looks_like_spec_url(url):
                 fetch_and_store_spec(asset, url if str(url).startswith("http") else r.get("url") or url, source="openapi")
@@ -468,6 +572,7 @@ def persist_capability_map(
     cmap: Dict[str, Any],
     *,
     source: str = "interceptor",
+    asset_id: Optional[int] = None,
 ) -> int:
     """Fold an Application Capability Map into sitemap_entries for the target host."""
     if not cmap or not organization_id:
@@ -477,7 +582,20 @@ def persist_capability_map(
     host = (parsed_target or {}).get("host") or _normalize_host(urlparse(target).netloc if target else "")
     if not host:
         return 0
-    asset = find_asset_for_host(db, organization_id, host)
+    if asset_id is not None:
+        asset = (
+            db.query(Asset)
+            .filter(Asset.id == asset_id, Asset.organization_id == organization_id)
+            .first()
+        )
+        if asset is not None:
+            stored = str(asset.value or "")
+            stored_host = urlparse(stored).hostname if "://" in stored else _normalize_host(stored)
+            if stored_host != host:
+                logger.warning("sitemap: bound asset %s does not match observed host %s", asset_id, host)
+                return 0
+    else:
+        asset = find_asset_for_host(db, organization_id, host)
     if not asset:
         logger.info("sitemap: no asset for host %s (org %s); skip capability map persist", host, organization_id)
         return 0
@@ -485,28 +603,74 @@ def persist_capability_map(
     pages = list(cmap.get("pages_visited") or [])
     js_endpoints = list(cmap.get("js_endpoints") or [])
     third = list(cmap.get("third_party") or [])
-    api_eps = list(cmap.get("api_endpoints") or [])
-    forms = list(cmap.get("forms") or [])
+    assessed_origin = urlsplit(str(cmap.get("scope") or cmap.get("target") or ""))
+
+    def on_assessed_host(value: Any, *, allow_relative: bool = False) -> bool:
+        raw = str(value or "").strip()
+        if not raw or raw.startswith("//"):
+            return False
+        parts = urlsplit(raw)
+        if parts.scheme or parts.netloc:
+            if source == "scoped_assessment":
+                return ((parts.scheme, parts.netloc.lower()) ==
+                        (assessed_origin.scheme, assessed_origin.netloc.lower()))
+            return parts.scheme in {"http", "https"} and _normalize_host(parts.netloc) == host
+        return raw.startswith("/") or allow_relative
+
+    api_eps = [
+        row for row in (cmap.get("api_endpoints") or [])
+        if (
+            isinstance(row, dict) and
+            _normalize_host(str(row.get("host") or host)) == host and
+            on_assessed_host(row.get("path"), allow_relative=True)
+        ) or (
+            isinstance(row, str) and
+            on_assessed_host(row)
+        )
+    ]
+    api_samples = [
+        row for row in (cmap.get("api_samples") or [])
+        if isinstance(row, dict) and on_assessed_host(row.get("url"))
+    ]
+    forms = [
+        row for row in (cmap.get("forms") or [])
+        if isinstance(row, dict) and on_assessed_host(
+            row.get("action") or row.get("page"), allow_relative=True,
+        )
+    ]
+    asset_map = {**cmap, "api_endpoints": api_eps,
+                 "api_samples": api_samples, "forms": forms}
+    _merge_asset_inventory(asset, asset_map)
     js_files = list(cmap.get("js_files") or [])
 
-    n = ingest_urls_for_asset(db, organization_id, asset, pages + js_endpoints + js_files, source=source)
+    scoped_host = host if source == "scoped_assessment" else None
+    n = ingest_urls_for_asset(
+        db, organization_id, asset, pages + js_endpoints + js_files,
+        source=source, asset_host_override=scoped_host,
+    )
 
     api_raw: List[Dict[str, Any]] = []
+    scheme = urlsplit(str(cmap.get("scope") or cmap.get("target") or "")).scheme or "https"
     for e in api_eps:
         if isinstance(e, dict):
             path = e.get("path") or ""
-            ehost = e.get("host") or host
+            ehost = (assessed_origin.netloc if source == "scoped_assessment"
+                     else e.get("host") or host)
             method = e.get("method") or "GET"
-            url = path if str(path).startswith("http") else f"https://{ehost}{path if str(path).startswith('/') else '/' + str(path)}"
-            api_raw.append({"url": url, "method": method})
+            url = path if str(path).startswith("http") else f"{scheme}://{ehost}{path if str(path).startswith('/') else '/' + str(path)}"
+            api_raw.append({"url": url, "method": method,
+                            "status": e.get("status"),
+                            "parameters": e.get("query_keys") or []})
         elif e:
             api_raw.append({"url": str(e), "method": "GET"})
     n += ingest_urls_for_asset(
-        db, organization_id, asset, api_raw, source=source, force_api=True
+        db, organization_id, asset, api_raw, source=source, force_api=True,
+        asset_host_override=scoped_host,
     )
 
     n += ingest_urls_for_asset(
-        db, organization_id, asset, third, source=source, force_kind=KIND_EXTERNAL
+        db, organization_id, asset, third, source=source, force_kind=KIND_EXTERNAL,
+        asset_host_override=scoped_host,
     )
 
     form_urls = []
@@ -529,7 +693,10 @@ def persist_capability_map(
                 }
             )
     if form_urls:
-        n += ingest_urls_for_asset(db, organization_id, asset, form_urls, source=source)
+        n += ingest_urls_for_asset(
+            db, organization_id, asset, form_urls, source=source,
+            asset_host_override=scoped_host,
+        )
     try:
         from app.services.rest_inventory_service import (
             fetch_and_store_spec,
@@ -540,12 +707,16 @@ def persist_capability_map(
 
         merge_rest_endpoints(
             asset,
-            rest_rows_from_capability_map(cmap),
+            rest_rows_from_capability_map(asset_map),
             source="vespasian" if source in ("interceptor", "deep_crawl") else source,
         )
-        for blob in list(cmap.get("pages_visited") or []) + list(cmap.get("js_endpoints") or []) + list(
-            cmap.get("api_endpoints") or []
-        ):
+        spec_candidates = (
+            [] if source == "scoped_assessment" else
+            list(cmap.get("pages_visited") or []) +
+            list(cmap.get("js_endpoints") or []) +
+            list(cmap.get("api_endpoints") or [])
+        )
+        for blob in spec_candidates:
             text = blob.get("path") if isinstance(blob, dict) else blob
             if looks_like_spec_url(str(text or "")):
                 url = str(blob.get("url") or text) if isinstance(blob, dict) else str(blob)
@@ -563,16 +734,17 @@ def persist_capability_map_safe(
     *,
     source: str = "interceptor",
     db: Optional[Session] = None,
+    asset_id: Optional[int] = None,
 ) -> int:
     if not organization_id or not cmap:
         return 0
     own = db is None
-    if own:
-        from app.db.database import SessionLocal
-
-        db = SessionLocal()
     try:
-        n = persist_capability_map(db, int(organization_id), cmap, source=source)
+        if own:
+            from app.db.database import SessionLocal
+
+            db = SessionLocal()
+        n = persist_capability_map(db, int(organization_id), cmap, source=source, asset_id=asset_id)
         if own:
             db.commit()
         return n
@@ -590,6 +762,67 @@ def persist_capability_map_safe(
                 db.close()
             except Exception:
                 pass
+
+
+def persist_js_review_safe(
+    organization_id: Optional[int], session_id: Optional[str],
+    script_url: str, summary: Dict[str, Any], evidence_id: str,
+) -> bool:
+    """Attach a value-free JS scan receipt to its scoped asset."""
+    if not organization_id or not session_id:
+        return False
+    parts = urlsplit(str(script_url or ""))
+    if (len(str(script_url or "")) > 1024 or
+            parts.scheme not in {"http", "https"} or not parts.hostname or
+            parts.username or parts.password or parts.query or parts.fragment):
+        return False
+    from app.db.database import SessionLocal
+    from app.models.scoped_assessment_run import ScopedAssessmentRun
+
+    db = None
+    try:
+        db = SessionLocal()
+        binding = db.query(ScopedAssessmentRun).filter_by(
+            organization_id=int(organization_id), session_id=session_id,
+        ).first()
+        if binding is None or binding.allowed_origin != f"{parts.scheme}://{parts.netloc}":
+            return False
+        asset = db.query(Asset).filter(
+            Asset.id == binding.asset_id,
+            Asset.organization_id == int(organization_id),
+        ).first()
+        if asset is None:
+            return False
+        counts = summary.get("counts") or {}
+        safe_counts = {
+            key: max(0, min(10_000, int(counts.get(key) or 0)))
+            for key in ("gitleaks", "regex", "client_signing")
+        }
+        status = str(summary.get("status") or "")
+        if status not in {"tested_clean", "in_focus", "inconclusive"}:
+            return False
+        metadata = dict(asset.metadata_ or {})
+        reviews = [row for row in (metadata.get("assessment_js_reviews") or [])
+                   if isinstance(row, dict) and row.get("url") != script_url]
+        reviews.append({
+            "url": script_url[:512], "status": status,
+            "counts": safe_counts, "evidence_id": str(evidence_id or "")[:64],
+            "observed_at": datetime.utcnow().isoformat(),
+        })
+        metadata["assessment_js_reviews"] = reviews[-160:]
+        asset.metadata_ = metadata
+        if script_url not in (asset.js_files or []):
+            asset.js_files = (list(asset.js_files or []) + [script_url])[:500]
+        db.commit()
+        return True
+    except Exception:
+        logger.warning("scoped JS review asset persist failed", exc_info=True)
+        if db is not None:
+            db.rollback()
+        return False
+    finally:
+        if db is not None:
+            db.close()
 
 
 def mark_secrets_on_urls(

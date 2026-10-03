@@ -32,6 +32,8 @@ from app.models.agent_note import AgentNote
 from app.models.agent_knowledge import AgentKnowledge
 from app.models.agent_palace import AgentPalaceDrawer
 from app.models.agent_conversation import AgentConversation
+from app.models.scoped_assessment_run import ScopedAssessmentRun
+from app.models.prowl_publication import ProwlPublication
 from app.models.recon_job import ReconJob, ReconWorkerHeartbeat
 from app.models.project_settings import (
     ProjectSettings,

@@ -436,12 +436,41 @@ def fingerprint_from_map(cmap: Dict[str, Any], *, target: str = "") -> Dict[str,
     from app.services.agent.request_mutate import samples_from_map
 
     samples = samples_from_map(cmap if isinstance(cmap, dict) else {})
+    observed_metadata: List[Dict[str, Any]] = []
     extra: List[str] = []
     if isinstance(cmap, dict):
+        root = urlparse(str(cmap.get("scope") or cmap.get("target") or target or ""))
+        for endpoint in (cmap.get("api_endpoints") or [])[:300]:
+            if not isinstance(endpoint, dict):
+                continue
+            path = str(endpoint.get("path") or "")
+            host = str(endpoint.get("host") or root.netloc)
+            if (not path.startswith("/") or path.startswith("//") or
+                    "?" in path or "#" in path or len(path) > 512 or
+                    host.lower() != root.netloc.lower() or
+                    root.scheme not in {"http", "https"}):
+                continue
+            sample = {"method": endpoint.get("method") or "GET",
+                      "url": f"{root.scheme}://{host}{path}"}
+            if endpoint.get("status") is not None:
+                sample["status"] = endpoint["status"]
+            if endpoint.get("content_type"):
+                sample["response_headers"] = {"content-type": endpoint["content_type"]}
+            observed_metadata.append(sample)
         extra.extend(str(u) for u in (cmap.get("js_files") or [])[:20])
         extra.extend(str(u) for u in (cmap.get("pages_visited") or [])[:20])
         target = target or str(cmap.get("target") or "")
-    return fingerprint_from_samples(samples, target=target, extra_urls=extra)
+    report = fingerprint_from_samples(samples + observed_metadata, target=target, extra_urls=extra)
+    report["captured_sample_count"] = len(samples)
+    report["observed_api_metadata_count"] = len(observed_metadata)
+    if observed_metadata:
+        report["source"] = "captured_traffic_and_observed_api_metadata" if samples else "observed_api_metadata"
+        report["note"] = (
+            "Passive fingerprint from in-scope observed API metadata and any available captured samples. "
+            "Headers and error signatures require captured response evidence; "
+            "endpoint paths alone do not prove a technology."
+        )
+    return report
 
 
 def _next_checks(indicators: List[Dict[str, str]], paths: List[str]) -> List[str]:
