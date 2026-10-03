@@ -72,6 +72,45 @@ def test_browser_observation_feeds_aegis_capability_map():
                 if row["name"] == "/comment/text")["artifact_id"] == "capture-9"
 
 
+@pytest.mark.asyncio
+async def test_scoped_browser_observation_persists_on_bound_asset(monkeypatch):
+    from app.services.agent import tools as agent_tools
+    from app.services.agent.tools import ASMToolsManager
+    from app.services import sitemap_service
+
+    binding = SimpleNamespace(asset_id=14, allowed_origin="https://app.example")
+    db = _DB(binding)
+    db.close = lambda: None
+    monkeypatch.setattr(agent_tools, "SessionLocal", lambda: db)
+    monkeypatch.setattr(agent_tools, "get_tenant_context", lambda: (8, 4))
+    async def fake_hunter(*_args, **_kwargs):
+        return {
+            "run_id": "a" * 32, "signal": "browser_inspect_js",
+            "result": {
+                "target_template": "https://app.example/",
+                "final_origin": "https://app.example", "final_path": "/",
+                "status": 200,
+                "requests": [{"method": "GET", "path": "/app.js",
+                              "resource_type": "script"}],
+            },
+        }
+    monkeypatch.setattr(bridge, "hunter_operation", fake_hunter)
+    saved = []
+    monkeypatch.setattr(sitemap_service, "persist_capability_map_safe",
+                        lambda *args, **kwargs: saved.append((args, kwargs)) or 1)
+    token = agent_tools.current_session_id.set("session-1")
+    try:
+        manager = ASMToolsManager()
+        result = await manager.scoped_assessment_observe("browser_inspect_js", {})
+    finally:
+        agent_tools.current_session_id.reset(token)
+    assert result["success"] is True
+    assert result["capability_map"]["js_files"] == ["https://app.example/app.js"]
+    assert saved[0][0][0] == 4
+    assert saved[0][1]["asset_id"] == 14
+    assert saved[0][1]["source"] == "scoped_assessment"
+
+
 def test_scoped_operations_are_available_to_aegis_agent(monkeypatch):
     from app.core import config
     from app.services.agent import prompts

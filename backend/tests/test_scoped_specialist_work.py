@@ -83,11 +83,20 @@ async def test_js_lease_scans_exact_script_and_records_receipt(monkeypatch):
                 "regex_hints": [], "client_signing_findings": []}
 
     monkeypatch.setattr("app.services.js_url_secrets_service.scan_js_urls_for_secrets", fake_scan)
+    saved_reviews = []
+    monkeypatch.setattr(
+        "app.services.sitemap_service.persist_js_review_safe",
+        lambda *args: saved_reviews.append(args) or True,
+    )
     manager = ASMToolsManager()
     manager._capability_map = cmap
     manager._engagement_brain = brain.to_dict()
     result = json.loads(await manager.scan_assigned_js(lease.coverage_cell_id, lease.id))
     assert result["success"] and result["summary"]["status"] == "tested_clean"
+    assert result["asset_review_saved"] is True
+    assert saved_reviews[0][2] == assigned["script_url"]
+    assert saved_reviews[0][3]["counts"] == {"gitleaks": 0, "regex": 0,
+                                            "client_signing": 0}
     assert seen == [(assigned["script_url"], 1, True)]
     assert json.loads(await manager.scan_assigned_js(lease.coverage_cell_id, lease.id))["error"] == "invalid_coverage_lease"
     closed = manager._engagement_brain["coverage_cells"]

@@ -96,6 +96,14 @@ identity, provenance, response metadata, and private capture IDs when present.
 observed metadata and existing captured samples. A path alone is only a
 discovery lead, not a verified framework or security finding.
 
+For a scoped engagement, Aegis also saves the observed paths, parameter
+names, first-party JS URLs, API rows, and a compact passive API fingerprint on
+the run's bound asset. It updates the asset's Application Structure sitemap and
+REST catalog. A JS scan writes a redacted status/count receipt under asset
+metadata; it never stores the recovered secret value there. Independently
+verified findings continue to become asset-linked Vulnerability records. The
+bound asset and observed origin must match before any of these writes occur.
+
 Confirmed service publications enter the ordinary Aegis Findings table through
 `POST /api/v1/prowl/findings`. This intake requires a service key, distinct
 hunter and verifier evidence, a supported proof recipe, asset matching, and

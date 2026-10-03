@@ -703,6 +703,22 @@ class ASMToolsManager(AssessmentCapabilities):
                     seed_parameter_coverage_cells(brain, collect_parameter_inventory(merged))
                     seed_js_coverage_cells(brain, merged)
                     self._engagement_brain = brain.to_dict()
+                    # The service run is bound to one stored asset. Persist the
+                    # value-free observation there even when its Asset.value is
+                    # a URL, which the generic host lookup cannot match.
+                    from app.models.scoped_assessment_run import ScopedAssessmentRun
+                    from app.services.sitemap_service import persist_capability_map_safe
+
+                    binding = db.query(ScopedAssessmentRun).filter_by(
+                        organization_id=org_id, user_id=user_id,
+                        session_id=session_id,
+                    ).first()
+                    if (binding is not None and
+                            binding.allowed_origin == merged.get("scope")):
+                        persist_capability_map_safe(
+                            org_id, merged, source="scoped_assessment",
+                            asset_id=binding.asset_id,
+                        )
             return payload
         except ValueError as exc:
             return {"success": False, "error": "assessment_rejected", "output": str(exc)[:500]}
@@ -3135,9 +3151,16 @@ class ASMToolsManager(AssessmentCapabilities):
                     "Fetch or scanner incomplete; JS review remains open"),
         )
         self._engagement_brain = brain.to_dict()
+        from app.services.sitemap_service import persist_js_review_safe
+
+        _user_id, organization_id = get_tenant_context()
+        asset_saved = persist_js_review_safe(
+            organization_id, current_session_id.get(), url, summary, evidence_id,
+        )
         return json.dumps({
             "success": True, "coverage_cell_id": updated["id"],
-            "evidence_id": evidence_id, "summary": summary,
+            "evidence_id": evidence_id, "asset_review_saved": asset_saved,
+            "summary": summary,
             "findings": {
                 "gitleaks_findings": result.get("gitleaks_findings") or [],
                 "regex_hints": result.get("regex_hints") or [],
