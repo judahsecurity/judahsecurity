@@ -233,9 +233,9 @@ def test_coverage_skill_pack_mentions_existing_prometheus_proxy():
     verifier = ss.skill_pack_for("independent_verifier")
     assert "404" in verifier or "existence" in verifier.lower()
     assert "aegis-enum-canary@example.invalid" in verifier
-    marcus = ss.skill_pack_for("risk_assessor")
-    assert "account" in marcus.lower() or "is_staff" in marcus.lower()
-    assert "critical" in marcus.lower()
+    leo = ss.skill_pack_for("risk_assessor")
+    assert "account" in leo.lower() or "is_staff" in leo.lower()
+    assert "critical" in leo.lower()
     api = ss.skill_pack_for("api_authz")
     assert "SaveSettings" in api or "savesettings" in api.lower()
     assert "unauth_settings_write" in api
@@ -261,7 +261,7 @@ def test_coverage_skill_pack_mentions_existing_prometheus_proxy():
     assert "package-lock" in coverage.lower() or "ghp_" in coverage.lower()
     judge = ss.skill_pack_for("finding_judge")
     assert "azurecr" in judge.lower() or "anonymous pull" in judge.lower()
-    assert "ask marcus" in judge.lower() or "verdict" in judge.lower()
+    assert "ask leo" in judge.lower() or "verdict" in judge.lower()
     cloud = ss.skill_pack_for("cloud_audit")
     assert "azurecr" in cloud.lower() or "anonymous" in cloud.lower()
     secrets = ss.skill_pack_for("secrets_hunter")
@@ -295,10 +295,10 @@ def test_js_secrets_allowlist_can_prove_live_api():
     assert "add_engagement_credential" in tools
 
 
-def test_risk_assessor_skill_pack_is_marcus():
+def test_risk_assessor_skill_pack_is_leo():
     ss = _load_specialist_skills()
     pack = ss.skill_pack_for("risk_assessor")
-    assert "Marcus" in pack
+    assert "Leo" in pack
     assert "assess_finding_risk" in pack
     assert "why_not_higher" in pack
     assert "live retest" in pack.lower() or "no live retest" in pack.lower()

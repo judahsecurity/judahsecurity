@@ -718,6 +718,19 @@ export default function AssetDetailPage() {
   const arsScore = asset.ars_score || asset.risk_score || 0;
   const vulnCount = asset.vulnerability_count || vulnerabilities.length;
   const ipIntelligence = asset.metadata_?.ip_intelligence || {};
+  const assessmentFingerprint = asset.metadata_?.assessment_api_fingerprint as {
+    captured_sample_count?: number;
+    observed_api_metadata_count?: number;
+    observed_at?: string;
+    technology_indicators?: Array<{ tech: string; confidence?: string }>;
+  } | undefined;
+  const jsReviews = (Array.isArray(asset.metadata_?.assessment_js_reviews)
+    ? asset.metadata_.assessment_js_reviews : []) as Array<{
+      url: string;
+      status: string;
+      counts?: { gitleaks?: number; regex?: number; client_signing?: number };
+      observed_at?: string;
+    }>;
 
   return (
     <MainLayout>
@@ -1847,18 +1860,69 @@ export default function AssetDetailPage() {
               </div>
             ) : (
               <>
-                {/* Summary Stats - Shows data from all scans containing this asset */}
+                {/* Application structure includes scan and scoped engagement observations. */}
                 <Card>
                   <CardHeader>
                     <CardTitle className="text-sm flex items-center gap-2">
                       <FolderSearch className="h-4 w-4" />
-                      Discovered from {appStructure?.summary?.scans_included || 0} Scans
+                      Application structure
                     </CardTitle>
                     <CardDescription>
-                      Same-origin sitemap, REST APIs, and third-party URLs for <code className="text-primary">{asset.value}</code>
+                      Saved paths, REST APIs, and JavaScript files for <code className="text-primary">{asset.value}</code>
+                      {' · '}{appStructure?.summary?.scans_included || 0} completed scans included
                     </CardDescription>
                   </CardHeader>
                 </Card>
+
+                {(assessmentFingerprint || jsReviews.length > 0) && (
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="text-sm flex items-center gap-2">
+                        <Shield className="h-4 w-4" />
+                        Engagement observations
+                      </CardTitle>
+                      <CardDescription>Passive API signals and JavaScript review receipts saved on this asset</CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4 text-sm">
+                      {assessmentFingerprint && (
+                        <div className="space-y-2">
+                          <p className="font-medium">API fingerprint</p>
+                          <p className="text-muted-foreground">
+                            {assessmentFingerprint.observed_api_metadata_count || 0} observed API rows
+                            {' · '}{assessmentFingerprint.captured_sample_count || 0} captured samples
+                          </p>
+                          {assessmentFingerprint.technology_indicators?.length ? (
+                            <div className="flex flex-wrap gap-2">
+                              {assessmentFingerprint.technology_indicators.map((indicator, index) => (
+                                <Badge key={`${indicator.tech}-${index}`} variant="outline">
+                                  {indicator.tech}{indicator.confidence ? ` (${indicator.confidence})` : ''}
+                                </Badge>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+                      )}
+                      {jsReviews.length > 0 && (
+                        <div className="space-y-2">
+                          <p className="font-medium">JavaScript reviews ({jsReviews.length})</p>
+                          <div className="max-h-64 overflow-y-auto space-y-2">
+                            {jsReviews.slice(-20).reverse().map((review, index) => (
+                              <div key={`${review.url}-${index}`} className="rounded-md border p-2">
+                                <p className="font-mono text-xs break-all">{review.url}</p>
+                                <p className="text-xs text-muted-foreground mt-1">
+                                  {review.status === 'in_focus' ? 'Needs review' :
+                                   review.status === 'tested_clean' ? 'Tested clean' : 'Inconclusive'}
+                                  {' · '}{(review.counts?.gitleaks || 0) + (review.counts?.regex || 0) +
+                                    (review.counts?.client_signing || 0)} candidate signals
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </CardContent>
+                  </Card>
+                )}
 
                 <div className="grid grid-cols-2 md:grid-cols-6 gap-4">
                   <Card>

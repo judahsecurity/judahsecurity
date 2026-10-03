@@ -1,8 +1,8 @@
-"""Marcus risk assessment — demonstrated-only RA on published findings.
+"""Leo risk assessment — demonstrated-only RA on published findings.
 
 Solomon (validate_finding) decides whether a card is a finding.
 Deborah (independent_verify) re-derives the proof.
-Marcus (assess_finding_risk) scores the *published* packet: confirm vs
+Leo (assess_finding_risk) scores the *published* packet: confirm vs
 inflate vs downgrade, CVSS on demonstrated evidence, control failures,
 ordered remediation with close criteria. No live retest.
 """
@@ -32,7 +32,7 @@ _CRITICAL_PROOF = re.compile(
     re.I,
 )
 
-RA_WRITEUP_GUIDANCE = """Risk assessment (Marcus) is required for every medium+ finding.
+RA_WRITEUP_GUIDANCE = """Risk assessment (Leo) is required for every medium+ finding.
 Score the *demonstrated packet only*. Do not live-retest. Do not invent writes, IMDS, or RCE.
 Call assess_finding_risk after create_finding (or pass risk_assessment JSON into create_finding).
 Required RA fields:
@@ -340,7 +340,7 @@ def pending_payload(*, title: str, severity: str, finding_id: Optional[int] = No
         "title": title,
         "severity": (severity or "").lower(),
         "updated_at": _now_iso(),
-        "assessor": "marcus",
+        "assessor": "leo",
     }
 
 
@@ -354,7 +354,7 @@ def complete_payload(
     out["status"] = status if status in RA_STATUSES else "complete"
     out["finding_id"] = finding_id or assessment.get("finding_id")
     out["updated_at"] = _now_iso()
-    out["assessor"] = "marcus"
+    out["assessor"] = "leo"
     return out
 
 
@@ -444,8 +444,8 @@ def format_gaps(gaps: Iterable[str]) -> str:
     return "RA IMPROVE — " + " | ".join(items)
 
 
-def finding_packet_for_marcus(vuln: Any, *, host: Optional[str] = None) -> str:
-    """Compact demonstrated packet for Ask Marcus. No live retest instructions."""
+def finding_packet_for_leo(vuln: Any, *, host: Optional[str] = None) -> str:
+    """Compact demonstrated packet for Ask Leo. No live retest instructions."""
     meta = dict(getattr(vuln, "metadata_", None) or {})
     detection = meta.get("agent_detection") or {}
     chain = detection.get("chain") or []
@@ -480,9 +480,9 @@ def finding_packet_for_marcus(vuln: Any, *, host: Optional[str] = None) -> str:
     ])
 
 
-def marcus_question(packet: str, finding_id: int) -> str:
+def leo_question(packet: str, finding_id: int) -> str:
     return (
-        "You are Marcus (risk_assessor). Complete a demonstrated-only risk "
+        "You are Leo (risk_assessor). Complete a demonstrated-only risk "
         f"assessment for finding {finding_id}. Call assess_finding_risk with "
         f"finding_id={finding_id} and assessment JSON covering verdict, "
         "confirmed_severity, why_this_severity, why_not_higher, why_not_lower, "

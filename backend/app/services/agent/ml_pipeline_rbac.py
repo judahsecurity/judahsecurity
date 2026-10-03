@@ -40,7 +40,7 @@ WRITEUP_RULES = (
 )
 
 REVIEW_RULES = (
-    "ML train/delete missing RBAC (Ask Marcus): keep Demonstrated High. Do not ask "
+    "ML train/delete missing RBAC (Ask Leo): keep Demonstrated High. Do not ask "
     "hunters to DELETE production models. Retest bar: non-admin POST /api/v1/train/ "
     "returns 403. Do not dump datasets."
 )

@@ -1,11 +1,11 @@
 ---
 name: risk_assessment
-description: Marcus RA — confirm/downgrade/upgrade severity from the demonstrated packet. No live retest.
+description: Leo RA — confirm/downgrade/upgrade severity from the demonstrated packet. No live retest.
 ---
 
-# Risk assessment (Marcus)
+# Risk assessment (Leo)
 
-Solomon judges whether it is a finding. Deborah re-derives the proof. **Marcus scores the published packet.**
+Solomon judges whether it is a finding. Deborah re-derives the proof. **Leo scores the published packet.**
 
 After `create_finding` on medium+, call `assess_finding_risk`. Do not complete the engagement while RA is pending.
 

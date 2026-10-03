@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { TrustBoundaryMap, TRUST_COLORS } from './TrustBoundaryMap';
+import type { AgentRunLedger } from './RunLedgerPanel';
 
 const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), {
   ssr: false,
@@ -60,6 +61,7 @@ export interface ChainData {
 
 interface AttackScenarioPanelProps {
   chainData: ChainData | null;
+  runLedger?: AgentRunLedger | null;
   recordedActions?: number;
   loading?: boolean;
   collapsed?: boolean;
@@ -97,6 +99,7 @@ type ViewMode = 'map' | 'timeline' | 'graph';
 
 export function AttackScenarioPanel({
   chainData,
+  runLedger,
   recordedActions = 0,
   loading = false,
   collapsed = false,
@@ -241,8 +244,8 @@ export function AttackScenarioPanel({
     );
   }
 
-  const isEmpty = !chainData || chainData.nodes.length === 0;
-  const isRunning = chainData?.meta?.status === 'running';
+  const isEmpty = !chainData?.nodes.length && !runLedger?.run_id && !runLedger?.scenario_surface?.items?.length;
+  const isRunning = runLedger?.status === 'running' || chainData?.meta?.status === 'running';
 
   return (
     <Card
@@ -258,7 +261,7 @@ export function AttackScenarioPanel({
             Attack Scenario
           </CardTitle>
           <div className="flex items-center gap-1">
-            {chainData?.meta?.status && (
+            {(runLedger?.status || chainData?.meta?.status) && (
               <Badge
                 variant="outline"
                 className={cn(
@@ -268,7 +271,7 @@ export function AttackScenarioPanel({
                     : 'text-emerald-400 border-emerald-400/60'
                 )}
               >
-                {chainData.meta.status}
+                {runLedger?.status || chainData?.meta?.status}
               </Badge>
             )}
             <div className="flex border rounded-md overflow-hidden">
@@ -300,24 +303,26 @@ export function AttackScenarioPanel({
         )}
         {viewMode === 'map' && !isEmpty && (
           <p className="text-[10px] font-mono text-muted-foreground/80 mt-1">
-            Attack chain across trust boundaries · nodes ignite as the agent reaches them
+            Observed external surface → potential scenarios → tested outcomes
           </p>
         )}
       </CardHeader>
 
       <CardContent className="p-0 flex-1 overflow-hidden flex flex-col">
         {!isEmpty && (
-          <div className="flex gap-3 px-3 py-1.5 border-b text-[10px] text-muted-foreground font-mono">
+          <div className="flex flex-wrap gap-x-3 gap-y-1 px-3 py-1.5 border-b text-[10px] text-muted-foreground font-mono">
+            {viewMode === 'map' ? (
+              <span>{runLedger?.scenario_surface?.items?.length || 0} surface observations · {runLedger?.hypotheses?.length || 0} scenarios</span>
+            ) : (
+              <span className="flex items-center gap-1"><Target className="h-3 w-3" /> {steps.length} chain steps</span>
+            )}
+            <span>{runLedger?.coverage?.actions ?? recordedActions} actions recorded</span>
             <span className="flex items-center gap-1">
-              <Target className="h-3 w-3" /> {steps.length} chain steps
+              <Shield className="h-3 w-3 text-emerald-500" /> {Math.max(findings.length, runLedger?.coverage?.published_findings || 0)} findings
             </span>
-            <span>{recordedActions} actions recorded</span>
-            <span className="flex items-center gap-1">
-              <Shield className="h-3 w-3 text-emerald-500" /> {findings.length} findings
-            </span>
-            <span className="flex items-center gap-1">
+            {viewMode !== 'map' && <span className="flex items-center gap-1">
               <Eye className="h-3 w-3" /> {phases.length} phases
-            </span>
+            </span>}
           </div>
         )}
 
@@ -327,7 +332,7 @@ export function AttackScenarioPanel({
               <Crosshair className="h-8 w-8 mx-auto mb-2 opacity-40" />
               <p className="text-xs">No attack scenario yet</p>
               <p className="text-[10px] mt-1 font-mono text-muted-foreground/70">
-                chain map builds as the agent tests
+                observed surface and hypotheses appear as the agent records them
               </p>
             </div>
           </div>
@@ -339,56 +344,16 @@ export function AttackScenarioPanel({
           </div>
         )}
 
-        {/* HF-style trust-boundary attack chain map */}
+        {/* Evidence-led external assessment map */}
         {viewMode === 'map' && !isEmpty && (
           <div className="flex-1 min-h-0 flex flex-col">
             <TrustBoundaryMap
               steps={steps}
               findings={findings}
+              runLedger={runLedger}
               isRunning={isRunning}
               className="flex-1 min-h-[360px]"
             />
-            {chainData?.attack_paths && chainData.attack_paths.length > 0 && (
-              <div className="border-t px-3 py-2 max-h-[120px] overflow-y-auto space-y-1.5 bg-[#070b12]">
-                <p className="text-[10px] font-mono tracking-[0.14em] font-semibold" style={{ color: TRUST_COLORS.blue }}>
-                  GRAPH PATHS · asset topology
-                </p>
-                {chainData.attack_paths.map((path, idx) => (
-                  <div
-                    key={idx}
-                    className="rounded-lg border px-2 py-1.5 text-[10px]"
-                    style={{ borderColor: `${TRUST_COLORS.blue}55`, background: 'rgba(2,6,23,0.7)' }}
-                  >
-                    <div className="flex items-center gap-1 mb-1">
-                      <span className="font-mono" style={{ color: TRUST_COLORS.blue }}>PATH {idx + 1}</span>
-                      {path.target_cve && (
-                        <Badge variant="outline" className="text-[9px] text-rose-400 border-rose-400/50">
-                          {path.target_cve}
-                        </Badge>
-                      )}
-                    </div>
-                    <div className="flex flex-wrap items-center gap-1 font-mono text-slate-300">
-                      {(path.assets || path.nodes?.map((n) => n.properties?.value || '?') || []).map(
-                        (asset, ai, arr) => (
-                          <span key={ai} className="flex items-center gap-1">
-                            <span
-                              className="rounded border px-1.5 py-0.5"
-                              style={{
-                                borderColor: `${TRUST_COLORS.blue}66`,
-                                background: `${TRUST_COLORS.blue}18`,
-                              }}
-                            >
-                              {String(asset)}
-                            </span>
-                            {ai < arr.length - 1 && <span className="text-slate-500">→</span>}
-                          </span>
-                        )
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
         )}
 

@@ -1,4 +1,4 @@
-"""Guard-lane proof: canaries, spray/crash/DELETE blocks, Deborah, Marcus High."""
+"""Guard-lane proof: canaries, spray/crash/DELETE blocks, Deborah, Leo High."""
 
 from __future__ import annotations
 
@@ -155,7 +155,7 @@ def test_email_change_force_unauth_and_proof_vs_foothold():
     assert verdict == "MUTANT_BYPASS_CANDIDATE"
 
 
-def test_email_change_marcus_keeps_high():
+def test_email_change_leo_keeps_high():
     parsed, gaps = validate_risk_assessment(
         _ra(
             title="High — Unauth POST reset_email",

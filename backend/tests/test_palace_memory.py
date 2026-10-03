@@ -143,6 +143,54 @@ def test_search_finds_stored_tool_output(monkeypatch):
     assert "Cloudflare" in hits[0]["snippet"]
 
 
+def test_target_recall_uses_exact_host_and_keeps_source_pointer(monkeypatch):
+    _session(monkeypatch)
+    pm.store_drawer(
+        1, "Cloudflare detected on the admin path", room="waf", source="tool",
+        source_id="scan:42", target="https://api.example.test/admin",
+    )
+    pm.store_drawer(
+        1, "Cloudflare detected on the impostor host", room="waf", source="tool",
+        source_id="scan:43", target="https://api.example.test.evil/admin",
+    )
+    hits = pm.search_memory(1, "Cloudflare", target="api.example.test")
+    assert [hit["source_id"] for hit in hits] == ["scan:42"]
+    assert "impostor" not in pm.wake_up(1, target="https://api.example.test/")
+
+
+def test_target_wake_up_finds_older_context_before_unrelated_recent_notes(monkeypatch):
+    _session(monkeypatch)
+    pm.store_drawer(None, "Global RoE: do not test payroll", room="scope_roe", title="scope")
+    pm.store_drawer(
+        1, "Prior target finding requires fresh verification", room="findings",
+        target="https://api.example.test/admin", title="prior target finding",
+    )
+    for i in range(35):
+        pm.store_drawer(
+            1, f"Unrelated WAF note {i} for other.example.test", room="waf",
+            target="https://other.example.test", title=f"unrelated {i}",
+        )
+    wake = pm.wake_up(1, target="api.example.test")
+    assert "do not test payroll" in wake
+    assert "prior target finding" in wake
+    assert "Unrelated WAF" not in wake
+
+
+def test_target_search_can_find_an_older_relevant_observation(monkeypatch):
+    _session(monkeypatch)
+    pm.store_drawer(
+        1, "SAML redirect loop on the admin login path", room="authz",
+        target="https://api.example.test/admin", title="SAML redirect",
+    )
+    for i in range(60):
+        pm.store_drawer(
+            1, f"Routine recon response {i} for api.example.test", room="recon",
+            target="https://api.example.test", title=f"recon {i}",
+        )
+    hits = pm.search_memory(1, "SAML redirect", target="api.example.test")
+    assert hits and hits[0]["title"] == "SAML redirect"
+
+
 def test_remember_skips_search_and_query_tools(monkeypatch):
     Session = _session(monkeypatch)
     monkeypatch.setattr(pm, "_current_tenant", lambda: (7, "sess-1"))

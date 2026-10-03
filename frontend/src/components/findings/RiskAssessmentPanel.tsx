@@ -31,7 +31,7 @@ export interface RiskAssessment {
 interface RiskAssessmentPanelProps {
   assessment?: RiskAssessment | null;
   asking?: boolean;
-  onAskMarcus?: () => void;
+  onAskLeo?: () => void;
 }
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
@@ -55,7 +55,7 @@ export function raStatusLabel(assessment?: RiskAssessment | null): string | null
 export function RiskAssessmentPanel({
   assessment,
   asking,
-  onAskMarcus,
+  onAskLeo,
 }: RiskAssessmentPanelProps) {
   const status = (assessment?.status || '').toLowerCase();
   const complete = status === 'complete';
@@ -71,17 +71,17 @@ export function RiskAssessmentPanel({
               {raStatusLabel(assessment)}
             </Badge>
           )}
-          {onAskMarcus && (
+          {onAskLeo && (
             <Button
               size="sm"
               variant="outline"
-              onClick={onAskMarcus}
+              onClick={onAskLeo}
               disabled={inFlight}
             >
               {inFlight ? (
                 <Loader2 className="h-4 w-4 mr-1.5 animate-spin" />
               ) : null}
-              Ask Marcus
+              Ask Leo
             </Button>
           )}
         </div>
@@ -90,8 +90,8 @@ export function RiskAssessmentPanel({
       {!complete && (
         <p className="text-sm text-muted-foreground">
           {status === 'failed'
-            ? assessment?.error || 'Marcus did not persist a complete RA.'
-            : 'Marcus scores the demonstrated packet only — no live retest. Confirm vs inflate vs downgrade, CVSS, close criteria.'}
+            ? assessment?.error || 'Leo could not complete the risk assessment.'
+            : 'Leo assesses the collected evidence without a live retest. It recommends severity and CVSS, identifies possible overstatement or understatement, and defines the criteria for closing the finding.'}
         </p>
       )}
 

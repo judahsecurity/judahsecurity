@@ -2,6 +2,7 @@
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import type { ScenarioSurface } from "./TrustBoundaryMap";
 
 export type AgentRunLedger = {
   run_id: string | null;
@@ -39,6 +40,7 @@ export type AgentRunLedger = {
     blocked_reason?: string;
     evidence_ids?: string[];
   }>;
+  scenario_surface?: ScenarioSurface;
 };
 
 export function RunLedgerPanel({ run }: { run: AgentRunLedger | null }) {

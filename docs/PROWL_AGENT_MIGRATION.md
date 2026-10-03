@@ -103,6 +103,8 @@ REST catalog. A JS scan writes a redacted status/count receipt under asset
 metadata; it never stores the recovered secret value there. Independently
 verified findings continue to become asset-linked Vulnerability records. The
 bound asset and observed origin must match before any of these writes occur.
+The asset detail page shows the passive API fingerprint and JS review receipts
+in App Structure alongside the saved paths, parameters, scripts, and REST APIs.
 
 Confirmed service publications enter the ordinary Aegis Findings table through
 `POST /api/v1/prowl/findings`. This intake requires a service key, distinct

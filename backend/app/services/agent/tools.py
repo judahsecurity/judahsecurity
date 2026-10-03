@@ -369,14 +369,21 @@ from app.services.agent.session_runtime import SessionValue
 
 
 from app.services.agent.assessment_capabilities import AssessmentCapabilities, CAPABILITY_TOOLS
+from app.services.agent.scoped_assessment_tools import ScopedAssessmentTools
 
 
-class ASMToolsManager(AssessmentCapabilities):
+class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     """Manager for ASM platform tools accessible by the AI agent."""
     
     _proof_plans = SessionValue(dict)
     _captured_proof_plans = SessionValue(dict)
     _request_capture_store = SessionValue(lambda: None)
+    _scoped_browser_exchanges = SessionValue(dict)
+    _scoped_get_count = SessionValue(lambda: 0)
+    _scoped_post_count = SessionValue(lambda: 0)
+    _scoped_body_replay_paths = SessionValue(set)
+    _scoped_owner_expectations = SessionValue(dict)
+    _scoped_assessment_started = SessionValue(lambda: False)
     _proof_engine = SessionValue(lambda: None)
     _js_intelligence = SessionValue(lambda: None)
     _secret_validation_policy = SessionValue(dict)
@@ -639,7 +646,7 @@ class ASMToolsManager(AssessmentCapabilities):
         return self.tools.get(name)
 
     async def _scoped_assessment_operation(self, operation: str, body: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        from app.services.agent.scoped_assessment import hunter_operation, capability_map_from_observation
+        from app.services.agent.prowl_service_bridge import hunter_operation, capability_map_from_observation
 
         user_id, org_id = get_tenant_context()
         session_id = current_session_id.get()
@@ -730,14 +737,14 @@ class ASMToolsManager(AssessmentCapabilities):
             db.close()
 
     async def scoped_assessment_observe(self, operation: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        from app.services.agent.scoped_assessment import OBSERVE_OPERATIONS
+        from app.services.agent.prowl_service_bridge import OBSERVE_OPERATIONS
 
         if operation not in OBSERVE_OPERATIONS:
             return {"success": False, "error": "invalid_operation", "output": "Unknown observation operation"}
         return await self._scoped_assessment_operation(operation, body)
 
     async def scoped_assessment_probe(self, operation: str, body: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        from app.services.agent.scoped_assessment import PROBE_OPERATIONS
+        from app.services.agent.prowl_service_bridge import PROBE_OPERATIONS
 
         if operation not in PROBE_OPERATIONS:
             return {"success": False, "error": "invalid_operation", "output": "Unknown probe operation"}
@@ -827,7 +834,7 @@ class ASMToolsManager(AssessmentCapabilities):
         submitted = await self._scoped_assessment_operation("submit_candidate", body)
         if not submitted.get("success") or not verification_recipe:
             return submitted
-        from app.services.agent.scoped_assessment import verify_candidate_with_fresh_proof
+        from app.services.agent.prowl_service_bridge import verify_candidate_with_fresh_proof
 
         user_id, org_id = get_tenant_context()
         session_id = current_session_id.get()
@@ -867,7 +874,7 @@ class ASMToolsManager(AssessmentCapabilities):
 
     async def scoped_assessment_publish(self, candidate_id: str) -> Dict[str, Any]:
         """Retry publication of a service-confirmed candidate after intake recovery."""
-        from app.services.agent.scoped_assessment import publish_confirmed_candidate
+        from app.services.agent.prowl_service_bridge import publish_confirmed_candidate
 
         user_id, org_id = get_tenant_context()
         session_id = current_session_id.get()
@@ -2551,7 +2558,7 @@ class ASMToolsManager(AssessmentCapabilities):
         - references: vendor hardening docs and OWASP/CWE URLs
         - demonstrated_chain: JSON array of proof steps [{summary, outcome, tool, args, result}]
         - not_demonstrated: what was NOT attempted (hash cracking, data modification, lateral movement)
-        - risk_assessment: optional Marcus RA JSON (verdict, why_not_higher, CVSS, retest_criteria).
+        - risk_assessment: optional Leo RA JSON (verdict, why_not_higher, CVSS, retest_criteria).
           Medium+ findings without a passing RA stay RA-pending; call assess_finding_risk next.
           Complete is blocked while RA is pending.
         Default/weak login alone is not a finding until privileged impact is proven.
@@ -2681,7 +2688,7 @@ class ASMToolsManager(AssessmentCapabilities):
                         )
                         db.commit()
                         ra_msg = (
-                            f", RA complete (Marcus {parsed.get('verdict')} "
+                            f", RA complete (Leo {parsed.get('verdict')} "
                             f"{parsed.get('confirmed_severity')} "
                             f"CVSS {parsed.get('cvss_score')})"
                         )
@@ -2869,7 +2876,7 @@ class ASMToolsManager(AssessmentCapabilities):
         cwes: Optional[str] = None,
         **kwargs: Any,
     ) -> str:
-        """Marcus risk assessment — score a demonstrated finding. No live retest.
+        """Leo risk assessment — score a demonstrated finding. No live retest.
 
         Required for every medium+ finding after create_finding. Pass assessment
         as JSON (preferred) or flattened fields. Quality gate rejects inflation
@@ -3702,11 +3709,13 @@ class ASMToolsManager(AssessmentCapabilities):
         query: str,
         room: Optional[str] = None,
         limit: int = 5,
+        target: Optional[str] = None,
     ) -> str:
         """Semantic search over org-scoped verbatim palace memory.
 
         Covers RoE/scope docs, prior tool output, specialist diaries, and
-        mined knowledge. Use before repeating recon, crawl, WAF, or Nuclei.
+        mined knowledge. Pass target to restrict recall to its exact host
+        before repeating recon, crawl, WAF, or Nuclei.
         """
         from app.services.agent.palace_memory import search_memory as palace_search
 
@@ -3719,10 +3728,11 @@ class ASMToolsManager(AssessmentCapabilities):
             org_id,
             query,
             room=(room or None),
+            target=(target or None),
             limit=max(1, min(int(limit or 5), 10)),
         )
         return json.dumps(
-            {"query": query, "count": len(rows), "results": rows},
+            {"query": query, "target": target, "count": len(rows), "results": rows},
             indent=2,
         )[:_tool_output_max_chars()]
 
@@ -7890,10 +7900,37 @@ class ASMToolsManager(AssessmentCapabilities):
                 from app.services.agent.evidence_store import evidence_store
 
                 evidence = evidence_store(self).records.get(evidence_id)
-                if not evidence or evidence.get("kind") not in ("http_exchange", "browser_xss"):
+                kind = evidence.get("kind") if evidence else ""
+                if kind not in (
+                    "http_exchange", "browser_xss", "scoped_http_get",
+                    "scoped_browser_check_xss",
+                ):
                     raise ValueError("tested_clean evidence_id must reference live transport evidence")
                 if identity and evidence.get("identity") != identity:
                     raise ValueError("coverage identity does not match the cited evidence")
+                if kind.startswith("scoped_"):
+                    from urllib.parse import urlsplit
+
+                    target_parts = urlsplit(evidence["target"])
+                    expected_host = (host or target_parts.netloc).lower()
+                    if (target_parts.netloc.lower() != expected_host
+                            or (target_parts.path or "/") != (urlsplit(path).path or "/")
+                            or method.upper() != "GET"):
+                        raise ValueError("scoped evidence does not match the coverage surface")
+                    payload = evidence["payload"]
+                    if kind == "scoped_http_get":
+                        if (test_type != "directory_index" or payload.get("status") != 200
+                                or payload.get("directory_index") is not False
+                                or payload.get("truncated") is not False
+                                or payload.get("redirected") is not False):
+                            raise ValueError("scoped HTTP evidence only closes a clean directory-index check")
+                    elif (test_type not in ("xss", "reflected_xss")
+                          or payload.get("operation") != "check_xss"
+                          or payload.get("executed") is not False
+                          or payload.get("status") != 200
+                          or not payload.get("nonce")
+                          or "__PROWL_NONCE__" not in payload.get("target_template", "")):
+                        raise ValueError("scoped browser evidence only closes a clean executed XSS check")
                 if coverage_cell_id and evidence.get("coverage_cell_id") not in (
                     "", coverage_cell_id
                 ):

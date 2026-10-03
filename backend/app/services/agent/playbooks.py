@@ -550,7 +550,7 @@ PLAYBOOKS: List[Dict[str, Any]] = [
             "8) Save chain recommendations with save_note(category='artifact').\n\n"
             "IMPORTANT: Never create_finding for a DROP verdict. Only create_finding after SUBMIT. "
             "Write description + impact + assets + remediation.\n\n"
-            "**Phase 4 — Pasted finding review (Ask Marcus)**\n"
+            "**Phase 4 — Pasted finding review (Ask Leo)**\n"
             "9) If the operator pasted an existing writeup: do NOT re-probe the live target "
             "unless they explicitly ask for a deny-check retest.\n"
             "10) Write: Verdict (keep/raise/drop severity and Demonstrated); What is proven; "
@@ -559,7 +559,7 @@ PLAYBOOKS: List[Dict[str, Any]] = [
             "images contained live privileged GitHub PATs (repo/workflow/admin). Expired ghs_* "
             "is a leak pattern. Internal-only secrets still count — rotate; do not hunt "
             "internal hosts. Retest bar is anonymous token denied / catalog 401 / revoked PAT 401.\n\n"
-            "**Phase 5 — Marcus RA (required after publish)**\n"
+            "**Phase 5 — Leo RA (required after publish)**\n"
             "12) After create_finding on medium+, call assess_finding_risk(finding_id, assessment JSON).\n"
             "13) Score the demonstrated packet only — no live retest. Include why_not_higher, "
             "CVSS, control_failures, remediation done_when, and retest_criteria.\n"
@@ -571,7 +571,7 @@ PLAYBOOKS: List[Dict[str, Any]] = [
             {"description": "Address failing questions if IMPROVE verdict", "status": "pending", "priority": "high"},
             {"description": "Run detect_bug_chains on confirmed findings", "status": "pending", "priority": "medium"},
             {"description": "Create findings only for SUBMIT verdicts", "status": "pending", "priority": "high"},
-            {"description": "assess_finding_risk (Marcus RA) on each published medium+ finding", "status": "pending", "priority": "high"},
+            {"description": "assess_finding_risk (Leo RA) on each published medium+ finding", "status": "pending", "priority": "high"},
         ],
     },
     {

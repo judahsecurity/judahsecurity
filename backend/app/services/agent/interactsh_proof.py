@@ -23,7 +23,7 @@ WRITEUP_RULES = (
 )
 
 REVIEW_RULES = (
-    "Blind SSRF/XXE (Ask Marcus): keep Demonstrated High when poll stdout has a "
+    "Blind SSRF/XXE (Ask Leo): keep Demonstrated High when poll stdout has a "
     "DNS/HTTP/SMTP hit on the Interactsh payload. Do not drop because IMDS was "
     "not reached. Do not ask hunters to switch to Canarytokens. Retest bar: "
     "planted payload_url gets no new_interactions. Do not re-hit metadata."

@@ -1,4 +1,4 @@
-"""Marcus RA quality gate — demonstrated-only, no inflation to Critical."""
+"""Leo RA quality gate — demonstrated-only, no inflation to Critical."""
 
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ def test_appsmith_packet_confirms_high():
     assert parsed["confirmed_severity"] == "high"
 
 
-def test_hmac_signing_key_is_critical_for_marcus():
+def test_hmac_signing_key_is_critical_for_leo():
     from app.services.js_client_signing_secrets import allows_critical_ra
 
     assert allows_critical_ra(
@@ -128,7 +128,7 @@ def test_hmac_signing_key_is_critical_for_marcus():
     assert parsed["confirmed_severity"] == "critical"
 
 
-def test_emailjs_and_encryption_key_are_critical_for_marcus():
+def test_emailjs_and_encryption_key_are_critical_for_leo():
     from app.services.js_client_signing_secrets import allows_critical_ra
     from app.services.agent.risk_assessment import validate_risk_assessment
 
@@ -229,7 +229,7 @@ def test_pending_ra_blocks_complete():
 def test_skill_pack_loads():
     pack = load_skill_md("risk_assessment")
     assert pack
-    assert "Marcus" in pack["body"]
+    assert "Leo" in pack["body"]
     assert "assess_finding_risk" in pack["body"]
     assert "why_not_higher" in pack["body"]
 
@@ -237,4 +237,4 @@ def test_skill_pack_loads():
 def test_pending_payload_shape():
     p = pending_payload(title="SSRF", severity="high", finding_id=3)
     assert p["status"] == "pending"
-    assert p["assessor"] == "marcus"
+    assert p["assessor"] == "leo"

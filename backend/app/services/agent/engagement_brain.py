@@ -3115,7 +3115,7 @@ def format_engagement_brain_for_prompt(
     ]
     if pending_ras:
         lines.append(
-            f"Marcus RA pending: {len(pending_ras)} finding(s). "
+            f"Leo RA pending: {len(pending_ras)} finding(s). "
             "Call assess_finding_risk (no live retest) before complete."
         )
         for r in pending_ras[:6]:
@@ -3600,7 +3600,7 @@ def methodology_progress(
             f"{len(open_cards)} open ({len(blocking)} high-priority blocking complete). "
             f"Coverage: {cov.get('summary', '')}. "
             f"Candidates pending verify: {len(pending_candidates)}. "
-            f"Findings pending Marcus RA: {len(pending_ras)}."
+            f"Findings pending Leo RA: {len(pending_ras)}."
         ),
     }
 
@@ -3628,7 +3628,7 @@ def format_methodology_progress_for_prompt(progress: Dict[str, Any]) -> str:
         )
     if progress.get("pending_risk_assessments"):
         lines.append(
-            f"Pending Marcus RA: {progress.get('pending_risk_assessments')} finding(s). "
+            f"Pending Leo RA: {progress.get('pending_risk_assessments')} finding(s). "
             "Call assess_finding_risk (or fireteam_dispatch specialists=risk_assessor). "
             "Do not complete until RA is complete."
         )
@@ -3756,8 +3756,9 @@ def denominator_surfaces(brain: EngagementBrain) -> List[Dict[str, Any]]:
         host = str(s.get("host") or "")
         key = surface_key(method, path, host)
         takes = bool(s.get("takes_input"))
+        assessment_check = bool(s.get("assessment_check"))
         in_focus = key in focus or any(path in f or f.endswith(path) for f in focus)
-        if not takes and not in_focus:
+        if not takes and not assessment_check and not in_focus:
             continue
         if key in seen:
             continue
@@ -3768,6 +3769,7 @@ def denominator_surfaces(brain: EngagementBrain) -> List[Dict[str, Any]]:
             "path": path,
             "host": host,
             "takes_input": takes,
+            "assessment_check": assessment_check,
             "in_focus": in_focus,
         })
         if len(out) >= 60:

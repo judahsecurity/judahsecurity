@@ -74,7 +74,7 @@ WRITEUP_RULES = (
 )
 
 REVIEW_RULES = (
-    "Unauth SaveSettings (Ask Marcus): keep Demonstrated High. Do not raise to "
+    "Unauth SaveSettings (Ask Leo): keep Demonstrated High. Do not raise to "
     "Critical on void 200 alone — Critical needs GetSettings round-trip of the "
     "canary AND a demonstrated security-control change. Do not drop because "
     "GetSettings is 500 / NRE (no read-back). Do not mix *.azurewebsites.net "

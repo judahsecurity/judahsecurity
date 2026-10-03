@@ -18,6 +18,17 @@ from app.services.agent.proof_engine import ProofEngine
 from app.services.agent.runtime_mapper import ingest_operations, merge_operations
 
 CAPABILITY_TOOLS = (
+    "scoped_browser_assessment",
+    "scoped_http_get",
+    "scoped_http_compare",
+    "scoped_query_probe",
+    "scoped_numeric_sqli",
+    "scoped_body_probe",
+    "scoped_owner_only",
+    "list_scoped_browser_exchanges",
+    "scoped_assessment_summary",
+    "complete_scoped_assessment",
+    "get_finding_candidate",
     "map_application_traffic",
     "generate_authorization_matrix",
     "run_authorization_proof",

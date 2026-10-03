@@ -566,6 +566,7 @@ async def get_app_structure_by_asset(
     # Merge paths/URLs stored on the asset itself (endpoints, login_portals, parameters, js_files).
     # Same host, different paths — all belong in this asset's App Structure.
     from urllib.parse import urlparse
+    asset_url = urlparse(asset.value) if "://" in asset.value else None
     if getattr(asset, 'endpoints', None):
         for p in asset.endpoints:
             if not p:
@@ -596,7 +597,13 @@ async def get_app_structure_by_asset(
                 continue
             j_str = j if isinstance(j, str) else str(j)
             j_lower = j_str.lower()
-            if asset_value in j_lower or (root_domain and root_domain in j_lower):
+            js_url = urlparse(j_str) if "://" in j_str else None
+            same_origin = bool(
+                asset_url and js_url and
+                (asset_url.scheme.lower(), asset_url.netloc.lower()) ==
+                (js_url.scheme.lower(), js_url.netloc.lower())
+            )
+            if same_origin or asset_value in j_lower or (root_domain and root_domain in j_lower):
                 all_js.add(j_str)
 
     sitemap_nodes: List[SitemapNode] = []

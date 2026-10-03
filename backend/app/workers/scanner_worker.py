@@ -1300,6 +1300,38 @@ class ScannerWorker:
             except Exception as e:
                 run_error = f"validator_error: {e}"
 
+            # The port exposure gate applies even when Leo uses Vanguard instead
+            # of the native validator. A filtered/closed port cannot validate an
+            # internet-exposure finding, regardless of the agent's other evidence.
+            if source_kind == "network_service" and (
+                not isinstance(verdict_data, dict)
+                or verdict_data.get("method") != "nmap_port_verify"
+            ):
+                try:
+                    from app.services.finding_revalidation_service import revalidate_port_exposure
+                    port_verdict = await revalidate_port_exposure(finding_payload)
+                except Exception as exc:
+                    logger.warning("VALIDATE_FINDING: port verification failed: %s", exc)
+                    port_verdict = None
+                if port_verdict:
+                    port_state = port_verdict.get("port_state")
+                    if port_state in ("filtered", "closed") or detected_by == "port_scanner":
+                        verdict_data = port_verdict
+                        run_error = None
+                    elif isinstance(verdict_data, dict):
+                        verdict_data = {
+                            **verdict_data,
+                            "port_check_method": "nmap_port_verify",
+                            "port_state": port_state,
+                            "port_host": port_verdict.get("port_host"),
+                            "port": port_verdict.get("port"),
+                            "protocol": port_verdict.get("protocol"),
+                            "port_check_error": port_verdict.get("error"),
+                            "evidence": "\n".join(filter(None, [
+                                verdict_data.get("evidence"), port_verdict.get("evidence"),
+                            ])),
+                        }
+
             now = datetime.utcnow()
             if verdict_data is None:
                 validation.status = ValidationStatus.FAILED
@@ -1339,6 +1371,45 @@ class ScannerWorker:
             vuln.validation_status = "completed"
             vuln.last_validation_verdict = verdict_enum.value
             vuln.last_validated_at = now
+
+            # Leo's live port check is also a verification result. Keep the Ports
+            # row and scanner-generated findings in sync with its Nmap verdict.
+            if (
+                source_kind == "network_service"
+                and (
+                    verdict_data.get("method") == "nmap_port_verify"
+                    or verdict_data.get("port_check_method") == "nmap_port_verify"
+                )
+                and verdict_data.get("port_state") in ("open", "filtered", "closed")
+            ):
+                checked_state = verdict_data["port_state"]
+                checked_port = db.query(PortService).filter(
+                    PortService.asset_id == vuln.asset_id,
+                    PortService.port == verdict_data.get("port"),
+                    PortService.protocol == Protocol(verdict_data.get("protocol", "tcp")),
+                ).first()
+                checked_host = verdict_data.get("port_host")
+                if checked_port and checked_host in (checked_port.scanned_ip, asset_value):
+                    checked_port.verified = True
+                    checked_port.verified_at = now
+                    checked_port.verified_state = checked_state
+                    checked_port.verification_scanner = "nmap"
+                    checked_port.state = PortState(checked_state)
+                    if checked_state != "open":
+                        PortFindingsService.resolve_findings_for_port(db, checked_port)
+                if checked_state != "open" and vuln.status in (
+                    VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS
+                ):
+                    vuln.status = VulnerabilityStatus.RESOLVED
+                    vuln.resolved_at = now
+                    vuln.metadata_ = {
+                        **(vuln.metadata_ or {}),
+                        "port_verification": {
+                            "state": checked_state,
+                            "scanner": "nmap",
+                            "verified_at": now.isoformat(),
+                        },
+                    }
             db.commit()
 
             # Log a template-logic issue when the FP is attributed to the template.
@@ -2643,6 +2714,9 @@ class ScannerWorker:
                         elif state == "closed":
                             port_record.state = PortState.CLOSED
                             closed_count += 1
+
+                        if state in ("filtered", "closed"):
+                            PortFindingsService.resolve_findings_for_port(db, port_record)
                         
                         verified_count += 1
                     

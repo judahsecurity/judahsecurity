@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.models.asset import AssetType
-from app.services.agent import scoped_assessment as bridge
+from app.services.agent import prowl_service_bridge as bridge
 
 
 def _asset(value="app.example", kind=AssetType.DOMAIN, in_scope=True):

@@ -131,7 +131,7 @@ def test_do_not_infer_200_useraccount_body():
     assert not inferred_role_payload(oracle)
 
 
-def test_marcus_requires_actual_critical_impact_for_account_lookup():
+def test_leo_requires_actual_critical_impact_for_account_lookup():
     parsed, gaps = validate_risk_assessment(_ra())
     assert any("Critical requires" in g for g in gaps)
 

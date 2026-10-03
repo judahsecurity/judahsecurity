@@ -111,10 +111,10 @@ def test_independent_verifier_is_isolated():
     assert "finding_judge" in _allowlists()
     assert "create_finding" not in _allowlists()["finding_judge"]
     assert "submit_finding_candidate" not in _allowlists()["finding_judge"]
-    marcus = _allowlists()["risk_assessor"]
-    assert "assess_finding_risk" in marcus
-    assert "create_finding" not in marcus
-    assert "execute_curl" not in marcus
+    leo = _allowlists()["risk_assessor"]
+    assert "assess_finding_risk" in leo
+    assert "create_finding" not in leo
+    assert "execute_curl" not in leo
 
 
 def test_medium_plus_requires_verify_receipt_when_flag_set():
