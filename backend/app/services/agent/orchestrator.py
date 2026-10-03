@@ -643,9 +643,9 @@ class AgentOrchestrator:
         recon_worker_briefs: List[str] = []
         kickoff: Any = {}
         auto_enrich_target: Optional[str] = None
-        if seed:
+        org_id = state.get("organization_id")
+        if seed and mode != "pilot":
             session_id = state.get("session_id")
-            org_id = state.get("organization_id")
             uid_raw = state.get("user_id")
             try:
                 uid_int = int(uid_raw) if uid_raw is not None and str(uid_raw).isdigit() else None
@@ -877,6 +877,15 @@ class AgentOrchestrator:
                 logger.warning("assessment kickoff skipped: %s", e)
                 kickoff_brief = ""
         
+        if mode == "pilot":
+            kickoff_brief = (
+                "Bounded pilot: automatic kickoff, Interceptor, scanner streams, "
+                "and directory brute force are disabled. Use only the allowed "
+                "browser and captured-request tools. The first pass permits "
+                "GET, HEAD, and OPTIONS on the exact registered HTTPS origin; "
+                "every request uses the shared rate and total budget."
+            )
+
         out = {
             "current_iteration": 0,
             "max_iterations": _max_iterations_var.get(None) or settings.AGENT_MAX_ITERATIONS,
@@ -890,6 +899,7 @@ class AgentOrchestrator:
             "objective_history": [],
             "original_objective": latest_message,
             "target_info": target_info,
+            "pilot_policy": state.get("pilot_policy"),
             "capability_map": None,
             "auth_session": None,
             "engagement_brain": None,
@@ -1435,6 +1445,13 @@ class AgentOrchestrator:
             objective_history_formatted = format_objective_history(state.get("objective_history") or [])
             available_tools = get_phase_tools(phase)
             available_tools += self._unavailable_tools_note()
+            if state.get("mode") == "pilot":
+                from app.services.agent.pilot_policy import PILOT_ALLOWED_TOOLS
+                available_tools = (
+                    "Bounded pilot tools only: " + ", ".join(sorted(PILOT_ALLOWED_TOOLS))
+                    + ". Network calls outside these tools are denied. "
+                    "Use anonymous GET/HEAD/OPTIONS requests on the exact target origin."
+                )
 
             # Append prior session intelligence to knowledge context
             combined_knowledge = knowledge_context
@@ -1442,8 +1459,9 @@ class AgentOrchestrator:
                 combined_knowledge = f"{knowledge_context}\n\n{prior_chain_context}"
             kickoff_brief = (state.get("kickoff_brief") or "").strip()
             if kickoff_brief and iteration <= 2:
+                heading = "Pilot constraints" if state.get("mode") == "pilot" else "Kickoff recon (already ran — use this)"
                 combined_knowledge = (
-                    f"{combined_knowledge}\n\n## Kickoff recon (already ran — use this)\n{kickoff_brief}"
+                    f"{combined_knowledge}\n\n## {heading}\n{kickoff_brief}"
                 )
             if drained_briefs:
                 from app.services.agent.recon_workers import format_briefs_for_prompt
@@ -1998,7 +2016,9 @@ class AgentOrchestrator:
         # "walk the app first" rule: only promote once the capability map is ready
         # (execute_deep_crawl has produced a usable map).
         auto_promoted_phase: Optional[str] = None
-        if not is_tool_allowed_in_phase(tool_name, phase):
+        from app.services.agent.pilot_policy import PILOT_ALLOWED_TOOLS
+        pilot_allowed = state.get("mode") == "pilot" and tool_name in PILOT_ALLOWED_TOOLS
+        if not pilot_allowed and not is_tool_allowed_in_phase(tool_name, phase):
             allowed_phases = TOOL_PHASE_MAP.get(tool_name, [])
             target_phase = (
                 "exploitation" if "exploitation" in allowed_phases
@@ -2927,6 +2947,9 @@ class AgentOrchestrator:
         cmap: Optional[Dict[str, Any]] = None,
     ) -> Optional[list]:
         """After a thin/404 crawl, start ferox+katana without waiting for Joshua."""
+        from app.services.agent.pilot_policy import current_pilot
+        if current_pilot() is not None:
+            return None
         from app.services.agent.tester_loop import (
             normalized_tools_run,
             primary_web_target,
@@ -3175,6 +3198,7 @@ class AgentOrchestrator:
         load_session_id: Optional[str] = None,
         price_limit_usd: Optional[float] = None,
         assessment_policy: Optional[Dict[str, Any]] = None,
+        pilot_config: Optional[Dict[str, Any]] = None,
     ) -> InvokeResponse:
         """Main entry point for agent invocation.
         
@@ -3206,8 +3230,22 @@ class AgentOrchestrator:
             budget_seconds=max(int(getattr(settings, "AGENT_REQUEST_TIMEOUT_SECONDS", 3600)), 3600),
         )
         run_token = active_run_id.set(run_id)
+        from app.services.agent.pilot_policy import (
+            PilotDenied, PilotPolicy, reset_pilot, set_pilot,
+        )
+        pilot_token = set_pilot(None)
         register_run(session_id, this_task)
         try:
+            pilot_policy = None
+            if mode == "pilot":
+                try:
+                    pilot_policy = PilotPolicy.from_config(
+                        pilot_config, organization_id, session_id,
+                    )
+                except PilotDenied as exc:
+                    finish_run(run_id, "error", str(exc))
+                    return InvokeResponse(error=str(exc))
+                set_pilot(pilot_policy)
             if not self._initialized:
                 await self.initialize()
             if not self._initialized:
@@ -3222,7 +3260,7 @@ class AgentOrchestrator:
 
             _max_iterations_var.set(max_iterations)
             self._start_turn_deadline()
-            set_autonomous_mode(mode == "agent")
+            set_autonomous_mode(mode in ("agent", "pilot"))
             logger.info(f"[{user_id}/{session_id}] Invoking with: {question[:100]}... (mode={mode}, max_iter={max_iterations or 'default'})")
             if price_limit_usd is not None:
                 set_price_limit(session_id, float(price_limit_usd))
@@ -3260,6 +3298,8 @@ class AgentOrchestrator:
                 "session_id": session_id,
                 "mode": mode,
             }
+            if pilot_policy is not None:
+                input_data["pilot_policy"] = pilot_policy.as_config()
             if initial_todos is not None:
                 input_data["initial_todos"] = initial_todos
             
@@ -3322,24 +3362,48 @@ class AgentOrchestrator:
             evograph.record_chain_end(session_id=session_id, status="error", outcome=str(e)[:300])
             return InvokeResponse(error=str(e))
         finally:
+            reset_pilot(pilot_token)
             active_run_id.reset(run_token)
             unregister_run(session_id, this_task)
             if status_callback:
                 self.clear_status_callback()
     
-    async def _arm_autonomous_from_state(self, config: dict) -> None:
-        """Restore autonomous auto-approval on resume from the checkpointed run
-        mode. An agent-mode run that paused (e.g. asked the user a question)
-        should keep auto-approving confirm-gated tools on resume rather than
-        stalling; assist-mode resumes stay interactive. Best-effort: defaults to
-        interactive (False) if the checkpoint can't be read."""
+    async def _arm_autonomous_from_state(self, config: dict, organization_id: int, session_id: str):
+        """Restore the mode and bounded policy from the checkpointed run."""
         mode = None
+        values = {}
         try:
             snap = await self.graph.aget_state(config)
-            mode = (getattr(snap, "values", None) or {}).get("mode")
+            values = getattr(snap, "values", None) or {}
+            mode = values.get("mode")
         except Exception:
             logger.debug("Could not read checkpoint mode for autonomous arm", exc_info=True)
-        set_autonomous_mode(mode == "agent")
+        # A checkpoint read failure must never turn a pilot resume into an
+        # unrestricted assist run. The conversation mode is a second guard.
+        from app.db.database import SessionLocal
+        from app.models.agent_conversation import AgentConversation
+        db = SessionLocal()
+        try:
+            conversation = db.query(AgentConversation).filter(
+                AgentConversation.session_id == session_id,
+                AgentConversation.organization_id == organization_id,
+            ).first()
+            if (conversation and (conversation.mode == "pilot") != (mode == "pilot")) or (
+                mode == "pilot" and conversation is None
+            ):
+                from app.services.agent.pilot_policy import PilotDenied
+                raise PilotDenied("Pilot checkpoint and conversation disagree; resume denied")
+        finally:
+            db.close()
+        from app.services.agent.pilot_policy import PilotPolicy, set_pilot
+        policy = None
+        if mode == "pilot":
+            policy = PilotPolicy.from_config(
+                values.get("pilot_policy"), organization_id, session_id,
+            )
+        token = set_pilot(policy)
+        set_autonomous_mode(mode in ("agent", "pilot"))
+        return token
 
     async def resume_after_approval(
         self,
@@ -3366,12 +3430,15 @@ class AgentOrchestrator:
         )
         run_token = active_run_id.set(run_id)
         register_run(session_id, this_task)
+        pilot_token = None
         if status_callback:
             self.set_status_callback(status_callback)
         
         try:
             config = {"configurable": {"thread_id": session_id}}
-            await self._arm_autonomous_from_state(config)
+            pilot_token = await self._arm_autonomous_from_state(
+                config, organization_id, session_id,
+            )
             
             update_data = {
                 "user_approval_response": decision,
@@ -3402,6 +3469,9 @@ class AgentOrchestrator:
             finish_run(run_id, "error", type(e).__name__)
             return InvokeResponse(error=str(e))
         finally:
+            if pilot_token is not None:
+                from app.services.agent.pilot_policy import reset_pilot
+                reset_pilot(pilot_token)
             active_run_id.reset(run_token)
             unregister_run(session_id, this_task)
             if status_callback:
@@ -3431,12 +3501,15 @@ class AgentOrchestrator:
         )
         run_token = active_run_id.set(run_id)
         register_run(session_id, this_task)
+        pilot_token = None
         if status_callback:
             self.set_status_callback(status_callback)
         
         try:
             config = {"configurable": {"thread_id": session_id}}
-            await self._arm_autonomous_from_state(config)
+            pilot_token = await self._arm_autonomous_from_state(
+                config, organization_id, session_id,
+            )
             
             update_data = {
                 "user_question_answer": answer,
@@ -3466,6 +3539,9 @@ class AgentOrchestrator:
             finish_run(run_id, "error", type(e).__name__)
             return InvokeResponse(error=str(e))
         finally:
+            if pilot_token is not None:
+                from app.services.agent.pilot_policy import reset_pilot
+                reset_pilot(pilot_token)
             active_run_id.reset(run_token)
             unregister_run(session_id, this_task)
             if status_callback:

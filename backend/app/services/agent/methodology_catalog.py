@@ -86,6 +86,8 @@ _SSRF_HINT_RE = re.compile(
     r")",
     re.I,
 )
+_XML_PARSER_RE = re.compile(r"(?:/soap\b|/xml\b|/xml/|\.xml\b|/saml\b|\bxml\s*import\b)", re.I)
+_XML_BODY_RE = re.compile(r"application/(?:soap\+)?xml|text/xml|<\?xml\b|<soap[:>]", re.I)
 _AZURE_FUNCTION_RE = re.compile(
     r"(azurewebsites\.net|azurefunctions\.net|/api/Tester\b|functions\.azure\.com)",
     re.I,
@@ -1714,6 +1716,35 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             why="URL-fetch / webhook / proxy style surface observed",
         ))
 
+    xml_inputs = [
+        str(e.get("path") or "") for e in apis if isinstance(e, dict)
+        and str(e.get("method") or "").upper() in {"POST", "PUT", "PATCH"}
+        and _XML_PARSER_RE.search(str(e.get("path") or ""))
+    ]
+    xml_inputs.extend(
+        str(s.get("url") or s.get("path") or "") for s in api_samples
+        if isinstance(s, dict)
+        and str(s.get("method") or "").upper() in {"POST", "PUT", "PATCH"}
+        and _XML_BODY_RE.search(str(s))
+    )
+    if xml_inputs:
+        add(Methodology(
+            id="xxe_xml_parser",
+            title="XML parser external-entity handling",
+            hunt="xxe",
+            specialist="ssrf",
+            priority="high",
+            assumption="An observed write endpoint parses caller-supplied XML with external entities enabled",
+            test="Use a harmless XML canary with a fresh OAST session; plant once, poll, and compare with an inert control",
+            pass_criteria="Correlated DNS/HTTP callback from the XML parser after the canary entity is submitted",
+            kill_criteria="XML rejected or external entities disabled; no correlated callback after bounded polling",
+            cwe_ids=["CWE-611"],
+            capec_ids=["CAPEC-201"],
+            owasp="A05:2021 Security Misconfiguration",
+            evidence=xml_inputs[0],
+            why="Observed XML-capable POST/PUT/PATCH surface",
+        ))
+
     # --- Upload / GraphQL / realtime / JS ---
     if has_upload:
         ev = next(
@@ -1728,8 +1759,8 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             specialist="file_upload",
             priority="high",
             assumption="Upload path trusts client content-type/filename",
-            test="Content-type/extension bypass and stored XSS/path tricks on mapped upload forms",
-            pass_criteria="Executable/HTML content stored or path traversal confirmed",
+            test="Bounded benign-file upload; retrieve, prove browser execution or unauthorized access, and clean up",
+            pass_criteria="Retrieved canary executes in browser or a distinct identity accesses a known private upload",
             kill_criteria="Strict type/extension and content validation",
             cwe_ids=["CWE-434", "CWE-79", "CWE-22"],
             capec_ids=["CAPEC-1", "CAPEC-126"],

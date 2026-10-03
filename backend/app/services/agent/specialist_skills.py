@@ -366,8 +366,9 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
     ),
     "file_upload": (
         "SKILL PACK — upload abuse:\n"
-        "- Content-type / extension / path tricks on mapped upload forms.\n"
-        "- Prefer stored XSS or path disclosure proofs; avoid destructive webshells."
+        "- Use a small benign canary file; vary one type/extension property at a time.\n"
+        "- Prove retrieval and browser execution or cross-identity access, then delete the test file.\n"
+        "- An upload 200 or reflected filename is only a lead; never upload a webshell."
     ),
     "saml_sso": (
         "SKILL PACK — SSO:\n"
@@ -498,8 +499,10 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
     ),
     "graphql_api": (
         "SKILL PACK — GraphQL:\n"
-        "- Probe /graphql paths; check introspection, suggestions, batching, CSRF on GET.\n"
-        "- Prefer execute_astf + execute_schemathesis + execute_curl; prove authz with compare_requests."
+        "- Map /graphql and use introspection only to select a real object query.\n"
+        "- Replay the same query, variables, and object ID with two verified identities.\n"
+        "- Prove a nested owner field (for example data.node.ownerId) and private data; 200 or schema exposure alone is not impact.\n"
+        "- Prefer compare_requests and authorization proof; bounded mutations need owner readback and cleanup."
     ),
     "web_recon": (
         "SKILL PACK — recon:\n"

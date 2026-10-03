@@ -40,6 +40,7 @@ NON_VULN_TYPES = {
 _CATEGORY_PATTERNS: List[tuple] = [
     ("sqli", r"\bsql[\s-]?injection\b|\bsqli\b"),
     ("xss", r"\bxss\b|cross[\s-]?site[\s-]?script"),
+    ("file_upload", r"(?:unsafe|unrestricted|unvalidated|arbitrary)[\s-]?file[\s-]?upload|file[\s-]?upload[\s-]?(?:bypass|execution)"),
     ("ssrf", r"\bssrf\b|server[\s-]?side[\s-]?request"),
     ("rce", r"\brce\b|remote[\s-]?code[\s-]?exec|command[\s-]?injection"),
     ("idor", r"\bidor\b|insecure[\s-]?direct[\s-]?object|broken[\s-]?object[\s-]?level"),

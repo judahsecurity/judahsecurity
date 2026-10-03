@@ -53,6 +53,7 @@ services:
       - DEBUG=${DEBUG:-false}
       - CORS_ORIGINS=${CORS_ORIGINS:-["https://aegis.theforcesecurity.io","https://aegis.judahsecurity.io","http://localhost","http://localhost:80","http://localhost:3000","http://localhost:8000","http://frontend:3000"]}
       - REDIS_URL=redis://redis:6379/0
+      - AEGIS_AGENT_EGRESS_IP=${AEGIS_AGENT_EGRESS_IP:-}
       - AEGIS_INTERACTSH_RPC_ENABLED=${AEGIS_INTERACTSH_RPC_ENABLED:-true}
       - AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS=${AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS:-35}
       - AEGIS_EVIDENCE_DIR=${AEGIS_EVIDENCE_DIR:-/app/data/evidence}

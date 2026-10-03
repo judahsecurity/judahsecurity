@@ -175,7 +175,9 @@ async def execute_browser_actions(actions_json: str, *, capture_callback=None) -
                     identity = "anonymous" if isinstance(spec, list) else spec.get("identity", "anonymous")
                     operations = normalize_request(request, identity=identity, source="browser")
                     session.application_operations = merge_operations(session.application_operations, operations)
-                    session.network_requests.append(dict(method=req.method, url=req.url.split("?", 1)[0]))
+                    from app.services.agent.pilot_policy import current_pilot
+                    captured_url = req.url if current_pilot() is not None else req.url.split("?", 1)[0]
+                    session.network_requests.append(dict(method=req.method, url=captured_url))
                 except Exception:
                     session.errors.append("Request metadata capture failed")
             page.on("request", capture_request)

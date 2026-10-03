@@ -46,6 +46,12 @@ async def assess(args, orchestrator=None):
             "Custom OAST is required but unavailable: "
             + str(oast_status.get("error") or "interactsh-client health check failed")
         )
+    sink = Path(os.environ.get("AEGIS_FINDINGS_SINK", "findings.jsonl")).resolve()
+    sink.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        sink.touch(exist_ok=False)
+    except FileExistsError as exc:
+        raise ValueError(f"Use a fresh findings sink for each assessment: {sink}") from exc
     manager = orchestrator.tool_manager
     from app.services.agent.assessment_scope import register_scope
 
@@ -127,9 +133,7 @@ async def assess(args, orchestrator=None):
         "ledger_metrics": ledger_metrics,
         "ledger_export_error": ledger_export_error,
     }
-    output = (
-        Path(os.environ.get("AEGIS_FINDINGS_SINK", "findings.jsonl")).resolve().parent
-    )
+    output = sink.parent
     output.mkdir(parents=True, exist_ok=True)
     (output / "product_assessment.json").write_text(json.dumps(summary, indent=2))
     (output / "agent_ledger.json").write_text(json.dumps(run_ledgers, indent=2))

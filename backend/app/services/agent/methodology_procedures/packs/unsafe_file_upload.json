@@ -1,0 +1,18 @@
+{
+  "id": "unsafe_file_upload",
+  "title": "Unsafe file upload with bounded proof",
+  "summary": "Use a benign canary file and prove public retrieval or browser execution before reporting impact.",
+  "steps": [
+    "Select an observed upload form or API in scope; use a disposable test account and record the normal filename, MIME, and size rules.",
+    "Upload a small benign text canary first, then one controlled mismatch of extension, declared content type, or file signature at a time.",
+    "For HTML execution, use only a tiny file that calls alert with the fresh aegis-verify canary; never upload a shell or destructive payload.",
+    "Retrieve the resulting URL in a clean browser session and verify actual script execution with browser_xss evidence. Use upload_xss proof with upload_id, read_id, browser_id, and cleanup_id. A 200 upload response, filename echo, or raw HTML reflection is only a lead.",
+    "For unauthorized file access, replay the same uploaded object under a distinct verified identity and apply authorization proof.",
+    "Delete the test object and verify cleanup. If cleanup is unavailable, stop and report the residual test artifact to the analyst.",
+    "Submit a candidate only with upload, retrieval, execution or authorization, and cleanup evidence IDs."
+  ],
+  "tools": ["replay_http_request", "mutate_captured_request", "execute_browser", "test_authorization_boundary", "independent_verify"],
+  "pass_signals": ["Uploaded active content executes in the browser at a same-origin retrieval URL", "A foreign identity retrieves a known private uploaded object"],
+  "kill_signals": ["Upload rejected or normalized to inert content", "Retrieval forces a download or sandboxed origin", "Only filename or Content-Type reflection observed"],
+  "references": ["CWE-434", "CWE-79", "OWASP WSTG-BUSL-08"]
+}

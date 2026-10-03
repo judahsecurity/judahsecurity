@@ -100,6 +100,12 @@ variable "scanner_desired_count" {
   default     = 2
 }
 
+variable "agent_egress_ip" {
+  description = "Verified public egress IP shared by every API task that can run a bounded agent pilot"
+  type        = string
+  default     = ""
+}
+
 # =============================================================================
 # Data Sources
 # =============================================================================
@@ -775,6 +781,10 @@ resource "aws_ecs_task_definition" "api" {
         {
           name  = "AEGIS_EVIDENCE_RETENTION_SECONDS"
           value = "86400"
+        },
+        {
+          name  = "AEGIS_AGENT_EGRESS_IP"
+          value = var.agent_egress_ip
         }
       ]
 
@@ -1155,7 +1165,6 @@ output "sqs_queue_url" {
   description = "SQS queue URL for scan jobs"
   value       = aws_sqs_queue.scan_jobs.url
 }
-
 
 
 

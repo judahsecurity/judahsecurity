@@ -273,6 +273,10 @@ class Settings(BaseSettings):
     # Comma-separated IPv4/IPv6 addresses or CIDRs, e.g. "203.0.113.10,198.51.100.0/24".
     ASM_SCANNER_EGRESS_IPS: str = ""
     ASM_SCANNER_USER_AGENT: str = "JudahSecurity-ASM-Scanner/1.0"
+    # Exact public source IP of the backend worker used for bounded agent
+    # pilots. Required before the pilot mode can start; kept separate from the
+    # scanner CIDR allowlist above.
+    AEGIS_AGENT_EGRESS_IP: str = ""
 
     # Dual Interceptor workers (Mac desktop + Ubuntu browser host)
     INTERCEPTOR_BIN: Optional[str] = None
@@ -308,7 +312,6 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
-
 
 
 

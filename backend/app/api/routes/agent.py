@@ -8,6 +8,8 @@ Includes conversation history CRUD and real-time WebSocket streaming.
 import asyncio
 import json
 import logging
+import os
+import time
 import uuid
 from datetime import datetime
 from typing import Optional, Literal, List
@@ -101,7 +103,8 @@ class AgentQueryRequest(BaseModel):
     session_id: Optional[str] = None
     playbook_id: Optional[str] = None
     target: Optional[str] = None
-    mode: Optional[Literal["assist", "agent"]] = "assist"
+    mode: Optional[Literal["assist", "agent", "pilot"]] = "assist"
+    pilot: Optional[dict] = None
     load_session_id: Optional[str] = None
     price_limit_usd: Optional[float] = None
     assessment_policy: Optional[AgentAssessmentPolicy] = None
@@ -114,6 +117,48 @@ class AgentQueryRequest(BaseModel):
         if not v.strip():
             raise ValueError("question must not be empty")
         return v
+
+
+def _pilot_launch_config(raw: Optional[dict], organization_id: int, session_id: str) -> dict:
+    """Server-owned two-hour window; reject missing/invalid preflight fields."""
+    from app.services.agent.pilot_policy import PilotDenied, PilotPolicy, configured_egress_ip
+
+    if not isinstance(raw, dict):
+        raise HTTPException(status_code=400, detail="Pilot target is required")
+    config = {
+        "target": (raw or {}).get("target"),
+        "source_ip": configured_egress_ip(),
+        "expires_at_ms": int(time.time() * 1000) + 7_200_000,
+    }
+    try:
+        return PilotPolicy.from_config(config, organization_id, session_id).as_config()
+    except PilotDenied as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _check_pilot_session(db: Session, session_id: str, user_id: int, mode: str) -> None:
+    """A bounded pilot starts in a fresh conversation and cannot be downgraded."""
+    existing = db.query(AgentConversation).filter(
+        AgentConversation.session_id == session_id,
+    ).first()
+    if existing and (mode == "pilot" or existing.mode == "pilot"):
+        raise HTTPException(
+            status_code=409,
+            detail="Start a new conversation for a bounded pilot or a different mode",
+        )
+
+
+def _pilot_question(question: str, config: dict, playbook_id: Optional[str],
+                    load_session_id: Optional[str]) -> str:
+    """Keep a pilot's seed target and objective tied to its server-validated origin."""
+    if playbook_id or load_session_id:
+        raise HTTPException(status_code=400, detail="A bounded pilot requires a fresh, direct objective")
+    return (
+        f"Pilot target: {config['target']}/. Only assess this exact HTTPS origin. "
+        "Use anonymous GET, HEAD, or OPTIONS requests and the bounded pilot tools. "
+        "Every network tool call requires analyst approval.\n"
+        f"Assessment objective: {question}"
+    )
 
 
 class AgentSteerRequest(BaseModel):
@@ -261,7 +306,7 @@ def _save_conversation(
     result=None,
     mode: str = "assist",
 ):
-    """Upsert conversation record and append the message.
+    """Upsert conversation record and append the message; return persistence status.
 
     Always uses a short-lived session. The request-scoped ``db`` can sit idle
     for the whole invoke (tens of minutes) and then fail on commit with a
@@ -330,12 +375,14 @@ def _save_conversation(
                 )
         except Exception:
             logger.debug("palace conversation mine skipped", exc_info=True)
+        return True
     except Exception:
         logger.exception("Failed to persist agent conversation session=%s", session_id)
         try:
             session.rollback()
         except Exception:
             pass
+        return False
     finally:
         session.close()
 
@@ -408,7 +455,15 @@ async def query_agent(
             question = objective
 
     mode = request.mode or "assist"
-    _save_conversation(db, session_id, current_user.id, org_id, "user", question, mode=mode)
+    _check_pilot_session(db, session_id, current_user.id, mode)
+    if mode == "pilot" and request.assessment_policy is not None:
+        raise HTTPException(status_code=400, detail="Bounded pilot does not accept an assessment policy")
+    pilot_config = _pilot_launch_config(request.pilot, org_id, session_id) if mode == "pilot" else None
+    if pilot_config is not None:
+        question = _pilot_question(question, pilot_config, request.playbook_id, request.load_session_id)
+    saved = _save_conversation(db, session_id, current_user.id, org_id, "user", question, mode=mode)
+    if pilot_config is not None and not saved:
+        raise HTTPException(status_code=503, detail="Pilot session could not be persisted")
 
     # Do not hold this HTTP request for the hunt. Playbooks against a live
     # target routinely exceed nginx/ALB idle timeouts; the UI then shows 504
@@ -438,6 +493,7 @@ async def query_agent(
                     load_session_id=load_session_id,
                     price_limit_usd=price_limit_usd,
                     assessment_policy=assessment_policy,
+                    pilot_config=pilot_config,
                 )
             )
             register_run(session_id, invoke_task)
@@ -745,6 +801,39 @@ async def get_agent_status():
             "custom_probe": True,
         } if available else {},
         "price_limit_usd": settings.AGENT_PRICE_LIMIT_USD if available else None,
+    }
+
+
+@router.get("/pilot/status")
+async def get_pilot_status(current_user: User = Depends(get_current_user)):
+    """Report bounded-pilot launch readiness without exposing the egress IP."""
+    import ipaddress
+
+    del current_user
+    from app.services.agent.pilot_policy import configured_egress_ip
+    raw_ip = configured_egress_ip()
+    try:
+        egress_ready = bool(ipaddress.ip_address(raw_ip).is_global)
+    except ValueError:
+        egress_ready = False
+    redis_ready = False
+    try:
+        import redis
+
+        client = redis.Redis.from_url(
+            os.environ.get("REDIS_URL", "redis://redis:6379/0"),
+            socket_connect_timeout=1, socket_timeout=2,
+        )
+        redis_ready = bool(await asyncio.to_thread(client.ping))
+    except Exception:
+        pass
+    return {
+        "ready": egress_ready and redis_ready,
+        "egress_ready": egress_ready,
+        "redis_ready": redis_ready,
+        "max_requests": 500,
+        "requests_per_second": 1,
+        "duration_seconds": 7200,
     }
 
 
@@ -1190,9 +1279,32 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                 playbook_id = data.get("playbook_id")
                 target = data.get("target")
                 mode = data.get("mode", "assist")
+                if mode not in ("assist", "agent", "pilot"):
+                    await websocket.send_json({"type": "error", "message": "Invalid agent mode"})
+                    continue
+                db_check = SessionLocal()
+                try:
+                    _check_pilot_session(db_check, session_id, user_id, mode)
+                except HTTPException as exc:
+                    await websocket.send_json({"type": "error", "message": exc.detail})
+                    continue
+                finally:
+                    db_check.close()
+                try:
+                    pilot_config = _pilot_launch_config(
+                        data.get("pilot"), org_id, session_id,
+                    ) if mode == "pilot" else None
+                except HTTPException as exc:
+                    await websocket.send_json({"type": "error", "message": exc.detail})
+                    continue
                 load_session_id = data.get("load_session_id") or None
                 assessment_policy = None
                 if data.get("assessment_policy") is not None:
+                    if mode == "pilot":
+                        await websocket.send_json({
+                            "type": "error", "message": "Bounded pilot does not accept an assessment policy",
+                        })
+                        continue
                     try:
                         assessment_policy = AgentAssessmentPolicy.model_validate(
                             data["assessment_policy"]
@@ -1201,6 +1313,12 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                         await websocket.send_json({
                             "type": "error", "message": "Invalid bounded assessment policy",
                         })
+                        continue
+                if pilot_config is not None:
+                    try:
+                        question = _pilot_question(question, pilot_config, playbook_id, load_session_id)
+                    except HTTPException as exc:
+                        await websocket.send_json({"type": "error", "message": exc.detail})
                         continue
                 price_limit_usd = None
                 if data.get("price_limit_usd") is not None:
@@ -1221,8 +1339,11 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
 
                 # Persist the session before invoking so the authenticated
                 # ledger endpoint can show live receipts during a WebSocket run.
-                _save_conversation(None, session_id, user_id, org_id,
-                                   "user", question, mode=mode)
+                saved = _save_conversation(None, session_id, user_id, org_id,
+                                           "user", question, mode=mode)
+                if pilot_config is not None and not saved:
+                    await websocket.send_json({"type": "error", "message": "Pilot session could not be persisted"})
+                    continue
 
                 async def _run_query(
                     q=question,
@@ -1231,6 +1352,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                     load_id=load_session_id,
                     limit=price_limit_usd,
                     policy=assessment_policy,
+                    pilot=pilot_config,
                 ):
                     try:
                         orchestrator = await get_agent_orchestrator(initialize=False)
@@ -1247,6 +1369,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                                 load_session_id=load_id,
                                 price_limit_usd=limit,
                                 assessment_policy=policy,
+                                pilot_config=pilot,
                             ),
                             timeout=_run_timeout_s(),
                         )

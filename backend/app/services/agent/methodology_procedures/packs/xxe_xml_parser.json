@@ -1,0 +1,17 @@
+{
+  "id": "xxe_xml_parser",
+  "title": "Blind XML external-entity test",
+  "summary": "Test only an observed XML parser with a fresh, harmless OAST canary.",
+  "steps": [
+    "Confirm the mapped POST/PUT/PATCH endpoint accepts XML; capture a normal request and an inert XML control.",
+    "Register a fresh Interactsh session and use its callback URL in a single external-entity reference. Do not read local files or target metadata services.",
+    "Submit the XML canary to the observed parser with run_oob_callback_workflow (raw body placeholder) or a recorded replay; preserve the request evidence ID.",
+    "Poll the same session after the plant. A DNS or HTTP event must match the fresh payload domain and occur after the request.",
+    "Use oob_callback proof with register_id, plant_id, and poll_id. A parser error, reflected entity text, or unrelated callback is inconclusive.",
+    "Describe only demonstrated external-entity resolution; do not claim file read or internal-network access without separate proof."
+  ],
+  "tools": ["run_oob_callback_workflow", "execute_interactsh", "replay_http_request", "compare_requests", "independent_verify"],
+  "pass_signals": ["Fresh XML entity causes a correlated DNS or HTTP callback"],
+  "kill_signals": ["XML is rejected", "External entity expansion is disabled", "No callback after bounded polling"],
+  "references": ["CWE-611", "OWASP WSTG-INPV-07"]
+}

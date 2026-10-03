@@ -25,6 +25,46 @@ equal-budget output directories with `python -m local_harness.ledger_compare
 [the rollout guide](../docs/AGENT_RELIABILITY_ROLLOUT.md) for deployment,
 ledger checks, and evaluation steps.
 
+### Product-agent bug-class benchmark
+
+`local_harness/product_class_benchmark.py` scores **the in-product agent** from
+its `product_assessment.json`, `agent_ledger.json`, and `findings.jsonl` exports.
+Each case is a separate run against an isolated positive or negative target.
+The scorer reports per-class precision, recall, verified recall, surface
+observation, test attempts, evidence, cost, and incomplete runs. A class passes
+only when its positive finding is verified, its negative has an evidenced
+rejection, neither run has an extra finding, and both runs used equal budgets.
+
+The included local lab exposes seven classes in positive and negative modes:
+SQLi, XSS, SSRF, IDOR, GraphQL authorization, unsafe upload, and CSRF. It binds
+only to `127.0.0.1`. The SSRF positive fixture makes a DNS lookup only for a
+host beneath an explicitly supplied controlled OAST suffix. Start one case at
+a time, using a dedicated assessment database and the **same model, budget,
+scope, and identities** for all cases:
+
+```bash
+cd harness
+python -m local_harness.benchmark.class_lab_manifest --out runs/class_lab/corpus.json
+python -m local_harness.benchmark.class_lab --class graphql_authz --polarity positive
+AEGIS_FINDINGS_SINK="$PWD/runs/class_lab/runs/graphql_authz-positive/findings.jsonl" \
+  AEGIS_ASSESSMENT_DATABASE_URL="$DEDICATED_ASSESSMENT_DATABASE_URL" \
+  python -m local_harness.product_agent --target http://127.0.0.1:8765 \
+    --scope http://127.0.0.1:8765 --organization-id "$LAB_ORG_ID" \
+    --user-id "$LAB_USER_ID" --identities runs/class_lab/class_lab_identities.json
+python -m local_harness.product_class_benchmark runs/class_lab/corpus.json \
+  --out runs/class_lab/report.json
+```
+
+Repeat the lab server and agent command for each manifest case, changing
+`--class`, `--polarity`, and the sink directory. For the SSRF positive, add
+`--callback-suffix YOUR_CONTROLLED_OAST_SUFFIX` and `--require-oast` to the agent
+command. Use a fresh sink path for every run; the adapter refuses an existing
+findings file. The scorer exits `0` only when all classes pass, `2` for measured
+failures, and `3` for incomplete or missing run artifacts. It does not turn an
+interrupted assessment into a false negative. The lab is a controlled regression
+fixture; benchmark results should also be checked against representative
+authorized applications before treating them as production recall.
+
 > **Authorization:** Only scan targets you are explicitly authorized to test.
 
 ---
