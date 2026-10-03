@@ -136,8 +136,8 @@ WPSCAN_API_TOKEN=
 # AI Agent Configuration (optional)
 # =============================================================================
 
-# AI Provider: "openai" or "anthropic" (default: openai)
-# The agent will auto-detect based on which API key is set.
+# AI Provider: anthropic, openai, deepseek, kimi, groq, or ollama.
+# If the selected cloud key is unavailable, the agent tries another configured key.
 # These keys also enable Katana AI secrets scan (set ai_secrets_scan: true in Katana scan config).
 AI_PROVIDER=openai
 
@@ -181,7 +181,8 @@ AEGIS_VANGUARD_IMAGE=aegis-vanguard:latest
 # OLLAMA_FALLBACK_ENABLED=false).
 # DOCKER_SOCK=/var/run/docker.sock   # only needed for docker mode
 
-# DeepSeek (OpenAI-compatible). Optional. Provider string in task_models: "deepseek"
+# DeepSeek (OpenAI-compatible). Set AI_PROVIDER=deepseek to use it by default,
+# or use "deepseek:<model>" in per-organization task_models.
 # Get key at: https://platform.deepseek.com/
 # DEEPSEEK_API_KEY=
 # DEEPSEEK_MODEL=deepseek-chat

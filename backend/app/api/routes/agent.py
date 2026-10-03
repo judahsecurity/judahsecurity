@@ -261,7 +261,7 @@ def _handle_agent_error(result_error: str):
         raise HTTPException(
             status_code=502,
             detail=(
-                "Cloud LLM API key is invalid. Update ANTHROPIC_API_KEY / OPENAI_API_KEY "
+                "Cloud LLM API key is invalid. Update the configured provider key "
                 "in .env, or enable local Ollama fallback "
                 "(COMPOSE_PROFILES=ollama, OLLAMA_FALLBACK_ENABLED=true) and restart."
             ),
@@ -360,15 +360,8 @@ def _save_conversation(
 
 def _agent_runtime_available() -> bool:
     """True when any cloud key is set or local Ollama can serve requests."""
-    from app.services.agent.model_router import ollama_fallback_available
-    return bool(
-        settings.OPENAI_API_KEY
-        or settings.ANTHROPIC_API_KEY
-        or getattr(settings, "DEEPSEEK_API_KEY", None)
-        or getattr(settings, "MOONSHOT_API_KEY", None)
-        or getattr(settings, "GROQ_API_KEY", None)
-        or ollama_fallback_available()
-    )
+    from app.services.agent.model_router import global_runtime_model_spec
+    return global_runtime_model_spec() is not None
 
 
 def _build_agent_response(result, session_id: str) -> AgentResponse:
@@ -747,37 +740,27 @@ async def get_agent_playbooks():
 @router.get("/status")
 async def get_agent_status():
     """Check if the AI agent is available."""
-    from app.services.agent.model_router import (
-        ollama_fallback_available,
-        _ollama_fallback_model_name,
-    )
+    from app.services.agent.model_router import global_runtime_model_spec, ollama_fallback_available
 
-    has_openai = bool(settings.OPENAI_API_KEY)
-    has_anthropic = bool(settings.ANTHROPIC_API_KEY)
-    has_ollama = ollama_fallback_available()
-    available = _agent_runtime_available()
-    
-    provider = settings.AI_PROVIDER.lower()
-    if provider == "anthropic" and has_anthropic:
-        active_provider, active_model = "anthropic", settings.ANTHROPIC_MODEL
-    elif provider == "openai" and has_openai:
-        active_provider, active_model = "openai", settings.OPENAI_MODEL
-    elif has_anthropic:
-        active_provider, active_model = "anthropic", settings.ANTHROPIC_MODEL
-    elif has_openai:
-        active_provider, active_model = "openai", settings.OPENAI_MODEL
-    elif has_ollama:
-        active_provider, active_model = "ollama", _ollama_fallback_model_name()
-    else:
-        active_provider, active_model = None, None
+    configured = {
+        "openai": bool(settings.OPENAI_API_KEY),
+        "anthropic": bool(settings.ANTHROPIC_API_KEY),
+        "deepseek": bool(settings.DEEPSEEK_API_KEY),
+        "kimi": bool(settings.MOONSHOT_API_KEY),
+        "groq": bool(settings.GROQ_API_KEY),
+        "ollama": ollama_fallback_available(),
+    }
+    selection = global_runtime_model_spec()
+    available = selection is not None
+    active_provider, active_model = selection or (None, None)
     
     hint = None
     if not available:
         hint = (
-            "Set a cloud LLM API key (ANTHROPIC_API_KEY / OPENAI_API_KEY) in .env, "
+            "Set a supported cloud LLM API key in .env, "
             "or enable local Ollama with COMPOSE_PROFILES=ollama, then restart the backend."
         )
-    elif not has_anthropic and not has_openai and has_ollama:
+    elif active_provider == "ollama":
         hint = (
             "Running on local Ollama. Add cloud API keys anytime for higher-quality models; "
             "if those keys run out of credits, the agent will keep working on Ollama."
@@ -787,11 +770,7 @@ async def get_agent_status():
         "available": available,
         "provider": active_provider,
         "model": active_model,
-        "providers_configured": {
-            "openai": has_openai,
-            "anthropic": has_anthropic,
-            "ollama": has_ollama,
-        },
+        "providers_configured": configured,
         "resilient_fallback": True,
         "hint": hint,
         "max_iterations": settings.AGENT_MAX_ITERATIONS if available else None,

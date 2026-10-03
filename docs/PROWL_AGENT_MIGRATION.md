@@ -128,6 +128,14 @@ can override this for reasoning, offensive work, reports, or recon, so check
 those settings during a model switch. The assessment service itself does not
 require a Claude model for browser and HTTP execution.
 
+To use DeepSeek as the default Aegis agent model, set `AI_PROVIDER=deepseek`,
+`DEEPSEEK_API_KEY`, and optionally `DEEPSEEK_MODEL` (default `deepseek-chat`).
+The Compose backend passes these settings through. A DeepSeek-only deployment
+can initialize the agent and use the same scoped assessment tools. Organization
+`task_models` values such as `deepseek:deepseek-chat` override the default;
+review existing overrides when switching providers. Tool execution and scope
+checks stay in Aegis and the assessment service, regardless of model provider.
+
 ## Remaining gates before making this the default
 
 1. Run the four proof recipes against controlled fixtures, including a browser
@@ -136,7 +144,7 @@ require a Claude model for browser and HTTP execution.
    deterministic replay.
 2. Add a UI flow for selecting an in-scope asset, exact origin, test identities,
    and rules of engagement before starting an agent session.
-3. Run the Aegis agent with an OpenAI model and an Anthropic model against the
+3. Run the Aegis agent with DeepSeek, OpenAI, and Anthropic models against the
    same controlled fixture, identity set, time limit, and spend limit. Measure
    reachable surfaces, correct findings, false positives, independent proof,
    tool calls, token cost, and recovery after restart.
