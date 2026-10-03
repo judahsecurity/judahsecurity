@@ -24,7 +24,8 @@ origin-wide run.
 
 Use the returned `session_id` with the usual `/api/v1/agent/query` or WebSocket
 agent endpoint. The agent can call allowlisted `scoped_assessment_observe`,
-`scoped_assessment_probe`, `scoped_assessment_candidate`,
+`scoped_assessment_probe`, `scoped_assessment_probe_assigned`,
+`scoped_assessment_candidate`,
 `scoped_assessment_plan`, `scoped_assessment_memory`, and
 `scoped_assessment_status` tools. Planning covers the service threat model,
 coverage checks, and completion gate. Memory recall is limited to the same
@@ -61,6 +62,39 @@ still requires independent verification before it becomes a finding. CSRF,
 session, and token fields are recorded but excluded from automatic injection
 work. Browser and crawl capture limits still bound what Aegis can discover;
 the ledger cannot claim coverage for inputs that were never observed.
+
+For a leased input backed by a PROWL private browser capture, XSS and SQLi
+specialists can call `scoped_assessment_probe_assigned`. Aegis selects the
+service operation from the cell's method, location, value type, and identity;
+the specialist cannot substitute another capture or parameter. A GET query
+can receive a bounded quote differential; a positive integer GET query can
+receive the service's Boolean SQLi proof; a configured POST JSON/form capture
+can receive a body probe. GET query XSS can receive a nonce browser check.
+Differentials remain leads. A service proof signal remains subject to the
+fresh verifier and publication gate above. Unsupported input shapes remain
+open rather than being marked tested.
+
+## JavaScript and API handoff
+
+Browser requests and `browser_inspect_js` supply first-party script URLs. Aegis
+creates one durable `js_secret_review` coverage cell per observed script and
+assigns it to the JS specialist. `scan_assigned_js` fetches only that scoped
+URL, refuses redirects, runs Gitleaks plus regex and structural client-signing
+checks, and records a redacted evidence receipt. A failed, truncated, or
+incomplete scan stays inconclusive; when PROWL supplied a source hash, a
+different fetched bundle also stays inconclusive. A candidate remains in focus for review;
+the agent can then inspect endpoints, sinks, source maps, and lazy chunks using
+the existing JShero tools. Authenticated scripts that cannot be fetched again
+are currently inconclusive, even when PROWL has a private browser source
+artifact. The service does not expose that private source to the agent.
+
+Observed first-party fetch/XHR operations and static JS API leads enter the
+central `application_operations` ledger with method, path, parameter names,
+identity, provenance, response metadata, and private capture IDs when present.
+`get_api_operation_inventory` pages this value-free ledger for API specialists.
+`fingerprint_api` performs passive, Caido-style classification from the
+observed metadata and existing captured samples. A path alone is only a
+discovery lead, not a verified framework or security finding.
 
 Confirmed service publications enter the ordinary Aegis Findings table through
 `POST /api/v1/prowl/findings`. This intake requires a service key, distinct

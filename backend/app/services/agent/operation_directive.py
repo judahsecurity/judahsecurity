@@ -39,6 +39,7 @@ class OperationDirective:
     coverage_cell_id: str = ""
     coverage_lease_id: str = ""
     parameter_work: Dict[str, str] = field(default_factory=dict)
+    js_work: Dict[str, str] = field(default_factory=dict)
     proof_escalation_id: str = ""
     proof_strategy: str = ""
     proof_requirements: List[str] = field(default_factory=list)
@@ -92,9 +93,19 @@ class OperationDirective:
                 f"{work.get('method', 'GET')} {work.get('host', '')}{work.get('path', '/')} "
                 f"{work.get('location', 'query')}:{work.get('name', '')} "
                 f"identity={work.get('identity', 'anonymous')}. "
+                + ("A PROWL private browser capture is available; use scoped_assessment_probe_assigned "
+                   "with this cell and lease. " if work.get("capture_id") else "") +
                 "Test this exact input with a baseline and bounded canary, then cite the "
                 "exchange evidence when closing its coverage cell. Other inputs remain open "
                 "for later waves; get_parameter_inventory can page through the full worklist."
+            )
+        if self.js_work:
+            block += (
+                "\nAssigned observed JavaScript for this wave: "
+                f"{self.js_work.get('url', '')}. Call scan_assigned_js with this cell and lease; "
+                "scan this file for secrets and sensitive "
+                "client configuration, inspect its routes and sinks, and cite tool evidence. "
+                "Other observed scripts remain open for later waves."
             )
         if self.proof_escalation_id:
             block += (
@@ -182,6 +193,12 @@ def directives_from_hypotheses(
                     "identity": str(coverage_cell.get("identity") or "anonymous"),
                     "capture_id": str(coverage_cell.get("capture_id") or ""),
                 }
+        js_work: Dict[str, str] = {}
+        if coverage_cell.get("source") == "js_inventory" and coverage_cell.get("script_url"):
+            js_work = {
+                "url": str(coverage_cell["script_url"]),
+                "capture_id": str(coverage_cell.get("capture_id") or ""),
+            }
         proof_escalation_id = str(coverage_cell.get("proof_escalation_id") or "")
         proof_escalation = next(
             (
@@ -209,7 +226,7 @@ def directives_from_hypotheses(
             matched = matched + [
                 h for h in open_hyps if getattr(h, "specialist", None) == "injection"
             ]
-        if parameter_work and not leased_hypothesis_id:
+        if (parameter_work or js_work) and not leased_hypothesis_id:
             matched = []
         if matched:
             h0 = matched[0]
@@ -282,6 +299,7 @@ def directives_from_hypotheses(
             coverage_cell_id=coverage_cell_id,
             coverage_lease_id=coverage_lease_id,
             parameter_work=parameter_work,
+            js_work=js_work,
             proof_escalation_id=proof_escalation_id,
             proof_strategy=str(proof_escalation.get("strategy") or ""),
             proof_requirements=list(proof_escalation.get("requirements") or []),

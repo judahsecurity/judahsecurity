@@ -67,6 +67,7 @@ def autonomous_mode_enabled() -> bool:
 
 READONLY_TOOLS = {
     "get_parameter_inventory",
+    "get_api_operation_inventory",
     "scoped_assessment_status",
     "scoped_assessment_memory",
     "get_assessment_coverage", "map_application_traffic", "generate_authorization_matrix",

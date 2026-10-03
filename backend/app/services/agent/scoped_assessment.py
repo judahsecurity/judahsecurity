@@ -59,6 +59,21 @@ def capability_map_from_observation(observation: dict) -> dict | None:
     scope = result.get("final_origin")
     if not isinstance(scope, str) or not scope:
         return None
+    origin_parts = urlsplit(scope)
+    if origin_parts.scheme not in ("http", "https") or not origin_parts.hostname:
+        return None
+
+    def in_origin_path(value: object) -> str:
+        if not isinstance(value, str) or not value or len(value) > 512:
+            return ""
+        if value.startswith(("http://", "https://")):
+            parts = urlsplit(value)
+            if (parts.scheme, parts.netloc) != (origin_parts.scheme, origin_parts.netloc):
+                return ""
+            value = parts.path or "/"
+        if not value.startswith("/") or value.startswith("//") or "?" in value or "#" in value:
+            return ""
+        return value
     from app.services.agent.capability_map import CapabilityMap, finalize_capability_map
 
     pages = []
@@ -84,26 +99,51 @@ def capability_map_from_observation(observation: dict) -> dict | None:
          ]}
         for row in raw_forms[:60] if isinstance(row, dict)
     ]
-    api_endpoints = [
-        {"host": urlsplit(scope).hostname or "", "method": row.get("method", "GET"),
-         "path": row["path"], "query_keys": row.get("query_keys") or []}
-        for row in (result.get("requests") or [])[:100]
-        if isinstance(row, dict) and row.get("resource_type") in ("xhr", "fetch")
-        and isinstance(row.get("path"), str)
-    ]
+    api_endpoints = []
+    for row in [*(result.get("requests") or [])[:200], *(result.get("traffic") or [])[:40]]:
+        if not isinstance(row, dict) or row.get("resource_type") not in ("xhr", "fetch"):
+            continue
+        path = in_origin_path(row.get("path"))
+        if path:
+            api_endpoints.append({
+                "host": origin_parts.netloc, "method": row.get("method", "GET"),
+                "path": path, "query_keys": row.get("query_keys") or
+                [field.get("name") for field in (row.get("query_fields") or []) if isinstance(field, dict)],
+                "identity": result.get("identity", "anonymous"),
+                "source": "browser_traffic" if row.get("artifact_id") else "browser_request",
+                "artifact_id": row.get("artifact_id", ""),
+                "status": row.get("status"), "content_type": row.get("content_type", ""),
+            })
     inventory = result.get("surface_inventory") or {}
     if not isinstance(inventory, dict):
         inventory = {}
-    js_endpoints = [
-        scope + row["path"]
-        for row in (inventory.get("endpoints") or [])[:100]
-        if isinstance(row, dict) and isinstance(row.get("path"), str)
-        and "javascript_static" in (row.get("sources") or [])
-    ]
-    js_files = [
-        scope + row["path"]
+    js_endpoints = []
+    for row in (inventory.get("endpoints") or [])[:100]:
+        if not isinstance(row, dict) or "javascript_static" not in (row.get("sources") or []):
+            continue
+        path = in_origin_path(row.get("path"))
+        if path:
+            js_endpoints.append(scope + path)
+            for method in (row.get("methods") or ["GET"])[:8]:
+                if method in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+                    api_endpoints.append({"host": origin_parts.netloc, "method": method,
+                                          "path": path, "source": "javascript_static"})
+    js_files = []
+    for row in [*(result.get("requests") or [])[:200], *(result.get("scripts") or [])[:20]]:
+        if not isinstance(row, dict):
+            continue
+        if row.get("resource_type") != "script" and row.get("kind") != "external":
+            continue
+        path = in_origin_path(row.get("path"))
+        if path:
+            js_files.append(scope + path)
+    js_files = list(dict.fromkeys(js_files))[:160]
+    js_sources = [
+        {"url": scope + path, "artifact_id": row.get("artifact_id", ""),
+         "sha256": row.get("sha256", ""), "bytes": row.get("bytes", 0)}
         for row in (result.get("scripts") or [])[:20]
-        if isinstance(row, dict) and isinstance(row.get("path"), str)
+        if isinstance(row, dict) and row.get("kind") == "external"
+        and (path := in_origin_path(row.get("path")))
     ]
     parameters = []
     for row in (result.get("requests") or [])[:100]:
@@ -131,10 +171,24 @@ def capability_map_from_observation(observation: dict) -> dict | None:
                 parameters.append(common | {"name": field.get("path"),
                                             "value_type": field.get("value_type", ""),
                                             "location": "body_json" if field.get("location") == "json" else "body_form"})
+    for script in (result.get("scripts") or [])[:20]:
+        if not isinstance(script, dict) or not isinstance(script.get("analysis"), dict):
+            continue
+        for lead in (script["analysis"].get("query_leads") or [])[:40]:
+            if not isinstance(lead, dict):
+                continue
+            path = in_origin_path(lead.get("path"))
+            method = lead.get("method")
+            if not path or method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+                continue
+            for name in (lead.get("names") or [])[:20]:
+                parameters.append({"method": method, "path": path, "name": name,
+                                   "location": "query", "source": "javascript_static"})
     cmap = CapabilityMap(
         target=str(result.get("target_template") or scope), scope=scope,
         pages_visited=pages, forms=forms, api_endpoints=api_endpoints,
-        js_endpoints=js_endpoints, js_files=js_files,
+        js_endpoints=list(dict.fromkeys(js_endpoints)), js_files=js_files,
+        js_sources=js_sources,
         parameter_inventory=parameters[:4000],
         notes=["Source: scoped assessment service browser observation"],
     )

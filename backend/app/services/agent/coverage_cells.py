@@ -94,6 +94,8 @@ def _specialist_for(test_type: str, hypothesis_id: str, brain: Any) -> str:
         return "auth_logic"
     if "xss" in kind:
         return "xss"
+    if kind == "js_secret_review":
+        return "js_secrets"
     if "sql" in kind:
         return "sqli"
     if "ssrf" in kind or "url_fetch" in kind:
@@ -454,9 +456,48 @@ def seed_parameter_coverage_cells(brain: Any, inventory: Iterable[dict[str, Any]
                 source="parameter_inventory", capture_id=raw.get("artifact_id", ""),
             )
             cell["priority_rank"] = parameter_priority(raw, specialist)
+            cell["value_type"] = str(raw.get("value_type") or "")[:40]
+            cell["observation_source"] = str(raw.get("source") or "")[:40]
             if cell["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
                 brain.coverage_cells.append(cell)
                 existing.add(cell["id"])
+    return migrate_coverage_cells(brain)
+
+
+def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep one durable review cell for every observed first-party JS file."""
+    target = urlsplit(str(cmap.get("target") or ""))
+    if target.scheme not in {"http", "https"} or not target.netloc:
+        return migrate_coverage_cells(brain)
+    sources = {
+        str(row.get("url")): row
+        for row in (cmap.get("js_sources") or [])[:160]
+        if isinstance(row, dict) and isinstance(row.get("url"), str)
+    }
+    existing = {row.get("id") for row in getattr(brain, "coverage_cells", []) if isinstance(row, dict)}
+    hypothesis = next((
+        h for h in getattr(brain, "hypotheses", []) or []
+        if getattr(h, "specialist", "") == "js_secrets"
+        and getattr(h, "status", "") in {"open", "in_progress"}
+    ), None)
+    for url in (cmap.get("js_files") or [])[:160]:
+        parts = urlsplit(str(url))
+        if (parts.scheme, parts.netloc) != (target.scheme, target.netloc) or not parts.path:
+            continue
+        script_url = f"{parts.scheme}://{parts.netloc}{parts.path}"
+        source = sources.get(script_url) or {}
+        cell = _new_cell(
+            brain, method="GET", path=parts.path, host=parts.netloc,
+            identity="anonymous", parameter="script", test_type="js_secret_review",
+            hypothesis_id=getattr(hypothesis, "id", ""), source="js_inventory",
+            capture_id=source.get("artifact_id", ""),
+        )
+        cell["script_url"] = script_url
+        cell["expected_sha256"] = str(source.get("sha256") or "")[:64]
+        cell["priority_rank"] = 0 if any(hint in parts.path.lower() for hint in ("_next/", "admin", "main", "chunk")) else 1
+        if cell["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
+            brain.coverage_cells.append(cell)
+            existing.add(cell["id"])
     return migrate_coverage_cells(brain)
 
 

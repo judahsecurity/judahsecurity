@@ -42,17 +42,28 @@ def test_browser_observation_feeds_aegis_capability_map():
             "forms": [{"method": "GET", "action": "https://app.example/search",
                        "fields": [{"name": "q", "control_type": "search"}]}],
             "requests": [{"resource_type": "xhr", "method": "GET", "path": "/api/search",
-                          "query_keys": ["term"]}],
+                          "query_keys": ["term"]},
+                         {"resource_type": "script", "method": "GET",
+                          "path": "/static/app.js"}],
             "traffic": [{"method": "POST", "path": "/api/comment", "artifact_id": "capture-9",
+                         "resource_type": "fetch", "status": 201,
+                         "content_type": "application/json",
                          "query_fields": [{"name": "draft", "value_type": "boolean"}],
                          "body_fields": [{"location": "json", "path": "/comment/text",
                                           "value_type": "string"}]}],
+            "scripts": [{"kind": "external", "path": "/static/app.js",
+                         "artifact_id": "script-9", "sha256": "abc", "bytes": 100,
+                         "analysis": {"query_leads": []}}],
         },
     }
     cmap = bridge.capability_map_from_observation(observation)
     assert cmap["pages_visited"] == ["https://app.example/"]
     assert cmap["forms"][0]["inputs"] == ["q"]
     assert cmap["api_endpoints"][0]["path"] == "/api/search"
+    assert any(row["path"] == "/api/comment" and row["artifact_id"] == "capture-9"
+               for row in cmap["api_endpoints"])
+    assert cmap["js_files"] == ["https://app.example/static/app.js"]
+    assert cmap["js_sources"][0]["artifact_id"] == "script-9"
     assert cmap["has_api"] is True
     assert {row["name"] for row in cmap["parameter_inventory"]} >= {
         "q", "term", "draft", "/comment/text",

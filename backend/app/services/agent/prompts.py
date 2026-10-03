@@ -646,6 +646,7 @@ Do not put credentials or bearer tokens in tool arguments. Use the service's art
         if settings.PROWL_ASSESSMENT_URL and settings.PROWL_ADMIN_TOKEN:
             tools += """
 - **scoped_assessment_probe**: Bounded proof action. Args: operation (browser_check_xss, http_query_probe, http_body_probe, http_sqli_boolean, http_authz_owner_only), body (service JSON with captured artifact ID where required).
+- **scoped_assessment_probe_assigned**: Specialist replay of its exact leased, browser-captured parameter through PROWL. Args: coverage_cell_id, coverage_lease_id, technique ("captured" or "xss_browser" for GET query XSS). The backend chooses the operation, identity, parameter, and private capture; it rejects unrelated or expired leases. A differential is a lead; only nonce browser execution or numeric boolean proof may support a candidate.
 - **scoped_assessment_candidate**: Submit a finding candidate to the service evidence gate. Args: body with title, target, severity, hypothesis, remediation, evidence_ids. Set verification_recipe to browser_xss, public_directory_index, numeric_sqli, or owner_only_authz only when the hunter has a matching proof artifact. For numeric_sqli and owner_only_authz, also provide verification_page_url: the in-scope page whose UI issues the observed GET. Numeric SQLi requires verification_parameter; owner-only authorization requires verification_identity set to the declared owner. Aegis captures a fresh verifier-owned browser exchange and asks the service to confirm before publishing. If that capture cannot reproduce the request, the candidate remains pending. Do not pass hunter capture IDs to the verifier.
 - **scoped_assessment_publish**: Retry publication of a service-confirmed candidate if Aegis intake was temporarily unavailable. Args: candidate_id. The service proof gate still decides whether publication is allowed.
 """
@@ -663,6 +664,7 @@ TOOL_PHASE_MAP = {
     "scoped_assessment_plan": ["informational", "exploitation", "post_exploitation"],
     "scoped_assessment_memory": ["informational", "exploitation", "post_exploitation"],
     "scoped_assessment_probe": ["exploitation", "post_exploitation"],
+    "scoped_assessment_probe_assigned": ["exploitation", "post_exploitation"],
     "scoped_assessment_candidate": ["exploitation", "post_exploitation"],
     "scoped_assessment_publish": ["exploitation", "post_exploitation"],
     # Informational tools - available in all phases
@@ -831,6 +833,8 @@ TOOL_PHASE_MAP = {
     "execute_gitleaks": ["informational", "exploitation", "post_exploitation"],
     "gitleaks_help": ["informational", "exploitation", "post_exploitation"],
     "scan_js_urls_for_secrets": ["informational", "exploitation", "post_exploitation"],
+    "scan_assigned_js": ["informational", "exploitation", "post_exploitation"],
+    "get_api_operation_inventory": ["informational", "exploitation", "post_exploitation"],
     "execute_retirejs": ["informational", "exploitation", "post_exploitation"],
     "execute_cmseek": ["informational", "exploitation", "post_exploitation"],
     "cmseek_help": ["informational", "exploitation", "post_exploitation"],

@@ -30,6 +30,7 @@ class CapabilityMap:
     api_endpoints: List[Dict[str, str]] = field(default_factory=list)  # method, path, host
     js_endpoints: List[str] = field(default_factory=list)
     js_files: List[str] = field(default_factory=list)
+    js_sources: List[Dict[str, Any]] = field(default_factory=list)  # observed URL + capture reference
     websockets: List[str] = field(default_factory=list)
     sse: List[str] = field(default_factory=list)
     source_maps: List[str] = field(default_factory=list)
@@ -829,6 +830,7 @@ def merge_capability_maps(
         api_endpoints=_uniq(list(old.api_endpoints) + list(new.api_endpoints))[:300],
         js_endpoints=_uniq(list(old.js_endpoints) + list(new.js_endpoints))[:300],
         js_files=_uniq(list(old.js_files) + list(new.js_files))[:160],
+        js_sources=_uniq(list(old.js_sources) + list(new.js_sources))[:160],
         websockets=_uniq(list(old.websockets) + list(new.websockets))[:60],
         sse=_uniq(list(old.sse) + list(new.sse))[:60],
         source_maps=_uniq(list(old.source_maps) + list(new.source_maps))[:60],

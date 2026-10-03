@@ -444,6 +444,7 @@ class ASMToolsManager(AssessmentCapabilities):
             "generate_injection_payloads": self.generate_injection_payloads,
             "discover_parameters": self.discover_parameters,
             "get_parameter_inventory": self.get_parameter_inventory,
+            "get_api_operation_inventory": self.get_api_operation_inventory,
             # Auto tool selection
             "auto_select_tools": self.auto_select_tools,
             # MCP Security Tools (delegated)
@@ -495,6 +496,7 @@ class ASMToolsManager(AssessmentCapabilities):
             "execute_feroxbuster": self.execute_mcp_tool,
             "execute_gitleaks": self.execute_mcp_tool,
             "scan_js_urls_for_secrets": self.scan_js_urls_for_secrets,
+            "scan_assigned_js": self.scan_assigned_js,
             "execute_retirejs": self.scan_js_urls_for_vulns,
             "execute_jwt": self.execute_mcp_tool,
             "execute_interactsh": self.execute_mcp_tool,
@@ -589,6 +591,7 @@ class ASMToolsManager(AssessmentCapabilities):
             # Private scoped executor: run binding and bearer tokens stay in Aegis.
             "scoped_assessment_observe": self.scoped_assessment_observe,
             "scoped_assessment_probe": self.scoped_assessment_probe,
+            "scoped_assessment_probe_assigned": self.scoped_assessment_probe_assigned,
             "scoped_assessment_candidate": self.scoped_assessment_candidate,
             "scoped_assessment_publish": self.scoped_assessment_publish,
             "scoped_assessment_status": self.scoped_assessment_status,
@@ -670,10 +673,36 @@ class ASMToolsManager(AssessmentCapabilities):
                 "service_artifact_ids": result.get("artifact_ids", []),
                 "truncated": len(serialized) > _tool_output_max_chars(),
             }
+            if operation in {"browser_check_xss", "http_query_probe", "http_body_probe", "http_sqli_boolean"}:
+                probe = result.get("result") if isinstance(result.get("result"), dict) else {}
+                payload["probe_result"] = {
+                    key: probe[key]
+                    for key in ("operation", "parameter", "changed", "inconclusive",
+                                "proof_confirmed", "executed", "requests_sent", "target")
+                    if key in probe
+                }
             if operation in {"browser_map", "browser_crawl", "browser_inspect_js"}:
                 capability_map = capability_map_from_observation(result)
                 if capability_map:
                     payload["capability_map"] = capability_map
+                    from app.services.agent.capability_map import merge_capability_maps
+                    from app.services.agent.engagement_brain import (
+                        engagement_brain_from_dict, seed_hypotheses_from_capability_map,
+                    )
+                    from app.services.agent.coverage_cells import (
+                        seed_js_coverage_cells, seed_parameter_coverage_cells,
+                    )
+                    from app.services.agent.runtime_mapper import ingest_capability_map_operations
+                    from app.services.agent.parameter_inventory import collect_parameter_inventory
+
+                    merged = merge_capability_maps(getattr(self, "_capability_map", None), capability_map)
+                    self._capability_map = merged
+                    brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+                    brain = seed_hypotheses_from_capability_map(brain, merged)
+                    ingest_capability_map_operations(brain, merged)
+                    seed_parameter_coverage_cells(brain, collect_parameter_inventory(merged))
+                    seed_js_coverage_cells(brain, merged)
+                    self._engagement_brain = brain.to_dict()
             return payload
         except ValueError as exc:
             return {"success": False, "error": "assessment_rejected", "output": str(exc)[:500]}
@@ -697,6 +726,82 @@ class ASMToolsManager(AssessmentCapabilities):
         if operation not in PROBE_OPERATIONS:
             return {"success": False, "error": "invalid_operation", "output": "Unknown probe operation"}
         return await self._scoped_assessment_operation(operation, body)
+
+    async def scoped_assessment_probe_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+        technique: str = "captured",
+    ) -> Dict[str, Any]:
+        """Replay exactly the specialist's leased PROWL browser input."""
+        import time
+        from urllib.parse import quote, urlsplit
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        if (not cell or cell.get("status") != "leased" or
+                cell.get("lease_id") != coverage_lease_id or
+                float(cell.get("lease_deadline") or 0) <= time.time() or
+                cell.get("source") != "parameter_inventory" or
+                cell.get("specialist") not in {"xss", "sqli"} or
+                cell.get("observation_source") != "browser_traffic" or
+                not cell.get("capture_id")):
+            return {"success": False, "error": "invalid_coverage_lease",
+                    "output": "An active lease on a browser-captured parameter is required"}
+        location, separator, parameter = str(cell.get("parameter") or "").partition(":")
+        if not separator or not parameter or technique not in {"captured", "xss_browser"}:
+            return {"success": False, "error": "invalid_parameter_probe",
+                    "output": "Unsupported parameter or technique"}
+        identity = str(cell.get("identity") or "anonymous")
+        body = {"artifact_id": cell["capture_id"], "parameter": parameter, "identity": identity}
+        method = str(cell.get("method") or "GET")
+        if technique == "xss_browser":
+            if cell.get("specialist") != "xss" or method != "GET" or location != "query":
+                return {"success": False, "error": "unsupported_xss_browser",
+                        "output": "Browser XSS check requires a captured GET query parameter"}
+            cmap = getattr(self, "_capability_map", None) or {}
+            origin = urlsplit(str(cmap.get("scope") or cmap.get("target") or ""))
+            if (origin.scheme not in {"http", "https"} or
+                    origin.netloc.lower() != str(cell.get("host") or "").lower()):
+                return {"success": False, "error": "scope_mismatch",
+                        "output": "Assigned input does not match the scoped origin"}
+            payload = '<script>alert("__PROWL_NONCE__")</script>'
+            template = (f"{origin.scheme}://{origin.netloc}{cell['path']}?"
+                        f"{quote(parameter, safe='')}={quote(payload, safe='')}")
+            operation = "browser_check_xss"
+            body = {"url_template": template, "identity": identity}
+        elif method == "GET" and location == "query":
+            operation = (
+                "http_sqli_boolean"
+                if cell.get("specialist") == "sqli" and cell.get("value_type") == "positive_integer"
+                else "http_query_probe"
+            )
+        elif method == "POST" and location in {"body_json", "body_form"}:
+            operation = "http_body_probe"
+        else:
+            return {"success": False, "error": "unsupported_capture",
+                    "output": "The scoped service cannot replay this input shape"}
+        result = await self._scoped_assessment_operation(operation, body)
+        result["coverage_cell_id"] = coverage_cell_id
+        result["coverage_lease_id"] = coverage_lease_id
+        result["assigned_operation"] = operation
+        if result.get("success") and result.get("service_artifact_ids"):
+            live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            current = next((row for row in live.coverage_cells
+                            if row.get("id") == coverage_cell_id and
+                            row.get("lease_id") == coverage_lease_id), None)
+            if current:
+                current["service_probe_artifact_ids"] = list(dict.fromkeys([
+                    *(current.get("service_probe_artifact_ids") or []),
+                    *result["service_artifact_ids"],
+                ]))[:20]
+                current["last_service_probe"] = operation
+                proof = result.get("probe_result") or {}
+                if proof.get("proof_confirmed") is True or proof.get("executed") is True:
+                    current["status"] = "in_focus"
+                    current["reason"] = "Scoped service returned a proof signal; independent verification required"
+                self._engagement_brain = live.to_dict()
+        return result
 
     async def scoped_assessment_candidate(
         self, body: Dict[str, Any], verification_recipe: str = "",
@@ -2956,6 +3061,90 @@ class ASMToolsManager(AssessmentCapabilities):
             dumped = dumped[:cap] + f"\n... (truncated, total {len(dumped)} chars)"
         return dumped
 
+    async def scan_assigned_js(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+    ) -> str:
+        """Scan the exact first-party script leased to the JS specialist."""
+        import asyncio
+        import time
+        from urllib.parse import urlsplit
+
+        from app.services.agent.coverage_cells import record_coverage_cell
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.js_url_secrets_service import scan_js_urls_for_secrets as run_scan
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells if row.get("id") == coverage_cell_id), None)
+        if (not cell or cell.get("status") != "leased" or
+                cell.get("lease_id") != coverage_lease_id or
+                float(cell.get("lease_deadline") or 0) <= time.time() or
+                cell.get("source") != "js_inventory" or
+                cell.get("specialist") != "js_secrets"):
+            return json.dumps({"success": False, "error": "invalid_coverage_lease"})
+        url = str(cell.get("script_url") or "")
+        target = urlsplit(str((getattr(self, "_capability_map", None) or {}).get("scope") or
+                              (getattr(self, "_capability_map", None) or {}).get("target") or ""))
+        script = urlsplit(url)
+        if ((script.scheme, script.netloc) != (target.scheme, target.netloc) or
+                script.scheme not in {"http", "https"} or not script.path or
+                script.query or script.fragment or script.path != cell.get("path")):
+            return json.dumps({"success": False, "error": "scope_mismatch"})
+        try:
+            result = await asyncio.to_thread(
+                run_scan, url, 1, same_origin_only=True,
+            )
+        except Exception as exc:
+            logger.exception("Assigned JS scan failed")
+            result = {"success": False, "error": type(exc).__name__, "downloads": []}
+        downloads = result.get("downloads") or []
+        fetched = (len(downloads) == 1 and downloads[0].get("url") == url
+                   and downloads[0].get("ok") is True)
+        expected_sha256 = str(cell.get("expected_sha256") or "")
+        source_matched = (not expected_sha256 or
+                          fetched and downloads[0].get("sha256") == expected_sha256)
+        complete = (fetched and not downloads[0].get("truncated") and
+                    source_matched and not result.get("gitleaks_error") and
+                    result.get("success") is True)
+        counts = {
+            "gitleaks": len(result.get("gitleaks_findings") or []),
+            "regex": len(result.get("regex_hints") or []),
+            "client_signing": len(result.get("client_signing_findings") or []),
+        }
+        hits = sum(counts.values())
+        status = "in_focus" if hits else "tested_clean" if complete else "inconclusive"
+        summary = {
+            "url": url, "fetched": fetched, "source_matched": source_matched,
+            "complete": complete,
+            "counts": counts, "status": status,
+            "truncated": bool(downloads and downloads[0].get("truncated")),
+            "scanner_error": bool(result.get("gitleaks_error")),
+        }
+        evidence_id = evidence_store(self).record(
+            "js_secret_review", summary, target=url,
+            coverage_cell_id=coverage_cell_id, test_type="js_secret_review",
+            capture_id=str(cell.get("capture_id") or ""), success=fetched,
+        )
+        updated = record_coverage_cell(
+            brain, method=cell["method"], path=cell["path"], host=cell["host"],
+            status=status, identity=cell["identity"], parameter=cell["parameter"],
+            test_type=cell["test_type"], coverage_cell_id_value=coverage_cell_id,
+            coverage_lease_id=coverage_lease_id, evidence_id=evidence_id,
+            reason=("Potential sensitive data requires specialist review" if hits else
+                    "Complete bounded scan found no candidate" if complete else
+                    "Fetch or scanner incomplete; JS review remains open"),
+        )
+        self._engagement_brain = brain.to_dict()
+        return json.dumps({
+            "success": True, "coverage_cell_id": updated["id"],
+            "evidence_id": evidence_id, "summary": summary,
+            "findings": {
+                "gitleaks_findings": result.get("gitleaks_findings") or [],
+                "regex_hints": result.get("regex_hints") or [],
+                "client_signing_findings": result.get("client_signing_findings") or [],
+            },
+        }, default=str)[:_tool_output_max_chars()]
+
     async def scan_js_urls_for_vulns(
         self,
         urls: str,
@@ -3206,6 +3395,30 @@ class ASMToolsManager(AssessmentCapabilities):
             "next_offset": end if end < len(rows) else None,
             "parameters": rows[start:end],
         })
+
+    async def get_api_operation_inventory(
+        self, offset: int = 0, limit: int = 40,
+    ) -> str:
+        """Read the central API operation ledger without request values."""
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+        try:
+            start = max(0, int(offset))
+            page_size = max(1, min(100, int(limit)))
+        except (TypeError, ValueError):
+            return json.dumps({"error": "offset and limit must be integers"})
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        rows = [row for row in brain.application_operations
+                if isinstance(row, dict) and row.get("protocol") in
+                {"rest", "graphql", "soap", "grpc-web", "websocket"}]
+        page = [{key: row.get(key) for key in (
+            "id", "method", "url", "path", "protocol", "operation", "parameters",
+            "identities", "sources", "capture_ids", "status", "content_type",
+            "discovery_only",
+        ) if key in row} for row in rows[start:start + page_size]]
+        return json.dumps({"total": len(rows), "offset": start,
+                           "next_offset": start + len(page) if start + len(page) < len(rows) else None,
+                           "operations": page})
 
     async def discover_parameters(
         self,
@@ -6858,10 +7071,13 @@ class ASMToolsManager(AssessmentCapabilities):
             else engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         )
         brain = seed_hypotheses_from_capability_map(brain, cmap if isinstance(cmap, dict) else {})
-        from app.services.agent.coverage_cells import seed_parameter_coverage_cells
+        from app.services.agent.coverage_cells import seed_js_coverage_cells, seed_parameter_coverage_cells
         from app.services.agent.parameter_inventory import collect_parameter_inventory
 
         seed_parameter_coverage_cells(brain, collect_parameter_inventory(cmap if isinstance(cmap, dict) else {}))
+        seed_js_coverage_cells(brain, cmap if isinstance(cmap, dict) else {})
+        from app.services.agent.runtime_mapper import ingest_capability_map_operations
+        ingest_capability_map_operations(brain, cmap if isinstance(cmap, dict) else {})
         graph = sync_graph_from_brain(brain)
         self._engagement_brain = brain.to_dict()
 
@@ -6889,6 +7105,10 @@ class ASMToolsManager(AssessmentCapabilities):
                     }
                     for name in ("xss", "sqli")
                 },
+                "js_coverage": {
+                    "total": sum(1 for c in brain.coverage_cells if c.get("source") == "js_inventory"),
+                    "remaining": sum(1 for c in brain.coverage_cells if c.get("source") == "js_inventory" and c.get("status") not in {"finding", "tested_clean", "skipped"}),
+                },
             }
         output_limit = _tool_output_max_chars()
         serialized = json.dumps(out, indent=2)
@@ -6904,6 +7124,7 @@ class ASMToolsManager(AssessmentCapabilities):
             "phase": out["phase"], "target": out["target"],
             "suggested_specialists": out["suggested_specialists"],
             "parameter_coverage": out["parameter_coverage"],
+            "js_coverage": out["js_coverage"],
             "task_graph_prompt": out["task_graph_prompt"][:2000],
             "open_hypothesis_count": len(out["open_hypotheses"]),
             "omitted_large_fields": ["engagement_brain", "prompt_view", "task_graph", "open_hypotheses"],
@@ -7909,7 +8130,7 @@ class ASMToolsManager(AssessmentCapabilities):
             specialists_from_open_hypotheses,
         )
         from app.services.agent.fireteam_service import run_fireteam
-        from app.services.agent.coverage_cells import CELL_OPEN, seed_parameter_coverage_cells
+        from app.services.agent.coverage_cells import CELL_OPEN, seed_js_coverage_cells, seed_parameter_coverage_cells
         from app.services.agent.penetration_task_graph import (
             apply_executor_summary,
             claim_task_leases,
@@ -7928,7 +8149,11 @@ class ASMToolsManager(AssessmentCapabilities):
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         if cmap:
             brain = seed_hypotheses_from_capability_map(brain, cmap.to_dict())
-            seed_parameter_coverage_cells(brain, cmap.parameter_inventory)
+            from app.services.agent.parameter_inventory import collect_parameter_inventory
+            seed_parameter_coverage_cells(brain, collect_parameter_inventory(cmap.to_dict()))
+            seed_js_coverage_cells(brain, cmap.to_dict())
+            from app.services.agent.runtime_mapper import ingest_capability_map_operations
+            ingest_capability_map_operations(brain, cmap.to_dict())
             self._engagement_brain = brain.to_dict()
 
         # Resolve specialists: "auto" → open hypotheses, else capability-map selection
@@ -8004,20 +8229,21 @@ class ASMToolsManager(AssessmentCapabilities):
                 if n not in ("finding_judge", "independent_verifier", "risk_assessor")
             ]
 
-        pending_parameter_specialists: set[str] = set()
+        pending_inventory_specialists: set[str] = set()
         if mode != "recon":
-            pending_parameter_specialists = {
+            pending_inventory_specialists = {
                 str(cell.get("specialist") or "")
                 for cell in (brain.coverage_cells or [])
                 if isinstance(cell, dict)
-                and cell.get("source") == "parameter_inventory"
+                and cell.get("source") in {"parameter_inventory", "js_inventory"}
                 and cell.get("status") in CELL_OPEN
-                and cell.get("specialist") in {"xss", "sqli"}
+                and cell.get("specialist") in {"xss", "sqli", "js_secrets"}
             }
             if auto:
-                for specialist_name in ("xss", "sqli"):
-                    if specialist_name in pending_parameter_specialists and specialist_name not in (chosen or []):
-                        chosen = list(chosen or []) + [specialist_name]
+                chosen = list(dict.fromkeys([
+                    *[name for name in ("js_secrets", "xss", "sqli") if name in pending_inventory_specialists],
+                    *(chosen or []),
+                ]))
             pending_proof_specialists = [
                 str(row.get("specialist") or "")
                 for row in (brain.proof_escalations or [])
@@ -8112,7 +8338,7 @@ class ASMToolsManager(AssessmentCapabilities):
             for name in chosen
             if name in task_leases
             or name not in represented_specialists
-            or name in pending_parameter_specialists
+            or name in pending_inventory_specialists
             or name in judge_roles
         ]
         profiles = {name: profiles[name] for name in chosen if name in profiles}
@@ -8380,6 +8606,10 @@ class ASMToolsManager(AssessmentCapabilities):
                 }
                 for name in ("xss", "sqli")
             },
+            "js_coverage": {
+                "total": sum(1 for c in brain.coverage_cells if c.get("source") == "js_inventory"),
+                "remaining": sum(1 for c in brain.coverage_cells if c.get("source") == "js_inventory" and c.get("status") not in {"finding", "tested_clean", "skipped"}),
+            },
             "specialists_run": result.specialists_run,
             "selection_mode": "auto" if auto else "explicit",
             "selection_source": selection_source,
@@ -8448,6 +8678,7 @@ class ASMToolsManager(AssessmentCapabilities):
             "task_leases": out["task_leases"],
             "coverage_leases": out["coverage_leases"],
             "parameter_coverage": out["parameter_coverage"],
+            "js_coverage": out["js_coverage"],
             "task_graph_prompt": out["task_graph_prompt"][:2000],
             "merged_summary": out["merged_summary"][:2000],
             "omitted_large_fields": omitted,
