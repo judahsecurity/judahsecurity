@@ -154,6 +154,19 @@ def inventory_query_ran(state: Optional[Dict[str, Any]] = None) -> bool:
     return False
 
 
+def registry_inventory_in_scope(state: Optional[Dict[str, Any]] = None) -> bool:
+    """Only an organization-wide assessment may expand into registry inventory."""
+    state = state or {}
+    if not state.get("organization_id"):
+        return False
+    target_info = state.get("target_info") or {}
+    capability_map = state.get("capability_map") or {}
+    if target_info.get("primary_target") or _g(capability_map, "target"):
+        return False
+    objective = str(state.get("original_objective") or state.get("objective") or "")
+    return not bool(re.search(r"https?://[^\s<>]+", objective, re.I))
+
+
 def registry_missing_probes(
     state: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, str]]:
@@ -169,7 +182,7 @@ def registry_missing_probes(
                 "+ catalog names. Do not pull images."
             ),
         })
-    elif (state or {}).get("organization_id") and not inventory_query_ran(state):
+    elif registry_inventory_in_scope(state) and not inventory_query_ran(state):
         missing.append({
             "id": "acr_inventory",
             "title": "Org inventory not searched for *.azurecr.io",
@@ -193,7 +206,7 @@ def registry_forced_step(
                 "anonymousPullEnabled with oauth2 token + catalog (no image pull)."
             ),
         }
-    if (state or {}).get("organization_id") and not inventory_query_ran(state):
+    if registry_inventory_in_scope(state) and not inventory_query_ran(state):
         return {
             "tool_name": "query_assets",
             "tool_args": {"search": "azurecr.io", "limit": 30},
