@@ -394,6 +394,10 @@ def complete_blocked_reason(
     completion_reason: str = "",
 ) -> Optional[str]:
     """Return a block message, or None if complete is allowed."""
+    if (state or {}).get("mode") == "pilot":
+        # The full tester loop requires crawlers, directory brute force and
+        # fireteam tools that the bounded pilot deliberately cannot run.
+        return None
     reason = (completion_reason or "").lower()
     if any(
         token in reason
@@ -435,6 +439,23 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
     tool_args, or None once crawl + dir brute + JS/API recon + fireteam have run.
     """
     state = state or {}
+    if state.get("mode") == "pilot":
+        target = primary_web_target(state)
+        ran = normalized_tools_run(_steps(state.get("execution_trace")))
+        if target and "execute_browser" not in ran:
+            import json
+
+            return {
+                "tool_name": "execute_browser",
+                "tool_args": {"args": json.dumps({"actions": [
+                    {"action": "navigate", "url": target},
+                    {"action": "get_source"},
+                ]})},
+                "thought": "Bounded pilot: inspect the exact target origin before testing inputs.",
+            }
+        # The remaining choices must come from the pilot allowlist in the
+        # dedicated planner prompt; never force the normal scanner pipeline.
+        return None
     try:
         from app.services.agent.registry_surface import (
             is_registry_primary,
@@ -607,4 +628,3 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
     except Exception:
         pass
     return None
-

@@ -1,5 +1,7 @@
 """Curious-tester loop: crawl, dir brute, params, fireteam — not fingerprint-and-stop."""
 
+import json
+
 from app.services.agent.assessment_kickoff import root_needs_dir_brute
 from app.services.agent.tester_loop import (
     complete_blocked_reason,
@@ -129,6 +131,29 @@ def test_interceptor_job_forces_attach_not_second_crawl():
         "execution_trace": [],
     })
     assert step and step["tool_name"] == "execute_interceptor"
+
+
+def test_bounded_pilot_never_enters_unavailable_tester_pipeline():
+    target = "https://ginandjuice.shop:443"
+    state = {
+        "mode": "pilot",
+        "organization_id": 42,
+        "original_objective": f"Assess {target}",
+        "target_info": {"primary_target": target},
+        "execution_trace": [],
+    }
+    step = forced_next_step(state)
+    assert step and step["tool_name"] == "execute_browser"
+    assert json.loads(step["tool_args"]["args"])["actions"] == [
+        {"action": "navigate", "url": target},
+        {"action": "get_source"},
+    ]
+    after_browser = {
+        **state,
+        "execution_trace": [{"tool_name": "execute_browser", "success": True}],
+    }
+    assert forced_next_step(after_browser) is None
+    assert complete_blocked_reason(after_browser) is None
 
 
 def test_complete_blocked_after_fingerprint_only():

@@ -58,6 +58,7 @@ from app.services.agent.state import (
 )
 from app.services.agent.prompts import (
     REACT_SYSTEM_PROMPT,
+    PILOT_SYSTEM_PROMPT,
     OUTPUT_ANALYSIS_PROMPT,
     PHASE_TRANSITION_MESSAGE,
     USER_QUESTION_MESSAGE,
@@ -1514,7 +1515,7 @@ class AgentOrchestrator:
                     break
 
             tool_recommendations = ""
-            if primary_target:
+            if primary_target and state.get("mode") != "pilot":
                 tool_recommendations = get_tool_recommendations(
                     target=primary_target,
                     target_info=target_info_raw,
@@ -1525,21 +1526,22 @@ class AgentOrchestrator:
                 )
             # WordPress-specific hunt: once WP is fingerprinted, do not wait for
             # methodology cards — run wpscan + REST user enum + ajax SQLi probes.
-            tool_recommendations += self._wordpress_hunt_note(state)
-            tool_recommendations += self._registry_hunt_note(state)
-            # Break unproductive loops: if the model has been hammering one tool
-            # without new findings, steer it to a different, higher-value action.
-            tool_recommendations += self._repetition_guard_note(state, phase)
-            try:
-                from app.services.agent.tester_loop import (
-                    format_tester_loop_for_prompt,
-                    tester_loop_progress,
-                )
-                loop_txt = format_tester_loop_for_prompt(tester_loop_progress(state), state)
-                if loop_txt:
-                    tool_recommendations = loop_txt + "\n\n" + tool_recommendations
-            except Exception:
-                logger.debug("tester loop prompt injection skipped", exc_info=True)
+            if state.get("mode") != "pilot":
+                tool_recommendations += self._wordpress_hunt_note(state)
+                tool_recommendations += self._registry_hunt_note(state)
+                # Break unproductive loops: if the model has been hammering one tool
+                # without new findings, steer it to a different, higher-value action.
+                tool_recommendations += self._repetition_guard_note(state, phase)
+                try:
+                    from app.services.agent.tester_loop import (
+                        format_tester_loop_for_prompt,
+                        tester_loop_progress,
+                    )
+                    loop_txt = format_tester_loop_for_prompt(tester_loop_progress(state), state)
+                    if loop_txt:
+                        tool_recommendations = loop_txt + "\n\n" + tool_recommendations
+                except Exception:
+                    logger.debug("tester loop prompt injection skipped", exc_info=True)
 
             from app.services.agent.capability_map import format_capability_map_for_prompt
             from app.services.agent.engagement_brain import format_engagement_brain_for_prompt
@@ -1550,7 +1552,11 @@ class AgentOrchestrator:
                 state.get("engagement_brain")
             )
 
-            system_prompt = REACT_SYSTEM_PROMPT.format(
+            prompt_template = (
+                PILOT_SYSTEM_PROMPT if state.get("mode") == "pilot"
+                else REACT_SYSTEM_PROMPT
+            )
+            system_prompt = prompt_template.format(
                 current_phase=phase,
                 available_tools=available_tools,
                 iteration=iteration,
