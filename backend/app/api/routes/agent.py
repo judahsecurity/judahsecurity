@@ -150,12 +150,13 @@ def _check_pilot_session(db: Session, session_id: str, user_id: int, mode: str) 
 
 def _pilot_question(question: str, config: dict, playbook_id: Optional[str],
                     load_session_id: Optional[str]) -> str:
-    """Keep a pilot's seed target and objective tied to its server-validated origin."""
+    """Keep a pilot's seed target and objective tied to its server-validated host."""
     if playbook_id or load_session_id:
         raise HTTPException(status_code=400, detail="A bounded pilot requires a fresh, direct objective")
     return (
-        f"Pilot target: {config['target']}/. Only assess this exact HTTPS origin. "
-        "Use anonymous GET, HEAD, or OPTIONS requests and the bounded pilot tools. "
+        f"Pilot seed: {config['target']}/. Only assess this exact hostname or public IP. "
+        "The seed is a starting web URL; other ports on this host may be probed within the shared budget. "
+        "Use anonymous GET, HEAD, or OPTIONS HTTP requests and the bounded pilot tools. "
         "Every network tool call requires analyst approval.\n"
         f"Assessment objective: {question}"
     )

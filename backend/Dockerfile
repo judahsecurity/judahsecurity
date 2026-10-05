@@ -221,6 +221,9 @@ RUN playwright install --with-deps chromium \
 RUN test -x "$CHROME_BIN" || ls "$PLAYWRIGHT_BROWSERS_PATH"/chromium* >/dev/null 2>&1 \
     || (echo "FATAL: no Chromium (managed or system) in image" && exit 1)
 
+# Optional pip tools below must not persist downloaded wheels in image layers.
+ENV PIP_NO_CACHE_DIR=1
+
 # Install ParamSpider
 RUN pip install paramspider || echo "ParamSpider installation skipped"
 
@@ -312,6 +315,7 @@ RUN git clone --depth 1 https://github.com/drwetter/testssl.sh.git /opt/testssl 
 # Install WPScan (WordPress scanner - Ruby gem)
 RUN apt-get update && apt-get install -y --no-install-recommends ruby ruby-dev build-essential \
     && gem install wpscan --no-document \
+    && rm -rf /root/.cache/gem /var/lib/gems/*/cache \
     && apt-get purge -y build-essential ruby-dev \
     && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/* || echo "WPScan installation skipped"

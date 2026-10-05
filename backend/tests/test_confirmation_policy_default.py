@@ -53,6 +53,10 @@ async def test_pilot_network_tool_requires_analyst_even_with_auto_policy(monkeyp
             "replay_http_request", {"url": "https://app.test/"}, 7, "pilot",
         )
         assert result["decision"] == "confirm"
+        port_result = await confirmation.gate(
+            "probe_pilot_ports", {"protocol": "tcp", "ports": [80, 443]}, 7, "pilot",
+        )
+        assert port_result["decision"] == "confirm"
     finally:
         reset_pilot(pilot_token)
         confirmation._autonomous_mode.reset(mode_token)

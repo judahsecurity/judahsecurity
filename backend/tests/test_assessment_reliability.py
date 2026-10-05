@@ -105,11 +105,32 @@ async def test_bounded_pilot_blocks_unmetered_and_out_of_scope_http(manager, tra
         assert len(sent) == 1
         with pytest.raises(PilotDenied):
             await manager._http_exchange("POST", "https://app.test/", use_auth_session=False)
-        with pytest.raises(PilotDenied):
-            await manager._http_exchange("GET", "https://app.test:8443/", use_auth_session=False)
-        assert len(sent) == 1
+        await manager._http_exchange("GET", "https://app.test:8443/", use_auth_session=False)
+        assert requests[-1] == ("GET", "https://app.test:8443/")
+        with pytest.raises(ValueError):
+            await manager._http_exchange("GET", "https://other.test/", use_auth_session=False)
+        assert len(sent) == 2
         denied = await manager._execute_impl("execute_curl", {"args": "https://app.test/"})
         assert denied["error"] == "pilot_policy_denied"
+    finally:
+        reset_pilot(token)
+
+
+@pytest.mark.asyncio
+async def test_bounded_pilot_rejects_browser_write_action_before_tool_call(manager):
+    policy = PilotPolicy(
+        target="https://app.test:443", source_ip="203.0.113.25",
+        organization_id=98765, session_id="pilot-browser-actions",
+        expires_at_ms=int(time.time() * 1000) + 60_000,
+    )
+    token = set_pilot(policy)
+    try:
+        result = await manager._execute_impl("execute_browser", {
+            "args": json.dumps({"actions": [
+                {"action": "set_cookie", "name": "session", "value": "x"},
+            ]}),
+        })
+        assert result["error"] == "pilot_policy_denied"
     finally:
         reset_pilot(token)
 

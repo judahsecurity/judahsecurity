@@ -1448,10 +1448,14 @@ class AgentOrchestrator:
             available_tools += self._unavailable_tools_note()
             if state.get("mode") == "pilot":
                 from app.services.agent.pilot_policy import PILOT_ALLOWED_TOOLS
+                from app.models.scan_schedule import CRITICAL_PORTS
                 available_tools = (
                     "Bounded pilot tools only: " + ", ".join(sorted(PILOT_ALLOWED_TOOLS))
                     + ". Network calls outside these tools are denied. "
-                    "Use anonymous GET/HEAD/OPTIONS requests on the exact target origin."
+                    "Use anonymous GET/HEAD/OPTIONS on the exact target host; "
+                    "probe_pilot_ports(protocol='tcp'|'udp', ports=[...]) may check "
+                    "up to 20 ports per approved action under the shared budget. "
+                    "Platform critical-port categories: " + json.dumps(CRITICAL_PORTS)
                 )
 
             # Append prior session intelligence to knowledge context

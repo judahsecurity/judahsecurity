@@ -453,6 +453,32 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
                 ]})},
                 "thought": "Bounded pilot: inspect the exact target origin before testing inputs.",
             }
+        port_steps = [step for step in _steps(state.get("execution_trace"))
+                      if step.get("tool_name") == "probe_pilot_ports"]
+        probed_protocols = {
+            str((step.get("tool_args") or {}).get("protocol") or "").lower()
+            for step in port_steps
+        }
+        if target and "tcp" not in probed_protocols:
+            from app.models.scan_schedule import CRITICAL_PORTS
+
+            priority = [
+                *CRITICAL_PORTS["web"],
+                *CRITICAL_PORTS["remote_access"],
+                *CRITICAL_PORTS["databases"],
+            ]
+            ports = list(dict.fromkeys(priority))[:20]
+            return {
+                "tool_name": "probe_pilot_ports",
+                "tool_args": {"protocol": "tcp", "ports": ports},
+                "thought": "Check the platform's priority TCP service ports under the shared pilot budget.",
+            }
+        if target and "udp" not in probed_protocols:
+            return {
+                "tool_name": "probe_pilot_ports",
+                "tool_args": {"protocol": "udp", "ports": [53, 69, 123, 161, 162, 500, 1434, 1900, 4500, 5353]},
+                "thought": "Check priority UDP ports; no response will remain inconclusive.",
+            }
         # The remaining choices must come from the pilot allowlist in the
         # dedicated planner prompt; never force the normal scanner pipeline.
         return None

@@ -229,6 +229,7 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
         elif tool in ("recon_worker:katana_urls", "recon_worker:ferox_dirs",
                       "execute_interceptor", "execute_deep_crawl", "execute_browser",
                       "execute_katana", "execute_feroxbuster", "fingerprint_api",
+                      "probe_pilot_ports",
                       "fetch_lazy_chunks", "extract_js_endpoints", "discover_parameters",
                       "execute_arjun", "ingest_urls_into_map"):
             stage = "surface_mapping"

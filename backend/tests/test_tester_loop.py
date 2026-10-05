@@ -152,7 +152,27 @@ def test_bounded_pilot_never_enters_unavailable_tester_pipeline():
         **state,
         "execution_trace": [{"tool_name": "execute_browser", "success": True}],
     }
-    assert forced_next_step(after_browser) is None
+    next_step = forced_next_step(after_browser)
+    assert next_step and next_step["tool_name"] == "probe_pilot_ports"
+    assert next_step["tool_args"]["protocol"] == "tcp"
+    assert 443 in next_step["tool_args"]["ports"]
+    assert len(next_step["tool_args"]["ports"]) <= 20
+    after_ports = {
+        **state,
+        "execution_trace": [
+            {"tool_name": "execute_browser", "success": True},
+            {"tool_name": "probe_pilot_ports", "tool_args": {"protocol": "tcp"}, "success": True},
+        ],
+    }
+    udp_step = forced_next_step(after_ports)
+    assert udp_step and udp_step["tool_args"]["protocol"] == "udp"
+    after_udp = {
+        **after_ports,
+        "execution_trace": [*after_ports["execution_trace"],
+                            {"tool_name": "probe_pilot_ports",
+                             "tool_args": {"protocol": "udp"}, "success": True}],
+    }
+    assert forced_next_step(after_udp) is None
     assert complete_blocked_reason(after_browser) is None
 
 

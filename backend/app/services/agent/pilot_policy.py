@@ -11,6 +11,7 @@ import asyncio
 import hashlib
 import ipaddress
 import os
+import re
 import time
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -19,7 +20,7 @@ from urllib.parse import urlsplit
 
 PILOT_NETWORK_TOOLS = frozenset({
     "execute_browser", "replay_http_request", "compare_requests",
-    "mutate_captured_request", "run_intruder_batch",
+    "mutate_captured_request", "run_intruder_batch", "probe_pilot_ports",
 })
 PILOT_LOCAL_TOOLS = frozenset({
     "list_captured_requests", "plan_intruder_mutations", "get_coverage",
@@ -57,6 +58,47 @@ def exact_origin(url: str) -> tuple[str, str, int]:
         raise PilotDenied("Invalid target port") from exc
     if port < 1 or port > 65535:
         raise PilotDenied("Invalid target port")
+    return parsed.scheme, parsed.hostname.lower().rstrip("."), port
+
+
+def normalize_seed_target(raw: str) -> str:
+    """Accept one FQDN or HTTPS URL/IP as the seed for an exact host scope."""
+    value = str(raw or "").strip()
+    if not value or any(char.isspace() for char in value):
+        raise PilotDenied("Pilot target must be one FQDN or HTTPS URL")
+    if "://" not in value:
+        value = "https://" + value
+    parsed = urlsplit(value)
+    scheme, host, port = exact_origin(value)
+    if parsed.path not in ("", "/") or parsed.query:
+        raise PilotDenied("Pilot seed must not contain a path or query")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        labels = host.split(".")
+        if (len(labels) < 2 or len(host) > 253 or any(
+            not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+            for label in labels
+        )):
+            raise PilotDenied("Pilot target must be a valid FQDN or public IP")
+    else:
+        if not address.is_global:
+            raise PilotDenied("Pilot target IP must be public")
+    authority = f"[{host}]" if ":" in host else host
+    return f"{scheme}://{authority}:{port}"
+
+
+def request_origin(url: str) -> tuple[str, str, int]:
+    parsed = urlsplit(str(url or ""))
+    if (parsed.scheme not in {"http", "https"} or not parsed.hostname
+            or parsed.username or parsed.password or parsed.fragment):
+        raise PilotDenied("Pilot requests require an absolute HTTP(S) URL")
+    try:
+        port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise PilotDenied("Invalid request port") from exc
+    if not 1 <= port <= 65535:
+        raise PilotDenied("Invalid request port")
     return parsed.scheme, parsed.hostname.lower().rstrip("."), port
 
 
@@ -105,7 +147,7 @@ class PilotPolicy:
     def from_config(cls, config: dict, organization_id: int, session_id: str) -> "PilotPolicy":
         if not isinstance(config, dict):
             raise PilotDenied("Pilot target and source IP are required")
-        target = str(config.get("target") or "").strip()
+        target = normalize_seed_target(config.get("target"))
         scheme, host, port = exact_origin(target)
         if not host or host.startswith("*."):
             raise PilotDenied("Pilot target must be one exact host")
@@ -124,7 +166,7 @@ class PilotPolicy:
         if not now_ms < expires_at_ms <= now_ms + 7_200_000:
             raise PilotDenied("Pilot window must end within two hours")
         return cls(
-            target=f"{scheme}://{host}:{port}", source_ip=source_ip,
+            target=target, source_ip=source_ip,
             organization_id=int(organization_id), session_id=str(session_id),
             expires_at_ms=expires_at_ms,
         )
@@ -134,10 +176,18 @@ class PilotPolicy:
                 "expires_at_ms": self.expires_at_ms}
 
     def check_request(self, url: str, method: str) -> None:
-        if exact_origin(url) != exact_origin(self.target):
-            raise PilotDenied("Out-of-scope pilot origin blocked")
+        if request_origin(url)[1] != exact_origin(self.target)[1]:
+            raise PilotDenied("Out-of-scope pilot host blocked")
         if str(method or "").upper() not in PILOT_METHODS:
             raise PilotDenied("Pilot first pass allows GET, HEAD, and OPTIONS only")
+        if int(time.time() * 1000) >= self.expires_at_ms:
+            raise PilotDenied("Pilot window expired")
+
+    def check_port_probe(self, port: int, protocol: str) -> None:
+        if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+            raise PilotDenied("Port probe requires a port from 1 to 65535")
+        if protocol not in {"tcp", "udp"}:
+            raise PilotDenied("Port probe protocol must be tcp or udp")
         if int(time.time() * 1000) >= self.expires_at_ms:
             raise PilotDenied("Pilot window expired")
 
@@ -147,14 +197,21 @@ class PilotPolicy:
 
     @property
     def budget_key(self) -> str:
-        # One shared counter for this exact origin, even if an operator opens
+        # One shared counter for this exact host across protocols and ports, even if an operator opens
         # another conversation or organization during the same pilot window.
-        origin_hash = hashlib.sha256(self.target.encode()).hexdigest()[:24]
+        origin_hash = hashlib.sha256(exact_origin(self.target)[1].encode()).hexdigest()[:24]
         return f"aegis:agent-pilot:{origin_hash}"
 
     async def acquire(self, url: str, method: str) -> int:
         """Reserve one actual outbound request; fail closed if Redis is unavailable."""
-        self.check_request(url, method)
+        return await self._reserve(lambda: self.check_request(url, method))
+
+    async def acquire_port_probe(self, port: int, protocol: str) -> int:
+        """Reserve one TCP connection or UDP datagram in the shared pilot budget."""
+        return await self._reserve(lambda: self.check_port_probe(port, protocol))
+
+    async def _reserve(self, validate) -> int:
+        validate()
         try:
             import redis
 
@@ -163,10 +220,10 @@ class PilotPolicy:
                 socket_connect_timeout=1, socket_timeout=2,
             )
             while True:
-                self.check_request(url, method)
+                validate()
                 result = await asyncio.to_thread(
                     client.eval, _RESERVE_SCRIPT, 1, self.budget_key,
-                    self.target, self.source_ip, self.expires_at_ms,
+                    exact_origin(self.target)[1], self.source_ip, self.expires_at_ms,
                     self.max_requests, self.interval_ms,
                 )
                 code, delay_ms, count = (int(value) for value in result)

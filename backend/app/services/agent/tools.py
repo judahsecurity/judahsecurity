@@ -430,6 +430,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "query_assets": self.query_assets,
             "query_vulnerabilities": self.query_vulnerabilities,
             "query_ports": self.query_ports,
+            "probe_pilot_ports": self.probe_pilot_ports,
             "query_technologies": self.query_technologies,
             "query_graph": self.query_graph,
             "analyze_attack_surface": self.analyze_attack_surface,
@@ -730,7 +731,19 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         raise PilotDenied("Pilot first pass does not accept credentials")
                     if len(spec["actions"]) > 10:
                         raise PilotDenied("Pilot browser call exceeds ten actions")
-                    spec["allowed_origin"] = pilot.target
+                    allowed_actions = {"navigate", "get_source", "screenshot", "wait", "check_response"}
+                    if any(not isinstance(action, dict) or action.get("action") not in allowed_actions
+                           for action in spec["actions"]):
+                        raise PilotDenied("Pilot browser action is outside the read-only allowlist")
+                    explicit_urls = [str(action.get("url")) for action in spec["actions"]
+                                     if action.get("url")]
+                    if explicit_urls:
+                        from app.services.agent.pilot_policy import request_origin
+                        if len({request_origin(url) for url in explicit_urls}) > 1:
+                            raise PilotDenied("One browser action may visit only one origin")
+                    allowed_origin = explicit_urls[0] if explicit_urls else pilot.target
+                    pilot.check_request(allowed_origin, "GET")
+                    spec["allowed_origin"] = allowed_origin
                     tool_args["args"] = json.dumps(spec)
             except (PilotDenied, ValueError, TypeError) as exc:
                 return {"success": False, "output": str(exc), "error": "pilot_policy_denied"}
@@ -890,7 +903,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 augur_block = result.get("augur")  # Augur reading: kept/dropped/next_steps/signals
                 capability_map = result.get("capability_map")  # deep_crawl / interceptor map
                 if pilot is not None and tool_name == "execute_browser" and result.get("success"):
-                    from app.services.agent.pilot_policy import PILOT_METHODS, exact_origin
+                    from app.services.agent.pilot_policy import PILOT_METHODS
                     observed = []
                     for item in result.get("network_requests") or []:
                         if not isinstance(item, dict):
@@ -898,7 +911,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         method = str(item.get("method") or "").upper()
                         url = str(item.get("url") or "")
                         try:
-                            if method in PILOT_METHODS and exact_origin(url) == exact_origin(pilot.target):
+                            if method in PILOT_METHODS:
+                                pilot.check_request(url, method)
                                 observed.append({"method": method, "url": url})
                         except ValueError:
                             continue
@@ -1193,6 +1207,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         finally:
             db.close()
     
+    async def probe_pilot_ports(self, protocol: str, ports: List[int] | str) -> dict:
+        """Probe at most 20 ports on the pilot host, with one shared reservation per attempt."""
+        from app.services.agent.pilot_policy import PilotDenied, current_pilot
+        from app.services.agent.pilot_port_probe import probe_ports
+
+        pilot = current_pilot()
+        if pilot is None:
+            raise PilotDenied("This metered port probe is available only in a bounded pilot")
+        return await probe_ports(pilot, protocol, ports)
+
     async def query_ports(
         self,
         port: Optional[int] = None,
@@ -6189,9 +6213,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             if identity not in (None, "anonymous") or cookies:
                 raise ValueError("Pilot first pass is anonymous only")
             if any(str(key).lower() in {
-                "authorization", "cookie", "proxy-authorization",
+                "authorization", "cookie", "proxy-authorization", "host",
+                "x-forwarded-host", "forwarded",
             } for key in (headers or {})):
-                raise ValueError("Pilot first pass cannot send credentials")
+                raise ValueError("Pilot first pass cannot override credentials or host routing")
             use_auth_session = False
         method = (method or "GET").upper().strip()
         raw_body, hdrs = coerce_request_body({"body": body, "headers": headers or {}}, headers or {})

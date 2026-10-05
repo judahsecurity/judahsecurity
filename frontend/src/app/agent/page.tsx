@@ -1197,7 +1197,7 @@ function AgentPageContent() {
     }
     if (!loading && mode === 'pilot' && !target.trim()) {
       toast({ variant: 'destructive', title: 'Pilot preflight incomplete',
-        description: 'Enter the exact HTTPS target.' });
+        description: 'Enter one FQDN or HTTPS URL with a public IP.' });
       return;
     }
 
@@ -2048,7 +2048,7 @@ function AgentPageContent() {
 
                       {(selectedPlaybookId !== 'custom' || mode === 'pilot') && (
                         <Input
-                          placeholder={mode === 'pilot' ? 'https://exact-host:443' : 'target (optional)'}
+          placeholder={mode === 'pilot' ? 'FQDN or https://public-ip' : 'target (optional)'}
                           value={target}
                           onChange={(e) => setTarget(e.target.value)}
                           disabled={loading || agentAvailable === false}
@@ -2106,7 +2106,7 @@ function AgentPageContent() {
 
                     {mode === 'pilot' && (
                       <p className={`text-xs ${pilotStatus?.ready ? 'text-muted-foreground' : 'text-amber-400'}`}>
-                        Anonymous first pass · exact HTTPS origin · GET/HEAD/OPTIONS only · 1 request/second · 500 requests · 2 hours.{' '}
+        Anonymous first pass · exact host, prioritized TCP/UDP ports · HTTP GET/HEAD/OPTIONS only · 1 probe/second · 500 total · 2 hours.{' '}
                         {pilotStatus === null ? 'Checking pilot controls…' : pilotStatus.ready
                           ? 'Pilot controls ready.'
                           : `Pilot unavailable: ${!pilotStatus.egress_ready ? 'worker egress IP' : 'Redis'} is not configured.`}
