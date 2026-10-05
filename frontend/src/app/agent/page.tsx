@@ -705,6 +705,7 @@ function AgentPageContent() {
   const [chainData, setChainData] = useState<ChainData | null>(null);
   const [engagementReplay, setEngagementReplay] = useState<ReplayStep[]>([]);
   const [runLedger, setRunLedger] = useState<AgentRunLedger | null>(null);
+  const activeRunIdRef = useRef<string | null>(null);
   const [ledgerError, setLedgerError] = useState(false);
   const [agentRequestTimeoutMs, setAgentRequestTimeoutMs] = useState(60 * 60_000);
   const [replayUsage, setReplayUsage] = useState<TokenUsage | null>(null);
@@ -777,6 +778,19 @@ function AgentPageContent() {
           failures = 0;
           setLedgerError(false);
           setRunLedger(value);
+          if (loading && value.run_id) {
+            if (value.status === 'running' || value.status === 'stalled') {
+              activeRunIdRef.current = value.run_id;
+            } else if (activeRunIdRef.current === value.run_id &&
+                       ['completed', 'cancelled', 'error', 'interrupted'].includes(value.status)) {
+              // A terminal receipt is authoritative even if the WebSocket's
+              // final response was lost. Do not leave the controls locked.
+              setLoading(false);
+              setLiveSteps([]);
+              toolInFlightRef.current = false;
+              activeRunIdRef.current = null;
+            }
+          }
         })
         .catch(() => {
           if (!active) return;
@@ -1236,7 +1250,7 @@ function AgentPageContent() {
 
     setMessages((prev) => [...prev, { id: `user-${Date.now()}`, role: 'user', content: displayContent }]);
     if (!usePreset) setQuestion('');
-    setUrlPrefilled(false); setLoading(true); setLiveSteps([]);
+    setUrlPrefilled(false); activeRunIdRef.current = null; setLoading(true); setLiveSteps([]);
     stopRequestedRef.current = false;
 
     try {
@@ -1416,7 +1430,7 @@ function AgentPageContent() {
 
   const handleApprove = async (decision: 'approve' | 'modify' | 'abort', modification?: string) => {
     if (!sessionId || loading) return;
-    setLoading(true); setLiveSteps([]); setShowModifyInput(false); setModifyInput('');
+    activeRunIdRef.current = null; setLoading(true); setLiveSteps([]); setShowModifyInput(false); setModifyInput('');
     const sent = sendViaWs({ type: 'approval', decision, modification });
     if (!sent) {
       try {
