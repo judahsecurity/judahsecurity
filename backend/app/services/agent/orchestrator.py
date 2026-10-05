@@ -15,19 +15,10 @@ import uuid
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Callable, Awaitable
 
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_core.language_models.chat_models import BaseChatModel
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
-
-# Conditionally import Anthropic
-try:
-    from langchain_anthropic import ChatAnthropic
-    ANTHROPIC_AVAILABLE = True
-except ImportError:
-    ANTHROPIC_AVAILABLE = False
-    ChatAnthropic = None
 
 from contextvars import ContextVar
 
@@ -235,9 +226,7 @@ class AgentOrchestrator:
     - WebSocket streaming callbacks for real-time UI updates
     - Cross-session learning via EvoGraph (Neo4j)
     
-    Supports multiple LLM providers:
-    - OpenAI (GPT-4, GPT-4o, etc.)
-    - Anthropic (Claude 3.5 Sonnet, Claude 3 Opus, etc.)
+    Supports configured cloud and local LLM providers through the model router.
     """
     
     def __init__(self):
@@ -248,6 +237,7 @@ class AgentOrchestrator:
         self._initialized = False
         self._initialize_lock = asyncio.Lock()
         self._provider = None
+        self._model = None
     
     async def initialize(self) -> None:
         """Initialize all components asynchronously."""
@@ -261,17 +251,11 @@ class AgentOrchestrator:
         
         logger.info("Initializing AgentOrchestrator...")
         
-        # Check for available API keys / local Ollama so the product can run
-        # even when a customer's preferred cloud provider has no credits.
-        from app.services.agent.model_router import ollama_fallback_available
+        from app.services.agent.model_router import global_runtime_model_spec
 
-        has_openai = bool(settings.OPENAI_API_KEY)
-        has_anthropic = bool(settings.ANTHROPIC_API_KEY)
-        has_ollama = ollama_fallback_available()
-        
-        if not has_openai and not has_anthropic and not has_ollama:
+        if global_runtime_model_spec() is None:
             logger.warning(
-                "No AI API key configured and Ollama is not reachable — AI agent will not function"
+                "No configured cloud LLM key or reachable Ollama — AI agent will not function"
             )
             return
         
@@ -287,7 +271,7 @@ class AgentOrchestrator:
                     max_tokens=settings.AGENT_MAX_OUTPUT_TOKENS,
                     timeout=120,
                     max_retries=2,
-                    model=getattr(settings, f"{self._provider.upper()}_MODEL", None),
+                    model=self._model,
                 )
         except Exception:
             logger.debug("Could not attach resilient LLM fallback to default LLM", exc_info=True)
@@ -298,81 +282,28 @@ class AgentOrchestrator:
         logger.info(f"AgentOrchestrator initialized successfully with {self._provider} provider")
     
     def _setup_llm(self) -> None:
-        """Initialize the LLM based on configuration."""
-        provider = settings.AI_PROVIDER.lower()
-        
-        # Auto-detect provider if not explicitly set or if configured provider is unavailable
-        if provider == "anthropic" and settings.ANTHROPIC_API_KEY:
-            self._setup_anthropic()
-        elif provider == "openai" and settings.OPENAI_API_KEY:
-            self._setup_openai()
-        elif settings.ANTHROPIC_API_KEY:
-            # Fallback to Anthropic if available
-            self._setup_anthropic()
-        elif settings.OPENAI_API_KEY:
-            # Fallback to OpenAI if available
-            self._setup_openai()
-        else:
-            # Last resort: local Ollama so the product still boots without cloud keys
-            from app.services.agent.model_router import (
-                build_ollama_chat_model,
-                ollama_fallback_available,
-                _ollama_fallback_model_name,
-            )
-            if not ollama_fallback_available():
-                raise ValueError("No valid AI provider configuration found")
-            self.llm = build_ollama_chat_model(
-                temperature=0,
-                max_tokens=settings.AGENT_MAX_OUTPUT_TOKENS,
-                timeout=120,
-                max_retries=2,
-            )
-            self._provider = "ollama"
-            logger.info(
-                "Setting up Ollama LLM (no cloud keys): %s",
-                _ollama_fallback_model_name(),
-            )
-    
-    def _setup_openai(self) -> None:
-        """Initialize OpenAI LLM."""
-        logger.info(f"Setting up OpenAI LLM: {settings.OPENAI_MODEL} (max_tokens={settings.AGENT_MAX_OUTPUT_TOKENS})")
-        self.llm = ChatOpenAI(
-            model=settings.OPENAI_MODEL,
-            api_key=settings.OPENAI_API_KEY,
+        """Build the process default through the same factory as task routing."""
+        from app.services.agent.llm_factory import build_chat_model
+        from app.services.agent.model_router import (
+            _settings_key_for_provider,
+            global_runtime_model_spec,
+        )
+
+        selection = global_runtime_model_spec()
+        if selection is None:
+            raise ValueError("No valid AI provider configuration found")
+        provider, model = selection
+        self.llm = build_chat_model(
+            provider,
+            model,
+            _settings_key_for_provider(provider),
             temperature=0,
             max_tokens=settings.AGENT_MAX_OUTPUT_TOKENS,
             timeout=120,
             max_retries=2,
         )
-        self._provider = "openai"
-    
-    def _setup_anthropic(self) -> None:
-        """Initialize Anthropic/Claude LLM. Uses ANTHROPIC_API_KEY from env so the SDK sends it unchanged."""
-        import os
-        if not ANTHROPIC_AVAILABLE:
-            raise ImportError("langchain-anthropic is not installed. Run: pip install langchain-anthropic")
-        
-        key = settings.ANTHROPIC_API_KEY or ""
-        key = (key.strip() if isinstance(key, str) else "").strip()
-        if not key:
-            raise ValueError("ANTHROPIC_API_KEY is empty. Set it in .env with a key from https://console.anthropic.com (API Keys), not a Cursor/Claude Code key.")
-        if not key.startswith("sk-ant-"):
-            logger.warning(
-                "ANTHROPIC_API_KEY does not start with 'sk-ant-'. "
-                "Use an API key from https://console.anthropic.com (API Keys); "
-                "keys from Cursor/Claude Code are not valid for this API."
-            )
-        # Let the SDK read the key from env (avoids any encoding/quoting issues from passing it in code)
-        os.environ["ANTHROPIC_API_KEY"] = key
-        logger.info(f"Setting up Anthropic LLM: {settings.ANTHROPIC_MODEL} (max_tokens={settings.AGENT_MAX_OUTPUT_TOKENS})")
-        self.llm = ChatAnthropic(
-            model=settings.ANTHROPIC_MODEL,
-            temperature=0,
-            max_tokens=settings.AGENT_MAX_OUTPUT_TOKENS,
-            timeout=120,
-            max_retries=2,
-        )
-        self._provider = "anthropic"
+        self._provider, self._model = provider, model
+        logger.info("Setting up agent LLM provider=%s model=%s", provider, model)
 
     def _resolve_llm(self, state: AgentState, task: str) -> BaseChatModel:
         """Resolve the chat model for ``task`` using the caller's org config.
@@ -2059,11 +1990,18 @@ class AgentOrchestrator:
             recon_ready = bool(_tech) and (
                 _params_found or bool(_cmap.get("capabilities"))
             ) or _wp
+            scoped_observed = tool_name in {
+                "scoped_assessment_probe", "scoped_assessment_candidate",
+            } and any(
+                step.get("tool_name") == "scoped_assessment_observe" and step.get("success")
+                for step in (state.get("execution_trace") or [])
+                if isinstance(step, dict)
+            )
             if (
                 state.get("mode") == "agent"
                 and phase == "informational"
                 and target_phase
-                and (cmap_ready or recon_ready)
+                and (cmap_ready or recon_ready or scoped_observed)
             ):
                 logger.info(
                     "[%s] Agent mode: auto-promoting informational->%s so %s can run "
@@ -2080,11 +2018,18 @@ class AgentOrchestrator:
                 })
             else:
                 if target_phase == "exploitation" and not cmap_ready:
-                    step_data["tool_output"] = (
-                        f"Error: '{tool_name}' needs the exploitation phase. Run "
-                        "execute_deep_crawl on the target first to build the "
-                        "capability map, then retry this tool."
-                    )
+                    if tool_name.startswith("scoped_assessment_"):
+                        step_data["tool_output"] = (
+                            f"Error: '{tool_name}' needs the exploitation phase. "
+                            "Run scoped_assessment_observe on the bound origin first, "
+                            "then retry this tool."
+                        )
+                    else:
+                        step_data["tool_output"] = (
+                            f"Error: '{tool_name}' needs the exploitation phase. Run "
+                            "execute_deep_crawl on the target first to build the "
+                            "capability map, then retry this tool."
+                        )
                 else:
                     step_data["tool_output"] = (
                         f"Error: Tool '{tool_name}' not allowed in '{phase}' phase"
@@ -3260,7 +3205,7 @@ class AgentOrchestrator:
                 await self.initialize()
             if not self._initialized:
                 finish_run(run_id, "error", "Agent not initialized")
-                return InvokeResponse(error="Agent not initialized - check OPENAI_API_KEY")
+                return InvokeResponse(error="Agent not initialized - check configured AI provider and API key")
 
             # Operator policy arrives through /agent, never through a model tool.
             # SessionValue then isolates it from other organizations and runs.

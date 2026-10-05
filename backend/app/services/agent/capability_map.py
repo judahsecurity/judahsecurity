@@ -30,12 +30,15 @@ class CapabilityMap:
     api_endpoints: List[Dict[str, str]] = field(default_factory=list)  # method, path, host
     js_endpoints: List[str] = field(default_factory=list)
     js_files: List[str] = field(default_factory=list)
+    js_sources: List[Dict[str, Any]] = field(default_factory=list)  # observed URL + capture reference
     websockets: List[str] = field(default_factory=list)
     sse: List[str] = field(default_factory=list)
     source_maps: List[str] = field(default_factory=list)
     third_party: List[str] = field(default_factory=list)
     # Sample captured XHR/fetch for replay_http_request
     api_samples: List[Dict[str, Any]] = field(default_factory=list)
+    # Names and locations only; request values and credentials stay out of the map.
+    parameter_inventory: List[Dict[str, Any]] = field(default_factory=list)
     # Action-linked browser discovery and an inventory without query/body values.
     action_checkpoints: List[Dict[str, Any]] = field(default_factory=list)
     surface_inventory: Dict[str, Any] = field(default_factory=dict)
@@ -154,6 +157,9 @@ def build_capability_map_from_dict(data: Dict[str, Any]) -> CapabilityMap:
 
 def finalize_capability_map(cmap: CapabilityMap) -> CapabilityMap:
     """Derive flags, hunt queue, and quality score from raw crawl fields."""
+    from app.services.agent.parameter_inventory import collect_parameter_inventory
+
+    cmap.parameter_inventory = collect_parameter_inventory(cmap.to_dict())
     pages_blob = " ".join(cmap.pages_visited)
     api_blob = " ".join(f"{e.get('method')} {e.get('path')}" for e in cmap.api_endpoints)
     js_blob = " ".join(cmap.js_endpoints + cmap.js_files)
@@ -196,6 +202,13 @@ def finalize_capability_map(cmap: CapabilityMap) -> CapabilityMap:
     for e in cmap.js_endpoints:
         if "?" in e or "=" in e:
             param_paths.append(e)
+    for row in cmap.parameter_inventory:
+        label = f"{row['method']} {row['path']}"
+        if row["location"] == "query":
+            label += f"?{row['name']}="
+        else:
+            label += f" {row['location']}:{row['name']}"
+        param_paths.append(label)
     cmap.param_rich_paths = list(dict.fromkeys(param_paths))[:40]
 
     caps: List[str] = []
@@ -848,11 +861,13 @@ def merge_capability_maps(
         api_endpoints=_uniq(list(old.api_endpoints) + list(new.api_endpoints))[:300],
         js_endpoints=_uniq(list(old.js_endpoints) + list(new.js_endpoints))[:300],
         js_files=_uniq(list(old.js_files) + list(new.js_files))[:160],
+        js_sources=_uniq(list(old.js_sources) + list(new.js_sources))[:160],
         websockets=_uniq(list(old.websockets) + list(new.websockets))[:60],
         sse=_uniq(list(old.sse) + list(new.sse))[:60],
         source_maps=_uniq(list(old.source_maps) + list(new.source_maps))[:60],
         third_party=_uniq(list(old.third_party) + list(new.third_party))[:60],
         api_samples=_uniq(list(old.api_samples) + list(new.api_samples))[:60],
+        parameter_inventory=_uniq(list(old.parameter_inventory) + list(new.parameter_inventory))[:4000],
         action_checkpoints=_uniq(list(old.action_checkpoints) + list(new.action_checkpoints))[:200],
         surface_inventory=merge_application_surface_inventories(
             old.surface_inventory, new.surface_inventory

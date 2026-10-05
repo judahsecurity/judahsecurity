@@ -381,7 +381,8 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
   - **SSRF detection**: Navigate and inspect network_requests in the output to see outgoing connections
   Actions: navigate, fill, click, type, execute_js, get_source, get_cookies, set_cookie, screenshot, wait, check_xss, submit_form, check_response
 - **nuclei_help**, **naabu_help**, **httpx_help**, **subfinder_help**, **dnsx_help**, **katana_help**, **tldfinder_help**, **waybackurls_help**, **nmap_help**, **masscan_help**, **ffuf_help**, **amass_help**, **whatweb_help**, **knockpy_help**, **gau_help**, **kiterunner_help**, **schemathesis_help**, **astf_help**, **sqlmap_help**, **nikto_help**, **wafw00f_help**, **testssl_help**, **sslyze_help**, **arjun_help**, **wpscan_help**, **xsstrike_help**, **gitleaks_help**, **jwt_help**, **semgrep_help**, **trivy_help**, **cmseek_help**: Get CLI usage for each tool
-- **fireteam_dispatch**: Schedule parallel short-lived specialist executors from the Penetration Task Graph. After sync_engagement_brain / deep_crawl, prefer specialists="auto" so ready nodes run from the page assessment (auth_logic, api_authz, xss, sqli, ssrf, …). Coverage stays blocked until high-pri logic is attempted. Returns executor summaries + graph snapshot — not raw scan dumps. A failed hunter is rewritten once (auto-prompter), not looped. Args: mission (optional if map/brain present), targets (list), specialists ("auto" or name list), max_parallel (default 4), mode ("attack"|"recon"). Example: fireteam_dispatch(specialists="auto", targets=["https://target.com"])
+- **get_parameter_inventory**: Read the value-free parameter worklist discovered across pages, forms, browser traffic, and API samples. Args: specialist ("all"|"xss"|"sqli"|"injection"), offset (default 0), limit (default 40, max 100). Use pagination to inspect every observed input; XSS/SQLi specialists receive one exact input lease per wave.
+- **fireteam_dispatch**: Schedule parallel short-lived specialist executors from the Penetration Task Graph. After sync_engagement_brain / deep_crawl, prefer specialists="auto" so ready nodes run from the page assessment (auth_logic, api_authz, xss, sqli, ssrf, …). XSS/SQLi input cells remain open until each has evidence-backed coverage; keep dispatching while they are open. Coverage stays blocked until high-pri logic is attempted. Returns executor summaries + graph snapshot — not raw scan dumps. A failed hunter is rewritten once (auto-prompter), not looped. Args: mission (optional if map/brain present), targets (list), specialists ("auto" or name list), max_parallel (default 4), mode ("attack"|"recon"). Example: fireteam_dispatch(specialists="auto", targets=["https://target.com"])
 - **spawn_recon_workers**: Launch Copilot-style background recon streams (non-blocking). Packs: `early` (httpx/waf/whatweb/nuclei_recon — auto on URL paste), `enrich` (ferox_dirs+katana_urls), `nuclei_recon` (informational Nuclei only), `full`. Or pass kinds=[...]. Results inject into the next think automatically. Example: spawn_recon_workers(pack="enrich", target="https://target.com")
 - **wait_recon_workers**: Soft-join parallel streams and return briefs. Args: timeout_sec (default 45), optional worker_ids.
 - **list_recon_workers**: Status of session recon streams.
@@ -626,9 +627,29 @@ These tools implement specialized offensive test workflows and require the explo
 """
 
     tools = informational_tools
+
+    # Offered only when the private executor has been configured. An operator
+    # binds the exact-origin run to this session before the model can use it.
+    from app.core.config import settings
+    if settings.PROWL_ASSESSMENT_URL and settings.PROWL_ADMIN_TOKEN:
+        tools += """
+### Scoped assessment service (when a run is bound to this session)
+- **scoped_assessment_observe**: Evidence-backed browser/HTTP discovery within the operator's exact origin. Args: operation (browser_map, browser_crawl, browser_inspect_js, http_get, http_compare), body (service JSON, e.g. {"url":"https://target.example/","identity":"anonymous"}). The service records private traffic and returns artifact IDs.
+- **scoped_assessment_status**: Read service coverage, threat model, or assessment summary. Args: operation (coverage, threat_model_get, or assessment_summary; default summary).
+- **scoped_assessment_plan**: Maintain the service assessment plan. Args: operation threat_model_set with body {attacker, assets[], entry_points[], trust_boundaries[], assumptions[]}; coverage_create with {kind,target,hypothesis,priority:1..3,expected_operation:http_get|http_compare|browser|manual,source_artifact_id?}; coverage_update with {coverage_id,status:tested|blocked|not_applicable|needs_follow_up,evidence_ids[],reason}; or complete_assessment after the threat model and all coverage checks are done. Service validates scope and evidence.
+- **scoped_assessment_memory**: Recall bounded, redacted observations and findings from prior runs for the same organization and asset. Args: optional target URL. Historical observations are leads; obtain fresh evidence in this run before submitting a candidate.
+Do not put credentials or bearer tokens in tool arguments. Use the service's artifact IDs for later proof and candidate submission.
+"""
     
     if phase in ["exploitation", "post_exploitation"]:
         tools += exploitation_tools
+        if settings.PROWL_ASSESSMENT_URL and settings.PROWL_ADMIN_TOKEN:
+            tools += """
+- **scoped_assessment_probe**: Bounded proof action. Args: operation (browser_check_xss, http_query_probe, http_body_probe, http_sqli_boolean, http_authz_owner_only), body (service JSON with captured artifact ID where required).
+- **scoped_assessment_probe_assigned**: Specialist replay of its exact leased, browser-captured parameter through PROWL. Args: coverage_cell_id, coverage_lease_id, technique ("captured" or "xss_browser" for GET query XSS). The backend chooses the operation, identity, parameter, and private capture; it rejects unrelated or expired leases. A differential is a lead; only nonce browser execution or numeric boolean proof may support a candidate.
+- **scoped_assessment_candidate**: Submit a finding candidate to the service evidence gate. Args: body with title, target, severity, hypothesis, remediation, evidence_ids. Set verification_recipe to browser_xss, public_directory_index, numeric_sqli, or owner_only_authz only when the hunter has a matching proof artifact. For numeric_sqli and owner_only_authz, also provide verification_page_url: the in-scope page whose UI issues the observed GET. Numeric SQLi requires verification_parameter; owner-only authorization requires verification_identity set to the declared owner. Aegis captures a fresh verifier-owned browser exchange and asks the service to confirm before publishing. If that capture cannot reproduce the request, the candidate remains pending. Do not pass hunter capture IDs to the verifier.
+- **scoped_assessment_publish**: Retry publication of a service-confirmed candidate if Aegis intake was temporarily unavailable. Args: candidate_id. The service proof gate still decides whether publication is allowed.
+"""
     
     if phase == "post_exploitation" and post_expl_enabled:
         tools += post_exploitation_tools
@@ -638,6 +659,14 @@ These tools implement specialized offensive test workflows and require the explo
 
 # Tool phase mapping
 TOOL_PHASE_MAP = {
+    "scoped_assessment_observe": ["informational", "exploitation", "post_exploitation"],
+    "scoped_assessment_status": ["informational", "exploitation", "post_exploitation"],
+    "scoped_assessment_plan": ["informational", "exploitation", "post_exploitation"],
+    "scoped_assessment_memory": ["informational", "exploitation", "post_exploitation"],
+    "scoped_assessment_probe": ["exploitation", "post_exploitation"],
+    "scoped_assessment_probe_assigned": ["exploitation", "post_exploitation"],
+    "scoped_assessment_candidate": ["exploitation", "post_exploitation"],
+    "scoped_assessment_publish": ["exploitation", "post_exploitation"],
     # Informational tools - available in all phases
     "add_asset": ["informational", "exploitation", "post_exploitation"],
     "create_scan": ["informational", "exploitation", "post_exploitation"],
@@ -731,6 +760,7 @@ TOOL_PHASE_MAP = {
     # Injection testing tools
     "generate_injection_payloads": ["informational", "exploitation", "post_exploitation"],
     "discover_parameters": ["informational", "exploitation", "post_exploitation"],
+    "get_parameter_inventory": ["informational", "exploitation", "post_exploitation"],
 
     # Auto tool selection
     "auto_select_tools": ["informational", "exploitation", "post_exploitation"],
@@ -803,6 +833,8 @@ TOOL_PHASE_MAP = {
     "execute_gitleaks": ["informational", "exploitation", "post_exploitation"],
     "gitleaks_help": ["informational", "exploitation", "post_exploitation"],
     "scan_js_urls_for_secrets": ["informational", "exploitation", "post_exploitation"],
+    "scan_assigned_js": ["informational", "exploitation", "post_exploitation"],
+    "get_api_operation_inventory": ["informational", "exploitation", "post_exploitation"],
     "execute_retirejs": ["informational", "exploitation", "post_exploitation"],
     "execute_cmseek": ["informational", "exploitation", "post_exploitation"],
     "cmseek_help": ["informational", "exploitation", "post_exploitation"],

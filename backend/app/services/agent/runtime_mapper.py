@@ -144,9 +144,64 @@ def merge_operations(existing: list[dict], incoming: list[dict]) -> list[dict]:
                 rows[item["id"]] = dict(item)
             continue
         row = rows[item["id"]]
-        for key in ("identities", "sources", "parameters"):
+        for key in ("identities", "sources", "parameters", "capture_ids"):
             row[key] = sorted(set(row.get(key, [])) | set(item.get(key, [])))
+        for key in ("status", "content_type"):
+            if item.get(key) is not None and not row.get(key):
+                row[key] = item[key]
     return list(rows.values())
+
+
+def ingest_capability_map_operations(brain, cmap: dict) -> list[dict]:
+    """Move observed/scoped API metadata into the central operation ledger.
+
+    The map contains names and capture references, never private request values.
+    Static JS routes remain discovery leads; captured browser requests carry a
+    private exchange ID that the scoped executor can replay.
+    """
+    root = urlsplit(str(cmap.get("scope") or ""))
+    if root.scheme not in ("http", "https") or not root.netloc:
+        root = urlsplit(str(cmap.get("target") or ""))
+    if root.scheme not in ("http", "https") or not root.netloc:
+        return []
+    from app.services.agent.parameter_inventory import collect_parameter_inventory
+
+    parameter_inventory = collect_parameter_inventory(cmap)
+    incoming = []
+    for endpoint in (cmap.get("api_endpoints") or [])[:300]:
+        if not isinstance(endpoint, dict):
+            continue
+        method = str(endpoint.get("method") or "GET").upper()
+        path = str(endpoint.get("path") or "")
+        host = str(endpoint.get("host") or root.netloc).lower()
+        if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"} or not path.startswith("/") or path.startswith("//"):
+            continue
+        if ("?" in path or "#" in path or len(path) > 512 or host != root.netloc.lower()):
+            continue
+        url = f"{root.scheme}://{root.netloc}{path}"
+        normalized = normalize_request({"url": url, "method": method},
+                                       identity=str(endpoint.get("identity") or "anonymous"),
+                                       source=str(endpoint.get("source") or "capability_map"))
+        if not normalized:
+            continue
+        row = normalized[0]
+        row["parameters"] = sorted({
+            f"{part.get('location')}:{part.get('name')}"
+            for part in parameter_inventory
+            if isinstance(part, dict) and part.get("method") == method
+            and part.get("host") == root.netloc.lower() and part.get("path") == path
+            and part.get("location") and part.get("name")
+        })
+        if endpoint.get("artifact_id"):
+            row["capture_ids"] = [str(endpoint["artifact_id"])[:80]]
+        if endpoint.get("status") is not None:
+            row["status"] = endpoint["status"]
+        if endpoint.get("content_type"):
+            row["content_type"] = str(endpoint["content_type"])[:100]
+        incoming.append(row)
+    brain.application_operations = merge_operations(brain.application_operations, incoming)
+    ingest_operations(brain, [])
+    return incoming
 
 
 def ingest_operations(

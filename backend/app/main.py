@@ -49,6 +49,7 @@ from app.api.routes import reports as reports_router
 from app.api.routes import pentest as pentest_router
 from app.api.routes import app_structure as app_structure_router
 from app.api.routes import mcp as mcp_router
+from app.api.routes import prowl as prowl_router
 from app.api.routes import mitre as mitre_router
 from app.api.routes import llm_red_team as llm_red_team_router
 from app.api.routes import detection_feedback as detection_feedback_router
@@ -60,6 +61,8 @@ from app.models.agent_palace import AgentPalaceDrawer  # noqa: F401 — palace m
 from app.models.recon_job import ReconJob, ReconWorkerHeartbeat  # noqa: F401 — interceptor workers
 from app.models.sitemap_entry import SitemapEntry  # noqa: F401 — Praetorian-style app sitemap
 from app.models.agent_run_ledger import AgentRunLedger, AgentActionReceipt, AgentHypothesisCoverage  # noqa: F401 — durable agent work receipts
+from app.models.scoped_assessment_run import ScopedAssessmentRun  # noqa: F401 — private service capabilities
+from app.models.prowl_publication import ProwlPublication  # noqa: F401 — finding idempotency
 from app.models.workflow import (  # noqa: F401 — ensure workflow tables are created
     Workflow,
     WorkflowVersion,
@@ -213,6 +216,7 @@ app.include_router(reports_router.router, prefix=settings.API_PREFIX)
 app.include_router(pentest_router.router, prefix=settings.API_PREFIX)
 app.include_router(app_structure_router.router, prefix=settings.API_PREFIX)
 app.include_router(mcp_router.router, prefix=settings.API_PREFIX)
+app.include_router(prowl_router.router, prefix=settings.API_PREFIX)
 app.include_router(mitre_router.router, prefix=settings.API_PREFIX)
 app.include_router(llm_red_team_router.router, prefix=settings.API_PREFIX)
 app.include_router(detection_feedback_router.router, prefix=settings.API_PREFIX)

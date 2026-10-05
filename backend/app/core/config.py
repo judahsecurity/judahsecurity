@@ -189,6 +189,10 @@ class Settings(BaseSettings):
     # emitted (so the UI never dangles on a tool_start).
     AGENT_TOOL_HARD_TIMEOUT_SECONDS: int = 600
 
+    # Private scoped-assessment executor. Aegis remains the agent/model runtime.
+    PROWL_ASSESSMENT_URL: str = ""
+    PROWL_ADMIN_TOKEN: str = ""
+
     # ---- Aegis Lictor / Censor / Augur (deterministic guard layer) ----
     # Lictor pre/post tool-execution hooks. Disabling skips ALL guards (not recommended).
     AGENT_LICTOR_ENABLED: bool = True

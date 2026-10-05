@@ -295,7 +295,7 @@ def list_vulnerabilities(
     limit: int = Query(20, ge=1, le=100),
     detected_by: Optional[str] = Query(
         None,
-        description="Filter by detector (e.g. agent, nuclei, port_scanner)",
+        description="Filter by detector (e.g. agent, PROWL, nuclei), or agent_family for both agent sources",
     ),
     risk_level: Optional[str] = Query(
         None,
@@ -343,7 +343,9 @@ def list_vulnerabilities(
     if cve_id:
         query = query.filter(Vulnerability.cve_id == cve_id)
     if detected_by:
-        query = query.filter(Vulnerability.detected_by == detected_by.strip())
+        detector = detected_by.strip()
+        query = query.filter(Vulnerability.detected_by.in_(("agent", "PROWL"))
+                             if detector == "agent_family" else Vulnerability.detected_by == detector)
     if risk_level:
         query = query.filter(Vulnerability.sev_level == risk_level.strip().lower())
     if triage:
@@ -2267,7 +2269,6 @@ def create_finding_detection_feedback(
             logger.warning(f"Detection pattern evaluation failed: {e}")
 
     return feedback_to_dict(feedback)
-
 
 
 

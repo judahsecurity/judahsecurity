@@ -167,6 +167,28 @@ def _global_default_spec() -> str:
     return f"{ExternalService.ANTHROPIC}:{model}"
 
 
+def global_runtime_model_spec() -> Optional[tuple[str, str]]:
+    """Select the process-default model from configured keys or local Ollama.
+
+    Used by agent startup and the status endpoint so both report the same
+    provider. Organization-specific task routing happens separately per call.
+    """
+    provider, model = parse_model_spec(_global_default_spec())
+    if provider == ExternalService.OLLAMA:
+        if ollama_fallback_available():
+            return provider, model
+    elif _settings_key_for_provider(provider):
+        return provider, model
+
+    for alternate in _CLOUD_FALLBACK_ORDER:
+        if alternate != provider and _settings_key_for_provider(alternate):
+            return alternate, _default_model_for_provider(alternate)
+
+    if ollama_fallback_available():
+        return ExternalService.OLLAMA, _ollama_fallback_model_name()
+    return None
+
+
 def resolve_model_spec_for_task(agent_config: Optional[dict], task: str) -> str:
     """Return the ``provider:model`` spec for ``task`` given an org agent config.
 

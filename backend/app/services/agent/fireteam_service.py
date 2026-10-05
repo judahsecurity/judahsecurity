@@ -92,6 +92,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ),
         allowed_tools=[
             "query_assets",
+            "get_api_operation_inventory",
             "execute_katana",
             "execute_gau",
             "execute_waybackurls",
@@ -125,6 +126,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ),
         allowed_tools=[
             "query_assets",
+            "scan_assigned_js",
             "scan_js_urls_for_secrets",
             "fetch_lazy_chunks",
             "extract_js_endpoints",
@@ -152,7 +154,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         max_iterations=12,
         llm_task="recon",
         system_prompt_suffix=(
-            "First fetch_lazy_chunks (dry_run then download) on webpack/Vite/Next/Angular "
+            "When an observed script is assigned, call scan_assigned_js with its coverage "
+            "cell and lease first; then inspect its endpoints and sinks. Fetch lazy chunks (dry_run then "
+            "download) on webpack/Vite/Next/Angular "
             "runtime bundles, then extract_js_endpoints, ingest_urls_into_map, then secrets. "
             "Hunt first-party /_next/static/chunks/*.js, Angular main-es2015.*.js, and "
             "main.*.js (often 5–10MB — do not skip). "
@@ -239,6 +243,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "for introspection, verbose errors, CSRF, batching DoS."
         ),
         allowed_tools=[
+            "get_api_operation_inventory",
             "execute_schemathesis",
             "execute_astf",
             "execute_kiterunner",
@@ -298,6 +303,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "from the capability map and open engagement hypotheses."
         ),
         allowed_tools=[
+            "get_api_operation_inventory",
             "execute_curl",
             "execute_browser",
             "execute_httpx",
@@ -377,6 +383,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "verb tampering, missing auth, and mass assignment on concrete paths."
         ),
         allowed_tools=[
+            "get_api_operation_inventory",
+            "fingerprint_api",
             "execute_curl",
             "execute_httpx",
             "execute_kiterunner",
@@ -399,6 +407,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ],
         max_iterations=12,
         system_prompt_suffix=(
+            "Start with get_api_operation_inventory and fingerprint_api; prioritize browser-captured "
+            "operations, then validate static JavaScript leads. Use capture references and "
+            "parameter names to plan bounded authorization and input checks. "
             "Prove with compare_requests across identities/object IDs. "
             "Status 200 alone is not a finding — show other-user fields. "
             "OpenAPI/DRF (GET /api/schema/ or swagger.json): count request serializers "
@@ -496,6 +507,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "a named CVE. If the map is thin, run discover_parameters + arjun first."
         ),
         allowed_tools=[
+            "get_parameter_inventory",
             "discover_parameters",
             "execute_arjun",
             "execute_sqlmap",
@@ -520,7 +532,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ],
         max_iterations=12,
         system_prompt_suffix=(
-            "Start with discover_parameters + arjun on live paths if params are unknown. "
+            "Start with get_parameter_inventory; use discover_parameters + arjun on live paths if params are unknown. "
             "SQLi/XSS/SSTI/cmd as usual. Also treat url/uri/request/datasource/execute/"
             "query fields as SSRF: execute_interactsh register → plant payload_url → poll, "
             "then compare benign vs internal canary (do not use cloud-metadata/loopback if Lictor blocks). "
@@ -534,6 +546,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "params the map actually showed — not a generic injection dump."
         ),
         allowed_tools=[
+            "get_parameter_inventory",
+            "scoped_assessment_probe_assigned",
+            "scoped_assessment_candidate",
             "execute_xsstrike",
             "execute_dalfox",
             "execute_browser",
@@ -552,8 +567,13 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ],
         max_iterations=10,
         system_prompt_suffix=(
-            "Only params that reflect or render (q, search, name, message, comment, "
-            "redirect). Canary first, then browser confirm. Status 200 is not XSS."
+            "Work the assigned observed input first. Use a harmless unique canary to check "
+            "reflection or rendering; if it is absent, record an evidence-backed negative for "
+            "that input. If the directive has a PROWL capture ID, call "
+            "scoped_assessment_probe_assigned with the coverage cell and lease IDs; "
+            "for a GET query, use technique='xss_browser' for nonce-backed browser execution. "
+            "Submit a scoped candidate only on executed=true with its service artifact ID. "
+            "A quote differential alone is not XSS. Status 200 is not XSS."
         ),
     ),
     SpecialistProfile(
@@ -563,6 +583,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "params with canaries; escalate to sqlmap/commix only on hits."
         ),
         allowed_tools=[
+            "get_parameter_inventory",
+            "scoped_assessment_probe_assigned",
+            "scoped_assessment_candidate",
             "discover_parameters",
             "execute_arjun",
             "execute_sqlmap",
@@ -582,7 +605,11 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ],
         max_iterations=10,
         system_prompt_suffix=(
-            "Login/auth fields are rank-1 even with no query params. "
+            "Work the assigned observed input first; login/auth fields are high priority. "
+            "If the directive has a PROWL capture ID, call scoped_assessment_probe_assigned "
+            "with the coverage cell and lease IDs. Numeric GET inputs use the scoped boolean "
+            "proof; a single quote differential is only a lead. Submit a scoped candidate "
+            "only on proof_confirmed=true and cite its service artifact ID. "
             "compare_requests error/boolean/time on username then password "
             "(or JSON /login body). Timing that scales with SLEEP is SUBMIT. "
             "Canary → differential. sqlmap --batch only on confirmed candidates. "
@@ -1048,7 +1075,7 @@ INSTRUCTIONS:
    Write demonstrated-compromise reports (description + impact + assets + remediation),
    not 'login worked' or template-match-only.
 7. Do not exceed {max_iter} iterations. If unsure, finish with done=true.
-8. Work only on the single leased hypothesis in the directive. Return one hypothesis_results entry for that ID; sibling tests stay open. Pass hypothesis_id to replay_http_request/compare_requests. Only independent verification marks proven.
+8. Work only on the single leased hypothesis or exact parameter coverage cell in the directive. Return one hypothesis_results entry when a hypothesis ID is leased; sibling tests stay open. Pass hypothesis_id and coverage_cell_id to replay_http_request/compare_requests when available. Only independent verification marks proven.
 9. Imagining tool output is a failure (soliloquy). If you did not call a tool, verdict=retry.
 9. save_note(category='hunt') with URL/param/hypothesis/next mutation — not raw httpx.
 
