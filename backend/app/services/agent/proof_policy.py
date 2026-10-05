@@ -26,6 +26,20 @@ def _json(row):
         return {}
 
 
+def _object_field(data: dict, path: str):
+    """Read a named object field, including GraphQL data.node.ownerId paths."""
+    if not isinstance(path, str) or not re.fullmatch(
+        r"[A-Za-z_][A-Za-z_0-9]*(?:\.[A-Za-z_][A-Za-z_0-9]*){0,7}", path
+    ):
+        return None
+    value = data
+    for segment in path.split("."):
+        if not isinstance(value, dict) or segment not in value:
+            return None
+        value = value[segment]
+    return value
+
+
 def validate_proof(
     store, candidate, proof: dict, evidence_ids: list[str]
 ) -> tuple[bool, str]:
@@ -107,6 +121,39 @@ def validate_proof(
                 "A dialog with the fresh verifier canary must execute; reflection is only a lead",
             )
         return True, ""
+    if kind == "upload_xss":
+        upload, read, browser, cleanup = (
+            row("upload_id"), row("read_id"), row("browser_id"), row("cleanup_id")
+        )
+        if (not successful(upload) or not successful(read) or not successful(cleanup)
+                or not browser or browser.get("kind") != "browser_xss"):
+            return False, "Upload, retrieval, browser execution, and cleanup evidence are required"
+        if any(item.get("kind") != "http_exchange" for item in (upload, read, cleanup)):
+            return False, "Upload, retrieval, and cleanup must be recorded HTTP exchanges"
+        ureq, rreq, creq = (item["payload"]["request"] for item in (upload, read, cleanup))
+        marker = "aegis-verify-" + candidate.nonce
+        if (ureq.get("method") not in ("POST", "PUT") or rreq.get("method") != "GET"
+                or creq.get("method") != "DELETE"):
+            return False, "Expected upload, GET retrieval, and DELETE cleanup"
+        if not upload["created_at"] < read["created_at"] < browser["created_at"] < cleanup["created_at"]:
+            return False, "Upload, retrieval, execution, and cleanup must occur in order"
+        if (marker not in str(ureq.get("body") or "")
+                or marker not in str(read["payload"]["response"].get("body") or "")
+                or browser["payload"].get("alert_text") != marker
+                or not browser["payload"].get("dialog_triggered")):
+            return False, "The uploaded verifier canary must be retrieved and execute in a browser"
+        from app.services.agent.evidence_store import origin
+
+        try:
+            if (len({origin(ureq["url"]), origin(rreq["url"]), origin(creq["url"])}) != 1
+                    or rreq["url"] != creq["url"]
+                    or browser["payload"].get("url") != rreq["url"]):
+                return False, "The browser and cleanup must target the uploaded same-origin object"
+        except (KeyError, ValueError):
+            return False, "Upload proof contains an invalid URL"
+        if not re.search(r"(?i)upload|attachment|file", candidate.title + " " + candidate.description):
+            return False, "Upload proof must match a file-upload claim"
+        return True, ""
     if kind == "oob_callback":
         register, plant, poll = row("register_id"), row("plant_id"), row("poll_id")
         if (
@@ -176,7 +223,8 @@ def validate_proof(
             mutant["identity"],
         ):
             return False, "Use two distinct explicit identities"
-        if b.get("url") != m.get("url") or b.get("method") != m.get("method"):
+        if (b.get("url") != m.get("url") or b.get("method") != m.get("method")
+                or b.get("body") != m.get("body")):
             return (
                 False,
                 "Replay the same protected object/action under both identities",
@@ -186,16 +234,16 @@ def validate_proof(
         ):
             return False, "Verify test identities before testing the boundary"
         bdata, mdata = _json(baseline), _json(mutant)
+        owner = _object_field(bdata, field)
         if (
-            field not in bdata
-            or bdata[field] in (None, "")
-            or mdata.get(field) != bdata[field]
+            owner in (None, "")
+            or _object_field(mdata, field) != owner
         ):
             return (
                 False,
                 "Both responses must contain the same known protected object field",
             )
-        if bdata[field] != b.get("principal_id"):
+        if owner != b.get("principal_id"):
             return (
                 False,
                 "The ownership field must identify the verified owner principal",

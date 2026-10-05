@@ -49,7 +49,7 @@ def test_forced_probe_before_crawl_on_registry_primary():
     assert step["tool_args"]["host"] == "contoso.azurecr.io"
 
 
-def test_inventory_query_only_with_organization_id():
+def test_single_web_target_does_not_expand_into_organization_registry_inventory():
     web = {
         "original_objective": "https://www.emulate3d.com",
         "target_info": {"primary_target": "https://www.emulate3d.com"},
@@ -60,12 +60,18 @@ def test_inventory_query_only_with_organization_id():
     assert step and step["tool_name"] in ("execute_deep_crawl", "execute_interceptor")
 
     org = {**web, "organization_id": 42}
-    step = registry_forced_step(org)
+    assert registry_forced_step(org) is None
+    assert registry_missing_probes(org) == []
+    step = forced_next_step(org)
+    assert step and step["tool_name"] in ("execute_deep_crawl", "execute_interceptor")
+
+    org_wide = {"organization_id": 42, "original_objective": "Assess our attack surface", "execution_trace": []}
+    step = registry_forced_step(org_wide)
     assert step and step["tool_name"] == "query_assets"
     assert step["tool_args"]["search"] == "azurecr.io"
 
     after = {
-        **org,
+        **org_wide,
         "execution_trace": [
             {
                 "tool_name": "query_assets",
@@ -75,8 +81,6 @@ def test_inventory_query_only_with_organization_id():
         ],
     }
     assert registry_forced_step(after) is None
-    step = forced_next_step(after)
-    assert step and step["tool_name"] == "execute_deep_crawl"
 
 
 def test_wordpress_probes_still_win_after_crawl_without_org():

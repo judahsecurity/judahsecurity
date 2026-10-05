@@ -2505,6 +2505,14 @@ class ApiClient {
     return response.data;
   }
 
+  async getAgentPilotStatus(): Promise<{
+    ready: boolean; egress_ready: boolean; redis_ready: boolean;
+    max_requests: number; requests_per_second: number; duration_seconds: number;
+  }> {
+    const response = await this.client.get('/agent/pilot/status');
+    return response.data;
+  }
+
   async getAgentPlaybooks(): Promise<{ id: string; name: string; description: string }[]> {
     const response = await this.client.get('/agent/playbooks');
     return response.data;
@@ -2516,7 +2524,8 @@ class ApiClient {
     options?: {
       playbookId?: string;
       target?: string;
-      mode?: 'assist' | 'agent';
+      mode?: 'assist' | 'agent' | 'pilot';
+      pilot?: { target: string };
       loadSessionId?: string;
       priceLimitUsd?: number;
       assessmentPolicy?: {
@@ -2531,6 +2540,7 @@ class ApiClient {
       playbook_id: options?.playbookId ?? undefined,
       target: options?.target ?? undefined,
       mode: options?.mode ?? 'assist',
+      pilot: options?.pilot,
       load_session_id: options?.loadSessionId ?? undefined,
       price_limit_usd: options?.priceLimitUsd ?? undefined,
       assessment_policy: options?.assessmentPolicy ?? undefined,

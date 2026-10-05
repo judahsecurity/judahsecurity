@@ -68,7 +68,11 @@ def _emit_finding_to_sink(
             "confidence": "confirmed" if confirmed else "high",
             "cve_id": (cve_id or "").strip() or None,
             "tags": tags,
-            "raw_data": {"poc": {"endpoint": url or target, "response_snippet": (poc or evidence or "")[:4000]}},
+            "raw_data": {"poc": {
+                "confirmed": confirmed,
+                "endpoint": url or target,
+                "response_snippet": (poc or evidence or "")[:4000],
+            }},
         }
         os.makedirs(os.path.dirname(os.path.abspath(sink)), exist_ok=True)
         with open(sink, "a", encoding="utf-8") as fh:
@@ -975,6 +979,28 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     async def _execute_impl(self, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool with the given arguments."""
         tool_args = dict(tool_args or {}) if isinstance(tool_args, dict) else {}
+        from app.services.agent.pilot_policy import PilotDenied, current_pilot
+        pilot = current_pilot()
+        if pilot is not None:
+            try:
+                pilot.check_tool(tool_name)
+                if tool_name == "execute_browser":
+                    if tool_args.get("identity") is not None:
+                        raise PilotDenied("Pilot first pass is anonymous only")
+                    spec = json.loads(str(tool_args.get("args") or "{}"))
+                    if not isinstance(spec, dict) or not isinstance(spec.get("actions"), list):
+                        raise PilotDenied("Pilot browser actions require a JSON object")
+                    if any(key in spec for key in (
+                        "login", "cookies", "storage_state", "headers", "basic_auth",
+                        "extra_headers", "identity",
+                    )):
+                        raise PilotDenied("Pilot first pass does not accept credentials")
+                    if len(spec["actions"]) > 10:
+                        raise PilotDenied("Pilot browser call exceeds ten actions")
+                    spec["allowed_origin"] = pilot.target
+                    tool_args["args"] = json.dumps(spec)
+            except (PilotDenied, ValueError, TypeError) as exc:
+                return {"success": False, "output": str(exc), "error": "pilot_policy_denied"}
 
         browser_identity = None
         if tool_name in ("execute_browser", "execute_deep_crawl"):
@@ -1130,6 +1156,29 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 max_chars = _tool_output_max_chars()
                 augur_block = result.get("augur")  # Augur reading: kept/dropped/next_steps/signals
                 capability_map = result.get("capability_map")  # deep_crawl / interceptor map
+                if pilot is not None and tool_name == "execute_browser" and result.get("success"):
+                    from app.services.agent.pilot_policy import PILOT_METHODS, exact_origin
+                    observed = []
+                    for item in result.get("network_requests") or []:
+                        if not isinstance(item, dict):
+                            continue
+                        method = str(item.get("method") or "").upper()
+                        url = str(item.get("url") or "")
+                        try:
+                            if method in PILOT_METHODS and exact_origin(url) == exact_origin(pilot.target):
+                                observed.append({"method": method, "url": url})
+                        except ValueError:
+                            continue
+                    observed.sort(key=lambda item: (
+                        not ("?" in item["url"] or "/api/" in item["url"]),
+                        item["url"],
+                    ))
+                    samples = list({(item["method"], item["url"]): item for item in observed}.values())[:40]
+                    capability_map = {
+                        "target": pilot.target,
+                        "api_samples": samples,
+                        "ready_for_attack": bool(samples),
+                    }
                 auth_session = result.get("auth_session")
                 if browser_identity is not None:
                     if capability_map:
@@ -6560,6 +6609,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         origin(url)
         from app.services.agent.assessment_scope import assert_url_in_scope
         assert_url_in_scope(self, url)
+        from app.services.agent.pilot_policy import current_pilot
+        pilot = current_pilot()
+        if pilot is not None:
+            if identity not in (None, "anonymous") or cookies:
+                raise ValueError("Pilot first pass is anonymous only")
+            if any(str(key).lower() in {
+                "authorization", "cookie", "proxy-authorization",
+            } for key in (headers or {})):
+                raise ValueError("Pilot first pass cannot send credentials")
+            use_auth_session = False
         method = (method or "GET").upper().strip()
         raw_body, hdrs = coerce_request_body({"body": body, "headers": headers or {}}, headers or {})
         session = {}
@@ -6614,6 +6673,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 req.headers.pop("cookie", None)
                 jar.set_cookie_header(req)
             for hop in range(11):
+                if pilot is not None:
+                    await pilot.acquire(str(req.url), req.method)
                 resp = await client.send(req, stream=max_response_bytes is not None)
                 if max_response_bytes is not None:
                     chunks, size = [], 0

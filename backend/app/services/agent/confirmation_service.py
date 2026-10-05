@@ -43,13 +43,9 @@ from app.models.project_settings import (
 logger = logging.getLogger(__name__)
 
 
-# Set by the orchestrator for autonomous ("agent") runs. When enabled, tools
-# whose policy decision is "confirm" are auto-approved instead of pausing for an
-# operator (which would just stall an unattended turn until the 5-minute
-# confirmation timeout). Explicit "deny" always still wins. Autonomous mode is
-# unattended by design — it also auto-approves phase transitions — so this keeps
-# the confirmation gate meaningful for interactive ("assist") sessions while
-# letting the agent actually run active testing on its own.
+# Set by the orchestrator for autonomous ("agent") runs. An organization may
+# explicitly enable auto-approval of policy "confirm" decisions, but the
+# default is to pause for an analyst.
 _autonomous_mode: ContextVar[bool] = ContextVar("agent_autonomous_mode", default=False)
 
 
@@ -344,13 +340,15 @@ async def gate(
     existing_token = tool_args.get("_confirm_token") if isinstance(tool_args, dict) else None
 
     policy_cfg = _load_policy(organization_id)
-    if not policy_cfg.get("tool_confirmation_enabled", True):
+    from app.services.agent.pilot_policy import PILOT_NETWORK_TOOLS, current_pilot
+    pilot_network_action = current_pilot() is not None and tool_name in PILOT_NETWORK_TOOLS
+    if not policy_cfg.get("tool_confirmation_enabled", True) and not pilot_network_action:
         if existing_token:
             tool_args.pop("_confirm_token", None)
         return {"decision": "auto"}
 
     readonly_auto = policy_cfg.get("tool_confirmation_readonly_auto_allow", True)
-    if readonly_auto and tool_name in READONLY_TOOLS:
+    if readonly_auto and tool_name in READONLY_TOOLS and not pilot_network_action:
         if existing_token:
             tool_args.pop("_confirm_token", None)
         return {"decision": "auto"}
@@ -379,6 +377,13 @@ async def gate(
         decision = "confirm"
         roe_escalated = True
 
+    # Every network-capable action in a bounded pilot goes to the analyst,
+    # including tools normally covered by an organization auto policy. The
+    # request-level budget still applies after approval.
+    if pilot_network_action and decision != "deny":
+        decision = "confirm"
+        roe_escalated = True
+
     if decision == "deny":
         return {
             "decision": "deny",
@@ -395,7 +400,7 @@ async def gate(
         and _autonomous_mode.get()
         and not roe_escalated
         and tool_name not in {"run_intruder_batch"}
-        and policy_cfg.get("agent_autonomous_auto_approve", True)
+        and policy_cfg.get("agent_autonomous_auto_approve", False)
     ):
         logger.info(
             "Autonomous agent mode: auto-approving confirm-gated tool %s", tool_name

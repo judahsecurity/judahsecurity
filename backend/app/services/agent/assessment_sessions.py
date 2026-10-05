@@ -148,14 +148,24 @@ def browser_storage_state(session: dict, target: str) -> dict:
 async def configure_browser_origin(context, target: str) -> None:
     """Apply the same exact-origin boundary to browser and crawler contexts."""
     expected_origin = origin(target)
+    from app.services.agent.pilot_policy import PilotDenied, current_pilot
+    pilot = current_pilot()
     async def scope_route(route):
         try:
             permitted = origin(route.request.url) == expected_origin
         except ValueError:
             permitted = False
+        if permitted and pilot is not None:
+            try:
+                await pilot.acquire(route.request.url, route.request.method)
+            except PilotDenied:
+                permitted = False
         await route.continue_() if permitted else await route.abort()
     await context.route("**/*", scope_route)
     def scope_socket_route(socket):
+        if pilot is not None:
+            socket.close()
+            return
         try:
             socket_url = socket.url.replace("wss://", "https://", 1).replace("ws://", "http://", 1)
             permitted = origin(socket_url) == expected_origin

@@ -64,9 +64,12 @@ export function RunLedgerPanel({ run }: { run: AgentRunLedger | null }) {
         {run.coverage?.completed_by_stage && (
           <p className="text-muted-foreground">
             Completed by stage: {Object.entries(run.coverage.completed_by_stage)
-              .map(([stage, count]) => `${stage.replaceAll("_", " ")} ${count}`).join(" · ")}
+              .map(([stage, count]) => `${stage === "http_requests" ? "logged HTTP exchanges" : stage.replaceAll("_", " ")} ${count}`).join(" · ")}
           </p>
         )}
+        <p className="text-muted-foreground">
+          Logged HTTP exchanges exclude requests made inside recon and scanner tools.
+        </p>
         {run.hypotheses?.length ? (
           <div className="space-y-1">
             <p className="font-medium text-foreground">Hypothesis coverage</p>

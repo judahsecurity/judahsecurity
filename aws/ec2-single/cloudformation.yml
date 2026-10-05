@@ -290,6 +290,7 @@ Resources:
           DATABASE_URL=postgresql://asm_user:$DB_PASSWORD@db:5432/asm_db
           SECRET_KEY=$JWT_SECRET
           REDIS_URL=redis://redis:6379
+          AEGIS_AGENT_EGRESS_IP=${ElasticIP}
           DEBUG=false
           ENVIRONMENT=${Environment}
           CORS_ORIGINS=["http://localhost:3000"]
@@ -404,7 +405,6 @@ Outputs:
     Value: !GetAtt ScanJobQueue.Arn
     Export:
       Name: !Sub '${AWS::StackName}-sqs-queue-arn'
-
 
 
 

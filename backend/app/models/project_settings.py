@@ -309,6 +309,10 @@ def default_agent_config():
         # Global override: when true, the gate is active; when false the
         # confirmation layer is bypassed (handy for headless automation).
         "tool_confirmation_enabled": True,
+        # Autonomous runs with an analyst present must honor "confirm" policy
+        # decisions. Unattended deployments can explicitly opt into bypassing
+        # those decisions after establishing separate engagement controls.
+        "agent_autonomous_auto_approve": False,
         # Auto-allow *read-only* tools regardless of the pattern above.
         "tool_confirmation_readonly_auto_allow": True,
     }

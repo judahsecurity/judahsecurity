@@ -686,7 +686,8 @@ function AgentPageContent() {
   const [target, setTarget] = useState('');
   const [bodyReplayPathsText, setBodyReplayPathsText] = useState('');
   const [ownerOnlyText, setOwnerOnlyText] = useState('');
-  const [mode, setMode] = useState<'assist' | 'agent'>('agent');
+  const [mode, setMode] = useState<'assist' | 'agent' | 'pilot'>('agent');
+  const [pilotStatus, setPilotStatus] = useState<{ ready: boolean; egress_ready: boolean; redis_ready: boolean } | null>(null);
   const [urlPrefilled, setUrlPrefilled] = useState(false);
   const [pendingAutostart, setPendingAutostart] = useState(false);
   const autostartFiredRef = useRef(false);
@@ -704,6 +705,7 @@ function AgentPageContent() {
   const [chainData, setChainData] = useState<ChainData | null>(null);
   const [engagementReplay, setEngagementReplay] = useState<ReplayStep[]>([]);
   const [runLedger, setRunLedger] = useState<AgentRunLedger | null>(null);
+  const activeRunIdRef = useRef<string | null>(null);
   const [ledgerError, setLedgerError] = useState(false);
   const [agentRequestTimeoutMs, setAgentRequestTimeoutMs] = useState(60 * 60_000);
   const [replayUsage, setReplayUsage] = useState<TokenUsage | null>(null);
@@ -750,7 +752,10 @@ function AgentPageContent() {
     if (t != null && t !== '') setTarget(decodeURIComponent(t));
     if (p != null && p !== '') setSelectedPlaybookId(decodeURIComponent(p));
     if (q != null && q !== '') { setQuestion(decodeURIComponent(q)); setUrlPrefilled(true); }
-    if (m === 'assist' || m === 'agent') setMode(m);
+    if (m === 'assist' || m === 'agent' || m === 'pilot') {
+      setMode(m);
+      if (m === 'pilot') setSelectedPlaybookId('custom');
+    }
     if (auto === '1' || auto === 'true') setPendingAutostart(true);
     // Handle tab param
     if (tab === 'cve' || tab === 'findings') setActiveTab(tab);
@@ -773,6 +778,19 @@ function AgentPageContent() {
           failures = 0;
           setLedgerError(false);
           setRunLedger(value);
+          if (loading && value.run_id) {
+            if (value.status === 'running' || value.status === 'stalled') {
+              activeRunIdRef.current = value.run_id;
+            } else if (activeRunIdRef.current === value.run_id &&
+                       ['completed', 'cancelled', 'error', 'interrupted'].includes(value.status)) {
+              // A terminal receipt is authoritative even if the WebSocket's
+              // final response was lost. Do not leave the controls locked.
+              setLoading(false);
+              setLiveSteps([]);
+              toolInFlightRef.current = false;
+              activeRunIdRef.current = null;
+            }
+          }
         })
         .catch(() => {
           if (!active) return;
@@ -816,6 +834,17 @@ function AgentPageContent() {
         setAgentStatusHint(getApiErrorMessage(err as Error, 'Could not reach agent status.'));
       });
   }, []);
+
+  useEffect(() => {
+    if (mode !== 'pilot') { setPilotStatus(null); return; }
+    let active = true;
+    const refresh = () => api.getAgentPilotStatus()
+      .then((status) => { if (active) setPilotStatus(status); })
+      .catch(() => { if (active) setPilotStatus({ ready: false, egress_ready: false, redis_ready: false }); });
+    refresh();
+    const timer = setInterval(refresh, 15000);
+    return () => { active = false; clearInterval(timer); };
+  }, [mode]);
 
   useEffect(() => {
     if (agentAvailable) {
@@ -1159,8 +1188,18 @@ function AgentPageContent() {
 
   const handleSend = async () => {
     const q = question.trim();
-    const usePreset = selectedPlaybookId !== 'custom';
+    const usePreset = mode !== 'pilot' && selectedPlaybookId !== 'custom';
     if (!usePreset && !q) return;
+    if (!loading && mode === 'pilot' && pilotStatus?.ready !== true) {
+      toast({ variant: 'destructive', title: 'Pilot controls unavailable',
+        description: 'Wait for the worker egress and shared request gate to be ready.' });
+      return;
+    }
+    if (!loading && mode === 'pilot' && !target.trim()) {
+      toast({ variant: 'destructive', title: 'Pilot preflight incomplete',
+        description: 'Enter the exact HTTPS target.' });
+      return;
+    }
 
     const sid = sessionId || crypto.randomUUID();
 
@@ -1184,8 +1223,8 @@ function AgentPageContent() {
       return;
     }
 
-    const bodyReplayPaths = bodyReplayPathsText.split(/[\n,]/).map((value) => value.trim()).filter(Boolean);
-    const ownerOnlyResources = ownerOnlyText.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
+    const bodyReplayPaths = mode === 'pilot' ? [] : bodyReplayPathsText.split(/[\n,]/).map((value) => value.trim()).filter(Boolean);
+    const ownerOnlyResources = (mode === 'pilot' ? [] : ownerOnlyText.split('\n').filter(Boolean)).map((line) => {
       const [resource, owner, other, ...extra] = line.split('|').map((value) => value.trim());
       return { target: resource, owner_identity: owner, other_identity: other, valid: !extra.length && Boolean(resource && owner && other) };
     });
@@ -1203,13 +1242,15 @@ function AgentPageContent() {
 
     if (!sessionId) setSessionId(sid);
 
-    const displayContent = usePreset
+    const displayContent = mode === 'pilot'
+      ? `${q}\nTarget: ${target.trim()}`
+      : usePreset
       ? `${playbooks.find((p) => p.id === selectedPlaybookId)?.name ?? selectedPlaybookId}${target.trim() ? ` — ${target.trim()}` : ''}`
       : q;
 
     setMessages((prev) => [...prev, { id: `user-${Date.now()}`, role: 'user', content: displayContent }]);
     if (!usePreset) setQuestion('');
-    setUrlPrefilled(false); setLoading(true); setLiveSteps([]);
+    setUrlPrefilled(false); activeRunIdRef.current = null; setLoading(true); setLiveSteps([]);
     stopRequestedRef.current = false;
 
     try {
@@ -1226,8 +1267,9 @@ function AgentPageContent() {
           loadConversations();
         }
       } else {
-        const wsMsg: Record<string, unknown> = { type: 'query', question: usePreset ? displayContent : q, mode };
-        if (assessmentPolicy) wsMsg.assessment_policy = assessmentPolicy;
+        const wsMsg: Record<string, unknown> = { type: 'query', question: mode === 'pilot' ? displayContent : (usePreset ? displayContent : q), mode };
+        if (mode === 'pilot') wsMsg.pilot = { target: target.trim() };
+        if (mode !== 'pilot' && assessmentPolicy) wsMsg.assessment_policy = assessmentPolicy;
         if (usePreset) { wsMsg.playbook_id = selectedPlaybookId; wsMsg.target = target.trim() || undefined; }
         if (pendingLoadSessionId) {
           wsMsg.load_session_id = pendingLoadSessionId;
@@ -1236,10 +1278,11 @@ function AgentPageContent() {
         await waitForAgentSocket(5000);
         const sent = sendViaWs(wsMsg);
         if (!sent) {
-          const data = await api.queryAgent(usePreset ? displayContent : q, sid, {
+          const data = await api.queryAgent(mode === 'pilot' ? displayContent : (usePreset ? displayContent : q), sid, {
             ...(usePreset ? { playbookId: selectedPlaybookId, target: target.trim() || undefined } : {}),
             mode,
-            assessmentPolicy,
+            ...(mode === 'pilot' ? { pilot: { target: target.trim() } } : {}),
+            ...(mode !== 'pilot' ? { assessmentPolicy } : {}),
             ...(pendingLoadSessionId ? { loadSessionId: pendingLoadSessionId } : {}),
           });
           setPendingLoadSessionId(null);
@@ -1366,6 +1409,7 @@ function AgentPageContent() {
   // ── Auto-start (deep link with ?autostart=1) ───────────────────
   useEffect(() => {
     if (!pendingAutostart || autostartFiredRef.current) return;
+    if (mode === 'pilot') { setPendingAutostart(false); return; }
     if (!agentAvailable || loading) return;
     const ready = selectedPlaybookId !== 'custom' || question.trim().length > 0;
     if (!ready) return;
@@ -1382,11 +1426,11 @@ function AgentPageContent() {
     const t = setTimeout(fire, 15000);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingAutostart, agentAvailable, loading, connectionMode, selectedPlaybookId, question]);
+  }, [pendingAutostart, agentAvailable, loading, connectionMode, selectedPlaybookId, question, mode]);
 
   const handleApprove = async (decision: 'approve' | 'modify' | 'abort', modification?: string) => {
     if (!sessionId || loading) return;
-    setLoading(true); setLiveSteps([]); setShowModifyInput(false); setModifyInput('');
+    activeRunIdRef.current = null; setLoading(true); setLiveSteps([]); setShowModifyInput(false); setModifyInput('');
     const sent = sendViaWs({ type: 'approval', decision, modification });
     if (!sent) {
       try {
@@ -1973,17 +2017,26 @@ function AgentPageContent() {
 
                     {/* Compact controls toolbar */}
                     <div className="flex items-center gap-2 flex-wrap">
-                      <Select value={mode} onValueChange={(v) => setMode(v as 'assist' | 'agent')}>
+                      <Select value={mode} onValueChange={(v) => {
+                        if ((messages.length || pendingLoadSessionId) && (v === 'pilot' || mode === 'pilot')) {
+                          startNewConversation();
+                        }
+                        setMode(v as 'assist' | 'agent' | 'pilot');
+                        if (v === 'pilot') {
+                          setSelectedPlaybookId('custom');
+                        }
+                      }} disabled={loading}>
                         <SelectTrigger className="h-7 text-xs w-auto min-w-[110px] border-dashed bg-transparent">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="assist">Assist mode</SelectItem>
                           <SelectItem value="agent">Agent mode</SelectItem>
+                          <SelectItem value="pilot">Bounded pilot</SelectItem>
                         </SelectContent>
                       </Select>
 
-                      <Select value={selectedPlaybookId} onValueChange={setSelectedPlaybookId}>
+                      <Select value={selectedPlaybookId} onValueChange={setSelectedPlaybookId} disabled={mode === 'pilot'}>
                         <SelectTrigger className="h-7 text-xs w-auto min-w-[100px] border-dashed bg-transparent">
                           <SelectValue placeholder="Custom" />
                         </SelectTrigger>
@@ -1993,9 +2046,9 @@ function AgentPageContent() {
                         </SelectContent>
                       </Select>
 
-                      {selectedPlaybookId !== 'custom' && (
+                      {(selectedPlaybookId !== 'custom' || mode === 'pilot') && (
                         <Input
-                          placeholder="target (optional)"
+                          placeholder={mode === 'pilot' ? 'https://exact-host:443' : 'target (optional)'}
                           value={target}
                           onChange={(e) => setTarget(e.target.value)}
                           disabled={loading || agentAvailable === false}
@@ -2003,7 +2056,7 @@ function AgentPageContent() {
                         />
                       )}
 
-                      <details className="text-xs text-muted-foreground">
+                      {mode !== 'pilot' && <details className="text-xs text-muted-foreground">
                         <summary className="cursor-pointer">Assessment policy</summary>
                         <div className="mt-2 space-y-2 w-80">
                           <Textarea
@@ -2023,7 +2076,7 @@ function AgentPageContent() {
                             className="text-xs min-h-16"
                           />
                         </div>
-                      </details>
+                      </details>}
 
                       {sessionId && (
                         <span className="ml-auto text-[10px] text-muted-foreground/50 font-mono tabular-nums">
@@ -2050,6 +2103,15 @@ function AgentPageContent() {
                         Compact
                       </Button>
                     </div>
+
+                    {mode === 'pilot' && (
+                      <p className={`text-xs ${pilotStatus?.ready ? 'text-muted-foreground' : 'text-amber-400'}`}>
+                        Anonymous first pass · exact HTTPS origin · GET/HEAD/OPTIONS only · 1 request/second · 500 requests · 2 hours.{' '}
+                        {pilotStatus === null ? 'Checking pilot controls…' : pilotStatus.ready
+                          ? 'Pilot controls ready.'
+                          : `Pilot unavailable: ${!pilotStatus.egress_ready ? 'worker egress IP' : 'Redis'} is not configured.`}
+                      </p>
+                    )}
 
                     {urlPrefilled && <p className="text-xs text-muted-foreground">Pre-filled from link — press Send to start.</p>}
                     {pendingLoadSessionId && (
@@ -2103,7 +2165,8 @@ function AgentPageContent() {
                         onClick={handleSend}
                         disabled={
                           agentAvailable === false
-                          || (loading ? !question.trim() : (selectedPlaybookId === 'custom' ? !question.trim() : false))
+                          || (mode === 'pilot' && pilotStatus?.ready !== true)
+                          || (loading ? !question.trim() : (mode === 'pilot' ? (!question.trim() || !target.trim()) : (selectedPlaybookId === 'custom' ? !question.trim() : false)))
                         }
                         size="icon"
                         className="shrink-0 h-auto py-3"

@@ -32,6 +32,15 @@ def test_load_csrf_pack():
     assert "compare_requests" in pack["tools"]
 
 
+def test_xml_parser_card_requires_an_observed_write_surface():
+    base = {"target": "https://app.test", "pages_visited": ["https://app.test/sitemap.xml"]}
+    assert "xxe_xml_parser" not in {m.id for m in methodologies_from_capability_map(base)}
+    base["api_endpoints"] = [{"method": "POST", "path": "/api/xml/import"}]
+    assert "xxe_xml_parser" in {m.id for m in methodologies_from_capability_map(base)}
+    pack = load_procedure("xxe_xml_parser")
+    assert "run_oob_callback_workflow" in pack["tools"]
+
+
 def test_format_procedures_for_prompt():
     text = format_procedures_for_prompt(["csrf_state_changing", "api_idor_bola"])
     assert "PROCEDURE PACK" in text
@@ -98,4 +107,3 @@ def test_ssrf_pack_requires_interactsh_not_canarytokens():
     assert "register" in blob
     assert "poll" in blob
     assert "canarytokens" in blob
-

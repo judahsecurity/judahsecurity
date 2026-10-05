@@ -1,0 +1,18 @@
+{
+  "id": "graphql_authz",
+  "title": "GraphQL object authorization",
+  "summary": "Use two verified test identities to replay the same query for one owned object.",
+  "steps": [
+    "Map the observed GraphQL endpoint and capture a real object query or bounded mutation; introspection is discovery only.",
+    "Create or identify a private test object owned by identity A, and verify distinct principals A and B.",
+    "Replay the exact same endpoint, method, GraphQL query, variables, and object ID as A and B; only authentication may differ.",
+    "Compare nested data object ownership and private fields. A 200 with errors, null data, or public data is not a pass.",
+    "For a read, independent_verify can use authorization proof with field such as data.node.ownerId and both HTTP evidence IDs.",
+    "For a mutation, require a bounded canary write, owner readback, and cleanup under the state-change proof policy.",
+    "Submit a candidate only after foreign object data or a cross-identity change is reproduced; preserve both request evidence IDs."
+  ],
+  "tools": ["list_test_identities", "check_test_identity", "replay_http_request", "compare_requests", "test_authorization_boundary", "independent_verify"],
+  "pass_signals": ["Identity B receives A's private object and owner field", "B's bounded mutation changes A's object with independent readback"],
+  "kill_signals": ["Foreign object is null or denied", "Only introspection or schema fields are exposed", "Query or variables differ between identity replays"],
+  "references": ["CWE-639", "OWASP API1:2023 BOLA"]
+}

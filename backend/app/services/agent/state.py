@@ -296,8 +296,9 @@ class AgentState(TypedDict, total=False):
     session_id: str
     organization_id: Optional[int]
     
-    # Mode: assist (approval required) | agent (autonomous)
+    # Mode: assist | agent | pilot (bounded, analyst-supervised)
     mode: Optional[str]
+    pilot_policy: Optional[Dict[str, Any]]
     
     # Initial input (playbook)
     initial_todos: Optional[List[Dict[str, Any]]]

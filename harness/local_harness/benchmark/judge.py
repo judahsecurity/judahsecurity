@@ -90,7 +90,8 @@ def _endpoint_overlap(expected_endpoint: str, finding: NormalizedFinding) -> boo
 
 def _compatible(exp: dict, finding: NormalizedFinding) -> bool:
     category = (exp.get("category") or categorize(exp.get("description", ""))).lower()
-    if finding.category != category or not _endpoint_overlap(exp.get("endpoint", ""), finding):
+    accepted = {category, *(str(value).lower() for value in exp.get("accepted_categories", []))}
+    if finding.category not in accepted or not _endpoint_overlap(exp.get("endpoint", ""), finding):
         return False
     return all(not exp.get(k) or exp[k] == finding.raw.get(k) for k in ("identity", "tenant", "method"))
 

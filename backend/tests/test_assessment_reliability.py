@@ -9,6 +9,7 @@ import httpx
 import pytest
 
 from app.services.agent.assessment_sessions import cookie_jar, identity_registry
+from app.services.agent.pilot_policy import PilotDenied, PilotPolicy, reset_pilot, set_pilot
 from app.services.agent.evidence_store import (
     VerificationRun,
     evidence_store,
@@ -78,6 +79,95 @@ def check(manager, cand):
         target=cand.target,
         tools_manager=manager,
     )[0]
+
+
+@pytest.mark.asyncio
+async def test_bounded_pilot_blocks_unmetered_and_out_of_scope_http(manager, transport, monkeypatch):
+    policy = PilotPolicy(
+        target="https://app.test:443", source_ip="203.0.113.25",
+        organization_id=98765, session_id="assessment-reliability-test",
+        expires_at_ms=int(time.time() * 1000) + 60_000,
+    )
+    requests = []
+    sent = []
+
+    async def acquire(self, url, method):
+        self.check_request(url, method)
+        requests.append((method, url))
+        return len(requests)
+
+    monkeypatch.setattr(PilotPolicy, "acquire", acquire)
+    transport(lambda req: (sent.append(req), httpx.Response(200, text="ok"))[1])
+    token = set_pilot(policy)
+    try:
+        await manager._http_exchange("GET", "https://app.test/", use_auth_session=False)
+        assert requests == [("GET", "https://app.test/")]
+        assert len(sent) == 1
+        with pytest.raises(PilotDenied):
+            await manager._http_exchange("POST", "https://app.test/", use_auth_session=False)
+        with pytest.raises(PilotDenied):
+            await manager._http_exchange("GET", "https://app.test:8443/", use_auth_session=False)
+        assert len(sent) == 1
+        denied = await manager._execute_impl("execute_curl", {"args": "https://app.test/"})
+        assert denied["error"] == "pilot_policy_denied"
+    finally:
+        reset_pilot(token)
+
+
+@pytest.mark.asyncio
+async def test_bounded_pilot_browser_route_checks_each_request(monkeypatch):
+    from app.services.agent.assessment_sessions import configure_browser_origin
+
+    policy = PilotPolicy(
+        target="https://app.test:443", source_ip="203.0.113.25",
+        organization_id=98765, session_id="browser-pilot",
+        expires_at_ms=int(time.time() * 1000) + 60_000,
+    )
+    seen = []
+
+    async def acquire(self, url, method):
+        self.check_request(url, method)
+        seen.append((method, url))
+        return len(seen)
+
+    monkeypatch.setattr(PilotPolicy, "acquire", acquire)
+
+    class Context:
+        async def route(self, _pattern, callback):
+            self.callback = callback
+
+        async def route_web_socket(self, _pattern, callback):
+            self.socket_callback = callback
+
+    class Route:
+        def __init__(self, method, url):
+            self.request = SimpleNamespace(method=method, url=url)
+            self.result = None
+
+        async def continue_(self):
+            self.result = "continued"
+
+        async def abort(self):
+            self.result = "aborted"
+
+    context = Context()
+    token = set_pilot(policy)
+    try:
+        await configure_browser_origin(context, policy.target)
+        for method, url, expected in (
+            ("GET", "https://app.test/shop", "continued"),
+            ("POST", "https://app.test/cart", "aborted"),
+            ("GET", "https://api.app.test/", "aborted"),
+        ):
+            route = Route(method, url)
+            await context.callback(route)
+            assert route.result == expected
+        assert seen == [("GET", "https://app.test/shop")]
+        socket = SimpleNamespace(url="wss://app.test/socket", close=lambda: seen.append("closed"))
+        context.socket_callback(socket)
+        assert seen[-1] == "closed"
+    finally:
+        reset_pilot(token)
 
 
 def cookies_for(jar, url):

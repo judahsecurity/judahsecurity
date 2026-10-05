@@ -101,6 +101,12 @@ CAPTCHA_SECRET_KEY=
 # ASM_SCANNER_EGRESS_IPS=203.0.113.10,198.51.100.0/24
 # ASM_SCANNER_USER_AGENT=JudahSecurity-ASM-Scanner/1.0
 
+# --- Bounded agent pilot ---
+# Set this to the worker's actual static public egress IP before launching a
+# bounded assessment from /agent. The pilot fails closed if it is missing.
+# AEGIS_AGENT_EGRESS_IP=your.public.egress.ip
+# REDIS_URL=redis://redis:6379/0
+
 # --- Rate limiting ---
 # On by default. Uses in-process memory storage (fine for a single backend
 # worker). For multiple workers/instances, point at Redis so limits are shared.
