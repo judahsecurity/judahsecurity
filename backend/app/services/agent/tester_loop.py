@@ -55,6 +55,10 @@ def normalized_tools_run(trace: Optional[Iterable[Any]]) -> Set[str]:
     """Tool names plus aliases (recon_worker:ferox_dirs ≡ execute_feroxbuster)."""
     names: Set[str] = set()
     for step in _steps(trace):
+        # A timed-out crawl or scanner is an attempt, not coverage. Counting it
+        # as completed lets the agent skip the browser fallback and testing.
+        if step.get("success") is False:
+            continue
         name = str(step.get("tool_name") or "").strip()
         if not name:
             continue
@@ -527,7 +531,12 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
     waits = sum(1 for s in trace if s.get("tool_name") == "wait_recon_workers")
 
     if not crawled:
-        if state.get("interceptor_job_id"):
+        interceptor_failed = any(
+            step.get("tool_name") == "execute_interceptor"
+            and step.get("success") is False
+            for step in trace
+        )
+        if state.get("interceptor_job_id") and not interceptor_failed:
             return {
                 "tool_name": "execute_interceptor",
                 "tool_args": {
@@ -540,6 +549,11 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
                     "(Interceptor already queued)."
                 ),
             }
+        # One failed fallback is a coverage gap for the model to report or
+        # address through another tool, rather than a deterministic retry loop.
+        if any(step.get("tool_name") == "execute_deep_crawl"
+               and step.get("success") is False for step in trace):
+            return None
         return {
             "tool_name": "execute_deep_crawl",
             "tool_args": {

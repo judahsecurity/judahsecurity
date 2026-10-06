@@ -352,7 +352,13 @@ async def _try_remote_workers(url: str, opts: Dict[str, Any]) -> Optional[Dict[s
             },
         )
 
-    timeout = float(os.environ.get("RECON_JOB_TIMEOUT_SEC", "900"))
+    # The agent's per-tool ceiling defaults to 600s. A 900s remote wait means
+    # the orchestrator cancels this tool before local/Playwright fallback can
+    # run. Bound the remote phase separately, leaving time for that fallback.
+    timeout = min(
+        float(os.environ.get("RECON_JOB_TIMEOUT_SEC", "900")),
+        float(os.environ.get("INTERCEPTOR_REMOTE_WAIT_SEC", "240")),
+    )
 
     async def _progress(v):
         await jobs.notify_session_ws(

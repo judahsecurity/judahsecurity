@@ -36,6 +36,27 @@ def test_ferox_worker_aliases_as_dir_brute():
     assert "execute_feroxbuster" not in started
 
 
+def test_failed_interceptor_falls_back_to_deep_crawl():
+    url = "https://example.com"
+    state = {
+        "original_objective": url,
+        "target_info": {"primary_target": url},
+        "interceptor_job_id": "stalled-job",
+        "execution_trace": [
+            {"tool_name": "execute_interceptor", "success": False,
+             "tool_output": "tool timed out"},
+        ],
+    }
+    assert "execute_interceptor" not in normalized_tools_run(state["execution_trace"])
+    assert loop_progress(state)["crawled"] is False
+    assert forced_next_step(state)["tool_name"] == "execute_deep_crawl"
+
+    state["execution_trace"].append(
+        {"tool_name": "execute_deep_crawl", "success": False}
+    )
+    assert forced_next_step(state) is None
+
+
 def test_forced_pipeline_crawl_then_enrich_then_fireteam():
     url = "https://appsmith-dmpc.unifytwin.com"
     empty = {
