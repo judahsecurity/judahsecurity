@@ -765,6 +765,7 @@ function AgentPageContent() {
 
   const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   useEffect(() => { scrollToBottom(); }, [messages, liveSteps]);
+  useEffect(() => { if (pendingConfirmation) scrollToBottom(); }, [pendingConfirmation]);
   useEffect(() => { liveStepsRef.current = liveSteps; }, [liveSteps]);
 
   useEffect(() => {
@@ -804,6 +805,35 @@ function AgentPageContent() {
     const timer = setInterval(refresh, 5000);
     return () => { active = false; clearInterval(timer); };
   }, [sessionId, loading]);
+
+  // REST fallback cannot receive pending_confirmation WebSocket events. Poll
+  // the same analyst queue so network tools remain reviewable before timeout.
+  useEffect(() => {
+    if (!sessionId || !loading || connectionMode === 'websocket') return;
+    let active = true;
+    const refresh = () => {
+      api.listAgentConfirmations({ session_id: sessionId })
+        .then((items: PendingToolConfirmation[]) => {
+          if (!active) return;
+          const next = Array.isArray(items) ? items.find(item => item.token) : undefined;
+          setPendingConfirmation(previous => {
+            if (!next) return null;
+            if (previous?.token === next.token) return previous;
+            lastAgentActivityRef.current = Date.now();
+            return {
+              token: next.token,
+              tool_name: next.tool_name,
+              tool_args: next.tool_args || {},
+              message: `Tool '${next.tool_name}' requires operator approval before continuing.`,
+            };
+          });
+        })
+        .catch(() => { /* Keep any WebSocket approval visible on a polling error. */ });
+    };
+    refresh();
+    const timer = setInterval(refresh, 2500);
+    return () => { active = false; clearInterval(timer); };
+  }, [sessionId, loading, connectionMode]);
 
   const hasInFlightTool = () => {
     if (toolInFlightRef.current) return true;
@@ -1300,7 +1330,7 @@ function AgentPageContent() {
           ) {
             toast({
               title: 'Hunt running',
-              description: 'REST fallback — this page updates when the agent finishes. A Live badge means WebSocket is working.',
+              description: 'REST fallback — progress appears in Work performed and tool approvals are polled. A Live badge means WebSocket is working.',
             });
             const conv = await pollAgentConversation(waitSid);
             setLoading(false);
@@ -1893,6 +1923,11 @@ function AgentPageContent() {
                               Tool
                             </p>
                             <p className="text-sm font-mono text-foreground/90">{pendingConfirmation.tool_name}</p>
+                            {mode === 'pilot' && pendingConfirmation.tool_args && (
+                              <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs text-muted-foreground">
+                                {JSON.stringify(pendingConfirmation.tool_args, null, 2).slice(0, 2500)}
+                              </pre>
+                            )}
                           </div>
                           <div className="flex gap-2 flex-wrap">
                             <Button

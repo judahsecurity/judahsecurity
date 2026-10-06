@@ -211,6 +211,23 @@ def normalize_execute_tool_args(
 
     args_val = raw.get("args", None)
 
+    # Browser actions are JSON, not CLI flags. Preserve structured actions
+    # before the generic execute_* normalizer flattens nested dictionaries.
+    if tool_name == "execute_browser":
+        browser_spec = args_val if isinstance(args_val, dict) else raw
+        if isinstance(args_val, list) and all(isinstance(item, dict) for item in args_val):
+            browser_spec = {"actions": args_val}
+        if isinstance(browser_spec, dict) and isinstance(browser_spec.get("actions"), list):
+            return {"args": json.dumps(browser_spec)}
+        browser_url = args_val if isinstance(args_val, str) and args_val.startswith("https://") else (
+            raw.get("url") or raw.get("target")
+        )
+        if isinstance(browser_url, str) and browser_url.startswith("https://"):
+            return {"args": json.dumps({"actions": [
+                {"action": "navigate", "url": browser_url},
+                {"action": "get_source"},
+            ]})}
+
     # Already a usable CLI string
     if isinstance(args_val, str) and args_val.strip():
         return {"args": args_val.strip()}

@@ -50,3 +50,20 @@ async def test_port_probe_result_reaches_trace_and_status_as_text(monkeypatch):
                   if call.args[0].get("type") == "tool_complete"]
     assert completion and completion[-1]["success"] is True
     assert completion[-1]["output_summary"].startswith('{"host":')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", ["confirmation_denied", "pilot_policy_denied"])
+async def test_denied_pilot_action_stops_without_more_model_calls(error):
+    orchestrator = AgentOrchestrator()
+    step = {
+        "tool_name": "execute_browser", "tool_output": "Approval timed out",
+        "error_message": error, "success": False,
+    }
+    result = await orchestrator._analyze_output_node({
+        "mode": "pilot", "execution_trace": [], "_current_step": step,
+        "session_id": "pilot-denial-test",
+    })
+    assert result["task_complete"] is True
+    assert result["execution_trace"] == [step]
+    assert error in result["completion_reason"]

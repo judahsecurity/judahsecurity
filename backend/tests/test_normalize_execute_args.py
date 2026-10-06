@@ -1,5 +1,7 @@
 """Tests for execute_* tool_args normalization (empty-args failure loop fix)."""
 
+import json
+
 from app.services.agent.tools import (
     _default_args_for_tool,
     extract_seed_target,
@@ -61,3 +63,21 @@ def test_default_args_dns_family():
     assert "-d emulate3d.com" in _default_args_for_tool(
         "execute_subfinder", "https://www.emulate3d.com/"
     )
+
+
+def test_browser_action_objects_remain_json_for_pilot_gate():
+    actions = [{"action": "navigate", "url": "https://ginandjuice.shop/"},
+               {"action": "get_source"}]
+    for supplied in ({"args": {"actions": actions}}, {"actions": actions}):
+        result = normalize_execute_tool_args("execute_browser", supplied)
+        assert json.loads(result["args"]) == {"actions": actions}
+
+
+def test_browser_url_becomes_read_only_navigation():
+    result = normalize_execute_tool_args(
+        "execute_browser", {"url": "https://ginandjuice.shop/"},
+    )
+    assert json.loads(result["args"]) == {"actions": [
+        {"action": "navigate", "url": "https://ginandjuice.shop/"},
+        {"action": "get_source"},
+    ]}

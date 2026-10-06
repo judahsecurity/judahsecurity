@@ -2431,6 +2431,27 @@ class AgentOrchestrator:
         step_data = state.get("_current_step") or {}
         tool_output = step_data.get("tool_output") or ""
         tool_name = step_data.get("tool_name") or "unknown"
+
+        # A denied pilot action is a stop decision, not a hint to rephrase and
+        # retry the same network operation. Preserve the failed step in the
+        # trace and finish with an explicit partial-coverage explanation.
+        pilot_stop_errors = {
+            "confirmation_denied", "policy_denied",
+            "confirmation_policy_unavailable", "pilot_policy_denied",
+        }
+        error_code = str(step_data.get("error_message") or "")
+        if state.get("mode") == "pilot" and error_code in pilot_stop_errors:
+            reason = f"Pilot stopped after {tool_name}: {error_code}"
+            return {
+                "_current_step": step_data,
+                "execution_trace": (state.get("execution_trace") or []) + [step_data],
+                "task_complete": True,
+                "completion_reason": reason,
+                "messages": [AIMessage(content=(
+                    f"{reason}. {str(tool_output)[:300]} "
+                    "No further target actions were attempted; coverage is incomplete."
+                ))],
+            }
         
         if not tool_output:
             tool_output = step_data.get("error_message") or "No output"
@@ -3293,7 +3314,7 @@ class AgentOrchestrator:
             completion_reason = str(final_state.get("completion_reason") or "")
             partial = any(phrase in completion_reason.lower() for phrase in (
                 "time budget", "spend cap", "iteration budget", "no schedulable hypotheses",
-            ))
+            )) or completion_reason.startswith("Pilot stopped after ")
             finish_run(run_id, "partial" if partial else ("completed" if response.task_complete else "paused"),
                        completion_reason)
             self._persist_palace_brain(organization_id, session_id, final_state)
