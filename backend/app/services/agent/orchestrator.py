@@ -2321,7 +2321,14 @@ class AgentOrchestrator:
                 "error": f"Tool '{tool_name}' raised: {e}",
             }
 
-        step_data["tool_output"] = result.get("output") or result.get("error") or ""
+        raw_output = result.get("output") or result.get("error") or ""
+        if isinstance(raw_output, str):
+            step_data["tool_output"] = raw_output
+        else:
+            try:
+                step_data["tool_output"] = json_dumps_safe(raw_output)
+            except (TypeError, ValueError):
+                step_data["tool_output"] = str(raw_output)
         step_data["success"] = result.get("success", False)
         step_data["error_message"] = result.get("error")
         # WPScan exit 5 / findings-in-stdout must never land as a failed step.
