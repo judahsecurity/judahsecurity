@@ -64,6 +64,7 @@ from app.models.workflow import (
     ScriptLanguage,
 )
 from app.models.wiz_integration import WizIntegration
+from app.models.netbrain_integration import NetBrainIntegration
 
 __all__ = [
     "User",
@@ -144,6 +145,7 @@ __all__ = [
     "WorkflowRunStatus",
     "WorkflowNodeRunStatus",
     "WizIntegration",
+    "NetBrainIntegration",
     "ScriptLanguage",
 ]
 

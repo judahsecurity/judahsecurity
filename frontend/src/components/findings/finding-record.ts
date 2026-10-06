@@ -36,6 +36,19 @@ export interface FindingRecord {
   agent_detection?: AgentDetection;
   detection?: ScannerDetection;
   risk_assessment?: RiskAssessment;
+  netbrain_exposure?: {
+    verdict?: 'prerequisite_present' | 'prerequisite_absent' | 'unknown';
+    analysis?: string;
+    reason?: string;
+    device_hostname?: string;
+    device_management_ip?: string;
+    configuration_time?: string;
+    configuration_age_hours?: number;
+    relevant_configuration?: string[];
+    exploitable_transports?: string[];
+    suggested_remediation?: string;
+    evaluated_at?: string;
+  };
   oracle?: { opes_score?: number; opes_category?: string; opes_confidence?: string; opes_label?: string };
 }
 

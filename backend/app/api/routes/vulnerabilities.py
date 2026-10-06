@@ -188,6 +188,9 @@ def build_vuln_response(
         risk_assessment = vuln.metadata_.get("risk_assessment")
         if risk_assessment:
             d["risk_assessment"] = risk_assessment
+        netbrain_exposure = vuln.metadata_.get("netbrain_exposure")
+        if netbrain_exposure:
+            d["netbrain_exposure"] = netbrain_exposure
         nuclei_matched = vuln.metadata_.get("nuclei_matched_at")
         if nuclei_matched:
             d["matched_at"] = nuclei_matched
@@ -2269,7 +2272,6 @@ def create_finding_detection_feedback(
             logger.warning(f"Detection pattern evaluation failed: {e}")
 
     return feedback_to_dict(feedback)
-
 
 
 

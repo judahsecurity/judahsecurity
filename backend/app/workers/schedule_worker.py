@@ -930,6 +930,35 @@ class ScheduleWorker:
         finally:
             db.close()
 
+    async def run_netbrain_assessments(self):
+        """Refresh NetBrain prerequisite evidence and reversible mitigations."""
+        from app.models.netbrain_integration import NetBrainIntegration
+        from app.services import netbrain_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+        try:
+            candidates = db.query(NetBrainIntegration).filter(
+                NetBrainIntegration.is_active == True,
+                NetBrainIntegration.continuous_sync_enabled == True,
+            ).all()
+            due = [connection for connection in candidates if connection.is_sync_due(datetime.utcnow())]
+            for integration in due:
+                result = await netbrain_service.sync_integration(db, integration)
+                logger.info(
+                    "NetBrain assessment (org %s, '%s'): %s",
+                    integration.organization_id, integration.name, result.get("message"),
+                )
+        except Exception as exc:
+            logger.error("NetBrain continuous assessment failed: %s", exc, exc_info=True)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            db.close()
+
     async def run(self):
         """Main worker loop."""
         logger.info("Starting schedule worker...")
@@ -959,6 +988,9 @@ class ScheduleWorker:
 
                 # Continuous F5 syncs — VIP → pool-member reachability
                 await self.run_f5_syncs()
+
+                # NetBrain configuration evidence — exploit prerequisite validation
+                await self.run_netbrain_assessments()
 
                 # Continuous Cloudflare WAF whitelist syncs
                 await self.run_cloudflare_waf_syncs()

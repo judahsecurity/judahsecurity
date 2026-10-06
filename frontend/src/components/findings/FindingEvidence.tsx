@@ -106,7 +106,7 @@ export function FindingScreenshot({ finding, onCite }: { finding: FindingRecord;
 }
 
 export function FindingTechnicalEvidence({ finding, onCite }: { finding: FindingRecord; onCite?: (reference: string) => void }) {
-  const hasEvidence = Boolean(hasScannerDetection(finding.detection) || finding.agent_detection?.chain?.length || finding.evidence || finding.proof_of_concept);
+  const hasEvidence = Boolean(hasScannerDetection(finding.detection) || finding.agent_detection?.chain?.length || finding.netbrain_exposure || finding.evidence || finding.proof_of_concept);
   return <div className="space-y-5">
     <div className="flex gap-2 justify-between items-start"><div><h4 className="text-sm font-semibold">Detection evidence</h4><p className="text-xs text-muted-foreground">{finding.detected_by || 'Unknown source'} · Last detected {formatDate(finding.last_detected || finding.created_at || '')}</p></div>
       {onCite && hasEvidence && <Button size="sm" variant="outline" onClick={() => onCite(`Finding #${finding.id}: detection evidence from ${finding.detected_by || 'unknown source'}, last detected ${finding.last_detected || finding.created_at || 'unknown'}`)}>Cite evidence</Button>}
@@ -114,6 +114,20 @@ export function FindingTechnicalEvidence({ finding, onCite }: { finding: Finding
     {!hasEvidence && <p className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">No technical evidence is attached. Record the missing evidence before confirming the claim.</p>}
     <DetectionPanel detection={finding.detection} />
     <DemonstratedChain detection={finding.agent_detection} />
+    {finding.netbrain_exposure && <section className="space-y-2 rounded-md border p-3">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <h5 className="text-sm font-medium">NetBrain prerequisite analysis</h5>
+        <span className="text-xs font-medium uppercase tracking-wide">
+          {finding.netbrain_exposure.verdict?.replaceAll('_', ' ') || 'unknown'}
+        </span>
+      </div>
+      <p className="text-sm">{finding.netbrain_exposure.analysis || finding.netbrain_exposure.reason || 'No analysis was returned.'}</p>
+      <p className="text-xs text-muted-foreground">
+        Device: {finding.netbrain_exposure.device_hostname || finding.netbrain_exposure.device_management_ip || 'unmatched'} · Configuration: {finding.netbrain_exposure.configuration_time ? formatDate(finding.netbrain_exposure.configuration_time) : 'not available'}
+      </p>
+      {!!finding.netbrain_exposure.relevant_configuration?.length && <pre className="rounded-md bg-muted/30 p-3 text-xs whitespace-pre-wrap">{finding.netbrain_exposure.relevant_configuration.join('\n')}</pre>}
+      {onCite && <Button size="sm" variant="outline" onClick={() => onCite(`NetBrain prerequisite analysis for ${finding.netbrain_exposure?.device_hostname || finding.host || 'device'}: ${finding.netbrain_exposure?.verdict || 'unknown'}; configuration ${finding.netbrain_exposure?.configuration_time || 'undated'}`)}>Cite NetBrain evidence</Button>}
+    </section>}
     {[['Recorded evidence', finding.evidence], ['Proof of concept', finding.proof_of_concept], ['Steps to reproduce', finding.steps_to_reproduce], ['Not demonstrated', finding.agent_detection?.not_demonstrated]].map(([label, content]) => content ? <section key={label} className="space-y-2"><h5 className="text-sm font-medium">{label}</h5><pre className="max-h-96 overflow-auto rounded-md border bg-muted/30 p-3 text-xs whitespace-pre-wrap break-words">{content}</pre></section> : null)}
   </div>;
 }

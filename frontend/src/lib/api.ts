@@ -632,6 +632,43 @@ export interface F5SyncResult {
   assets_missing_from_source: number;
 }
 
+export interface NetBrainIntegration {
+  id: number;
+  organization_id: number;
+  name: string;
+  base_url: string;
+  authentication_id?: string | null;
+  tenant_id: string;
+  domain_id: string;
+  verify_ssl: boolean;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  max_config_age_hours: number;
+  auto_mitigate_enabled: boolean;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface NetBrainAssessmentResult {
+  ok: boolean;
+  message: string;
+  findings_seen: number;
+  findings_assessed: number;
+  findings_mitigated: number;
+  findings_reopened: number;
+  prerequisites_present: number;
+  prerequisites_absent: number;
+  unknown: number;
+}
+
 class ApiClient {
   private client: AxiosInstance;
   private token: string | null = null;
@@ -3391,6 +3428,64 @@ class ApiClient {
 
   async syncF5Integration(id: number): Promise<F5SyncResult> {
     const response = await this.client.post(`/integrations/f5/${id}/sync`);
+    return response.data;
+  }
+
+  // ── NetBrain Configuration Evidence Integration ───────────────────────────
+
+  async getNetBrainIntegrations(): Promise<NetBrainIntegration[]> {
+    const response = await this.client.get('/integrations/netbrain');
+    return response.data;
+  }
+
+  async createNetBrainIntegration(payload: {
+    name: string;
+    base_url: string;
+    username: string;
+    password: string;
+    authentication_id?: string | null;
+    tenant_id: string;
+    domain_id: string;
+    verify_ssl?: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+    max_config_age_hours?: number;
+    auto_mitigate_enabled?: boolean;
+  }): Promise<NetBrainIntegration> {
+    const response = await this.client.post('/integrations/netbrain', payload);
+    return response.data;
+  }
+
+  async updateNetBrainIntegration(id: number, payload: Partial<{
+    name: string;
+    base_url: string;
+    username: string;
+    password: string;
+    authentication_id: string | null;
+    tenant_id: string;
+    domain_id: string;
+    verify_ssl: boolean;
+    is_active: boolean;
+    continuous_sync_enabled: boolean;
+    sync_interval_minutes: number;
+    max_config_age_hours: number;
+    auto_mitigate_enabled: boolean;
+  }>): Promise<NetBrainIntegration> {
+    const response = await this.client.put(`/integrations/netbrain/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteNetBrainIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/netbrain/${id}`);
+  }
+
+  async testNetBrainConnection(id: number): Promise<{ ok: boolean; message: string; device_count?: number }> {
+    const response = await this.client.post(`/integrations/netbrain/${id}/test`);
+    return response.data;
+  }
+
+  async assessNetBrainFindings(id: number): Promise<NetBrainAssessmentResult> {
+    const response = await this.client.post(`/integrations/netbrain/${id}/assess`);
     return response.data;
   }
 

@@ -33,7 +33,7 @@ def evidence_fingerprint(vuln):
     payload["asset_business_app_id"] = getattr(getattr(vuln, "asset", None), "business_app_id", None)
     payload.update({key: metadata.get(key) for key in (
         "agent_detection", "risk_assessment", "oracle", "nuclei_matched_at", "detection",
-        "risk_overrides",
+        "risk_overrides", "netbrain_exposure",
     )})
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 

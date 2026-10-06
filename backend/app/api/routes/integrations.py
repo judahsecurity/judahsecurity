@@ -26,6 +26,7 @@ from app.models.panorama_integration import (
     PanoramaIntegration,
 )
 from app.models.f5_integration import F5Integration
+from app.models.netbrain_integration import NetBrainIntegration
 from app.models.cloudflare_integration import CloudflareWafIntegration
 from app.models.user import User
 from app.models.vulnerability import Vulnerability
@@ -98,6 +99,13 @@ from app.schemas.f5_schemas import (
     F5SyncResult,
     F5TestConnectionResponse,
 )
+from app.schemas.netbrain_schemas import (
+    NetBrainAssessmentResult,
+    NetBrainIntegrationCreate,
+    NetBrainIntegrationResponse,
+    NetBrainIntegrationUpdate,
+    NetBrainTestConnectionResponse,
+)
 from app.schemas.cloudflare_schemas import (
     CloudflareIntegrationCreate,
     CloudflareIntegrationResponse,
@@ -113,6 +121,7 @@ from app.services import (
     akamai_waf_service,
     panorama_service,
     f5_service,
+    netbrain_service,
     cloudflare_waf_service,
     servicenow_service,
 )
@@ -1746,6 +1755,131 @@ async def sync_f5_integration(
 
     result = await f5_service.sync_integration(db, integration)
     return F5SyncResult(**result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# NetBrain — read-only network configuration evidence
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_netbrain_integration(db: Session, org_id: int, integration_id: int) -> NetBrainIntegration:
+    integration = db.query(NetBrainIntegration).filter(
+        NetBrainIntegration.id == integration_id,
+        NetBrainIntegration.organization_id == org_id,
+    ).first()
+    if not integration:
+        raise HTTPException(status_code=404, detail="NetBrain connection not found.")
+    return integration
+
+
+@router.get("/netbrain", response_model=List[NetBrainIntegrationResponse])
+def list_netbrain_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    return db.query(NetBrainIntegration).filter(
+        NetBrainIntegration.organization_id == _get_org_id(current_user)
+    ).order_by(NetBrainIntegration.created_at.desc()).all()
+
+
+@router.post("/netbrain", response_model=NetBrainIntegrationResponse, status_code=status.HTTP_201_CREATED)
+async def create_netbrain_integration(
+    payload: NetBrainIntegrationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    existing = db.query(NetBrainIntegration).filter(
+        NetBrainIntegration.organization_id == org_id,
+        NetBrainIntegration.name == payload.name,
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail=f"A NetBrain connection named '{payload.name}' already exists.")
+    integration = NetBrainIntegration(
+        organization_id=org_id, name=payload.name, base_url=payload.base_url,
+        authentication_id=payload.authentication_id, tenant_id=payload.tenant_id,
+        domain_id=payload.domain_id, verify_ssl=payload.verify_ssl,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        max_config_age_hours=payload.max_config_age_hours,
+        auto_mitigate_enabled=payload.auto_mitigate_enabled, is_active=True,
+    )
+    integration.set_username(payload.username)
+    integration.set_password(payload.password)
+    result = await netbrain_service.test_connection(integration)
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    integration.last_error = None if result["ok"] else result["message"]
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.put("/netbrain/{integration_id}", response_model=NetBrainIntegrationResponse)
+async def update_netbrain_integration(
+    integration_id: int,
+    payload: NetBrainIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    integration = _get_netbrain_integration(db, _get_org_id(current_user), integration_id)
+    values = payload.model_dump(exclude_unset=True)
+    username = values.pop("username", None)
+    password = values.pop("password", None)
+    for field, value in values.items():
+        setattr(integration, field, value)
+    if username:
+        integration.set_username(username)
+    if password:
+        integration.set_password(password)
+    result = await netbrain_service.test_connection(integration)
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    integration.last_error = None if result["ok"] else result["message"]
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/netbrain/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_netbrain_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    integration = _get_netbrain_integration(db, _get_org_id(current_user), integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post("/netbrain/{integration_id}/test", response_model=NetBrainTestConnectionResponse)
+async def test_netbrain_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    integration = _get_netbrain_integration(db, _get_org_id(current_user), integration_id)
+    result = await netbrain_service.test_connection(integration)
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    integration.last_error = None if result["ok"] else result["message"]
+    db.commit()
+    return NetBrainTestConnectionResponse(**result)
+
+
+@router.post("/netbrain/{integration_id}/assess", response_model=NetBrainAssessmentResult)
+async def assess_netbrain_findings(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    integration = _get_netbrain_integration(db, _get_org_id(current_user), integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This NetBrain connection is disabled.")
+    return NetBrainAssessmentResult(**(await netbrain_service.sync_integration(db, integration)))
 
 
 # ══════════════════════════════════════════════════════════════════════════════

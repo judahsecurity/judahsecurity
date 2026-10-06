@@ -60,6 +60,7 @@ import { cn } from '@/lib/utils';
 import { JiraProjectPicker } from '@/components/integrations/JiraProjectPicker';
 import { ServiceNowSection } from '@/components/integrations/ServiceNowSection';
 import { WizSection } from '@/components/integrations/WizSection';
+import { NetBrainSection } from '@/components/integrations/NetBrainSection';
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'] as const;
 
@@ -3222,6 +3223,9 @@ export default function IntegrationsPage() {
 
         {/* F5 BIG-IP Reachability Integration Card */}
         <F5Section />
+
+        {/* NetBrain configuration-evidence integration */}
+        <NetBrainSection />
 
         {/* Cloudflare WAF Integration Card */}
         <CloudflareSection />

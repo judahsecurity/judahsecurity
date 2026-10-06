@@ -26,6 +26,7 @@ Technical docs for the Judah Security ASM platform, AI agent, and Aegis tooling.
 | [ADHOC_AND_RECURRING_SCANS.md](./ADHOC_AND_RECURRING_SCANS.md) | Ad-hoc vs scheduled scans |
 | [GRAPH_SCHEMA.md](./GRAPH_SCHEMA.md) | Neo4j schema and queries |
 | [GRAPH_KNOWLEDGE_EXPANSION.md](./GRAPH_KNOWLEDGE_EXPANSION.md) | JS evidence, source graph import, and agent retrieval |
+| [NETBRAIN_INTEGRATION.md](./NETBRAIN_INTEGRATION.md) | Network-device configuration evidence and exploit prerequisites |
 | [GRAPH_AND_DATA_FLOW_ROADMAP.md](./GRAPH_AND_DATA_FLOW_ROADMAP.md) | Graph feature roadmap |
 | [MCP_AND_TLDFINDER.md](./MCP_AND_TLDFINDER.md) | MCP tool server and TLDFinder |
 | [GUARDIAN_TOOL_PARITY.md](./GUARDIAN_TOOL_PARITY.md) | Agent MCP tool parity vs Guardian-CLI |
