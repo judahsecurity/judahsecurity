@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -34,6 +35,37 @@ def over_budget(token_usage: Optional[Dict[str, Any]], limit_usd: float) -> bool
     if limit_usd <= 0:
         return False
     return session_cost_usd(token_usage) >= limit_usd
+
+
+def prior_identical_browser_action(
+    trace: List[Dict[str, Any]], tool_args: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """Find a successful identical browser action before it can run again."""
+    try:
+        spec = json.loads(tool_args.get("args") or "{}")
+        actions = spec.get("actions")
+        if not isinstance(actions, list) or not actions:
+            return None
+        identity = spec.get("identity") or tool_args.get("identity") or "anonymous"
+        signature = json.dumps(actions, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+    for step in reversed(trace[-24:]):
+        if step.get("tool_name") != "execute_browser" or not step.get("success"):
+            continue
+        try:
+            prior_args = step.get("tool_args") or {}
+            prior_spec = json.loads(prior_args.get("args") or "{}")
+            prior_actions = prior_spec.get("actions")
+            prior_identity = prior_spec.get("identity") or prior_args.get("identity") or "anonymous"
+            if prior_identity == identity and json.dumps(
+                prior_actions, sort_keys=True, separators=(",", ":")
+            ) == signature:
+                return step
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return None
 
 
 def compact_execution_trace(

@@ -153,6 +153,13 @@ class PendingConfirmation:
     waiters: list[asyncio.Future] = field(default_factory=list)
 
 
+def preview_tool_args(tool_args: dict) -> dict:
+    """Show the action being approved without disclosing browser session state."""
+    from app.services.agent.orchestrator import redact_tool_args
+
+    return redact_tool_args(tool_args or {})
+
+
 class ConfirmationStore:
     def __init__(self) -> None:
         self._items: dict[str, PendingConfirmation] = {}

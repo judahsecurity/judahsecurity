@@ -1215,11 +1215,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     from app.services.agent.orchestrator import _status_callback_var
                     cb = _status_callback_var.get(None)
                     if cb:
+                        from app.services.agent.confirmation_service import preview_tool_args
                         await cb({
                             "type": "pending_confirmation",
                             "token": token,
                             "tool_name": tool_name,
-                            "tool_args": gate_result.get("tool_args") or {},
+                            "tool_args": preview_tool_args(gate_result.get("tool_args") or {}),
                             "expires_at": gate_result.get("expires_at"),
                             "message": (
                                 f"Tool '{tool_name}' requires operator approval before continuing."

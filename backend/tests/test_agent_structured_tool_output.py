@@ -53,6 +53,32 @@ async def test_port_probe_result_reaches_trace_and_status_as_text(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_duplicate_browser_post_is_skipped_before_tool_execution(monkeypatch):
+    from app.services.agent import action_ledger
+
+    monkeypatch.setattr(action_ledger, "append_action", lambda *_args, **_kwargs: None)
+    args = {"args": json.dumps({"actions": [
+        {"action": "navigate", "url": "https://ginandjuice.shop/catalog"},
+        {"action": "execute_js", "script": "fetch('/catalog/subscribe',{method:'POST'})"},
+    ]})}
+    orchestrator = AgentOrchestrator()
+    orchestrator.tool_manager = SimpleNamespace(execute=AsyncMock(), _fallback_target="")
+    orchestrator._emit_status = AsyncMock()
+
+    result = await orchestrator._execute_tool_node({
+        "user_id": "1", "organization_id": 1, "session_id": "duplicate-browser-test",
+        "mode": "agent", "current_phase": "exploitation", "current_iteration": 2,
+        "target_info": {"primary_target": "https://ginandjuice.shop"},
+        "execution_trace": [{"tool_name": "execute_browser", "tool_args": args,
+                             "success": True, "tool_output": "HTTP 200"}],
+        "_current_step": {"tool_name": "execute_browser", "tool_args": args},
+    })
+
+    assert result["_current_step"]["error_message"] == "duplicate_browser_action"
+    orchestrator.tool_manager.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("error", ["confirmation_denied", "pilot_policy_denied"])
 async def test_denied_pilot_action_stops_without_more_model_calls(error):
     orchestrator = AgentOrchestrator()

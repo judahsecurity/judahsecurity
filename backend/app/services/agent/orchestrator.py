@@ -1959,6 +1959,30 @@ class AgentOrchestrator:
         # UI, execution trace, or cross-session learning store.
         safe_args = redact_tool_args(tool_args)
 
+        if tool_name == "execute_browser":
+            from app.services.agent.session_ops import prior_identical_browser_action
+
+            prior = prior_identical_browser_action(
+                state.get("execution_trace") or [], safe_args,
+            )
+            if prior is not None:
+                step_data["tool_args"] = safe_args
+                step_data["tool_output"] = (
+                    "Skipped identical browser action already completed in this run. "
+                    "Use its prior result or change the action sequence; no new request was sent."
+                )
+                step_data["success"] = False
+                step_data["error_message"] = "duplicate_browser_action"
+                record_skip("duplicate_browser_action")
+                await self._emit_status({
+                    "type": "tool_complete",
+                    "tool_name": tool_name,
+                    "success": False,
+                    "output_summary": step_data["tool_output"],
+                    "iteration": iteration,
+                })
+                return {"_current_step": step_data}
+
         logger.info(f"[{user_id}] Executing tool: {tool_name} args={safe_args}")
 
         await self._emit_status({

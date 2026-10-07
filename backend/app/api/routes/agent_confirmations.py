@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from app.api.deps import require_analyst
 from app.models.user import User
-from app.services.agent.confirmation_service import get_store
+from app.services.agent.confirmation_service import get_store, preview_tool_args
 
 router = APIRouter(prefix="/agent/confirmations", tags=["agent-confirmations"])
 
@@ -45,7 +45,7 @@ def list_confirmations(
         {
             "token": pc.token,
             "tool_name": pc.tool_name,
-            "tool_args": pc.tool_args,
+            "tool_args": preview_tool_args(pc.tool_args),
             "organization_id": pc.organization_id,
             "session_id": pc.session_id,
             "created_at": pc.created_at,

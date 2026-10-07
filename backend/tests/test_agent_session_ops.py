@@ -1,9 +1,12 @@
 """CAI-style compact, prior-hunt brief, and spend-cap helpers."""
 
+import json
+
 from app.services.agent.session_ops import (
     compact_execution_trace,
     format_prior_hunt_brief,
     over_budget,
+    prior_identical_browser_action,
     price_limit_usd,
     should_auto_compact,
 )
@@ -40,6 +43,21 @@ def test_spend_cap():
     assert not over_budget({"cost_usd": 99.0}, 0)
     assert price_limit_usd(2.5) == 2.5
     assert price_limit_usd(-1) == 0.0
+
+
+def test_identical_successful_browser_action_is_detected_before_resending_post():
+    actions = [
+        {"action": "navigate", "url": "https://ginandjuice.shop/catalog"},
+        {"action": "execute_js", "script": "fetch('/catalog/subscribe',{method:'POST'})"},
+    ]
+    args = {"args": json.dumps({"actions": actions})}
+    prior = {"tool_name": "execute_browser", "tool_args": args,
+             "success": True, "tool_output": "HTTP 200"}
+    assert prior_identical_browser_action([prior], args) is prior
+    assert prior_identical_browser_action([prior], {
+        "args": json.dumps({"actions": [actions[0]]}),
+    }) is None
+    assert prior_identical_browser_action([{**prior, "success": False}], args) is None
 
 
 def test_prior_hunt_brief_includes_replay_and_last_prompt():

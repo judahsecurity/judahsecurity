@@ -2,10 +2,22 @@
 
 import pytest
 import time
+import json
 
 from app.models.project_settings import default_agent_config
 from app.services.agent import confirmation_service as confirmation
 from app.services.agent.pilot_policy import PilotPolicy, reset_pilot, set_pilot
+
+
+def test_confirmation_preview_redacts_nested_browser_cookies():
+    args = {"args": json.dumps({
+        "actions": [{"action": "navigate", "url": "https://ginandjuice.shop/catalog"}],
+        "storage_state": {"cookies": [{"name": "session", "value": "private-session-cookie"}]},
+    })}
+    preview = confirmation.preview_tool_args(args)
+    assert "private-session-cookie" not in str(preview)
+    assert "https://ginandjuice.shop/catalog" in str(preview)
+    assert "REDACTED" in str(preview)
 
 
 @pytest.mark.asyncio
