@@ -1246,9 +1246,9 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
             finally:
                 db.close()
             if result.error:
-                await websocket.send_json({"type": "error", "message": result.error})
+                await ws_manager.send_message(session_id, {"type": "error", "message": result.error})
             else:
-                await websocket.send_json(_ws_response_payload(result))
+                await ws_manager.send_message(session_id, _ws_response_payload(result))
 
         def spawn_run(coro):
             from app.services.agent.run_control import register_run
@@ -1266,8 +1266,10 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
             return task
 
         def run_in_progress() -> bool:
+            from app.services.agent.run_control import has_running_task
+
             task = run_holder.get("task")
-            return bool(task is not None and not task.done())
+            return bool(task is not None and not task.done()) or has_running_task(session_id)
 
         # Require authentication within 30 seconds
         try:
@@ -1308,6 +1310,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
         user_id = user.id
         authenticated = True
         await websocket.send_json({"type": "authenticated", "user_id": user_id})
+        await websocket.send_json({"type": "run_status", "run_in_progress": run_in_progress()})
 
         while True:
             data = await websocket.receive_json()
@@ -1445,7 +1448,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                                             mode=run_mode)
                     except Exception as e:
                         logger.error(f"WS agent query error for session {session_id}: {e}")
-                        await websocket.send_json({"type": "error", "message": f"Agent error: {e}"})
+                        await ws_manager.send_message(session_id, {"type": "error", "message": f"Agent error: {e}"})
 
                 spawn_run(_run_query())
             
@@ -1591,6 +1594,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                 })
 
             elif msg_type == "stop":
+                logger.info("Agent stop requested via WebSocket for session %s by user %s", session_id, user_id)
                 _stop_agent_session(session_id)
                 await emit_cancelled()
             
@@ -1599,11 +1603,9 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
     
     except WebSocketDisconnect:
         if ws_manager.active_connections.get(session_id) is websocket:
-            _stop_agent_session(session_id)
             ws_manager.disconnect(session_id)
-        logger.info(f"WebSocket disconnected: {session_id}")
+        logger.info("WebSocket disconnected: %s; in-flight run continues", session_id)
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
         if ws_manager.active_connections.get(session_id) is websocket:
-            _stop_agent_session(session_id)
             ws_manager.disconnect(session_id)

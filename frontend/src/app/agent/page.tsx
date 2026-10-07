@@ -806,10 +806,10 @@ function AgentPageContent() {
     return () => { active = false; clearInterval(timer); };
   }, [sessionId, loading]);
 
-  // REST fallback cannot receive pending_confirmation WebSocket events. Poll
-  // the same analyst queue so network tools remain reviewable before timeout.
+  // Poll the analyst queue even with WebSocket connected so approvals are
+  // restored after a reconnect that missed the original event.
   useEffect(() => {
-    if (!sessionId || !loading || connectionMode === 'websocket') return;
+    if (!sessionId || !loading) return;
     let active = true;
     const refresh = () => {
       api.listAgentConfirmations({ session_id: sessionId })
@@ -833,7 +833,7 @@ function AgentPageContent() {
     refresh();
     const timer = setInterval(refresh, 2500);
     return () => { active = false; clearInterval(timer); };
-  }, [sessionId, loading, connectionMode]);
+  }, [sessionId, loading]);
 
   const hasInFlightTool = () => {
     if (toolInFlightRef.current) return true;
@@ -949,7 +949,7 @@ function AgentPageContent() {
         'thinking', 'tool_start', 'tool_complete', 'response', 'error',
         'cancelled', 'cost', 'steered', 'compacted',
         'pending_confirmation', 'capability_map_update', 'auth_session_update',
-        'attack_scenario_update', 'authenticated', 'pong',
+        'attack_scenario_update', 'authenticated', 'run_status', 'pong',
       ].includes(msgType)
     ) {
       lastAgentActivityRef.current = Date.now();
@@ -1045,6 +1045,8 @@ function AgentPageContent() {
           id: `agent-${Date.now()}`, role: 'agent' as const, content: msg,
         }];
       });
+    } else if (msgType === 'run_status') {
+      if (data.run_in_progress === true) setLoading(true);
     } else if (msgType === 'error') {
       setLiveSteps([]); setLoading(false);
       const errMsg = (data.message as string) || 'Unknown error';
@@ -1923,7 +1925,7 @@ function AgentPageContent() {
                               Tool
                             </p>
                             <p className="text-sm font-mono text-foreground/90">{pendingConfirmation.tool_name}</p>
-                            {mode === 'pilot' && pendingConfirmation.tool_args && (
+                            {pendingConfirmation.tool_args && (
                               <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap break-all text-xs text-muted-foreground">
                                 {JSON.stringify(pendingConfirmation.tool_args, null, 2).slice(0, 2500)}
                               </pre>
