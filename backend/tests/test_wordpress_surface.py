@@ -83,6 +83,12 @@ def test_forced_wp_probes_after_crawl():
     }
     assert wordpress_detected(state)
     step = forced_next_step(state)
+    assert step and step["tool_name"] == "spawn_recon_workers"
+    state["execution_trace"].append({
+        "tool_name": "spawn_recon_workers", "success": True,
+        "tool_args": {"pack": "enrich"},
+    })
+    step = forced_next_step(state)
     assert step and step["tool_name"] == "check_cve_applicability"
     assert "emulate3d.com" in (step.get("tool_args") or {}).get("url", "")
 

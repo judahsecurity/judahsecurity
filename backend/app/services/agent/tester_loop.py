@@ -13,6 +13,8 @@ Informational Nuclei (tech/exposure/panel) runs as a parallel recon stream
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set
 from urllib.parse import urlparse
@@ -32,7 +34,6 @@ _PARAM_TOOLS = {
     "discover_parameters",
     "execute_arjun",
 }
-_FIRETEAM_TOOLS = {"fireteam_dispatch"}
 _BRAIN_TOOLS = {"sync_engagement_brain", "fireteam_dispatch"}
 _JS_SURFACE_TOOLS = ("fingerprint_api", "fetch_lazy_chunks", "extract_js_endpoints")
 
@@ -41,6 +42,9 @@ _404_TEXT_RE = re.compile(
     re.I,
 )
 _WEB_HINT_RE = re.compile(r"https?://|\bwww\.|\.(com|net|io|org|app)\b", re.I)
+OBSERVED_INPUT_SOURCES = frozenset({
+    "observed_form", "captured_api", "browser_traffic", "page_url", "api_endpoint",
+})
 
 
 def _steps(trace: Optional[Iterable[Any]]) -> List[Dict[str, Any]]:
@@ -169,6 +173,106 @@ def primary_web_target(state: Optional[Dict[str, Any]] = None) -> str:
     return ""
 
 
+def observed_input_signature(state: Optional[Dict[str, Any]] = None) -> str:
+    """Stable, value-free key for browser-observed inputs ready for a hunt wave."""
+    cmap = (state or {}).get("capability_map") or {}
+    if not isinstance(cmap, dict) or not cmap.get("target"):
+        return ""
+    from app.services.agent.parameter_inventory import collect_parameter_inventory
+
+    inputs = sorted({
+        (
+            row["host"], row["method"], row["path"], row["location"],
+            row["name"], row["identity"],
+        )
+        for row in collect_parameter_inventory(cmap)
+        if row.get("testable") and row.get("source") in OBSERVED_INPUT_SOURCES
+    })
+    if not inputs:
+        return ""
+    return hashlib.sha256(json.dumps(inputs, separators=(",", ":")).encode()).hexdigest()[:16]
+
+
+def _dispatched_input_signature(trace: List[Dict[str, Any]], signature: str) -> bool:
+    return bool(signature) and any(
+        step.get("tool_name") == "fireteam_dispatch"
+        and (step.get("tool_args") or {}).get("surface_signature") == signature
+        for step in trace
+    )
+
+
+def _full_fireteam_completed(trace: List[Dict[str, Any]]) -> bool:
+    return any(
+        step.get("tool_name") == "fireteam_dispatch"
+        and step.get("success") is not False
+        and not (step.get("tool_args") or {}).get("surface_signature")
+        for step in trace
+    )
+
+
+def _untested_observed_input_count(state: Dict[str, Any]) -> int:
+    brain = state.get("engagement_brain") or {}
+    return sum(
+        1
+        for cell in (brain.get("coverage_cells") or [])
+        if isinstance(cell, dict)
+        and cell.get("source") == "parameter_inventory"
+        and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
+        and cell.get("specialist") in {"xss", "sqli"}
+        and cell.get("status") == "untested"
+    )
+
+
+def _observed_input_specialists(state: Dict[str, Any]) -> List[str]:
+    cells = (state.get("engagement_brain") or {}).get("coverage_cells") or []
+    pending = {
+        cell.get("specialist")
+        for cell in cells
+        if isinstance(cell, dict)
+        and cell.get("source") == "parameter_inventory"
+        and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
+        and cell.get("status") == "untested"
+    }
+    return [name for name in ("xss", "sqli") if name in pending] or ["xss", "sqli"]
+
+
+def _input_wave_made_progress(
+    state: Dict[str, Any], trace: List[Dict[str, Any]], signature: str
+) -> bool:
+    """Continue a leased input queue only when the last wave consumed work."""
+    prior = next((
+        step for step in reversed(trace)
+        if step.get("tool_name") == "fireteam_dispatch"
+        and (step.get("tool_args") or {}).get("surface_signature") == signature
+    ), None)
+    if not prior:
+        return False
+    previous = (prior.get("tool_args") or {}).get("pending_input_count")
+    current = _untested_observed_input_count(state)
+    return isinstance(previous, int) and 0 < current < previous
+
+
+def _observed_input_wave(
+    target: str, signature: str, pending_count: int, specialists: List[str]
+) -> Dict[str, Any]:
+    return {
+        "tool_name": "fireteam_dispatch",
+        "tool_args": {
+            "specialists": specialists,
+            "mode": "observed_inputs",
+            "targets": [target],
+            "surface_signature": signature,
+            "pending_input_count": pending_count,
+            "mission": (
+                "Test browser-observed inputs for XSS and SQL injection first. "
+                "Lease one concrete input per specialist; use live evidence "
+                "and approved actions. Other bug classes run in the full wave."
+            ),
+        },
+        "thought": "Dispatch a parallel hunt wave on observed inputs now.",
+    }
+
+
 def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Checklist a curious tester must finish before calling the host clean.
@@ -188,7 +292,7 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
         "dir_brute_started" in ran and waits >= 2
     )
     params = bool(ran & _PARAM_TOOLS)
-    fireteam = bool(ran & _FIRETEAM_TOOLS)
+    fireteam = _full_fireteam_completed(_steps(state.get("execution_trace")))
     js_surface = all(t in ran for t in _JS_SURFACE_TOOLS)
     brain = bool(ran & _BRAIN_TOOLS) or bool(
         ((state.get("engagement_brain") or {}).get("hypotheses") or [])
@@ -461,8 +565,9 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
     """
     Deterministic next tool for a web assessment.
 
-    Joshua does not get to choose fingerprint-and-stop. Returns tool_name +
-    tool_args, or None once crawl + dir brute + JS/API recon + fireteam have run.
+    Joshua does not get to choose fingerprint-and-stop. Start a hunt wave as
+    soon as the browser exposes real inputs; background enrichment continues
+    and a changed input inventory can trigger another wave.
     """
     state = state or {}
     if state.get("mode") == "pilot":
@@ -551,7 +656,9 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
     crawled = bool(ran & _CRAWL_TOOLS)
     dir_done = bool(ran & _DIR_BRUTE_TOOLS)
     dir_started = "dir_brute_started" in ran or dir_done
-    fireteam = bool(ran & _FIRETEAM_TOOLS)
+    full_fireteam = _full_fireteam_completed(trace)
+    input_signature = observed_input_signature(state)
+    input_dispatched = _dispatched_input_signature(trace, input_signature)
     waits = sum(1 for s in trace if s.get("tool_name") == "wait_recon_workers")
 
     if not crawled:
@@ -589,6 +696,32 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             ),
         }
 
+    # Launch enrichment without waiting for it before testing real browser inputs.
+    if not dir_started:
+        return {
+            "tool_name": "spawn_recon_workers",
+            "tool_args": {"pack": "enrich", "target": target},
+            "thought": "Start bounded directory and URL enrichment in the background.",
+        }
+
+    if input_signature and not input_dispatched:
+        if "sync_engagement_brain" not in ran and "build_threat_model" not in ran:
+            return {
+                "tool_name": "sync_engagement_brain",
+                "tool_args": {},
+                "thought": "Seed observed input hypotheses while enrichment continues.",
+            }
+        return _observed_input_wave(
+            target, input_signature, _untested_observed_input_count(state),
+            _observed_input_specialists(state),
+        )
+
+    if input_signature and _input_wave_made_progress(state, trace, input_signature):
+        return _observed_input_wave(
+            target, input_signature, _untested_observed_input_count(state),
+            _observed_input_specialists(state),
+        )
+
     try:
         from app.services.agent.wordpress_surface import wordpress_forced_step
 
@@ -598,25 +731,12 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
     except Exception:
         pass
 
-    if not dir_done:
-        if dir_started and waits < 2:
-            return {
-                "tool_name": "wait_recon_workers",
-                "tool_args": {"timeout_sec": 45},
-                "thought": (
-                    "Assessment pipeline: join ferox/katana enrich, then hunt "
-                    "whatever paths answered."
-                ),
-            }
-        if not dir_started:
-            return {
-                "tool_name": "spawn_recon_workers",
-                "tool_args": {"pack": "enrich", "target": target},
-                "thought": (
-                    "Assessment pipeline: bounded directory brute-force + URL "
-                    "enrich (404/thin pages still have unlinked paths)."
-                ),
-            }
+    if not dir_done and waits < 2:
+        return {
+            "tool_name": "wait_recon_workers",
+            "tool_args": {"timeout_sec": 45},
+            "thought": "Join background enrichment for additional paths and inputs.",
+        }
 
     if "fingerprint_api" not in ran:
         return {
@@ -657,7 +777,7 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             ),
         }
 
-    if not fireteam:
+    if not full_fireteam:
         return {
             "tool_name": "fireteam_dispatch",
             "tool_args": {

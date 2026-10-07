@@ -115,3 +115,24 @@ def test_specialist_lease_prioritizes_likely_input_but_keeps_other_inputs_open()
     assert assigned["parameter"] == "query:q"
     assert any(cell["parameter"] == "query:zzz" and cell["status"] == "untested"
                for cell in brain.coverage_cells if cell["test_type"] == "xss")
+
+
+def test_early_wave_leases_only_browser_observed_inputs():
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, [
+        {"method": "GET", "host": "app.test", "path": "/static-lead",
+         "location": "query", "name": "search", "identity": "anonymous",
+         "source": "javascript_static", "testable": True},
+        {"method": "POST", "host": "app.test", "path": "/catalog/subscribe",
+         "location": "form", "name": "email", "identity": "anonymous",
+         "source": "observed_form", "testable": True},
+    ])
+    leases = claim_coverage_cell_leases(
+        brain, ["xss", "sqli"],
+        allowed_observation_sources=frozenset({"observed_form"}),
+    )
+    assert set(leases) == {"xss", "sqli"}
+    for lease in leases.values():
+        cell = next(row for row in brain.coverage_cells if row["id"] == lease.coverage_cell_id)
+        assert cell["path"] == "/catalog/subscribe"
+        assert cell["observation_source"] == "observed_form"

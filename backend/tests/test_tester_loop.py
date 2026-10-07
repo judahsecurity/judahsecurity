@@ -8,6 +8,7 @@ from app.services.agent.tester_loop import (
     forced_next_step,
     format_tester_loop_for_prompt,
     normalized_tools_run,
+    observed_input_signature,
     surface_looks_empty,
     tester_loop_progress as loop_progress,
 )
@@ -142,6 +143,136 @@ def test_forced_pipeline_crawl_then_enrich_then_fireteam():
     }
     assert forced_next_step(after_hunt) is None
     assert complete_blocked_reason(after_hunt) is None
+
+
+def test_observed_input_hunt_starts_before_enrichment_join_and_js_pipeline():
+    target = "https://app.example.com"
+    cmap = {
+        "target": target,
+        "scope": target,
+        "pages_visited": [target + "/catalog"],
+        "forms": [{
+            "method": "POST", "action": "/catalog/subscribe",
+            "inputs": ["email", "csrf"],
+        }],
+    }
+    state = {
+        "mode": "agent",
+        "target_info": {"primary_target": target},
+        "capability_map": cmap,
+        "execution_trace": [
+            {"tool_name": "execute_deep_crawl", "success": True},
+            {"tool_name": "spawn_recon_workers", "success": True,
+             "tool_args": {"pack": "enrich"}},
+        ],
+    }
+    signature = observed_input_signature(state)
+    assert signature
+    assert forced_next_step(state)["tool_name"] == "sync_engagement_brain"
+
+    state["execution_trace"].append({"tool_name": "sync_engagement_brain", "success": True})
+    wave = forced_next_step(state)
+    assert wave["tool_name"] == "fireteam_dispatch"
+    assert wave["tool_args"]["surface_signature"] == signature
+
+    state["execution_trace"].append({
+        "tool_name": "fireteam_dispatch", "success": True,
+        "tool_args": wave["tool_args"],
+    })
+    assert forced_next_step(state)["tool_name"] == "wait_recon_workers"
+
+    cmap["forms"].append({"method": "GET", "action": "/catalog", "inputs": ["q"]})
+    second = forced_next_step(state)
+    assert second["tool_name"] == "fireteam_dispatch"
+    assert second["tool_args"]["surface_signature"] != signature
+
+
+def test_observed_input_hunt_precedes_wordpress_followups(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.agent.wordpress_surface.wordpress_forced_step",
+        lambda _state: {"tool_name": "check_cve_applicability", "tool_args": {}},
+    )
+    target = "https://wp.example.com"
+    state = {
+        "target_info": {"primary_target": target},
+        "capability_map": {
+            "target": target, "scope": target,
+            "forms": [{"method": "GET", "action": "/search", "inputs": ["q"]}],
+        },
+        "execution_trace": [
+            {"tool_name": "execute_deep_crawl", "success": True},
+            {"tool_name": "spawn_recon_workers", "success": True,
+             "tool_args": {"pack": "enrich"}},
+            {"tool_name": "sync_engagement_brain", "success": True},
+        ],
+    }
+    assert forced_next_step(state)["tool_name"] == "fireteam_dispatch"
+
+
+def test_static_js_endpoint_without_observed_input_does_not_start_early_hunt():
+    state = {
+        "target_info": {"primary_target": "https://app.example.com"},
+        "capability_map": {
+            "target": "https://app.example.com",
+            "scope": "https://app.example.com",
+            "js_endpoints": ["/api/guess"],
+        },
+        "execution_trace": [
+            {"tool_name": "execute_deep_crawl", "success": True},
+            {"tool_name": "spawn_recon_workers", "success": True,
+             "tool_args": {"pack": "enrich"}},
+        ],
+    }
+    assert observed_input_signature(state) == ""
+    assert forced_next_step(state)["tool_name"] == "wait_recon_workers"
+
+
+def test_observed_input_queue_advances_only_after_progress_then_runs_full_wave():
+    target = "https://app.example.com"
+    state = {
+        "mode": "agent",
+        "target_info": {"primary_target": target},
+        "capability_map": {
+            "target": target, "scope": target,
+            "forms": [{"method": "GET", "action": "/search", "inputs": ["q", "sort"]}],
+        },
+        "engagement_brain": {"coverage_cells": [
+            {"source": "parameter_inventory", "observation_source": "observed_form",
+             "specialist": "xss", "status": "untested"},
+            {"source": "parameter_inventory", "observation_source": "observed_form",
+             "specialist": "sqli", "status": "untested"},
+        ]},
+        "execution_trace": [
+            {"tool_name": name, "success": True}
+            for name in (
+                "execute_deep_crawl", "recon_worker:ferox_dirs", "fingerprint_api",
+                "fetch_lazy_chunks", "extract_js_endpoints", "sync_engagement_brain",
+            )
+        ],
+    }
+    signature = observed_input_signature(state)
+    state["execution_trace"].append({
+        "tool_name": "fireteam_dispatch", "success": True,
+        "tool_args": {"surface_signature": signature, "pending_input_count": 4},
+    })
+    next_wave = forced_next_step(state)
+    assert next_wave["tool_name"] == "fireteam_dispatch"
+    assert next_wave["tool_args"]["pending_input_count"] == 2
+
+    state["engagement_brain"]["coverage_cells"][1]["status"] = "tested_clean"
+    narrowed = forced_next_step(state)
+    assert narrowed["tool_args"]["specialists"] == ["xss"]
+    state["engagement_brain"]["coverage_cells"][1]["status"] = "untested"
+
+    state["execution_trace"].append({
+        "tool_name": "fireteam_dispatch", "success": True,
+        "tool_args": next_wave["tool_args"],
+    })
+    assert loop_progress(state)["fireteam"] is False
+    full_wave = forced_next_step(state)
+    assert full_wave["tool_name"] == "fireteam_dispatch"
+    assert full_wave["tool_args"]["specialists"] == "auto"
+    assert not full_wave["tool_args"].get("surface_signature")
 
 
 def test_mapped_assessment_follow_up_skips_first_turn_pipeline():

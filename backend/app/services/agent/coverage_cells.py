@@ -668,6 +668,7 @@ def claim_coverage_cell_leases(
     *,
     task_leases: dict[str, Any] | None = None,
     denominator: Iterable[dict[str, Any]] | None = None,
+    allowed_observation_sources: frozenset[str] | None = None,
     lease_seconds: int = 3600,
     now: float | None = None,
 ) -> dict[str, CoverageCellLease]:
@@ -691,6 +692,13 @@ def claim_coverage_cell_leases(
             for cell in brain.coverage_cells
             if cell.get("status") in CELL_OPEN
             and not cell.get("lease_id")
+            and (
+                allowed_observation_sources is None
+                or (
+                    cell.get("source") == "parameter_inventory"
+                    and cell.get("observation_source") in allowed_observation_sources
+                )
+            )
             and (
                 cell.get("specialist") == specialist
                 or (hypothesis_id and cell.get("hypothesis_id") == hypothesis_id)

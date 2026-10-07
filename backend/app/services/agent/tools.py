@@ -8366,6 +8366,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         max_parallel: int = 4,
         capability_map: Optional[Dict[str, Any]] = None,
         mode: str = "attack",
+        surface_signature: str = "",
+        pending_input_count: int = 0,
     ) -> str:
         """Scatter-gather: spawn N parallel specialist sub-agents on the same mission.
 
@@ -8379,7 +8381,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             max_parallel: How many specialists to run concurrently.
             capability_map: Structured map from execute_deep_crawl (optional if
                 the orchestrator injects session state).
-            mode: ``attack`` (default, map-driven hunters) or ``recon`` (legacy triad).
+            mode: ``attack`` (default), ``observed_inputs`` (leased browser inputs),
+                or ``recon`` (legacy triad).
+            surface_signature: Value-free observed-input inventory revision for scheduling.
+            pending_input_count: Number of untested observed input cells when queued.
         """
         from app.services.agent.capability_map import (
             build_capability_map_from_dict,
@@ -8508,19 +8513,20 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     *[name for name in ("js_secrets", "xss", "sqli") if name in pending_inventory_specialists],
                     *(chosen or []),
                 ]))
-            pending_proof_specialists = [
-                str(row.get("specialist") or "")
-                for row in (brain.proof_escalations or [])
-                if isinstance(row, dict) and row.get("status") == "pending"
-            ]
-            for specialist_name in pending_proof_specialists:
-                if specialist_name and specialist_name not in (chosen or []):
-                    chosen = list(chosen or []) + [specialist_name]
+            if mode != "observed_inputs":
+                pending_proof_specialists = [
+                    str(row.get("specialist") or "")
+                    for row in (brain.proof_escalations or [])
+                    if isinstance(row, dict) and row.get("status") == "pending"
+                ]
+                for specialist_name in pending_proof_specialists:
+                    if specialist_name and specialist_name not in (chosen or []):
+                        chosen = list(chosen or []) + [specialist_name]
             chosen = list(chosen or [])[:8]
 
         from app.services.agent.risk_assessment import pending_ra_rows
         pending_ra = pending_ra_rows(brain)
-        if pending_ra and "risk_assessor" not in (chosen or []):
+        if mode != "observed_inputs" and pending_ra and "risk_assessor" not in (chosen or []):
             chosen = list(chosen or []) + ["risk_assessor"]
 
         if not mission or not str(mission).strip():
@@ -8627,12 +8633,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             )
         from app.services.agent.coverage_cells import claim_coverage_cell_leases
         from app.services.agent.engagement_brain import denominator_surfaces
+        from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
 
         coverage_leases = claim_coverage_cell_leases(
             brain,
             chosen,
             task_leases=task_leases,
             denominator=denominator_surfaces(brain),
+            allowed_observation_sources=(
+                OBSERVED_INPUT_SOURCES if mode == "observed_inputs" else None
+            ),
         )
         directives = directives_from_hypotheses(
             brain=brain,
@@ -8660,6 +8670,173 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 if asyncio.iscoroutine(message):
                     await message
 
+        from app.services.agent.independent_verify import (
+            candidate_from_dict,
+            ingest_report_findings,
+            run_independent_verifiers,
+            verify_receipt_key,
+        )
+
+        verify_lock = asyncio.Lock()
+        verified_early: set[str] = set()
+        early_verify_reports: list = []
+        lifted_early: list = []
+        early_verdicts: dict[str, dict] = {}
+        ingested_reports: set[int] = set()
+
+        def _remember_early_verdict(live, candidate) -> None:
+            """Save a verdict at the moment it is written to shared state."""
+            if not candidate or not candidate.verified_at:
+                return
+            receipt_key = verify_receipt_key(candidate.title, candidate.target)
+            early_verdicts[candidate.id] = {
+                "candidate": candidate.to_dict(),
+                "receipt_key": receipt_key,
+                "receipt": (live.verification_receipts or {}).get(receipt_key),
+                "coverage_cell": next((
+                    dict(cell) for cell in live.coverage_cells
+                    if candidate.coverage_cell_id and cell.get("id") == candidate.coverage_cell_id
+                ), None),
+                "authorization_rows": [
+                    dict(row) for row in live.authorization_matrix
+                    if candidate.hypothesis_id
+                    and row.get("hypothesis_id") == candidate.hypothesis_id
+                ],
+                "proof_escalation": next((
+                    dict(row) for row in live.proof_escalations
+                    if candidate.proof_escalation_id
+                    and row.get("id") == candidate.proof_escalation_id
+                ), None),
+                "hypothesis": next((
+                    h for h in live.hypotheses
+                    if candidate.hypothesis_id and h.id == candidate.hypothesis_id
+                ), None),
+            }
+
+        def _capture_early_verdicts(candidate_ids: set[str]) -> None:
+            """Also capture test doubles and verifiers that update the brain directly."""
+            live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            for raw in live.candidates or []:
+                candidate = candidate_from_dict(raw)
+                if candidate and candidate.id in candidate_ids and candidate.id not in early_verdicts:
+                    _remember_early_verdict(live, candidate)
+
+        async def _verify_completed_hunter(report) -> None:
+            """Verify submitted candidates while sibling hunters keep working."""
+            async with verify_lock:
+                live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+                lifted = ingest_report_findings(live, [report])
+                ingested_reports.add(id(report))
+                if getattr(report, "key_findings", None):
+                    self._engagement_brain = live.to_dict()
+                if lifted:
+                    lifted_early.extend(lifted)
+                pending = [
+                    candidate
+                    for candidate in (
+                        candidate_from_dict(raw) for raw in (live.candidates or [])
+                    )
+                    if candidate and candidate.status == "pending"
+                    and candidate.id not in verified_early
+                ]
+                if not pending:
+                    return
+                verified_early.update(candidate.id for candidate in pending)
+                threat_slice = ""
+                if live.threat_model:
+                    try:
+                        from app.services.agent.threat_model import format_threat_model_for_prompt
+                        threat_slice = format_threat_model_for_prompt(live.threat_model)[:2500]
+                    except Exception:
+                        pass
+                previous_observer = getattr(self, "_early_verdict_observer", None)
+                self._early_verdict_observer = _remember_early_verdict
+                try:
+                    early_verify_reports.extend(await run_independent_verifiers(
+                        pending,
+                        llm=llm,
+                        tools_manager=self,
+                        targets=target_list,
+                        threat_slice=threat_slice,
+                        max_parallel=1,
+                    ))
+                    _capture_early_verdicts({candidate.id for candidate in pending})
+                except Exception:
+                    logger.exception("Early independent verification failed; final wave will retry pending candidates")
+                finally:
+                    self._early_verdict_observer = previous_observer
+
+        def _preserve_live_execution_state() -> None:
+            """Keep candidate and verifier writes made during a parallel hunt wave."""
+            live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            for field_name in (
+                "application_operations", "authorization_matrix", "proof_receipts",
+                "candidates", "coverage", "coverage_cells", "proof_escalations",
+                "verification_receipts",
+            ):
+                value = getattr(live, field_name, None)
+                if value:
+                    setattr(brain, field_name, value)
+            applied_early_ids: set[str] = set()
+            for snapshot in early_verdicts.values():
+                candidate = snapshot["candidate"]
+                current = next((raw for raw in brain.candidates
+                                if isinstance(raw, dict) and raw.get("id") == candidate["id"]), None)
+                if current and current.get("revision") != candidate.get("revision"):
+                    continue
+                applied_early_ids.add(candidate["id"])
+                brain.candidates = [raw for raw in brain.candidates
+                                    if not isinstance(raw, dict) or raw.get("id") != candidate["id"]]
+                brain.candidates.append(dict(candidate))
+                key, receipt = snapshot["receipt_key"], snapshot["receipt"]
+                brain.verification_receipts.pop(key, None)
+                if receipt:
+                    brain.verification_receipts[key] = dict(receipt)
+                for field_name, row in (
+                    ("coverage_cells", snapshot["coverage_cell"]),
+                    ("proof_escalations", snapshot["proof_escalation"]),
+                ):
+                    if row:
+                        rows = getattr(brain, field_name)
+                        rows[:] = [existing for existing in rows if existing.get("id") != row.get("id")]
+                        rows.append(dict(row))
+                if snapshot["authorization_rows"]:
+                    brain.authorization_matrix = [
+                        row for row in brain.authorization_matrix
+                        if row.get("hypothesis_id") != candidate.get("hypothesis_id")
+                    ] + [dict(row) for row in snapshot["authorization_rows"]]
+                hypothesis = snapshot["hypothesis"]
+                if hypothesis:
+                    for existing in brain.hypotheses:
+                        if existing.id == hypothesis.id:
+                            existing.status = hypothesis.status
+                            existing.evidence = hypothesis.evidence
+                            break
+            verified_hypotheses = {
+                str(raw.get("hypothesis_id") or "")
+                for raw in (brain.candidates or [])
+                if isinstance(raw, dict) and raw.get("verified_at") and raw.get("hypothesis_id")
+            }
+            from app.services.agent.penetration_task_graph import NODE_PROVEN, NODE_RETRY
+
+            live_hypotheses = {h.id: h for h in live.hypotheses if h.id in verified_hypotheses}
+            live_hypotheses.update({
+                snapshot["hypothesis"].id: snapshot["hypothesis"]
+                for candidate_id, snapshot in early_verdicts.items()
+                if candidate_id in applied_early_ids and snapshot["hypothesis"]
+            })
+            for hypothesis in brain.hypotheses:
+                latest = live_hypotheses.get(hypothesis.id)
+                if not latest:
+                    continue
+                hypothesis.status = latest.status
+                hypothesis.evidence = latest.evidence
+                node = graph.nodes.get(hypothesis.id)
+                if node and latest.status == "proven":
+                    node.status = NODE_PROVEN
+                elif node and node.status == NODE_PROVEN:
+                    node.status = NODE_RETRY
+
         result = await run_fireteam(
             mission=mission,
             targets=target_list,
@@ -8670,6 +8847,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             directives=directives,
             llm_for_specialist=_llm_for_profile,
             progress_callback=_fireteam_progress,
+            report_callback=_verify_completed_hunter,
         )
 
         from app.services.agent.auto_prompter import (
@@ -8723,6 +8901,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     retry_directives[rewrite.specialist] = apply_rewrite_to_directive(d, rewrite)
                 retry_names.append(rewrite.specialist)
             if retry_profiles:
+                _preserve_live_execution_state()
                 persist_graph(brain, graph)
                 self._engagement_brain = brain.to_dict()
                 _checkpoint_task_graph()
@@ -8736,6 +8915,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     directives=retry_directives,
                     llm_for_specialist=_llm_for_profile,
                     progress_callback=_fireteam_progress,
+                    report_callback=_verify_completed_hunter,
                 )
                 result.reports.extend(list(retry_result.reports))
                 result.specialists_run = list(result.specialists_run) + list(
@@ -8756,35 +8936,18 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     ensure_spawned_hypotheses(brain, spawned)
                     graph = sync_graph_from_brain(brain)
 
-        # Specialist tools update the manager-owned brain while executors run.
-        # Preserve those execution-owned ledgers before persisting graph results.
-        live_brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
-        for field_name in (
-            "application_operations",
-            "authorization_matrix",
-            "proof_receipts",
-            "candidates",
-            "coverage",
-            "coverage_cells",
-            "proof_escalations",
-            "verification_receipts",
-        ):
-            live_value = getattr(live_brain, field_name, None)
-            if live_value:
-                setattr(brain, field_name, live_value)
+        # Specialist and verifier tools write to the manager-owned brain while
+        # the wave runs. Preserve those receipts before persisting graph results.
+        _preserve_live_execution_state()
         persist_graph(brain, graph)
         self._engagement_brain = brain.to_dict()
         _checkpoint_task_graph()
 
         self._require_independent_verify = True
-        from app.services.agent.independent_verify import (
-            candidate_from_dict,
-            ingest_report_findings,
-            run_independent_verifiers,
-        )
-
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
-        lifted = ingest_report_findings(brain, result.reports)
+        lifted = [*lifted_early, *ingest_report_findings(
+            brain, [report for report in result.reports if id(report) not in ingested_reports]
+        )]
         from app.services.agent.coverage_cells import release_coverage_cell_lease
 
         reports_by_specialist = {}
@@ -8828,7 +8991,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             for c in (candidate_from_dict(raw) for raw in (brain.candidates or []))
             if c and c.status == "pending"
         ]
-        verify_reports: list = []
+        verify_reports: list = list(early_verify_reports)
         if pending:
             threat_slice = ""
             if brain.threat_model:
@@ -8837,19 +9000,21 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     threat_slice = format_threat_model_for_prompt(brain.threat_model)[:2500]
                 except Exception:
                     threat_slice = ""
-            verify_reports = await run_independent_verifiers(
+            verify_reports.extend(await run_independent_verifiers(
                 pending,
                 llm=llm,
                 tools_manager=self,
                 targets=target_list,
                 threat_slice=threat_slice,
                 max_parallel=max_parallel,
-            )
+            ))
             brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
             _checkpoint_task_graph()
         out = {
             "commander": pantheon_line("orchestrator"),
             "mission": result.mission[:2000],
+            "surface_signature": surface_signature[:32],
+            "pending_input_count": max(0, pending_input_count) if isinstance(pending_input_count, int) else 0,
             "specialists_requested": chosen,
             "specialists_epithets": {
                 n: epithet_for(n) for n in chosen

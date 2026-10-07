@@ -1402,6 +1402,7 @@ async def run_fireteam(
     tools_manager: Any,
     max_parallel: int = 4,
     progress_callback: Optional[Callable[[str, str], Awaitable[None]]] = None,
+    report_callback: Optional[Callable[[SpecialistReport], Awaitable[None]]] = None,
     directives: Optional[Dict[str, Any]] = None,
     llm_for_specialist: Optional[Callable[[SpecialistProfile], Any]] = None,
     member_timeout_sec: float = 600.0,
@@ -1412,6 +1413,7 @@ async def run_fireteam(
     ``specialists`` may contain either string names from :data:`DEFAULT_SPECIALISTS`
     or fully custom :class:`SpecialistProfile` instances (for ad-hoc missions).
     ``directives`` maps specialist name → OperationDirective (optional).
+    ``report_callback`` receives each completed member before the whole wave ends.
     """
     start = datetime.utcnow()
     directives = directives or {}
@@ -1512,6 +1514,13 @@ async def run_fireteam(
                 f"specialist:{p.name}", target=targets_list[0] if targets_list else "",
                 detail=rep.error or rep.verdict or "",
             )
+            if report_callback and not rep.error:
+                try:
+                    await report_callback(rep)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    logger.exception("Fireteam report callback failed for %s", p.name)
             return rep
 
     def _log_late_failure(task: asyncio.Task) -> None:

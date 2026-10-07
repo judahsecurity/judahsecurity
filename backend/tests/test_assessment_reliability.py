@@ -771,6 +771,65 @@ async def test_fireteam_dispatch_does_not_bypass_interrupted_lease(
 
 
 @pytest.mark.asyncio
+async def test_fireteam_verifies_candidate_on_hunter_completion(manager, monkeypatch):
+    from app.services.agent.fireteam_service import FireteamResult, SpecialistReport
+    from app.services.agent.independent_verify import FindingCandidate
+    from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+    hypothesis = Hypothesis(
+        id="observed-xss", title="Observed input reflection", assumption="Input reflects",
+        test="Use a bounded canary", pass_criteria="Browser execution",
+        kill_criteria="No execution", specialist="xss",
+    )
+    manager._engagement_brain = EngagementBrain(
+        target="https://app.test", hypotheses=[hypothesis],
+    ).to_dict()
+    monkeypatch.setattr(manager, "_cheap_llm", lambda: object())
+    monkeypatch.setattr("app.services.agent.run_snapshot.save_run_snapshot",
+                        lambda *_args, **_kwargs: None)
+    verifier_calls = []
+
+    async def fake_verify(candidates, **_kwargs):
+        verifier_calls.append([candidate.id for candidate in candidates])
+        live = engagement_brain_from_dict(manager._engagement_brain)
+        live.candidates[0]["status"] = "confirmed"
+        live.candidates[0]["verified_at"] = "2026-10-07T00:00:00Z"
+        live.hypotheses[0].status = "proven"
+        manager._engagement_brain = live.to_dict()
+        return [{"candidate_id": candidates[0].id, "status": "confirmed"}]
+
+    async def fake_fireteam(*, mission, directives, report_callback, **_kwargs):
+        lease = directives["xss"]
+        live = engagement_brain_from_dict(manager._engagement_brain)
+        live.candidates = [FindingCandidate(
+            id="cand-xss", title="XSS candidate", target="https://app.test",
+            hypothesis_id=hypothesis.id,
+        ).to_dict()]
+        manager._engagement_brain = live.to_dict()
+        stale_hunter_state = live.to_dict()
+        report = SpecialistReport(
+            specialist="xss", role="XSS", mission=mission,
+            summary="Candidate submitted", verdict="proven",
+            hypothesis_ids=[hypothesis.id], assigned_hypothesis_id=hypothesis.id,
+            lease_id=lease.lease_id,
+        )
+        await report_callback(report)
+        assert verifier_calls == [["cand-xss"]]
+        # A sibling hunter can finish with the brain it read before verification.
+        manager._engagement_brain = stale_hunter_state
+        return FireteamResult(mission=mission, specialists_run=["xss"], reports=[report])
+
+    monkeypatch.setattr("app.services.agent.fireteam_service.run_fireteam", fake_fireteam)
+    monkeypatch.setattr("app.services.agent.independent_verify.run_independent_verifiers", fake_verify)
+    result = json.loads(await manager.fireteam_dispatch(
+        mission="Test observed XSS input", targets=["https://app.test"], specialists=["xss"],
+    ))
+    assert result["verify_wave"] == [{"candidate_id": "cand-xss", "status": "confirmed"}]
+    assert manager._engagement_brain["candidates"][0]["status"] == "confirmed"
+    assert manager._engagement_brain["task_graph"]["nodes"][hypothesis.id]["status"] == "proven"
+
+
+@pytest.mark.asyncio
 async def test_workflow_resumes_and_cleans_up_after_prerequisite_failure(
     manager, transport
 ):

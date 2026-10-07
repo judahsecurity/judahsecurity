@@ -124,3 +124,34 @@ async def test_wave_deadline_keeps_completed_member(monkeypatch):
     )
     assert result.reports[0].summary == "completed"
     assert "wave timed out" in result.reports[1].error
+
+
+@pytest.mark.asyncio
+async def test_completed_hunter_can_start_verification_before_sibling_finishes(monkeypatch):
+    release_slow = asyncio.Event()
+    verified_early = asyncio.Event()
+
+    async def specialist(profile, mission, targets, llm, tools_manager, directive=None):
+        if profile.name == "slow":
+            await release_slow.wait()
+        return SpecialistReport(
+            specialist=profile.name, role=profile.role, mission=mission,
+            summary="completed", key_findings=["candidate"] if profile.name == "quick" else [],
+        )
+
+    async def verify(report):
+        if report.specialist == "quick":
+            verified_early.set()
+
+    monkeypatch.setattr("app.services.agent.fireteam_service._run_specialist", specialist)
+    profiles = [SpecialistProfile(name=name, role=name, allowed_tools=[])
+                for name in ("quick", "slow")]
+    wave = asyncio.create_task(run_fireteam(
+        mission="test", targets=[], specialists=profiles, llm=None,
+        tools_manager=None, report_callback=verify,
+    ))
+    await asyncio.wait_for(verified_early.wait(), timeout=1)
+    assert not wave.done()
+    release_slow.set()
+    result = await asyncio.wait_for(wave, timeout=1)
+    assert [report.specialist for report in result.reports] == ["quick", "slow"]
