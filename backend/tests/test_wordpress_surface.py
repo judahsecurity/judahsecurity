@@ -89,6 +89,13 @@ def test_forced_wp_probes_after_crawl():
         "tool_args": {"pack": "enrich"},
     })
     step = forced_next_step(state)
+    assert step and step["tool_name"] == "fireteam_dispatch"
+    assert step["tool_args"]["specialists"] == ["cms_followup"]
+    state["execution_trace"].append({
+        "tool_name": "fireteam_dispatch", "success": True,
+        "tool_args": step["tool_args"],
+    })
+    step = forced_next_step(state)
     assert step and step["tool_name"] == "check_cve_applicability"
     assert "emulate3d.com" in (step.get("tool_args") or {}).get("url", "")
 
@@ -121,6 +128,19 @@ def test_forced_wp_probes_after_crawl():
     mutant = (step.get("tool_args") or {}).get("mutant") or {}
     assert "admin-ajax.php" in str(mutant.get("url") or "")
     assert "SLEEP(2)" in str(mutant.get("body") or "")
+
+
+def test_cms_specialist_summary_does_not_count_as_wordpress_probe():
+    state = {
+        "execution_trace": [{
+            "tool_name": "fireteam_dispatch",
+            "tool_args": {"specialists": ["cms_followup"]},
+            "tool_output": "Potential /wp-json/wp/v2/users and admin-ajax.php tax_query",
+        }],
+    }
+    status = wordpress_probe_status(state)
+    assert status["users_enum"] is False
+    assert status["ajax_sqli"] is False
 
 
 def test_complete_blocked_until_wp_probes():

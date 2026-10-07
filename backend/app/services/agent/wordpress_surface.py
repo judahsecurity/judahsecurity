@@ -189,6 +189,9 @@ def wordpress_probe_status(state: Optional[Dict[str, Any]] = None) -> Dict[str, 
         if not isinstance(step, dict):
             continue
         name = str(step.get("tool_name") or "")
+        if name == "fireteam_dispatch":
+            # A specialist summary may mention a probe without executing it.
+            continue
         blob = _trace_blob(step)
         if name == "execute_wpscan":
             wpscan = True

@@ -8382,7 +8382,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             capability_map: Structured map from execute_deep_crawl (optional if
                 the orchestrator injects session state).
             mode: ``attack`` (default), ``observed_inputs`` (leased browser inputs),
-                or ``recon`` (legacy triad).
+                ``cms_followup`` (fingerprinted CMS), or ``recon`` (legacy triad).
             surface_signature: Value-free observed-input inventory revision for scheduling.
             pending_input_count: Number of untested observed input cells when queued.
         """
@@ -8513,7 +8513,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     *[name for name in ("js_secrets", "xss", "sqli") if name in pending_inventory_specialists],
                     *(chosen or []),
                 ]))
-            if mode != "observed_inputs":
+            if mode not in {"observed_inputs", "cms_followup"}:
                 pending_proof_specialists = [
                     str(row.get("specialist") or "")
                     for row in (brain.proof_escalations or [])
@@ -8526,7 +8526,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         from app.services.agent.risk_assessment import pending_ra_rows
         pending_ra = pending_ra_rows(brain)
-        if mode != "observed_inputs" and pending_ra and "risk_assessor" not in (chosen or []):
+        if mode not in {"observed_inputs", "cms_followup"} and pending_ra and "risk_assessor" not in (chosen or []):
             chosen = list(chosen or []) + ["risk_assessor"]
 
         if not mission or not str(mission).strip():

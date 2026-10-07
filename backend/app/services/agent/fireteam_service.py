@@ -206,6 +206,43 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         llm_task="recon",
     ),
     SpecialistProfile(
+        name="cms_followup",
+        role=(
+            "CMS follow-up specialist. Investigate fingerprinted core, plugin, theme, "
+            "and configuration leads while application-input hunters run."
+        ),
+        allowed_tools=[
+            "fingerprint_passive_stack",
+            "check_cve_applicability",
+            "execute_cmseek",
+            "execute_wpscan",
+            "search_cve",
+            "search_vulnx",
+            "vulnx_query",
+            "execute_curl",
+            "execute_browser",
+            "compare_requests",
+            "get_engagement_brain",
+            "submit_finding_candidate",
+            "update_hypothesis",
+            "queue_finding_followups",
+            "save_note",
+        ],
+        max_iterations=8,
+        llm_task="recon",
+        system_prompt_suffix=(
+            "Use the observed CMS fingerprint and exact scoped host. Research only "
+            "components and versions supported by response evidence; an unversioned "
+            "label is a lead, not a finding. Investigate public plugin/theme files and "
+            "CMS configuration exposures with bounded requests. On WordPress, Joshua "
+            "separately runs the passive CVE map, REST user enumeration, and admin-ajax "
+            "checks; focus on distinct plugin/theme/configuration follow-ups. "
+            "Submit a candidate only with a matched affected range or reproduced "
+            "configuration impact, including URL and evidence. Independent verification "
+            "will confirm or refute it. Record uncertain leads as notes."
+        ),
+    ),
+    SpecialistProfile(
         name="secrets_hunter",
         role=(
             "Secrets & credential exposure specialist. Focus on leaked keys, "

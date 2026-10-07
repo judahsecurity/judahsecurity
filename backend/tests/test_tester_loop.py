@@ -4,6 +4,7 @@ import json
 
 from app.services.agent.assessment_kickoff import root_needs_dir_brute
 from app.services.agent.tester_loop import (
+    cms_followup_product,
     complete_blocked_reason,
     forced_next_step,
     format_tester_loop_for_prompt,
@@ -185,6 +186,53 @@ def test_observed_input_hunt_starts_before_enrichment_join_and_js_pipeline():
     second = forced_next_step(state)
     assert second["tool_name"] == "fireteam_dispatch"
     assert second["tool_args"]["surface_signature"] != signature
+
+
+def test_cms_followup_runs_with_observed_input_hunters_once():
+    target = "https://cms.example.com"
+    state = {
+        "target_info": {"primary_target": target, "technologies": ["Drupal:10"]},
+        "capability_map": {
+            "target": target, "scope": target,
+            "forms": [{"method": "GET", "action": "/search", "inputs": ["q"]}],
+        },
+        "execution_trace": [
+            {"tool_name": "execute_deep_crawl", "success": True},
+            {"tool_name": "spawn_recon_workers", "success": True,
+             "tool_args": {"pack": "enrich"}},
+            {"tool_name": "sync_engagement_brain", "success": True},
+        ],
+    }
+    assert cms_followup_product(state) == "Drupal"
+    first = forced_next_step(state)
+    assert first["tool_args"]["specialists"] == ["xss", "sqli", "cms_followup"]
+    state["execution_trace"].append({
+        "tool_name": "fireteam_dispatch", "success": True,
+        "tool_args": first["tool_args"],
+    })
+    assert loop_progress(state)["fireteam"] is False
+    assert forced_next_step(state)["tool_name"] == "wait_recon_workers"
+
+
+def test_cms_followup_runs_without_input_and_does_not_complete_full_wave():
+    target = "https://cms.example.com"
+    state = {
+        "target_info": {"primary_target": target, "technologies": ["Joomla 5"]},
+        "capability_map": {"target": target, "scope": target},
+        "execution_trace": [
+            {"tool_name": "execute_deep_crawl", "success": True},
+            {"tool_name": "spawn_recon_workers", "success": True,
+             "tool_args": {"pack": "enrich"}},
+        ],
+    }
+    first = forced_next_step(state)
+    assert first["tool_args"]["specialists"] == ["cms_followup"]
+    state["execution_trace"].append({
+        "tool_name": "fireteam_dispatch", "success": True,
+        "tool_args": first["tool_args"],
+    })
+    assert loop_progress(state)["fireteam"] is False
+    assert forced_next_step(state)["tool_name"] == "wait_recon_workers"
 
 
 def test_observed_input_hunt_precedes_wordpress_followups(monkeypatch):

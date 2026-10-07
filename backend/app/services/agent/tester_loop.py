@@ -205,7 +205,37 @@ def _full_fireteam_completed(trace: List[Dict[str, Any]]) -> bool:
     return any(
         step.get("tool_name") == "fireteam_dispatch"
         and step.get("success") is not False
+        and (step.get("tool_args") or {}).get("mode") not in {"observed_inputs", "cms_followup"}
         and not (step.get("tool_args") or {}).get("surface_signature")
+        for step in trace
+    )
+
+
+def cms_followup_product(state: Optional[Dict[str, Any]] = None) -> str:
+    """Return a CMS with a concrete fingerprint in current assessment state."""
+    state = state or {}
+    from app.services.agent.wordpress_surface import wordpress_detected
+
+    if wordpress_detected(state):
+        return "WordPress"
+    cmap = state.get("capability_map") or {}
+    info = state.get("target_info") or {}
+    signals = [
+        *(info.get("technologies") or []),
+        *((cmap.get("notes") or []) if isinstance(cmap, dict) else []),
+        *((cmap.get("capabilities") or []) if isinstance(cmap, dict) else []),
+    ]
+    blob = " ".join(str(item) for item in signals)
+    for product in ("Drupal", "Joomla", "Magento"):
+        if re.search(rf"\b{product}\b", blob, re.I):
+            return product
+    return ""
+
+
+def _cms_followup_dispatched(trace: List[Dict[str, Any]]) -> bool:
+    return any(
+        step.get("tool_name") == "fireteam_dispatch"
+        and "cms_followup" in ((step.get("tool_args") or {}).get("specialists") or [])
         for step in trace
     )
 
@@ -253,12 +283,14 @@ def _input_wave_made_progress(
 
 
 def _observed_input_wave(
-    target: str, signature: str, pending_count: int, specialists: List[str]
+    target: str, signature: str, pending_count: int, specialists: List[str],
+    cms_product: str = "",
 ) -> Dict[str, Any]:
+    chosen = [*specialists, *(["cms_followup"] if cms_product else [])]
     return {
         "tool_name": "fireteam_dispatch",
         "tool_args": {
-            "specialists": specialists,
+            "specialists": chosen,
             "mode": "observed_inputs",
             "targets": [target],
             "surface_signature": signature,
@@ -266,10 +298,30 @@ def _observed_input_wave(
             "mission": (
                 "Test browser-observed inputs for XSS and SQL injection first. "
                 "Lease one concrete input per specialist; use live evidence "
-                "and approved actions. Other bug classes run in the full wave."
+                "and approved actions. "
+                + (f"In parallel, investigate fingerprinted {cms_product} components and configuration. "
+                   if cms_product else "")
+                + "Other bug classes run in the full wave."
             ),
         },
         "thought": "Dispatch a parallel hunt wave on observed inputs now.",
+    }
+
+
+def _cms_followup_wave(target: str, product: str) -> Dict[str, Any]:
+    return {
+        "tool_name": "fireteam_dispatch",
+        "tool_args": {
+            "specialists": ["cms_followup"],
+            "mode": "cms_followup",
+            "targets": [target],
+            "mission": (
+                f"Investigate fingerprinted {product} core, plugin/theme, and "
+                "configuration leads on the scoped host. Submit evidence-backed "
+                "candidates for independent verification."
+            ),
+        },
+        "thought": "Run CMS follow-up analysis while path enrichment continues.",
     }
 
 
@@ -659,6 +711,8 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
     full_fireteam = _full_fireteam_completed(trace)
     input_signature = observed_input_signature(state)
     input_dispatched = _dispatched_input_signature(trace, input_signature)
+    cms_product = cms_followup_product(state)
+    cms_dispatched = _cms_followup_dispatched(trace)
     waits = sum(1 for s in trace if s.get("tool_name") == "wait_recon_workers")
 
     if not crawled:
@@ -714,7 +768,11 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         return _observed_input_wave(
             target, input_signature, _untested_observed_input_count(state),
             _observed_input_specialists(state),
+            cms_product if not cms_dispatched else "",
         )
+
+    if cms_product and not cms_dispatched:
+        return _cms_followup_wave(target, cms_product)
 
     if input_signature and _input_wave_made_progress(state, trace, input_signature):
         return _observed_input_wave(

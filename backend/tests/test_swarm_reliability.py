@@ -155,3 +155,12 @@ async def test_completed_hunter_can_start_verification_before_sibling_finishes(m
     release_slow.set()
     result = await asyncio.wait_for(wave, timeout=1)
     assert [report.specialist for report in result.reports] == ["quick", "slow"]
+
+
+def test_cms_followup_profile_can_submit_candidates():
+    from app.services.agent.fireteam_service import get_specialist
+
+    profile = get_specialist("cms_followup")
+    assert profile is not None
+    assert "submit_finding_candidate" in profile.allowed_tools
+    assert "execute_wpscan" in profile.allowed_tools
