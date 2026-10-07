@@ -48,8 +48,7 @@ from app.services.agent.state import (
     clip_text,
 )
 from app.services.agent.prompts import (
-    REACT_SYSTEM_PROMPT,
-    PILOT_SYSTEM_PROMPT,
+    render_system_prompt,
     OUTPUT_ANALYSIS_PROMPT,
     PHASE_TRANSITION_MESSAGE,
     USER_QUESTION_MESSAGE,
@@ -1487,11 +1486,8 @@ class AgentOrchestrator:
                 state.get("engagement_brain")
             )
 
-            prompt_template = (
-                PILOT_SYSTEM_PROMPT if state.get("mode") == "pilot"
-                else REACT_SYSTEM_PROMPT
-            )
-            system_prompt = prompt_template.format(
+            system_prompt = render_system_prompt(
+                mode=state.get("mode") or "assist",
                 current_phase=phase,
                 available_tools=available_tools,
                 iteration=iteration,

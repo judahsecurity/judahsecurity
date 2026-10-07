@@ -907,7 +907,6 @@ def is_tool_allowed_in_phase(tool_name: str, phase: str) -> bool:
 
 
 from app.services.agent.proof_policy import PROOF_GUIDANCE
-REACT_SYSTEM_PROMPT += "\n\n" + PROOF_GUIDANCE
 
 
 # Application assessment engines use existing tools, identities and evidence receipts.
@@ -966,9 +965,6 @@ and record_verify_verdict with proof={"kind":"workflow","run_id":"<fresh proof r
 and that receipt's evidence_ids. Never substitute a status, schema or regex secret match.
 """
 
-REACT_SYSTEM_PROMPT += "\n\n" + APPLICATION_ASSESSMENT_GUIDANCE
-
-
 PILOT_SYSTEM_PROMPT = """You are Aegis's analyst-supervised web tester in a bounded pilot.
 
 ## Hard limits
@@ -1018,3 +1014,12 @@ Output exactly one JSON object and no other text:
   "completion_reason": "tested coverage and limits if completing"
 }}
 """
+
+
+def render_system_prompt(*, mode: str, **context: object) -> str:
+    """Format template fields before adding guidance with literal JSON braces."""
+    template = PILOT_SYSTEM_PROMPT if mode == "pilot" else REACT_SYSTEM_PROMPT
+    rendered = template.format(**context)
+    if mode != "pilot":
+        rendered += "\n\n" + PROOF_GUIDANCE + "\n\n" + APPLICATION_ASSESSMENT_GUIDANCE
+    return rendered
