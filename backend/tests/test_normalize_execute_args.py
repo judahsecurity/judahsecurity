@@ -5,6 +5,9 @@ import json
 from app.services.agent.tools import (
     _default_args_for_tool,
     extract_seed_target,
+    is_probable_file_target,
+    recover_assessment_target,
+    same_assessment_target,
     normalize_execute_tool_args,
 )
 
@@ -20,6 +23,28 @@ def test_extract_seed_target_from_assessment_prompt():
 def test_extract_seed_accepts_www_and_bare_domain():
     assert extract_seed_target("assess www.emulate3d.com") == "https://www.emulate3d.com"
     assert extract_seed_target("look at emulate3d.com please") == "https://emulate3d.com"
+
+
+def test_extract_seed_skips_source_file_names():
+    text = "Continue testing stockCheck.js and deparam.js on ginandjuice.shop"
+    assert extract_seed_target(text) == "https://ginandjuice.shop"
+    assert is_probable_file_target("https://stockcheck.js")
+    assert not is_probable_file_target("https://ginandjuice.shop")
+
+
+def test_follow_up_keeps_original_assessment_target():
+    assert recover_assessment_target(
+        "https://ginandjuice.shop", "test stockCheck.js on other.example.org"
+    ) == "https://ginandjuice.shop"
+    assert recover_assessment_target(
+        "https://stockcheck.js", "Continue stockCheck.js on ginandjuice.shop"
+    ) == "https://ginandjuice.shop"
+    assert recover_assessment_target(
+        "", "Read https://docs.example.net", "https://ginandjuice.shop"
+    ) == "https://ginandjuice.shop"
+    assert same_assessment_target("ginandjuice.shop/", "https://ginandjuice.shop")
+    assert same_assessment_target("https://ginandjuice.shop:443", "https://ginandjuice.shop")
+    assert not same_assessment_target("stockcheck.js", "https://ginandjuice.shop")
 
 
 def test_normalize_empty_args_fills_httpx_from_fallback():

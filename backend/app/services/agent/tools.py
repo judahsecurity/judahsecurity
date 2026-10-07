@@ -115,6 +115,45 @@ _DOMAIN_IN_TEXT_RE = _re.compile(
     r"\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,})\b",
     _re.I,
 )
+_FILE_SUFFIXES = {
+    "css", "gif", "html", "ico", "jpeg", "jpg", "js", "json", "map",
+    "pdf", "png", "svg", "txt", "webp", "woff", "woff2", "xml",
+    "yaml", "yml",
+}
+
+
+def is_probable_file_target(target: str) -> bool:
+    """Reject a source filename accidentally promoted to an assessment host."""
+    from urllib.parse import urlsplit
+
+    host = urlsplit(target if "://" in target else f"https://{target}").hostname or ""
+    return host.rsplit(".", 1)[-1].lower() in _FILE_SUFFIXES
+
+
+def recover_assessment_target(
+    existing_target: str, snapshot_objective: str, snapshot_target: str = "",
+) -> str:
+    """Keep a conversation on its original host when a follow-up is submitted."""
+    for candidate in (existing_target, snapshot_target):
+        candidate = (candidate or "").strip()
+        if candidate and not is_probable_file_target(candidate):
+            return candidate
+    return extract_seed_target(snapshot_objective)
+
+
+def same_assessment_target(left: str, right: str) -> bool:
+    """Compare saved target seeds without URL scheme or trailing-slash noise."""
+    from urllib.parse import urlsplit
+
+    def host_port(value: str) -> tuple[str, int | None]:
+        parsed = urlsplit(value if "://" in value else f"https://{value}")
+        try:
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            return (parsed.hostname or "").lower(), port
+        except ValueError:
+            return "", None
+
+    return bool(left and right and host_port(left)[0] and host_port(left) == host_port(right))
 
 
 def extract_seed_target(text: str) -> str:
@@ -131,7 +170,7 @@ def extract_seed_target(text: str) -> str:
     skip = {"example.com", "target.com", "localhost", "github.com"}
     for m in _DOMAIN_IN_TEXT_RE.finditer(text):
         host = m.group(0).lower().rstrip(".")
-        if host in skip or host.endswith(".png") or host.endswith(".jpg"):
+        if host in skip or host.rsplit(".", 1)[-1] in _FILE_SUFFIXES:
             continue
         return f"https://{host}"
     return ""

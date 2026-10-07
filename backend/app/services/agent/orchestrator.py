@@ -546,14 +546,37 @@ class AgentOrchestrator:
         todo_list = state.get("initial_todos") if state.get("initial_todos") else []
         mode = state.get("mode") or "assist"
 
-        # Seed primary_target from the user's message so execute_* can recover
-        # when the LLM omits tool_args.args (common empty-{} failure loop).
-        target_info = TargetInfo().model_dump()
+        # An assessment's target is bound to its conversation. A follow-up can
+        # mention file names or reference hosts without authorizing a new scan.
+        prior_target_info = state.get("target_info") or {}
+        from app.services.agent.tools import (
+            extract_seed_target, recover_assessment_target, same_assessment_target,
+        )
+        prior_snapshot = {}
+        if org_id and session_id:
+            try:
+                from app.services.agent.run_snapshot import load_run_snapshot
+                prior_snapshot = load_run_snapshot(org_id, session_id)
+            except Exception:
+                logger.debug("prior assessment target recovery skipped", exc_info=True)
+        saved_map = prior_snapshot.get("capability_map") or {}
+        saved_map_target = str(saved_map.get("target") or "") if isinstance(saved_map, dict) else ""
+        prior_target = recover_assessment_target(
+            str(prior_target_info.get("primary_target") or ""),
+            str(prior_snapshot.get("original_objective") or ""),
+            saved_map_target,
+        )
+        resume_ready = same_assessment_target(saved_map_target, prior_target)
+        target_info = (
+            dict(prior_target_info)
+            if prior_target and prior_target_info.get("primary_target") == prior_target
+            else TargetInfo().model_dump()
+        )
         kickoff_brief = ""
         seed = None
         try:
             from app.services.agent.tools import extract_seed_target, set_seed_target
-            seed = extract_seed_target(latest_message)
+            seed = prior_target or extract_seed_target(latest_message)
             if seed:
                 target_info["primary_target"] = seed
                 set_seed_target(seed)
@@ -575,7 +598,7 @@ class AgentOrchestrator:
         kickoff: Any = {}
         auto_enrich_target: Optional[str] = None
         org_id = state.get("organization_id")
-        if seed and mode != "pilot":
+        if seed and mode != "pilot" and not resume_ready:
             session_id = state.get("session_id")
             uid_raw = state.get("user_id")
             try:
@@ -895,9 +918,10 @@ class AgentOrchestrator:
         except Exception:
             pass
         try:
-            from app.services.agent.run_snapshot import load_run_snapshot
-
-            snap = load_run_snapshot(org_id, session_id)
+            snap = prior_snapshot
+            snapshot_map_target = str((snap.get("capability_map") or {}).get("target") or "")
+            if snapshot_map_target and seed and not same_assessment_target(snapshot_map_target, seed):
+                snap = {}
             if snap.get("capability_map"):
                 out["capability_map"] = snap["capability_map"]
             if snap.get("engagement_brain"):
