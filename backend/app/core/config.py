@@ -170,16 +170,16 @@ class Settings(BaseSettings):
     AGENT_MAX_OUTPUT_TOKENS: int = 4096  # Max tokens for LLM response (Claude/OpenAI); increase for long answers (e.g. 8192, 16384, 64000)
     AGENT_TOOL_OUTPUT_MAX_CHARS: int = 20000  # RedAmon-style default; truncation for LLM context
     AGENT_REST_MAX_ITERATIONS: int = 15  # Cap per REST request to avoid proxy timeouts
-    AGENT_WS_MAX_ITERATIONS: int = 40  # Cap per WebSocket agent turn (previously fell through to AGENT_MAX_ITERATIONS=100)
-    AGENT_REQUEST_TIMEOUT_SECONDS: int = 3600  # Hard timeout for a single agent REST/WS turn (1h)
+    AGENT_WS_MAX_ITERATIONS: int = 160  # Allow a full assessment to continue past the initial recon loop.
+    AGENT_REQUEST_TIMEOUT_SECONDS: int = 7200  # Hard timeout for a single agent REST/WS turn (2h).
     # Internal wall-clock budget for one agent turn's ReAct loop. Once exceeded the
     # loop stops picking new tools and wraps up with a partial report. Keep below
     # AGENT_REQUEST_TIMEOUT_SECONDS so the graceful path wins over the hard cutoff.
     # 10 minutes was shorter than Interceptor crawl + fireteam on a live app.
-    AGENT_TURN_BUDGET_SECONDS: int = 1800
+    AGENT_TURN_BUDGET_SECONDS: int = 6900  # Reserve five minutes for the final report.
     # Hard USD spend cap for one agent session (CAI CAI_PRICE_LIMIT analog).
     # 0 disables the cap. Checked before each LLM think so we stop before overspend.
-    AGENT_PRICE_LIMIT_USD: float = 5.0
+    AGENT_PRICE_LIMIT_USD: float = 20.0
     # Auto-compact the execution trace once it exceeds this many steps.
     AGENT_COMPACT_TRACE_STEPS: int = 24
     # Timeout for attaching an external MCP server (Burp/Caido).
@@ -316,7 +316,6 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
-
 
 
 
