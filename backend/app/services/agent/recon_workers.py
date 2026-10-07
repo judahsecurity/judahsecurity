@@ -323,7 +323,7 @@ async def _worker_body(
     if kind == "ferox_dirs":
         args = (
             f"-u {url} -w {wl} -d 1 -t 15 --rate-limit 40 "
-            f"-q --silent -C 404,429"
+            f"--silent -C 404,429"
         )
         res = await _run_mcp(
             tools_manager, "execute_feroxbuster", args,

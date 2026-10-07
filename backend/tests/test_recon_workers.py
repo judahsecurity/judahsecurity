@@ -87,6 +87,20 @@ class _FakeTools:
         return self._result
 
 
+def test_ferox_worker_uses_compatible_output_flags():
+    tm = _FakeTools({"success": True, "output": ""})
+    asyncio.run(
+        _worker_body(
+            "ferox_dirs", "https://example.com", tm,
+            user_id=None, org_id=None, session_id="t",
+        )
+    )
+    tool_name, tool_args = tm.calls[0]
+    assert tool_name == "execute_feroxbuster"
+    assert "--silent" in tool_args["args"].split()
+    assert "-q" not in tool_args["args"].split()
+
+
 def test_nuclei_recon_worker_runs_bounded_nuclei_and_filters():
     jsonl = (
         '{"template-id":"wordpress-detect","info":{"name":"WordPress Detect",'

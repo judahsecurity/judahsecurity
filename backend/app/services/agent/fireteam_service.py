@@ -16,6 +16,7 @@ failed hunter instead of looping the same prompt.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import uuid
@@ -1036,6 +1037,7 @@ TARGETS: {targets}
 
 AVAILABLE TOOLS (allowlist -- you MAY NOT call anything else):
 {tool_list}
+Use only the argument names shown above. Names with ? are optional. For execute_* tools that take args, pass one CLI argument string in {{"args": "..."}}.
 
 PALACE / HUNT NOTES (compact — URL, param, hypothesis, next mutation):
 {memory}
@@ -1081,6 +1083,30 @@ INSTRUCTIONS:
 
 {suffix}
 """
+
+
+def _tool_contract(tools_manager: Any, tool_name: str) -> str:
+    """Show specialists the actual registered argument names for a tool."""
+    registry = getattr(tools_manager, "tools", None)
+    tool = registry.get(tool_name) if isinstance(registry, dict) else None
+    if not callable(tool):
+        return f"  - {tool_name}"
+    if getattr(tool, "__name__", "") == "execute_mcp_tool":
+        return f"  - {tool_name}(args?)"
+    try:
+        parameters = inspect.signature(tool).parameters.values()
+    except (TypeError, ValueError):
+        return f"  - {tool_name}"
+    names = []
+    for parameter in parameters:
+        if parameter.name == "self" or parameter.kind in (
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        ):
+            continue
+        optional = "?" if parameter.default is not inspect.Parameter.empty else ""
+        names.append(f"{parameter.name}{optional}")
+    return f"  - {tool_name}({', '.join(names)})"
 
 
 async def _run_specialist(
@@ -1193,7 +1219,7 @@ async def _run_specialist(
         directive=directive_block,
         mission=mission_for_prompt,
         targets=", ".join(target_list) or "<see analyze_attack_surface output>",
-        tool_list="\n".join(f"  - {t}" for t in allowed_tools),
+        tool_list="\n".join(_tool_contract(tools_manager, t) for t in allowed_tools),
         memory=memory_block,
         max_iter=max_iter,
         suffix=suffix,
