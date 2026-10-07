@@ -69,3 +69,29 @@ def assert_url_in_scope(manager, url: str) -> str:
         if not exact:
             raise ValueError("IP address destinations require an exact scope entry")
     return host
+
+
+def prepare_browser_scope(manager, spec: dict, *, fallback_target: str = "") -> dict:
+    """Bind an Agent mode browser call to one registered HTTP origin."""
+    if not isinstance(spec, dict) or not isinstance(spec.get("actions"), list):
+        raise ValueError("Browser actions require a JSON object with an actions array")
+    urls = [action.get("url") for action in spec["actions"]
+            if isinstance(action, dict) and action.get("url")]
+    login = spec.get("login")
+    if isinstance(login, dict) and login.get("url"):
+        urls.append(login["url"])
+    if not urls and fallback_target:
+        urls.append(fallback_target)
+    if not urls:
+        raise ValueError("Browser actions require an assessment URL")
+    origins = set()
+    for url in urls:
+        assert_url_in_scope(manager, str(url))
+        parsed = urlsplit(str(url))
+        origins.add((parsed.scheme, parsed.hostname.lower(), parsed.port or
+                     (443 if parsed.scheme == "https" else 80)))
+    if len(origins) != 1:
+        raise ValueError("Browser actions must stay on one origin per call")
+    bounded = dict(spec)
+    bounded["allowed_origin"] = str(urls[0])
+    return bounded

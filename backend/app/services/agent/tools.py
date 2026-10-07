@@ -250,22 +250,72 @@ def normalize_execute_tool_args(
 
     args_val = raw.get("args", None)
 
-    # Browser actions are JSON, not CLI flags. Preserve structured actions
-    # before the generic execute_* normalizer flattens nested dictionaries.
+    # Browser actions are JSON, not CLI flags. Specialists sometimes supply a
+    # URL, a JSON string, or Playwright-style action aliases; normalize these
+    # before the confirmation gate so the analyst sees the actual action.
     if tool_name == "execute_browser":
-        browser_spec = args_val if isinstance(args_val, dict) else raw
-        if isinstance(args_val, list) and all(isinstance(item, dict) for item in args_val):
-            browser_spec = {"actions": args_val}
-        if isinstance(browser_spec, dict) and isinstance(browser_spec.get("actions"), list):
-            return {"args": json.dumps(browser_spec)}
-        browser_url = args_val if isinstance(args_val, str) and args_val.startswith("https://") else (
-            raw.get("url") or raw.get("target")
-        )
-        if isinstance(browser_url, str) and browser_url.startswith("https://"):
-            return {"args": json.dumps({"actions": [
-                {"action": "navigate", "url": browser_url},
-                {"action": "get_source"},
-            ]})}
+        browser_spec: Any = args_val if isinstance(args_val, (dict, list)) else raw
+        if isinstance(args_val, str):
+            value = args_val.strip()
+            browser_spec = None
+            if value.startswith(("{", "[")):
+                try:
+                    browser_spec = json.loads(value)
+                except json.JSONDecodeError:
+                    pass
+            elif value.startswith(("--url ", "-u ")):
+                import shlex
+
+                try:
+                    tokens = shlex.split(value)
+                except ValueError:
+                    tokens = []
+                if len(tokens) >= 2 and tokens[0] in ("--url", "-u"):
+                    actions = [{"action": "navigate", "url": tokens[1]}]
+                    remainder = tokens[2:]
+                    if len(remainder) == 2 and remainder[0] in ("--wait", "--wait-ms"):
+                        try:
+                            actions.append({"action": "wait", "ms": int(remainder[1])})
+                            remainder = []
+                        except ValueError:
+                            pass
+                    if not remainder:
+                        browser_spec = {"actions": [*actions, {"action": "get_source"}]}
+            elif value.startswith(("https://", "http://")):
+                browser_spec = {"url": value}
+        if isinstance(browser_spec, list) and all(isinstance(item, dict) for item in browser_spec):
+            browser_spec = {"actions": browser_spec}
+        if isinstance(browser_spec, dict):
+            browser_spec = dict(browser_spec)
+            actions = browser_spec.get("actions")
+            if not isinstance(actions, list):
+                browser_url = browser_spec.get("url") or browser_spec.get("target")
+                if not browser_url:
+                    browser_url = fallback_target
+                if isinstance(browser_url, str) and browser_url.startswith(("https://", "http://")):
+                    actions = [{"action": "navigate", "url": browser_url}]
+                    wait_ms = browser_spec.pop("wait_ms", None)
+                    if isinstance(wait_ms, (int, float)) and wait_ms > 0:
+                        actions.append({"action": "wait", "ms": min(int(wait_ms), 10000)})
+                    actions.append({"action": "get_source"})
+                    browser_spec.pop("url", None)
+                    browser_spec.pop("target", None)
+                    browser_spec["actions"] = actions
+            if isinstance(actions, list):
+                aliases = {"goto": "navigate", "evaluate": "execute_js"}
+                normalized_actions = []
+                for item in actions:
+                    if not isinstance(item, dict):
+                        normalized_actions.append(item)
+                        continue
+                    action = dict(item)
+                    action_name = str(action.pop("type", action.get("action") or "")).lower()
+                    action["action"] = aliases.get(action_name, action_name)
+                    if action["action"] == "execute_js" and not action.get("script"):
+                        action["script"] = action.pop("expression", "")
+                    normalized_actions.append(action)
+                browser_spec["actions"] = normalized_actions
+                return {"args": json.dumps(browser_spec)}
 
     # Already a usable CLI string
     if isinstance(args_val, str) and args_val.strip():
@@ -1130,6 +1180,17 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     ),
                     "error": "Missing required parameter: args",
                 }
+
+        if tool_name == "execute_browser" and pilot is None:
+            from app.services.agent.confirmation_service import autonomous_mode_enabled
+            if autonomous_mode_enabled():
+                try:
+                    from app.services.agent.assessment_scope import prepare_browser_scope
+                    spec = json.loads(tool_args["args"])
+                    spec = prepare_browser_scope(self, spec, fallback_target=fallback)
+                    tool_args["args"] = json.dumps(spec)
+                except (ValueError, TypeError, KeyError) as exc:
+                    return {"success": False, "output": str(exc), "error": "assessment_scope_denied"}
 
         # -- Per-tool confirmation gate ---------------------------------------
         # Consult the org's agent confirmation policy. Dangerous tools

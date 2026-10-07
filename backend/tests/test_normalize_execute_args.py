@@ -1,6 +1,9 @@
 """Tests for execute_* tool_args normalization (empty-args failure loop fix)."""
 
 import json
+from types import SimpleNamespace
+
+import pytest
 
 from app.services.agent.tools import (
     _default_args_for_tool,
@@ -10,6 +13,7 @@ from app.services.agent.tools import (
     same_assessment_target,
     normalize_execute_tool_args,
 )
+from app.services.agent.assessment_scope import prepare_browser_scope
 
 
 def test_extract_seed_target_from_assessment_prompt():
@@ -106,3 +110,64 @@ def test_browser_url_becomes_read_only_navigation():
         {"action": "navigate", "url": "https://ginandjuice.shop/"},
         {"action": "get_source"},
     ]}
+
+
+@pytest.mark.parametrize("supplied", [
+    {"args": "--url https://ginandjuice.shop/"},
+    {"args": "https://ginandjuice.shop/"},
+    {"args": {"url": "https://ginandjuice.shop/"}},
+])
+def test_browser_specialist_url_shapes_become_actions(supplied):
+    result = normalize_execute_tool_args("execute_browser", supplied)
+    assert json.loads(result["args"])["actions"] == [
+        {"action": "navigate", "url": "https://ginandjuice.shop/"},
+        {"action": "get_source"},
+    ]
+
+
+def test_browser_specialist_wait_and_action_aliases():
+    result = normalize_execute_tool_args(
+        "execute_browser", {"url": "https://ginandjuice.shop/", "wait_ms": 3000}
+    )
+    assert json.loads(result["args"])["actions"] == [
+        {"action": "navigate", "url": "https://ginandjuice.shop/"},
+        {"action": "wait", "ms": 3000},
+        {"action": "get_source"},
+    ]
+    result = normalize_execute_tool_args("execute_browser", {"actions": [
+        {"type": "goto", "url": "https://ginandjuice.shop/"},
+        {"type": "evaluate", "expression": "document.title"},
+    ]})
+    assert json.loads(result["args"])["actions"] == [
+        {"action": "navigate", "url": "https://ginandjuice.shop/"},
+        {"action": "execute_js", "script": "document.title"},
+    ]
+
+
+def test_browser_unknown_flags_are_not_silently_discarded():
+    result = normalize_execute_tool_args(
+        "execute_browser", {"args": "--url https://ginandjuice.shop/ --unknown x"},
+        fallback_target="https://ginandjuice.shop/",
+    )
+    assert result["args"] == "--url https://ginandjuice.shop/ --unknown x"
+
+
+def test_agent_browser_scope_requires_registered_host_and_one_origin():
+    manager = SimpleNamespace(
+        _assessment_scope={"ginandjuice.shop"},
+        _fallback_target="https://ginandjuice.shop/",
+        _identity_registry=SimpleNamespace(identities={}),
+    )
+    bounded = prepare_browser_scope(manager, {"actions": [
+        {"action": "navigate", "url": "https://ginandjuice.shop/"},
+    ]})
+    assert bounded["allowed_origin"] == "https://ginandjuice.shop/"
+    with pytest.raises(ValueError, match="Out-of-scope"):
+        prepare_browser_scope(manager, {"actions": [
+            {"action": "navigate", "url": "https://other.example/"},
+        ]})
+    with pytest.raises(ValueError, match="one origin"):
+        prepare_browser_scope(manager, {"actions": [
+            {"action": "navigate", "url": "https://ginandjuice.shop/"},
+            {"action": "check_response", "url": "http://ginandjuice.shop/"},
+        ]})
