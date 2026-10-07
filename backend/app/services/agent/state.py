@@ -309,6 +309,9 @@ class AgentState(TypedDict, total=False):
     auth_session: Optional[Dict[str, Any]]
     # Tester-process control plane (hypotheses, creds, approaches, chains)
     engagement_brain: Optional[Dict[str, Any]]
+    # A follow-up on a mapped assessment should test its new objective without
+    # repeating the mandatory first-turn discovery and specialist pipeline.
+    assessment_resume: Optional[bool]
 
     # Fast URL kickoff (robots / key paths) — injected before first LLM think
     kickoff_brief: Optional[str]

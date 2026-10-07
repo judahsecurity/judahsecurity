@@ -254,6 +254,21 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
             }
     except Exception:
         pass
+    if state.get("assessment_resume") and pipeline:
+        return {
+            "is_web": web,
+            "surface_empty": empty,
+            "crawled": True,
+            "dir_brute": True,
+            "js_surface": True,
+            "params": True,
+            "fireteam": True,
+            "brain": True,
+            "missing": [],
+            "ready_to_complete": True,
+            "next_action": "Test the latest scoped follow-up objective with saved evidence",
+            "summary": "Resumed mapped assessment; first-turn surface loop already ran",
+        }
     if pipeline and not crawled:
         missing.append({
             "id": "crawl",
@@ -346,6 +361,13 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
 def format_tester_loop_for_prompt(progress: Dict[str, Any], state: Optional[Dict[str, Any]] = None) -> str:
     if not progress or not progress.get("is_web"):
         return ""
+    if (state or {}).get("assessment_resume") and not progress.get("cve_applicability_only"):
+        return (
+            "### Resumed assessment\n"
+            "The first-turn surface loop already ran. Use the saved map and "
+            "evidence to test the latest scoped objective. Do not restart broad "
+            "discovery or fireteam dispatch solely because this turn's trace is empty."
+        )
     if progress.get("cve_applicability_only"):
         lines = [
             "### CVE applicability (Glasswing observe — do this before Interceptor)",
@@ -519,6 +541,8 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             return None
     except Exception:
         pass
+    if state.get("assessment_resume"):
+        return None
     target = primary_web_target(state)
     if not target:
         return None

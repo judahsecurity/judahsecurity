@@ -839,6 +839,12 @@ class AgentOrchestrator:
                 "GET, HEAD, and OPTIONS on the exact registered HTTPS origin; "
                 "every request uses the shared rate and total budget."
             )
+        elif resume_ready:
+            kickoff_brief = (
+                f"Resuming the mapped assessment of {seed}. Use saved observations "
+                "and focus on this turn's objective. Do not repeat kickoff, broad "
+                "recon, or fireteam dispatch unless the saved evidence is insufficient."
+            )
 
         out = {
             "current_iteration": 0,
@@ -857,6 +863,7 @@ class AgentOrchestrator:
             "capability_map": None,
             "auth_session": None,
             "engagement_brain": None,
+            "assessment_resume": resume_ready,
             "kickoff_brief": kickoff_brief or None,
             "interceptor_job_id": interceptor_job_id,
             "recon_worker_briefs": recon_worker_briefs,

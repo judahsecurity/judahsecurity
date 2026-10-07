@@ -6,6 +6,7 @@ from app.services.agent.assessment_kickoff import root_needs_dir_brute
 from app.services.agent.tester_loop import (
     complete_blocked_reason,
     forced_next_step,
+    format_tester_loop_for_prompt,
     normalized_tools_run,
     surface_looks_empty,
     tester_loop_progress as loop_progress,
@@ -141,6 +142,23 @@ def test_forced_pipeline_crawl_then_enrich_then_fireteam():
     }
     assert forced_next_step(after_hunt) is None
     assert complete_blocked_reason(after_hunt) is None
+
+
+def test_mapped_assessment_follow_up_skips_first_turn_pipeline():
+    state = {
+        "mode": "agent",
+        "assessment_resume": True,
+        "original_objective": "Continue stock-check testing on https://ginandjuice.shop",
+        "target_info": {"primary_target": "https://ginandjuice.shop"},
+        "capability_map": {"target": "https://ginandjuice.shop", "pages_visited": ["/catalog"]},
+        "execution_trace": [],
+    }
+    assert forced_next_step(state) is None
+    progress = loop_progress(state)
+    assert progress["ready_to_complete"] is True
+    assert progress["missing"] == []
+    assert "Do not restart broad discovery" in format_tester_loop_for_prompt(progress, state)
+    assert complete_blocked_reason(state) is None
 
 
 def test_interceptor_job_forces_attach_not_second_crawl():
