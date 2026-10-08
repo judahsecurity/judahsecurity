@@ -786,7 +786,7 @@ class AgentOrchestrator:
                     else:
                         next_steps = [
                             "execute_interceptor (attaches to early job if queued)",
-                            "spawn_recon_workers(pack='enrich') for ferox+katana streams (auto on 404)",
+                            "spawn_recon_workers(pack='enrich') for ferox+katana streams (auto on 404); archive_params is already running",
                             "ingest_urls_into_map → discover_parameters/arjun",
                             "sync_engagement_brain → fireteam_dispatch(specialists='auto')",
                         ]
@@ -819,7 +819,7 @@ class AgentOrchestrator:
                             ExecutionStep(
                                 iteration=0,
                                 phase="informational",
-                                thought="404/empty root — started ferox+katana enrich",
+                                thought="404/empty root — started ferox+katana enrichment",
                                 reasoning="Directory brute is part of the assessment pipeline",
                                 tool_name="spawn_recon_workers",
                                 tool_args={"pack": "enrich", "target": auto_enrich_target},
@@ -2639,7 +2639,7 @@ class AgentOrchestrator:
                 extra = ExecutionStep(
                     iteration=step_data.get("iteration") or 0,
                     phase=state.get("current_phase") or "informational",
-                    thought="Thin/404 surface — started ferox+katana enrich",
+                    thought="Thin/404 surface — started ferox+katana enrichment",
                     reasoning="Directory brute is part of the assessment pipeline",
                     tool_name="spawn_recon_workers",
                     tool_args={"pack": "enrich", "target": seed},

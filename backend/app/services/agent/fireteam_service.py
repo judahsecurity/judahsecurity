@@ -103,6 +103,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_feroxbuster",
             "execute_kiterunner",
             "execute_arjun",
+            "spawn_recon_workers",
+            "list_recon_workers",
             "discover_parameters",
             "ingest_urls_into_map",
             "create_scan",

@@ -581,7 +581,7 @@ class ToolSelector:
             ))
             recs.append(ToolRecommendation(
                 tool_name="execute_kiterunner",
-                args_template="scan https://{target} -A=apiroutes-210228",
+                args_template="scan https://{target} -A=apiroutes-210228:500 -x 2 -j 1",
                 priority=7,
                 rationale="API detected — discover hidden REST/GraphQL routes.",
                 category="api",
@@ -941,7 +941,7 @@ class ToolSelector:
         ):
             recs.append(ToolRecommendation(
                 tool_name="execute_kiterunner",
-                args_template="scan https://{target} -A=apiroutes-210228",
+                args_template="scan https://{target} -A=apiroutes-210228:500 -x 2 -j 1",
                 priority=7,
                 rationale="API/SPA signals — discover undocumented REST routes via smart wordlists.",
                 category="api",

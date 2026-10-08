@@ -334,8 +334,12 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
     ),
     "xss": (
         "SKILL PACK — XSS on what the page showed:\n"
-        "- Only search/reflect params (q, search, name, message, comment, redirect, next).\n"
-        "- Canary first. Confirm in browser (DOM) or HTML context map. CSP block ≠ kill.\n"
+        "- Prioritize search/reflect params (q, search, searchTerm, name, message, comment, redirect, next).\n"
+        "- Archive parameters are leads: first verify the path responds, then send one "
+        "unique canary in one observed GET parameter. Record whether it appears in "
+        "HTML text, an attribute, a script, or only a DOM update. Do not POST to an "
+        "unobserved form or declare XSS from reflection alone.\n"
+        "- Confirm execution in the browser or show unambiguous active HTML context. CSP block ≠ kill.\n"
         "- mutate_list(kind='xss') then mutate_captured_request / xsstrike / dalfox.\n"
         "- Stored: comments/profiles/filenames if those forms exist. Status 200 is not XSS."
     ),
@@ -525,7 +529,11 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "- 404/empty/login-wall: still run bounded feroxbuster/ffuf with "
         "/opt/wordlists/app-dirs-common.txt (-d 1, rate-limited). Unlinked dirs are the point.\n"
         "- Fetch robots.txt + sitemap.xml; merge with katana/gau via ingest_urls_into_map.\n"
+        "- Read archive_params recon leads when available. They are historical; verify "
+        "the same-host endpoint responds before treating it as observed.\n"
         "- fingerprint_api from captured XHR (not Caido). If no samples, interceptor/crawl first.\n"
+        "- Use execute_kiterunner only after API evidence; cap the route list with "
+        "-A=apiroutes-210228:500 and low concurrency.\n"
         "- extract_js_endpoints on first-party bundles for hidden /api routes.\n"
         "- On every live hit: discover_parameters + execute_arjun (GET and POST). "
         "mutate_list(kind='paths'|'params') is a single shot — then brute/arjun, don't think about it.\n"

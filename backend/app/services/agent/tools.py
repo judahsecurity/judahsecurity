@@ -8347,7 +8347,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         Args:
             target: URL/host (defaults to session seed).
             pack: ``early`` | ``enrich`` | ``nuclei_recon`` | ``full`` (optional if kinds set).
-            kinds: Explicit list: httpx_tech, waf_probe, whatweb, nuclei_recon, ferox_dirs, katana_urls.
+            kinds: Explicit list: httpx_tech, waf_probe, whatweb, nuclei_recon,
+                ferox_dirs, katana_urls, archive_params.
         """
         import json as _json
         from app.services.agent import recon_workers
@@ -8382,7 +8383,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     "Streams are running in the background. Continue with execute_interceptor "
                     "or other tools; completed results inject on the next think. "
                     "Call wait_recon_workers(timeout_sec=45) to join, or "
-                    "spawn_recon_workers(pack='enrich') for ferox+katana."
+                    "spawn_recon_workers(pack='enrich') for ferox+katana. "
+                    "Archive parameter leads start in the early pack."
                 ),
             },
             indent=2,

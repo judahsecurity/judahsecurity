@@ -10,6 +10,7 @@ from app.services.agent.recon_workers import (
     format_briefs_for_prompt,
     is_bounded_nuclei_recon_args,
     nuclei_recon_args,
+    scoped_archive_urls,
 )
 
 
@@ -25,6 +26,7 @@ def test_early_pack_defers_nuclei_recon():
         "httpx_tech",
         "waf_probe",
         "whatweb",
+        "archive_params",
     ]
     assert PACKS["nuclei_recon"] == ["nuclei_recon"]
     assert "nuclei_recon" in PACKS["full"]
@@ -34,6 +36,91 @@ def test_early_pack_defers_nuclei_recon():
 def test_normalize_url():
     assert _normalize_url("example.com") == "https://example.com"
     assert _normalize_url("https://example.com/") == "https://example.com"
+
+
+def test_archive_params_pack_and_exact_host_filter():
+    assert "archive_params" in PACKS["early"]
+    assert "archive_params" not in PACKS["enrich"]
+    assert scoped_archive_urls(
+        [
+            "http://example.com/catalog?category=Drinks",
+            "https://example.com/catalog?category=Drinks#old",
+            "https://example.com/search?term=FUZZ",
+            "https://api.example.com/admin?x=1",
+            "https://example.com:8443/hidden?x=1",
+            "https://user:secret@example.com/private?x=1",
+            "https://example.com:bad/invalid",
+        ],
+        "https://example.com",
+    ) == [
+        "https://example.com/catalog?category=",
+        "https://example.com/search?term=",
+    ]
+
+
+def test_archive_params_worker_emits_scoped_leads(monkeypatch):
+    from app.services import paramspider_service
+    from app.services.agent import recon_workers
+
+    class FakeParamSpider:
+        def is_available(self):
+            return True
+
+        async def scan_domain(self, domain, timeout):
+            assert domain == "example.com"
+            assert timeout <= 120
+            return paramspider_service.ParamSpiderResult(
+                domain=domain,
+                urls=[
+                    "http://example.com/catalog?searchTerm=old",
+                    "https://other.example.com/private?token=x",
+                ],
+                success=True,
+            )
+
+    monkeypatch.setattr(paramspider_service, "ParamSpiderService", FakeParamSpider)
+    observations = []
+    token = recon_workers._capture_context.set(("https://example.com", observations))
+    try:
+        brief = asyncio.run(_worker_body(
+            "archive_params", "https://example.com", None,
+            user_id=None, org_id=None, session_id="t",
+        ))
+    finally:
+        recon_workers._capture_context.reset(token)
+    assert "same_origin_leads=1" in brief
+    assert observations == [{
+        "type": "HTTP_ENDPOINT",
+        "target": "https://example.com/catalog?searchTerm=",
+        "source": "paramspider_archive",
+    }]
+
+
+def test_archive_params_handoff_seeds_bug_class_work():
+    from app.services.agent.capability_map import ingest_passive_urls
+    from app.services.agent.methodology_catalog import methodologies_from_capability_map
+    from app.services.agent.parameter_inventory import collect_parameter_inventory
+
+    target = "https://example.com"
+    leads = scoped_archive_urls([
+        "http://example.com/catalog?searchTerm=FUZZ&category=FUZZ",
+        "http://example.com/stock?url=FUZZ",
+        "http://example.com/login?next=FUZZ",
+        "http://example.com/download?file=FUZZ",
+        "http://example.com/api/profile?user_id=FUZZ",
+    ], target)
+    cmap = ingest_passive_urls(None, leads, target=target, source="archive_params")
+    names = {row["name"] for row in collect_parameter_inventory(cmap)}
+    assert {"searchTerm", "category", "url", "next", "file", "user_id"} <= names
+    method_ids = {method.id for method in methodologies_from_capability_map(cmap)}
+    assert {
+        "reflected_xss", "param_injection", "ssrf_url_fetch", "open_redirect",
+        "file_path_traversal", "api_idor_bola",
+    } <= method_ids
+    search_only = ingest_passive_urls(None, ["https://example.com/catalog?searchTerm="], target=target)
+    assert "reflected_xss" in {
+        method.id for method in methodologies_from_capability_map(search_only)
+    }
 
 
 def test_format_briefs_for_prompt():

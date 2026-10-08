@@ -201,12 +201,14 @@ class ParamSpiderService:
                 )
             except asyncio.TimeoutError:
                 process.kill()
+                await process.wait()
                 result.error = f"ParamSpider timed out after {timeout}s"
                 return result
             
             if process.returncode not in (0, None):
                 stderr_text = stderr.decode('utf-8', errors='ignore').strip() if stderr else ''
                 logger.warning(f"ParamSpider exited {process.returncode} for {domain}: {stderr_text}")
+                result.error = f"ParamSpider exit {process.returncode}: {stderr_text[:240]}"
             
             all_urls: Set[str] = set()
             all_params: Set[str] = set()
@@ -244,7 +246,9 @@ class ParamSpiderService:
             result.parameters = sorted(list(all_params))
             result.endpoints = sorted(list(all_endpoints))
             result.js_files = sorted(list(all_js_files))
-            result.success = True
+            # A partial stream can still provide leads, but a failed process
+            # with no URLs must not be reported as a successful recon pass.
+            result.success = process.returncode == 0 or bool(all_urls)
             
             logger.info(
                 f"ParamSpider found {len(result.urls)} URLs, "
@@ -296,4 +300,3 @@ async def discover_parameters(domain: str) -> ParamSpiderResult:
     """Quick function to discover parameters for a domain."""
     service = ParamSpiderService()
     return await service.scan_domain(domain)
-

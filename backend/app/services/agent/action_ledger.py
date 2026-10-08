@@ -227,6 +227,7 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
         if tool == "http_exchange":
             stage = "http_requests"
         elif tool in ("recon_worker:katana_urls", "recon_worker:ferox_dirs",
+                      "recon_worker:archive_params",
                       "execute_interceptor", "execute_deep_crawl", "execute_browser",
                       "execute_katana", "execute_feroxbuster", "fingerprint_api",
                       "probe_pilot_ports",

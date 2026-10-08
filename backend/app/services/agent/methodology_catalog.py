@@ -75,7 +75,11 @@ _ID_PARAM_RE = re.compile(
     re.I,
 )
 _REFLECT_PARAM_RE = re.compile(
-    r"(?:[?&](?:q|query|search|s|keyword|term|name|message|comment|redirect|url|next|return)=)",
+    r"(?:[?&](?:q|query|search|searchTerm|s|keyword|term|name|message|comment|redirect|url|next|return)=)",
+    re.I,
+)
+_FILE_PARAM_RE = re.compile(
+    r"(?:[?&](?:file|filename|filepath|path|template|include|lang|document|doc|download|asset)=)",
     re.I,
 )
 _SSRF_HINT_RE = re.compile(
@@ -456,7 +460,7 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
 
     # Open redirect — login/OAuth/logout style params
     _REDIRECT_RE = re.compile(
-        r"(?:[?&](?:redirect|redir|next|return|returnUrl|return_url|url|continue|goto|dest|destination)=)",
+        r"(?:[?&](?:redirect|redir|next|return|returnUrl|return_url|url|continue|goto|forward|dest|destination)=)",
         re.I,
     )
     redirect_hits = [p for p in param_paths if _REDIRECT_RE.search(p)] + [
@@ -474,8 +478,8 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             priority="medium",
             assumption="Redirect/next/return parameters accept off-site destinations",
             test=(
-                "Set redirect params to an engagement canary host; confirm Location or "
-                "client-side navigation off-domain"
+                "Set redirect params to https://example.invalid/ without following; "
+                "confirm an off-domain Location header or client-side navigation target"
             ),
             pass_criteria="Browser/HTTP redirect to external canary",
             kill_criteria="Allowlist rejects external hosts after disciplined probes",
@@ -1682,6 +1686,29 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             owasp="A03:2021 Injection",
             evidence=ev,
             why="Parameter-rich paths or searchable inputs observed",
+        ))
+
+    file_paths = [p for p in param_paths if _FILE_PARAM_RE.search(p)]
+    if file_paths:
+        add(Methodology(
+            id="file_path_traversal",
+            title="File/path parameter traversal or inclusion",
+            hunt="injection",
+            specialist="injection",
+            priority="medium",
+            assumption="A file/path/template parameter may read outside its intended resource set",
+            test=(
+                "First verify the archived path is live. Compare a harmless in-scope "
+                "public-file reference against a traversal variant; do not request "
+                "private files or remote inclusion URLs without run authorization"
+            ),
+            pass_criteria="Response contains a distinct known public file outside the intended path",
+            kill_criteria="Path is not live, or traversal is rejected/normalized",
+            cwe_ids=["CWE-22", "CWE-98"],
+            capec_ids=["CAPEC-126"],
+            owasp="A01:2021 Broken Access Control",
+            evidence=file_paths[0],
+            why="File/path parameter name surfaced by crawl or archive recon",
         ))
 
     if _SSRF_HINT_RE.search(combined) or any(

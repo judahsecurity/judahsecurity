@@ -10,11 +10,12 @@ Worker kinds (bounded — not DirBuster-scale):
   waf_probe    — wafw00f
   ferox_dirs   — depth-1 common dirs (app-dirs-common.txt)
   katana_urls  — shallow URL/JS crawl enrich
+  archive_params — historical parameter URLs from ParamSpider (leads only)
   whatweb      — quick fingerprint
   nuclei_recon — informational Nuclei (tech / detect). Not CVE spray.
 
 Packs:
-  early        — httpx_tech + waf_probe + whatweb
+  early        — httpx_tech + waf_probe + whatweb + archive_params
                  (auto on URL paste; interceptor queued separately)
   enrich       — ferox_dirs + katana_urls
   nuclei_recon — informational Nuclei only (explicit spawn)
@@ -32,7 +33,7 @@ import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 logger = logging.getLogger(__name__)
 
@@ -41,12 +42,13 @@ WORKER_KINDS = (
     "waf_probe",
     "ferox_dirs",
     "katana_urls",
+    "archive_params",
     "whatweb",
     "nuclei_recon",
 )
 
 PACKS: Dict[str, List[str]] = {
-    "early": ["httpx_tech", "waf_probe", "whatweb"],
+    "early": ["httpx_tech", "waf_probe", "whatweb", "archive_params"],
     "enrich": ["ferox_dirs", "katana_urls"],
     "nuclei_recon": ["nuclei_recon"],
     "full": [
@@ -56,6 +58,7 @@ PACKS: Dict[str, List[str]] = {
         "nuclei_recon",
         "ferox_dirs",
         "katana_urls",
+        "archive_params",
     ],
 }
 
@@ -66,6 +69,7 @@ _KIND_TIMEOUT_SEC: Dict[str, float] = {
     "whatweb": 60.0,
     "ferox_dirs": 180.0,
     "katana_urls": 180.0,
+    "archive_params": 120.0,
     "nuclei_recon": 120.0,
 }
 
@@ -212,6 +216,46 @@ def extract_recon_urls(kind: str, brief: str, target: str) -> List[str]:
     return urls
 
 
+def scoped_archive_urls(urls: Sequence[str], target: str) -> List[str]:
+    """Map archived paths to the assessed origin without broadening host/port scope.
+
+    Archive records are leads, not evidence that an endpoint is live. Historical
+    HTTP entries are kept as paths on the current HTTPS origin for later checks.
+    """
+    origin = urlparse(_normalize_url(target))
+    if not origin.hostname:
+        return []
+    found: List[str] = []
+    seen: set[str] = set()
+    for raw in urls:
+        try:
+            parsed = urlparse(str(raw))
+            archive_port = parsed.port
+        except ValueError:
+            continue
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname != origin.hostname
+            or parsed.username or parsed.password
+            or archive_port not in (None, origin.port)
+            or not parsed.query
+        ):
+            continue
+        # Keep only parameter names. Archived values may be stale secrets or
+        # payloads, and ParamSpider often substitutes them with FUZZ.
+        query = urlencode([
+            (name, "") for name, _ in parse_qsl(parsed.query, keep_blank_values=True)
+        ])
+        candidate = urlunparse((origin.scheme, origin.netloc, parsed.path or "/",
+                                parsed.params, query, ""))
+        if candidate not in seen:
+            seen.add(candidate)
+            found.append(candidate)
+        if len(found) >= 40:
+            break
+    return found
+
+
 async def _emit(thought: str) -> None:
     try:
         from app.services.agent.orchestrator import _status_callback_var
@@ -349,6 +393,36 @@ async def _worker_body(
         return (
             f"[recon_worker:katana_urls] success={bool(res.get('success'))}\n{out}\n"
             "HINT: call ingest_urls_into_map to fold URLs into the capability map."
+        )
+
+    if kind == "archive_params":
+        from app.services.paramspider_service import (
+            ParamSpiderService,
+            filter_scannable_domains,
+        )
+
+        domains, _ = filter_scannable_domains([urlparse(url).hostname or host])
+        if not domains:
+            return "[recon_worker:archive_params] success=True skipped non-domain target"
+        service = ParamSpiderService()
+        if not service.is_available():
+            raise RuntimeError("ParamSpider unavailable in backend image")
+        result = await service.scan_domain(domains[0], timeout=100)
+        if not result.success:
+            raise RuntimeError(result.error or "ParamSpider archive query failed")
+        leads = scoped_archive_urls(result.urls, url)
+        capture = _capture_context.get()
+        if capture:
+            _, observations = capture
+            observations.extend(
+                {"type": "HTTP_ENDPOINT", "target": lead, "source": "paramspider_archive"}
+                for lead in leads
+            )
+        preview = "\n".join(leads[:20])
+        return (
+            f"[recon_worker:archive_params] success=True "
+            f"same_origin_leads={len(leads)} error={result.error or 'none'}\n"
+            f"{preview}\nHistorical URLs are leads only; verify live before testing."
         )
 
     if kind == "nuclei_recon":
