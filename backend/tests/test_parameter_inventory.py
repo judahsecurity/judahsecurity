@@ -117,6 +117,49 @@ def test_specialist_lease_prioritizes_likely_input_but_keeps_other_inputs_open()
                for cell in brain.coverage_cells if cell["test_type"] == "xss")
 
 
+def test_browser_capture_is_leased_before_unreplayable_form_input():
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, [
+        {"method": "GET", "host": "app.test", "path": "/catalog",
+         "location": "query", "name": "searchTerm", "identity": "anonymous",
+         "source": "observed_form", "testable": True},
+        {"method": "GET", "host": "app.test", "path": "/catalog/product",
+         "location": "query", "name": "productId", "identity": "anonymous",
+         "source": "browser_traffic", "artifact_id": "private-capture",
+         "testable": True},
+    ])
+    leases = claim_coverage_cell_leases(brain, ["xss", "sqli"])
+    for name, lease in leases.items():
+        cell = next(row for row in brain.coverage_cells if row["id"] == lease.coverage_cell_id)
+        assert cell["specialist"] == name
+        assert cell["path"] == "/catalog/product"
+        assert cell["capture_id"] == "private-capture"
+
+
+def test_nonprivate_capture_does_not_advertise_scoped_probe():
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, [
+        {"method": "GET", "host": "app.test", "path": "/catalog",
+         "location": "query", "name": "searchTerm", "identity": "anonymous",
+         "source": "captured_api", "artifact_id": "public-evidence",
+         "testable": True},
+    ])
+    lease = claim_coverage_cell_leases(brain, ["xss"])["xss"]
+    profiles = {"xss": SimpleNamespace(
+        role="XSS specialist.",
+        allowed_tools=["scoped_assessment_probe_assigned", "compare_requests"],
+        max_iterations=4,
+    )}
+    directive = directives_from_hypotheses(
+        brain=brain, profiles_by_name=profiles, specialists=["xss"],
+        default_target="https://app.test", coverage_leases={"xss": lease},
+    )["xss"]
+    assert directive.parameter_work["capture_id"] == "public-evidence"
+    assert not directive.parameter_work["scoped_capture_id"]
+    assert "scoped_assessment_probe_assigned" not in directive.allowed_tools
+    assert "No PROWL private browser capture" in directive.to_prompt_block()
+
+
 def test_early_wave_leases_only_browser_observed_inputs():
     brain = EngagementBrain(target="https://app.test")
     seed_parameter_coverage_cells(brain, [

@@ -24,6 +24,20 @@ CELL_STATUSES = frozenset({*CELL_TERMINAL, *CELL_OPEN, "leased", "blocked"})
 MAX_COVERAGE_CELLS = 10_000
 
 
+def scoped_replay_eligible(cell: dict[str, Any]) -> bool:
+    """Whether the scoped service can replay this private browser capture."""
+    location, separator, parameter = str(cell.get("parameter") or "").partition(":")
+    method = str(cell.get("method") or "").upper()
+    return bool(
+        cell.get("source") == "parameter_inventory"
+        and cell.get("observation_source") == "browser_traffic"
+        and cell.get("capture_id")
+        and separator and parameter
+        and ((method == "GET" and location == "query")
+             or (method == "POST" and location in {"body_json", "body_form"}))
+    )
+
+
 def _text(value: Any) -> str:
     return str(value or "").strip()
 
@@ -706,6 +720,7 @@ def claim_coverage_cell_leases(
         ]
         candidates.sort(
             key=lambda cell: (
+                0 if specialist in {"xss", "sqli"} and scoped_replay_eligible(cell) else 1,
                 0
                 if hypothesis_id and cell.get("hypothesis_id") == hypothesis_id
                 else 1,

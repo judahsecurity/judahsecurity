@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 
 from app.services.agent.aegis_pantheon import epithet_for, pantheon_line
+from app.services.agent.coverage_cells import scoped_replay_eligible
 
 
 @dataclass
@@ -94,7 +95,9 @@ class OperationDirective:
                 f"{work.get('location', 'query')}:{work.get('name', '')} "
                 f"identity={work.get('identity', 'anonymous')}. "
                 + ("A PROWL private browser capture is available; use scoped_assessment_probe_assigned "
-                   "with this cell and lease. " if work.get("capture_id") else "") +
+                   "with this cell and lease. " if work.get("scoped_capture_id") else
+                   "No PROWL private browser capture is available for this input; use "
+                   "structured request replay and browser tools, not scoped_assessment_probe_assigned. ") +
                 "Test this exact input with a baseline and bounded canary, then cite the "
                 "exchange evidence when closing its coverage cell. Other inputs remain open "
                 "for later waves; get_parameter_inventory can page through the full worklist."
@@ -192,6 +195,11 @@ def directives_from_hypotheses(
                     "name": parameter_name,
                     "identity": str(coverage_cell.get("identity") or "anonymous"),
                     "capture_id": str(coverage_cell.get("capture_id") or ""),
+                    "scoped_capture_id": (
+                        str(coverage_cell.get("capture_id") or "")
+                        if scoped_replay_eligible(coverage_cell)
+                        else ""
+                    ),
                 }
         js_work: Dict[str, str] = {}
         if coverage_cell.get("source") == "js_inventory" and coverage_cell.get("script_url"):
@@ -278,6 +286,12 @@ def directives_from_hypotheses(
             owasps = []
             priority = "medium"
             target = default_target or ""
+        allowed_tools = list(profile.allowed_tools)
+        if parameter_work and not parameter_work.get("scoped_capture_id"):
+            allowed_tools = [
+                tool for tool in allowed_tools
+                if tool not in {"scoped_assessment_probe_assigned", "scoped_assessment_candidate"}
+            ]
         out[name] = OperationDirective(
             specialist=name,
             epithet=getattr(profile, "epithet", None) or epithet_for(name),
@@ -287,7 +301,7 @@ def directives_from_hypotheses(
             test=test,
             pass_criteria=pass_c,
             kill_criteria=kill_c,
-            allowed_tools=list(profile.allowed_tools),
+            allowed_tools=allowed_tools,
             hypothesis_ids=hyp_ids,
             methodology_ids=method_ids,
             cwe_ids=cwes,

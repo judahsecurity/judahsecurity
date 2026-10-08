@@ -590,7 +590,6 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_xsstrike",
             "execute_dalfox",
             "execute_browser",
-            "execute_curl",
             "compare_requests",
             "mutate_list",
             "list_captured_requests",
@@ -607,7 +606,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         system_prompt_suffix=(
             "Work the assigned observed input first. Use a harmless unique canary to check "
             "reflection or rendering; if it is absent, record an evidence-backed negative for "
-            "that input. If the directive has a PROWL capture ID, call "
+            "that input. Use structured request tools for special characters; do not "
+            "pass raw injection strings through a shell command. If the directive has "
+            "a PROWL private browser capture, call "
             "scoped_assessment_probe_assigned with the coverage cell and lease IDs; "
             "For a captured GET query, inspect the canary reflection context first. "
             "Use technique='xss_browser' for HTML body/DOM insertion, "
@@ -634,7 +635,6 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_commix",
             "execute_interactsh",
             "generate_injection_payloads",
-            "execute_curl",
             "compare_requests",
             "plan_intruder_mutations",
             "run_intruder_batch",
@@ -651,7 +651,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "category/filter/search/product inputs before blind login guesses; test login "
             "only with a valid captured CSRF workflow. If baseline and mutants all "
             "return the same CSRF 400, mark that input blocked and move on. "
-            "If the directive has a PROWL capture ID, call scoped_assessment_probe_assigned "
+            "Use structured request tools for SQL syntax; do not pass raw injection "
+            "strings through a shell command. If the directive has a PROWL private "
+            "browser capture, call scoped_assessment_probe_assigned "
             "with the coverage cell and lease IDs. Numeric GET inputs use the scoped boolean "
             "proof; a single quote differential is only a lead. Submit a scoped candidate "
             "only on proof_confirmed=true and cite its service artifact ID. "
@@ -1210,6 +1212,13 @@ async def _run_specialist(
         max_iter = profile.max_iterations
 
     allowed_tools = list(profile.allowed_tools)
+    if (isinstance(directive, OperationDirective)
+            and directive.parameter_work
+            and not directive.parameter_work.get("scoped_capture_id")):
+        allowed_tools = [
+            tool for tool in allowed_tools
+            if tool not in {"scoped_assessment_probe_assigned", "scoped_assessment_candidate"}
+        ]
     allowed_tools.extend(t for t in ("read_evidence", "list_test_identities") if t not in allowed_tools)
     if profile.name in ("auth_logic", "independent_verifier", "api_logic", "coverage"):
         allowed_tools.extend(

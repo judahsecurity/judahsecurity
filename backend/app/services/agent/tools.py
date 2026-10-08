@@ -873,15 +873,20 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         cell = next((row for row in brain.coverage_cells
                      if row.get("id") == coverage_cell_id), None)
-        if (not cell or cell.get("status") != "leased" or
-                cell.get("lease_id") != coverage_lease_id or
-                float(cell.get("lease_deadline") or 0) <= time.time() or
-                cell.get("source") != "parameter_inventory" or
-                cell.get("specialist") not in {"xss", "sqli"} or
-                cell.get("observation_source") != "browser_traffic" or
-                not cell.get("capture_id")):
+        lease_error = (
+            "missing_cell" if not cell else
+            "not_leased" if cell.get("status") != "leased" else
+            "lease_mismatch" if cell.get("lease_id") != coverage_lease_id else
+            "lease_expired" if float(cell.get("lease_deadline") or 0) <= time.time() else
+            "not_parameter_inventory" if cell.get("source") != "parameter_inventory" else
+            "wrong_specialist" if cell.get("specialist") not in {"xss", "sqli"} else
+            "not_private_browser_capture" if cell.get("observation_source") != "browser_traffic" else
+            "missing_capture" if not cell.get("capture_id") else ""
+        )
+        if lease_error:
             return {"success": False, "error": "invalid_coverage_lease",
-                    "output": "An active lease on a browser-captured parameter is required"}
+                    "reason": lease_error,
+                    "output": f"An active lease on a browser-captured parameter is required ({lease_error})"}
         location, separator, parameter = str(cell.get("parameter") or "").partition(":")
         xss_payloads = {
             "xss_browser": '<img src=x onerror=alert("__PROWL_NONCE__")>',

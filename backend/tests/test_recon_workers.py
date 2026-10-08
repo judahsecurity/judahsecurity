@@ -125,6 +125,8 @@ def test_nuclei_recon_worker_runs_bounded_nuclei_and_filters():
     tool_name, tool_args = tm.calls[0]
     assert tool_name == "execute_nuclei"
     assert is_bounded_nuclei_recon_args(tool_args["args"])
+    assert "-rate-limit 20" in tool_args["args"]
+    assert "-tags tech,detect" in tool_args["args"]
     assert "[recon_worker:nuclei_recon]" in brief
     assert "wordpress" in brief.lower()
     assert "coverage leftover" in brief.lower()

@@ -11,7 +11,7 @@ Worker kinds (bounded — not DirBuster-scale):
   ferox_dirs   — depth-1 common dirs (app-dirs-common.txt)
   katana_urls  — shallow URL/JS crawl enrich
   whatweb      — quick fingerprint
-  nuclei_recon — informational Nuclei (tech / exposure / panel). Not CVE spray.
+  nuclei_recon — informational Nuclei (tech / detect). Not CVE spray.
 
 Packs:
   early        — httpx_tech + waf_probe + whatweb + nuclei_recon
@@ -72,7 +72,7 @@ _KIND_TIMEOUT_SEC: Dict[str, float] = {
 # Informational Nuclei only. Tags are OR'd; -etags keeps this off CVE/fuzz spray.
 # Confirmation gate treats this arg shape as safe recon (like httpx), not a
 # full execute_nuclei engagement scan.
-NUCLEI_RECON_TAGS = "tech,exposure,panel,misconfig,detect"
+NUCLEI_RECON_TAGS = "tech,detect"
 NUCLEI_RECON_EXCLUDE_TAGS = "dos,fuzz"
 _ALLOWED_RECON_SEVERITIES = {"info", "low"}
 _ALLOWED_RECON_TAG_HINTS = {
@@ -92,8 +92,8 @@ _BLOCKED_RECON_TAGS = {"cve", "rce", "exploit"}
 def nuclei_recon_args(url: str) -> str:
     """Bounded Nuclei CLI for the parallel recon worker."""
     return (
-        f"-u {url} -jsonl -silent -rate-limit 80 -c 20 -timeout 8 -retries 0 "
-        f"-severity info,low -tags {NUCLEI_RECON_TAGS} "
+        f"-u {url} -jsonl -silent -rate-limit 20 -c 5 -timeout 5 -retries 0 "
+        f"-severity info -tags {NUCLEI_RECON_TAGS} "
         f"-etags {NUCLEI_RECON_EXCLUDE_TAGS}"
     )
 
@@ -360,7 +360,7 @@ async def _worker_body(
         out = _nuclei_recon_brief(res)
         return (
             f"[recon_worker:nuclei_recon] success={bool(res.get('success'))}\n{out}\n"
-            "HINT: informational Nuclei only (tech/exposure/panel). Follow Augur "
+            "HINT: informational Nuclei only (tech/detect). Follow Augur "
             "pivots (WordPress → REST enum / wpscan, panel → bounded dir brute). "
             "Full CVE nuclei remains coverage leftover — this is not a vuln scan."
         )
