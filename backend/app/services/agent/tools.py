@@ -1328,7 +1328,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 max_chars = _tool_output_max_chars()
                 augur_block = result.get("augur")  # Augur reading: kept/dropped/next_steps/signals
                 capability_map = result.get("capability_map")  # deep_crawl / interceptor map
-                if tool_name == "execute_deep_crawl" and result.get("success") and isinstance(capability_map, dict):
+                if tool_name in {"execute_deep_crawl", "execute_interceptor"} and result.get("success") and isinstance(capability_map, dict):
                     try:
                         from app.services.agent.action_ledger import active_run_id, append_action
 

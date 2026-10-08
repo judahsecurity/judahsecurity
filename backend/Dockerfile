@@ -224,8 +224,11 @@ RUN test -x "$CHROME_BIN" || ls "$PLAYWRIGHT_BROWSERS_PATH"/chromium* >/dev/null
 # Optional pip tools below must not persist downloaded wheels in image layers.
 ENV PIP_NO_CACHE_DIR=1
 
-# Install ParamSpider
-RUN pip install paramspider || echo "ParamSpider installation skipped"
+# The initial recon worker runs inside the backend image. Install the upstream
+# CLI from its maintained repository and fail the build if its entrypoint is
+# absent; a best-effort PyPI install silently shipped images without it.
+RUN pip install --no-cache-dir 'git+https://github.com/devanshbatham/ParamSpider.git' \
+    && command -v paramspider >/dev/null
 
 # Install Knockpy (subdomain brute-forcer)
 RUN pip install knockpy || echo "Knockpy installation skipped"
