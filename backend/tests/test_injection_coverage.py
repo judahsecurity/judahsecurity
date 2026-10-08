@@ -9,6 +9,7 @@ from app.services.agent.engagement_brain import EngagementBrain
 from app.services.agent.operation_directive import directives_from_hypotheses
 from app.services.agent.parameter_inventory import collect_parameter_inventory
 from app.services.agent.request_mutate import apply_one_mutation
+from app.services.agent.js_sinks import scan_body, scan_dom_sources
 from app.services.agent.scoped_assessment.javascript import analyze_javascript
 
 
@@ -76,6 +77,10 @@ def test_dom_work_requires_both_browser_source_and_sink():
     assert [cell["path"] for cell in dom] == ["/risky.js"]
     assert dom[0]["status"] == "untested"
     assert dom[0]["specialist"] == "xss"
+
+    source = target + "/risky.js"
+    assert scan_dom_sources("const x = location.hash", source=source)[0]["source"] == source
+    assert scan_body("document.body.innerHTML = x", source=source)[0]["source"] == source
 
 
 def test_xml_replay_preserves_observed_request_and_rejects_network_callbacks():

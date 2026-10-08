@@ -7,10 +7,9 @@ eval / innerHTML / postMessage / location sinks for spa_client to prove.
 from __future__ import annotations
 
 import re
+from itertools import islice
 from typing import Any, Dict, Iterable, List
 from urllib.parse import urlparse
-
-import httpx
 
 MAX_URLS = 20
 MAX_BYTES = 1_500_000
@@ -28,6 +27,10 @@ SINK_PATTERNS = {
     "window.open": r"window\.open\s*\(",
 }
 _COMPILED = {k: re.compile(v) for k, v in SINK_PATTERNS.items()}
+_DOM_SOURCES = {
+    "fragment": re.compile(r"(?:window\.)?location\.hash\b"),
+    "query": re.compile(r"(?:window\.)?location\.search\b|\bURLSearchParams\s*\("),
+}
 
 
 def scan_body(body: str, *, source: str = "") -> List[Dict[str, Any]]:
@@ -49,12 +52,25 @@ def scan_body(body: str, *, source: str = "") -> List[Dict[str, Any]]:
     return hits
 
 
+def scan_dom_sources(body: str, *, source: str = "") -> List[Dict[str, Any]]:
+    """Return bounded source locations; source plus sink is still only a lead."""
+    text = body or ""
+    hits = []
+    for kind, pattern in _DOM_SOURCES.items():
+        for match in islice(pattern.finditer(text), MAX_HITS_PER_KIND):
+            hits.append({"kind": kind, "source": source,
+                         "line": text.count("\n", 0, match.start()) + 1})
+    return hits
+
+
 async def scan_js_sinks(
     urls: Iterable[str],
     *,
     origin_host: str = "",
     timeout: float = 12.0,
 ) -> Dict[str, Any]:
+    import httpx
+
     urls = [str(u).strip() for u in urls if str(u).strip().startswith(("http://", "https://"))][:MAX_URLS]
     if not urls:
         return {"ok": False, "error": "no https URLs"}
@@ -62,6 +78,8 @@ async def scan_js_sinks(
     expected = urlparse(origin_host) if "://" in origin_host else None
     expected_netloc = (expected.netloc if expected else origin_host).lower()
     sinks: List[Dict[str, Any]] = []
+    sources: List[Dict[str, Any]] = []
+    analyzed_urls: List[str] = []
     analyzed = 0
     errors: List[str] = []
     async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
@@ -74,8 +92,14 @@ async def scan_js_sinks(
                 continue
             try:
                 r = await client.get(url)
-                sinks.extend(scan_body((r.text or "")[:MAX_BYTES], source=url))
+                if r.status_code != 200:
+                    errors.append(f"{url}: HTTP {r.status_code}"[:180])
+                    continue
+                body = (r.text or "")[:MAX_BYTES]
+                sinks.extend(scan_body(body, source=url))
+                sources.extend(scan_dom_sources(body, source=url))
                 analyzed += 1
+                analyzed_urls.append(url)
             except Exception as exc:
                 errors.append(f"{url}: {exc}"[:180])
     by_type: Dict[str, int] = {}
@@ -87,6 +111,8 @@ async def scan_js_sinks(
         "sink_count": len(sinks),
         "sinks_by_type": by_type,
         "sinks": sinks[:80],
+        "dom_sources": sources[:80],
+        "analyzed_urls": analyzed_urls,
         "errors": errors[:8],
         "next": (
             "DOM XSS / postMessage / open-redirect leads for spa_client. "

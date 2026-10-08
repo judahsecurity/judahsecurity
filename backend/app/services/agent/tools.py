@@ -4492,6 +4492,38 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         parts = urlsplit(target)
         origin = f"{parts.scheme}://{parts.netloc}" if parts.scheme in {"http", "https"} and parts.netloc else ""
         result = await run_scan(parsed, origin_host=origin or self._origin_host())
+        if origin and result.get("analyzed_urls") and isinstance(cmap, dict):
+            from app.services.agent.coverage_cells import seed_js_coverage_cells
+            from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+            updated = dict(cmap)
+            known = {str(row.get("url")): dict(row) for row in (cmap.get("js_sources") or [])
+                     if isinstance(row, dict) and isinstance(row.get("url"), str)}
+            before = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            prior_ids = {cell.get("id") for cell in before.coverage_cells}
+            for url in result["analyzed_urls"]:
+                if urlsplit(url).scheme != parts.scheme or urlsplit(url).netloc != parts.netloc:
+                    continue
+                row = known.setdefault(url, {"url": url})
+                row["source_leads"] = [
+                    {"kind": lead["kind"], "line": lead["line"]}
+                    for lead in result.get("dom_sources", []) if lead.get("source") == url
+                ][:10]
+                row["sink_leads"] = [
+                    {"kind": lead["type"], "line": lead["line"]}
+                    for lead in result.get("sinks", []) if lead.get("source") == url
+                ][:30]
+            updated["js_sources"] = list(known.values())[:160]
+            updated["js_files"] = list(dict.fromkeys([
+                *(cmap.get("js_files") or []), *result["analyzed_urls"]
+            ]))[:160]
+            self._capability_map = updated
+            seed_js_coverage_cells(before, updated)
+            self._engagement_brain = before.to_dict()
+            result["coverage_cells_added"] = len([
+                cell for cell in before.coverage_cells
+                if cell.get("id") not in prior_ids and cell.get("test_type") == "dom_xss"
+            ])
         return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
 
     async def fingerprint_api(self, **kwargs: Any) -> str:
