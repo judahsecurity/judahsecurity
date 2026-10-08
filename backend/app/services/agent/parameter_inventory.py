@@ -14,8 +14,8 @@ MAX_PARAMETERS = 4000
 _NAME = re.compile(r"[A-Za-z_/][A-Za-z0-9_./*\[\]-]{0,79}\Z")
 _PROTECTED = re.compile(r"csrf|xsrf|nonce|session|token|secret|api[_-]?key|authorization|jwt|bearer", re.I)
 _XSS_HINT = re.compile(r"q|query|search|term|name|title|message|comment|content|text|html|redirect|url", re.I)
-_SQL_HINT = re.compile(r"id|key|filter|sort|page|limit|offset|search|query|email|user|order", re.I)
-_LOCATIONS = {"query", "form", "body_json", "body_form"}
+_SQL_HINT = re.compile(r"id|key|category|filter|sort|page|limit|offset|search|query|email|user|order", re.I)
+_LOCATIONS = {"query", "form", "body_json", "body_form", "body_xml"}
 
 
 def _origin(value: str) -> str:
@@ -131,12 +131,20 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
         url = str(sample.get("url") or "")
         query(url, method, "captured_api")
         body = sample.get("body")
+        headers = sample.get("headers") if isinstance(sample.get("headers"), dict) else {}
+        request_type = str(sample.get("request_content_type") or next(
+            (value for key, value in headers.items() if str(key).lower() == "content-type"), ""
+        )).lower()
+        if method.upper() in {"POST", "PUT", "PATCH"} and any(
+            mime in request_type for mime in ("application/xml", "text/xml", "+xml")
+        ):
+            add(method=method, url=url, name="document", location="body_xml",
+                source="captured_api", artifact_id=sample.get("artifact_id", ""))
         if isinstance(body, str) and len(body) <= 16_000:
             try:
                 body = json.loads(body)
             except ValueError:
-                content_type = str((sample.get("headers") or {}).get("content-type") or "").lower()
-                if "application/x-www-form-urlencoded" in content_type:
+                if "application/x-www-form-urlencoded" in request_type:
                     try:
                         for name, _ in parse_qsl(body, keep_blank_values=True, max_num_fields=100)[:40]:
                             add(method=method, url=url, name=name, location="body_form", source="captured_api")
@@ -186,6 +194,8 @@ def parameter_priority(row: dict, specialist: str) -> int:
     """Order likely sinks first without removing lower-signal observed inputs."""
     name = str(row.get("name") or "")
     value_type = str(row.get("value_type") or "")
+    if specialist == "sqli" and re.search(r"category|filter|search|query", name, re.I):
+        return 0
     if specialist == "xss":
         favored = bool(_XSS_HINT.search(name)) or value_type in {"search", "text", "textarea"}
     elif specialist == "sqli":
@@ -193,4 +203,4 @@ def parameter_priority(row: dict, specialist: str) -> int:
     else:
         favored = bool(_XSS_HINT.search(name) or _SQL_HINT.search(name))
     observed = row.get("source") in {"observed_form", "captured_api", "browser_traffic"}
-    return 0 if favored and observed else 1 if favored else 2
+    return 1 if favored and observed else 2 if favored else 3

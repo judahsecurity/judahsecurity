@@ -4485,7 +4485,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 parsed = [p.strip() for p in blob.replace(",", "\n").splitlines() if p.strip()]
         if not parsed:
             parsed = self._js_urls_from_map()
-        result = await run_scan(parsed, origin_host=self._origin_host())
+        from urllib.parse import urlsplit
+
+        cmap = getattr(self, "_capability_map", None) or {}
+        target = str(cmap.get("target") or cmap.get("scope") or "") if isinstance(cmap, dict) else ""
+        parts = urlsplit(target)
+        origin = f"{parts.scheme}://{parts.netloc}" if parts.scheme in {"http", "https"} and parts.netloc else ""
+        result = await run_scan(parsed, origin_host=origin or self._origin_host())
         return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
 
     async def fingerprint_api(self, **kwargs: Any) -> str:

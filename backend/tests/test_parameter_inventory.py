@@ -74,7 +74,8 @@ def test_parameter_cells_are_leased_exactly_and_completed_cells_survive_reseed()
     inventory = collect_parameter_inventory(_map())
     cells = seed_parameter_coverage_cells(brain, inventory)
     testable = [row for row in inventory if row["testable"]]
-    assert len([c for c in cells if c["source"] == "parameter_inventory"]) == 2 * len(testable)
+    assert len([c for c in cells if c["source"] == "parameter_inventory"]) >= 2 * len(testable)
+    assert any(c["test_type"] == "stored_xss" and c["path"] == "/comment" for c in cells)
     assert not any("csrf_token" in c["parameter"] for c in cells)
 
     leases = claim_coverage_cell_leases(brain, ["xss", "sqli"])
@@ -117,7 +118,7 @@ def test_specialist_lease_prioritizes_likely_input_but_keeps_other_inputs_open()
                for cell in brain.coverage_cells if cell["test_type"] == "xss")
 
 
-def test_browser_capture_is_leased_before_unreplayable_form_input():
+def test_likely_input_is_leased_before_unrelated_browser_capture():
     brain = EngagementBrain(target="https://app.test")
     seed_parameter_coverage_cells(brain, [
         {"method": "GET", "host": "app.test", "path": "/catalog",
@@ -132,8 +133,8 @@ def test_browser_capture_is_leased_before_unreplayable_form_input():
     for name, lease in leases.items():
         cell = next(row for row in brain.coverage_cells if row["id"] == lease.coverage_cell_id)
         assert cell["specialist"] == name
-        assert cell["path"] == "/catalog/product"
-        assert cell["capture_id"] == "private-capture"
+        assert cell["path"] == "/catalog"
+        assert cell["parameter"] == "query:searchTerm"
 
 
 def test_nonprivate_capture_does_not_advertise_scoped_probe():

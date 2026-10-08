@@ -55,17 +55,22 @@ async def scan_js_sinks(
     origin_host: str = "",
     timeout: float = 12.0,
 ) -> Dict[str, Any]:
-    urls = [u.strip() for u in urls if str(u).strip().startswith("http")][:MAX_URLS]
+    urls = [str(u).strip() for u in urls if str(u).strip().startswith(("http://", "https://"))][:MAX_URLS]
     if not urls:
         return {"ok": False, "error": "no https URLs"}
-    origin_host = origin_host or (urlparse(urls[0]).hostname or "")
+    origin_host = origin_host or (urlparse(urls[0]).netloc or "")
+    expected = urlparse(origin_host) if "://" in origin_host else None
+    expected_netloc = (expected.netloc if expected else origin_host).lower()
     sinks: List[Dict[str, Any]] = []
     analyzed = 0
     errors: List[str] = []
-    async with httpx.AsyncClient(follow_redirects=True, verify=False, timeout=timeout) as client:
+    async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
         for url in urls:
-            host = (urlparse(url).hostname or "").lower()
-            if origin_host and host and host != origin_host.lower() and not host.endswith("." + origin_host.lower()):
+            parsed = urlparse(url)
+            if (not parsed.hostname or parsed.username or parsed.password or
+                    parsed.query or parsed.fragment or
+                    (expected_netloc and parsed.netloc.lower() != expected_netloc) or
+                    (expected and parsed.scheme != expected.scheme)):
                 continue
             try:
                 r = await client.get(url)

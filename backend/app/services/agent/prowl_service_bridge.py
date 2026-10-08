@@ -140,7 +140,9 @@ def capability_map_from_observation(observation: dict) -> dict | None:
     js_files = list(dict.fromkeys(js_files))[:160]
     js_sources = [
         {"url": scope + path, "artifact_id": row.get("artifact_id", ""),
-         "sha256": row.get("sha256", ""), "bytes": row.get("bytes", 0)}
+         "sha256": row.get("sha256", ""), "bytes": row.get("bytes", 0),
+         "sink_leads": row["analysis"].get("sink_leads", []) if isinstance(row.get("analysis"), dict) else [],
+         "source_leads": row["analysis"].get("source_leads", []) if isinstance(row.get("analysis"), dict) else []}
         for row in (result.get("scripts") or [])[:20]
         if isinstance(row, dict) and row.get("kind") == "external"
         and (path := in_origin_path(row.get("path")))
@@ -161,6 +163,11 @@ def capability_map_from_observation(observation: dict) -> dict | None:
         common = {"method": row.get("method", "GET"), "path": row["path"],
                   "source": "browser_traffic", "identity": result.get("identity", "anonymous"),
                   "artifact_id": row.get("artifact_id", "")}
+        request_type = str(row.get("request_content_type") or "").lower()
+        if str(common["method"]).upper() in {"POST", "PUT", "PATCH"} and any(
+            mime in request_type for mime in ("application/xml", "text/xml", "+xml")
+        ):
+            parameters.append(common | {"name": "document", "location": "body_xml"})
         for field in (row.get("query_fields") or [])[:20]:
             if isinstance(field, dict):
                 parameters.append(common | {"name": field.get("name"),

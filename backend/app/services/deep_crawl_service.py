@@ -857,6 +857,8 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                 # products/APIs before static marketing spam). Seed = depth 0.
                 queue: List[tuple] = [(-_functionality_score(seed), 0, seed)]
                 seen: Set[str] = set()
+                from app.services.crawl_priority import next_crawl_index, route_family
+                visited_families: Dict[tuple[str, tuple[str, ...]], int] = {}
 
                 while queue and len(result.pages_visited) < max_pages:
                     if time.monotonic() >= crawl_deadline:
@@ -869,7 +871,9 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                         )
                         break
 
-                    _score, depth, url = queue.pop(0)
+                    _score, depth, url = queue.pop(
+                        next_crawl_index(queue, visited_families)
+                    )
                     norm = url.split("#")[0]
                     if norm in seen:
                         continue
@@ -892,6 +896,8 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                                    before_path, urlparse(page.url).path or "/")
 
                     result.pages_visited.append(page.url)
+                    family = route_family(page.url)
+                    visited_families[family] = visited_families.get(family, 0) + 1
                     page_score = _functionality_score(page.url)
 
                     try:

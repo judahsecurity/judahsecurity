@@ -586,6 +586,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_xsstrike",
             "execute_dalfox",
             "execute_browser",
+            "scan_js_sinks",
             "compare_requests",
             "mutate_list",
             "list_captured_requests",
@@ -613,6 +614,10 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "JavaScript string. Each runs a fresh nonce-backed browser proof. "
             "Submit a scoped candidate only on executed=true with its service artifact ID. "
             "A quote differential alone is not XSS. Status 200 is not XSS."
+            " For DOM XSS, inspect the assigned first-party script and show a real data path "
+            "from location.search or location.hash into an executable sink before browser proof. "
+            "For stored XSS, request approval for a reversible canary write and verify a "
+            "separate read; leave the cell blocked if no write is authorized."
         ),
     ),
     SpecialistProfile(
@@ -659,7 +664,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "For time-based probes, alternate multiple baseline and delay requests "
             "and require a repeatable gap beyond normal latency before submission. "
             "Canary → differential. sqlmap --batch only on confirmed candidates. "
-            "Blind OOB SQLi/XXE: execute_interactsh register → plant payload_url → poll. "
+            "Blind OOB SQLi/XXE requires explicit callback permission for this run; "
+            "otherwise use local, bounded controls and record an untested proof path. "
             "If WAF/403: run_custom_probe / encoding, then prove or kill. "
             "No os-shell. Status 200 is not SQLi."
         ),

@@ -102,14 +102,52 @@ class OperationDirective:
                 "exchange evidence when closing its coverage cell. Other inputs remain open "
                 "for later waves; get_parameter_inventory can page through the full worklist."
             )
+            kind = work.get("test_type")
+            if kind == "sqli" and work.get("value_type") != "positive_integer":
+                block += (
+                    " For text SQLi, preserve the observed request shape and compare repeated "
+                    "baseline, true-condition, false-condition, and unrelated-invalid controls. "
+                    "A lone quote response change is an inconclusive lead, not proof."
+                )
+            elif kind == "stored_xss":
+                block += (
+                    " Stored XSS needs an approved reversible write, a unique harmless canary, "
+                    "a separate read of the rendered comment, and fresh browser execution proof. "
+                    "If the write is not approved or the comment form cannot be used, mark blocked."
+                )
+            elif kind == "command_injection":
+                block += (
+                    " Command injection needs a benign output marker or repeatable timing "
+                    "differential against controls. Do not use file reads or outbound callbacks "
+                    "as the first proof. A changed status alone is not evidence of execution."
+                )
+            elif kind == "xxe":
+                block += (
+                    " XML parser testing requires an observed XML request and approved replay of "
+                    "this exact endpoint. If a captured XML sample is available, use "
+                    "mutate_captured_request location=body_xml, field=document and compare a "
+                    "harmless local entity canary with an inert XML control. The structured "
+                    "mutation blocks network callbacks; leave the proof inconclusive if no "
+                    "approved replay path exists."
+                )
         if self.js_work:
-            block += (
-                "\nAssigned observed JavaScript for this wave: "
-                f"{self.js_work.get('url', '')}. Call scan_assigned_js with this cell and lease; "
-                "scan this file for secrets and sensitive "
-                "client configuration, inspect its routes and sinks, and cite tool evidence. "
-                "Other observed scripts remain open for later waves."
-            )
+            if self.js_work.get("test_type") == "dom_xss":
+                block += (
+                    "\nAssigned DOM XSS lead in first-party JavaScript: "
+                    f"{self.js_work.get('url', '')}. Source leads: "
+                    f"{self.js_work.get('source_leads', '')}; sink leads: "
+                    f"{self.js_work.get('sink_leads', '')}. Trace actual data flow from "
+                    "query or fragment to an executable sink and prove it with a fresh browser "
+                    "nonce in the target origin. Co-located regex matches alone are not a finding."
+                )
+            else:
+                block += (
+                    "\nAssigned observed JavaScript for this wave: "
+                    f"{self.js_work.get('url', '')}. Call scan_assigned_js with this cell and lease; "
+                    "scan this file for secrets and sensitive "
+                    "client configuration, inspect its routes and sinks, and cite tool evidence. "
+                    "Other observed scripts remain open for later waves."
+                )
         if self.proof_escalation_id:
             block += (
                 f"\nPROOF ESCALATION {self.proof_escalation_id}: strategy="
@@ -195,6 +233,8 @@ def directives_from_hypotheses(
                     "name": parameter_name,
                     "identity": str(coverage_cell.get("identity") or "anonymous"),
                     "capture_id": str(coverage_cell.get("capture_id") or ""),
+                    "test_type": str(coverage_cell.get("test_type") or ""),
+                    "value_type": str(coverage_cell.get("value_type") or ""),
                     "scoped_capture_id": (
                         str(coverage_cell.get("capture_id") or "")
                         if scoped_replay_eligible(coverage_cell)
@@ -206,6 +246,9 @@ def directives_from_hypotheses(
             js_work = {
                 "url": str(coverage_cell["script_url"]),
                 "capture_id": str(coverage_cell.get("capture_id") or ""),
+                "test_type": str(coverage_cell.get("test_type") or ""),
+                "source_leads": str(coverage_cell.get("source_leads") or "")[:300],
+                "sink_leads": str(coverage_cell.get("sink_leads") or "")[:300],
             }
         proof_escalation_id = str(coverage_cell.get("proof_escalation_id") or "")
         proof_escalation = next(

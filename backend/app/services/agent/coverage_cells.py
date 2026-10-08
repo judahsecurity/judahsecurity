@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import uuid
 from collections.abc import Iterable
@@ -30,6 +31,7 @@ def scoped_replay_eligible(cell: dict[str, Any]) -> bool:
     method = str(cell.get("method") or "").upper()
     return bool(
         cell.get("source") == "parameter_inventory"
+        and cell.get("test_type") in {"xss", "sqli"}
         and cell.get("observation_source") == "browser_traffic"
         and cell.get("capture_id")
         and separator and parameter
@@ -112,9 +114,11 @@ def _specialist_for(test_type: str, hypothesis_id: str, brain: Any) -> str:
         return "js_secrets"
     if "sql" in kind:
         return "sqli"
+    if kind == "xxe":
+        return "sqli"
     if "ssrf" in kind or "url_fetch" in kind:
         return "ssrf"
-    if "path" in kind or "command" in kind or kind == "input_boundary":
+    if "path" in kind or "command" in kind or kind in {"cmdi", "input_boundary"}:
         return "injection"
     return "app_mapper"
 
@@ -441,7 +445,7 @@ def migrate_coverage_cells(
 
 
 def seed_parameter_coverage_cells(brain: Any, inventory: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Create one durable XSS and SQLi work item per eligible observed input.
+    """Create durable injection work for eligible observed inputs.
 
     Repeated mapping cannot reset a completed or leased cell. Parameters that
     carry authentication or anti-CSRF state remain in the inventory but are
@@ -453,8 +457,23 @@ def seed_parameter_coverage_cells(brain: Any, inventory: Iterable[dict[str, Any]
     for raw in inventory:
         if not isinstance(raw, dict) or raw.get("testable") is not True:
             continue
-        for test_type in ("xss", "sqli"):
-            specialist = test_type
+        path = str(raw.get("path") or "").lower()
+        name = str(raw.get("name") or "").lower()
+        method = str(raw.get("method") or "GET").upper()
+        location = str(raw.get("location") or "query")
+        if location == "body_xml":
+            test_types = ("xxe",)
+        else:
+            test_types = ["xss", "sqli"]
+            if (method in {"POST", "PUT", "PATCH"} and
+                    re.search(r"comment|review|blog|post", path) and
+                    re.search(r"comment|author|body|message|content|name|text", name)):
+                test_types.append("stored_xss")
+            if (re.search(r"command|cmd|exec|ping|host|address|ip_address", name) or
+                    re.search(r"stock|feedback", path)):
+                test_types.append("command_injection")
+        for test_type in test_types:
+            specialist = _specialist_for(test_type, "", brain)
             hypothesis = next((
                 h for h in getattr(brain, "hypotheses", []) or []
                 if getattr(h, "specialist", "") == specialist
@@ -470,6 +489,10 @@ def seed_parameter_coverage_cells(brain: Any, inventory: Iterable[dict[str, Any]
                 source="parameter_inventory", capture_id=raw.get("artifact_id", ""),
             )
             cell["priority_rank"] = parameter_priority(raw, specialist)
+            if test_type == "command_injection":
+                cell["priority_rank"] = 0
+            elif test_type in {"stored_xss", "xxe"}:
+                cell["priority_rank"] = 2
             cell["value_type"] = str(raw.get("value_type") or "")[:40]
             cell["observation_source"] = str(raw.get("source") or "")[:40]
             if cell["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
@@ -512,6 +535,19 @@ def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, A
         if cell["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
             brain.coverage_cells.append(cell)
             existing.add(cell["id"])
+        if source.get("source_leads") and source.get("sink_leads"):
+            dom = _new_cell(
+                brain, method="GET", path=parts.path, host=parts.netloc,
+                identity="anonymous", parameter="script", test_type="dom_xss",
+                source="js_inventory", capture_id=source.get("artifact_id", ""),
+            )
+            dom["script_url"] = script_url
+            dom["source_leads"] = list(source.get("source_leads") or [])[:10]
+            dom["sink_leads"] = list(source.get("sink_leads") or [])[:30]
+            dom["priority_rank"] = 2
+            if dom["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
+                brain.coverage_cells.append(dom)
+                existing.add(dom["id"])
     return migrate_coverage_cells(brain)
 
 
@@ -720,12 +756,12 @@ def claim_coverage_cell_leases(
         ]
         candidates.sort(
             key=lambda cell: (
+                int(cell.get("priority_rank", 2)),
                 0 if specialist in {"xss", "sqli"} and scoped_replay_eligible(cell) else 1,
                 0
                 if hypothesis_id and cell.get("hypothesis_id") == hypothesis_id
                 else 1,
                 0 if cell.get("proof_escalation_id") else 1,
-                int(cell.get("priority_rank", 2)),
                 int(cell.get("attempts") or 0),
                 cell.get("surface_key", ""),
                 cell.get("identity", ""),

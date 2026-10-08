@@ -7,11 +7,12 @@ by describing Nuclei templates.
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-LOCATIONS = ("query", "header", "body_json", "body_form", "path", "method")
+LOCATIONS = ("query", "header", "body_json", "body_form", "body_xml", "path", "method")
 
 
 def coerce_request_body(
@@ -166,6 +167,17 @@ def apply_one_mutation(
         ctype = {k.lower(): k for k in mutant["headers"]}
         if "content-type" not in ctype:
             mutant["headers"]["Content-Type"] = "application/x-www-form-urlencoded"
+    elif loc == "body_xml":
+        mime = next((str(v).lower() for k, v in mutant["headers"].items()
+                     if k.lower() == "content-type"), "")
+        if (field != "document" or not mutant.get("body") or
+                not any(mark in mime for mark in ("application/xml", "text/xml", "+xml"))):
+            raise ValueError("XML mutation requires an observed XML document")
+        if not isinstance(value, str) or len(value) > 4_096 or not value.lstrip().startswith("<"):
+            raise ValueError("XML replacement must be a bounded XML document")
+        if re.search(r"(?:https?|ftp)://", value, re.I):
+            raise ValueError("XML network references require a separately approved callback workflow")
+        mutant["body"] = value
 
     return baseline, mutant
 
