@@ -7055,6 +7055,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         timeout: int = 30,
         hypothesis_id: Optional[str] = None,
         coverage_cell_id: str = "",
+        identity: Optional[str] = None,
     ) -> str:
         """Differential HTTP proof — baseline vs one mutation (tester core loop).
 
@@ -7072,6 +7073,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
               on those gold-bar pairs when Authorization is absent.
             timeout: per-request timeout
             hypothesis_id: optional engagement hypothesis to annotate with result
+            identity: optional default identity for both requests; a request-level
+              identity takes precedence when comparing two named identities.
         """
         import json as _json
         import re as _re
@@ -7106,7 +7109,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "headers": hdrs,
                 "body": raw_body,
                 "cookies": spec.get("cookies"),
-                "identity": spec.get("identity"),
+                "identity": spec.get("identity") if spec.get("identity") is not None else identity,
             }
 
         try:

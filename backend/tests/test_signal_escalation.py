@@ -222,3 +222,30 @@ async def test_compare_requests_automatically_queues_proof(monkeypatch):
     finally:
         current_session_id.reset(session_token)
         current_organization_id.reset(org_token)
+
+
+@pytest.mark.asyncio
+async def test_compare_requests_accepts_default_identity_without_overriding_request_identity():
+    manager = ASMToolsManager()
+    observed = []
+
+    async def fake_exchange(**kwargs):
+        observed.append(kwargs["identity"])
+        return {"response": {"status": 200, "length": 2, "elapsed_s": 0},
+                "_body_text": "ok", "evidence_id": f"e{len(observed)}", "trace": {}}
+
+    manager._http_exchange = fake_exchange
+    await manager.compare_requests(
+        {"method": "GET", "url": "https://app.test/a"},
+        {"method": "GET", "url": "https://app.test/b"},
+        identity="anonymous",
+    )
+    assert observed == ["anonymous", "anonymous"]
+
+    observed.clear()
+    await manager.compare_requests(
+        {"method": "GET", "url": "https://app.test/a", "identity": "owner"},
+        {"method": "GET", "url": "https://app.test/b", "identity": "other"},
+        identity="anonymous",
+    )
+    assert observed == ["owner", "other"]
