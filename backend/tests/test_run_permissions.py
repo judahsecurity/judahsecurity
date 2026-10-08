@@ -2,6 +2,7 @@
 
 from app.services.agent.run_permissions import (
     credential_testing_allowed,
+    oob_callbacks_allowed,
     permitted_specialists,
 )
 
@@ -25,3 +26,13 @@ def test_auto_wave_removes_credential_assault_without_grant():
     names = ["xss", "credential_assault", "sqli"]
     assert permitted_specialists(names, allow_credential_testing=False) == ["xss", "sqli"]
     assert permitted_specialists(names, allow_credential_testing=True) == names
+
+
+def test_oob_callbacks_require_a_separate_operator_grant():
+    assert not oob_callbacks_allowed("Run a full assessment")
+    assert not oob_callbacks_allowed(
+        "Avoid third-party callbacks without approval",
+        {"oob_callbacks_allowed": True},
+    )
+    assert oob_callbacks_allowed("I authorize out-of-band callbacks")
+    assert oob_callbacks_allowed("Run a full assessment", {"oob_callbacks_allowed": True})

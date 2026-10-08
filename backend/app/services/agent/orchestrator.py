@@ -3291,8 +3291,13 @@ class AgentOrchestrator:
             set_tenant_context(int(user_id), organization_id, session_id)
             if assessment_policy is not None:
                 self.tool_manager.set_scoped_assessment_policy(assessment_policy)
-            from app.services.agent.run_permissions import credential_testing_allowed
+            from app.services.agent.run_permissions import (
+                credential_testing_allowed, oob_callbacks_allowed,
+            )
             self.tool_manager._credential_testing_allowed = credential_testing_allowed(
+                question, assessment_policy,
+            )
+            self.tool_manager._oob_callbacks_allowed = oob_callbacks_allowed(
                 question, assessment_policy,
             )
 

@@ -511,6 +511,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _assessment_scope = SessionValue(set)
     _fallback_target = SessionValue(lambda: "")
     _credential_testing_allowed = SessionValue(lambda: False)
+    _oob_callbacks_allowed = SessionValue(lambda: False)
 
     def __init__(self):
         self.tools = self._register_tools()
@@ -1103,6 +1104,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "success": False,
                 "output": "Credential testing requires explicit operator authorization for this run.",
                 "error": "credential_testing_not_authorized",
+            }
+        if tool_name in {"execute_interactsh", "run_oob_callback_workflow"} and not self._oob_callbacks_allowed:
+            return {
+                "success": False,
+                "output": "Out-of-band callbacks require explicit operator authorization for this run.",
+                "error": "oob_callbacks_not_authorized",
             }
         from app.services.agent.pilot_policy import PilotDenied, current_pilot
         pilot = current_pilot()

@@ -342,7 +342,6 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ),
         allowed_tools=[
             "get_api_operation_inventory",
-            "execute_curl",
             "execute_browser",
             "execute_httpx",
             "bypass_403",
@@ -420,7 +419,6 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         allowed_tools=[
             "get_api_operation_inventory",
             "fingerprint_api",
-            "execute_curl",
             "execute_httpx",
             "execute_kiterunner",
             "execute_schemathesis",
@@ -552,7 +550,6 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_browser",
             "execute_interactsh",
             "generate_injection_payloads",
-            "execute_curl",
             "compare_requests",
             "mutate_list",
             "list_captured_requests",
@@ -568,8 +565,10 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         max_iterations=12,
         system_prompt_suffix=(
             "Start with get_parameter_inventory; use discover_parameters + arjun on live paths if params are unknown. "
-            "SQLi/XSS/SSTI/cmd as usual. Also treat url/uri/request/datasource/execute/"
-            "query fields as SSRF: execute_interactsh register → plant payload_url → poll, "
+            "SQLi/XSS/SSTI/cmd as usual. Use structured request tools for payloads. "
+            "Also treat url/uri/request/datasource/execute/"
+            "query fields as SSRF: if this run authorizes OOB, register a callback, plant "
+            "a unique payload URL, and poll; otherwise keep checks local and read-only. "
             "then compare benign vs internal canary (do not use cloud-metadata/loopback if Lictor blocks). "
             "Do not use Canarytokens. Status 200 is not a finding. Unknown-bug hunting beats Nuclei templates."
         ),
@@ -1192,6 +1191,11 @@ async def _run_specialist(
             "login attempts, password spraying, or brute force. Use only supplied "
             "test identities for auth comparisons."
         )
+    if not getattr(tools_manager, "_oob_callbacks_allowed", False):
+        suffix_parts.append(
+            "This run has no operator authorization for out-of-band or third-party "
+            "callbacks. Do not register callback services or embed callback URLs."
+        )
     suffix = "\n\n".join(suffix_parts)
 
     if isinstance(directive, OperationDirective):
@@ -1215,6 +1219,11 @@ async def _run_specialist(
         max_iter = profile.max_iterations
 
     allowed_tools = list(profile.allowed_tools)
+    if not getattr(tools_manager, "_oob_callbacks_allowed", False):
+        allowed_tools = [
+            tool for tool in allowed_tools
+            if tool not in {"execute_interactsh", "run_oob_callback_workflow"}
+        ]
     if (isinstance(directive, OperationDirective)
             and directive.parameter_work
             and not directive.parameter_work.get("scoped_capture_id")):
@@ -1267,7 +1276,8 @@ async def _run_specialist(
             directive=directive if isinstance(directive, OperationDirective) else None,
             cmap=cmap if isinstance(cmap, dict) else {},
             palace_snippet=palace_snippet,
-            provision_oob=profile.name in OOB_SPECIALISTS,
+            provision_oob=(profile.name in OOB_SPECIALISTS
+                           and bool(getattr(tools_manager, "_oob_callbacks_allowed", False))),
         )
     except Exception:
         logger.debug("specialist hunt-brief skipped", exc_info=True)
