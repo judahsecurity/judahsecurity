@@ -3,14 +3,14 @@
   "title": "Injection on mapped parameters",
   "summary": "Detect SQLi/SSTI/command injection via disciplined canaries then targeted escalation.",
   "steps": [
-    "Rank params from map (id, q, sort, template, host, cmd-like names).",
-    "Send benign baseline then one canary family at a time (SQLi boolean/time, SSTI {{7*7}}, cmd separators).",
-    "compare_requests baseline vs mutant for body/timing differentials.",
+    "Rank captured dynamic params from the map, including catalog category/filter/search/product identifiers; defer static assets and login requests without a valid CSRF workflow.",
+    "For SQLi, compare an unchanged baseline, true and false conditions, and an unrelated invalid control on the same parameter and request shape. A changed search term or status alone is not proof.",
+    "Repeat candidate boolean differentials after normalizing dynamic response content. For blind timing, alternate multiple baseline and delay requests and compare against normal latency before treating a delay as evidence.",
     "Escalate with sqlmap/xsstrike only on anomalous params — never blind spray all params.",
-    "On PASS: concrete param + differential or data extraction evidence."
+    "On PASS: a named parameter with a repeatable controlled differential and independent verification; no data extraction is required."
   ],
   "tools": ["compare_requests", "execute_curl", "execute_sqlmap", "execute_commix"],
-  "pass_signals": ["Boolean/time/error-based differential", "Template/command evaluation evidenced"],
+  "pass_signals": ["Repeatable boolean/time/error-based differential with a matching control", "Template/command evaluation evidenced"],
   "kill_signals": ["No anomalous differentials after ranked probes"],
   "references": ["CWE-89", "CWE-94", "CWE-78", "PortSwigger: Detect SQL Injection"]
 }

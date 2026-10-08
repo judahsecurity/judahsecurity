@@ -183,8 +183,13 @@ async def test_assigned_probe_uses_private_capture_and_cannot_change_input(monke
     xss = await manager.scoped_assessment_probe_assigned(
         lease.coverage_cell_id, lease.id, "xss_browser")
     assert xss["assigned_operation"] == "browser_check_xss"
+    assert "%3Cimg%20src%3Dx%20onerror%3Dalert" in calls[-1][1]["url_template"]
     assert "__PROWL_NONCE__" in calls[-1][1]["url_template"]
     assert calls[-1][1]["identity"] == "anonymous"
+    js = await manager.scoped_assessment_probe_assigned(
+        lease.coverage_cell_id, lease.id, "xss_browser_js_single")
+    assert js["assigned_operation"] == "browser_check_xss"
+    assert "%27%3Balert" in calls[-1][1]["url_template"]
 
 
 @pytest.mark.asyncio

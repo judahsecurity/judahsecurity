@@ -883,13 +883,19 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             return {"success": False, "error": "invalid_coverage_lease",
                     "output": "An active lease on a browser-captured parameter is required"}
         location, separator, parameter = str(cell.get("parameter") or "").partition(":")
-        if not separator or not parameter or technique not in {"captured", "xss_browser"}:
+        xss_payloads = {
+            "xss_browser": '<img src=x onerror=alert("__PROWL_NONCE__")>',
+            "xss_browser_attribute": '"><img src=x onerror=alert("__PROWL_NONCE__")>',
+            "xss_browser_js_single": "';alert(\"__PROWL_NONCE__\");//",
+            "xss_browser_js_double": '\";alert(\'__PROWL_NONCE__\');//',
+        }
+        if not separator or not parameter or technique not in {"captured", *xss_payloads}:
             return {"success": False, "error": "invalid_parameter_probe",
                     "output": "Unsupported parameter or technique"}
         identity = str(cell.get("identity") or "anonymous")
         body = {"artifact_id": cell["capture_id"], "parameter": parameter, "identity": identity}
         method = str(cell.get("method") or "GET")
-        if technique == "xss_browser":
+        if technique in xss_payloads:
             if cell.get("specialist") != "xss" or method != "GET" or location != "query":
                 return {"success": False, "error": "unsupported_xss_browser",
                         "output": "Browser XSS check requires a captured GET query parameter"}
@@ -899,7 +905,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     origin.netloc.lower() != str(cell.get("host") or "").lower()):
                 return {"success": False, "error": "scope_mismatch",
                         "output": "Assigned input does not match the scoped origin"}
-            payload = '<script>alert("__PROWL_NONCE__")</script>'
+            payload = xss_payloads[technique]
             template = (f"{origin.scheme}://{origin.netloc}{cell['path']}?"
                         f"{quote(parameter, safe='')}={quote(payload, safe='')}")
             operation = "browser_check_xss"

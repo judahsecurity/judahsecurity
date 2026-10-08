@@ -4,14 +4,14 @@
   "summary": "Prove untrusted input executes in HTML/JS contexts in a victim browser.",
   "steps": [
     "Inject a unique canary into search/reflect params from the map.",
-    "Confirm reflection context (HTML body, attribute, script) via response or browser.",
-    "Escalate to a minimal execution proof (alert/console) in-scope only.",
+    "Confirm reflection context (HTML body, quoted attribute, JavaScript string) and encoding via response or browser; reflection alone is not execution.",
+    "Choose one context-matched, nonce-backed browser execution proof in-scope; an event handler is suitable for HTML body or DOM insertion, while a quoted JavaScript string needs a matching string-breakout probe.",
     "If filtered, try one context-appropriate encoding — do not spray huge payload lists.",
     "Stored: submit canary, reload as second identity if available.",
-    "On PASS: demonstrated script execution or unambiguous injectable context with repro URL."
+    "On PASS: fresh nonce-backed script execution in the scoped browser with a reproducible URL; reflection or raw markup alone is only a lead."
   ],
   "tools": ["execute_browser", "execute_curl", "execute_dalfox", "execute_xsstrike"],
-  "pass_signals": ["Script executes in browser", "Unambiguous HTML/JS injection with canary"],
+  "pass_signals": ["Fresh nonce appears in a browser dialog from the scoped origin"],
   "kill_signals": ["Output encoded and CSP blocks with no viable bypass after context tests"],
   "references": ["CWE-79", "PortSwigger: Find XSS / Reflected XSS / Stored XSS"]
 }

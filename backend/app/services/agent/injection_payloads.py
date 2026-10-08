@@ -340,8 +340,8 @@ def _get_detection_hints(vuln_type: str) -> Dict:
             "union_based": "Look for extra data rows appearing in the response from UNION SELECT",
         },
         "xss": {
-            "reflected": "Check if payload appears unescaped in response HTML",
-            "dom": "Check if alert dialog is triggered (execute_browser check_xss action)",
+            "reflected": "Locate a unique canary in the response, identify its HTML/attribute/JavaScript context, and compare encoding. Reflection is a lead, not an XSS finding.",
+            "dom": "Require a fresh nonce-bearing browser dialog from the target origin (execute_browser check_xss or scoped_assessment_probe_assigned).",
             "indicators": [
                 "Payload reflected verbatim in page source",
                 "JavaScript alert/prompt/confirm dialog triggered",

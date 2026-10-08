@@ -6,9 +6,9 @@
     "Identify the mapped login form or POST /login|/signin|/api/auth/login (JSON body counts).",
     "compare_requests: baseline valid-looking credentials vs one mutation on username, then password — error canary first.",
     "If no SQL error: boolean pair (true vs false condition) on the same field.",
-    "If still quiet: timing pair. A delay that scales with SLEEP is SUBMIT with the timing table (same bar as WP tax_query).",
+    "If still quiet: alternate multiple baseline and delay probes using the same valid CSRF workflow; submit only a repeatable timing gap beyond normal latency with independent verification.",
     "generate_injection_payloads(vuln_type='sqli', technique='time_based') and technique='auth_bypass' for mutant values. sqlmap --batch only after a canary.",
-    "If WAF/403/timeout: one compare_requests or run_custom_probe rewrite from the defense body, then prove or kill. Do not re-run sqlmap with the same flags.",
+    "If baseline and mutants all hit the same CSRF/WAF gate, mark the input blocked and move to another observed input. Do not re-run sqlmap with the same flags.",
     "Auth bypass (session issued from a canary) is Critical. Blind timing without a session is High. Status 200 without a differential is not a finding. No os-shell, no table dump."
   ],
   "tools": [
