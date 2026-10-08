@@ -19,13 +19,12 @@ def test_packs_cover_known_kinds():
         assert all(k in WORKER_KINDS for k in kinds)
 
 
-def test_early_pack_includes_nuclei_recon():
+def test_early_pack_defers_nuclei_recon():
     assert "nuclei_recon" in WORKER_KINDS
     assert PACKS["early"] == [
         "httpx_tech",
         "waf_probe",
         "whatweb",
-        "nuclei_recon",
     ]
     assert PACKS["nuclei_recon"] == ["nuclei_recon"]
     assert "nuclei_recon" in PACKS["full"]
@@ -56,8 +55,9 @@ def test_format_briefs_for_prompt():
 def test_nuclei_recon_args_are_informational():
     args = nuclei_recon_args("https://example.com")
     assert is_bounded_nuclei_recon_args(args)
-    assert "-severity info,low" in args
-    assert "-tags tech,exposure,panel" in args
+    assert "-severity info" in args
+    assert "-tags tech,detect" in args
+    assert "-rate-limit 20" in args
     assert "-jsonl" in args
     assert "-etags" in args
 

@@ -347,9 +347,6 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_httpx",
             "bypass_403",
             "test_saml_sso",
-            "test_credential_spray",
-            "execute_hydra",
-            "execute_brutus",
             "execute_jwt",
             "compare_requests",
             "mutate_captured_request",
@@ -364,11 +361,11 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ],
         max_iterations=12,
         system_prompt_suffix=(
-            "Prefer compare_requests (anonymous vs auth). On default/weak login success: "
-            "add_engagement_credential + queue_finding_followups(vuln_type='default_login'). "
+            "Prefer compare_requests (anonymous vs supplied test identities). "
             "Login username/password (or JSON /login body) is also an injection surface — "
             "spawn sqli for error/boolean/time canaries; do not treat login as creds-only. "
-            "Never invent credentials. Hand large sprays to credential_assault (Samson). "
+            "Never invent credentials. Credential testing needs explicit operator authorization "
+            "and belongs to credential_assault (Samson), not this specialist. "
             "ASP.NET SaveSettings: missing [Authorize] is sibling 401 vs unauth 200 void — "
             "hand to api_authz; queue_finding_followups(vuln_type='unauth_settings_write'). "
             "djoser reset_email: unauth 204 vs set_password 401 — hand to auth_logic; "
@@ -1189,6 +1186,12 @@ async def _run_specialist(
     suffix_parts.append(PROOF_GUIDANCE)
     from app.services.agent.prompts import APPLICATION_ASSESSMENT_GUIDANCE
     suffix_parts.append(APPLICATION_ASSESSMENT_GUIDANCE)
+    if not getattr(tools_manager, "_credential_testing_allowed", False):
+        suffix_parts.append(
+            "This run has no operator authorization for credential guessing, default "
+            "login attempts, password spraying, or brute force. Use only supplied "
+            "test identities for auth comparisons."
+        )
     suffix = "\n\n".join(suffix_parts)
 
     if isinstance(directive, OperationDirective):

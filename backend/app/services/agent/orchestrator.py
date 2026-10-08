@@ -3291,6 +3291,10 @@ class AgentOrchestrator:
             set_tenant_context(int(user_id), organization_id, session_id)
             if assessment_policy is not None:
                 self.tool_manager.set_scoped_assessment_policy(assessment_policy)
+            from app.services.agent.run_permissions import credential_testing_allowed
+            self.tool_manager._credential_testing_allowed = credential_testing_allowed(
+                question, assessment_policy,
+            )
 
             _max_iterations_var.set(max_iterations)
             self._start_turn_deadline()

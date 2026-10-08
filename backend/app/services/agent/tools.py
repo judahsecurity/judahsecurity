@@ -510,6 +510,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _require_independent_verify = SessionValue(lambda: True)
     _assessment_scope = SessionValue(set)
     _fallback_target = SessionValue(lambda: "")
+    _credential_testing_allowed = SessionValue(lambda: False)
 
     def __init__(self):
         self.tools = self._register_tools()
@@ -1097,6 +1098,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     async def _execute_impl(self, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool with the given arguments."""
         tool_args = dict(tool_args or {}) if isinstance(tool_args, dict) else {}
+        if tool_name in {"test_credential_spray", "execute_hydra", "execute_brutus"} and not self._credential_testing_allowed:
+            return {
+                "success": False,
+                "output": "Credential testing requires explicit operator authorization for this run.",
+                "error": "credential_testing_not_authorized",
+            }
         from app.services.agent.pilot_policy import PilotDenied, current_pilot
         pilot = current_pilot()
         if pilot is not None:
@@ -8539,6 +8546,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         pending_ra = pending_ra_rows(brain)
         if mode not in {"observed_inputs", "cms_followup"} and pending_ra and "risk_assessor" not in (chosen or []):
             chosen = list(chosen or []) + ["risk_assessor"]
+
+        from app.services.agent.run_permissions import permitted_specialists
+        chosen = permitted_specialists(
+            chosen or [],
+            allow_credential_testing=bool(self._credential_testing_allowed),
+        )
 
         if not mission or not str(mission).strip():
             if brain.hypotheses:

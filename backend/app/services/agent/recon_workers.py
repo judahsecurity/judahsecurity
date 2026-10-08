@@ -14,7 +14,7 @@ Worker kinds (bounded — not DirBuster-scale):
   nuclei_recon — informational Nuclei (tech / detect). Not CVE spray.
 
 Packs:
-  early        — httpx_tech + waf_probe + whatweb + nuclei_recon
+  early        — httpx_tech + waf_probe + whatweb
                  (auto on URL paste; interceptor queued separately)
   enrich       — ferox_dirs + katana_urls
   nuclei_recon — informational Nuclei only (explicit spawn)
@@ -46,7 +46,7 @@ WORKER_KINDS = (
 )
 
 PACKS: Dict[str, List[str]] = {
-    "early": ["httpx_tech", "waf_probe", "whatweb", "nuclei_recon"],
+    "early": ["httpx_tech", "waf_probe", "whatweb"],
     "enrich": ["ferox_dirs", "katana_urls"],
     "nuclei_recon": ["nuclei_recon"],
     "full": [

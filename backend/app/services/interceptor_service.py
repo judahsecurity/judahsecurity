@@ -352,12 +352,11 @@ async def _try_remote_workers(url: str, opts: Dict[str, Any]) -> Optional[Dict[s
             },
         )
 
-    # The agent's per-tool ceiling defaults to 600s. A 900s remote wait means
-    # the orchestrator cancels this tool before local/Playwright fallback can
-    # run. Bound the remote phase separately, leaving time for that fallback.
+    # The agent's per-tool ceiling defaults to 600s. Bound the remote phase so
+    # an unresponsive worker does not delay local/Playwright mapping for minutes.
     timeout = min(
         float(os.environ.get("RECON_JOB_TIMEOUT_SEC", "900")),
-        float(os.environ.get("INTERCEPTOR_REMOTE_WAIT_SEC", "240")),
+        float(os.environ.get("INTERCEPTOR_REMOTE_WAIT_SEC", "90")),
     )
 
     async def _progress(v):
