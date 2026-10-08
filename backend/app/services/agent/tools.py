@@ -1307,11 +1307,67 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     except (ValueError, AttributeError):
                         browser_proof_allowed = False
                 for observation in (result.get("browser_evidence") or []) if browser_proof_allowed else []:
-                    evidence_ids.append(evidence_store(self).record("browser_xss", observation,
-                        target=observation.get("url", ""), success=bool(observation.get("dialog_triggered"))))
+                    browser_id = evidence_store(self).record(
+                        "browser_xss", observation, target=observation.get("url", ""),
+                        success=bool(observation.get("dialog_triggered")),
+                    )
+                    evidence_ids.append(browser_id)
+                    try:
+                        from app.services.agent.action_ledger import active_run_id, append_action
+
+                        append_action(
+                            active_run_id.get(), os.urandom(16).hex(), "completed", "browser_xss_check",
+                            target=observation.get("url", ""), phase="logic_testing",
+                            detail=("dialog observed; independent finding verification required"
+                                    if observation.get("dialog_triggered") else
+                                    "browser check completed; no script execution observed"),
+                            evidence_ids=[browser_id],
+                        )
+                    except Exception:
+                        logger.exception("Could not record browser XSS check")
                 max_chars = _tool_output_max_chars()
                 augur_block = result.get("augur")  # Augur reading: kept/dropped/next_steps/signals
                 capability_map = result.get("capability_map")  # deep_crawl / interceptor map
+                if tool_name == "execute_deep_crawl" and result.get("success") and isinstance(capability_map, dict):
+                    try:
+                        from app.services.agent.action_ledger import active_run_id, append_action
+
+                        run_id = active_run_id.get()
+                        target_origin = str(capability_map.get("target") or "")
+                        parameters = capability_map.get("parameter_inventory") or []
+                        if parameters:
+                            parameter_id = evidence_store(self).record(
+                                "parameter_discovery",
+                                {"count": len(parameters), "parameters": parameters[:80]},
+                                target=target_origin,
+                            )
+                            evidence_ids.append(parameter_id)
+                            append_action(
+                                run_id, os.urandom(16).hex(), "completed", "parameter_discovery",
+                                target=target_origin, phase="surface_mapping",
+                                detail=f"{len(parameters)} named inputs observed; no vulnerability inferred",
+                                evidence_ids=[parameter_id],
+                            )
+                        for observation in (capability_map.get("reflection_observations") or [])[:20]:
+                            if not isinstance(observation, dict):
+                                continue
+                            reflection_id = evidence_store(self).record(
+                                "parameter_reflection_check", observation,
+                                target=target_origin, parameter=str(observation.get("parameter") or ""),
+                                test_type="benign_get_canary", success=True,
+                            )
+                            evidence_ids.append(reflection_id)
+                            append_action(
+                                run_id, os.urandom(16).hex(), "completed", "parameter_reflection_check",
+                                target=target_origin, phase="surface_mapping",
+                                detail=(f"{observation.get('path', '/')} "
+                                        f"parameter={observation.get('parameter', '')} "
+                                        f"reflected={bool(observation.get('reflected'))}; "
+                                        "browser execution unverified"),
+                                evidence_ids=[reflection_id],
+                            )
+                    except Exception:
+                        logger.exception("Could not record crawl parameter evidence")
                 if pilot is not None and tool_name == "execute_browser" and result.get("success"):
                     from app.services.agent.pilot_policy import PILOT_METHODS
                     observed = []

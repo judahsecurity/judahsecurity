@@ -388,6 +388,7 @@ class CrawlResult:
     action_checkpoints: List[Dict[str, Any]] = field(default_factory=list)
     js_file_actions: Dict[str, str] = field(default_factory=dict)
     js_endpoint_sources: Dict[str, Set[str]] = field(default_factory=dict)
+    reflection_observations: List[Dict[str, Any]] = field(default_factory=list)
 
 
 def _check_playwright() -> bool:
@@ -948,6 +949,17 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                 elif capture_js and result.js_files:
                     result.errors.append("skipped JS mining — crawl budget exhausted")
 
+                # A small follow-up to the observed GET surface. These alphanumeric
+                # canaries only establish reflection, never XSS or script execution.
+                if time.monotonic() < crawl_deadline - 2:
+                    from app.services.agent.capability_map import build_capability_map_from_crawl
+                    from app.services.agent.reflection_probe import probe_reflections
+
+                    inventory = build_capability_map_from_crawl(result).parameter_inventory
+                    result.reflection_observations = await probe_reflections(
+                        context, seed, inventory, deadline=crawl_deadline,
+                    )
+
                 # Export session so the agent can hand off auth to execute_browser /
                 # privileged re-crawls (tester methodology: login once, reuse session).
                 try:
@@ -1507,6 +1519,15 @@ def _format_output(r: CrawlResult) -> str:
         for f in r.forms[:20]:
             inputs = ",".join(f.get("inputs", [])[:12])
             lines.append(f"    {f.get('method')} {f.get('action') or '(self)'}  inputs=[{inputs}]")
+
+    if r.reflection_observations:
+        reflected = [item for item in r.reflection_observations if item.get("reflected")]
+        lines.append(
+            f"\nGET canary checks: {len(r.reflection_observations)} tested, "
+            f"{len(reflected)} reflected in HTML source. Reflection is not XSS proof."
+        )
+        for item in reflected[:8]:
+            lines.append(f"    {item['path']} parameter={item['parameter']} — browser execution unverified")
 
     if r.third_party:
         lines.append(f"\nThird-party / out-of-scope hosts contacted ({len(r.third_party)}):")

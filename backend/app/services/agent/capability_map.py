@@ -39,6 +39,8 @@ class CapabilityMap:
     api_samples: List[Dict[str, Any]] = field(default_factory=list)
     # Names and locations only; request values and credentials stay out of the map.
     parameter_inventory: List[Dict[str, Any]] = field(default_factory=list)
+    # Benign marker checks; reflection alone is not an XSS finding.
+    reflection_observations: List[Dict[str, Any]] = field(default_factory=list)
     # Action-linked browser discovery and an inventory without query/body values.
     action_checkpoints: List[Dict[str, Any]] = field(default_factory=list)
     surface_inventory: Dict[str, Any] = field(default_factory=dict)
@@ -140,6 +142,7 @@ def build_capability_map_from_crawl(crawl: Any) -> CapabilityMap:
             source_maps=source_maps[:40],
             third_party=third_party[:40],
             api_samples=api_samples,
+            reflection_observations=list(getattr(crawl, "reflection_observations", []) or [])[:20],
             action_checkpoints=list(getattr(crawl, "action_checkpoints", []) or [])[:200],
             surface_inventory=build_application_surface_inventory(crawl),
         )
@@ -790,6 +793,17 @@ def format_capability_map_for_prompt(cmap: Optional[CapabilityMap | Dict[str, An
             )
     if cmap.action_checkpoints:
         lines.append(f"Browser actions recorded: {len(cmap.action_checkpoints)}")
+    if cmap.reflection_observations:
+        leads = [row for row in cmap.reflection_observations if row.get("reflected")]
+        lines.append(
+            f"GET canary checks: {len(cmap.reflection_observations)}; "
+            f"HTML-source reflections: {len(leads)}. These are XSS leads, not execution proof."
+        )
+        for row in leads[:8]:
+            lines.append(
+                f"  - {row.get('path')} parameter={row.get('parameter')} "
+                "reflected; inspect encoding/context and verify in browser before a finding."
+            )
     if cmap.forms:
         lines.append("Forms:")
         for f in cmap.forms[:6]:
@@ -868,6 +882,7 @@ def merge_capability_maps(
         third_party=_uniq(list(old.third_party) + list(new.third_party))[:60],
         api_samples=_uniq(list(old.api_samples) + list(new.api_samples))[:60],
         parameter_inventory=_uniq(list(old.parameter_inventory) + list(new.parameter_inventory))[:4000],
+        reflection_observations=_uniq(list(old.reflection_observations) + list(new.reflection_observations))[:80],
         action_checkpoints=_uniq(list(old.action_checkpoints) + list(new.action_checkpoints))[:200],
         surface_inventory=merge_application_surface_inventories(
             old.surface_inventory, new.surface_inventory

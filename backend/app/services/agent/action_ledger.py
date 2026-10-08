@@ -232,6 +232,7 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
                       "execute_katana", "execute_feroxbuster", "fingerprint_api",
                       "probe_pilot_ports",
                       "fetch_lazy_chunks", "extract_js_endpoints", "discover_parameters",
+                      "parameter_discovery", "parameter_reflection_check",
                       "execute_arjun", "ingest_urls_into_map"):
             stage = "surface_mapping"
         elif tool in ("assessment_kickoff", "spawn_recon_workers") or tool.startswith("recon_worker:"):
@@ -239,7 +240,7 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
         elif tool.startswith("specialist:") or tool in (
                       "compare_requests", "test_authorization_boundary",
                       "replay_http_request", "independent_verify", "run_assessment_workflow",
-                      "mutate_captured_request", "run_intruder_batch"):
+                      "mutate_captured_request", "run_intruder_batch", "browser_xss_check"):
             stage = "logic_testing"
         elif tool in ("execute_nuclei", "execute_nikto", "execute_ffuf", "execute_wpscan"):
             stage = "scanner_coverage"
