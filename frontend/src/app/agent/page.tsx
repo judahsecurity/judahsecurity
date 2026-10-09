@@ -679,6 +679,7 @@ function AgentPageContent() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [agentAvailable, setAgentAvailable] = useState<boolean | null>(null);
+  const [prowlConfigured, setProwlConfigured] = useState<boolean | null>(null);
   const [agentStatusHint, setAgentStatusHint] = useState<string | null>(null);
   const [pendingAnswer, setPendingAnswer] = useState(false);
   const [playbooks, setPlaybooks] = useState<{ id: string; name: string; description: string }[]>([]);
@@ -849,8 +850,9 @@ function AgentPageContent() {
   // ── Agent status + playbooks + conversations ───────────────────
   useEffect(() => {
     api.getAgentStatus()
-      .then((data: { available?: boolean; hint?: string; price_limit_usd?: number; request_timeout_seconds?: number }) => {
+      .then((data: { available?: boolean; hint?: string; price_limit_usd?: number; request_timeout_seconds?: number; prowl_configured?: boolean }) => {
         setAgentAvailable(data?.available ?? false);
+        setProwlConfigured(data?.prowl_configured ?? false);
         setAgentStatusHint(data?.hint ?? null);
         if (typeof data?.price_limit_usd === 'number' && data.price_limit_usd > 0) {
           setSpendLimit(data.price_limit_usd);
@@ -1302,7 +1304,8 @@ function AgentPageContent() {
         const wsMsg: Record<string, unknown> = { type: 'query', question: mode === 'pilot' ? displayContent : (usePreset ? displayContent : q), mode };
         if (mode === 'pilot') wsMsg.pilot = { target: target.trim() };
         if (mode !== 'pilot' && assessmentPolicy) wsMsg.assessment_policy = assessmentPolicy;
-        if (usePreset) { wsMsg.playbook_id = selectedPlaybookId; wsMsg.target = target.trim() || undefined; }
+        if (mode !== 'pilot' && target.trim()) wsMsg.target = target.trim();
+        if (usePreset) wsMsg.playbook_id = selectedPlaybookId;
         if (pendingLoadSessionId) {
           wsMsg.load_session_id = pendingLoadSessionId;
           setPendingLoadSessionId(null);
@@ -1311,7 +1314,8 @@ function AgentPageContent() {
         const sent = sendViaWs(wsMsg);
         if (!sent) {
           const data = await api.queryAgent(mode === 'pilot' ? displayContent : (usePreset ? displayContent : q), sid, {
-            ...(usePreset ? { playbookId: selectedPlaybookId, target: target.trim() || undefined } : {}),
+            ...(usePreset ? { playbookId: selectedPlaybookId } : {}),
+            ...(mode !== 'pilot' && target.trim() ? { target: target.trim() } : {}),
             mode,
             ...(mode === 'pilot' ? { pilot: { target: target.trim() } } : {}),
             ...(mode !== 'pilot' ? { assessmentPolicy } : {}),
@@ -2083,7 +2087,7 @@ function AgentPageContent() {
                         </SelectContent>
                       </Select>
 
-                      {(selectedPlaybookId !== 'custom' || mode === 'pilot') && (
+                      {(mode === 'agent' || selectedPlaybookId !== 'custom' || mode === 'pilot') && (
                         <Input
           placeholder={mode === 'pilot' ? 'FQDN or https://public-ip' : 'target (optional)'}
                           value={target}
@@ -2091,6 +2095,12 @@ function AgentPageContent() {
                           disabled={loading || agentAvailable === false}
                           className="h-7 text-xs w-40 border-dashed bg-transparent"
                         />
+                      )}
+
+                      {mode === 'agent' && prowlConfigured === false && (
+                        <span className="text-[10px] text-amber-600" title="PROWL executor is not configured on the backend">
+                          PROWL unavailable
+                        </span>
                       )}
 
                       {mode !== 'pilot' && <details className="text-xs text-muted-foreground">
