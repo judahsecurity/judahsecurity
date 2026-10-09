@@ -59,6 +59,21 @@ def _operation_brain():
     )
 
 
+def test_static_assets_do_not_consume_http_assessment_cells():
+    brain = EngagementBrain(surfaces=[
+        {"method": "GET", "path": "/catalog", "host": "app.test", "takes_input": True},
+        {"method": "GET", "path": "/image/products/1.png", "host": "app.test",
+         "assessment_check": True},
+        {"method": "GET", "path": "/resources/js/app.js", "host": "app.test",
+         "assessment_check": True},
+        {"method": "GET", "path": "/image/resize.png", "host": "app.test",
+         "takes_input": True},
+    ])
+    assert [row["path"] for row in denominator_surfaces(brain)] == [
+        "/catalog", "/image/resize.png",
+    ]
+
+
 def test_legacy_surface_status_does_not_hide_new_identity_parameter_cells():
     brain = _operation_brain()
     brain.coverage = [

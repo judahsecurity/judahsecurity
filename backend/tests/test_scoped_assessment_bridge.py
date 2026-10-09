@@ -6,6 +6,7 @@ import pytest
 
 from app.models.asset import AssetType
 from app.services.agent import prowl_service_bridge as bridge
+from app.services.agent.scoped_assessment.browser import _link_query_inputs
 
 
 def _asset(value="app.example", kind=AssetType.DOMAIN, in_scope=True):
@@ -70,6 +71,32 @@ def test_browser_observation_feeds_aegis_capability_map():
     }
     assert next(row for row in cmap["parameter_inventory"]
                 if row["name"] == "/comment/text")["artifact_id"] == "capture-9"
+
+
+def test_browser_link_query_names_reach_parameter_inventory_without_values():
+    hrefs = [
+        "https://app.example/catalog?category=Gifts&searchTerm=private-value",
+        "https://app.example/catalog?category=Other",
+        "https://other.example/catalog?outside=1",
+        "https://app.example/delete?unsafe=1",
+    ]
+    inputs = _link_query_inputs(hrefs, ["https://app.example"])
+    assert inputs == [{"path": "/catalog", "query_keys": ["category", "searchTerm"]}]
+    observation = {
+        "signal": "browser_crawl",
+        "result": {
+            "target_template": "https://app.example/",
+            "final_origin": "https://app.example",
+            "pages": [{"url": "https://app.example/", "status": 200,
+                       "link_query_inputs": inputs}],
+        },
+    }
+    cmap = bridge.capability_map_from_observation(observation)
+    catalog = [row for row in cmap["parameter_inventory"] if row["path"] == "/catalog"]
+    assert {(row["name"], row["source"]) for row in catalog} == {
+        ("category", "browser_link"), ("searchTerm", "browser_link"),
+    }
+    assert "private-value" not in str(cmap)
 
 
 @pytest.mark.asyncio

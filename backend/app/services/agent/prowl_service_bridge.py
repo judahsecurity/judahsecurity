@@ -148,6 +148,20 @@ def capability_map_from_observation(observation: dict) -> dict | None:
         and (path := in_origin_path(row.get("path")))
     ]
     parameters = []
+    link_inputs = list(result.get("link_query_inputs") or [])
+    for page in (result.get("pages") or [])[:80]:
+        if isinstance(page, dict):
+            link_inputs.extend(page.get("link_query_inputs") or [])
+    for row in link_inputs[:300]:
+        if not isinstance(row, dict):
+            continue
+        path = in_origin_path(row.get("path"))
+        if not path:
+            continue
+        for name in (row.get("query_keys") or [])[:20]:
+            if isinstance(name, str):
+                parameters.append({"method": "GET", "path": path, "name": name,
+                                   "location": "query", "source": "browser_link"})
     for row in (result.get("requests") or [])[:100]:
         if not isinstance(row, dict) or not isinstance(row.get("path"), str):
             continue

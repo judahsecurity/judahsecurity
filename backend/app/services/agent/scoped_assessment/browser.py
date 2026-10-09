@@ -86,6 +86,29 @@ def _crawl_links(hrefs: list[str], allowed_origins: list[str]) -> list[str]:
     return found
 
 
+def _link_query_inputs(hrefs: list[str], allowed_origins: list[str]) -> list[dict]:
+    """Keep query names from in-scope links without exposing their values."""
+    from .browser_actions import allowed_discovery_path
+
+    by_path: dict[str, set[str]] = {}
+    for href in hrefs[:100]:
+        try:
+            assert_in_scope(href, allowed_origins)
+            parts = urlsplit(href)
+            path = parts.path or "/"
+            if not parts.query or not allowed_discovery_path(path) or len(path) > 300:
+                continue
+            names = {key[:80] for key, _ in parse_qsl(
+                parts.query[:2048], keep_blank_values=True, max_num_fields=100,
+            ) if key}
+            if names:
+                by_path.setdefault(path, set()).update(names)
+        except (TypeError, ValueError):
+            continue
+    return [{"path": path, "query_keys": sorted(names)[:20]}
+            for path, names in list(by_path.items())[:100]]
+
+
 async def _forms(page, expected_origin: str) -> list[dict]:
     """Return same-origin form input names and control types, never values."""
     rows = await page.locator("form").evaluate_all(FORM_INVENTORY_JS)
@@ -376,6 +399,7 @@ async def check_browser(
                             "status": response.status if response else None,
                             "title": (await page.title())[:200],
                             "links": links,
+                            "link_query_inputs": _link_query_inputs(hrefs, [expected_origin]),
                             "forms": forms,
                             "requests": requests[request_start:],
                         })
@@ -507,9 +531,11 @@ async def check_browser(
                 "blocked_requests": blocked_requests,
             }
             if operation == "map":
-                result["links"] = (await page.locator("a[href]").evaluate_all(
-                    "els => els.slice(0, 100).map(e => { const u = new URL(e.href); return (u.origin + u.pathname).slice(0, 512); })"
-                ))
+                hrefs = await page.locator("a[href]").evaluate_all(
+                    "els => els.slice(0, 100).map(e => e.href)"
+                )
+                result["links"] = _crawl_links(hrefs, [expected_origin])
+                result["link_query_inputs"] = _link_query_inputs(hrefs, [expected_origin])
                 result["forms"] = await _forms(page, expected_origin)
             elif operation == "check_xss":
                 # A dialog containing a fresh server nonce is execution evidence.

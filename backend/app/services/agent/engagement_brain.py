@@ -3772,6 +3772,10 @@ def denominator_surfaces(brain: EngagementBrain) -> List[Dict[str, Any]]:
     Focus-area surfaces plus takes_input rows (capped) — not every static asset.
     """
     focus = _focus_surface_set(brain)
+    static_asset = re.compile(
+        r"\.(?:css|js|mjs|map|png|jpe?g|gif|webp|svg|ico|woff2?|ttf|eot|otf|mp[34]|webm|avif)$",
+        re.I,
+    )
     out: List[Dict[str, Any]] = []
     seen: set[str] = set()
     for s in brain.surfaces or []:
@@ -3781,6 +3785,10 @@ def denominator_surfaces(brain: EngagementBrain) -> List[Dict[str, Any]]:
         key = surface_key(method, path, host)
         takes = bool(s.get("takes_input"))
         assessment_check = bool(s.get("assessment_check"))
+        # Assets can be evidence for source/dependency review, but do not
+        # consume one HTTP assessment cell each unless they accept input.
+        if static_asset.search(path.split("?", 1)[0]) and not takes:
+            continue
         in_focus = key in focus or any(path in f or f.endswith(path) for f in focus)
         if not takes and not assessment_check and not in_focus:
             continue
