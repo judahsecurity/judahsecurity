@@ -1519,11 +1519,14 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         
         try:
             result = await tool(**tool_args)
-            return {
+            payload = {
                 "success": True,
                 "output": result,
                 "error": None
             }
+            if tool_name == "scoped_browser_assessment" and self._capability_map:
+                payload["capability_map"] = self._capability_map
+            return payload
         except TypeError as e:
             import inspect
             sig = inspect.signature(tool)

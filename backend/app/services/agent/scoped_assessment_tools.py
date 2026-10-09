@@ -290,6 +290,28 @@ class ScopedAssessmentTools:
                 if len(brain.surfaces) >= 200:
                     break
         self._engagement_brain = brain.to_dict()
+        if operation in ("map", "crawl", "inspect_js"):
+            # The browser already runs in this backend. Feed its observations
+            # into the same map and specialist worklist used by the agent.
+            from app.services.agent.prowl_service_bridge import capability_map_from_observation
+            from app.services.agent.capability_map import merge_capability_maps
+            from app.services.agent.coverage_cells import (
+                seed_js_coverage_cells, seed_parameter_coverage_cells,
+            )
+            from app.services.agent.parameter_inventory import collect_parameter_inventory
+            from app.services.agent.runtime_mapper import ingest_capability_map_operations
+
+            observed_map = capability_map_from_observation({
+                "signal": "browser_" + operation, "result": result,
+            })
+            if observed_map:
+                merged = merge_capability_maps(getattr(self, "_capability_map", None), observed_map)
+                self._capability_map = merged
+                brain = engagement_brain_from_dict(self._engagement_brain)
+                ingest_capability_map_operations(brain, merged)
+                seed_parameter_coverage_cells(brain, collect_parameter_inventory(merged))
+                seed_js_coverage_cells(brain, merged)
+                self._engagement_brain = brain.to_dict()
         receipt_id = evidence_store(self).record(
             "scoped_browser_" + operation, result, target=target, identity=identity,
             success=bool(result.get("executed")) if operation == "check_xss" else True,
@@ -419,7 +441,7 @@ class ScopedAssessmentTools:
         return json.dumps(result)
 
     async def scoped_numeric_sqli(self, artifact_id: str, parameter: str, identity: str = "anonymous") -> str:
-        """Run PROWL's six-request numeric Boolean proof on browser observed GET."""
+        """Run a six-request numeric Boolean proof on a browser-observed GET."""
         private = self._scoped_exchange(artifact_id, identity)
         self._scoped_assessment_started = True
         allowed = self._scoped_origin(browser.origin(json.loads(private)["url"]))

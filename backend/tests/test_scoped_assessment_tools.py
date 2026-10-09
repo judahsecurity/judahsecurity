@@ -46,7 +46,14 @@ async def test_agent_browser_inventory_keeps_private_exchange_values_out_of_tool
     assert exchange["artifact_id"] in manager._scoped_browser_exchanges
     summary = json.loads(await manager.scoped_assessment_summary())
     assert summary["complete"] is False
-    assert summary["coverage"]["denominator"] == 1
+    assert summary["coverage"]["denominator"] >= 1
+    assert manager._capability_map["scope"] == "https://app.example.test"
+    assert any(row["name"] == "id" for row in manager._capability_map["parameter_inventory"])
+    tool_result = await manager.execute("scoped_browser_assessment", {
+        "operation": "inspect_js", "url": "https://app.example.test/",
+    })
+    assert tool_result["success"] is True
+    assert tool_result["capability_map"]["scope"] == "https://app.example.test"
     assert result["technology_detection"]["engine"] == "wappalyzer-offline"
     with pytest.raises(ValueError, match="unfinished coverage"):
         await manager.complete_scoped_assessment()

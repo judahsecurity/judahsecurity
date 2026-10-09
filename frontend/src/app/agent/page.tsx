@@ -670,7 +670,7 @@ function AgentPageContent() {
   const handleTabChange = (value: string) => {
     const tab = value as 'chat' | 'cve' | 'findings';
     setActiveTab(tab);
-    router.push(`/agent?tab=${tab}`, { scroll: false } as Parameters<typeof router.push>[1]);
+    router.push(`/prowl?tab=${tab}`, { scroll: false } as Parameters<typeof router.push>[1]);
   };
 
   // ── Agent state ─────────────────────────────────────────────────
@@ -679,7 +679,6 @@ function AgentPageContent() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [agentAvailable, setAgentAvailable] = useState<boolean | null>(null);
-  const [prowlConfigured, setProwlConfigured] = useState<boolean | null>(null);
   const [agentStatusHint, setAgentStatusHint] = useState<string | null>(null);
   const [pendingAnswer, setPendingAnswer] = useState(false);
   const [playbooks, setPlaybooks] = useState<{ id: string; name: string; description: string }[]>([]);
@@ -850,9 +849,8 @@ function AgentPageContent() {
   // ── Agent status + playbooks + conversations ───────────────────
   useEffect(() => {
     api.getAgentStatus()
-      .then((data: { available?: boolean; hint?: string; price_limit_usd?: number; request_timeout_seconds?: number; prowl_configured?: boolean }) => {
+      .then((data: { available?: boolean; hint?: string; price_limit_usd?: number; request_timeout_seconds?: number }) => {
         setAgentAvailable(data?.available ?? false);
-        setProwlConfigured(data?.prowl_configured ?? false);
         setAgentStatusHint(data?.hint ?? null);
         if (typeof data?.price_limit_usd === 'number' && data.price_limit_usd > 0) {
           setSpendLimit(data.price_limit_usd);
@@ -1736,8 +1734,8 @@ function AgentPageContent() {
     <MainLayout>
       <div className="flex flex-col h-full">
         <Header
-          title="Agent"
-          subtitle="AI security agent — run scans, query assets, and analyze vulnerabilities"
+          title="Prowl"
+          subtitle="Autonomous security assessments, asset analysis, and vulnerability testing"
         />
 
         <div className="flex-1 overflow-auto p-6">
@@ -1837,7 +1835,7 @@ function AgentPageContent() {
                     <div className="flex items-center justify-between">
                       <CardTitle className="flex items-center gap-2 text-sm font-semibold text-foreground/80">
                         <MessageSquare className="h-4 w-4 text-primary" />
-                        AI Security Agent
+                        Prowl
                       </CardTitle>
                       <div className="flex items-center gap-1">
                         <Button variant="ghost" size="icon" onClick={() => setShowScenario(!showScenario)}
@@ -2072,7 +2070,7 @@ function AgentPageContent() {
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="assist">Assist mode</SelectItem>
-                          <SelectItem value="agent">Agent mode</SelectItem>
+                          <SelectItem value="agent">Prowl mode</SelectItem>
                           <SelectItem value="pilot">Bounded pilot</SelectItem>
                         </SelectContent>
                       </Select>
@@ -2095,12 +2093,6 @@ function AgentPageContent() {
                           disabled={loading || agentAvailable === false}
                           className="h-7 text-xs w-40 border-dashed bg-transparent"
                         />
-                      )}
-
-                      {mode === 'agent' && prowlConfigured === false && (
-                        <span className="text-[10px] text-amber-600" title="PROWL executor is not configured on the backend">
-                          PROWL unavailable
-                        </span>
                       )}
 
                       {mode !== 'pilot' && <details className="text-xs text-muted-foreground">

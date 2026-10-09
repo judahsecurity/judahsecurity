@@ -1,18 +1,20 @@
-# Agent consolidation: Aegis runtime, PROWL assessment capabilities
+# Prowl consolidation in Aegis
 
 ## Direction
 
-The existing Aegis ReAct/LangGraph runtime is the canonical agent. Its task
-model router supports Anthropic, OpenAI, and other configured providers. The
-separate PROWL assessment service supplies exact-origin browser and HTTP
-execution, evidence, candidate review, and proof gates. The service is an
-executor; it does not choose the agent model or own the main planning loop.
+Prowl is the product name for the existing Aegis ReAct/LangGraph agent. Normal
+Prowl mode uses the browser, HTTP, input-inventory, specialist, and proof tools
+already in the Aegis backend. It does not require a second image, service URL,
+or PROWL token pair. The `/prowl` UI route is canonical; `/agent` and the
+`/api/v1/agent` API remain as compatibility paths.
 
-The product may later be renamed PROWL. Rename code, URLs, data directories,
-and deployment identifiers only after the agent and assessment workflows are
-joined and compared on the same controlled targets.
+The separate executor described below is a legacy optional integration, not
+the default or a prerequisite for normal Prowl assessments. Its evidence and
+publication flow can be migrated into the built-in runtime incrementally. A
+normal run must not silently switch to that service based on environment
+variables.
 
-## First connected slice
+## Legacy optional executor integration
 
 An authenticated operator calls `POST /api/v1/agent/scoped-assessments` with an
 in-scope `asset_id`, an exact `origin`, and optional named test identities,
@@ -112,9 +114,13 @@ hunter and verifier evidence, a supported proof recipe, asset matching, and
 idempotency by candidate ID. For runs provisioned by Aegis, it also checks the
 bound organization, asset, and exact origin.
 
-## Configuration
+## Configuration for the legacy optional executor
 
-Build the separate assessment image from the PROWL service checkout and make
+Normal Prowl mode needs the existing backend and frontend images, plus the
+backend's configured browser runtime. It does not use the settings below.
+
+For the legacy executor integration only, build the separate assessment image
+from the PROWL service checkout and make
 it available as `PROWL_ASSESSMENT_IMAGE` (default `prowl-browser:latest`). In
 the Aegis deployment set `PROWL_ASSESSMENT_URL` to
 `http://prowl-assessment:8833`, set a strong `PROWL_ADMIN_TOKEN`, and share a

@@ -211,7 +211,7 @@ def capability_map_from_observation(observation: dict) -> dict | None:
         js_endpoints=list(dict.fromkeys(js_endpoints)), js_files=js_files,
         js_sources=js_sources,
         parameter_inventory=parameters[:4000],
-        notes=["Source: scoped assessment service browser observation"],
+        notes=["Source: scoped browser observation"],
     )
     return finalize_capability_map(cmap).to_dict()
 

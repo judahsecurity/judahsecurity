@@ -111,6 +111,7 @@ services:
       - AGENT_WS_MAX_ITERATIONS=${AGENT_WS_MAX_ITERATIONS:-160}
       - AGENT_PRICE_LIMIT_USD=${AGENT_PRICE_LIMIT_USD:-20}
       - AGENT_REST_MAX_ITERATIONS=${AGENT_REST_MAX_ITERATIONS:-15}
+      # Legacy optional executor; normal Prowl mode uses the built-in backend tools.
       - PROWL_ASSESSMENT_URL=${PROWL_ASSESSMENT_URL:-}
       - PROWL_ADMIN_TOKEN=${PROWL_ADMIN_TOKEN:-}
       - PROWL_INGEST_KEY=${PROWL_INGEST_KEY:-}
@@ -281,8 +282,8 @@ services:
       - nginx
     entrypoint: /bin/sh -c 'trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done;'
 
-  # Optional private executor for Aegis-owned agent sessions. Build the image
-  # from the scoped service repository; no Claude agent runtime is needed here.
+  # Legacy optional executor for sessions provisioned through the scoped API.
+  # Normal Prowl assessments do not need this image or Compose profile.
   prowl-assessment:
     image: ${PROWL_ASSESSMENT_IMAGE:-prowl-browser:latest}
     restart: unless-stopped

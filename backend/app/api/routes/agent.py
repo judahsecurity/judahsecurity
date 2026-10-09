@@ -25,9 +25,8 @@ from app.db.database import get_db, SessionLocal
 from app.models.user import User
 from app.models.organization import Organization
 from app.models.agent_conversation import AgentConversation
-from app.models.asset import Asset, AssetType
-from app.models.scoped_assessment_run import ScopedAssessmentRun
-from app.services.agent.prowl_service_bridge import exact_asset_origin, provision_run
+from app.models.asset import Asset
+from app.services.agent.prowl_service_bridge import provision_run
 from app.services.agent.orchestrator import get_agent_orchestrator
 from app.services.agent.state import InvokeResponse
 from app.services.agent.playbooks import build_initial_objective, list_playbooks
@@ -39,68 +38,22 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/agent", tags=["Agent"])
 
 
-async def _bind_agent_assessment(
-    db: Session, *, organization_id: int, user_id: int, session_id: str,
-    mode: str, target: Optional[str], question: str,
-    assessment_policy: Optional[dict] = None,
-) -> Optional[ScopedAssessmentRun]:
-    """Attach normal Agent web runs to PROWL when its executor is configured."""
-    if mode != "agent" or not settings.PROWL_ASSESSMENT_URL or not settings.PROWL_ADMIN_TOKEN:
-        return None
-    from sqlalchemy import func
+def _agent_question_with_target(question: str, target: Optional[str]) -> str:
+    """Pass the operator's selected target to the built-in Aegis assessment runtime."""
+    if not target or not target.strip():
+        return question
     from app.services.agent.scoped_assessment.browser import origin as browser_origin
-    from app.services.agent.tools import extract_seed_target
 
-    existing = db.query(ScopedAssessmentRun).filter_by(
-        organization_id=organization_id, user_id=user_id, session_id=session_id,
-    ).first()
-    if existing and not target:
-        return existing
-
-    raw = (target or extract_seed_target(question) or "").strip()
-    if not raw:
-        return None
+    raw = target.strip()
     if "://" not in raw:
         raw = "https://" + raw
     try:
         allowed_origin = browser_origin(raw)
-        hostname = urlsplit(allowed_origin).hostname or ""
     except ValueError as exc:
         raise ValueError("Agent assessment target must be one HTTP(S) host") from exc
-
-    if existing:
-        if existing.allowed_origin != allowed_origin:
-            raise ValueError("This Agent session is already bound to another assessment origin")
-        return existing
-
-    # A prior in-scope asset is the authorization boundary. Match exact host
-    # or root URL only; a parent domain does not authorize its subdomains.
-    candidate_values = [hostname, allowed_origin, allowed_origin + "/"]
-    candidates = db.query(Asset).filter(
-        Asset.organization_id == organization_id,
-        Asset.in_scope.is_(True),
-        Asset.asset_type.in_((AssetType.DOMAIN, AssetType.SUBDOMAIN,
-                              AssetType.IP_ADDRESS, AssetType.URL)),
-        func.lower(Asset.value).in_([value.lower() for value in candidate_values]),
-    ).limit(20).all()
-    asset = None
-    for candidate in candidates:
-        try:
-            exact_asset_origin(candidate, allowed_origin)
-        except ValueError:
-            continue
-        asset = candidate
-        break
-    if asset is None:
-        raise ValueError("Add this exact host as an in-scope asset before starting a PROWL-backed Agent assessment")
-
-    policy = assessment_policy or {}
-    return await provision_run(
-        db, organization_id=organization_id, user_id=user_id,
-        session_id=session_id, asset=asset, origin=allowed_origin,
-        body_replay_paths=policy.get("body_replay_paths") or [],
-        authz_expectations=policy.get("owner_only_resources") or [],
-    )
+    # Put the selected target first: the agent's seed extractor uses the first
+    # URL in the objective, and a pasted reference URL must not replace scope.
+    return f"Assessment target: {allowed_origin}\n\n{question.strip()}"
 
 
 def _run_timeout_s() -> int:
@@ -588,15 +541,8 @@ async def query_agent(
         question = _pilot_question(question, pilot_config, request.playbook_id, request.load_session_id)
     assessment_policy = request.assessment_policy.model_dump() if request.assessment_policy else None
     if mode == "agent":
-        import httpx
         try:
-            await _bind_agent_assessment(
-                db, organization_id=org_id, user_id=current_user.id,
-                session_id=session_id, mode=mode, target=request.target,
-                question=question, assessment_policy=assessment_policy,
-            )
-        except httpx.RequestError as exc:
-            raise HTTPException(status_code=502, detail="PROWL assessment service is unavailable") from exc
+            question = _agent_question_with_target(question, request.target)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
     saved = _save_conversation(db, session_id, current_user.id, org_id, "user", question, mode=mode)
@@ -905,7 +851,6 @@ async def get_agent_status():
         "provider": active_provider,
         "model": active_model,
         "providers_configured": configured,
-        "prowl_configured": bool(settings.PROWL_ASSESSMENT_URL and settings.PROWL_ADMIN_TOKEN),
         "resilient_fallback": True,
         "hint": hint,
         "max_iterations": settings.AGENT_MAX_ITERATIONS if available else None,
@@ -1482,24 +1427,11 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                         question = objective
 
                 if mode == "agent":
-                    import httpx
-                    db_bind = SessionLocal()
                     try:
-                        await _bind_agent_assessment(
-                            db_bind, organization_id=org_id, user_id=user_id,
-                            session_id=session_id, mode=mode, target=target,
-                            question=question, assessment_policy=assessment_policy,
-                        )
-                    except httpx.RequestError:
-                        await websocket.send_json({
-                            "type": "error", "message": "PROWL assessment service is unavailable",
-                        })
-                        continue
+                        question = _agent_question_with_target(question, target)
                     except ValueError as exc:
                         await websocket.send_json({"type": "error", "message": str(exc)})
                         continue
-                    finally:
-                        db_bind.close()
 
                 # Persist the session before invoking so the authenticated
                 # ledger endpoint can show live receipts during a WebSocket run.

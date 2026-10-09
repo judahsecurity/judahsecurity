@@ -6,7 +6,7 @@ import { useRouter } from 'next/navigation';
 export default function OracleRedirect() {
   const router = useRouter();
   useEffect(() => {
-    router.replace('/agent?view=oracle');
+    router.replace('/prowl?view=oracle');
   }, [router]);
   return null;
 }

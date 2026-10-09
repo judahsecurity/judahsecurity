@@ -60,6 +60,33 @@ def test_failed_interceptor_falls_back_to_deep_crawl():
     assert forced_next_step(state) is None
 
 
+def test_prowl_uses_built_in_browser_after_crawl_and_as_fallback():
+    target = "https://ginandjuice.shop"
+    base = {
+        "mode": "agent", "original_objective": f"Assess {target}",
+        "target_info": {"primary_target": target},
+    }
+    failed = {**base, "execution_trace": [
+        {"tool_name": "execute_deep_crawl", "success": False},
+    ]}
+    fallback = forced_next_step(failed)
+    assert fallback["tool_name"] == "scoped_browser_assessment"
+    assert fallback["tool_args"]["operation"] == "crawl"
+
+    crawled = {**base, "execution_trace": [
+        {"tool_name": "execute_deep_crawl", "success": True},
+    ]}
+    inspection = forced_next_step(crawled)
+    assert inspection["tool_name"] == "scoped_browser_assessment"
+    assert inspection["tool_args"]["operation"] == "inspect_js"
+    inspected = {**base, "execution_trace": [
+        *crawled["execution_trace"],
+        {"tool_name": "scoped_browser_assessment", "tool_args": inspection["tool_args"],
+         "success": True},
+    ]}
+    assert forced_next_step(inspected)["tool_name"] == "spawn_recon_workers"
+
+
 def test_forced_pipeline_crawl_then_enrich_then_fireteam():
     url = "https://appsmith-dmpc.unifytwin.com"
     empty = {

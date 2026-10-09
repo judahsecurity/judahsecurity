@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 _CRAWL_TOOLS = {
     "execute_interceptor",
     "execute_deep_crawl",
+    "scoped_browser_crawl",
     "recon_worker:katana_urls",
     "execute_katana",
 }
@@ -89,6 +90,9 @@ def normalized_tools_run(trace: Optional[Iterable[Any]]) -> Set[str]:
             names.add("execute_katana")
         if name == "execute_interceptor":
             names.add("execute_deep_crawl")
+        if (name == "scoped_browser_assessment" and isinstance(args, dict)
+                and args.get("operation") in ("crawl", "inspect_js")):
+            names.add("scoped_browser_crawl")
     return names
 
 
@@ -819,10 +823,21 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
                     "(Interceptor already queued)."
                 ),
             }
-        # One failed fallback is a coverage gap for the model to report or
-        # address through another tool, rather than a deterministic retry loop.
+        # The built-in scoped browser is a distinct fallback when deep crawl
+        # cannot complete. Do not retry either operation indefinitely.
         if any(step.get("tool_name") == "execute_deep_crawl"
                and step.get("success") is False for step in trace):
+            if state.get("mode") == "agent" and not any(
+                step.get("tool_name") == "scoped_browser_assessment"
+                and isinstance(step.get("tool_args"), dict)
+                and step["tool_args"].get("operation") == "crawl"
+                for step in trace
+            ):
+                return {
+                    "tool_name": "scoped_browser_assessment",
+                    "tool_args": {"operation": "crawl", "url": target, "max_pages": 10},
+                    "thought": "Prowl: recover the application map with the built-in scoped browser.",
+                }
             return None
         return {
             "tool_name": "execute_deep_crawl",
@@ -833,6 +848,19 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
                 "Assessment pipeline: crawl the primary URL before any "
                 "'no vulns' conclusion."
             ),
+        }
+
+    if state.get("mode") == "agent" and not input_signature and not any(
+        step.get("tool_name") == "scoped_browser_assessment"
+        and isinstance(step.get("tool_args"), dict)
+        and step["tool_args"].get("operation") == "inspect_js"
+        for step in trace
+    ):
+        return {
+            "tool_name": "scoped_browser_assessment",
+            "tool_args": {"operation": "inspect_js", "url": target,
+                          "max_pages": 4, "max_actions": 3},
+            "thought": "Prowl: capture browser actions, inputs, and first-party API traffic for specialist work.",
         }
 
     # Launch enrichment without waiting for it before testing real browser inputs.
