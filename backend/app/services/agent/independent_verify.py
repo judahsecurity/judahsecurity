@@ -149,11 +149,37 @@ def check_verify_receipt(
             store[key] = receipt
             tools_manager._verify_receipts = store
     if not receipt:
+        candidate = next((c for c in (
+            candidate_from_dict(raw) for raw in (getattr(brain, "candidates", None) or [])
+        ) if c and c.title.strip() == title.strip() and c.target.strip() == target.strip()), None) if brain else None
+        if candidate and candidate.status in ("inconclusive", "refuted"):
+            return False, (
+                "INDEPENDENT VERIFY GATE: candidate " + candidate.id
+                + " is " + candidate.status + " at revision " + str(candidate.revision)
+                + ". Do not retry create_finding or independent_verify on this revision. "
+                "Collect a new supported execution proof, resubmit the exact candidate "
+                "with its new evidence ID, then verify the new revision. Reason: "
+                + (candidate.verifier_summary or "unsupported or insufficient proof")[:300]
+            )
+        if candidate and candidate.status == "pending":
+            return False, (
+                "INDEPENDENT VERIFY GATE: candidate " + candidate.id
+                + " is pending; call independent_verify(candidate_id=\"" + candidate.id
+                + "\") once before create_finding."
+            )
+        related = [c for c in (
+            candidate_from_dict(raw) for raw in (getattr(brain, "candidates", None) or [])
+        ) if c and c.target.strip() == target.strip()][:3] if brain else []
+        exact_claim = (
+            " Existing candidate titles for this target: "
+            + "; ".join(repr(c.title) + " [" + c.status + "]" for c in related)
+            + ". Use the exact verified title, target, description, and severity."
+        ) if related else ""
         return False, (
             "INDEPENDENT VERIFY GATE: medium+ findings require independent_verify → "
             f"confirmed for this title/target first (key={key}). "
             "Hunters must submit_finding_candidate; Joshua (or fireteam second wave) "
-            "runs independent_verify; then create_finding."
+            "runs independent_verify; then create_finding." + exact_claim
         )
     if receipt.get("verdict") != "confirmed":
         return False, (
@@ -359,8 +385,11 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         "For scoped browser/HTTP candidates, rerun the matching Aegis scoped tool. "
         "Inspect JavaScript again to get a fresh browser exchange before scoped_numeric_sqli, "
         "scoped_query_probe, scoped_body_probe, or scoped_owner_only. "
-        "For a confirmed numeric Boolean SQLi, owner-only access, public directory index, "
-        "or browser XSS, use proof {kind: numeric_boolean_sqli|owner_only|"
+        "For a mapped string-valued GET query input, scoped_string_sqli(url, parameter) "
+        "builds a fresh eight-request Boolean proof without an XHR capture. "
+        "Use its evidence_id with the candidate's earlier scoped_string_sqli evidence_id. "
+        "For a confirmed numeric or string Boolean SQLi, owner-only access, public directory index, "
+        "or browser XSS, use proof {kind: numeric_boolean_sqli|string_boolean_sqli|owner_only|"
         "public_directory_index|scoped_browser_xss, hunter_artifact_id, artifact_id}. "
         "The first ID must be the candidate's hunter receipt and the second your fresh receipt. "
         f"For XSS use execute_browser check_xss with alert('aegis-verify-{candidate.nonce}'); "
@@ -650,10 +679,12 @@ def submit_candidate(
         if c:
             existing.append(c)
             if c.id == cid:
-                changed = any(value and value != getattr(c, name) for name, value in (
+                new_evidence = set(evidence_ids or []) - set(c.evidence_ids)
+                claim_changed = any(value and value != getattr(c, name) for name, value in (
                     ("evidence", evidence), ("description", description), ("severity", severity),
                     ("claimed_request", claimed_request),
                 ))
+                changed = bool(new_evidence) if c.status in ("inconclusive", "refuted") else claim_changed
                 if changed:
                     c.evidence = evidence[:4000] if evidence else c.evidence
                     c.description = description or c.description
@@ -663,6 +694,7 @@ def submit_candidate(
                     c.status = "pending"
                     c.nonce = new_nonce()
                     c.verifier_evidence = c.verifier_summary = c.verified_at = ""
+                    c.verifier_run_id = ""
                     brain.verification_receipts.pop(
                         verify_receipt_key(c.title, c.target), None
                     )

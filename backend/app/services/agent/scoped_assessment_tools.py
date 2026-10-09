@@ -16,7 +16,7 @@ from app.services.agent.assessment_sessions import browser_storage_state, identi
 from app.services.agent.evidence_store import evidence_store, verification_run
 from app.services.agent.scoped_assessment import (
     authz_proof, body_probe, browser, http_observe, planning, query_probe,
-    sqli_boolean, technology,
+    sqli_boolean, sqli_string, technology,
 )
 from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
 
@@ -27,6 +27,7 @@ SCOPED_ASSESSMENT_TOOLS = (
     "scoped_http_compare",
     "scoped_query_probe",
     "scoped_numeric_sqli",
+    "scoped_string_sqli",
     "scoped_body_probe",
     "scoped_owner_only",
     "list_scoped_browser_exchanges",
@@ -137,7 +138,7 @@ class ScopedAssessmentTools:
         return browser_storage_state(session, url)
 
     def _scoped_claim_gets(self, count: int) -> None:
-        if count < 1 or count > 6:
+        if count < 1 or count > 8:
             raise ValueError("Invalid assessment request reservation")
         used = int(getattr(self, "_scoped_get_count", 0) or 0)
         if used + count > 40:
@@ -460,6 +461,43 @@ class ScopedAssessmentTools:
         result["finding"] = False  # One actor's proof is a candidate, never publication.
         result["evidence_id"] = evidence_store(self).record(
             "scoped_numeric_sqli", result, target=result["target"], identity=identity,
+            success=result["proof_confirmed"],
+        )
+        return json.dumps(result)
+
+    async def scoped_string_sqli(self, url: str, parameter: str, identity: str = "anonymous") -> str:
+        """Run an eight-request Boolean proof on an observed string GET input."""
+        allowed = self._scoped_origin(url)
+        parts = urlsplit(url)
+        from app.services.agent.parameter_inventory import collect_parameter_inventory
+
+        observed = next((row for row in collect_parameter_inventory(
+            getattr(self, "_capability_map", None) or {},
+        ) if row.get("method") == "GET" and row.get("host") == parts.netloc
+            and row.get("path") == (parts.path or "/")
+            and row.get("name") == parameter and row.get("location") == "query"
+            and row.get("identity") == identity and row.get("testable")
+            and row.get("source") in {
+                "page_url", "observed_form", "captured_api", "browser_traffic", "api_endpoint",
+            }), None)
+        if observed is None:
+            raise ValueError("String SQLi proof requires a mapped GET query parameter")
+        baseline, variants, nonce = sqli_string.plan_string_boolean(
+            url, parameter=parameter, allowed_origins=[allowed],
+        )
+        self._scoped_assessment_started = True
+        self._scoped_claim_gets(8)
+        result = await asyncio.to_thread(
+            sqli_string.probe_string_boolean,
+            baseline, variants, nonce,
+            parameter=parameter, allowed_origins=[allowed],
+            storage_state=self._scoped_state(identity, baseline),
+            before_request=lambda: None,
+        )
+        result["source"] = observed["source"]
+        result["finding"] = False
+        result["evidence_id"] = evidence_store(self).record(
+            "scoped_string_sqli", result, target=result["target"], identity=identity,
             success=result["proof_confirmed"],
         )
         return json.dumps(result)

@@ -442,6 +442,25 @@ class EvidenceStore:
                     row["success"] and row["payload"].get("dialog_triggered")
                 )
                 continue
+            if row["kind"] in {
+                "scoped_numeric_sqli", "scoped_string_sqli", "scoped_owner_only",
+                "scoped_http_get", "scoped_browser_check_xss",
+            }:
+                try:
+                    if origin(row["target"]) != origin(target):
+                        return False, "Scoped proof left candidate origin"
+                except ValueError:
+                    return False, "Invalid scoped proof target"
+                target_path_seen |= urlsplit(row["target"]).path == urlsplit(target).path
+                payload = row["payload"] if isinstance(row["payload"], dict) else {}
+                if row["kind"] == "scoped_http_get":
+                    proven = payload.get("status") == 200 and payload.get("directory_index") is True
+                elif row["kind"] == "scoped_browser_check_xss":
+                    proven = payload.get("executed") is True
+                else:
+                    proven = payload.get("proof_confirmed") is True
+                has_response |= bool(row["success"] and proven)
+                continue
             if row["kind"] != "http_exchange":
                 return (
                     False,

@@ -876,6 +876,7 @@ TOOL_PHASE_MAP = {
     "get_finding_candidate": ["informational", "exploitation", "post_exploitation"],
     "scoped_query_probe": ["exploitation", "post_exploitation"],
     "scoped_numeric_sqli": ["exploitation", "post_exploitation"],
+    "scoped_string_sqli": ["exploitation", "post_exploitation"],
     "scoped_body_probe": ["exploitation", "post_exploitation"],
     "scoped_owner_only": ["exploitation", "post_exploitation"],
     # Tester-process control plane
@@ -919,15 +920,22 @@ XHR/fetch sample. scoped_http_get and scoped_http_compare return bounded
 response metadata. scoped_query_probe is exploratory; changed responses are
 leads only. scoped_numeric_sqli runs six bounded requests on one observed
 positive numeric GET field. Its proof_confirmed flag is one actor's evidence;
+scoped_string_sqli(url, parameter) runs eight bounded requests on one mapped
+string-valued GET field, including quote-error, escaped-quote, and stable
+Boolean true/false controls. Use it for string filters such as category.
+Its proof_confirmed flag is also one actor's evidence;
 submit a candidate and require a fresh independent verifier proof before
 create_finding. Never treat prior memory or JavaScript-only leads as proof.
+For scoped SQLi candidates, use the tool result's target (origin + path, no
+query) as the exact candidate target. Keep the title, target, description,
+and severity unchanged between submit_finding_candidate and create_finding.
 scoped_body_probe requires an operator-approved POST path in the assessment
 request. scoped_owner_only requires an operator-declared exact owner-only GET
 resource and two registered test identities. Neither may invent its own policy.
 For a scoped proof candidate, include the hunter tool evidence_id in
 submit_finding_candidate. A verifier must repeat the same operation with fresh
 browser capture when required, then call record_verify_verdict with both
-execution IDs: proof={"kind":"numeric_boolean_sqli"|"owner_only"|
+execution IDs: proof={"kind":"numeric_boolean_sqli"|"string_boolean_sqli"|"owner_only"|
 "public_directory_index"|"scoped_browser_xss",
 "hunter_artifact_id":"...","artifact_id":"<fresh verifier evidence>"}.
 The proof gate checks both records, same target, and operation-specific evidence.

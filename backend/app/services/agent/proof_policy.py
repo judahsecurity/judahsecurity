@@ -51,13 +51,14 @@ def validate_proof(
         return bool(item and 200 <= item["payload"]["response"].get("status", 0) < 300)
 
     kind = proof.get("kind")
-    if kind in ("numeric_boolean_sqli", "owner_only", "public_directory_index", "scoped_browser_xss"):
+    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "owner_only", "public_directory_index", "scoped_browser_xss"):
         hunter_id = proof.get("hunter_artifact_id")
         verifier = row("artifact_id")
         hunter = (store.records.get(hunter_id)
                   if isinstance(hunter_id, str) and hunter_id in (candidate.evidence_ids or []) else None)
         expected_kind = {
             "numeric_boolean_sqli": "scoped_numeric_sqli",
+            "string_boolean_sqli": "scoped_string_sqli",
             "owner_only": "scoped_owner_only",
             "public_directory_index": "scoped_http_get",
             "scoped_browser_xss": "scoped_browser_check_xss",
@@ -78,6 +79,21 @@ def validate_proof(
                     or first.get("nonce") == second.get("nonce")
                     or hunter["identity"] != verifier["identity"]):
                 return False, "Independent matching numeric Boolean SQLi proof is required"
+            return True, ""
+        if kind == "string_boolean_sqli":
+            from app.services.agent.scoped_assessment.sqli_string import string_sql_proof_valid
+            if (not string_sql_proof_valid(first) or not string_sql_proof_valid(second)
+                    or first.get("proof_confirmed") is not True
+                    or second.get("proof_confirmed") is not True
+                    or first.get("parameter") != second.get("parameter")
+                    or first.get("nonce") == second.get("nonce")
+                    or any(abs(first["checks"][key]["bytes_captured"]
+                               - second["checks"][key]["bytes_captured"])
+                           > max(64, max(first["checks"][key]["bytes_captured"],
+                                         second["checks"][key]["bytes_captured"]) // 100)
+                           for key in ("baseline_first", "escaped_quote", "true_first", "false_first"))
+                    or hunter["identity"] != verifier["identity"]):
+                return False, "Independent matching string Boolean SQLi proof is required"
             return True, ""
         if kind == "owner_only":
             from app.services.agent.scoped_assessment.authz_proof import owner_only_proof_valid

@@ -630,6 +630,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ),
         allowed_tools=[
             "get_parameter_inventory",
+            "scoped_string_sqli",
+            "scoped_numeric_sqli",
             "scoped_assessment_probe_assigned",
             "scoped_assessment_candidate",
             "discover_parameters",
@@ -660,9 +662,13 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "with the coverage cell and lease IDs. Numeric GET inputs use the scoped boolean "
             "proof; a single quote differential is only a lead. Submit a scoped candidate "
             "only on proof_confirmed=true and cite its service artifact ID. "
-            "For a text query, compare baseline, true-condition, false-condition, "
-            "and unrelated invalid controls with the same request shape. Repeat any "
-            "candidate differential; normalize dynamic content before comparing. "
+            "For a mapped string GET input, use scoped_string_sqli on the observed "
+            "path and parameter; its quote, escaped-quote, true, false, and repeat "
+            "controls produce an execution-owned proof receipt. Submit a candidate "
+            "only when proof_confirmed=true and cite that receipt. For other text "
+            "inputs, compare baseline, true-condition, false-condition, and unrelated "
+            "invalid controls with the same request shape. Repeat any candidate "
+            "differential and account for dynamic content. "
             "For time-based probes, alternate multiple baseline and delay requests "
             "and require a repeatable gap beyond normal latency before submission. "
             "Canary → differential. sqlmap --batch only on confirmed candidates. "
@@ -969,6 +975,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "proof without the hunter transcript. Issues verify receipts only."
         ),
         allowed_tools=[
+            "scoped_string_sqli",
+            "scoped_numeric_sqli",
             "compare_requests",
             "execute_curl",
             "execute_browser",
