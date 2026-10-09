@@ -601,6 +601,10 @@ async def test_fireteam_dispatch_executes_only_its_leased_hypothesis(
     )
 
     async def fake_fireteam(*, mission, directives, **kwargs):
+        from app.core.config import settings
+
+        assert 0 < kwargs["member_timeout_sec"] < kwargs["wave_timeout_sec"]
+        assert kwargs["wave_timeout_sec"] < settings.AGENT_TOOL_HARD_TIMEOUT_SECONDS
         directive = directives["api_authz"]
         assert len(directive.hypothesis_ids) == 1
         hypothesis_id = directive.hypothesis_ids[0]

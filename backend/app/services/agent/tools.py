@@ -8526,6 +8526,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             specialists_from_open_hypotheses,
         )
         from app.services.agent.fireteam_service import run_fireteam
+        import time as _time
         from app.services.agent.coverage_cells import CELL_OPEN, seed_js_coverage_cells, seed_parameter_coverage_cells
         from app.services.agent.penetration_task_graph import (
             apply_executor_summary,
@@ -8537,6 +8538,17 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             ready_wave,
             sync_graph_from_brain,
         )
+
+        # The orchestrator has a hard per-tool deadline. Keep the entire
+        # specialist wave, optional rewrite, and final verification inside it
+        # so completed reports and leases are reconciled before returning.
+        outer_cap = max(1.0, float(getattr(settings, "AGENT_TOOL_HARD_TIMEOUT_SECONDS", 600) or 600))
+        outer_margin = min(60.0, outer_cap * 0.1)
+        dispatch_deadline = _time.monotonic() + outer_cap - outer_margin
+        reserve = min(180.0, outer_cap * 0.3)
+
+        def _remaining_dispatch_time() -> float:
+            return max(0.0, dispatch_deadline - _time.monotonic())
 
         cmap_raw = capability_map or getattr(self, "_capability_map", None)
         cmap = build_capability_map_from_dict(cmap_raw) if cmap_raw else None
@@ -8970,6 +8982,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 elif node and node.status == NODE_PROVEN:
                     node.status = NODE_RETRY
 
+        first_wave_timeout = min(420.0, max(1.0, _remaining_dispatch_time() - reserve))
         result = await run_fireteam(
             mission=mission,
             targets=target_list,
@@ -8981,6 +8994,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             llm_for_specialist=_llm_for_profile,
             progress_callback=_fireteam_progress,
             report_callback=_verify_completed_hunter,
+            member_timeout_sec=max(1.0, first_wave_timeout - 10.0),
+            wave_timeout_sec=first_wave_timeout,
         )
 
         from app.services.agent.auto_prompter import (
@@ -9008,7 +9023,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             graph = sync_graph_from_brain(brain)
 
         retry_names = []
-        if rewrites:
+        retry_window = min(180.0, _remaining_dispatch_time() - reserve)
+        retry_deferred = bool(rewrites and retry_window < 90.0)
+        if rewrites and retry_window >= 90.0:
             retry_leases = claim_task_leases(
                 graph, [rewrite.specialist for rewrite in rewrites]
             )
@@ -9049,6 +9066,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     llm_for_specialist=_llm_for_profile,
                     progress_callback=_fireteam_progress,
                     report_callback=_verify_completed_hunter,
+                    member_timeout_sec=max(1.0, retry_window - 10.0),
+                    wave_timeout_sec=retry_window,
                 )
                 result.reports.extend(list(retry_result.reports))
                 result.specialists_run = list(result.specialists_run) + list(
@@ -9125,7 +9144,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             if c and c.status == "pending"
         ]
         verify_reports: list = list(early_verify_reports)
-        if pending:
+        verification_window = _remaining_dispatch_time() - min(30.0, reserve / 2)
+        verification_deferred = bool(pending and verification_window < 15.0)
+        if pending and verification_window >= 15.0:
             threat_slice = ""
             if brain.threat_model:
                 try:
@@ -9133,14 +9154,21 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     threat_slice = format_threat_model_for_prompt(brain.threat_model)[:2500]
                 except Exception:
                     threat_slice = ""
-            verify_reports.extend(await run_independent_verifiers(
-                pending,
-                llm=llm,
-                tools_manager=self,
-                targets=target_list,
-                threat_slice=threat_slice,
-                max_parallel=max_parallel,
-            ))
+            try:
+                verify_reports.extend(await asyncio.wait_for(
+                    run_independent_verifiers(
+                        pending,
+                        llm=llm,
+                        tools_manager=self,
+                        targets=target_list,
+                        threat_slice=threat_slice,
+                        max_parallel=max_parallel,
+                    ),
+                    timeout=verification_window,
+                ))
+            except asyncio.TimeoutError:
+                verification_deferred = True
+                logger.warning("Fireteam verification deferred after %.0fs", verification_window)
             brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
             _checkpoint_task_graph()
         out = {
@@ -9183,6 +9211,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 {"specialist": r.specialist, "failure": r.failure}
                 for r in rewrites
             ],
+            "retry_deferred": retry_deferred,
+            "verification_deferred": verification_deferred,
             "spawned": spawned,
             "open_hypotheses": [
                 {"id": h.id, "title": h.title, "specialist": h.specialist, "status": h.status}
@@ -9243,6 +9273,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "js_coverage": out["js_coverage"],
             "task_graph_prompt": out["task_graph_prompt"][:2000],
             "merged_summary": out["merged_summary"][:2000],
+            "retry_deferred": retry_deferred,
+            "verification_deferred": verification_deferred,
             "omitted_large_fields": omitted,
         })
 
