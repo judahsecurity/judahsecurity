@@ -58,6 +58,7 @@ async def test_agent_browser_inventory_keeps_private_exchange_values_out_of_tool
     with pytest.raises(ValueError, match="unfinished coverage"):
         await manager.complete_scoped_assessment()
     assert is_tool_allowed_in_phase("scoped_numeric_sqli", "exploitation")
+    assert is_tool_allowed_in_phase("scoped_text_sqli", "exploitation")
     assert not is_tool_allowed_in_phase("scoped_numeric_sqli", "informational")
 
 
@@ -83,11 +84,113 @@ async def test_scoped_assessment_cannot_complete_with_confirmed_unpublished_cand
     blocked = json.loads(await manager.scoped_assessment_summary())
     assert blocked["complete"] is False
     assert blocked["unpublished_candidates"] == ["candidate-1"]
+    assert blocked["detection_funnel"]["candidate_statuses"]["confirmed"] == 1
+    assert blocked["detection_funnel"]["published_findings"] == 0
 
     brain.candidates[0]["finding_id"] = "finding-1"
     manager._engagement_brain = brain.to_dict()
     complete = json.loads(await manager.scoped_assessment_summary())
     assert complete["complete"] is True
+    assert complete["detection_funnel"]["published_findings"] == 1
+
+
+def test_xml_capture_lists_fields_without_values_or_executable_proof():
+    from app.services.agent.prowl_service_bridge import capability_map_from_observation
+
+    public, private = package_exchange(
+        url="https://app.example.test/catalog/product/stock",
+        expected_origin="https://app.example.test", action_ref="ui-1",
+        method="POST", resource_type="fetch", status=200,
+        content_type="application/xml", request_content_type="application/xml",
+        request_body=b"<stock><productId>123</productId><storeId>456</storeId></stock>",
+        response_body=b"<quantity>8</quantity>",
+    )
+    assert public["body_fields_status"] == "parsed"
+    assert {field["path"] for field in public["body_fields"]} == {
+        "/stock/productId", "/stock/storeId",
+    }
+    assert "123" not in json.dumps(public) and "456" not in json.dumps(public)
+    assert private
+    cmap = capability_map_from_observation({
+        "signal": "browser_inspect_js",
+        "result": {"final_origin": "https://app.example.test", "status": 200,
+                   "final_path": "/catalog", "traffic": [public]},
+    })
+    assert any(row["location"] == "body_xml" and row["name"] == "document"
+               for row in cmap["parameter_inventory"])
+    unsafe, _ = package_exchange(
+        url="https://app.example.test/catalog/product/stock",
+        expected_origin="https://app.example.test", action_ref="ui-2",
+        method="POST", resource_type="fetch", status=200,
+        content_type="application/xml", request_content_type="application/xml",
+        request_body=b'<!DOCTYPE stock [<!ENTITY marker "private">]><stock>&marker;</stock>',
+        response_body=b"ok",
+    )
+    assert unsafe["body_fields_status"] == "unsafe_xml"
+    assert unsafe["body_fields"] == []
+
+
+def test_browser_actions_require_exact_operator_page_policy():
+    from app.services.agent.scoped_assessment.browser_actions import allowed_operator_action
+
+    assert allowed_operator_action("Check stock")
+    assert allowed_operator_action("Subscribe")
+    assert not allowed_operator_action("Delete product")
+    manager = ASMToolsManager()
+    manager.set_scoped_assessment_policy({"browser_action_paths": ["/catalog"]})
+    assert manager._scoped_browser_action_paths == {"/catalog"}
+    with pytest.raises(ValueError, match="Invalid body replay path"):
+        manager.set_scoped_assessment_policy({"browser_action_paths": ["https://other.test/"]})
+
+
+def test_hunter_and_verifier_can_call_built_in_proof_tools():
+    from app.services.agent.fireteam_service import get_specialist
+
+    assert "scoped_text_sqli" in get_specialist("sqli").allowed_tools
+    assert "scoped_browser_assessment" in get_specialist("xss").allowed_tools
+    verifier = get_specialist("independent_verifier")
+    assert {"scoped_browser_assessment", "scoped_text_sqli", "scoped_numeric_sqli"}.issubset(
+        set(verifier.allowed_tools)
+    )
+
+
+@pytest.mark.asyncio
+async def test_denied_tool_action_does_not_request_approval_twice(monkeypatch):
+    import app.services.agent.confirmation_service as confirmation
+
+    calls = []
+
+    async def requires_approval(name, args, org_id, session_id):
+        calls.append((name, args))
+        return {"decision": "confirm", "token": "denied-token", "tool_args": args}
+
+    async def denied(token):
+        return False
+
+    monkeypatch.setattr(confirmation, "gate", requires_approval)
+    monkeypatch.setattr(confirmation, "wait_for_decision", denied)
+    manager = ASMToolsManager()
+    args = {"operation": "inspect_js", "url": "https://app.example.test"}
+    first = await manager._execute_impl("scoped_browser_assessment", args)
+    second = await manager._execute_impl("scoped_browser_assessment", args)
+    assert first["error"] == "confirmation_denied"
+    assert second["error"] == "previous_confirmation_denied"
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_finding_triage_accepts_hypothesis_and_requires_real_evidence():
+    manager = ASMToolsManager()
+    result = json.loads(await manager.validate_finding(
+        title="Reflected script execution", description="The search parameter may execute script",
+        severity="medium", target="https://app.example.test/catalog",
+        hypothesis_id="hyp-search",
+    ))
+    assert result["hypothesis_id"] == "hyp-search"
+    assert result["verdict"] == "IMPROVE"
+    assert result["has_evidence"] is False
+    assert result["questions"][4]["pass"] is False
+    assert "independent_verify" not in result["next_step"]
 
 
 @pytest.mark.asyncio
@@ -128,6 +231,39 @@ async def test_numeric_probe_needs_observed_exchange_and_exact_origin(monkeypatc
             await manager.scoped_numeric_sqli("observed-id", "id")
     finally:
         verification_run.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_text_sqli_proof_uses_captured_string_and_new_nonce(monkeypatch):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    public, private = package_exchange(
+        url="https://app.example.test/catalog?category=shoes",
+        expected_origin="https://app.example.test", action_ref="navigate",
+        method="GET", resource_type="fetch", status=200,
+        content_type="text/html", request_body=b"", response_body=b"items",
+    )
+    manager._scoped_browser_exchanges = {
+        "observed-category": {"identity": "anonymous", "private": private, "public": public}
+    }
+
+    def fake_probe(baseline, true_url, false_url, nonce, **kwargs):
+        assert baseline == "https://app.example.test/catalog?category=shoes"
+        assert "%27%20AND%20%27" in true_url and true_url != false_url
+        assert kwargs["parameter"] == "category"
+        return {"target": "https://app.example.test/catalog",
+                "operation": "sqli_boolean_text", "proof_confirmed": True,
+                "nonce": nonce, "parameter": "category"}
+
+    monkeypatch.setattr(
+        "app.services.agent.scoped_assessment_tools.sqli_boolean.probe_text_boolean", fake_probe,
+    )
+    result = json.loads(await manager.scoped_text_sqli("observed-category", "category"))
+    assert result["proof_confirmed"] and result["finding"] is False
+    assert result["source_artifact_id"] == "observed-category"
+    with pytest.raises(ValueError, match="Unknown browser exchange"):
+        await manager.scoped_text_sqli("invented", "category")
 
 
 @pytest.mark.asyncio

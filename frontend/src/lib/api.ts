@@ -2567,6 +2567,7 @@ class ApiClient {
       priceLimitUsd?: number;
       assessmentPolicy?: {
         body_replay_paths: string[];
+        browser_action_paths: string[];
         owner_only_resources: { target: string; owner_identity: string; other_identity: string }[];
       };
     }

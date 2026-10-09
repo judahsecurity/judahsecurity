@@ -462,6 +462,10 @@ def seed_parameter_coverage_cells(brain: Any, inventory: Iterable[dict[str, Any]
         method = str(raw.get("method") or "GET").upper()
         location = str(raw.get("location") or "query")
         if location == "body_xml":
+            # One document-level XXE review is enough; individual XML elements
+            # remain in the inventory as source evidence, not separate probes.
+            if name != "document":
+                continue
             test_types = ("xxe",)
         else:
             test_types = ["xss", "sqli"]

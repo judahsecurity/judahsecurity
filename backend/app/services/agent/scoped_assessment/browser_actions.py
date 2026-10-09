@@ -6,6 +6,10 @@ import re
 
 
 MAX_DISCOVERY_ACTIONS = 6
+_OPERATOR_ACTION = re.compile(
+    r"(?:check|get|view)\s+(?:stock|availability)|search|filter|subscribe",
+    re.I,
+)
 _DESTRUCTIVE = re.compile(
     r"\b(delete|remove|sign\s*out|log\s*out|purchase|pay|submit|save|send|create|update|reset|confirm|unsubscribe)\b",
     re.I,
@@ -31,3 +35,8 @@ def allowed_discovery_control(*, kind: str, label: str, in_form: bool,
         and bool(label.strip())
         and not _DESTRUCTIVE.search(label)
     )
+
+
+def allowed_operator_action(label: str) -> bool:
+    """Narrow set of controls eligible for an explicitly approved page path."""
+    return bool(_OPERATOR_ACTION.fullmatch(" ".join(label.split())))

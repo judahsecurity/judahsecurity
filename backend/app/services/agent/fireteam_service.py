@@ -583,6 +583,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ),
         allowed_tools=[
             "get_parameter_inventory",
+            "scoped_browser_assessment",
+            "list_scoped_browser_exchanges",
             "scoped_assessment_probe_assigned",
             "scoped_assessment_candidate",
             "execute_xsstrike",
@@ -606,7 +608,11 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "Work the assigned observed input first. Use a harmless unique canary to check "
             "reflection or rendering; if it is absent, record an evidence-backed negative for "
             "that input. Use structured request tools for special characters; do not "
-            "pass raw injection strings through a shell command. If the directive has "
+            "pass raw injection strings through a shell command. For a built-in browser "
+            "candidate, call scoped_browser_assessment(operation='check_xss') with "
+            "a context-appropriate nonce template and require executed=true. "
+            "For DOM or client template sinks, demonstrate browser execution on the "
+            "observed page; source/sink strings alone are leads. If the directive has "
             "a PROWL private browser capture, call "
             "scoped_assessment_probe_assigned with the coverage cell and lease IDs; "
             "For a captured GET query, inspect the canary reflection context first. "
@@ -614,7 +620,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "'xss_browser_attribute' for a double-quoted HTML attribute, or "
             "'xss_browser_js_single'/'xss_browser_js_double' for the corresponding "
             "JavaScript string. Each runs a fresh nonce-backed browser proof. "
-            "Submit a scoped candidate only on executed=true with its service artifact ID. "
+            "Submit a scoped candidate only on executed=true with its browser evidence_id. "
             "A quote differential alone is not XSS. Status 200 is not XSS."
             " For DOM XSS, inspect the assigned first-party script and show a real data path "
             "from location.search or location.hash into an executable sink before browser proof. "
@@ -630,6 +636,12 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ),
         allowed_tools=[
             "get_parameter_inventory",
+            "scoped_browser_assessment",
+            "list_scoped_browser_exchanges",
+            "scoped_query_probe",
+            "scoped_numeric_sqli",
+            "scoped_text_sqli",
+            "scoped_body_probe",
             "scoped_assessment_probe_assigned",
             "scoped_assessment_candidate",
             "discover_parameters",
@@ -655,11 +667,14 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "only with a valid captured CSRF workflow. If baseline and mutants all "
             "return the same CSRF 400, mark that input blocked and move on. "
             "Use structured request tools for SQL syntax; do not pass raw injection "
-            "strings through a shell command. If the directive has a PROWL private "
+            "strings through a shell command. For a built-in browser capture, call "
+            "scoped_numeric_sqli on a positive integer GET field or scoped_text_sqli "
+            "on a string GET field; both require six stable true/false controls. "
+            "If the directive has a PROWL service private "
             "browser capture, call scoped_assessment_probe_assigned "
             "with the coverage cell and lease IDs. Numeric GET inputs use the scoped boolean "
             "proof; a single quote differential is only a lead. Submit a scoped candidate "
-            "only on proof_confirmed=true and cite its service artifact ID. "
+            "only on proof_confirmed=true and cite its execution evidence_id. "
             "For a text query, compare baseline, true-condition, false-condition, "
             "and unrelated invalid controls with the same request shape. Repeat any "
             "candidate differential; normalize dynamic content before comparing. "
@@ -913,7 +928,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         system_prompt_suffix=(
             "Re-score each proposed finding with validate_finding. Do NOT create_finding "
             "or submit_finding_candidate — hunters submit candidates; Deborah verifies; "
-            "Joshua publishes. Kill theoretical / status-only / identity-less IDOR claims. "
+            "Joshua publishes. Keep theoretical / status-only / identity-less IDOR claims "
+            "unverified until a controlled test confirms or refutes them. "
             "Prefer sanitize_evidence before publish. "
             "Grafana CVE-2024-9264: SUBMIT if /api/ds/query type=sql forks duckdb — "
             "including 'no such file or directory'. Missing binary and sqlExpressions=0 "
@@ -970,6 +986,15 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ),
         allowed_tools=[
             "compare_requests",
+            "scoped_browser_assessment",
+            "list_scoped_browser_exchanges",
+            "scoped_numeric_sqli",
+            "scoped_text_sqli",
+            "scoped_query_probe",
+            "scoped_body_probe",
+            "scoped_owner_only",
+            "scoped_http_get",
+            "read_evidence",
             "execute_curl",
             "execute_browser",
             "execute_interactsh",

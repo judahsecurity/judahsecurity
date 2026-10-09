@@ -23,6 +23,7 @@ CAPABILITY_TOOLS = (
     "scoped_http_compare",
     "scoped_query_probe",
     "scoped_numeric_sqli",
+    "scoped_text_sqli",
     "scoped_body_probe",
     "scoped_owner_only",
     "list_scoped_browser_exchanges",

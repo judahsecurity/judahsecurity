@@ -551,7 +551,7 @@ SKILLS: list[Skill] = [
     Skill(
         id="finding-validation",
         aliases=["validate", "gate", "7q", "triage", "validate-finding"],
-        title="Finding validation (8-Question Gate)",
+        title="Finding evidence triage",
         description=(
             "Score a proposed finding before reporting: impact, reachability, reproducibility, "
             "boundary, evidence, severity, N/A risk, and identity discipline for authz."
@@ -560,10 +560,10 @@ SKILLS: list[Skill] = [
         playbook_id="finding_validation",
         system_context=(
             "You are running the FINDING-VALIDATION skill. Call validate_finding with "
-            "the title, description, severity, and any evidence. Use the score and "
-            "verdict to decide: SUBMIT (pass nearly all), IMPROVE, or DROP. "
+            "the title, description, severity, hypothesis_id, and any evidence. Use the score and "
+            "verdict to improve the candidate writeup; independent_verify confirms the proof. "
             "For authz findings, require anonymous/user-A/user-B identity context. "
-            "For IMPROVE, explain each failing question to the user. "
+            "For IMPROVE, record each evidence gap without treating it as a negative test result. "
             "After validation, call detect_bug_chains to surface follow-on test opportunities."
         ),
         required_inputs=["finding"],

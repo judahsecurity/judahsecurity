@@ -8,7 +8,7 @@ from app.services.agent.api_fingerprint import fingerprint_from_map
 from app.services.agent.coverage_cells import (
     claim_coverage_cell_leases, seed_js_coverage_cells, seed_parameter_coverage_cells,
 )
-from app.services.agent.engagement_brain import EngagementBrain
+from app.services.agent.engagement_brain import EngagementBrain, engagement_brain_from_dict
 from app.services.agent.operation_directive import directives_from_hypotheses
 from app.services.agent.runtime_mapper import ingest_capability_map_operations
 from app.services.agent.tools import ASMToolsManager
@@ -180,14 +180,20 @@ async def test_assigned_probe_uses_private_capture_and_cannot_change_input(monke
     assert result["assigned_operation"] == "http_query_probe"
     assert calls == [("http_query_probe", {"artifact_id": "capture-q",
                                            "parameter": "q", "identity": "anonymous"})]
+    retry_brain = engagement_brain_from_dict(manager._engagement_brain)
+    retry = claim_coverage_cell_leases(retry_brain, ["xss"])["xss"]
+    manager._engagement_brain = retry_brain.to_dict()
     xss = await manager.scoped_assessment_probe_assigned(
-        lease.coverage_cell_id, lease.id, "xss_browser")
+        retry.coverage_cell_id, retry.id, "xss_browser")
     assert xss["assigned_operation"] == "browser_check_xss"
     assert "%3Cimg%20src%3Dx%20onerror%3Dalert" in calls[-1][1]["url_template"]
     assert "__PROWL_NONCE__" in calls[-1][1]["url_template"]
     assert calls[-1][1]["identity"] == "anonymous"
+    retry_brain = engagement_brain_from_dict(manager._engagement_brain)
+    retry = claim_coverage_cell_leases(retry_brain, ["xss"])["xss"]
+    manager._engagement_brain = retry_brain.to_dict()
     js = await manager.scoped_assessment_probe_assigned(
-        lease.coverage_cell_id, lease.id, "xss_browser_js_single")
+        retry.coverage_cell_id, retry.id, "xss_browser_js_single")
     assert js["assigned_operation"] == "browser_check_xss"
     assert "%27%3Balert" in calls[-1][1]["url_template"]
 
@@ -225,4 +231,31 @@ async def test_assigned_sqli_selects_service_proof_shape(
     cell = next(row for row in manager._engagement_brain["coverage_cells"]
                 if row["id"] == lease.coverage_cell_id)
     assert cell["service_probe_artifact_ids"] == ["probe-item"]
-    assert cell["status"] == ("in_focus" if expected == "http_sqli_boolean" else "leased")
+    assert cell["status"] == ("in_focus" if expected == "http_sqli_boolean" else "inconclusive")
+
+
+@pytest.mark.asyncio
+async def test_failed_assigned_probe_records_retryable_inconclusive_outcome(monkeypatch):
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "path": "/catalog", "host": "app.test",
+        "name": "category", "location": "query", "value_type": "string",
+        "source": "browser_traffic", "identity": "anonymous",
+        "artifact_id": "capture-category", "testable": True,
+    }])
+    lease = claim_coverage_cell_leases(brain, ["sqli"])["sqli"]
+    manager = ASMToolsManager()
+    manager._engagement_brain = brain.to_dict()
+
+    async def denied(operation, body):
+        return {"success": False, "error": "confirmation_denied", "output": "Approval denied"}
+
+    monkeypatch.setattr(manager, "_scoped_assessment_operation", denied)
+    result = await manager.scoped_assessment_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert result["error"] == "confirmation_denied"
+    cell = next(row for row in manager._engagement_brain["coverage_cells"]
+                if row["id"] == lease.coverage_cell_id)
+    assert cell["status"] == "inconclusive"
+    assert cell["attempts"] == 1
+    assert "confirmation_denied" in cell["reason"]
+    assert not cell["lease_id"]
