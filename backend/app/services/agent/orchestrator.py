@@ -376,6 +376,7 @@ class AgentOrchestrator:
             "think",
             self._route_after_think,
             {
+                "think": "think",
                 "execute_tool": "execute_tool",
                 "await_approval": "await_approval",
                 "await_question": "await_question",

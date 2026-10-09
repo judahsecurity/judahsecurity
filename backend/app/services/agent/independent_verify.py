@@ -10,6 +10,7 @@ finder's own validate_finding score.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import time
@@ -387,6 +388,9 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         "scoped_query_probe, scoped_body_probe, or scoped_owner_only. "
         "For a mapped string-valued GET query input, scoped_string_sqli(url, parameter) "
         "builds a fresh eight-request Boolean proof without an XHR capture. "
+        "Its URL may be the canonical path when the browser map contains an ordinary "
+        "observed value for that parameter. Prefer this structured proof to raw curl "
+        "replays; do not repeat the same eight requests after it completes. "
         "Use its evidence_id with the candidate's earlier scoped_string_sqli evidence_id. "
         "For a confirmed numeric or string Boolean SQLi, owner-only access, public directory index, "
         "or browser XSS, use proof {kind: numeric_boolean_sqli|string_boolean_sqli|owner_only|"
@@ -507,6 +511,17 @@ def apply_verdict(
     proof: Optional[Dict[str, Any]] = None,
 ) -> Optional[FindingCandidate]:
     from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+    # Some verifier models serialize the proof object as a JSON string. Accept
+    # that shape, but never let malformed output crash the whole assessment or
+    # become a confirmed receipt.
+    if isinstance(proof, str):
+        try:
+            proof = json.loads(proof)
+        except ValueError:
+            proof = None
+    if not isinstance(proof, dict):
+        proof = {}
 
     verdict = (verdict or "").strip().lower()
     if verdict not in ("confirmed", "refuted", "inconclusive"):

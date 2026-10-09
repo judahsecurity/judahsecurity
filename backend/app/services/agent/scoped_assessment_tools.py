@@ -482,9 +482,30 @@ class ScopedAssessmentTools:
             }), None)
         if observed is None:
             raise ValueError("String SQLi proof requires a mapped GET query parameter")
-        baseline, variants, nonce = sqli_string.plan_string_boolean(
-            url, parameter=parameter, allowed_origins=[allowed],
-        )
+        if not parts.query:
+            # Verifiers often receive the canonical finding target without its
+            # query. Recover only a live, same-path URL that the browser already
+            # observed; never invent a value or widen the request scope.
+            candidates = (
+                page for page in (getattr(self, "_capability_map", None) or {}).get("pages_visited", [])
+                if isinstance(page, str) and urlsplit(page).scheme == parts.scheme
+                and urlsplit(page).netloc == parts.netloc
+                and (urlsplit(page).path or "/") == (parts.path or "/")
+            )
+            for candidate in candidates:
+                try:
+                    baseline, variants, nonce = sqli_string.plan_string_boolean(
+                        candidate, parameter=parameter, allowed_origins=[allowed],
+                    )
+                    break
+                except ValueError:
+                    continue
+            else:
+                raise ValueError("String SQLi proof needs an ordinary observed GET URL with this parameter")
+        else:
+            baseline, variants, nonce = sqli_string.plan_string_boolean(
+                url, parameter=parameter, allowed_origins=[allowed],
+            )
         self._scoped_assessment_started = True
         self._scoped_claim_gets(8)
         result = await asyncio.to_thread(

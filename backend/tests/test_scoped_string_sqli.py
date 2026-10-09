@@ -118,11 +118,20 @@ async def test_string_tool_requires_mapped_parameter_and_exact_scope(monkeypatch
     monkeypatch.setattr(sqli_string, "probe_string_boolean", fake_probe)
     result = json.loads(await manager.scoped_string_sqli(URL, "category"))
     assert result["proof_confirmed"] and result["finding"] is False
+    canonical = json.loads(await manager.scoped_string_sqli(TARGET, "category"))
+    assert canonical["proof_confirmed"]
     assert manager.get_tool("scoped_string_sqli") is not None
     with pytest.raises(ValueError, match="mapped GET query parameter"):
         await manager.scoped_string_sqli(TARGET + "?other=gin", "other")
     with pytest.raises(ValueError):
         await manager.scoped_string_sqli("https://other.example.test/catalog?category=gin", "category")
+
+    manager._capability_map = {
+        "scope": "https://app.example.test",
+        "forms": [{"method": "GET", "action": TARGET, "fields": ["category"]}],
+    }
+    with pytest.raises(ValueError, match="ordinary observed GET URL"):
+        await manager.scoped_string_sqli(TARGET, "category")
 
 
 def test_inconclusive_candidate_requires_new_proof_before_retry():
@@ -151,7 +160,8 @@ def test_hunter_and_independent_verifier_can_use_string_proof():
     assert "scoped_string_sqli" in get_specialist("independent_verifier").allowed_tools
 
 
-def test_string_proof_issues_publication_receipt_after_fresh_verifier(monkeypatch):
+@pytest.mark.parametrize("serialized_proof", [False, True])
+def test_string_proof_issues_publication_receipt_after_fresh_verifier(monkeypatch, serialized_proof):
     manager = ASMToolsManager()
     store = evidence_store(manager)
     hunter = store.record(
@@ -170,12 +180,13 @@ def test_string_proof_issues_publication_receipt_after_fresh_verifier(monkeypatc
             "scoped_string_sqli", _proof(monkeypatch, "67890"),
             target=TARGET, identity="anonymous",
         )
+        proof = {"kind": "string_boolean_sqli", "hunter_artifact_id": hunter,
+                 "artifact_id": verifier}
         verdict = apply_verdict(
             manager, candidate_id=candidate.id, verdict="confirmed",
             evidence="Fresh verifier reproduced quote error and stable Boolean branch expansion",
             evidence_ids=[verifier],
-            proof={"kind": "string_boolean_sqli", "hunter_artifact_id": hunter,
-                   "artifact_id": verifier},
+            proof=json.dumps(proof) if serialized_proof else proof,
         )
     finally:
         verification_run.reset(token)
@@ -184,3 +195,30 @@ def test_string_proof_issues_publication_receipt_after_fresh_verifier(monkeypatc
         manager._verify_receipts, title=candidate.title, target=TARGET,
         tools_manager=manager,
     )[0]
+
+
+def test_malformed_verifier_proof_is_inconclusive_not_a_crash(monkeypatch):
+    manager = ASMToolsManager()
+    store = evidence_store(manager)
+    hunter = store.record(
+        "scoped_string_sqli", _proof(monkeypatch, "12345"),
+        target=TARGET, identity="anonymous",
+    )
+    brain = EngagementBrain(target="https://app.example.test")
+    candidate = submit_candidate(
+        brain, title="String SQLi", target=TARGET, evidence_ids=[hunter], severity="high",
+    )
+    manager._engagement_brain = brain.to_dict()
+    token = verification_run.set(VerificationRun("verifier-run", candidate.id, 1, candidate.nonce))
+    try:
+        verifier = store.record(
+            "scoped_string_sqli", _proof(monkeypatch, "67890"),
+            target=TARGET, identity="anonymous",
+        )
+        verdict = apply_verdict(
+            manager, candidate_id=candidate.id, verdict="confirmed",
+            evidence="Fresh response controls", evidence_ids=[verifier], proof="not JSON",
+        )
+    finally:
+        verification_run.reset(token)
+    assert verdict.status == "inconclusive"
