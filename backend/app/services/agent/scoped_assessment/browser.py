@@ -145,6 +145,7 @@ async def check_browser(
     javascript_sources: list[dict] | None = None,
     traffic_exchanges: list[dict] | None = None,
     max_actions: int = 3,
+    approved_action_paths: set[str] | None = None,
 ) -> tuple[dict, bytes | None]:
     """Execute one bounded browser check with HTTP and WebSocket origin routing."""
     from playwright.async_api import async_playwright
@@ -180,6 +181,8 @@ async def check_browser(
     request_rows: dict[object, dict] = {}
     current_action_ref = "navigate"
     actions: list[dict] = []
+    approval_required_actions: list[dict] = []
+    approved_action_paths = set(approved_action_paths or ())
 
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(**launch_options())
@@ -417,7 +420,67 @@ async def check_browser(
             response = await page.goto(final_target, wait_until="domcontentloaded", timeout=20_000)
             await page.wait_for_timeout(650)
             if operation == "inspect_js":
-                from .browser_actions import allowed_discovery_control
+                from .browser_actions import allowed_discovery_control, allowed_operator_action
+
+                approved_action_count = 0
+                passive_action_count = 0
+
+                async def inspect_operator_action() -> None:
+                    nonlocal current_action_ref, approved_action_count
+                    path = urlsplit(page.url).path or "/"
+                    for control in (await page.query_selector_all(
+                        "button, input[type=submit], input[type=button]"
+                    ))[:24]:
+                        try:
+                            if not await control.is_visible():
+                                continue
+                            label = " ".join((await control.inner_text()
+                                              or await control.get_attribute("value") or "").split())[:80]
+                            if not allowed_operator_action(label):
+                                continue
+                            if path not in approved_action_paths:
+                                if len(approval_required_actions) < 8:
+                                    approval_required_actions.append({
+                                        "page_path": path, "label": label,
+                                        "status": "approval_required",
+                                    })
+                                continue
+                            if approved_action_count + passive_action_count >= max_actions:
+                                return
+                            if label.strip().lower() == "subscribe":
+                                email_field = page.locator("input[type=email]")
+                                if await email_field.count() != 1:
+                                    actions.append({"kind": "approved_control", "path": path,
+                                                    "label": label, "status": "missing_single_email_input"})
+                                    continue
+                                await email_field.fill(
+                                    "aegis-capture-" + secrets.token_hex(4) + "@example.invalid"
+                                )
+                            ref = f"approved-ui-{approved_action_count + 1}"
+                            current_action_ref = ref
+                            start = (len(requests), len(javascript_sources), len(traffic_exchanges))
+                            approved_action_count += 1
+                            try:
+                                await control.click(timeout=1500, no_wait_after=True)
+                                await page.wait_for_timeout(450)
+                                assert_in_scope(page.url, allowed_origins)
+                                await settle_capture()
+                                status = "completed"
+                            except ValueError:
+                                raise
+                            except Exception as exc:
+                                status = type(exc).__name__
+                            actions.append(await checkpoint(
+                                ref, "approved_control", start, label=label,
+                                before_path=path, after_path=urlsplit(page.url).path or "/",
+                                status=status, approved_by_policy=True,
+                            ))
+                            if (urlsplit(page.url).path or "/") != path:
+                                return
+                        except ValueError:
+                            raise
+                        except Exception:
+                            continue
 
                 await collect_inline()
                 actions.append(await checkpoint("navigate", "navigate", (0, 0, 0),
@@ -429,8 +492,10 @@ async def check_browser(
                 await collect_inline()
                 actions.append(await checkpoint("scroll", "scroll", start,
                                                 path=urlsplit(page.url).path or "/", status="completed"))
+                await inspect_operator_action()
                 seen_controls: set[tuple[str, str, str, str]] = set()
-                while len(actions) - 2 < max_actions:
+                passive_limit = max_actions - min(len(approved_action_paths), max_actions)
+                while passive_action_count < passive_limit:
                     selected = None
                     controls = await page.query_selector_all(
                         "[role=tab], button[aria-expanded='false'][aria-controls], summary"
@@ -476,6 +541,7 @@ async def check_browser(
                         control_index=index, before_path=before_path,
                         after_path=urlsplit(page.url).path or "/", status=status,
                     ))
+                    passive_action_count += 1
                 current_action_ref = "settle"
                 await page.wait_for_timeout(300)
                 await settle_capture()
@@ -509,6 +575,7 @@ async def check_browser(
                         page_paths.append(page_path)
                         actions.append(await checkpoint(ref, "navigate_link", start, path=page_path,
                                                         navigation_mode=navigation_mode, status="completed"))
+                        await inspect_operator_action()
                         hrefs = await page.locator("a[href]").evaluate_all(
                             "els => els.slice(0, 100).map(e => e.href)"
                         )
@@ -547,6 +614,7 @@ async def check_browser(
                 result["script_count"] = len(javascript_sources)
                 result["collection_limit"] = MAX_SOURCES
                 result["actions"] = actions
+                result["approval_required_actions"] = approval_required_actions
                 result["traffic_count"] = len(traffic_exchanges)
                 result["max_actions"] = max_actions
                 result["max_pages"] = max_pages

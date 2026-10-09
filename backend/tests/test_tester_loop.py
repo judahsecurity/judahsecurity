@@ -275,6 +275,13 @@ def test_observed_input_hunt_starts_before_enrichment_join_and_js_pipeline():
     }
     signature = observed_input_signature(state)
     assert signature
+    inspection = forced_next_step(state)
+    assert inspection["tool_name"] == "scoped_browser_assessment"
+    assert inspection["tool_args"]["operation"] == "inspect_js"
+    state["execution_trace"].append({
+        "tool_name": "scoped_browser_assessment", "tool_args": inspection["tool_args"],
+        "success": True,
+    })
     assert forced_next_step(state)["tool_name"] == "sync_engagement_brain"
 
     state["execution_trace"].append({"tool_name": "sync_engagement_brain", "success": True})
@@ -405,6 +412,10 @@ def test_observed_input_queue_advances_only_after_progress_then_runs_full_wave()
         ],
     }
     signature = observed_input_signature(state)
+    state["execution_trace"].append({
+        "tool_name": "scoped_browser_assessment", "success": True,
+        "tool_args": {"operation": "inspect_js", "url": target},
+    })
     state["execution_trace"].append({
         "tool_name": "fireteam_dispatch", "success": True,
         "tool_args": {"surface_signature": signature, "pending_input_count": 4},

@@ -3,6 +3,7 @@
 import json
 import os
 import threading
+import base64
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -13,6 +14,78 @@ pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_ASSESSMENT_BROWSER_TESTS") != "1",
     reason="Opt-in local Chromium fixture",
 )
+
+
+@pytest.mark.asyncio
+async def test_approved_browser_actions_capture_stock_xml_and_subscribe_request():
+    from app.services.agent.scoped_assessment.browser import check_browser
+
+    posted = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            if self.path == "/":
+                self.wfile.write(b'<a href="/stock">Stock</a><a href="/subscribe">Subscribe</a>')
+            elif self.path == "/stock":
+                self.wfile.write(b'''<button onclick="fetch('/api/stock', {method:'POST',
+                  headers:{'Content-Type':'application/xml'},
+                  body:'<stock><productId>7</productId></stock>'})">Check stock</button>''')
+            else:
+                self.wfile.write(b'''<input type="email" id="email"><button onclick="fetch('/api/subscribe',
+                  {method:'POST', headers:{'Content-Type':'application/json'},
+                  body:JSON.stringify({email:document.querySelector('#email').value})})">Subscribe</button>''')
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            posted.append((self.path, body))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        base = f"http://127.0.0.1:{server.server_port}"
+        denied_exchanges = []
+        denied, _ = await check_browser(
+            operation="inspect_js", url=base, allowed_origins=[base],
+            javascript_sources=[], traffic_exchanges=denied_exchanges,
+            max_pages=3, max_actions=2,
+        )
+        assert not posted and not denied_exchanges
+        assert {row["page_path"] for row in denied["approval_required_actions"]} == {
+            "/stock", "/subscribe",
+        }
+
+        exchanges = []
+        allowed, _ = await check_browser(
+            operation="inspect_js", url=base, allowed_origins=[base],
+            javascript_sources=[], traffic_exchanges=exchanges,
+            max_pages=3, max_actions=2,
+            approved_action_paths={"/stock", "/subscribe"},
+        )
+        assert {path for path, _ in posted} == {"/api/stock", "/api/subscribe"}
+        assert {row["public"]["path"] for row in exchanges} == {"/api/stock", "/api/subscribe"}
+        assert any(row["public"]["request_content_type"] == "application/xml" for row in exchanges)
+        assert len([row for row in allowed["actions"] if row.get("kind") == "approved_control"
+                    and row.get("status") == "completed"]) == 2
+        subscribe = next(row for row in exchanges if row["public"]["path"] == "/api/subscribe")
+        private = json.loads(subscribe["private"])
+        body = base64.b64decode(private["request_body_base64"])
+        assert b"@example.invalid" in body
+        assert "@example.invalid" not in json.dumps(subscribe["public"])
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 @pytest.mark.asyncio

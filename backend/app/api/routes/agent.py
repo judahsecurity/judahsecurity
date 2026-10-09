@@ -105,15 +105,16 @@ class OwnerOnlyResource(BaseModel):
 
 class AgentAssessmentPolicy(BaseModel):
     body_replay_paths: list[str] = Field(default_factory=list, max_length=8)
+    browser_action_paths: list[str] = Field(default_factory=list, max_length=8)
     owner_only_resources: list[OwnerOnlyResource] = Field(default_factory=list, max_length=8)
 
-    @field_validator("body_replay_paths")
+    @field_validator("body_replay_paths", "browser_action_paths")
     @classmethod
     def validate_body_paths(cls, paths: list[str]) -> list[str]:
         for path in paths:
             if (not path.startswith("/") or path.startswith("//") or path == "/"
                     or len(path) > 256 or any(char in path for char in "?#\\\r\n\t ")):
-                raise ValueError("Body replay needs exact absolute paths without query values")
+                raise ValueError("Approved action needs exact absolute paths without query values")
         return paths
 
 

@@ -5,6 +5,7 @@ Tools for the AI agent to interact with the ASM platform.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -492,6 +493,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _scoped_get_count = SessionValue(lambda: 0)
     _scoped_post_count = SessionValue(lambda: 0)
     _scoped_body_replay_paths = SessionValue(set)
+    _scoped_browser_action_paths = SessionValue(set)
+    _denied_tool_fingerprints = SessionValue(set)
     _scoped_owner_expectations = SessionValue(dict)
     _scoped_assessment_started = SessionValue(lambda: False)
     _proof_engine = SessionValue(lambda: None)
@@ -875,6 +878,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         cell = next((row for row in brain.coverage_cells
                      if row.get("id") == coverage_cell_id), None)
+
+        def record_inconclusive(reason: str) -> None:
+            from app.services.agent.coverage_cells import release_coverage_cell_lease
+
+            release_coverage_cell_lease(
+                brain, {"id": coverage_lease_id, "coverage_cell_id": coverage_cell_id},
+                verdict="inconclusive", reason=reason,
+            )
+            self._engagement_brain = brain.to_dict()
+
         lease_error = (
             "missing_cell" if not cell else
             "not_leased" if cell.get("status") != "leased" else
@@ -886,6 +899,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "missing_capture" if not cell.get("capture_id") else ""
         )
         if lease_error:
+            if lease_error in {"not_private_browser_capture", "missing_capture"}:
+                record_inconclusive("No replayable browser request: " + lease_error)
             return {"success": False, "error": "invalid_coverage_lease",
                     "reason": lease_error,
                     "output": f"An active lease on a browser-captured parameter is required ({lease_error})"}
@@ -904,6 +919,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         method = str(cell.get("method") or "GET")
         if technique in xss_payloads:
             if cell.get("specialist") != "xss" or method != "GET" or location != "query":
+                record_inconclusive("Browser XSS execution is unavailable for this captured input shape")
                 return {"success": False, "error": "unsupported_xss_browser",
                         "output": "Browser XSS check requires a captured GET query parameter"}
             cmap = getattr(self, "_capability_map", None) or {}
@@ -926,9 +942,14 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         elif method == "POST" and location in {"body_json", "body_form"}:
             operation = "http_body_probe"
         else:
+            record_inconclusive("No scoped replay recipe for the captured input shape")
             return {"success": False, "error": "unsupported_capture",
                     "output": "The scoped service cannot replay this input shape"}
         result = await self._scoped_assessment_operation(operation, body)
+        if not result.get("success"):
+            record_inconclusive(
+                "Assigned proof action failed: " + str(result.get("error") or "unknown")[:120]
+            )
         result["coverage_cell_id"] = coverage_cell_id
         result["coverage_lease_id"] = coverage_lease_id
         result["assigned_operation"] = operation
@@ -947,7 +968,17 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 if proof.get("proof_confirmed") is True or proof.get("executed") is True:
                     current["status"] = "in_focus"
                     current["reason"] = "Scoped service returned a proof signal; independent verification required"
+                else:
+                    from app.services.agent.coverage_cells import release_coverage_cell_lease
+
+                    release_coverage_cell_lease(
+                        live, {"id": coverage_lease_id, "coverage_cell_id": coverage_cell_id},
+                        verdict="inconclusive", evidence_ids=result["service_artifact_ids"],
+                        reason="Probe completed without class-specific proof",
+                    )
                 self._engagement_brain = live.to_dict()
+        elif result.get("success") and not result.get("service_artifact_ids"):
+            record_inconclusive("Probe completed without an execution receipt")
         return result
 
     async def scoped_assessment_candidate(
@@ -1217,6 +1248,18 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 except (ValueError, TypeError, KeyError) as exc:
                     return {"success": False, "output": str(exc), "error": "assessment_scope_denied"}
 
+        # A denied action cannot create a fresh approval prompt by repeating
+        # the same arguments in this assessment session.
+        approval_fingerprint = hashlib.sha256(
+            json.dumps([tool_name, tool_args], sort_keys=True, default=str).encode()
+        ).hexdigest()
+        if approval_fingerprint in self._denied_tool_fingerprints:
+            return {
+                "success": False,
+                "output": "This exact tool action was already denied; record it as unattempted and continue elsewhere.",
+                "error": "previous_confirmation_denied",
+            }
+
         # -- Per-tool confirmation gate ---------------------------------------
         # Consult the org's agent confirmation policy. Dangerous tools
         # (execute_*, create_scan, ...) either pause for a human ``approve`` or
@@ -1227,6 +1270,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             _sess = current_session_id.get()
             gate_result = await _gate_tool(tool_name, tool_args or {}, org_id, _sess)
             if gate_result.get("decision") == "deny":
+                self._denied_tool_fingerprints.add(approval_fingerprint)
                 return {
                     "success": False,
                     "output": gate_result.get("reason")
@@ -1256,6 +1300,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 from app.services.agent.confirmation_service import wait_for_decision
                 approved = await wait_for_decision(token)
                 if not approved:
+                    self._denied_tool_fingerprints.add(approval_fingerprint)
                     return {
                         "success": False,
                         "output": (
@@ -5210,11 +5255,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         evidence: Optional[str] = None,
         cve_id: Optional[str] = None,
         remediation: Optional[str] = None,
+        hypothesis_id: Optional[str] = None,
     ) -> str:
-        """Validation gate — score a proposed finding before reporting.
+        """Triage a proposed finding's writeup before independent verification.
 
         Evaluates the finding against demonstrated-compromise criteria and returns
-        SUBMIT, IMPROVE, or DROP. Default/weak login IMPROVE until privileged
+        SUBMIT or IMPROVE. Default/weak login remains IMPROVE until privileged
         API impact is documented.
 
         Args:
@@ -5225,6 +5271,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             evidence: Request/response snippet or reproduction proof.
             cve_id: Optional CVE ID if mapping to a known CVE.
             remediation: Optional remediation guidance.
+            hypothesis_id: Optional hypothesis being triaged.
         """
         text = f"{title} {description} {evidence or ''} {remediation or ''}".lower()
         questions: List[Dict[str, Any]] = []
@@ -5277,16 +5324,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         })
 
         # Q5: Has direct evidence (not purely theoretical)
-        theoretical_words = ["might", "could potentially", "it is possible that", "theoretically",
-                              "in theory", "may be possible", "hypothetically"]
-        q5_theoretical = any(w in text for w in theoretical_words)
         q5_has_evidence = bool(evidence and len(evidence.strip()) > 30)
-        q5 = q5_has_evidence or not q5_theoretical
+        q5 = q5_has_evidence
         questions.append({
             "question": "Is the finding backed by direct evidence (not purely theoretical)?",
             "pass": q5,
-            "feedback": "PASS — evidence provided or non-theoretical language." if q5 else
-                        "FAIL — replace theoretical language with a tested payload and observed response.",
+            "feedback": "PASS — direct evidence provided." if q5 else
+                        "FAIL — provide a tested payload and observed response; confident wording is not proof.",
         })
 
         # Q6: Non-trivial severity
@@ -5837,8 +5881,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             gaps = [q["feedback"] for q in questions if not q["pass"]]
             verdict_detail = "Address the gaps before submitting: " + " | ".join(gaps)
         else:
-            verdict = "DROP"
-            verdict_detail = "Fundamental issues — likely to be rejected. Address all failing questions."
+            verdict = "IMPROVE"
+            verdict_detail = "Insufficient writeup evidence. Keep the observation open until a controlled test confirms or refutes it."
 
         receipt_id = None
         if verdict == "SUBMIT":
@@ -5856,6 +5900,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         return json.dumps({
             "title": title,
+            "hypothesis_id": hypothesis_id,
             "severity": severity,
             "target": target or "not specified",
             "score": f"{score}/{total}",
@@ -5867,9 +5912,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "has_remediation": bool(remediation),
             "has_cve": bool(cve_id),
             "next_step": (
-                "create_finding with the same title/target is now unlocked for medium+"
+                "submit_finding_candidate, then obtain a confirmed independent_verify receipt before create_finding"
                 if receipt_id
-                else "Do not create_finding until verdict is SUBMIT"
+                else "Improve the candidate or record why verification was inconclusive; do not publish without proof"
             ),
         }, indent=2)
 

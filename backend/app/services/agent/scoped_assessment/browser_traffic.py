@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import re
+import xml.etree.ElementTree as ElementTree
 from collections import Counter
 from urllib.parse import parse_qsl, urlsplit
 
@@ -82,6 +83,32 @@ def _body_fields(data: bytes, content_type: str) -> tuple[str, str, list[dict]]:
                 fields.append({"location": "form", "path": name, "value_type": "string"})
                 if len(fields) >= MAX_BODY_FIELDS:
                     break
+        return mime, "parsed", fields
+    if mime in {"application/xml", "text/xml"} or mime.endswith("+xml"):
+        # XML is inventoried only. Parsing never authorizes a replay or an XXE claim.
+        if re.search(rb"<!\s*(?:DOCTYPE|ENTITY)\b", data, re.I):
+            return mime, "unsafe_xml", []
+        try:
+            document = ElementTree.fromstring(data)
+        except ElementTree.ParseError:
+            return mime, "invalid", []
+
+        def collect_xml(node: ElementTree.Element, path: str, depth: int) -> None:
+            if depth > 5 or len(fields) >= MAX_BODY_FIELDS:
+                return
+            tag = node.tag.rsplit("}", 1)[-1]
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,79}", tag):
+                return
+            current = f"{path}/{tag}"
+            if len(current) > 300:
+                return
+            if not list(node) and current not in seen:
+                seen.add(current)
+                fields.append({"location": "xml", "path": current, "value_type": "string"})
+            for child in list(node)[:MAX_BODY_FIELDS]:
+                collect_xml(child, current, depth + 1)
+
+        collect_xml(document, "", 0)
         return mime, "parsed", fields
     return mime, "unsupported", []
 

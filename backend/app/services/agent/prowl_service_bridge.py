@@ -189,9 +189,13 @@ def capability_map_from_observation(observation: dict) -> dict | None:
                                             "location": "query"})
         for field in (row.get("body_fields") or [])[:40]:
             if isinstance(field, dict):
+                field_location = {"json": "body_json", "form": "body_form",
+                                  "xml": "body_xml"}.get(field.get("location"))
+                if not field_location:
+                    continue
                 parameters.append(common | {"name": field.get("path"),
                                             "value_type": field.get("value_type", ""),
-                                            "location": "body_json" if field.get("location") == "json" else "body_form"})
+                                            "location": field_location})
     for script in (result.get("scripts") or [])[:20]:
         if not isinstance(script, dict) or not isinstance(script.get("analysis"), dict):
             continue

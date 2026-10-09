@@ -685,6 +685,7 @@ function AgentPageContent() {
   const [selectedPlaybookId, setSelectedPlaybookId] = useState<string>('custom');
   const [target, setTarget] = useState('');
   const [bodyReplayPathsText, setBodyReplayPathsText] = useState('');
+  const [browserActionPathsText, setBrowserActionPathsText] = useState('');
   const [ownerOnlyText, setOwnerOnlyText] = useState('');
   const [mode, setMode] = useState<'assist' | 'agent' | 'pilot'>('agent');
   const [pilotStatus, setPilotStatus] = useState<{ ready: boolean; egress_ready: boolean; redis_ready: boolean } | null>(null);
@@ -1256,17 +1257,19 @@ function AgentPageContent() {
     }
 
     const bodyReplayPaths = mode === 'pilot' ? [] : bodyReplayPathsText.split(/[\n,]/).map((value) => value.trim()).filter(Boolean);
+    const browserActionPaths = mode === 'pilot' ? [] : browserActionPathsText.split(/[\n,]/).map((value) => value.trim()).filter(Boolean);
     const ownerOnlyResources = (mode === 'pilot' ? [] : ownerOnlyText.split('\n').filter(Boolean)).map((line) => {
       const [resource, owner, other, ...extra] = line.split('|').map((value) => value.trim());
       return { target: resource, owner_identity: owner, other_identity: other, valid: !extra.length && Boolean(resource && owner && other) };
     });
-    if (bodyReplayPaths.length > 8 || ownerOnlyResources.length > 8 || ownerOnlyResources.some((row) => !row.valid)) {
+    if (bodyReplayPaths.length > 8 || browserActionPaths.length > 8 || ownerOnlyResources.length > 8 || ownerOnlyResources.some((row) => !row.valid)) {
       toast({ variant: 'destructive', title: 'Invalid assessment policy',
-        description: 'Use at most eight POST paths and eight owner-only lines in URL | owner | other format.' });
+        description: 'Use at most eight POST paths, eight browser action pages, and eight owner-only lines in URL | owner | other format.' });
       return;
     }
-    const assessmentPolicy = bodyReplayPaths.length || ownerOnlyResources.length
+    const assessmentPolicy = bodyReplayPaths.length || browserActionPaths.length || ownerOnlyResources.length
       ? { body_replay_paths: bodyReplayPaths,
+          browser_action_paths: browserActionPaths,
           owner_only_resources: ownerOnlyResources.map((row) => ({
             target: row.target, owner_identity: row.owner_identity, other_identity: row.other_identity,
           })) }
@@ -2106,6 +2109,18 @@ function AgentPageContent() {
                             disabled={loading}
                             className="text-xs min-h-16"
                           />
+                          <Textarea
+                            aria-label="Approved browser action pages"
+                            placeholder="Approved browser action page paths, one per line (for example /catalog)"
+                            value={browserActionPathsText}
+                            onChange={(event) => setBrowserActionPathsText(event.target.value)}
+                            disabled={loading}
+                            className="text-xs min-h-16"
+                          />
+                          <p className="text-[11px] text-muted-foreground">
+                            On listed pages, PROWL may click a stock, availability, search, filter, or subscribe control.
+                            Subscribe uses a test address at example.invalid.
+                          </p>
                           <Textarea
                             aria-label="Owner-only resources"
                             placeholder="Owner-only resource: URL | owner identity | other identity"

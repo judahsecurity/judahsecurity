@@ -850,7 +850,7 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             ),
         }
 
-    if state.get("mode") == "agent" and not input_signature and not any(
+    if state.get("mode") == "agent" and not any(
         step.get("tool_name") == "scoped_browser_assessment"
         and isinstance(step.get("tool_args"), dict)
         and step["tool_args"].get("operation") == "inspect_js"

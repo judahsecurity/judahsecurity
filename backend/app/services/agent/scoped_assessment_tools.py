@@ -27,6 +27,7 @@ SCOPED_ASSESSMENT_TOOLS = (
     "scoped_http_compare",
     "scoped_query_probe",
     "scoped_numeric_sqli",
+    "scoped_text_sqli",
     "scoped_body_probe",
     "scoped_owner_only",
     "list_scoped_browser_exchanges",
@@ -69,6 +70,26 @@ class ScopedAssessmentTools:
                        for row in brain.candidates or []
                        if (row.get("status") if isinstance(row, dict) else row.status) == "confirmed"
                        and not (row.get("finding_id") if isinstance(row, dict) else row.finding_id)]
+        candidate_statuses = {status: 0 for status in ("pending", "confirmed", "refuted", "inconclusive")}
+        published = 0
+        for row in brain.candidates or []:
+            value = row if isinstance(row, dict) else row.to_dict()
+            status = value.get("status")
+            if status in candidate_statuses:
+                candidate_statuses[status] += 1
+            published += bool(value.get("finding_id"))
+        cells = brain.coverage_cells or []
+        detection_funnel = {
+            "observed_inputs": sum(1 for row in cells if row.get("source") == "parameter_inventory"),
+            "attempted_inputs": sum(1 for row in cells if row.get("source") == "parameter_inventory"
+                                    and int(row.get("attempts") or 0) > 0),
+            "conclusive_inputs": sum(1 for row in cells if row.get("source") == "parameter_inventory"
+                                     and row.get("status") in {"finding", "tested_clean"}),
+            "inconclusive_inputs": sum(1 for row in cells if row.get("source") == "parameter_inventory"
+                                       and row.get("status") in {"inconclusive", "blocked"}),
+            "candidate_statuses": candidate_statuses,
+            "published_findings": published,
+        }
         complete = bool(brain.threat_model and coverage["denominator"]
                         and coverage["untested_count"] == 0
                         and coverage["open_cell_count"] == 0
@@ -77,16 +98,20 @@ class ScopedAssessmentTools:
         self._engagement_brain = brain.to_dict()
         return json.dumps({"complete": complete, "threat_model_present": bool(brain.threat_model),
                            "coverage": coverage, "pending_candidates": pending,
-                           "unpublished_candidates": unpublished})
+                           "unpublished_candidates": unpublished,
+                           "detection_funnel": detection_funnel})
 
     def set_scoped_assessment_policy(self, policy: dict | None) -> None:
         """Install operator supplied rules for this agent session, never model supplied rules."""
         policy = policy or {}
         paths = policy.get("body_replay_paths") or []
+        action_paths = policy.get("browser_action_paths") or []
         expectations = policy.get("owner_only_resources") or []
-        if not isinstance(paths, list) or len(paths) > 8 or not isinstance(expectations, list) or len(expectations) > 8:
+        if (not isinstance(paths, list) or len(paths) > 8
+                or not isinstance(action_paths, list) or len(action_paths) > 8
+                or not isinstance(expectations, list) or len(expectations) > 8):
             raise ValueError("Invalid bounded assessment policy")
-        for path in paths:
+        for path in [*paths, *action_paths]:
             if (not isinstance(path, str) or not path.startswith("/") or path.startswith("//")
                     or path == "/" or len(path) > 256 or any(char in path for char in "?#\\\r\n\t ")):
                 raise ValueError("Invalid body replay path")
@@ -106,8 +131,9 @@ class ScopedAssessmentTools:
                 raise ValueError("Owner-only resource needs an exact safe path")
             approved[target] = (owner, other)
         self._scoped_body_replay_paths = set(paths)
+        self._scoped_browser_action_paths = set(action_paths)
         self._scoped_owner_expectations = approved
-        if paths or approved:
+        if paths or action_paths or approved:
             self._scoped_assessment_started = True
 
     def _scoped_origin(self, url: str) -> str:
@@ -177,6 +203,8 @@ class ScopedAssessmentTools:
             javascript_sources=sources if operation == "inspect_js" else None,
             traffic_exchanges=exchanges if operation == "inspect_js" else None,
             max_actions=max_actions,
+            approved_action_paths=(getattr(self, "_scoped_browser_action_paths", None) or set())
+            if operation == "inspect_js" else None,
         )
         self._scoped_assessment_started = True
         target = allowed + (urlsplit(url).path or "/")
@@ -325,6 +353,7 @@ class ScopedAssessmentTools:
                 "final_origin": result.get("final_origin"),
                 "request_count": len(result.get("requests") or []),
                 "action_count": len(result.get("actions") or []),
+                "approval_required_actions": (result.get("approval_required_actions") or [])[:8],
                 "technology_detection": result.get("technology_detection"),
                 "recommended_specialists": result.get("recommended_specialists"),
                 "suggested_coverage": (result.get("suggested_coverage") or [])[:10],
@@ -460,6 +489,30 @@ class ScopedAssessmentTools:
         result["finding"] = False  # One actor's proof is a candidate, never publication.
         result["evidence_id"] = evidence_store(self).record(
             "scoped_numeric_sqli", result, target=result["target"], identity=identity,
+            success=result["proof_confirmed"],
+        )
+        return json.dumps(result)
+
+    async def scoped_text_sqli(self, artifact_id: str, parameter: str, identity: str = "anonymous") -> str:
+        """Run a six-request quoted-text Boolean proof on a browser-observed GET."""
+        private = self._scoped_exchange(artifact_id, identity)
+        self._scoped_assessment_started = True
+        allowed = self._scoped_origin(browser.origin(json.loads(private)["url"]))
+        baseline, true_url, false_url, nonce = sqli_boolean.plan_text_boolean(
+            private, parameter=parameter, allowed_origins=[allowed],
+        )
+        self._scoped_claim_gets(6)
+        result = await asyncio.to_thread(
+            sqli_boolean.probe_text_boolean,
+            baseline, true_url, false_url, nonce,
+            parameter=parameter, allowed_origins=[allowed],
+            storage_state=self._scoped_state(identity, baseline),
+            before_request=lambda: None,
+        )
+        result["source_artifact_id"] = artifact_id
+        result["finding"] = False
+        result["evidence_id"] = evidence_store(self).record(
+            "scoped_text_sqli", result, target=result["target"], identity=identity,
             success=result["proof_confirmed"],
         )
         return json.dumps(result)

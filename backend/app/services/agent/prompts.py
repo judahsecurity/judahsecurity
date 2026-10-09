@@ -876,6 +876,7 @@ TOOL_PHASE_MAP = {
     "get_finding_candidate": ["informational", "exploitation", "post_exploitation"],
     "scoped_query_probe": ["exploitation", "post_exploitation"],
     "scoped_numeric_sqli": ["exploitation", "post_exploitation"],
+    "scoped_text_sqli": ["exploitation", "post_exploitation"],
     "scoped_body_probe": ["exploitation", "post_exploitation"],
     "scoped_owner_only": ["exploitation", "post_exploitation"],
     # Tester-process control plane
@@ -916,10 +917,18 @@ For a first-party web assessment, use scoped_browser_assessment(operation="map"|
 The inspect_js result has action-linked traffic artifact IDs and a redacted
 surface_inventory. Use list_scoped_browser_exchanges to locate an observed
 XHR/fetch sample. scoped_http_get and scoped_http_compare return bounded
-response metadata. scoped_query_probe is exploratory; changed responses are
+response metadata. inspect_js records approval_required_actions for eligible
+controls on pages outside the operator's browser_action_paths policy; these
+remain unattempted. An approved page permits bounded stock, search,
+filter, or subscribe action with a canary email when applicable. Use the
+captured exchange ID for follow-up probes.
+scoped_query_probe is exploratory; changed responses are
 leads only. scoped_numeric_sqli runs six bounded requests on one observed
 positive numeric GET field. Its proof_confirmed flag is one actor's evidence;
-submit a candidate and require a fresh independent verifier proof before
+scoped_text_sqli applies the same six-request proof to one captured string GET
+field using paired quoted conditions. Stable true/baseline and repeatable false
+responses are required; a changed response alone is inconclusive.
+Submit a candidate and require a fresh independent verifier proof before
 create_finding. Never treat prior memory or JavaScript-only leads as proof.
 scoped_body_probe requires an operator-approved POST path in the assessment
 request. scoped_owner_only requires an operator-declared exact owner-only GET
@@ -927,7 +936,7 @@ resource and two registered test identities. Neither may invent its own policy.
 For a scoped proof candidate, include the hunter tool evidence_id in
 submit_finding_candidate. A verifier must repeat the same operation with fresh
 browser capture when required, then call record_verify_verdict with both
-execution IDs: proof={"kind":"numeric_boolean_sqli"|"owner_only"|
+execution IDs: proof={"kind":"numeric_boolean_sqli"|"text_boolean_sqli"|"owner_only"|
 "public_directory_index"|"scoped_browser_xss",
 "hunter_artifact_id":"...","artifact_id":"<fresh verifier evidence>"}.
 The proof gate checks both records, same target, and operation-specific evidence.
