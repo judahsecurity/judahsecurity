@@ -10,6 +10,11 @@ from app.services.agent.session_ops import (
     price_limit_usd,
     should_auto_compact,
 )
+from app.services.agent.tester_loop import (
+    _dispatched_input_signature,
+    _full_fireteam_completed,
+    normalized_tools_run,
+)
 
 
 def test_compact_keeps_recent_and_summarizes_older():
@@ -35,6 +40,62 @@ def test_auto_compact_threshold():
     assert should_auto_compact([{"a": 1}] * 24, threshold=24)
     assert not should_auto_compact([{"a": 1}] * 10, threshold=24)
     assert not should_auto_compact([], threshold=0)
+
+
+def test_compaction_keeps_control_progress_and_exact_evidence_handles():
+    artifact = "a" * 32
+    trace = [
+        {"tool_name": "assessment_kickoff", "success": True,
+         "tool_args": {"root_status": 200}},
+        {"tool_name": "execute_deep_crawl", "success": True,
+         "artifact_id": artifact},
+        {"tool_name": "scoped_browser_assessment", "success": True,
+         "tool_args": {"operation": "inspect_js"}},
+        {"tool_name": "spawn_recon_workers", "success": True,
+         "tool_args": {"pack": "enrich"}},
+        {"tool_name": "wait_recon_workers", "success": True},
+        {"tool_name": "wait_recon_workers", "success": True},
+        {"tool_name": "fingerprint_api", "success": True},
+        {"tool_name": "fetch_lazy_chunks", "success": True},
+        {"tool_name": "extract_js_endpoints", "success": True},
+        {"tool_name": "sync_engagement_brain", "success": True},
+        {"tool_name": "fireteam_dispatch", "success": True,
+         "tool_args": {"mode": "observed_inputs", "surface_signature": "sig-1",
+                       "pending_input_count": 5}},
+        {"tool_name": "fireteam_dispatch", "success": True,
+         "tool_args": {"specialists": "auto"}},
+        *({"tool_name": "other", "success": True} for _ in range(12)),
+    ]
+    compacted, brief = compact_execution_trace(trace)
+    assert "artifact_id=" + artifact in brief
+    assert compacted[0]["evidence_cards"][0]["artifact_id"] == artifact
+    assert "execute_deep_crawl" in normalized_tools_run(compacted)
+    assert "scoped_browser_crawl" in normalized_tools_run(compacted)
+    assert _dispatched_input_signature(compacted, "sig-1")
+    assert _full_fireteam_completed(compacted)
+    assert sum(s.get("tool_name") == "wait_recon_workers" for s in compacted) == 2
+    assert not should_auto_compact(compacted, threshold=24)
+
+    twice, second_brief = compact_execution_trace([
+        *compacted, *({"tool_name": "other", "success": True} for _ in range(15))
+    ])
+    assert "execute_deep_crawl" in normalized_tools_run(twice)
+    assert _dispatched_input_signature(twice, "sig-1")
+    assert "artifact_id=" + artifact in second_brief
+
+
+def test_subtask_boundary_compacts_only_when_there_is_context_to_save():
+    trace = [{"tool_name": "other", "tool_output": "x" * 1600}
+             for _ in range(13)]
+    trace[-1] = {"tool_name": "fireteam_dispatch", "success": True}
+    assert should_auto_compact(trace)
+    assert not should_auto_compact(trace, threshold=24)
+    trace[0]["tool_output"] = "x"
+    trace[1]["tool_output"] = "x"
+    trace[2]["tool_output"] = "x"
+    trace[3]["tool_output"] = "x"
+    trace[4]["tool_output"] = "x"
+    assert not should_auto_compact(trace)
 
 
 def test_spend_cap():

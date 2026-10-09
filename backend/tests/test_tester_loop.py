@@ -175,6 +175,7 @@ def test_forced_pipeline_crawl_then_enrich_then_fireteam():
 
 def test_confirmed_candidate_is_published_with_exact_verified_claim_once():
     from app.services.agent.independent_verify import verify_receipt_key
+    from app.services.agent.session_ops import compact_execution_trace
 
     target = "https://app.example.com/catalog?category=1"
     candidate = {
@@ -216,6 +217,16 @@ def test_confirmed_candidate_is_published_with_exact_verified_claim_once():
     assert forced_next_step(state) is None
 
     state["execution_trace"] = [{"tool_name": "create_finding", "tool_args": step["tool_args"]}]
+    assert forced_next_step(state) is None
+    state["execution_trace"] = compact_execution_trace([
+        *state["execution_trace"],
+        *({"tool_name": "other", "success": True} for _ in range(20)),
+    ])[0]
+    assert forced_next_step(state) is None
+    state["execution_trace"] = compact_execution_trace([
+        *state["execution_trace"],
+        *({"tool_name": "other", "success": True} for _ in range(20)),
+    ])[0]
     assert forced_next_step(state) is None
     state["execution_trace"] = []
     candidate["finding_id"] = "123"

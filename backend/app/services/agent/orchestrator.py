@@ -1958,6 +1958,11 @@ class AgentOrchestrator:
         # operator hands the agent (or inline login secrets) never leak into the
         # UI, execution trace, or cross-session learning store.
         safe_args = redact_tool_args(tool_args)
+        if tool_name == "create_finding":
+            from app.services.agent.session_ops import finding_attempt_key
+
+            step_data["claim_key"] = finding_attempt_key(tool_args, exact=False)
+            step_data["submission_key"] = finding_attempt_key(tool_args, exact=True)
 
         if tool_name == "execute_browser":
             from app.services.agent.session_ops import prior_identical_browser_action
@@ -2383,6 +2388,8 @@ class AgentOrchestrator:
                 step_data["tool_output"] = str(raw_output)
         step_data["success"] = result.get("success", False)
         step_data["error_message"] = result.get("error")
+        if isinstance(result.get("artifact_id"), str):
+            step_data["artifact_id"] = result["artifact_id"]
         # WPScan exit 5 / findings-in-stdout must never land as a failed step.
         if tool_name == "execute_wpscan":
             from app.services.mcp.cli_results import (
@@ -2508,9 +2515,14 @@ class AgentOrchestrator:
         if not tool_output:
             tool_output = step_data.get("error_message") or "No output"
         
-        # Truncate for LLM
+        # Keep a bounded observation in context and a stored evidence handle.
+        from app.services.agent.observation_pack import project_observation
+
         max_chars = settings.AGENT_TOOL_OUTPUT_MAX_CHARS
-        truncated_output = tool_output[:max_chars] if len(tool_output) > max_chars else tool_output
+        truncated_output = project_observation(
+            tool_output, artifact_id=str(step_data.get("artifact_id") or ""),
+            max_chars=max_chars,
+        )
         
         # Build analysis prompt
         analysis_prompt = OUTPUT_ANALYSIS_PROMPT.format(

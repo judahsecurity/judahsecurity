@@ -334,6 +334,7 @@ def _confirmed_candidate_publication_step(
 ) -> Optional[Dict[str, Any]]:
     """File a verified claim with its exact fields before more hunt work."""
     from app.services.agent.independent_verify import verify_receipt_key
+    from app.services.agent.session_ops import finding_attempt_key
 
     brain = state.get("engagement_brain") or {}
     receipts = brain.get("verification_receipts") or {}
@@ -374,21 +375,27 @@ def _confirmed_candidate_publication_step(
             continue
         # A model may have tried to rewrite the claim. Retry once with the
         # exact verified fields, but do not loop on a failed exact submission.
+        claim_key = finding_attempt_key({"title": title, "target": claim_target}, exact=False)
         prior_attempts = [
             step for step in trace
             if step.get("tool_name") == "create_finding"
-            and (step.get("tool_args") or {}).get("title") == title
-            and (step.get("tool_args") or {}).get("target") == claim_target
+            and (step.get("claim_key") == claim_key or (
+                (step.get("tool_args") or {}).get("title") == title
+                and (step.get("tool_args") or {}).get("target") == claim_target
+            ))
         ]
         if len(prior_attempts) >= 2:
             continue
-        if any(
-            all((step.get("tool_args") or {}).get(key) == value for key, value in (
+        exact_key = finding_attempt_key({
+            "title": title, "target": claim_target,
+            "description": description, "severity": severity,
+        }, exact=True)
+        if any(step.get("submission_key") == exact_key or all(
+            (step.get("tool_args") or {}).get(key) == value for key, value in (
                 ("title", title), ("target", claim_target),
                 ("description", description), ("severity", severity),
-            ))
-            for step in prior_attempts
-        ):
+            )
+        ) for step in prior_attempts):
             continue
         evidence = "\n\n".join(filter(None, (
             str(candidate.get("evidence") or ""),

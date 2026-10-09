@@ -65,6 +65,21 @@ interrupted assessment into a false negative. The lab is a controlled regression
 fixture; benchmark results should also be checked against representative
 authorized applications before treating them as production recall.
 
+To assess a harness efficiency change, run the same corpus with the same
+targets, model routes, identities, and budgets on the baseline and candidate
+branches. Compare their two `product_class_benchmark` reports:
+
+```bash
+python -m local_harness.product_class_compare baseline-report.json candidate-report.json
+```
+
+The comparison rejects incomplete cases, changed budgets or model routes,
+missing test attempts, lost evidence, weaker verified recall, new false
+positives, or missing evidenced negative results. It accepts the candidate
+only when every bug class passes its proof gate and measured cost falls by at
+least 1% (configurable with `--min-cost-saving`). This is a paired smoke gate,
+not a substitute for repeated runs on held-out authorized applications.
+
 > **Authorization:** Only scan targets you are explicitly authorized to test.
 
 ---

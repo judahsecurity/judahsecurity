@@ -1035,6 +1035,7 @@ class ToolInvocation:
     summary: str
     error: Optional[str] = None
     evidence_ids: list[str] = field(default_factory=list)
+    artifact_id: str = ""
 
 
 @dataclass
@@ -1428,7 +1429,12 @@ async def _safe_invoke(tools_manager: Any, tool_name: str, args: dict) -> ToolIn
     try:
         result = await tools_manager.execute(tool_name, args or {})
         success = bool(result.get("success"))
-        summary = _stringify_tool_result(result)
+        from app.services.agent.observation_pack import project_observation
+
+        summary = project_observation(
+            _stringify_tool_result(result),
+            artifact_id=str(result.get("artifact_id") or ""), max_chars=5200,
+        )
         if result.get("evidence_ids"):
             summary = json.dumps({"evidence_ids": result["evidence_ids"]}) + "\n" + summary
         import re
@@ -1449,6 +1455,7 @@ async def _safe_invoke(tools_manager: Any, tool_name: str, args: dict) -> ToolIn
             summary=summary,
             error=result.get("error") if not success else None,
             evidence_ids=ids,
+            artifact_id=str(result.get("artifact_id") or ""),
         )
     except Exception as exc:
         return ToolInvocation(
@@ -1683,17 +1690,37 @@ async def run_fireteam(
 
 
 def _merge_reports(mission: str, reports: list[SpecialistReport]) -> str:
+    from app.services.agent.observability import redact_string
+    from app.services.agent.penetration_task_graph import parse_executor_summary
+
     lines: list[str] = [f"# Aegis fireteam debrief (Joshua) — {mission}\n"]
+    lines.append("Tool receipts below identify executed actions. Analyst notes are leads; only independent proof can confirm a finding.\n")
     for r in reports:
+        contracted = parse_executor_summary(r)
         lines.append(f"## {r.specialist} ({r.role})")
         if r.error:
             lines.append(f"- status: **error** -- {r.error}")
         lines.append(f"- tool calls: {len(r.tool_calls)}  duration: {r.duration_seconds:.1f}s")
+        for invocation in r.tool_calls[-16:]:
+            refs = [str(ref) for ref in invocation.evidence_ids[:4]]
+            if invocation.artifact_id:
+                refs.insert(0, invocation.artifact_id)
+            lines.append(
+                f"- receipt: {invocation.tool} "
+                f"{'completed' if invocation.success else 'failed'}"
+                + (f" | evidence IDs: {', '.join(refs)}" if refs else " | no saved evidence ID")
+            )
+        for result in contracted.hypothesis_results[:8]:
+            lines.append(
+                f"- grounded hypothesis: {str(result.get('hypothesis_id') or '')[:80]} "
+                f"{str(result.get('verdict') or '')[:24]} | evidence IDs: "
+                + ", ".join(str(item) for item in result.get("evidence_ids", [])[:4])
+            )
         if r.key_findings:
-            lines.append("- key findings:")
-            for kf in r.key_findings:
-                lines.append(f"  * {kf}")
+            lines.append("- analyst leads (unverified): " + "; ".join(
+                redact_string(str(kf))[:160] for kf in r.key_findings[:3]
+            ))
         if r.summary:
-            lines.append(r.summary.strip())
+            lines.append("- analyst note (unverified): " + redact_string(r.summary.strip())[:700])
         lines.append("")
     return "\n".join(lines)
