@@ -352,6 +352,23 @@ def test_pending_candidate_blocks_complete_even_if_coverage_done():
     assert progress["ready_to_complete"] is False
 
 
+def test_confirmed_candidate_blocks_complete_until_published():
+    brain = EngagementBrain(target="https://app.example.com")
+    brain.hypotheses = [_killed_card()]
+    candidate = _confirmed_candidate().to_dict()
+    brain.candidates = [candidate]
+
+    progress = methodology_progress(brain)
+    assert progress["unpublished_candidates"] == 1
+    assert progress["ready_to_complete"] is False
+    assert any(row["methodology_id"] == "publish" for row in progress["blockers"])
+
+    candidate["finding_id"] = "finding-7"
+    progress = methodology_progress(brain)
+    assert progress["unpublished_candidates"] == 0
+    assert progress["ready_to_complete"] is True
+
+
 def test_verifier_mission_includes_nonce_and_adversarial_framing():
     from app.services.agent.independent_verify import verifier_mission
 

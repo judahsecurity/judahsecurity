@@ -325,6 +325,88 @@ def _cms_followup_wave(target: str, product: str) -> Dict[str, Any]:
     }
 
 
+def _confirmed_candidate_publication_step(
+    state: Dict[str, Any], trace: List[Dict[str, Any]], target: str,
+) -> Optional[Dict[str, Any]]:
+    """File a verified claim with its exact fields before more hunt work."""
+    from app.services.agent.independent_verify import verify_receipt_key
+
+    brain = state.get("engagement_brain") or {}
+    receipts = brain.get("verification_receipts") or {}
+    scope_host = urlparse(target).hostname
+    if not scope_host:
+        return None
+    for candidate in brain.get("candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("status") != "confirmed" or candidate.get("finding_id"):
+            continue
+        title = str(candidate.get("title") or "")
+        claim_target = str(candidate.get("target") or "")
+        parsed_claim = urlparse(claim_target)
+        if (
+            not title or parsed_claim.scheme not in {"http", "https"}
+            or parsed_claim.hostname != scope_host
+        ):
+            continue
+        receipt = receipts.get(verify_receipt_key(title, claim_target)) or {}
+        if (
+            receipt.get("verdict") != "confirmed"
+            or receipt.get("candidate_id") != candidate.get("id")
+            or receipt.get("title") != title
+            or receipt.get("target") != claim_target
+            or receipt.get("revision") != candidate.get("revision")
+            or receipt.get("run_id") != candidate.get("verifier_run_id")
+            or not receipt.get("nonce_observed")
+            or receipt.get("nonce") != candidate.get("nonce")
+            or not receipt.get("evidence_ids")
+            or not set(receipt["evidence_ids"]).issubset(set(candidate.get("evidence_ids") or []))
+            or not candidate.get("verified_at")
+        ):
+            continue
+        description = str(candidate.get("description") or "")
+        severity = str(candidate.get("severity") or "medium")
+        if severity.strip().lower() not in {"medium", "high", "critical"}:
+            continue
+        # A model may have tried to rewrite the claim. Retry once with the
+        # exact verified fields, but do not loop on a failed exact submission.
+        prior_attempts = [
+            step for step in trace
+            if step.get("tool_name") == "create_finding"
+            and (step.get("tool_args") or {}).get("title") == title
+            and (step.get("tool_args") or {}).get("target") == claim_target
+        ]
+        if len(prior_attempts) >= 2:
+            continue
+        if any(
+            all((step.get("tool_args") or {}).get(key) == value for key, value in (
+                ("title", title), ("target", claim_target),
+                ("description", description), ("severity", severity),
+            ))
+            for step in prior_attempts
+        ):
+            continue
+        evidence = "\n\n".join(filter(None, (
+            str(candidate.get("evidence") or ""),
+            str(candidate.get("verifier_evidence") or ""),
+        )))[:5000]
+        args = {
+            "title": title,
+            "description": description,
+            "severity": severity,
+            "target": claim_target,
+            "evidence": evidence,
+        }
+        if candidate.get("claimed_request"):
+            args["steps_to_reproduce"] = str(candidate["claimed_request"])[:10000]
+        return {
+            "tool_name": "create_finding",
+            "tool_args": args,
+            "thought": "Publish the independently confirmed candidate with its verified claim fields.",
+        }
+    return None
+
+
 def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Checklist a curious tester must finish before calling the host clean.
@@ -698,12 +780,15 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             return None
     except Exception:
         pass
-    if state.get("assessment_resume"):
-        return None
     target = primary_web_target(state)
     if not target:
         return None
     trace = _steps(state.get("execution_trace"))
+    publication = _confirmed_candidate_publication_step(state, trace, target)
+    if publication:
+        return publication
+    if state.get("assessment_resume"):
+        return None
     ran = normalized_tools_run(trace)
     crawled = bool(ran & _CRAWL_TOOLS)
     dir_done = bool(ran & _DIR_BRUTE_TOOLS)

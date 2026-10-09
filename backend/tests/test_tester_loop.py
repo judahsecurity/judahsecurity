@@ -146,6 +146,85 @@ def test_forced_pipeline_crawl_then_enrich_then_fireteam():
     assert complete_blocked_reason(after_hunt) is None
 
 
+def test_confirmed_candidate_is_published_with_exact_verified_claim_once():
+    from app.services.agent.independent_verify import verify_receipt_key
+
+    target = "https://app.example.com/catalog?category=1"
+    candidate = {
+        "id": "candidate-1", "title": "Confirmed catalog SQL injection",
+        "description": "A controlled Boolean differential changed catalog results.",
+        "severity": "medium", "target": target, "status": "confirmed",
+        "revision": 2, "nonce": "verify-nonce", "verified_at": "2026-10-09T00:00:00Z",
+        "verifier_run_id": "run-1", "evidence_ids": ["hunter-1", "verifier-1"],
+        "evidence": "Finder observed a differential.",
+        "verifier_evidence": "Verifier reproduced it independently.",
+    }
+    receipt = {
+        "title": candidate["title"], "target": target, "verdict": "confirmed",
+        "candidate_id": candidate["id"], "revision": 2, "run_id": "run-1",
+        "nonce": "verify-nonce", "nonce_observed": True,
+        "evidence_ids": ["verifier-1"],
+    }
+    state = {
+        "mode": "agent", "assessment_resume": True,
+        "target_info": {"primary_target": "https://app.example.com"},
+        "execution_trace": [],
+        "engagement_brain": {
+            "candidates": [candidate],
+            "verification_receipts": {verify_receipt_key(candidate["title"], target): receipt},
+        },
+    }
+    step = forced_next_step(state)
+    assert step["tool_name"] == "create_finding"
+    assert step["tool_args"]["description"] == candidate["description"]
+    assert step["tool_args"]["target"] == target
+    assert "Verifier reproduced" in step["tool_args"]["evidence"]
+
+    state["execution_trace"] = [{
+        "tool_name": "create_finding",
+        "tool_args": {**step["tool_args"], "description": "Rewritten claim"},
+    }]
+    assert forced_next_step(state)["tool_args"]["description"] == candidate["description"]
+    state["execution_trace"].append({"tool_name": "create_finding", "tool_args": step["tool_args"]})
+    assert forced_next_step(state) is None
+
+    state["execution_trace"] = [{"tool_name": "create_finding", "tool_args": step["tool_args"]}]
+    assert forced_next_step(state) is None
+    state["execution_trace"] = []
+    candidate["finding_id"] = "123"
+    assert forced_next_step(state) is None
+
+
+def test_confirmed_candidate_handoff_requires_matching_receipt_and_scope():
+    from app.services.agent.independent_verify import verify_receipt_key
+
+    target = "https://other.example.com/catalog"
+    candidate = {
+        "id": "candidate-1", "title": "Claim", "description": "Proof",
+        "severity": "medium", "target": target, "status": "confirmed",
+        "revision": 1, "nonce": "nonce", "verified_at": "now",
+        "verifier_run_id": "run-1", "evidence_ids": ["verifier-1"],
+    }
+    receipt = {
+        "title": "Claim", "target": target, "verdict": "confirmed",
+        "candidate_id": "candidate-1", "revision": 1, "run_id": "run-1",
+        "nonce": "nonce", "nonce_observed": True,
+        "evidence_ids": ["verifier-1"],
+    }
+    state = {
+        "mode": "agent", "assessment_resume": True,
+        "target_info": {"primary_target": "https://app.example.com"},
+        "execution_trace": [],
+        "engagement_brain": {
+            "candidates": [candidate],
+            "verification_receipts": {verify_receipt_key("Claim", target): receipt},
+        },
+    }
+    assert forced_next_step(state) is None
+    candidate["target"] = "https://app.example.com/catalog"
+    assert forced_next_step(state) is None  # stale receipt cannot unlock another target
+
+
 def test_observed_input_hunt_starts_before_enrichment_join_and_js_pipeline():
     target = "https://app.example.com"
     cmap = {

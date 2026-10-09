@@ -2141,6 +2141,7 @@ class AgentOrchestrator:
             "submit_finding_candidate",
             "independent_verify",
             "record_verify_verdict",
+            "create_finding",
             "record_surface_coverage",
             "get_coverage",
             "ingest_urls_into_map",

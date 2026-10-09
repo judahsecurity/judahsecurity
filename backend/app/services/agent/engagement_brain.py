@@ -3526,6 +3526,11 @@ def methodology_progress(
         c for c in (brain.candidates or [])
         if (c.get("status") if isinstance(c, dict) else getattr(c, "status", "")) == "pending"
     ]
+    unpublished_candidates = [
+        c for c in (brain.candidates or [])
+        if (c.get("status") if isinstance(c, dict) else getattr(c, "status", "")) == "confirmed"
+        and not (c.get("finding_id") if isinstance(c, dict) else getattr(c, "finding_id", ""))
+    ]
     pending_ras = [
         r for r in (brain.pending_risk_assessments or [])
         if isinstance(r, dict) and r.get("status") != "complete"
@@ -3534,6 +3539,7 @@ def methodology_progress(
         ready_to_complete_methods
         and cov.get("ready_to_complete_coverage", True)
         and not pending_candidates
+        and not unpublished_candidates
         and not pending_ras
     )
     blockers = [
@@ -3567,6 +3573,17 @@ def methodology_progress(
                 "status": "pending",
             })
 
+    for c in unpublished_candidates[:6]:
+        if isinstance(c, dict):
+            blockers.append({
+                "id": c.get("id"),
+                "methodology_id": "publish",
+                "title": f"confirmed but unpublished: {c.get('title')}",
+                "specialist": "orchestrator",
+                "priority": "high",
+                "status": "confirmed",
+            })
+
     for r in pending_ras[:6]:
         blockers.append({
             "id": r.get("finding_id"),
@@ -3592,6 +3609,7 @@ def methodology_progress(
         "ready_to_complete_methods": ready_to_complete_methods,
         "coverage": cov,
         "pending_candidates": len(pending_candidates),
+        "unpublished_candidates": len(unpublished_candidates),
         "pending_risk_assessments": len(pending_ras),
         "blockers": blockers,
         "checklist": checklist,
@@ -3600,6 +3618,7 @@ def methodology_progress(
             f"{len(open_cards)} open ({len(blocking)} high-priority blocking complete). "
             f"Coverage: {cov.get('summary', '')}. "
             f"Candidates pending verify: {len(pending_candidates)}. "
+            f"Confirmed candidates awaiting finding: {len(unpublished_candidates)}. "
             f"Findings pending Leo RA: {len(pending_ras)}."
         ),
     }
@@ -3625,6 +3644,11 @@ def format_methodology_progress_for_prompt(progress: Dict[str, Any]) -> str:
         lines.append(
             f"Pending independent_verify: {progress.get('pending_candidates')} candidate(s). "
             "Do not create_finding until confirmed."
+        )
+    if progress.get("unpublished_candidates"):
+        lines.append(
+            f"Confirmed but unpublished: {progress.get('unpublished_candidates')} candidate(s). "
+            "Call create_finding with each candidate's exact verified title, target, description, and severity."
         )
     if progress.get("pending_risk_assessments"):
         lines.append(
@@ -4097,6 +4121,8 @@ def _derive_next_steps(brain: EngagementBrain) -> List[str]:
             0,
             f"independent_verify pending candidates ({len(pending)}) — fresh agent, then create_finding",
         )
+    if progress.get("unpublished_candidates"):
+        steps.insert(0, "create_finding for independently confirmed candidates using exact verified claim fields")
     cov = progress.get("coverage") or {}
     if cov.get("untested"):
         steps.append(

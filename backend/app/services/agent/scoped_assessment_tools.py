@@ -65,14 +65,19 @@ class ScopedAssessmentTools:
         pending = [row.get("id") if isinstance(row, dict) else row.id
                    for row in brain.candidates or []
                    if (row.get("status") if isinstance(row, dict) else row.status) == "pending"]
+        unpublished = [row.get("id") if isinstance(row, dict) else row.id
+                       for row in brain.candidates or []
+                       if (row.get("status") if isinstance(row, dict) else row.status) == "confirmed"
+                       and not (row.get("finding_id") if isinstance(row, dict) else row.finding_id)]
         complete = bool(brain.threat_model and coverage["denominator"]
                         and coverage["untested_count"] == 0
                         and coverage["open_cell_count"] == 0
                         and coverage["pending_proof_escalation_count"] == 0
-                        and not pending)
+                        and not pending and not unpublished)
         self._engagement_brain = brain.to_dict()
         return json.dumps({"complete": complete, "threat_model_present": bool(brain.threat_model),
-                           "coverage": coverage, "pending_candidates": pending})
+                           "coverage": coverage, "pending_candidates": pending,
+                           "unpublished_candidates": unpublished})
 
     def set_scoped_assessment_policy(self, policy: dict | None) -> None:
         """Install operator supplied rules for this agent session, never model supplied rules."""

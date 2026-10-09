@@ -55,6 +55,35 @@ async def test_agent_browser_inventory_keeps_private_exchange_values_out_of_tool
 
 
 @pytest.mark.asyncio
+async def test_scoped_assessment_cannot_complete_with_confirmed_unpublished_candidate():
+    from app.services.agent.engagement_brain import (
+        EngagementBrain, record_surface_coverage, seed_coverage_from_surfaces,
+    )
+
+    manager = ASMToolsManager()
+    brain = EngagementBrain(target="https://app.example.test")
+    brain.threat_model = {"actors": ["anonymous"]}
+    brain.surfaces = [{"method": "GET", "path": "/search",
+                       "host": "app.example.test", "takes_input": True}]
+    seed_coverage_from_surfaces(brain)
+    record_surface_coverage(
+        brain, method="GET", path="/search", host="app.example.test",
+        status="tested_clean", reason="Negative control",
+    )
+    brain.candidates = [{"id": "candidate-1", "status": "confirmed", "finding_id": ""}]
+    manager._engagement_brain = brain.to_dict()
+
+    blocked = json.loads(await manager.scoped_assessment_summary())
+    assert blocked["complete"] is False
+    assert blocked["unpublished_candidates"] == ["candidate-1"]
+
+    brain.candidates[0]["finding_id"] = "finding-1"
+    manager._engagement_brain = brain.to_dict()
+    complete = json.loads(await manager.scoped_assessment_summary())
+    assert complete["complete"] is True
+
+
+@pytest.mark.asyncio
 async def test_numeric_probe_needs_observed_exchange_and_exact_origin(monkeypatch):
     manager = ASMToolsManager()
     manager._fallback_target = "https://app.example.test"
