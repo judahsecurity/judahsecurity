@@ -670,7 +670,7 @@ function AgentPageContent() {
   const handleTabChange = (value: string) => {
     const tab = value as 'chat' | 'cve' | 'findings';
     setActiveTab(tab);
-    router.push(`/prowl?tab=${tab}`, { scroll: false } as Parameters<typeof router.push>[1]);
+    router.push(`/agent?tab=${tab}`, { scroll: false } as Parameters<typeof router.push>[1]);
   };
 
   // ── Agent state ─────────────────────────────────────────────────
@@ -1734,7 +1734,7 @@ function AgentPageContent() {
     <MainLayout>
       <div className="flex flex-col h-full">
         <Header
-          title="Prowl"
+          title="Prowl Agent"
           subtitle="Autonomous security assessments, asset analysis, and vulnerability testing"
         />
 
@@ -1835,7 +1835,7 @@ function AgentPageContent() {
                     <div className="flex items-center justify-between">
                       <CardTitle className="flex items-center gap-2 text-sm font-semibold text-foreground/80">
                         <MessageSquare className="h-4 w-4 text-primary" />
-                        Prowl
+                        Prowl Agent
                       </CardTitle>
                       <div className="flex items-center gap-1">
                         <Button variant="ghost" size="icon" onClick={() => setShowScenario(!showScenario)}

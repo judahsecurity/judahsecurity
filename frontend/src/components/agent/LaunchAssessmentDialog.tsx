@@ -78,7 +78,7 @@ export function LaunchAssessmentDialog({
     params.set('mode', mode);
     params.set('autostart', '1');
     setOpen(false);
-    router.push(`/prowl?${params.toString()}`);
+    router.push(`/agent?${params.toString()}`);
   };
 
   return (

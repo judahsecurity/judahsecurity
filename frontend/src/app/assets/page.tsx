@@ -1451,7 +1451,7 @@ export default function AssetsPage() {
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   const targetEnc = encodeURIComponent(asset.value);
-                                  router.push(`/prowl?target=${targetEnc}&playbook=vuln_scan&mode=agent&autostart=1`);
+                                  router.push(`/agent?target=${targetEnc}&playbook=vuln_scan&mode=agent&autostart=1`);
                                 }}
                               >
                                 <Shield className="h-4 w-4 mr-2" />

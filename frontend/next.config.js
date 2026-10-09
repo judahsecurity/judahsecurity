@@ -22,6 +22,11 @@ const nextConfig = {
   async redirects() {
     return [
       {
+        source: '/prowl',
+        destination: '/agent',
+        permanent: false,
+      },
+      {
         source: '/threat-intel',
         destination: '/vulnerability-intel',
         permanent: true,

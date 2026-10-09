@@ -67,7 +67,7 @@ const navigationGroups = [
       { name: 'Schedules', href: '/schedules', icon: CalendarClock },
       { name: 'Ports', href: '/ports', icon: Network },
       { name: 'Discovery', href: '/discovery', icon: Search },
-      { name: 'Prowl', href: '/prowl', icon: MessageSquare },
+      { name: 'Prowl Agent', href: '/agent', icon: MessageSquare },
       { name: 'Pentest', href: '/pentest', icon: Crosshair },
       { name: 'Integrations', href: '/integrations', icon: Plug },
     ],
@@ -147,7 +147,7 @@ export function Sidebar() {
             <div className="space-y-1">
               {group.items.map((item) => {
                 const isActive = pathname === item.href || pathname.startsWith(`${item.href}/`)
-                  || (item.href === '/prowl' && (pathname === '/agent' || pathname === '/oracle'));
+                  || (item.href === '/agent' && (pathname === '/prowl' || pathname === '/oracle'));
                 return (
                   <Link
                     key={item.name}
