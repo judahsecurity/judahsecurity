@@ -681,6 +681,9 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
         budget_sec = CRAWL_BUDGET_SEC
     budget_sec = max(60, min(budget_sec, 1800))  # 1–30 minutes
     crawl_deadline = time.monotonic() + budget_sec
+    # Keep a small tail for observed-input canaries. Otherwise a busy browser
+    # crawl or JS mining can consume the entire budget before they run.
+    navigation_deadline = crawl_deadline - min(20, max(8, budget_sec // 20))
 
     seed_host = urlparse(seed).netloc
     scope_apex = str(opts.get("scope") or "").strip().lower() or _apex(seed_host)
@@ -861,11 +864,28 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                 from app.services.crawl_priority import next_crawl_index, route_family
                 visited_families: Dict[tuple[str, tuple[str, ...]], int] = {}
 
+                async def record_surface(child_depth: int) -> None:
+                    """Keep forms on the original page even when safe clicks navigate."""
+                    links, forms = await _harvest(page)
+                    page_url = page.url
+                    for form in forms:
+                        row = dict(form)
+                        row.setdefault("page", page_url)
+                        if len(result.forms) < 60 and row not in result.forms:
+                            result.forms.append(row)
+                    for link in links:
+                        absu = urljoin(page_url, link).split("#")[0]
+                        host = urlparse(absu).netloc
+                        if absu.startswith("http") and _in_scope(host, scope_apex):
+                            _enqueue_func(
+                                queue, seen, absu, child_depth, max_depth, HARD_MAX_PAGES * 4
+                            )
+
                 while queue and len(result.pages_visited) < max_pages:
-                    if time.monotonic() >= crawl_deadline:
+                    if time.monotonic() >= navigation_deadline:
                         result.errors.append(
-                            f"crawl_budget_exhausted after {budget_sec}s "
-                            f"({len(result.pages_visited)}/{max_pages} pages) — returning partial map"
+                            f"navigation_budget_exhausted after {budget_sec}s "
+                            f"({len(result.pages_visited)}/{max_pages} pages) — finishing input checks"
                         )
                         await _emit_crawl_progress(
                             f"deep_crawl: budget exhausted at {len(result.pages_visited)} pages — finishing"
@@ -884,7 +904,7 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                     before_path = urlparse(page.url).path or "/"
                     try:
                         # Cap per-page nav by remaining budget
-                        remaining_ms = int(max(3000, (crawl_deadline - time.monotonic()) * 1000))
+                        remaining_ms = int(max(1000, (navigation_deadline - time.monotonic()) * 1000))
                         nav_timeout = min(timeout_ms, remaining_ms)
                         await page.goto(url, wait_until="domcontentloaded", timeout=nav_timeout)
                     except Exception as e:
@@ -909,6 +929,13 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                     except Exception:
                         pass
 
+                    # Capture the page as loaded. Interactions can move away from
+                    # a search form before the later settled-DOM harvest runs.
+                    try:
+                        await record_surface(depth + 1)
+                    except Exception as e:
+                        result.errors.append(f"harvest initial {url[:80]}: {str(e)[:120]}")
+
                     # High-value pages get more safe clicks (understand functionality).
                     click_budget = DEFAULT_MAX_CLICKS + (8 if page_score >= 40 else 0)
                     try:
@@ -926,28 +953,9 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
 
                     # Harvest links + forms from the settled DOM.
                     try:
-                        links, forms = await _harvest(page)
-                        for f in forms:
-                            if len(result.forms) < 60:
-                                f = dict(f)
-                                f.setdefault("page", page.url)
-                                result.forms.append(f)
-                        child_depth = depth + 1
-                        for link in links:
-                            absu = urljoin(page.url, link).split("#")[0]
-                            h = urlparse(absu).netloc
-                            if absu.startswith("http") and _in_scope(h, scope_apex):
-                                _enqueue_func(
-                                    queue, seen, absu, child_depth, max_depth, HARD_MAX_PAGES * 4
-                                )
+                        await record_surface(depth + 1)
                     except Exception as e:
                         result.errors.append(f"harvest {url[:80]}: {str(e)[:120]}")
-
-                # Mine collected JS bundles for endpoints/source maps.
-                if capture_js and result.js_files and time.monotonic() < crawl_deadline:
-                    await _mine_js(context, result, deadline=crawl_deadline, allowed_origin=opts.get("allowed_origin"))
-                elif capture_js and result.js_files:
-                    result.errors.append("skipped JS mining — crawl budget exhausted")
 
                 # A small follow-up to the observed GET surface. These alphanumeric
                 # canaries only establish reflection, never XSS or script execution.
@@ -959,6 +967,13 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                     result.reflection_observations = await probe_reflections(
                         context, seed, inventory, deadline=crawl_deadline,
                     )
+
+                # Mine collected JS bundles after the input checks so a large
+                # bundle does not starve the reflection evidence handoff.
+                if capture_js and result.js_files and time.monotonic() < crawl_deadline:
+                    await _mine_js(context, result, deadline=crawl_deadline, allowed_origin=opts.get("allowed_origin"))
+                elif capture_js and result.js_files:
+                    result.errors.append("skipped JS mining — crawl budget exhausted")
 
                 # Export session so the agent can hand off auth to execute_browser /
                 # privileged re-crawls (tester methodology: login once, reuse session).

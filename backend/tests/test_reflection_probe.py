@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 from app.services.agent.capability_map import build_capability_map_from_crawl, merge_capability_maps
+from app.services.agent.parameter_inventory import collect_parameter_inventory
 from app.services.agent.reflection_probe import probe_reflections, reflection_candidates
 from app.services.deep_crawl_service import CrawlResult
 
@@ -25,6 +26,23 @@ def test_reflection_candidates_restrict_to_observed_safe_same_origin_get():
     ]
     assert [(row["path"], row["parameter"]) for row in
             reflection_candidates("https://example.test", rows)] == [("/catalog", "searchTerm")]
+
+
+def test_observed_catalog_search_form_reaches_reflection_queue():
+    cmap = {
+        "target": "https://example.test",
+        "forms": [{
+            "page": "https://example.test/catalog",
+            "action": "/catalog",
+            "method": "GET",
+            "inputs": ["searchTerm"],
+        }],
+    }
+    rows = collect_parameter_inventory(cmap)
+    candidates = reflection_candidates("https://example.test", rows)
+    assert [(row["path"], row["parameter"]) for row in candidates] == [
+        ("/catalog", "searchTerm"),
+    ]
 
 
 def test_probe_records_reflection_without_claiming_execution():

@@ -12,19 +12,9 @@ import re
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-WP_MARKERS = (
-    "wordpress",
-    "wp-content",
-    "wp-json",
-    "wp-admin",
-    "wp-login",
-    "wp-includes",
-    "xmlrpc.php",
-    "generator content=\"wordpress",
-)
-
-_WP_RE = re.compile(
-    r"wordpress|wp-content|wp-json|wp-admin|wp-login|wp-includes|xmlrpc\.php",
+_WP_PATH_RE = re.compile(
+    r"^/(?:wp-content|wp-json|wp-admin|wp-includes)(?:/|$)"
+    r"|^/(?:wp-login\.php|xmlrpc\.php)$",
     re.I,
 )
 
@@ -48,40 +38,28 @@ def _g(cmap: Any, key: str, default: Any = None) -> Any:
     return getattr(cmap, key, default)
 
 
-def _join_cmap_text(cmap: Any) -> str:
-    pages = _g(cmap, "pages_visited") or []
-    apis = _g(cmap, "api_endpoints") or []
-    js_files = _g(cmap, "js_files") or []
-    js_endpoints = _g(cmap, "js_endpoints") or []
-    notes = _g(cmap, "notes") or []
-    caps = _g(cmap, "capabilities") or []
-    api_blob = " ".join(
-        f"{e.get('path', '')} {e.get('host', '')}" if isinstance(e, dict) else str(e)
-        for e in apis
-    )
-    return " ".join(
-        [
-            str(_g(cmap, "target") or ""),
-            " ".join(str(p) for p in pages),
-            api_blob,
-            " ".join(str(j) for j in js_files),
-            " ".join(str(j) for j in js_endpoints),
-            " ".join(str(n) for n in notes),
-            " ".join(str(c) for c in caps),
-        ]
-    )
-
-
 def wordpress_from_map(cmap: Any) -> bool:
-    """True when crawl/map text already shows WordPress."""
-    return bool(_WP_RE.search(_join_cmap_text(cmap)))
+    """Use observed WordPress paths or an explicit fingerprint, not prose."""
+    if "wordpress" in {str(c).lower() for c in (_g(cmap, "capabilities") or [])}:
+        return True
+    if any(re.search(r"\bwordpress fingerprinted\b", str(n), re.I)
+           for n in (_g(cmap, "notes") or [])):
+        return True
+    observed = [*(_g(cmap, "pages_visited") or []), *(_g(cmap, "js_files") or [])]
+    for endpoint in (_g(cmap, "api_endpoints") or []):
+        observed.append(endpoint.get("path", "") if isinstance(endpoint, dict) else endpoint)
+    for raw in observed:
+        path = urlparse(str(raw)).path
+        if _WP_PATH_RE.search(path):
+            return True
+    return False
 
 
 def stamp_stack_on_map(
     cmap: Optional[Dict[str, Any]],
     state: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
-    """If kickoff/tech says WordPress but the map notes do not, stamp and re-finalize.
+    """If observed technology says WordPress, stamp and re-finalize the map.
 
     Thin marketing sites often have `/` as the only page URL; the WP signal
     lives in Wappalyzer, not in the path list. Methodologies still need to seed.
@@ -96,7 +74,7 @@ def stamp_stack_on_map(
     notes = list(cmap.get("notes") or [])
     if not already:
         notes.append(
-            "WordPress fingerprinted (kickoff/tech) — REST user enum and "
+            "WordPress fingerprinted (technology) — REST user enum and "
             "admin-ajax tax_query hunts are in-play even on a thin map."
         )
     patched = dict(cmap)
@@ -111,35 +89,17 @@ def stamp_stack_on_map(
         return patched
 
 
-def _state_blob(state: Optional[Dict[str, Any]]) -> str:
-    state = state or {}
-    tech = " ".join(
-        str(t) for t in ((state.get("target_info") or {}).get("technologies") or [])
-    )
-    parts = [
-        tech,
-        str(state.get("kickoff_brief") or ""),
-        _join_cmap_text(state.get("capability_map")),
-        str((state.get("target_info") or {}).get("primary_target") or ""),
-    ]
-    for brief in state.get("recon_worker_briefs") or []:
-        parts.append(str(brief)[:800])
-    for s in state.get("execution_trace") or []:
-        if not isinstance(s, dict):
-            continue
-        parts.append(str(s.get("tool_output") or "")[:800])
-        parts.append(str(s.get("thought") or "")[:200])
-        args = s.get("tool_args") or {}
-        if isinstance(args, dict):
-            parts.append(json.dumps(args, default=str)[:600])
-        else:
-            parts.append(str(args)[:600])
-    return " ".join(parts).lower()
-
-
 def wordpress_detected(state: Optional[Dict[str, Any]] = None) -> bool:
-    blob = _state_blob(state)
-    return any(m in blob for m in WP_MARKERS)
+    """Only observed technology or mapped paths can trigger WordPress hunts.
+
+    Kickoff prose, objectives, tool arguments, and model thoughts often mention
+    WordPress as a hypothetical test and must not become a fingerprint.
+    """
+    state = state or {}
+    technologies = (state.get("target_info") or {}).get("technologies") or []
+    return any(re.search(r"\bwordpress\b", str(t), re.I) for t in technologies) or wordpress_from_map(
+        state.get("capability_map")
+    )
 
 
 def wordpress_origin(state: Optional[Dict[str, Any]] = None) -> str:

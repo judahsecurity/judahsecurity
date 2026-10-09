@@ -70,6 +70,31 @@ def test_stamp_kickoff_tech_onto_empty_paths():
     assert "wp_rest_user_enum" in ids
 
 
+def test_hypothetical_wordpress_mentions_are_not_a_fingerprint():
+    state = {
+        "original_objective": "Do not chase WordPress on https://ginandjuice.shop",
+        "target_info": {
+            "primary_target": "https://ginandjuice.shop",
+            "technologies": ["React", "AngularJS"],
+        },
+        "kickoff_brief": "A status 200 is not robots/git/WordPress/swagger.",
+        "recon_worker_briefs": ["WordPress is a hypothetical follow-up"],
+        "execution_trace": [{
+            "tool_name": "fireteam_dispatch",
+            "thought": "Do not chase WordPress",
+            "tool_args": {"mission": "Skip WordPress without a fingerprint"},
+        }],
+        "capability_map": {
+            "target": "https://ginandjuice.shop",
+            "pages_visited": ["https://ginandjuice.shop/catalog"],
+            "notes": ["No WordPress signal observed"],
+        },
+    }
+    assert wordpress_detected(state) is False
+    assert wordpress_from_map(state["capability_map"]) is False
+    assert stamp_stack_on_map(state["capability_map"], state) == state["capability_map"]
+
+
 def test_forced_wp_probes_after_crawl():
     url = "https://www.emulate3d.com"
     state = {
