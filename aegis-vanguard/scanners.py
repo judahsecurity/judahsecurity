@@ -174,6 +174,12 @@ _FORM_CONTROL_TYPES = {"hidden", "submit", "button", "reset", "image", "file"}
 _CONTROL_NAME_RE = re.compile(
     r"(?:csrf|xsrf|authenticity|nonce|token|captcha|submit|action)", re.I
 )
+_LINK_PARAMETER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_.\[\]-]{0,79}\Z")
+_LINK_SECRET_NAME_RE = re.compile(
+    r"(?:password|passwd|secret|session|api[_-]?key|access[_-]?key|"
+    r"authorization|authentication|auth[_-]?(?:code|key)|jwt)", re.I
+)
+_LINK_BASELINE_RE = re.compile(r"[A-Za-z0-9 ._-]{1,40}\Z")
 _STATIC_PATH_RE = re.compile(
     r"\.(?:css|js|mjs|map|png|jpe?g|gif|svg|ico|woff2?|ttf|eot|pdf|zip)(?:$|\?)",
     re.I,
@@ -412,6 +418,46 @@ def _form_control_summary(control: dict) -> dict:
     }
 
 
+def _linked_get_template(url: str, source_url: str) -> Optional[dict]:
+    """Represent a linked GET query without exposing token-like link values."""
+    parsed = urlparse(url)
+    try:
+        pairs = parse_qsl(parsed.query, keep_blank_values=True, max_num_fields=40)
+    except ValueError:
+        return None
+    baselines: dict[str, str] = {}
+    for name, value in pairs:
+        if (not _LINK_PARAMETER_RE.fullmatch(name)
+                or _CONTROL_NAME_RE.search(name)
+                or _LINK_SECRET_NAME_RE.search(name)):
+            continue
+        # Keep short public values such as category=Gifts so the baseline is
+        # meaningful. Replace empty, encoded, and opaque values with a canary.
+        safe_value = (
+            value if _LINK_BASELINE_RE.fullmatch(value)
+            and not (len(value) >= 20 and " " not in value)
+            else "aegis"
+        )
+        baselines.setdefault(name, safe_value)
+    if not baselines:
+        return None
+    query_template = urlencode(list(baselines.items()))
+    action_url = parsed._replace(query=query_template, fragment="").geturl()
+    eligible = [f"query:{name}" for name in baselines]
+    return {
+        "source_url": source_url,
+        "source": "html-link",
+        "method": "GET",
+        "action_url": action_url,
+        "content_type": "",
+        "headers_json": "{}",
+        "body_template": "",
+        "query_template": query_template,
+        "eligible_parameters": eligible,
+        "coverage": {name: "pending" for name in eligible},
+    }
+
+
 def run_discover_input_surface(
     target_url: str,
     bridge: ASMBridge,
@@ -420,7 +466,7 @@ def run_discover_input_surface(
     *,
     fetch_html=None,
 ) -> Dict[str, Any]:
-    """Passively inventory HTML forms and their user-controlled parameters.
+    """Passively inventory forms, linked GET inputs, and literal fetch calls.
 
     Only GET requests are sent. Form submissions are represented as canonical,
     sanitized request templates for later guarded probes. Hidden values are
@@ -439,6 +485,7 @@ def run_discover_input_surface(
     visited: set = set()
     seen_forms: set = set()
     seen_requests: set = set()
+    seen_link_queries: set = set()
     forms: List[dict] = []
     request_templates: List[dict] = []
     skipped_cross_origin = 0
@@ -525,6 +572,17 @@ def run_discover_input_surface(
                 continue
             if _STATIC_PATH_RE.search(parsed.path or ""):
                 continue
+            if parsed.query:
+                request = _linked_get_template(candidate, page_url)
+                if request:
+                    key = (
+                        parsed.scheme.lower(), parsed.netloc.lower(), parsed.path or "/",
+                        tuple(sorted(request["eligible_parameters"])),
+                    )
+                    if key not in seen_link_queries:
+                        seen_link_queries.add(key)
+                        request_templates.append(request)
+                        bridge.submit_url(request["action_url"], source="html-link")
             if candidate not in visited and candidate not in queue:
                 queue.append(candidate)
 

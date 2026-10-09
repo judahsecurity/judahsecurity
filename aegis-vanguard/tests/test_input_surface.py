@@ -2,6 +2,7 @@ import json
 from urllib.parse import parse_qsl
 
 import scanners
+from agent.coverage import CoverageLedger
 
 
 class DummyBridge:
@@ -112,3 +113,50 @@ def test_input_surface_extracts_graphql_argument_from_template_literal():
     assert json.loads(request["body_template"]) == {
         "query": 'query { jobs(jobType: "aegis") { id name } }'
     }
+
+
+def test_linked_get_parameters_enter_hunter_coverage_once_per_parameter_set():
+    html = """
+    <a href="/catalog?category=Gifts">Gifts</a>
+    <a href="/catalog?category=Food">Food</a>
+    <a href="/catalog?searchTerm=">Search</a>
+    <a href="/catalog?category=Gifts&amp;searchTerm=">Combined</a>
+    <a href="/catalog?session_token=private-value&amp;category=Gifts">Session link</a>
+    <a href="https://outside.example/catalog?category=Other">Outside</a>
+    """
+    bridge = DummyBridge()
+    result = scanners.run_discover_input_surface(
+        "https://app.example/", bridge, max_pages=1, fetch_html=lambda _url: html
+    )
+
+    assert result["request_templates_discovered"] == 3
+    requests = {
+        frozenset(item["eligible_parameters"]): item
+        for item in result["request_templates"]
+    }
+    category = requests[frozenset({"query:category"})]
+    assert category["action_url"] == "https://app.example/catalog?category=Gifts"
+    assert category["coverage"] == {"query:category": "pending"}
+    assert requests[frozenset({"query:searchTerm"})]["query_template"] == "searchTerm=aegis"
+    assert "private-value" not in str(result)
+    assert all(item["source"] == "html-link" for item in requests.values())
+    assert len(bridge.urls) == 3
+
+    rows = CoverageLedger.from_input_surface(result).snapshot()
+    assert any(row["parameter"] == "query:category"
+               and row["vulnerability_class"] == "sqli"
+               and row["state"] == "pending" for row in rows)
+    assert any(row["parameter"] == "query:searchTerm"
+               and row["vulnerability_class"] == "xss"
+               and row["state"] == "pending" for row in rows)
+
+
+def test_link_query_sanitization_keeps_author_as_a_testable_input():
+    request = scanners._linked_get_template(
+        "https://app.example/blog?author=Alice&authorization=private-value",
+        "https://app.example/blog",
+    )
+
+    assert request["eligible_parameters"] == ["query:author"]
+    assert request["action_url"] == "https://app.example/blog?author=Alice"
+    assert "private-value" not in str(request)

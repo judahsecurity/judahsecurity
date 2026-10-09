@@ -192,7 +192,7 @@ def discover_input_surface(
     timeout: int = 60,
     max_pages: int = 12,
 ) -> str:
-    """Passively inventory forms and user-controlled parameters before testing.
+    """Passively inventory forms, linked GET inputs, and fetch parameters.
 
     Returns sanitized canonical request templates. It does not submit forms or
     expose hidden token values. Use this before parameter fuzzing so POST bodies
