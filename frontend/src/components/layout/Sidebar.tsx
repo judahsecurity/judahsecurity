@@ -67,7 +67,7 @@ const navigationGroups = [
       { name: 'Schedules', href: '/schedules', icon: CalendarClock },
       { name: 'Ports', href: '/ports', icon: Network },
       { name: 'Discovery', href: '/discovery', icon: Search },
-      { name: 'Prowl Agent', href: '/agent', icon: MessageSquare },
+      { name: 'Agents', href: '/agent', icon: MessageSquare },
       { name: 'Pentest', href: '/pentest', icon: Crosshair },
       { name: 'Integrations', href: '/integrations', icon: Plug },
     ],
