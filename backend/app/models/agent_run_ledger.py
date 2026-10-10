@@ -35,6 +35,7 @@ class AgentActionReceipt(Base):
     phase = Column(String(32), nullable=False, default="")
     detail = Column(Text, nullable=False, default="")
     evidence_ids = Column(JSON, nullable=False, default=list)
+    fingerprint = Column(String(64), nullable=True)
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
 
 

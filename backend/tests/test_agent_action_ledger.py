@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -81,6 +82,58 @@ def test_completed_and_skipped_actions_have_distinct_receipts(monkeypatch):
     assert report["coverage"]["actions"] == 2
     assert report["coverage"]["by_status"] == {"completed": 1, "skipped": 1}
     assert report["actions"][1]["detail"] == "capability_map_required"
+
+
+def test_exact_repeat_metric_uses_fingerprint_not_shared_host(monkeypatch):
+    factory = _isolated_ledger(monkeypatch)
+    run_id = action_ledger.start_run(
+        session_id="repeats", organization_id=12, user_id=7,
+        objective="https://demo.example", mode="agent", budget_seconds=60,
+    )
+    for action_id, fingerprint in (("a", "a" * 64), ("b", "b" * 64), ("c", "a" * 64)):
+        action_ledger.append_action(
+            run_id, action_id, "started", "scoped_query_probe",
+            target="https://demo.example/catalog?secret=value", fingerprint=fingerprint,
+        )
+        action_ledger.append_action(
+            run_id, action_id, "completed", "scoped_query_probe",
+            target="https://demo.example/catalog?secret=value", fingerprint=fingerprint,
+        )
+    with factory() as db:
+        report = action_ledger.latest_run(
+            db, session_id="repeats", organization_id=12, user_id=7,
+        )
+    assert report["coverage"]["repeated_tool_target_actions"] == 2
+    assert report["coverage"]["fingerprinted_tool_calls"] == 3
+    assert report["coverage"]["exact_repeated_tool_calls"] == 1
+    assert "secret" not in str(report)
+    assert "a" * 64 not in str(report)
+
+
+def test_tool_execution_writes_exact_repeat_fingerprints(monkeypatch):
+    from app.services.agent.tools import ASMToolsManager
+
+    factory = _isolated_ledger(monkeypatch)
+    run_id = action_ledger.start_run(
+        session_id="live-repeats", organization_id=12, user_id=7,
+        objective="https://demo.example", mode="agent", budget_seconds=60,
+    )
+    manager = ASMToolsManager()
+    manager._execute_impl = AsyncMock(return_value={"success": True, "output": "ok"})
+    monkeypatch.setattr(manager, "record_invocation", lambda *_args: None)
+    token = action_ledger.active_run_id.set(run_id)
+    try:
+        asyncio.run(manager.execute("read_evidence", {"artifact_id": "a"}))
+        asyncio.run(manager.execute("read_evidence", {"artifact_id": "b"}))
+        asyncio.run(manager.execute("read_evidence", {"artifact_id": "a"}))
+    finally:
+        action_ledger.active_run_id.reset(token)
+    with factory() as db:
+        report = action_ledger.latest_run(
+            db, session_id="live-repeats", organization_id=12, user_id=7,
+        )
+    assert report["coverage"]["fingerprinted_tool_calls"] == 3
+    assert report["coverage"]["exact_repeated_tool_calls"] == 1
 
 
 def test_hypothesis_coverage_distinguishes_evidence_and_unattempted(monkeypatch):

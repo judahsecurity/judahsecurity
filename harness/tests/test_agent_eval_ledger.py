@@ -12,6 +12,8 @@ def _assessment(test_actions, *, target="https://lab.example"):
         "ledger_metrics": {
             "receipt_complete": True, "actions": test_actions + 1,
             "test_actions": test_actions, "repeated_tool_target_actions": 0,
+            "fingerprinted_tool_calls": test_actions,
+            "exact_repeated_tool_calls": 0,
             "timeout_runs": 0, "published_findings": 0,
             "duration_seconds": 30,
         },
@@ -23,10 +25,12 @@ def test_ledger_metrics_detect_complete_and_incomplete_runs():
         "run_id": "run-1", "status": "partial",
         "actions": [{"id": "a", "status": "completed"}],
         "coverage": {"actions": 1, "model_calls": 1, "test_actions": 0,
+                     "fingerprinted_tool_calls": 1, "exact_repeated_tool_calls": 0,
                      "duration_seconds": 30},
     }])
     assert complete["receipt_complete"] is True
     assert complete["actions"] == 1
+    assert complete["fingerprinted_tool_calls"] == 1
     assert summarize_run_ledgers([{
         "run_id": "run-2", "status": "timeout",
         "actions": [{"id": "a", "status": "running"}],

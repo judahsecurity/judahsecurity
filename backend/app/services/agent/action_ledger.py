@@ -56,7 +56,8 @@ def start_run(*, session_id: str, organization_id: int, user_id: int,
 
 def append_action(run_id: str | None, action_id: str, event: str, tool_name: str,
                   *, target: str = "", phase: str = "", detail: str = "",
-                  evidence_ids: list[str] | None = None) -> None:
+                  evidence_ids: list[str] | None = None,
+                  fingerprint: str = "") -> None:
     if not run_id:
         return
     from app.services.agent.observability import redact_string
@@ -72,6 +73,7 @@ def append_action(run_id: str | None, action_id: str, event: str, tool_name: str
             tool_name=tool_name[:128], target=safe_target(target), phase=phase[:32],
             detail=redact_string(detail or "")[:300],
             evidence_ids=[str(item)[:64] for item in (evidence_ids or [])[:16]],
+            fingerprint=fingerprint if len(fingerprint) == 64 else None,
         ))
         db.commit()
 
@@ -100,6 +102,7 @@ def finish_run(run_id: str | None, status: str, reason: str = "") -> None:
                     event="interrupted", tool_name=item.tool_name,
                     target=item.target, phase=item.phase,
                     detail="Run ended before this action returned",
+                    fingerprint=item.fingerprint,
                 ))
         row.status = status
         row.reason = reason[:500]
@@ -165,7 +168,10 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
         AgentHypothesisCoverage.run_id == row.id,
     ).order_by(AgentHypothesisCoverage.updated_at.desc()).all()
     actions: dict[str, dict] = {}
+    fingerprints: dict[str, str] = {}
     for event in events:
+        if event.fingerprint:
+            fingerprints[event.action_id] = event.fingerprint
         item = actions.setdefault(event.action_id, {
             "id": event.action_id, "tool_name": event.tool_name,
             "target": event.target, "phase": event.phase,
@@ -215,11 +221,15 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
                 item["detail"] = "Run deadline passed without a terminal receipt"
     counts: dict[str, int] = {}
     repeated: dict[tuple[str, str], int] = {}
+    exact: dict[str, int] = {}
     stages: dict[str, int] = {name: 0 for name in (
         "discovery", "surface_mapping", "logic_testing", "scanner_coverage", "http_requests",
     )}
     for item in actions.values():
         counts[item["status"]] = counts.get(item["status"], 0) + 1
+        fingerprint = fingerprints.get(item["id"])
+        if fingerprint and item["status"] != "skipped":
+            exact[fingerprint] = exact.get(fingerprint, 0) + 1
         tool = item["tool_name"]
         if tool != "http_exchange" and not tool.startswith("agent_"):
             key = (tool, item["target"])
@@ -262,6 +272,8 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
         "coverage": {"actions": len(actions), "by_status": counts,
                      "duration_seconds": round(((row.ended_at or datetime.utcnow()) - row.started_at).total_seconds(), 1),
                      "repeated_tool_target_actions": sum(max(0, n - 1) for n in repeated.values()),
+                     "fingerprinted_tool_calls": sum(exact.values()),
+                     "exact_repeated_tool_calls": sum(max(0, n - 1) for n in exact.values()),
                      "model_calls": sum(1 for item in actions.values()
                                         if item["tool_name"].startswith("agent_")),
                      "test_actions": sum(1 for item in actions.values()

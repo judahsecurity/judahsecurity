@@ -53,13 +53,13 @@ async def test_port_probe_result_reaches_trace_and_status_as_text(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_duplicate_browser_post_is_skipped_before_tool_execution(monkeypatch):
+async def test_duplicate_passive_browser_action_is_skipped_before_tool_execution(monkeypatch):
     from app.services.agent import action_ledger
 
     monkeypatch.setattr(action_ledger, "append_action", lambda *_args, **_kwargs: None)
     args = {"args": json.dumps({"actions": [
         {"action": "navigate", "url": "https://ginandjuice.shop/catalog"},
-        {"action": "execute_js", "script": "fetch('/catalog/subscribe',{method:'POST'})"},
+        {"action": "get_source"},
     ]})}
     orchestrator = AgentOrchestrator()
     orchestrator.tool_manager = SimpleNamespace(execute=AsyncMock(), _fallback_target="")
