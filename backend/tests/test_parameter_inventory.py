@@ -7,6 +7,7 @@ import pytest
 from app.services.agent.capability_map import build_capability_map_from_dict
 from app.services.agent.coverage_cells import (
     claim_coverage_cell_leases,
+    parameter_test_funnel,
     release_coverage_cell_lease,
     seed_parameter_coverage_cells,
 )
@@ -69,7 +70,7 @@ async def test_inventory_tool_pages_specialist_worklist():
     assert first["parameters"] != second["parameters"]
 
 
-def test_parameter_cells_are_leased_exactly_and_completed_cells_survive_reseed():
+def test_parameter_cells_are_leased_exactly_and_inconclusive_cells_survive_reseed():
     brain = EngagementBrain(target="https://app.test")
     inventory = collect_parameter_inventory(_map())
     cells = seed_parameter_coverage_cells(brain, inventory)
@@ -97,9 +98,31 @@ def test_parameter_cells_are_leased_exactly_and_completed_cells_survive_reseed()
     closed_id = leases["xss"].coverage_cell_id
     release_coverage_cell_lease(brain, leases["xss"], verdict="killed", evidence_ids=["http-evidence"])
     seed_parameter_coverage_cells(brain, inventory)
-    assert next(c for c in brain.coverage_cells if c["id"] == closed_id)["status"] == "tested_clean"
+    assert next(c for c in brain.coverage_cells if c["id"] == closed_id)["status"] == "inconclusive"
     next_lease = claim_coverage_cell_leases(brain, ["xss"])["xss"]
-    assert next_lease.coverage_cell_id != closed_id
+    assert next_lease.coverage_cell_id != leases["sqli"].coverage_cell_id
+
+
+def test_parameter_funnel_counts_probes_and_verdicts_separately():
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "host": "app.test", "path": "/catalog",
+        "name": "category", "location": "query", "identity": "anonymous",
+        "source": "browser_link", "testable": True,
+    }])
+    report = parameter_test_funnel(brain)
+    assert report["inputs"] == 1
+    assert report["checks"] == 2
+    assert report["attempted"] == report["probed"] == 0
+    sqli = next(row for row in brain.coverage_cells if row["test_type"] == "sqli")
+    sqli.update(attempts=1, status="in_focus", service_probe_artifact_ids=["probe-1"])
+    brain.candidates = [{"id": "candidate-1", "coverage_cell_id": sqli["id"],
+                         "status": "confirmed", "evidence_ids": ["proof-1"],
+                         "finding_id": "finding-1"}]
+    report = parameter_test_funnel(brain)
+    assert report["attempted"] == report["probed"] == 1
+    assert report["candidates"] == report["verified"] == report["published"] == 1
+    assert report["open"] == 2
 
 
 def test_specialist_lease_prioritizes_likely_input_but_keeps_other_inputs_open():

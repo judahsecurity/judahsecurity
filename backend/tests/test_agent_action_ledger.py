@@ -208,6 +208,7 @@ def test_live_ledger_api_and_outer_timeout_keep_a_partial_record(monkeypatch):
     live = client.get("/agent/conversations/live-session/ledger")
     assert live.status_code == 200
     assert live.json()["actions"][0]["status"] == "running"
+    assert live.json()["input_testing"]["checks"] == 0
     assert "secret" not in live.text
 
     app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=8, organization_id=12)

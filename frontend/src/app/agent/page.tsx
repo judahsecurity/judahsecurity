@@ -783,7 +783,7 @@ function AgentPageContent() {
             if (value.status === 'running' || value.status === 'stalled') {
               activeRunIdRef.current = value.run_id;
             } else if (activeRunIdRef.current === value.run_id &&
-                       ['completed', 'cancelled', 'error', 'interrupted'].includes(value.status)) {
+                       ['completed', 'cancelled', 'error', 'interrupted', 'paused'].includes(value.status)) {
               // A terminal receipt is authoritative even if the WebSocket's
               // final response was lost. Do not leave the controls locked.
               setLoading(false);

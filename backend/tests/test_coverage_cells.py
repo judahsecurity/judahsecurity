@@ -197,7 +197,7 @@ def test_cell_leases_are_exclusive_and_evidence_closes_exact_cell():
         verdict="killed",
         evidence_ids=["a" * 32],
     )
-    assert row["status"] == "tested_clean"
+    assert row["status"] == "inconclusive"
     assert row["lease_id"] == ""
 
 

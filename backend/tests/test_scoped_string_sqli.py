@@ -130,8 +130,84 @@ async def test_string_tool_requires_mapped_parameter_and_exact_scope(monkeypatch
         "scope": "https://app.example.test",
         "forms": [{"method": "GET", "action": TARGET, "fields": ["category"]}],
     }
-    with pytest.raises(ValueError, match="ordinary observed GET URL"):
+    preflights = []
+
+    def observe_form(url, allowed_origins, storage_state):
+        preflights.append(url)
+        return {"status": 200, "redirected": False, "truncated": False}
+
+    def probe_form(baseline, variants, nonce, **kwargs):
+        assert baseline == preflights[0]
+        assert parse_qs(urlsplit(baseline).query)["category"][0].startswith("AegisProbe")
+        return {"target": TARGET, "operation": "sqli_boolean_string",
+                "proof_confirmed": False, "nonce": nonce, "parameter": "category"}
+
+    monkeypatch.setattr("app.services.agent.scoped_assessment_tools.http_observe.observe_get", observe_form)
+    monkeypatch.setattr(sqli_string, "probe_string_boolean", probe_form)
+    form_result = json.loads(await manager.scoped_string_sqli(TARGET, "category"))
+    assert form_result["baseline_source"] == "observed_get_form"
+    assert len(preflights) == 1
+
+
+@pytest.mark.asyncio
+async def test_string_tool_uses_private_browser_link_and_reserves_verifier_budget(monkeypatch):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    manager._capability_map = {
+        "scope": "https://app.example.test",
+        "parameter_inventory": [{"method": "GET", "path": "/catalog",
+                                 "name": "category", "location": "query",
+                                 "source": "browser_link"}],
+    }
+    manager._scoped_link_baselines = {"anonymous": [URL]}
+
+    def fake_probe(baseline, variants, nonce, **kwargs):
+        assert baseline == URL
+        return {"target": TARGET, "operation": "sqli_boolean_string",
+                "proof_confirmed": False, "nonce": nonce, "parameter": "category"}
+
+    monkeypatch.setattr(sqli_string, "probe_string_boolean", fake_probe)
+    manager._scoped_get_count = 160
+    with pytest.raises(ValueError, match="budget exhausted"):
         await manager.scoped_string_sqli(TARGET, "category")
+    token = verification_run.set(VerificationRun("verifier-run", "candidate", 1, "fresh"))
+    try:
+        result = json.loads(await manager.scoped_string_sqli(TARGET, "category"))
+    finally:
+        verification_run.reset(token)
+    assert result["baseline_source"] == "observed_url"
+    assert manager._scoped_verify_get_count == 8
+    assert manager._scoped_get_count == 160
+
+
+@pytest.mark.asyncio
+async def test_browser_link_reaches_string_proof_without_exposing_its_value(monkeypatch):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+
+    async def fake_browser(**kwargs):
+        kwargs["link_baselines"].append(URL)
+        return ({"operation": "map", "final_origin": "https://app.example.test",
+                 "final_path": "/catalog", "status": 200, "requests": [],
+                 "link_query_inputs": [{"path": "/catalog", "query_keys": ["category"]}],
+                 "forms": []}, None)
+
+    monkeypatch.setattr(
+        "app.services.agent.scoped_assessment_tools.browser.check_browser", fake_browser,
+    )
+    observed = await manager.scoped_browser_assessment("map", TARGET)
+    assert "category=gin" not in observed
+
+    def fake_probe(baseline, variants, nonce, **kwargs):
+        assert baseline == URL
+        return {"target": TARGET, "operation": "sqli_boolean_string",
+                "proof_confirmed": False, "nonce": nonce, "parameter": "category"}
+
+    monkeypatch.setattr(sqli_string, "probe_string_boolean", fake_probe)
+    result = json.loads(await manager.scoped_string_sqli(TARGET, "category"))
+    assert result["baseline_source"] == "observed_url"
 
 
 def test_inconclusive_candidate_requires_new_proof_before_retry():

@@ -501,6 +501,64 @@ def seed_parameter_coverage_cells(brain: Any, inventory: Iterable[dict[str, Any]
     return migrate_coverage_cells(brain)
 
 
+def parameter_test_funnel(brain: Any) -> dict[str, Any]:
+    """Summarize exact input tests without treating discovery as proof."""
+    if isinstance(brain, dict) or brain is None:
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+        brain = engagement_brain_from_dict(brain)
+    cells = [row for row in getattr(brain, "coverage_cells", []) or []
+             if isinstance(row, dict) and row.get("source") == "parameter_inventory"]
+    candidates = {
+        str(row.get("coverage_cell_id") or ""): row
+        for row in (getattr(brain, "candidates", []) or [])
+        if isinstance(row, dict) and row.get("coverage_cell_id")
+    }
+    counts = {key: 0 for key in (
+        "checks", "attempted", "probed", "tested_clean", "candidates",
+        "verified", "published", "open",
+    )}
+    by_class: dict[str, dict[str, int]] = {}
+    inputs: set[tuple[str, str, str, str, str]] = set()
+    open_rows: list[dict[str, str]] = []
+    for cell in cells:
+        kind = str(cell.get("test_type") or "unknown")
+        group = by_class.setdefault(kind, {key: 0 for key in counts})
+        candidate = candidates.get(str(cell.get("id") or ""), {})
+        status = str(cell.get("status") or "untested")
+        checks = {
+            "checks": True,
+            "attempted": bool(cell.get("attempts")) or status in {
+                "leased", "in_focus", "inconclusive", "tested_clean", "finding",
+            },
+            "probed": bool(cell.get("service_probe_artifact_ids")) or (
+                status in {"tested_clean", "finding"} and bool(cell.get("evidence_ids"))
+            ) or bool(candidate.get("evidence_ids")),
+            "tested_clean": status == "tested_clean",
+            "candidates": bool(candidate),
+            "verified": candidate.get("status") == "confirmed",
+            "published": bool(cell.get("finding_id") or candidate.get("finding_id")),
+            "open": status not in CELL_TERMINAL,
+        }
+        for key, matched in checks.items():
+            if matched:
+                counts[key] += 1
+                group[key] += 1
+        inputs.add(tuple(str(cell.get(key) or "") for key in (
+            "host", "method", "path", "identity", "parameter",
+        )))
+        if checks["open"] and len(open_rows) < 20:
+            open_rows.append({
+                "method": str(cell.get("method") or "GET"),
+                "path": str(cell.get("path") or "/"),
+                "parameter": str(cell.get("parameter") or ""),
+                "test_type": kind,
+                "status": status,
+                "reason": str(cell.get("reason") or "")[:160],
+            })
+    return {"inputs": len(inputs), **counts, "by_class": by_class, "open_rows": open_rows}
+
+
 def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, Any]]:
     """Keep one durable review cell for every observed first-party JS file."""
     target = urlsplit(str(cmap.get("target") or ""))
@@ -823,24 +881,10 @@ def release_coverage_cell_lease(
     if candidate_id:
         cell["candidate_id"] = _text(candidate_id)
     if cell.get("status") == "leased":
-        # A summary cannot invent terminal coverage.  Only a cited clean result or
-        # publication can close the cell; a hunter's signal remains in focus.
-        if _text(verdict).lower() == "killed" and ids:
-            cell["status"] = "tested_clean"
-            escalation_id = _text(cell.get("proof_escalation_id"))
-            if escalation_id:
-                for escalation in getattr(brain, "proof_escalations", None) or []:
-                    if escalation.get("id") == escalation_id:
-                        escalation.update(
-                            status="refuted",
-                            refuted_by="evidence_backed_specialist_control",
-                            evidence_ids=list(
-                                dict.fromkeys(
-                                    [*(escalation.get("evidence_ids") or []), *ids]
-                                )
-                            ),
-                        )
-        elif _text(verdict).lower() == "proven":
+        # A report can cite unrelated discovery evidence. Only the explicit
+        # record_surface_coverage tool validates a negative receipt and closes
+        # a cell; a summary alone cannot claim that this input was tested.
+        if _text(verdict).lower() == "proven":
             cell["status"] = "in_focus"
         else:
             cell["status"] = "inconclusive"

@@ -922,7 +922,9 @@ leads only. scoped_numeric_sqli runs six bounded requests on one observed
 positive numeric GET field. Its proof_confirmed flag is one actor's evidence;
 scoped_string_sqli(url, parameter) runs eight bounded requests on one mapped
 string-valued GET field, including quote-error, escaped-quote, and stable
-Boolean true/false controls. Use it for string filters such as category.
+Boolean true/false controls. It can recover an ordinary browser link privately
+or preflight a one-field observed GET form. Use it for string filters such as
+category. A missing baseline leaves the input inconclusive; it is not clean.
 Its proof_confirmed flag is also one actor's evidence;
 submit a candidate and require a fresh independent verifier proof before
 create_finding. Never treat prior memory or JavaScript-only leads as proof.

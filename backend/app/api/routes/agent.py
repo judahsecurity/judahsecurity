@@ -1013,6 +1013,9 @@ async def get_conversation_ledger(
     result["scenario_surface"] = project_scenario_surface(
         snapshot.get("capability_map"), snapshot.get("engagement_brain"),
     )
+    from app.services.agent.coverage_cells import parameter_test_funnel
+
+    result["input_testing"] = parameter_test_funnel(snapshot.get("engagement_brain"))
     return result
 
 

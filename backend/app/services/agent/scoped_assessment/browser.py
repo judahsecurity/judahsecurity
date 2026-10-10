@@ -109,6 +109,36 @@ def _link_query_inputs(hrefs: list[str], allowed_origins: list[str]) -> list[dic
             for path, names in list(by_path.items())[:100]]
 
 
+def _private_link_baselines(hrefs: list[str], allowed_origins: list[str]) -> list[str]:
+    """Retain bounded, ordinary link URLs for session-local proof replay only."""
+    from .browser_actions import allowed_discovery_path
+
+    found: list[str] = []
+    for href in hrefs[:100]:
+        try:
+            assert_in_scope(href, allowed_origins)
+            parts = urlsplit(href)
+            if (not parts.query or parts.fragment or len(href) > 2048
+                    or not allowed_discovery_path(parts.path or "/")
+                    or href in found):
+                continue
+            names = [name.lower() for name, _ in parse_qsl(
+                parts.query, keep_blank_values=True, max_num_fields=40,
+            )]
+            if not names or any(any(word in name for word in (
+                "csrf", "xsrf", "nonce", "action", "delete", "remove",
+                "purchase", "pay", "save", "send", "reset", "confirm",
+                "unsubscribe", "logout", "signout",
+            )) for name in names):
+                continue
+            found.append(href)
+            if len(found) >= 80:
+                break
+        except (TypeError, ValueError):
+            continue
+    return found
+
+
 async def _forms(page, expected_origin: str) -> list[dict]:
     """Return same-origin form input names and control types, never values."""
     rows = await page.locator("form").evaluate_all(FORM_INVENTORY_JS)
@@ -144,6 +174,7 @@ async def check_browser(
     storage_state: dict | None = None, max_pages: int = 1,
     javascript_sources: list[dict] | None = None,
     traffic_exchanges: list[dict] | None = None,
+    link_baselines: list[str] | None = None,
     max_actions: int = 3,
 ) -> tuple[dict, bytes | None]:
     """Execute one bounded browser check with HTTP and WebSocket origin routing."""
@@ -391,6 +422,8 @@ async def check_browser(
                         hrefs = await page.locator("a[href]").evaluate_all(
                             "els => els.slice(0, 100).map(e => e.href)"
                         )
+                        if link_baselines is not None:
+                            link_baselines.extend(_private_link_baselines(hrefs, [expected_origin]))
                         links = _crawl_links(hrefs, [expected_origin])
                         forms = await _forms(page, expected_origin)
                         pages.append({
@@ -483,6 +516,8 @@ async def check_browser(
                 hrefs = await page.locator("a[href]").evaluate_all(
                     "els => els.slice(0, 100).map(e => e.href)"
                 )
+                if link_baselines is not None:
+                    link_baselines.extend(_private_link_baselines(hrefs, [expected_origin]))
                 queue = _crawl_links(hrefs, [expected_origin])
                 visited = {expected_origin + page_paths[0]}
                 while queue and len(page_paths) < max_pages:
@@ -512,6 +547,8 @@ async def check_browser(
                         hrefs = await page.locator("a[href]").evaluate_all(
                             "els => els.slice(0, 100).map(e => e.href)"
                         )
+                        if link_baselines is not None:
+                            link_baselines.extend(_private_link_baselines(hrefs, [expected_origin]))
                         queue.extend(link for link in _crawl_links(hrefs, [expected_origin])
                                      if link not in visited and link not in queue)
                     except ValueError:
@@ -534,6 +571,8 @@ async def check_browser(
                 hrefs = await page.locator("a[href]").evaluate_all(
                     "els => els.slice(0, 100).map(e => e.href)"
                 )
+                if link_baselines is not None:
+                    link_baselines.extend(_private_link_baselines(hrefs, [expected_origin]))
                 result["links"] = _crawl_links(hrefs, [expected_origin])
                 result["link_query_inputs"] = _link_query_inputs(hrefs, [expected_origin])
                 result["forms"] = await _forms(page, expected_origin)

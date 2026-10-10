@@ -714,7 +714,7 @@ async def test_fireteam_dispatch_continues_parameter_cells_after_xss_hypothesis_
     assert result["parameter_coverage"]["xss"]["remaining"] > 0
     rows = [c for c in manager._engagement_brain["coverage_cells"]
             if c.get("specialist") == "xss" and c.get("source") == "parameter_inventory"]
-    assert any(c["status"] == "tested_clean" for c in rows)
+    assert any(c["status"] == "inconclusive" for c in rows)
     assert any(c["status"] == "untested" for c in rows)
 
 

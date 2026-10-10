@@ -28,6 +28,7 @@ async def test_agent_browser_inventory_keeps_private_exchange_values_out_of_tool
     async def fake_browser(**kwargs):
         assert kwargs["allowed_origins"] == ["https://app.example.test"]
         kwargs["traffic_exchanges"].append({"public": public, "private": private})
+        kwargs["link_baselines"].append("https://app.example.test/catalog?category=gin")
         return ({"operation": "inspect_js", "final_origin": "https://app.example.test",
                  "final_path": "/", "requests": [], "actions": [], "status": 200}, b"png")
 
@@ -40,6 +41,10 @@ async def test_agent_browser_inventory_keeps_private_exchange_values_out_of_tool
     assert result["surface_inventory"]["finding"] is False
     assert result["surface_inventory"]["test_suggestions"][0]["operation"] == "http_sqli_boolean"
     assert "private-response" not in json.dumps(result)
+    assert "category=gin" not in json.dumps(result)
+    assert manager._scoped_link_baselines["anonymous"] == [
+        "https://app.example.test/catalog?category=gin",
+    ]
     exchange = result["traffic"][0]
     assert exchange["path"] == "/api/items"
     assert "id=7" not in json.dumps(result)
@@ -209,6 +214,42 @@ async def test_scoped_clean_coverage_requires_matching_negative_evidence():
         test_type="directory_index", status="tested_clean", evidence_id=artifact_id,
     ))
     assert "does not match" in mismatch["error"]
+
+
+@pytest.mark.asyncio
+async def test_sqli_clean_coverage_requires_complete_stable_controls():
+    from app.services.agent.engagement_brain import EngagementBrain
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.scoped_assessment.sqli_string import CHECK_ORDER
+
+    manager = ASMToolsManager()
+    manager._engagement_brain = EngagementBrain(target="https://app.example.test").to_dict()
+    checks = {key: {"status": 200, "bytes_captured": 4000,
+                    "redirected": False, "truncated": False} for key in CHECK_ORDER}
+    payload = {"operation": "sqli_boolean_string", "parameter": "category",
+               "proof_confirmed": False, "requests_sent": 8, "checks": checks}
+    artifact_id = evidence_store(manager).record(
+        "scoped_string_sqli", payload,
+        target="https://app.example.test/catalog", identity="anonymous",
+    )
+    accepted = json.loads(await manager.record_surface_coverage(
+        path="/catalog", host="app.example.test", identity="anonymous",
+        parameter="query:category", test_type="sqli", status="tested_clean",
+        evidence_id=artifact_id,
+    ))
+    assert accepted["row"]["status"] == "tested_clean"
+
+    checks["true_first"]["bytes_captured"] = 8000
+    changed_id = evidence_store(manager).record(
+        "scoped_string_sqli", payload,
+        target="https://app.example.test/catalog", identity="anonymous",
+    )
+    rejected = json.loads(await manager.record_surface_coverage(
+        path="/catalog", host="app.example.test", identity="anonymous",
+        parameter="query:category", test_type="sqli", status="tested_clean",
+        evidence_id=changed_id,
+    ))
+    assert rejected["error"] == "SQLi response differences remain inconclusive"
 
 
 @pytest.mark.asyncio

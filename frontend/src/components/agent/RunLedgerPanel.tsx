@@ -40,6 +40,19 @@ export type AgentRunLedger = {
     blocked_reason?: string;
     evidence_ids?: string[];
   }>;
+  input_testing?: {
+    inputs: number;
+    checks: number;
+    attempted: number;
+    probed: number;
+    tested_clean: number;
+    candidates: number;
+    verified: number;
+    published: number;
+    open: number;
+    by_class: Record<string, { checks: number; probed: number; verified: number }>;
+    open_rows: Array<{ method: string; path: string; parameter: string; test_type: string; status: string; reason: string }>;
+  };
   scenario_surface?: ScenarioSurface;
 };
 
@@ -70,6 +83,24 @@ export function RunLedgerPanel({ run }: { run: AgentRunLedger | null }) {
         <p className="text-muted-foreground">
           Logged HTTP exchanges exclude requests made inside recon and scanner tools.
         </p>
+        {Boolean(run.input_testing?.checks) && (
+          <div className="rounded-md border border-border/60 px-2.5 py-2 space-y-1">
+            <p className="font-medium text-foreground">Input testing</p>
+            <p className="text-muted-foreground">
+              {run.input_testing!.inputs} inputs · {run.input_testing!.checks} class checks · {run.input_testing!.attempted} attempted · {run.input_testing!.probed} with probe evidence · {run.input_testing!.candidates} candidates · {run.input_testing!.verified} verified · {run.input_testing!.published} published · {run.input_testing!.open} open
+            </p>
+            <p className="text-muted-foreground">
+              {Object.entries(run.input_testing!.by_class).map(([kind, row]) =>
+                `${kind.replaceAll('_', ' ')} ${row.probed}/${row.checks} probed`
+              ).join(' · ')}
+            </p>
+            {run.input_testing!.open_rows.slice(0, 5).map((row, index) => (
+              <p key={`${row.method}-${row.path}-${row.parameter}-${row.test_type}-${index}`} className="text-amber-400">
+                Open: {row.method} {row.path} {row.parameter} · {row.test_type} · {row.status}{row.reason ? ` · ${row.reason}` : ''}
+              </p>
+            ))}
+          </div>
+        )}
         {run.hypotheses?.length ? (
           <div className="space-y-1">
             <p className="font-medium text-foreground">Hypothesis coverage</p>

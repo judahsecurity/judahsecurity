@@ -6,7 +6,7 @@ import pytest
 
 from app.models.asset import AssetType
 from app.services.agent import prowl_service_bridge as bridge
-from app.services.agent.scoped_assessment.browser import _link_query_inputs
+from app.services.agent.scoped_assessment.browser import _link_query_inputs, _private_link_baselines
 
 
 def _asset(value="app.example", kind=AssetType.DOMAIN, in_scope=True):
@@ -82,6 +82,10 @@ def test_browser_link_query_names_reach_parameter_inventory_without_values():
     ]
     inputs = _link_query_inputs(hrefs, ["https://app.example"])
     assert inputs == [{"path": "/catalog", "query_keys": ["category", "searchTerm"]}]
+    assert _private_link_baselines(
+        [*hrefs, "https://app.example/catalog?category=Gin&action=delete"],
+        ["https://app.example"],
+    ) == hrefs[:2]
     observation = {
         "signal": "browser_crawl",
         "result": {

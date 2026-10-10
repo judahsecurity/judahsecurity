@@ -489,7 +489,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _captured_proof_plans = SessionValue(dict)
     _request_capture_store = SessionValue(lambda: None)
     _scoped_browser_exchanges = SessionValue(dict)
+    _scoped_link_baselines = SessionValue(dict)
     _scoped_get_count = SessionValue(lambda: 0)
+    _scoped_verify_get_count = SessionValue(lambda: 0)
     _scoped_post_count = SessionValue(lambda: 0)
     _scoped_body_replay_paths = SessionValue(set)
     _scoped_owner_expectations = SessionValue(dict)
@@ -8232,7 +8234,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 kind = evidence.get("kind") if evidence else ""
                 if kind not in (
                     "http_exchange", "browser_xss", "scoped_http_get",
-                    "scoped_browser_check_xss",
+                    "scoped_browser_check_xss", "scoped_string_sqli",
                 ):
                     raise ValueError("tested_clean evidence_id must reference live transport evidence")
                 if identity and evidence.get("identity") != identity:
@@ -8253,6 +8255,26 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                                 or payload.get("truncated") is not False
                                 or payload.get("redirected") is not False):
                             raise ValueError("scoped HTTP evidence only closes a clean directory-index check")
+                    elif kind == "scoped_string_sqli":
+                        from app.services.agent.scoped_assessment.sqli_string import CHECK_ORDER
+
+                        checks = payload.get("checks")
+                        _, _, expected_parameter = parameter.partition(":")
+                        if (test_type != "sqli" or expected_parameter != payload.get("parameter")
+                                or payload.get("operation") != "sqli_boolean_string"
+                                or payload.get("proof_confirmed") is not False
+                                or payload.get("requests_sent") != len(CHECK_ORDER)
+                                or not isinstance(checks, dict)
+                                or any(not isinstance(checks.get(key), dict)
+                                       or checks[key].get("status") != 200
+                                       or not isinstance(checks[key].get("bytes_captured"), int)
+                                       or checks[key].get("redirected") is not False
+                                       or checks[key].get("truncated") is not False
+                                       for key in CHECK_ORDER)):
+                            raise ValueError("SQLi coverage needs a complete negative control sequence for this input")
+                        sizes = [checks[key]["bytes_captured"] for key in CHECK_ORDER]
+                        if max(sizes) - min(sizes) > max(64, max(sizes) // 100):
+                            raise ValueError("SQLi response differences remain inconclusive")
                     elif (test_type not in ("xss", "reflected_xss")
                           or payload.get("operation") != "check_xss"
                           or payload.get("executed") is not False

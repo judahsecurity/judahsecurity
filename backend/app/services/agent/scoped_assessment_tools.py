@@ -9,7 +9,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from urllib.parse import urlsplit
+import secrets
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 from app.services.agent.assessment_scope import assert_url_in_scope
 from app.services.agent.assessment_sessions import browser_storage_state, identity_registry
@@ -35,6 +36,9 @@ SCOPED_ASSESSMENT_TOOLS = (
     "complete_scoped_assessment",
     "get_finding_candidate",
 )
+
+HUNTER_GET_BUDGET = 160
+VERIFIER_GET_BUDGET = 40
 
 
 class ScopedAssessmentTools:
@@ -138,12 +142,15 @@ class ScopedAssessmentTools:
         return browser_storage_state(session, url)
 
     def _scoped_claim_gets(self, count: int) -> None:
-        if count < 1 or count > 8:
+        if count < 1 or count > 9:
             raise ValueError("Invalid assessment request reservation")
-        used = int(getattr(self, "_scoped_get_count", 0) or 0)
-        if used + count > 40:
+        verifier = verification_run.get() is not None
+        counter = "_scoped_verify_get_count" if verifier else "_scoped_get_count"
+        limit = VERIFIER_GET_BUDGET if verifier else HUNTER_GET_BUDGET
+        used = int(getattr(self, counter, 0) or 0)
+        if used + count > limit:
             raise ValueError("Scoped HTTP GET budget exhausted for this assessment session")
-        self._scoped_get_count = used + count
+        setattr(self, counter, used + count)
 
     def _scoped_exchange(self, artifact_id: str, identity: str) -> bytes:
         row = (getattr(self, "_scoped_browser_exchanges", None) or {}).get(artifact_id)
@@ -172,13 +179,21 @@ class ScopedAssessmentTools:
         state = self._scoped_state(identity, url)
         sources: list[dict] = []
         exchanges: list[dict] = []
+        link_baselines: list[str] = []
         result, screenshot = await browser.check_browser(
             operation=operation, url=url, allowed_origins=[allowed],
             storage_state=state, max_pages=max_pages,
             javascript_sources=sources if operation == "inspect_js" else None,
             traffic_exchanges=exchanges if operation == "inspect_js" else None,
+            link_baselines=link_baselines if operation != "check_xss" else None,
             max_actions=max_actions,
         )
+        if link_baselines:
+            private = dict(getattr(self, "_scoped_link_baselines", None) or {})
+            private[identity] = list(dict.fromkeys([
+                *(private.get(identity) or []), *link_baselines,
+            ]))[-120:]
+            self._scoped_link_baselines = private
         self._scoped_assessment_started = True
         target = allowed + (urlsplit(url).path or "/")
         result["screenshot_sha256"] = hashlib.sha256(screenshot).hexdigest() if screenshot else None
@@ -471,51 +486,100 @@ class ScopedAssessmentTools:
         parts = urlsplit(url)
         from app.services.agent.parameter_inventory import collect_parameter_inventory
 
+        cmap = getattr(self, "_capability_map", None) or {}
         observed = next((row for row in collect_parameter_inventory(
-            getattr(self, "_capability_map", None) or {},
+            cmap,
         ) if row.get("method") == "GET" and row.get("host") == parts.netloc
             and row.get("path") == (parts.path or "/")
             and row.get("name") == parameter and row.get("location") == "query"
             and row.get("identity") == identity and row.get("testable")
             and row.get("source") in {
-                "page_url", "observed_form", "captured_api", "browser_traffic", "api_endpoint",
+                "page_url", "observed_form", "captured_api", "browser_traffic", "browser_link", "api_endpoint",
             }), None)
         if observed is None:
             raise ValueError("String SQLi proof requires a mapped GET query parameter")
+        needs_preflight = False
+        baseline_source = observed["source"]
         if not parts.query:
-            # Verifiers often receive the canonical finding target without its
-            # query. Recover only a live, same-path URL that the browser already
-            # observed; never invent a value or widen the request scope.
-            candidates = (
-                page for page in (getattr(self, "_capability_map", None) or {}).get("pages_visited", [])
-                if isinstance(page, str) and urlsplit(page).scheme == parts.scheme
-                and urlsplit(page).netloc == parts.netloc
-                and (urlsplit(page).path or "/") == (parts.path or "/")
-            )
+            # The public inventory is value-free. Keep ordinary link values in
+            # session-local browser state, then recover only this exact input.
+            candidates = [
+                *(page for page in cmap.get("pages_visited", []) if isinstance(page, str)),
+                *(sample.get("url") for sample in cmap.get("api_samples", [])
+                  if isinstance(sample, dict) and str(sample.get("method", "GET")).upper() == "GET"),
+                *((getattr(self, "_scoped_link_baselines", None) or {}).get(identity) or []),
+            ]
             for candidate in candidates:
+                if not isinstance(candidate, str) or urlsplit(candidate).scheme != parts.scheme \
+                        or urlsplit(candidate).netloc != parts.netloc \
+                        or (urlsplit(candidate).path or "/") != (parts.path or "/"):
+                    continue
                 try:
                     baseline, variants, nonce = sqli_string.plan_string_boolean(
                         candidate, parameter=parameter, allowed_origins=[allowed],
                     )
+                    baseline_source = "observed_url"
                     break
                 except ValueError:
                     continue
             else:
-                raise ValueError("String SQLi proof needs an ordinary observed GET URL with this parameter")
+                # A one-field GET form can supply a harmless baseline. Observe
+                # the response once before using that value for a proof recipe.
+                if identity != "anonymous":
+                    raise ValueError("String SQLi proof needs an ordinary observed GET URL with this parameter")
+                baseline = ""
+                for form in cmap.get("forms", []):
+                    if not isinstance(form, dict) or str(form.get("method", "GET")).upper() != "GET":
+                        continue
+                    raw_action = form.get("action") or form.get("page")
+                    if not isinstance(raw_action, str) or not raw_action:
+                        continue
+                    action = urljoin(allowed + "/", raw_action)
+                    action_parts = urlsplit(action)
+                    if (action_parts.scheme, action_parts.netloc, action_parts.path or "/") != (
+                        parts.scheme, parts.netloc, parts.path or "/"
+                    ):
+                        continue
+                    fields = form.get("fields") or form.get("inputs") or []
+                    names = [field.get("name") if isinstance(field, dict) else field for field in fields]
+                    if names != [parameter]:
+                        continue
+                    pairs = parse_qsl(action_parts.query, keep_blank_values=True)
+                    if pairs:
+                        continue
+                    canary = "AegisProbe" + str(secrets.randbelow(900000) + 100000)
+                    baseline = urlunsplit(action_parts._replace(
+                        query=urlencode([*pairs, (parameter, canary)]),
+                    ))
+                    break
+                if not baseline:
+                    raise ValueError("String SQLi proof needs an ordinary observed GET URL with this parameter")
+                baseline, variants, nonce = sqli_string.plan_string_boolean(
+                    baseline, parameter=parameter, allowed_origins=[allowed],
+                )
+                needs_preflight = True
+                baseline_source = "observed_get_form"
         else:
             baseline, variants, nonce = sqli_string.plan_string_boolean(
                 url, parameter=parameter, allowed_origins=[allowed],
             )
         self._scoped_assessment_started = True
-        self._scoped_claim_gets(8)
+        self._scoped_claim_gets(9 if needs_preflight else 8)
+        state = self._scoped_state(identity, baseline)
+        if needs_preflight:
+            preflight = await asyncio.to_thread(http_observe.observe_get, baseline, [allowed], state)
+            if (preflight.get("status") != 200 or preflight.get("redirected")
+                    or preflight.get("truncated")):
+                raise ValueError("Observed GET form did not produce a stable baseline response")
         result = await asyncio.to_thread(
             sqli_string.probe_string_boolean,
             baseline, variants, nonce,
             parameter=parameter, allowed_origins=[allowed],
-            storage_state=self._scoped_state(identity, baseline),
+            storage_state=state,
             before_request=lambda: None,
         )
         result["source"] = observed["source"]
+        result["baseline_source"] = baseline_source
         result["finding"] = False
         result["evidence_id"] = evidence_store(self).record(
             "scoped_string_sqli", result, target=result["target"], identity=identity,
