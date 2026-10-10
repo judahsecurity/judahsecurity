@@ -382,3 +382,40 @@ def test_verifier_mission_includes_nonce_and_adversarial_framing():
     assert "ADVERSARIAL" in text
     assert "X-Aegis-Verify: deadbeefcafebabe" in text
     assert "record_verify_verdict" in text
+
+
+def test_cve_version_is_only_a_lead_in_verifier_mission():
+    from app.services.agent.independent_verify import verifier_mission
+
+    candidate = FindingCandidate(id="cve", title="CVE-2025-12345 on server")
+    mission = verifier_mission(candidate)
+    assert "Vulnerability class: known_cve; supported proof kinds: none yet" in mission
+    assert "applicability lead" in mission
+    assert "confirmed if your GET still shows" not in mission
+
+
+def test_methodology_progress_surfaces_inconclusive_verdict_reason():
+    brain = EngagementBrain(target="https://app.example.com")
+    brain.hypotheses = [_killed_card()]
+    candidate = FindingCandidate(
+        id="candidate-1", title="SQL injection in search", status="inconclusive",
+        verifier_summary="No independent Boolean SQLi proof",
+    )
+    brain.candidates = [candidate.to_dict()]
+    progress = methodology_progress(brain)
+    assert progress["candidate_verdicts"]["inconclusive"] == 1
+    assert progress["inconclusive_candidates"][0]["reason"] == candidate.verifier_summary
+    assert "Candidates inconclusive: 1" in progress["summary"]
+
+
+def test_candidate_class_survives_serialization_and_revision():
+    brain = EngagementBrain(target="https://app.example.com")
+    candidate = submit_candidate(
+        brain, title="SQL injection in search", vulnerability_class="sql_injection",
+    )
+    assert brain.candidates[0]["vulnerability_class"] == "sql_injection"
+    updated = submit_candidate(
+        brain, title=candidate.title, vulnerability_class="sql_injection", evidence="new evidence",
+    )
+    assert updated.vulnerability_class == "sql_injection"
+    assert updated.revision == 2

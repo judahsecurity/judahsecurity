@@ -118,12 +118,18 @@ def test_custom_oast_workflow_returns_verifier_ready_proof(monkeypatch):
     candidate = SimpleNamespace(
         title="Blind SSRF callback",
         description="The target issued a DNS callback.",
+        target="https://app.test/fetch",
         nonce="nonce-1",
     )
     ok, why = validate_proof(
         evidence_store(manager), candidate, result["proof"], result["evidence_ids"]
     )
     assert ok, why
+    tampered_records = dict(records)
+    tampered_records[plant_id]["payload"]["request"]["url"] = "https://abc123456789.oast.test"
+    assert not validate_proof(
+        SimpleNamespace(records=tampered_records), candidate, result["proof"], result["evidence_ids"]
+    )[0]
 
 
 def test_raw_callback_injection_requires_placeholder():

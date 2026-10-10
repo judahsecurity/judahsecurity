@@ -2,13 +2,63 @@
 
 from types import SimpleNamespace
 
-from app.services.agent.proof_policy import validate_proof
+from app.services.agent.proof_policy import proof_kind_allowed, validate_proof
 from app.services.agent.evidence_store import EvidenceStore, VerificationRun, verification_run
 
 
 class Store:
     def __init__(self, hunter, verifier):
         self.records = {"hunter": hunter, "verifier": verifier}
+
+
+def test_proof_kind_must_match_the_claimed_vulnerability():
+    cases = (
+        ("SQL injection in search", "response_match", False),
+        ("Reflected XSS", "response_match", False),
+        ("CVE-2025-12345 affects server", "response_match", False),
+        ("CVE-2025-12345 stored XSS", "browser_xss", True),
+        ("Command injection in export", "oob_callback", False),
+        ("XXE in XML upload", "oob_callback", False),
+        ("Sensitive configuration exposure", "response_match", True),
+        ("Sensitive configuration exposure", "workflow", False),
+        ("Blind SSRF in image fetch", "oob_callback", True),
+        ("SQL injection in search", "numeric_boolean_sqli", True),
+    )
+    for title, kind, expected in cases:
+        candidate = SimpleNamespace(title=title, description="", vulnerability_class="")
+        assert proof_kind_allowed(candidate, kind)[0] is expected, (title, kind)
+
+    mislabeled = SimpleNamespace(
+        title="SQL injection in search", description="", vulnerability_class="exposure",
+    )
+    assert not proof_kind_allowed(mislabeled, "response_match")[0]
+
+
+def test_response_match_requires_direct_anonymous_get():
+    target = "https://app.example.test/config"
+    row = {
+        "id": "verifier", "kind": "http_exchange", "identity": "anonymous",
+        "payload": {
+            "request": {"method": "GET", "url": target},
+            "response": {"status": 200, "url": target, "body": "private diagnostic configuration"},
+        },
+    }
+    store = SimpleNamespace(records={"verifier": row})
+    candidate = SimpleNamespace(title="Sensitive configuration exposure", description="")
+    proof = {"kind": "response_match", "artifact_id": "verifier",
+             "contains": "private diagnostic configuration"}
+    assert validate_proof(store, candidate, proof, ["verifier"])[0]
+    row["identity"] = "legacy"
+    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
+    row["identity"] = "anonymous"
+    row["payload"]["response"]["url"] = "https://app.example.test/login"
+    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
+    row["payload"]["response"]["url"] = target
+    row["payload"]["request"]["headers"] = {"Authorization": "Bearer redacted"}
+    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
+    row["payload"]["request"]["headers"] = {}
+    candidate.description = "This might also enable SQL injection"
+    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
 
 
 def record(artifact_id, kind, payload, created_at):
@@ -42,6 +92,7 @@ def test_numeric_proof_requires_two_matching_independent_observations():
     store = Store(hunter, verifier)
     candidate = SimpleNamespace(
         target="https://app.example.test/api/items", evidence_ids=["hunter"],
+        title="SQL injection in item ID",
     )
     proof = {"kind": "numeric_boolean_sqli", "hunter_artifact_id": "hunter",
              "artifact_id": "verifier"}
@@ -66,6 +117,7 @@ def test_directory_listing_needs_complete_anonymous_repeat():
     store = Store(hunter, verifier)
     candidate = SimpleNamespace(
         target="https://app.example.test/api/items", evidence_ids=["hunter"],
+        title="Public directory index exposure",
     )
     proof = {"kind": "public_directory_index", "hunter_artifact_id": "hunter",
              "artifact_id": "verifier"}
@@ -88,7 +140,8 @@ def test_real_evidence_receipts_preserve_the_numeric_proof_boundary():
         )
     finally:
         verification_run.reset(token)
-    candidate = SimpleNamespace(target=target, evidence_ids=[hunter_id])
+    candidate = SimpleNamespace(target=target, evidence_ids=[hunter_id],
+                                title="SQL injection in item ID")
     assert validate_proof(store, candidate, {
         "kind": "numeric_boolean_sqli", "hunter_artifact_id": hunter_id,
         "artifact_id": verifier_id,

@@ -94,7 +94,8 @@ def test_string_boolean_publication_needs_independent_matching_receipts(monkeypa
         )
     finally:
         verification_run.reset(token)
-    candidate = SimpleNamespace(target=TARGET, evidence_ids=[hunter])
+    candidate = SimpleNamespace(target=TARGET, evidence_ids=[hunter],
+                                title="SQL injection in category")
     receipt = {"kind": "string_boolean_sqli", "hunter_artifact_id": hunter, "artifact_id": verifier}
     assert validate_proof(store, candidate, receipt, [verifier])[0]
     assert not validate_proof(store, candidate, receipt, [hunter])[0]
