@@ -524,14 +524,21 @@ async def spawn_workers(
             bucket[wid] = rec
 
             async def _run(record: WorkerRecord = rec, k: str = kind) -> None:
+                from app.core.config import settings
+                from app.services.agent.action_fingerprint import action_fingerprint
                 from app.services.agent.action_ledger import active_run_id, append_action
 
                 run_id = active_run_id.get()
+                fingerprint = action_fingerprint(
+                    run_id=run_id, tool_name=f"recon_worker:{k}", target=target,
+                    tool_args={}, secret_key=settings.SECRET_KEY,
+                )
                 observations: List[Dict[str, str]] = []
                 capture_token = _capture_context.set((target, observations))
                 timeout = float(_KIND_TIMEOUT_SEC.get(k, 120.0))
                 try:
-                    append_action(run_id, record.id, "started", f"recon_worker:{k}", target=target)
+                    append_action(run_id, record.id, "started", f"recon_worker:{k}",
+                                  target=target, fingerprint=fingerprint)
                     record.status = "running"
                     await _emit(f"Recon stream [{k}] started on {target}")
                     brief = await asyncio.wait_for(
@@ -573,6 +580,7 @@ async def spawn_workers(
                         "interrupted" if record.status == "cancelled" else "failed",
                         f"recon_worker:{k}", target=target,
                         detail=record.error or "",
+                        fingerprint=fingerprint,
                     )
 
             rec.task = asyncio.create_task(_run())

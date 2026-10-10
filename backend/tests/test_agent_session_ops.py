@@ -45,10 +45,10 @@ def test_spend_cap():
     assert price_limit_usd(-1) == 0.0
 
 
-def test_identical_successful_browser_action_is_detected_before_resending_post():
+def test_identical_passive_browser_action_is_detected():
     actions = [
         {"action": "navigate", "url": "https://ginandjuice.shop/catalog"},
-        {"action": "execute_js", "script": "fetch('/catalog/subscribe',{method:'POST'})"},
+        {"action": "get_source"},
     ]
     args = {"args": json.dumps({"actions": actions})}
     prior = {"tool_name": "execute_browser", "tool_args": args,
@@ -58,6 +58,21 @@ def test_identical_successful_browser_action_is_detected_before_resending_post()
         "args": json.dumps({"actions": [actions[0]]}),
     }) is None
     assert prior_identical_browser_action([{**prior, "success": False}], args) is None
+    assert prior_identical_browser_action([
+        prior, {"tool_name": "execute_curl", "success": True},
+    ], args) is None
+
+
+def test_fresh_xss_proof_and_stateful_browser_actions_are_not_reused():
+    for action in (
+        {"action": "check_xss", "url": "https://ginandjuice.shop/catalog?searchTerm=%3Cimg%3E"},
+        {"action": "execute_js", "script": "fetch('/catalog/subscribe',{method:'POST'})"},
+        {"action": "submit_form", "selector": "form"},
+    ):
+        args = {"args": json.dumps({"actions": [action]})}
+        prior = {"tool_name": "execute_browser", "tool_args": args,
+                 "success": True, "tool_output": "HTTP 200"}
+        assert prior_identical_browser_action([prior], args) is None
 
 
 def test_prior_hunt_brief_includes_replay_and_last_prompt():

@@ -25,8 +25,10 @@ CREATE TABLE IF NOT EXISTS agent_action_receipts (
     phase VARCHAR(32) NOT NULL DEFAULT '',
     detail TEXT NOT NULL DEFAULT '',
     evidence_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+    fingerprint VARCHAR(64),
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE agent_action_receipts ADD COLUMN IF NOT EXISTS fingerprint VARCHAR(64);
 CREATE INDEX IF NOT EXISTS ix_agent_action_receipts_run_id
     ON agent_action_receipts (run_id);
 CREATE INDEX IF NOT EXISTS ix_agent_action_receipts_action_id

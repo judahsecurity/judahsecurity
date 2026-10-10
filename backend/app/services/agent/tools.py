@@ -1055,7 +1055,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
     async def execute(self, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool with the given arguments."""
+        from app.services.agent.action_fingerprint import action_fingerprint
         from app.services.agent.action_ledger import active_run_id, append_action
+        from app.services.agent.evidence_store import verification_run
 
         run_id = active_run_id.get()
         action_id = os.urandom(16).hex()
@@ -1065,7 +1067,14 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         target = (args_dict.get("target") or args_dict.get("url") or
                   nested.get("target") or nested.get("url") or nested.get("url_template") or
                   current_seed_target.get() or "")
-        append_action(run_id, action_id, "started", tool_name, target=target)
+        verifier = verification_run.get()
+        fingerprint = action_fingerprint(
+            run_id=run_id, tool_name=tool_name, target=str(target),
+            tool_args=args_dict, secret_key=settings.SECRET_KEY,
+            verifier_run_id=verifier.id if verifier else "",
+        )
+        append_action(run_id, action_id, "started", tool_name, target=target,
+                      fingerprint=fingerprint)
         try:
             result = await self._execute_impl(tool_name, tool_args)
             from app.services.agent.evidence_store import evidence_store
@@ -1080,11 +1089,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 logger.debug("palace remember skipped: %s", exc)
         except asyncio.CancelledError:
             append_action(run_id, action_id, "interrupted", tool_name,
-                          target=target, detail="Tool cancelled before completion")
+                          target=target, detail="Tool cancelled before completion",
+                          fingerprint=fingerprint)
             raise
         except Exception as exc:
             append_action(run_id, action_id, "failed", tool_name,
-                          target=target, detail=type(exc).__name__)
+                          target=target, detail=type(exc).__name__,
+                          fingerprint=fingerprint)
             raise
         published = (tool_name == "create_finding" and
                      str(result.get("output") or "").startswith("Finding created:"))
@@ -1094,6 +1105,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         append_action(run_id, action_id, "completed" if completed else "failed",
                       tool_name, target=target,
                       detail="finding_published" if published else str(result.get("error") or "")[:300],
+                      fingerprint=fingerprint,
                       evidence_ids=[*evidence_ids,
                                     *([result["artifact_id"]] if result.get("artifact_id") else [])])
         return result

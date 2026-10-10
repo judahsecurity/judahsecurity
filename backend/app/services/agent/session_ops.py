@@ -40,20 +40,28 @@ def over_budget(token_usage: Optional[Dict[str, Any]], limit_usd: float) -> bool
 def prior_identical_browser_action(
     trace: List[Dict[str, Any]], tool_args: Dict[str, Any]
 ) -> Optional[Dict[str, Any]]:
-    """Find a successful identical browser action before it can run again."""
+    """Reuse only passive browser observations; proof and writes need fresh runs."""
     try:
         spec = json.loads(tool_args.get("args") or "{}")
         actions = spec.get("actions")
         if not isinstance(actions, list) or not actions:
+            return None
+        # A matching URL is not a duplicate proof: check_xss needs a fresh
+        # execution nonce, while clicks, form submits and JS can change state.
+        passive = {"navigate", "get_source", "check_response"}
+        if any(not isinstance(action, dict) or action.get("action") not in passive
+               for action in actions):
             return None
         identity = spec.get("identity") or tool_args.get("identity") or "anonymous"
         signature = json.dumps(actions, sort_keys=True, separators=(",", ":"))
     except (TypeError, ValueError, AttributeError):
         return None
 
+    # Only collapse an immediate repeat. An intervening tool may have changed
+    # page state, making an otherwise identical observation useful again.
     for step in reversed(trace[-24:]):
         if step.get("tool_name") != "execute_browser" or not step.get("success"):
-            continue
+            break
         try:
             prior_args = step.get("tool_args") or {}
             prior_spec = json.loads(prior_args.get("args") or "{}")
@@ -64,7 +72,8 @@ def prior_identical_browser_action(
             ) == signature:
                 return step
         except (TypeError, ValueError, AttributeError):
-            continue
+            break
+        break
     return None
 
 

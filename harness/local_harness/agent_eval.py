@@ -74,6 +74,12 @@ def summarize_run_ledgers(runs: Sequence[dict]) -> Dict[str, Any]:
         "repeated_tool_target_actions": sum(
             int(row.get("repeated_tool_target_actions") or 0) for row in coverage
         ),
+        "fingerprinted_tool_calls": sum(
+            int(row.get("fingerprinted_tool_calls") or 0) for row in coverage
+        ),
+        "exact_repeated_tool_calls": sum(
+            int(row.get("exact_repeated_tool_calls") or 0) for row in coverage
+        ),
         "published_findings": sum(int(row.get("published_findings") or 0) for row in coverage),
         "duration_seconds": round(sum(float(row.get("duration_seconds") or 0) for row in coverage), 1),
         "timeout_runs": sum(run.get("status") in {"timeout", "interrupted", "stalled"} for run in valid),
@@ -93,6 +99,7 @@ def compare_ledger_assessments(baseline: dict, candidate: dict) -> Dict[str, Any
         raise ValueError("Both assessments need complete run receipts")
     metrics = (
         "actions", "test_actions", "repeated_tool_target_actions",
+        "fingerprinted_tool_calls", "exact_repeated_tool_calls",
         "timeout_runs", "published_findings", "duration_seconds",
     )
     return {

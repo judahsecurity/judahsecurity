@@ -14,6 +14,8 @@ export type AgentRunLedger = {
     by_status: Record<string, number>;
     duration_seconds?: number;
     repeated_tool_target_actions?: number;
+    fingerprinted_tool_calls?: number;
+    exact_repeated_tool_calls?: number;
     model_calls?: number;
     test_actions?: number;
     completed_by_stage?: Record<string, number>;
@@ -72,7 +74,12 @@ export function RunLedgerPanel({ run }: { run: AgentRunLedger | null }) {
           {run.coverage?.actions || 0} actions · {counts.completed || 0} completed · {counts.failed || 0} failed · {counts.interrupted || 0} interrupted · {counts.skipped || 0} skipped · {run.coverage?.published_findings || 0} published findings
         </p>
         <p className="text-muted-foreground">
-          {Math.round((run.coverage?.duration_seconds || 0) / 60)} min elapsed · {run.coverage?.model_calls || 0} model calls · {run.coverage?.repeated_tool_target_actions || 0} repeated tool/target actions
+          {Math.round((run.coverage?.duration_seconds || 0) / 60)} min elapsed · {run.coverage?.model_calls || 0} model calls · {run.coverage?.fingerprinted_tool_calls
+            ? `${run.coverage.exact_repeated_tool_calls || 0} exact repeat calls among ${run.coverage.fingerprinted_tool_calls} fingerprinted calls`
+            : "exact repeats unavailable for this run"}
+        </p>
+        <p className="text-muted-foreground">
+          {run.coverage?.repeated_tool_target_actions || 0} additional same-tool/host calls (distinct tests and required controls included)
         </p>
         {run.coverage?.completed_by_stage && (
           <p className="text-muted-foreground">

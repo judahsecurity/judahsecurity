@@ -311,6 +311,7 @@ async def startup_event():
     # Apply Oracle schema migrations so the Go service's tables exist
     apply_oracle_migrations()
     apply_scan_profile_migrations()
+    apply_agent_ledger_migrations()
 
     # Check ProjectDiscovery tools installation
     from app.services.nuclei_service import NucleiService
@@ -737,6 +738,17 @@ def apply_oracle_migrations():
         logger.info("Oracle schema migrations applied.")
     except Exception as exc:
         logger.error("Oracle schema migrations failed (non-fatal): %s", exc)
+
+
+def apply_agent_ledger_migrations():
+    """Add optional exact-call fingerprints to existing action receipt tables."""
+    from sqlalchemy import text
+
+    with engine.begin() as conn:
+        conn.execute(text(
+            "ALTER TABLE agent_action_receipts "
+            "ADD COLUMN IF NOT EXISTS fingerprint VARCHAR(64)"
+        ))
 
 
 def apply_scan_profile_migrations():
