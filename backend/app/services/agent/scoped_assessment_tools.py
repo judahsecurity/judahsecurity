@@ -553,7 +553,10 @@ class ScopedAssessmentTools:
                         query=urlencode([*pairs, (parameter, canary)]),
                     ))
                     break
-                if not baseline and observed["source"] in {"browser_link", "browser_request", "browser_traffic"}:
+                if not baseline and observed["source"] in {
+                    "browser_link", "browser_request", "browser_traffic",
+                    "page_url", "captured_api",
+                }:
                     # Browser maps intentionally expose parameter names without
                     # link values. A fresh, harmless value can still establish
                     # an execution-owned baseline for an observed safe GET input.

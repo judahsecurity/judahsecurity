@@ -183,7 +183,8 @@ async def test_string_tool_uses_private_browser_link_and_reserves_verifier_budge
 
 
 @pytest.mark.asyncio
-async def test_string_tool_preflights_observed_link_when_browser_kept_only_names(monkeypatch):
+@pytest.mark.parametrize("source", ["browser_link", "page_url", "captured_api"])
+async def test_string_tool_preflights_observed_link_when_browser_kept_only_names(monkeypatch, source):
     manager = ASMToolsManager()
     manager._fallback_target = "https://app.example.test"
     register_scope(manager, "app.example.test")
@@ -191,7 +192,7 @@ async def test_string_tool_preflights_observed_link_when_browser_kept_only_names
         "scope": "https://app.example.test",
         "parameter_inventory": [{"method": "GET", "path": "/catalog",
                                  "name": "category", "location": "query",
-                                 "source": "browser_link"}],
+                                 "source": source}],
     }
     preflights = []
 
