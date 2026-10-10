@@ -40,6 +40,7 @@ class FindingCandidate:
     tenant: str = ""
     parameter: str = ""
     test_type: str = ""
+    vulnerability_class: str = ""
     coverage_cell_id: str = ""
     capture_id: str = ""
     evidence_ids: List[str] = field(default_factory=list)
@@ -305,6 +306,7 @@ def parse_verdict_from_text(text: str) -> str:
 
 
 def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> str:
+    from app.services.agent.proof_policy import PROOFS_BY_CLASS, inferred_vulnerability_class
     from app.services.agent.auth_header_bypass import (
         VERIFIER_ADDENDUM as AUTH_HEADER_VERIFIER_ADDENDUM,
         is_auth_header_finding,
@@ -359,6 +361,8 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
     if is_oob_finding(packet):
         addenda.append(INTERACTSH_VERIFIER_ADDENDUM)
     class_addendum = ("\n\n" + "\n\n".join(addenda)) if addenda else ""
+    claim_class = candidate.vulnerability_class or inferred_vulnerability_class(candidate)
+    proof_options = ", ".join(sorted(PROOFS_BY_CLASS.get(claim_class, ()))) or "none yet"
 
     return (
         "You are an ADVERSARIAL verifier in a FRESH session. You did not see the "
@@ -369,6 +373,7 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         "so your evidence is distinguishable from the finder's.\n\n"
         f"CANDIDATE id={candidate.id}\n"
         f"Title: {candidate.title}\n"
+        f"Vulnerability class: {claim_class or 'unclassified'}; supported proof kinds: {proof_options}\n"
         f"Severity: {candidate.severity}\n"
         f"Target: {candidate.target}\n"
         f"Hypothesis: {candidate.hypothesis_id or '—'}  threat={candidate.threat_id or '—'}\n"
@@ -419,8 +424,9 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         "No body/schema/version alone proves authorization or mass assignment. "
         "with verdict confirmed|refuted|inconclusive, then done=true. "
         "confirmed = you reproduced impact with your own request/response. "
-        "Version-in-range CVE applicability: confirmed if your GET still shows the "
-        "claimed product+version inside the published range — do not exploit it. "
+        "A product version within a CVE's published range is an applicability lead, "
+        "not proof of the vulnerability. Mark inconclusive until a class-specific "
+        "validator demonstrates the claimed behavior. "
         "refuted = control holds or the finder hallucinated. "
         "inconclusive = you could not re-derive and must not rubber-stamp."
     )
@@ -542,10 +548,12 @@ def apply_verdict(
             if c.revision != run.revision:
                 return None
             if verdict == "confirmed":
+                from app.services.agent.proof_policy import proof_kind_allowed
+                ok, why = proof_kind_allowed(c, proof.get("kind"))
                 matrix_candidate = any(row.get('hypothesis_id') == c.hypothesis_id for row in brain.authorization_matrix)
                 is_workflow = matrix_candidate or (proof or {}).get('kind') == 'workflow'
                 evidence_target = c.target
-                if is_workflow:
+                if ok and is_workflow:
                     engine = getattr(tools_manager, '_proof_engine', None)
                     if engine and (proof or {}).get('kind') == 'workflow':
                         ok, why = engine.validate_receipt(proof.get('run_id'), c, evidence_ids or [])
@@ -553,8 +561,6 @@ def apply_verdict(
                             evidence_target = engine.receipts[proof['run_id']].attack_url
                     else:
                         ok, why = False, 'Authorization matrix candidates require a fresh workflow receipt'
-                else:
-                    ok, why = True, ''
                 if ok:
                     ok, why = evidence_store(tools_manager).validate(
                         evidence_ids or [], candidate_id=c.id, revision=c.revision,
@@ -678,7 +684,9 @@ def submit_candidate(
     evidence_ids: Optional[List[str]] = None,
     proof_run_id: str = "",
     proof_escalation_id: str = "",
+    vulnerability_class: str = "",
 ) -> FindingCandidate:
+    vulnerability_class = str(vulnerability_class or "").strip().lower()
     if coverage_cell_id and not proof_escalation_id:
         proof_escalation_id = next(
             (
@@ -699,13 +707,16 @@ def submit_candidate(
                 claim_changed = any(value and value != getattr(c, name) for name, value in (
                     ("evidence", evidence), ("description", description), ("severity", severity),
                     ("claimed_request", claimed_request),
+                    ("vulnerability_class", vulnerability_class),
                 ))
-                changed = bool(new_evidence) if c.status in ("inconclusive", "refuted") else claim_changed
+                class_changed = bool(vulnerability_class and vulnerability_class != c.vulnerability_class)
+                changed = bool(new_evidence or class_changed) if c.status in ("inconclusive", "refuted") else claim_changed
                 if changed:
                     c.evidence = evidence[:4000] if evidence else c.evidence
                     c.description = description or c.description
                     c.severity = severity or c.severity
                     c.claimed_request = claimed_request[:2000] or c.claimed_request
+                    c.vulnerability_class = vulnerability_class or c.vulnerability_class
                     c.revision += 1
                     c.status = "pending"
                     c.nonce = new_nonce()
@@ -759,6 +770,7 @@ def submit_candidate(
         tenant=tenant,
         parameter=parameter,
         test_type=test_type,
+        vulnerability_class=vulnerability_class,
         coverage_cell_id=coverage_cell_id,
         capture_id=capture_id,
         evidence_ids=list(dict.fromkeys(evidence_ids or [])),

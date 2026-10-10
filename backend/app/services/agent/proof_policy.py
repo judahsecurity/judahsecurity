@@ -17,6 +17,67 @@ Severity follows demonstrated impact and preconditions; do not auto-escalate by 
 Keep observations, candidates, confirmed findings, refutations, and inconclusive tests distinct.
 """
 
+# A proof recipe demonstrates a particular mechanism. A response containing a
+# marker, for example, cannot establish SQL execution or an authorization bypass.
+# Keep unsupported classes inconclusive until they have their own validator.
+PROOFS_BY_CLASS = {
+    "exposure": frozenset({"response_match", "public_directory_index"}),
+    "sql_injection": frozenset({"numeric_boolean_sqli", "string_boolean_sqli"}),
+    "xss": frozenset({"browser_xss", "scoped_browser_xss", "upload_xss"}),
+    "authorization": frozenset({"authorization", "owner_only", "state_change", "workflow"}),
+    "ssrf": frozenset({"oob_callback"}),
+    "xxe": frozenset(),
+    "command_injection": frozenset(),
+    "path_traversal": frozenset(),
+    "csrf": frozenset(),
+    "known_cve": frozenset(),
+    "account_enumeration": frozenset(),
+}
+
+_CLAIM_PATTERNS = (
+    ("sql_injection", r"\bSQLi\b|\bSQL\s+injection\b"),
+    ("xss", r"\bXSS\b|cross[ -]?site scripting|\bscript injection\b"),
+    ("ssrf", r"\bSSRF\b|server[ -]?side request forgery"),
+    ("xxe", r"\bXXE\b|XML external entity"),
+    ("command_injection", r"\b(?:OS|shell|command) injection\b|\bRCE\b|remote code execution"),
+    ("path_traversal", r"\bpath traversal\b|\bdirectory traversal\b|\bLFI\b|local file inclusion"),
+    ("csrf", r"\bCSRF\b|cross[ -]?site request forgery"),
+    ("account_enumeration", r"\baccount enumeration\b|\buser enumeration\b"),
+    ("authorization", r"\bIDOR\b|\bBOLA\b|\b(?:unauthorized|unauthenticated)\b.{0,50}"
+     r"\b(?:mutation|write|update|change|access|action|request|operation)\b|"
+     r"\bauthori[sz]ation bypass\b|\bauthentication bypass\b|\bcross[ -]?(?:tenant|user)\b|"
+     r"\bmass assignment\b|\baccount takeover\b|\bprivilege escalation\b"),
+    ("known_cve", r"\bCVE-\d{4}-\d{4,}\b|\bknown CVE\b"),
+    ("exposure", r"\bexpos(?:ed|ure)\b|\bdisclos(?:ed|ure)\b|\bdirectory index\b|"
+     r"\bdirectory listing\b|\bpublicly accessible\b"),
+)
+
+
+def inferred_vulnerability_class(candidate) -> str:
+    """Infer only an obvious claim; ambiguous claims need an explicit class."""
+    title = str(getattr(candidate, "title", "") or "")
+    description = str(getattr(candidate, "description", "") or "")
+    for source in (title, description):
+        for name, pattern in _CLAIM_PATTERNS:
+            if re.search(pattern, source, re.IGNORECASE):
+                return name
+    return ""
+
+
+def proof_kind_allowed(candidate, kind: str) -> tuple[bool, str]:
+    explicit = str(getattr(candidate, "vulnerability_class", "") or "").strip().lower()
+    inferred = inferred_vulnerability_class(candidate)
+    if explicit and explicit not in PROOFS_BY_CLASS:
+        return False, f"Unsupported vulnerability class: {explicit}"
+    if explicit and inferred and explicit != inferred:
+        return False, f"Vulnerability class {explicit} conflicts with the {inferred} claim"
+    claim_class = explicit or inferred
+    if not claim_class:
+        return False, "Specify a supported vulnerability class or an unambiguous claim"
+    if kind not in PROOFS_BY_CLASS[claim_class]:
+        return False, f"{kind or 'Missing proof'} cannot confirm {claim_class}; use a class-specific validator"
+    return True, ""
+
 
 def _json(row):
     try:
@@ -51,6 +112,9 @@ def validate_proof(
         return bool(item and 200 <= item["payload"]["response"].get("status", 0) < 300)
 
     kind = proof.get("kind")
+    allowed, reason = proof_kind_allowed(candidate, kind)
+    if not allowed:
+        return False, reason
     if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "owner_only", "public_directory_index", "scoped_browser_xss"):
         hunter_id = proof.get("hunter_artifact_id")
         verifier = row("artifact_id")
@@ -188,6 +252,16 @@ def validate_proof(
         domain = r.get("payload_domain") or ""
         if r.get("reused") or not domain or r.get("session_id") != p.get("session_id"):
             return False, "Use a newly registered collaborator session"
+        from app.services.agent.evidence_store import origin
+        from urllib.parse import urlsplit
+
+        planted_url = plant["payload"].get("request", {}).get("url", "")
+        try:
+            if (origin(planted_url) != origin(candidate.target)
+                    or urlsplit(planted_url).hostname == domain.lower()):
+                return False, "Plant the callback URL in the candidate endpoint, not as the request destination"
+        except (AttributeError, ValueError, TypeError):
+            return False, "Callback proof requires a valid candidate endpoint"
         from urllib.parse import unquote
 
         request_text = unquote(json.dumps(plant["payload"]["request"]))
@@ -211,13 +285,25 @@ def validate_proof(
         item, marker = row("artifact_id"), proof.get("contains")
         claim = candidate.title + " " + candidate.description
         if re.search(
-            r"(?i)xss|cross.?site.?script|ssrf|blind.?xxe|idor|bola|auth(?:entication|orization)?\s*(?:bypass|skip)|mass.?assignment|account.?takeover|account.?lookup|enumeration|settings.?write|cross.?(?:tenant|user)",
+            r"(?i)xss|cross.?site.?script|ssrf|xxe|idor|bola|sql.?injection|sqli|"
+            r"(?:os|shell|command).?injection|\brce\b|path.?traversal|\blfi\b|"
+            r"\bcsrf\b|\bcve-\d{4}-\d{4,}\b|"
+            r"auth(?:entication|orization)?\s*(?:bypass|skip)|mass.?assignment|"
+            r"account.?takeover|account.?lookup|enumeration|settings.?write|cross.?(?:tenant|user)",
             claim,
         ):
             return (
                 False,
                 "This impact claim requires differential or state-change proof",
             )
+        if item:
+            request, response = item["payload"].get("request", {}), item["payload"].get("response", {})
+            headers = {str(name).lower() for name in (request.get("headers") or {})}
+            if (item.get("kind") != "http_exchange" or item.get("identity") != "anonymous"
+                    or request.get("method") != "GET"
+                    or request.get("url") != response.get("url")
+                    or headers & {"authorization", "cookie", "proxy-authorization", "x-api-key"}):
+                return False, "Exposure requires a direct anonymous GET observation"
         if successful(item) and isinstance(marker, str) and len(marker.strip()) >= 12:
             if marker in item["payload"]["response"].get("body", ""):
                 return True, ""

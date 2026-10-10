@@ -8013,8 +8013,15 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         evidence_ids: Optional[List[str]] = None,
         proof_run_id: str = "",
         proof_escalation_id: str = "",
+        vulnerability_class: str = "",
     ) -> str:
-        """Queue a medium+ finding for independent verification. Hunters must not create_finding."""
+        """Queue a medium+ finding for independent verification.
+
+        Set vulnerability_class to exposure, sql_injection, xss, authorization,
+        ssrf, xxe, command_injection, path_traversal, csrf, known_cve, or
+        account_enumeration. Unsupported classes remain inconclusive until a
+        matching proof validator exists. Hunters must not create_finding.
+        """
         from app.services.agent.engagement_brain import engagement_brain_from_dict
         from app.services.agent.independent_verify import submit_candidate
 
@@ -8083,6 +8090,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             evidence_ids=evidence_ids or [],
             proof_run_id=proof_run_id or "",
             proof_escalation_id=proof_escalation_id or "",
+            vulnerability_class=vulnerability_class or "",
         )
         self._engagement_brain = brain.to_dict()
         return json.dumps(

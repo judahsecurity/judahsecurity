@@ -3526,6 +3526,19 @@ def methodology_progress(
         c for c in (brain.candidates or [])
         if (c.get("status") if isinstance(c, dict) else getattr(c, "status", "")) == "pending"
     ]
+    candidate_status = {"pending": 0, "confirmed": 0, "refuted": 0, "inconclusive": 0}
+    inconclusive_candidates = []
+    for raw in brain.candidates or []:
+        row = raw if isinstance(raw, dict) else raw.to_dict()
+        status = row.get("status", "pending")
+        if status in candidate_status:
+            candidate_status[status] += 1
+        if status == "inconclusive":
+            inconclusive_candidates.append({
+                "id": row.get("id", ""),
+                "title": row.get("title", ""),
+                "reason": str(row.get("verifier_summary") or "No supported proof recorded")[:200],
+            })
     unpublished_candidates = [
         c for c in (brain.candidates or [])
         if (c.get("status") if isinstance(c, dict) else getattr(c, "status", "")) == "confirmed"
@@ -3609,6 +3622,8 @@ def methodology_progress(
         "ready_to_complete_methods": ready_to_complete_methods,
         "coverage": cov,
         "pending_candidates": len(pending_candidates),
+        "candidate_verdicts": candidate_status,
+        "inconclusive_candidates": inconclusive_candidates[:12],
         "unpublished_candidates": len(unpublished_candidates),
         "pending_risk_assessments": len(pending_ras),
         "blockers": blockers,
@@ -3618,6 +3633,8 @@ def methodology_progress(
             f"{len(open_cards)} open ({len(blocking)} high-priority blocking complete). "
             f"Coverage: {cov.get('summary', '')}. "
             f"Candidates pending verify: {len(pending_candidates)}. "
+            f"Candidates inconclusive: {candidate_status['inconclusive']}; "
+            f"refuted: {candidate_status['refuted']}. "
             f"Confirmed candidates awaiting finding: {len(unpublished_candidates)}. "
             f"Findings pending Leo RA: {len(pending_ras)}."
         ),

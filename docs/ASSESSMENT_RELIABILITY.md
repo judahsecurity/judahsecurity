@@ -18,11 +18,23 @@ The verifier must execute its own requests and call `record_verify_verdict` with
 
 | Proof kind | Required observation |
 |---|---|
-| `response_match` | A substantial literal response observation for an exposure; unavailable for authorization, mass assignment, XSS, and blind SSRF claims |
+| `response_match` | A substantial literal observation from a direct anonymous GET for an exposure; it cannot confirm another bug class or a claim of further impact |
 | `authorization` | Same private object/action, distinct verified principals, and the owner's principal ID in the same response field |
 | `state_change` | The candidate-specific `aegis-verify-` value written, returned by a readback under the required identity boundary, and then cleaned up |
 | `browser_xss` | Browser dialog executing the fresh verifier canary; source reflection alone is insufficient |
 | `oob_callback` | Fresh collaborator registration, an observed request planting that payload, and a matching subsequent callback |
+
+Candidates now carry `vulnerability_class`. Hunters can set it on `submit_finding_candidate`; the verifier also infers an obvious class from the claim for older candidates. A declared class that conflicts with the claim cannot be confirmed. The verifier accepts only proof kinds assigned to that class:
+
+| Class | Accepted proof kinds |
+|---|---|
+| `exposure` | `response_match`, `public_directory_index` |
+| `sql_injection` | `numeric_boolean_sqli`, `string_boolean_sqli` |
+| `xss` | `browser_xss`, `scoped_browser_xss`, `upload_xss` |
+| `authorization` | `authorization`, `owner_only`, `state_change`, `workflow` |
+| `ssrf` | `oob_callback` |
+
+`xxe`, `command_injection`, `path_traversal`, `csrf`, `known_cve`, and `account_enumeration` have no confirmation recipe yet. Keep these candidates inconclusive until a dedicated validator demonstrates the claimed behavior. Version-in-range is a CVE applicability lead; the separate named-CVE applicability workflow reports that classification and must not be read as exploit verification. Assessment progress includes counts of pending, confirmed, refuted, and inconclusive candidates, plus concise inconclusive reasons.
 
 These are minimum proof requirements, not a universal vulnerability oracle. The verifier still has to establish intended access policy, context, and impact. A public object accessible to two users is not an IDOR. A legitimate authorized write is not an authorization flaw. Unsupported proof types stay inconclusive rather than falling back to a prose confirmation.
 
