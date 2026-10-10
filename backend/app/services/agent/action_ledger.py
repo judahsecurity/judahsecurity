@@ -251,7 +251,7 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
                       "compare_requests", "test_authorization_boundary",
                       "replay_http_request", "independent_verify", "run_assessment_workflow",
                       "mutate_captured_request", "run_intruder_batch", "browser_xss_check",
-                      "scoped_assessment_probe_assigned", "scoped_query_probe",
+                      "scoped_assessment_probe_assigned", "scoped_input_probe_assigned", "scoped_query_probe",
                       "scoped_numeric_sqli", "scoped_string_sqli", "scoped_body_probe"):
             stage = "logic_testing"
         elif tool in ("execute_nuclei", "execute_nikto", "execute_ffuf", "execute_wpscan"):
@@ -284,7 +284,7 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
                                              "run_assessment_workflow", "mutate_captured_request",
                                              "run_intruder_batch", "execute_nuclei", "execute_nikto",
                                              "execute_wpscan", "execute_sqlmap",
-                                             "scoped_assessment_probe_assigned", "scoped_query_probe",
+                                             "scoped_assessment_probe_assigned", "scoped_input_probe_assigned", "scoped_query_probe",
                                              "scoped_numeric_sqli", "scoped_string_sqli", "scoped_body_probe",
                                          )),
                      "completed_by_stage": stages,

@@ -96,8 +96,13 @@ class OperationDirective:
                 f"identity={work.get('identity', 'anonymous')}. "
                 + ("A PROWL private browser capture is available; use scoped_assessment_probe_assigned "
                    "with this cell and lease. " if work.get("scoped_capture_id") else
-                   "No PROWL private browser capture is available for this input; use "
-                   "structured request replay and browser tools, not scoped_assessment_probe_assigned. ") +
+                   "No PROWL private browser capture is available for this input; "
+                   + ("use scoped_input_probe_assigned with this cell and lease. "
+                      if work.get("method") == "GET" and work.get("location") == "query"
+                      and work.get("test_type") in {"xss", "sqli"}
+                      and not (work.get("test_type") == "sqli" and
+                               work.get("value_type") in {"positive_integer", "number"}) else
+                      "use structured request replay and browser tools. ")) +
                 "Test this exact input with a baseline and bounded canary, then cite the "
                 "exchange evidence when closing its coverage cell. Other inputs remain open "
                 "for later waves; get_parameter_inventory can page through the full worklist."

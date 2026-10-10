@@ -714,6 +714,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "scoped_assessment_observe": self.scoped_assessment_observe,
             "scoped_assessment_probe": self.scoped_assessment_probe,
             "scoped_assessment_probe_assigned": self.scoped_assessment_probe_assigned,
+            "scoped_input_probe_assigned": self.scoped_input_probe_assigned,
             "scoped_assessment_candidate": self.scoped_assessment_candidate,
             "scoped_assessment_publish": self.scoped_assessment_publish,
             "scoped_assessment_status": self.scoped_assessment_status,
@@ -864,6 +865,111 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if operation not in PROBE_OPERATIONS:
             return {"success": False, "error": "invalid_operation", "output": "Unknown probe operation"}
         return await self._scoped_assessment_operation(operation, body)
+
+    async def scoped_input_probe_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+        technique: str = "html_body",
+    ) -> Dict[str, Any]:
+        """Probe one leased, observed GET input with a local proof receipt.
+
+        Browser links and forms do not always yield a private XHR capture. The
+        scoped browser/SQLi tools can still test those exact observed inputs;
+        this adapter binds their evidence to the assigned coverage cell.
+        """
+        import time
+        from urllib.parse import quote, urlsplit
+
+        from app.services.agent.coverage_cells import parameter_test_funnel
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        location, separator, parameter = str((cell or {}).get("parameter") or "").partition(":")
+        reason = (
+            "missing_cell" if not cell else
+            "not_leased" if cell.get("status") != "leased" else
+            "lease_mismatch" if cell.get("lease_id") != coverage_lease_id else
+            "lease_expired" if float(cell.get("lease_deadline") or 0) <= time.time() else
+            "not_observed_input" if cell.get("source") != "parameter_inventory" or
+                cell.get("observation_source") not in {
+                    "browser_link", "browser_request", "observed_form", "browser_traffic",
+                    "page_url", "captured_api",
+                } else
+            "unsupported_input" if cell.get("test_type") not in {"xss", "sqli"} or
+                str(cell.get("method") or "").upper() != "GET" or
+                location != "query" or not separator or not parameter else
+            "unsafe_path" if not allowed_discovery_path(str(cell.get("path") or "/")) else ""
+        )
+        if reason:
+            return {"success": False, "error": "invalid_coverage_lease",
+                    "reason": reason, "output": f"An active lease on an observed GET input is required ({reason})"}
+        if cell["test_type"] == "sqli" and cell.get("value_type") in {"positive_integer", "number"}:
+            return {"success": False, "error": "numeric_capture_required",
+                    "output": "Numeric SQLi requires an observed positive numeric value and the numeric Boolean proof"}
+
+        cmap = getattr(self, "_capability_map", None) or {}
+        target = str(cmap.get("target") or cmap.get("scope") or
+                     getattr(self, "_fallback_target", "") or "")
+        parts = urlsplit(target)
+        if parts.scheme not in {"http", "https"} or parts.netloc.lower() != str(cell.get("host") or "").lower():
+            return {"success": False, "error": "scope_mismatch",
+                    "output": "Assigned input does not match the assessment origin"}
+        url = f"{parts.scheme}://{parts.netloc}{cell['path']}"
+        self._scoped_origin(url)
+        identity = str(cell.get("identity") or "anonymous")
+
+        if cell["test_type"] == "sqli":
+            if technique != "html_body":
+                return {"success": False, "error": "unsupported_technique"}
+            proof = json.loads(await self.scoped_string_sqli(url, parameter, identity))
+            operation = "scoped_string_sqli"
+            confirmed = proof.get("proof_confirmed") is True
+        else:
+            payloads = {
+                "html_body": '<img src=x onerror=alert("__PROWL_NONCE__")>',
+                "html_attribute": '"><img src=x onerror=alert("__PROWL_NONCE__")>',
+                "js_single": "';alert(\"__PROWL_NONCE__\");//",
+                "js_double": '\";alert(\'__PROWL_NONCE__\');//',
+            }
+            if technique not in payloads:
+                return {"success": False, "error": "unsupported_technique"}
+            template = f"{url}?{quote(parameter, safe='')}={quote(payloads[technique], safe='')}"
+            proof = json.loads(await self.scoped_browser_assessment(
+                "check_xss", template, identity=identity,
+            ))
+            operation = "scoped_browser_check_xss"
+            confirmed = proof.get("executed") is True
+
+        artifact_id = str(proof.get("evidence_id") or "")
+        if not artifact_id:
+            return {"success": False, "error": "missing_probe_evidence",
+                    "output": "The probe returned no execution-owned evidence receipt"}
+        live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        current = next((row for row in live.coverage_cells
+                        if row.get("id") == coverage_cell_id and
+                        row.get("lease_id") == coverage_lease_id), None)
+        if current is None:
+            return {"success": False, "error": "lease_changed",
+                    "output": "Coverage lease changed while the probe was running"}
+        current["probe_artifact_ids"] = list(dict.fromkeys([
+            *(current.get("probe_artifact_ids") or []), artifact_id,
+        ]))[:20]
+        current["evidence_ids"] = list(dict.fromkeys([
+            *(current.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        current["last_probe"] = operation
+        if confirmed:
+            current["status"] = "in_focus"
+            current["reason"] = "Execution-owned proof signal; independent verification required"
+        self._engagement_brain = live.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "operation": operation,
+                "evidence_id": artifact_id, "proof_confirmed": confirmed,
+                "probe_result": {key: proof[key] for key in (
+                    "executed", "proof_confirmed", "requests_sent", "baseline_source",
+                ) if key in proof}, "funnel": parameter_test_funnel(live)}
 
     async def scoped_assessment_probe_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,

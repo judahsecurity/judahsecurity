@@ -494,7 +494,8 @@ class ScopedAssessmentTools:
             and row.get("name") == parameter and row.get("location") == "query"
             and row.get("identity") == identity and row.get("testable")
             and row.get("source") in {
-                "page_url", "observed_form", "captured_api", "browser_traffic", "browser_link", "api_endpoint",
+                "page_url", "observed_form", "captured_api", "browser_traffic",
+                "browser_link", "browser_request", "api_endpoint",
             }), None)
         if observed is None:
             raise ValueError("String SQLi proof requires a mapped GET query parameter")
@@ -552,13 +553,25 @@ class ScopedAssessmentTools:
                         query=urlencode([*pairs, (parameter, canary)]),
                     ))
                     break
+                if not baseline and observed["source"] in {"browser_link", "browser_request", "browser_traffic"}:
+                    # Browser maps intentionally expose parameter names without
+                    # link values. A fresh, harmless value can still establish
+                    # an execution-owned baseline for an observed safe GET input.
+                    # The preflight below must succeed before SQL controls run.
+                    from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+
+                    if allowed_discovery_path(parts.path or "/"):
+                        canary = "AegisProbe" + str(secrets.randbelow(900000) + 100000)
+                        baseline = urlunsplit(parts._replace(query=urlencode([(parameter, canary)])))
+                        baseline_source = "observed_parameter_preflight"
                 if not baseline:
                     raise ValueError("String SQLi proof needs an ordinary observed GET URL with this parameter")
                 baseline, variants, nonce = sqli_string.plan_string_boolean(
                     baseline, parameter=parameter, allowed_origins=[allowed],
                 )
                 needs_preflight = True
-                baseline_source = "observed_get_form"
+                if baseline_source != "observed_parameter_preflight":
+                    baseline_source = "observed_get_form"
         else:
             baseline, variants, nonce = sqli_string.plan_string_boolean(
                 url, parameter=parameter, allowed_origins=[allowed],

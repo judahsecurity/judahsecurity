@@ -4,9 +4,11 @@ import json
 
 import pytest
 
+from app.services.agent.assessment_scope import register_scope
 from app.services.agent.api_fingerprint import fingerprint_from_map
 from app.services.agent.coverage_cells import (
-    claim_coverage_cell_leases, seed_js_coverage_cells, seed_parameter_coverage_cells,
+    claim_coverage_cell_leases, parameter_test_funnel,
+    seed_js_coverage_cells, seed_parameter_coverage_cells,
 )
 from app.services.agent.engagement_brain import EngagementBrain
 from app.services.agent.operation_directive import directives_from_hypotheses
@@ -226,3 +228,93 @@ async def test_assigned_sqli_selects_service_proof_shape(
                 if row["id"] == lease.coverage_cell_id)
     assert cell["service_probe_artifact_ids"] == ["probe-item"]
     assert cell["status"] == ("in_focus" if expected == "http_sqli_boolean" else "leased")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("executed", [False, True])
+async def test_assigned_link_xss_probe_records_exact_cell_receipt(monkeypatch, executed):
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "path": "/catalog", "host": "app.test",
+        "name": "searchTerm", "location": "query", "source": "browser_link",
+        "identity": "anonymous", "testable": True,
+    }])
+    lease = claim_coverage_cell_leases(brain, ["xss"])["xss"]
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.test"
+    manager._capability_map = {"target": "https://app.test"}
+    manager._engagement_brain = brain.to_dict()
+    register_scope(manager, "app.test")
+    calls = []
+
+    async def fake_browser(operation, url, identity="anonymous"):
+        calls.append((operation, url, identity))
+        return json.dumps({"evidence_id": "browser-proof", "executed": executed})
+
+    monkeypatch.setattr(manager, "scoped_browser_assessment", fake_browser)
+    assert (await manager.scoped_input_probe_assigned(lease.coverage_cell_id, "wrong"))["error"] == "invalid_coverage_lease"
+    assert not calls
+    result = await manager.scoped_input_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert result["success"] and result["proof_confirmed"] is executed
+    assert calls[0][0] == "check_xss" and "searchTerm=" in calls[0][1]
+    assert "__PROWL_NONCE__" in calls[0][1]
+    cell = next(row for row in manager._engagement_brain["coverage_cells"]
+                if row["id"] == lease.coverage_cell_id)
+    assert cell["probe_artifact_ids"] == cell["evidence_ids"] == ["browser-proof"]
+    assert cell["status"] == ("in_focus" if executed else "leased")
+    assert parameter_test_funnel(manager._engagement_brain)["probed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_assigned_link_sqli_probe_records_proof_without_closing_sibling(monkeypatch):
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "path": "/catalog", "host": "app.test",
+        "name": "category", "location": "query", "source": "browser_link",
+        "identity": "anonymous", "testable": True,
+    }])
+    lease = claim_coverage_cell_leases(brain, ["sqli"])["sqli"]
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.test"
+    manager._capability_map = {"target": "https://app.test"}
+    manager._engagement_brain = brain.to_dict()
+    register_scope(manager, "app.test")
+    calls = []
+
+    async def fake_sqli(url, parameter, identity):
+        calls.append((url, parameter, identity))
+        return json.dumps({"evidence_id": "sqli-proof", "proof_confirmed": True,
+                           "requests_sent": 8, "baseline_source": "observed_parameter_preflight"})
+
+    monkeypatch.setattr(manager, "scoped_string_sqli", fake_sqli)
+    result = await manager.scoped_input_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert result["success"] and result["proof_confirmed"]
+    assert calls == [("https://app.test/catalog", "category", "anonymous")]
+    cells = manager._engagement_brain["coverage_cells"]
+    sqli = next(row for row in cells if row["id"] == lease.coverage_cell_id)
+    xss = next(row for row in cells if row["test_type"] == "xss")
+    assert sqli["probe_artifact_ids"] == ["sqli-proof"]
+    assert sqli["status"] == "in_focus" and xss["status"] == "untested"
+    assert parameter_test_funnel(manager._engagement_brain)["probed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_assigned_numeric_input_rejects_string_proof(monkeypatch):
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "path": "/catalog", "host": "app.test",
+        "name": "productId", "location": "query", "source": "browser_link",
+        "value_type": "positive_integer", "identity": "anonymous", "testable": True,
+    }])
+    lease = claim_coverage_cell_leases(brain, ["sqli"])["sqli"]
+    manager = ASMToolsManager()
+    manager._capability_map = {"target": "https://app.test"}
+    manager._engagement_brain = brain.to_dict()
+
+    async def forbidden(*_args):
+        pytest.fail("String SQLi proof must not run on a numeric input")
+
+    monkeypatch.setattr(manager, "scoped_string_sqli", forbidden)
+    result = await manager.scoped_input_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert result["error"] == "numeric_capture_required"
+    assert parameter_test_funnel(manager._engagement_brain)["probed"] == 0

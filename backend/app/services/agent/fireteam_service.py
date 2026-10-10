@@ -583,6 +583,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ),
         allowed_tools=[
             "get_parameter_inventory",
+            "scoped_input_probe_assigned",
             "scoped_assessment_probe_assigned",
             "scoped_assessment_candidate",
             "execute_xsstrike",
@@ -607,6 +608,13 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "reflection or rendering; if it is absent, record an evidence-backed negative for "
             "that input. Use structured request tools for special characters; do not "
             "pass raw injection strings through a shell command. If the directive has "
+            "an observed GET query input without a private browser capture, call "
+            "scoped_input_probe_assigned with its coverage cell and lease IDs. "
+            "This records an execution-owned browser receipt on the exact cell. "
+            "Choose html_body, html_attribute, js_single, or js_double from the observed reflection context. "
+            "When it confirms execution, submit_finding_candidate with the receipt and coverage cell; "
+            "an independent verifier must repeat the proof. "
+            "If the directive has "
             "a PROWL private browser capture, call "
             "scoped_assessment_probe_assigned with the coverage cell and lease IDs; "
             "For a captured GET query, inspect the canary reflection context first. "
@@ -630,6 +638,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         ),
         allowed_tools=[
             "get_parameter_inventory",
+            "scoped_input_probe_assigned",
             "scoped_string_sqli",
             "scoped_numeric_sqli",
             "scoped_assessment_probe_assigned",
@@ -662,6 +671,13 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "with the coverage cell and lease IDs. Numeric GET inputs use the scoped boolean "
             "proof; a single quote differential is only a lead. Submit a scoped candidate "
             "only on proof_confirmed=true and cite its service artifact ID. "
+            "For an assigned string GET query without a private browser capture, call "
+            "scoped_input_probe_assigned with its coverage cell and lease IDs; it preflights "
+            "an ordinary baseline when the browser disclosed only parameter names and "
+            "links the result to the exact coverage cell. A numeric input needs a captured "
+            "positive value and the numeric Boolean proof. For a confirmed local receipt, "
+            "submit_finding_candidate with its evidence ID and coverage cell so an independent "
+            "verifier can repeat it. "
             "For a mapped string GET input, use scoped_string_sqli on the observed "
             "path and parameter. It can recover a private same-origin browser link "
             "or preflight a one-field observed GET form; if neither exists, mark "

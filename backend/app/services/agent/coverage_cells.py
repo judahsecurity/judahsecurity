@@ -531,7 +531,8 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
             "attempted": bool(cell.get("attempts")) or status in {
                 "leased", "in_focus", "inconclusive", "tested_clean", "finding",
             },
-            "probed": bool(cell.get("service_probe_artifact_ids")) or (
+            "probed": bool(cell.get("service_probe_artifact_ids") or
+                           cell.get("probe_artifact_ids")) or (
                 status in {"tested_clean", "finding"} and bool(cell.get("evidence_ids"))
             ) or bool(candidate.get("evidence_ids")),
             "tested_clean": status == "tested_clean",
