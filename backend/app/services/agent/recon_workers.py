@@ -11,11 +11,12 @@ Worker kinds (bounded — not DirBuster-scale):
   ferox_dirs   — depth-1 common dirs (app-dirs-common.txt)
   katana_urls  — shallow URL/JS crawl enrich
   whatweb      — quick fingerprint
-  nuclei_recon — informational Nuclei (tech / detect). Not CVE spray.
+  nuclei_recon — informational Nuclei (info,low; tech / detect). Not CVE spray.
 
 Packs:
-  early        — httpx_tech + waf_probe + whatweb
-                 (auto on URL paste; interceptor queued separately)
+  early        — httpx_tech + waf_probe + whatweb + nuclei_recon (Tier 0:
+                 informational/passive, runs at kickoff to seed the brain while
+                 the browser crawls; auto on URL paste, interceptor separate)
   enrich       — ferox_dirs + katana_urls
   nuclei_recon — informational Nuclei only (explicit spawn)
   full         — early + enrich
@@ -46,7 +47,11 @@ WORKER_KINDS = (
 )
 
 PACKS: Dict[str, List[str]] = {
-    "early": ["httpx_tech", "waf_probe", "whatweb"],
+    # Tier 0: informational/passive recon runs at kickoff, in parallel with the
+    # browser crawl, so the brain and central ledger have tech/exposure signal
+    # before the fireteam dispatches. nuclei_recon stays bounded to info,low
+    # detect/tech templates (never CVE spray — see is_bounded_nuclei_recon_args).
+    "early": ["httpx_tech", "waf_probe", "whatweb", "nuclei_recon"],
     "enrich": ["ferox_dirs", "katana_urls"],
     "nuclei_recon": ["nuclei_recon"],
     "full": [
@@ -93,7 +98,7 @@ def nuclei_recon_args(url: str) -> str:
     """Bounded Nuclei CLI for the parallel recon worker."""
     return (
         f"-u {url} -jsonl -silent -rate-limit 20 -c 5 -timeout 5 -retries 0 "
-        f"-severity info -tags {NUCLEI_RECON_TAGS} "
+        f"-severity info,low -tags {NUCLEI_RECON_TAGS} "
         f"-etags {NUCLEI_RECON_EXCLUDE_TAGS}"
     )
 
