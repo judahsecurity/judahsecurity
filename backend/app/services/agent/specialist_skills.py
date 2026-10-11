@@ -391,8 +391,8 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "- Confirm DOM XSS in browser; hidden APIs → hand off to api_authz."
     ),
     "coverage": (
-        "SKILL PACK — coverage leftovers:\n"
-        "- Run AFTER logic specialists.\n"
+        "SKILL PACK — bounded scanner coverage:\n"
+        "- Run after the live map is ready, alongside logic specialists.\n"
         "- get_engagement_brain for creds; prefer authenticated nuclei -var.\n"
         "- Chain default-login → authenticated CVE / admin SSRF cards via queue_finding_followups.\n"
         "- Grafana admin: prove read-only first — GET /api/admin/settings, /api/datasources, "

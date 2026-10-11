@@ -606,7 +606,7 @@ _HUNT_CARDS: Dict[str, Dict[str, str]] = {
     },
     "coverage": {
         "title": "Coverage scan for known vulns/misconfig",
-        "assumption": "Known CVE/misconfig templates may hit remaining inventory after logic hunts",
+        "assumption": "Known CVE/misconfig templates may hit mapped live inventory",
         "test": "execute_nuclei without severity filter on primary live URLs; authenticated -var if creds exist",
         "pass_criteria": "Template match with corroborating response evidence",
         "kill_criteria": "No actionable template hits after scoped coverage",
@@ -2347,7 +2347,7 @@ def seed_hypotheses_from_capability_map(
             covered_hunts.add(str(m["hunt"]))
 
     queue = list(cmap.get("ranked_hunt_queue") or [])
-    # Always consider coverage after logic hunts when map is attack-ready.
+    # Consider a bounded coverage lane as soon as the live map is attack-ready.
     hunt_names = [q.get("hunt") for q in queue if q.get("hunt")]
     if cmap.get("ready_for_attack") and "coverage" not in hunt_names:
         hunt_names.append("coverage")
@@ -3449,7 +3449,7 @@ def classify_finding_type(title: str = "", description: str = "", tags: Optional
 
 
 _HIGH_PRI = {"critical", "high"}
-# Coverage leftovers are expected last — do not block complete on them alone.
+# Coverage is an independent lane; it does not replace logic completion.
 _COVERAGE_METHOD_IDS = {"coverage_known_vulns"}
 _COVERAGE_HUNTS = {"coverage"}
 
@@ -3510,15 +3510,10 @@ def methodology_progress(
             "owasp": h.owasp or "",
         })
 
-    ready_for_coverage = map_ready and seeded and (
-        # Prefer: high-pri logic cards resolved OR still open but brain exists
-        # Coverage may run in parallel with remaining medium cards after fireteam started.
-        len(proven) + len(killed) > 0 or len(blocking) == 0 or len(cards) > 0
-    )
-    # Stricter: coverage spray should wait until no high-pri blockers OR fireteam attempted
-    ready_for_coverage_spray = seeded and (
-        len(blocking) == 0 or any(h.status == "in_progress" for h in cards) or len(proven) + len(killed) > 0
-    )
+    # Discovery and methodology seeding are prerequisites; unrelated logic
+    # cards may continue in parallel and remain blockers for completion.
+    ready_for_coverage = map_ready and seeded
+    ready_for_coverage_spray = ready_for_coverage
 
     ready_to_complete_methods = seeded and len(blocking) == 0
     cov = coverage_progress(brain)
@@ -3617,7 +3612,7 @@ def methodology_progress(
         "blocking_high_priority": len(blocking),
         "open_coverage": len(open_coverage),
         "ready_for_coverage": ready_for_coverage,
-        "ready_for_coverage_spray": ready_for_coverage_spray or (map_ready and seeded and len(blocking) == 0),
+        "ready_for_coverage_spray": ready_for_coverage_spray,
         "ready_to_complete": ready_to_complete,
         "ready_to_complete_methods": ready_to_complete_methods,
         "coverage": cov,

@@ -20,7 +20,10 @@ from app.services.agent.engagement_brain import (
 from app.services.agent.operation_directive import directives_from_hypotheses
 from app.services.agent.penetration_task_graph import (
     NODE_BLOCKED,
+    NODE_READY,
     ExecutorSummary,
+    PenetrationTaskGraph,
+    TaskNode,
     apply_executor_summary,
     claim_task_leases,
     compact_scheduler_mission,
@@ -91,15 +94,49 @@ def test_seed_promotes_cards_onto_task_graph():
     assert any(n.methodology_id or n.source in ("methodology", "map") for n in graph.nodes.values())
 
 
-def test_coverage_blocked_until_logic_attempted():
+def test_coverage_runs_with_unattempted_logic_and_legacy_edges_are_removed():
     brain = _seeded_brain()
     graph = sync_graph_from_brain(brain)
     coverage = [n for n in graph.nodes.values() if n.specialist == "coverage"]
     assert coverage, "expected a coverage leftover node"
-    assert all(n.status == NODE_BLOCKED for n in coverage)
+    assert all(n.status == NODE_READY and not n.depends_on for n in coverage)
+    logic_ids = [n.id for n in graph.nodes.values() if n.specialist != "coverage"]
+    coverage[0].depends_on = logic_ids
+    brain.task_graph = graph.to_dict()
+    graph = sync_graph_from_brain(brain)
+    assert not graph.nodes[coverage[0].id].depends_on
     wave = ready_wave(graph)
-    assert "coverage" not in wave
+    assert "coverage" in wave
     assert wave, "high-pri logic cards should be ready"
+
+
+def test_coverage_has_a_wave_slot_when_high_priority_logic_is_backlogged():
+    nodes = {
+        f"logic-{index}": TaskNode(
+            id=f"logic-{index}", title=f"Logic {index}", specialist=f"hunter-{index}",
+            status=NODE_READY, priority="high",
+        )
+        for index in range(8)
+    }
+    nodes["scanner"] = TaskNode(
+        id="scanner", title="Known vulnerability coverage", specialist="coverage",
+        methodology_id="coverage_known_vulns", status=NODE_READY,
+        priority="medium",
+    )
+    wave = ready_wave(PenetrationTaskGraph(nodes=nodes), max_specialists=4)
+    assert wave[0] == "coverage"
+    assert len(wave) == 4
+    assert len(set(wave)) == 4
+
+
+def test_noncoverage_dependency_survives_graph_resync():
+    brain = _seeded_brain()
+    graph = sync_graph_from_brain(brain)
+    logic = [node for node in graph.nodes.values() if node.specialist != "coverage"]
+    logic[0].depends_on = [logic[1].id]
+    brain.task_graph = graph.to_dict()
+    restored = sync_graph_from_brain(brain)
+    assert restored.nodes[logic[0].id].depends_on == [logic[1].id]
 
 
 def test_ready_wave_is_specialists_not_every_card():

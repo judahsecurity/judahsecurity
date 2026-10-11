@@ -2229,33 +2229,12 @@ class AgentOrchestrator:
                     step_data["tool_output"] = (
                         f"Blocked: '{tool_name}' before methodology cards are seeded. "
                         "Call sync_engagement_brain so observation→methodology hypotheses exist, "
-                        "run fireteam_dispatch on high-priority cards, then resume coverage. "
+                        "then run bounded coverage alongside logic specialists. "
                         "Pass force=true to override."
                     )
                     step_data["success"] = False
                     step_data["error_message"] = "methodology_required"
                     record_skip("methodology_required")
-                    await self._emit_status({
-                        "type": "tool_complete",
-                        "tool_name": tool_name,
-                        "success": False,
-                        "output_summary": (step_data.get("tool_output") or "")[:300],
-                        "iteration": iteration,
-                    })
-                    return {"_current_step": step_data}
-                if not progress.get("ready_for_coverage_spray"):
-                    blockers = progress.get("blockers") or []
-                    blocker_txt = ", ".join(
-                        (b.get("methodology_id") or b.get("title") or "?") for b in blockers[:4]
-                    ) or "high-priority methodology cards"
-                    step_data["tool_output"] = (
-                        f"Blocked: '{tool_name}' while high-priority methodologies are unresolved "
-                        f"({blocker_txt}). Prove/kill those cards first (fireteam / compare_requests / "
-                        "update_hypothesis), then run coverage scanners. Pass force=true to override."
-                    )
-                    step_data["success"] = False
-                    step_data["error_message"] = "methodology_incomplete"
-                    record_skip("methodology_incomplete")
                     await self._emit_status({
                         "type": "tool_complete",
                         "tool_name": tool_name,

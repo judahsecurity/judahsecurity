@@ -170,6 +170,7 @@ def test_methodology_progress_blocks_complete_until_high_pri_resolved():
     progress = methodology_progress(brain, cmap=cmap.to_dict())
     assert progress["seeded"] is True
     assert progress["blocking_high_priority"] > 0
+    assert progress["ready_for_coverage_spray"] is True
     assert progress["ready_to_complete"] is False
 
     for h in list(brain.hypotheses):

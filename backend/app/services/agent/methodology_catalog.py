@@ -2175,7 +2175,7 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             hunt="coverage",
             specialist="coverage",
             priority="medium",
-            assumption="Known CVE/misconfig templates may hit remaining inventory after logic hunts",
+            assumption="Known CVE/misconfig templates may hit mapped live inventory",
             test=(
                 "execute_nuclei without severity filter on primary live URLs; "
                 "authenticated -var if engagement credentials exist"
@@ -2186,7 +2186,7 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             capec_ids=[],
             owasp="A06:2021 Vulnerable and Outdated Components",
             evidence=str(g("target") or (pages[0] if pages else "")),
-            why="Live web surface mapped — run coverage after logic hunts",
+            why="Live web surface mapped — run bounded coverage alongside logic hunts",
         ))
 
     if not out and pages:

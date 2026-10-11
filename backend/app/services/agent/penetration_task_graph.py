@@ -1,8 +1,9 @@
 """
 Penetration Task Graph (PTG) — swarm schedule over methodology cards.
 
-Methodology / chain hypotheses are nodes. Edges are dependencies
-(coverage waits on high-pri logic; chain cards wait on a parent finding).
+Methodology / chain hypotheses are nodes. Edges represent actual prerequisites,
+such as a chain card waiting on its parent finding. Coverage is an independent
+lane once the initial surface has been mapped.
 Joshua (orchestrator) only schedules ready nodes. Specialists are short-lived
 executors: fresh context, summary contract back to the graph — never raw
 nmap dumps into the commander window.
@@ -29,7 +30,6 @@ NODE_RETRY = "retry"
 
 _TERMINAL = {NODE_PROVEN, NODE_KILLED}
 _OPEN_HYP = {"open", "in_progress"}
-_HIGH_PRI = {"critical", "high"}
 _COVERAGE_SPECIALISTS = {"coverage"}
 _COVERAGE_METHOD_IDS = {"coverage_known_vulns"}
 _JUDGE_ROLES = {"finding_judge", "independent_verifier", "risk_assessor"}
@@ -160,15 +160,6 @@ def graph_from_dict(data: Optional[Dict[str, Any]]) -> PenetrationTaskGraph:
     return PenetrationTaskGraph(nodes=nodes)
 
 
-def _is_coverage(hyp: Any) -> bool:
-    mid = str(getattr(hyp, "methodology_id", "") or "").lower()
-    if mid in _COVERAGE_METHOD_IDS:
-        return True
-    specialist = str(getattr(hyp, "specialist", "") or "")
-    title = str(getattr(hyp, "title", "") or "").lower()
-    return specialist in _COVERAGE_SPECIALISTS or "coverage" in title
-
-
 def _hyp_status_to_node(status: str) -> str:
     if status == "proven":
         return NODE_PROVEN
@@ -243,28 +234,19 @@ def sync_graph_from_brain(brain: Any) -> PenetrationTaskGraph:
 
 
 def _apply_default_dependencies(graph: PenetrationTaskGraph, hyps: Sequence[Any]) -> None:
-    """Coverage waits on high-pri logic. Chain cards wait on a parent hyp if known."""
-    high_logic_ids = [
-        h.id
-        for h in hyps
-        if h.priority in _HIGH_PRI and not _is_coverage(h) and h.source in (
-            "methodology",
-            "map",
-            "threat_model",
-        )
-    ]
+    """Remove legacy coverage barriers while preserving other explicit edges."""
     title_index = {h.title.lower(): h.id for h in hyps}
 
     for h in hyps:
         node = graph.nodes.get(h.id)
         if not node:
             continue
-        deps: List[str] = list(node.depends_on)
-
-        if _is_coverage(h):
-            for hid in high_logic_ids:
-                if hid != h.id and hid not in deps:
-                    deps.append(hid)
+        # Older snapshots contain a coverage -> every high-priority logic edge.
+        # Clear only coverage edges; keep other explicit dependencies intact.
+        coverage_node = (node.specialist in _COVERAGE_SPECIALISTS
+                         or node.methodology_id in _COVERAGE_METHOD_IDS
+                         or "coverage" in node.title.lower())
+        deps: List[str] = [] if coverage_node else list(node.depends_on)
 
         parent = (getattr(h, "parent_finding", None) or "").strip()
         parent_id = (getattr(h, "parent_hypothesis_id", None) or "").strip()
@@ -283,17 +265,14 @@ def _deps_satisfied(graph: PenetrationTaskGraph, node: TaskNode) -> bool:
         dep = graph.nodes.get(dep_id)
         if dep is None:
             continue
-        # Coverage may start once deps have been attempted (running/retry/terminal),
-        # not only after every logic card is proven — otherwise one stuck card
-        # blocks leftovers forever. Chain cards still want a terminal parent.
+        # Chain cards need a terminal parent. Other explicit parent edges may
+        # proceed after the parent has started, without waiting for a verdict.
         if node.source == "chain":
             if dep.status not in _TERMINAL:
                 return False
         else:
             if dep.status not in _TERMINAL | {NODE_RUNNING, NODE_RETRY}:
-                # First wave: coverage stays blocked until logic cards leave pending.
-                if dep.status in (NODE_PENDING, NODE_READY, NODE_BLOCKED):
-                    return False
+                return False
     return True
 
 
@@ -337,6 +316,14 @@ def ready_wave(
     selected: List[str] = []
     if include_app_mapper and "app_mapper" not in selected:
         selected.append("app_mapper")
+    # Reserve one wave slot for mapped scanner coverage. Otherwise a large
+    # high-priority logic queue can starve this medium-priority lane even after
+    # its blanket dependency barrier is removed.
+    coverage = next((n.specialist for n in ready_nodes
+                     if n.specialist in _COVERAGE_SPECIALISTS
+                     or n.methodology_id in _COVERAGE_METHOD_IDS), None)
+    if coverage and coverage not in selected and len(selected) < max_specialists:
+        selected.append(coverage)
     for n in ready_nodes:
         if n.specialist and n.specialist not in selected:
             selected.append(n.specialist)

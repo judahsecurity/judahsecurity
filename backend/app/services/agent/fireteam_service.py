@@ -820,8 +820,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
     SpecialistProfile(
         name="coverage",
         role=(
-            "Coverage / known-vuln specialist. Run Nuclei and related scanners AFTER "
-            "logic hunts. If engagement credentials exist, prefer authenticated templates "
+            "Coverage / known-vuln specialist. Run bounded Nuclei coverage on the "
+            "mapped live surface alongside logic hunts. If engagement credentials exist, prefer authenticated templates "
             "(-var username/password) for default-login and post-auth CVEs."
         ),
         allowed_tools=[
