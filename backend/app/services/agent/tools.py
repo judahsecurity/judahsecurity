@@ -9002,10 +9002,28 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 ),
                 "",
             )
+            # A `killed` verdict from a high-value injection/XSS lane may only
+            # close the cell clean if it actually escalated to a confirmation
+            # tool; otherwise keep the cell open (inconclusive) for one more
+            # escalated pass so a dismissed differential is not closed forever.
+            from app.services.agent.penetration_task_graph import kill_is_disciplined
+
+            raw_verdict = getattr(final_report, "verdict", "") or "inconclusive"
+            tools_run = [
+                invocation.tool
+                for report in reports
+                for invocation in (report.tool_calls or [])
+            ]
+            effective_verdict = raw_verdict
+            if raw_verdict.lower() == "killed" and not kill_is_disciplined(
+                specialist, tools_run, getattr(lease, "attempt", 1)
+            ):
+                effective_verdict = "inconclusive"
+
             release_coverage_cell_lease(
                 brain,
                 lease,
-                verdict=(getattr(final_report, "verdict", "") or "inconclusive"),
+                verdict=effective_verdict,
                 evidence_ids=evidence_ids,
                 candidate_id=candidate_id,
                 reason=(

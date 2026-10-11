@@ -29,6 +29,11 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 logger = logging.getLogger(__name__)
 
 
+# Repeat-probe guard lives in its own dependency-free module so it stays
+# unit-testable without the heavy LLM imports this module carries.
+from app.services.agent.probe_guard import RepeatGuard as _RepeatGuard
+
+
 # ---------------------------------------------------------------------------
 # Built-in specialist profiles
 # ---------------------------------------------------------------------------
@@ -1298,6 +1303,8 @@ async def _run_specialist(
     messages.append(HumanMessage(content="Begin."))
 
     iteration = 0
+    guard = _RepeatGuard()
+    stall = 0
     while iteration < max_iter:
         iteration += 1
         try:
@@ -1343,6 +1350,31 @@ async def _run_specialist(
                         "Pick from the allowlist or finish with done=true."
             ))
             continue
+
+        # Repeat-probe guard: drop structurally identical re-probes that would
+        # spend budget without producing new evidence.
+        fresh_calls = [tc for tc in tool_calls
+                       if guard.allow(tc.get("tool", ""), tc.get("args") or {})]
+        if not fresh_calls:
+            stall += 1
+            if stall >= 2:
+                report.summary = report.summary or (
+                    f"{profile.name} stalled: repeated identical probes without new "
+                    f"evidence. Last tools: {[tc.get('tool') for tc in tool_calls]}"
+                )
+                break
+            messages.append(HumanMessage(
+                content=(
+                    "You already ran that probe with identical arguments; repeating "
+                    "it yields no new evidence. Change a variable (parameter, payload, "
+                    "technique, or encoding), escalate to a confirmation tool "
+                    "(e.g. sql_injection_test/execute_sqlmap, execute_browser), or "
+                    "finish with done=true and your verdict."
+                )
+            ))
+            continue
+        stall = 0
+        tool_calls = fresh_calls
 
         tool_results = await asyncio.gather(*(
             _safe_invoke(tools_manager, tc.get("tool", ""), tc.get("args") or {})

@@ -233,6 +233,9 @@ def test_lease_records_structured_evidence_ids():
             specialist=specialist,
             assigned_hypothesis_id=lease.hypothesis_id,
             lease_id=lease.id,
+            # Escalation tools so a high-value injection/XSS lane's kill is
+            # disciplined and still closes (see kill_is_disciplined).
+            tools_run=["execute_sqlmap", "execute_browser"],
             hypothesis_results=[
                 {
                     "hypothesis_id": lease.hypothesis_id,

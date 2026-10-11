@@ -38,6 +38,42 @@ _JUDGE_ROLES = {"finding_judge", "independent_verifier", "risk_assessor"}
 VALID_VERDICTS = {"proven", "killed", "blocked", "retry", "inconclusive"}
 
 
+# Confirmation/escalation tools that make a `killed` verdict disciplined for
+# high-value injection/XSS lanes. Closing one of these classes clean after only
+# differential probing (compare_requests / run_custom_probe) — with no escalation
+# to a confirmation tool — is exactly how a real SQLi/XSS gets dismissed as noise
+# (observed: a live run saw a 9399→8690 byte differential on `category`, never
+# ran sqlmap, and closed the cell negative). Those probe tools are deliberately
+# NOT in these sets.
+_KILL_ESCALATION_TOOLS: Dict[str, frozenset] = {
+    "sqli": frozenset({"execute_sqlmap", "execute_commix"}),
+    "injection": frozenset({"execute_sqlmap", "execute_commix"}),
+    "xss": frozenset({"execute_dalfox", "execute_xsstrike", "execute_browser"}),
+}
+
+
+def kill_is_disciplined(
+    specialist: str,
+    tools_run: Iterable[str],
+    attempts: int,
+    max_attempts: int = 2,
+) -> bool:
+    """Whether a ``killed`` verdict from this lane may close its node/cell.
+
+    Non-high-value lanes keep existing behaviour (always True). High-value
+    injection/XSS lanes may close clean only if an escalation/confirmation tool
+    actually ran — otherwise the kill is sent back for one escalated pass. The
+    retry budget (``attempts``/``max_attempts``) bounds this: once it is spent
+    the kill is accepted, so a lane can never loop.
+    """
+    escalation = _KILL_ESCALATION_TOOLS.get((specialist or "").strip().lower())
+    if not escalation:
+        return True
+    if int(attempts) >= max(1, int(max_attempts)):
+        return True
+    return any((tool or "") in escalation for tool in (tools_run or []))
+
+
 @dataclass
 class TaskNode:
     """One swarm work item — usually a methodology or chain hypothesis."""
@@ -525,7 +561,24 @@ def apply_executor_summary(
         evidence = str(result.get("evidence") or "")[:2000]
         node.evidence_ids = [str(item) for item in result.get("evidence_ids", [])][:50]
         if verdict == "killed" and result.get("evidence_ids") and evidence:
-            node.status, hyp_status = NODE_KILLED, "killed"
+            if kill_is_disciplined(
+                summary.specialist, summary.tools_run, node.attempts, node.max_attempts
+            ):
+                node.status, hyp_status = NODE_KILLED, "killed"
+            else:
+                # High-value lane tried to close without escalating. Send it
+                # back for one confirmation pass instead of closing clean.
+                node.status, hyp_status = NODE_RETRY, "in_progress"
+                node.last_failure = (
+                    "Kill rejected: injection/XSS hypothesis closed after only "
+                    "differential probing with no escalation (sqlmap/commix or "
+                    "dalfox/xsstrike/browser). Re-run and escalate, or confirm the "
+                    "differential, before killing."
+                )
+                node.rewritten_test = node.rewritten_test or (
+                    "Escalate to a confirmation tool on the observed differential "
+                    "before returning verdict=killed."
+                )
         elif verdict == "blocked":
             node.status, hyp_status = NODE_BLOCKED, "open"
         else:
