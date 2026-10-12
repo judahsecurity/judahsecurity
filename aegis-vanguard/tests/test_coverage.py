@@ -141,3 +141,48 @@ def test_coverage_event_can_attribute_each_tested_identity():
         and row["planned"]
     }
     assert states == {"owner": "tested_negative", "other": "candidate"}
+
+
+def test_plan_includes_observed_non_sqli_classes_and_endpoint_checks():
+    ledger = CoverageLedger.from_input_surface({
+        "forms": [
+            {"action_url": "https://example.test/api/orders", "method": "POST",
+             "content_type": "application/json",
+             "eligible_parameters": ["json:filter", "json:template", "json:comment"]},
+            {"action_url": "https://example.test/import.xml", "method": "POST",
+             "content_type": "application/xml", "eligible_parameters": []},
+        ],
+    })
+    rows = {(row["endpoint"], row["parameter"], row["vulnerability_class"])
+            for row in ledger.snapshot() if row["planned"]}
+    assert ("https://example.test/api/orders", "json:filter", "nosql") in rows
+    assert ("https://example.test/api/orders", "json:template", "ssti") in rows
+    assert ("https://example.test/api/orders", "json:comment", "stored_xss") in rows
+    assert ("https://example.test/api/orders", "endpoint", "prototype_pollution") in rows
+    assert ("https://example.test/import.xml", "endpoint", "xxe") in rows
+
+
+def test_post_probe_result_matches_planned_class_and_method():
+    ledger = CoverageLedger.from_input_surface({"forms": [{
+        "action_url": "https://example.test/api/orders", "method": "POST",
+        "content_type": "application/json", "eligible_parameters": ["json:filter"],
+    }]})
+    touched = ledger.record_probe_result({
+        "probe": "nosql", "target": "https://example.test/api/orders",
+        "method": "POST", "tested_params": ["json:filter"], "candidates": [],
+    }, source="injection_hunter")
+    assert touched == 1
+    assert next(row for row in ledger.snapshot()
+                if row["vulnerability_class"] == "nosql"
+                and row["parameter"] == "json:filter")["state"] == "tested_negative"
+    assert any(row["vulnerability_class"] == "sqli" and row["state"] == "pending"
+               for row in ledger.snapshot())
+
+
+def test_bounded_pending_list_includes_multiple_classes():
+    ledger = CoverageLedger.from_input_surface({"forms": [{
+        "action_url": f"https://example.test/api/search/{index}",
+        "method": "GET", "eligible_parameters": ["q", "redirect_url", "template"],
+    } for index in range(30)]})
+    classes = {row["vulnerability_class"] for row in ledger.pending(limit=10)}
+    assert len(classes) >= 6

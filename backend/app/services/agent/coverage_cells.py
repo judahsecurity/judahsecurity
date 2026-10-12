@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import time
 import uuid
 from collections.abc import Iterable
@@ -105,7 +104,12 @@ def _specialist_for(test_type: str, hypothesis_id: str, brain: Any) -> str:
     for hypothesis in getattr(brain, "hypotheses", None) or []:
         if getattr(hypothesis, "id", "") == hypothesis_id:
             return _text(getattr(hypothesis, "specialist", "")) or "app_mapper"
+    from app.services.agent.vulnerability_catalog import specialist_for_class
+
     kind = _text(test_type).lower()
+    catalog_specialist = specialist_for_class(kind)
+    if catalog_specialist != "app_mapper":
+        return catalog_specialist
     if kind in {"authorization", "auth", "authz", "csrf", "business_logic"}:
         return "auth_logic"
     if "xss" in kind:
@@ -445,34 +449,23 @@ def migrate_coverage_cells(
 
 
 def seed_parameter_coverage_cells(brain: Any, inventory: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Create durable injection work for eligible observed inputs.
+    """Create durable, applicable vulnerability work for observed inputs.
 
     Repeated mapping cannot reset a completed or leased cell. Parameters that
     carry authentication or anti-CSRF state remain in the inventory but are
     excluded from automatic injection work.
     """
     from app.services.agent.parameter_inventory import parameter_priority
+    from app.services.agent.vulnerability_catalog import (
+        endpoint_test_classes,
+        parameter_test_classes,
+    )
 
     existing = {row.get("id") for row in getattr(brain, "coverage_cells", []) if isinstance(row, dict)}
     for raw in inventory:
         if not isinstance(raw, dict) or raw.get("testable") is not True:
             continue
-        path = str(raw.get("path") or "").lower()
-        name = str(raw.get("name") or "").lower()
-        method = str(raw.get("method") or "GET").upper()
-        location = str(raw.get("location") or "query")
-        if location == "body_xml":
-            test_types = ("xxe",)
-        else:
-            test_types = ["xss", "sqli"]
-            if (method in {"POST", "PUT", "PATCH"} and
-                    re.search(r"comment|review|blog|post", path) and
-                    re.search(r"comment|author|body|message|content|name|text", name)):
-                test_types.append("stored_xss")
-            if (re.search(r"command|cmd|exec|ping|host|address|ip_address", name) or
-                    re.search(r"stock|feedback", path)):
-                test_types.append("command_injection")
-        for test_type in test_types:
+        for test_type in parameter_test_classes(raw):
             specialist = _specialist_for(test_type, "", brain)
             hypothesis = next((
                 h for h in getattr(brain, "hypotheses", []) or []
@@ -489,11 +482,31 @@ def seed_parameter_coverage_cells(brain: Any, inventory: Iterable[dict[str, Any]
                 source="parameter_inventory", capture_id=raw.get("artifact_id", ""),
             )
             cell["priority_rank"] = parameter_priority(raw, specialist)
-            if test_type == "command_injection":
+            if test_type in {"command_injection", "ssrf", "authz"}:
                 cell["priority_rank"] = 0
-            elif test_type in {"stored_xss", "xxe"}:
+            elif test_type in {"stored_xss", "xxe", "race_condition"}:
                 cell["priority_rank"] = 2
             cell["value_type"] = str(raw.get("value_type") or "")[:40]
+            cell["observation_source"] = str(raw.get("source") or "")[:40]
+            if cell["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
+                brain.coverage_cells.append(cell)
+                existing.add(cell["id"])
+        for test_type in endpoint_test_classes(raw):
+            specialist = _specialist_for(test_type, "", brain)
+            hypothesis = next((
+                h for h in getattr(brain, "hypotheses", []) or []
+                if getattr(h, "specialist", "") == specialist
+                and getattr(h, "status", "") in ("open", "in_progress")
+            ), None)
+            cell = _new_cell(
+                brain,
+                method=raw.get("method", "GET"), path=raw.get("path", "/"),
+                host=raw.get("host", ""), identity=raw.get("identity", "anonymous"),
+                parameter="endpoint", test_type=test_type,
+                hypothesis_id=getattr(hypothesis, "id", ""),
+                source="surface_applicability", capture_id=raw.get("artifact_id", ""),
+            )
+            cell["priority_rank"] = 2
             cell["observation_source"] = str(raw.get("source") or "")[:40]
             if cell["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
                 brain.coverage_cells.append(cell)
@@ -508,7 +521,9 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
 
         brain = engagement_brain_from_dict(brain)
     cells = [row for row in getattr(brain, "coverage_cells", []) or []
-             if isinstance(row, dict) and row.get("source") == "parameter_inventory"]
+             if isinstance(row, dict) and row.get("source") in {
+                 "parameter_inventory", "surface_applicability",
+             }]
     candidates = {
         str(row.get("coverage_cell_id") or ""): row
         for row in (getattr(brain, "candidates", []) or [])
@@ -557,7 +572,14 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
                 "status": status,
                 "reason": str(cell.get("reason") or "")[:160],
             })
-    return {"inputs": len(inputs), **counts, "by_class": by_class, "open_rows": open_rows}
+    return {
+        "inputs": len(inputs), **counts, "by_class": by_class,
+        "classes_planned": len(by_class),
+        "classes_without_probes": sorted(
+            kind for kind, group in by_class.items() if group["probed"] == 0
+        ),
+        "open_rows": open_rows,
+    }
 
 
 def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, Any]]:
@@ -778,6 +800,8 @@ def claim_coverage_cell_leases(
     task_leases: dict[str, Any] | None = None,
     denominator: Iterable[dict[str, Any]] | None = None,
     allowed_observation_sources: frozenset[str] | None = None,
+    allowed_sources: frozenset[str] | None = None,
+    excluded_test_types: frozenset[str] | None = None,
     lease_seconds: int = 3600,
     now: float | None = None,
 ) -> dict[str, CoverageCellLease]:
@@ -801,6 +825,8 @@ def claim_coverage_cell_leases(
             for cell in brain.coverage_cells
             if cell.get("status") in CELL_OPEN
             and not cell.get("lease_id")
+            and (not allowed_sources or cell.get("source") in allowed_sources)
+            and (not excluded_test_types or cell.get("test_type") not in excluded_test_types)
             and (
                 allowed_observation_sources is None
                 or (

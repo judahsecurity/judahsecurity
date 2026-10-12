@@ -110,6 +110,15 @@ class PenetrationTaskGraph:
             "pending": [],
         }
         for n in self.nodes.values():
+            waiting_on = [
+                self.nodes[dep_id].title
+                for dep_id in n.depends_on
+                if dep_id in self.nodes
+                and self.nodes[dep_id].status not in (
+                    _TERMINAL if n.source == "chain"
+                    else _TERMINAL | {NODE_RUNNING, NODE_RETRY}
+                )
+            ]
             row = {
                 "id": n.id,
                 "title": n.title,
@@ -122,7 +131,10 @@ class PenetrationTaskGraph:
                 "lease_id": n.lease_id,
                 "lease_deadline": n.lease_deadline,
                 "recovery_required": n.recovery_required,
-                "blocked_reason": n.blocked_reason,
+                "blocked_reason": n.blocked_reason or (
+                    "Waiting for prerequisite: " + ", ".join(waiting_on[:3])
+                    if n.status == NODE_BLOCKED and waiting_on else ""
+                ),
             }
             buckets.setdefault(n.status, []).append(row)
         return buckets

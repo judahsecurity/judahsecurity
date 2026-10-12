@@ -300,7 +300,7 @@ def run_probe_ssti(target_url: str, params: str = "", method: str = "GET",
     param_list = _parameter_specs(target_url, params, method, request_headers, body)
     candidates: List[Dict[str, Any]] = []
     if not param_list:
-        return {"probe": "ssti", "target": target_url, "candidates": [],
+        return {"probe": "ssti", "target": target_url, "method": method.upper(), "candidates": [],
                 "note": "no request parameters to test; pass typed params such as query:q or json:name"}
     for param in param_list:
         for tmpl in _SSTI_TEMPLATES:
@@ -321,7 +321,7 @@ def run_probe_ssti(target_url: str, params: str = "", method: str = "GET",
                     "confirmed": True,
                 })
                 break  # this param confirmed; move on
-    return {"probe": "ssti", "target": target_url,
+    return {"probe": "ssti", "target": target_url, "method": method.upper(),
             "tested_params": param_list, "candidates": candidates}
 
 
@@ -341,7 +341,7 @@ def run_probe_path_traversal(target_url: str, params: str = "", method: str = "G
     param_list = _parameter_specs(target_url, params, method, request_headers, body)
     candidates: List[Dict[str, Any]] = []
     if not param_list:
-        return {"probe": "path_traversal", "target": target_url, "candidates": [],
+        return {"probe": "path_traversal", "target": target_url, "method": method.upper(), "candidates": [],
                 "note": "no request parameters to test; pass params=… (e.g. form:file,json:path)"}
     for param in param_list:
         for payload in _TRAVERSAL_PAYLOADS:
@@ -361,7 +361,7 @@ def run_probe_path_traversal(target_url: str, params: str = "", method: str = "G
                     "evidence": f"leaked file signature: {label}", "confirmed": True,
                 })
                 break
-    return {"probe": "path_traversal", "target": target_url,
+    return {"probe": "path_traversal", "target": target_url, "method": method.upper(),
             "tested_params": param_list, "candidates": candidates}
 
 
@@ -404,7 +404,7 @@ def run_probe_open_redirect(target_url: str, params: str = "", method: str = "GE
                     "evidence": why, "confirmed": True,
                 })
                 break
-    return {"probe": "open_redirect", "target": target_url,
+    return {"probe": "open_redirect", "target": target_url, "method": method.upper(),
             "tested_params": param_list, "candidates": candidates}
 
 
@@ -423,7 +423,7 @@ def run_probe_crlf(target_url: str, params: str = "", method: str = "GET",
     param_list = _parameter_specs(target_url, params, method, request_headers, body)
     candidates: List[Dict[str, Any]] = []
     if not param_list:
-        return {"probe": "crlf", "target": target_url, "candidates": [],
+        return {"probe": "crlf", "target": target_url, "method": method.upper(), "candidates": [],
                 "note": "no request parameters to test; pass typed params such as query:q or form:name"}
     for param in param_list:
         for payload in injections:
@@ -443,7 +443,7 @@ def run_probe_crlf(target_url: str, params: str = "", method: str = "GET",
                     "confirmed": True,
                 })
                 break
-    return {"probe": "crlf", "target": target_url,
+    return {"probe": "crlf", "target": target_url, "method": method.upper(),
             "tested_params": param_list, "candidates": candidates}
 
 
@@ -480,7 +480,7 @@ def run_probe_nosql(target_url: str, params: str = "", method: str = "GET",
     request_headers = _headers(headers_json)
     param_list = _parameter_specs(target_url, params, method, request_headers, body)
     if not param_list:
-        return {"probe": "nosql", "target": target_url, "candidates": [],
+        return {"probe": "nosql", "target": target_url, "method": method.upper(), "candidates": [],
                 "note": "no request parameters to test; pass typed params such as form:user or json:user"}
     candidates: List[Dict[str, Any]] = []
     for param in param_list:
@@ -524,7 +524,7 @@ def run_probe_nosql(target_url: str, params: str = "", method: str = "GET",
                                 "differential response", "confirmed": True,
                 })
                 break
-    return {"probe": "nosql", "target": target_url,
+    return {"probe": "nosql", "target": target_url, "method": method.upper(),
             "tested_params": param_list, "candidates": candidates}
 
 
@@ -548,7 +548,7 @@ def run_probe_command_injection(
     param_list = _parameter_specs(target_url, params, method, request_headers, body)
     if not param_list:
         return {
-            "probe": "command_injection", "target": target_url, "candidates": [],
+            "probe": "command_injection", "target": target_url, "method": method.upper(), "candidates": [],
             "note": "no request parameters to test; pass typed params such as form:host or json:command",
         }
     payloads = [
@@ -583,7 +583,7 @@ def run_probe_command_injection(
                 })
                 break
     return {
-        "probe": "command_injection", "target": target_url,
+        "probe": "command_injection", "target": target_url, "method": method.upper(),
         "tested_params": param_list, "candidates": candidates,
     }
 
@@ -689,7 +689,7 @@ def run_probe_stored_xss(inject_url: str, observe_urls: str, params: str = "",
                 "inject_url": inject_url, "payload": payload,
                 "evidence": f"{why} (observed at {obs})", "confirmed": True,
             })
-    return {"probe": "stored_xss", "inject_url": inject_url,
+    return {"probe": "stored_xss", "inject_url": inject_url, "method": method.upper(),
             "observed": targets, "candidates": candidates}
 
 

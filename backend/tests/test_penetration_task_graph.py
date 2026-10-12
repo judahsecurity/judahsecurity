@@ -139,6 +139,19 @@ def test_noncoverage_dependency_survives_graph_resync():
     assert restored.nodes[logic[0].id].depends_on == [logic[1].id]
 
 
+def test_dependency_block_has_an_explainable_snapshot_reason():
+    graph = PenetrationTaskGraph(nodes={
+        "parent": TaskNode(id="parent", title="Map live input", specialist="app_mapper",
+                           status=NODE_READY),
+        "child": TaskNode(id="child", title="Test mapped input", specialist="injection",
+                          status=NODE_BLOCKED, depends_on=["parent"]),
+    })
+    reason = next(row["blocked_reason"] for row in graph.snapshot()["blocked"]
+                  if row["id"] == "child")
+    assert "Map live input" in reason
+    assert graph.nodes["child"].blocked_reason == ""
+
+
 def test_ready_wave_is_specialists_not_every_card():
     brain = _seeded_brain()
     graph = sync_graph_from_brain(brain)

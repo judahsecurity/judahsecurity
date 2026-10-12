@@ -209,7 +209,9 @@ def _full_fireteam_completed(trace: List[Dict[str, Any]]) -> bool:
     return any(
         step.get("tool_name") == "fireteam_dispatch"
         and step.get("success") is not False
-        and (step.get("tool_args") or {}).get("mode") not in {"observed_inputs", "cms_followup"}
+        and (step.get("tool_args") or {}).get("mode") not in {
+            "observed_inputs", "cms_followup", "coverage_followup",
+        }
         and not (step.get("tool_args") or {}).get("surface_signature")
         for step in trace
     )
@@ -309,6 +311,73 @@ def _observed_input_wave(
             ),
         },
         "thought": "Dispatch a parallel hunt wave on observed inputs now.",
+    }
+
+
+def _coverage_followup_wave(
+    state: Dict[str, Any], trace: List[Dict[str, Any]], target: str,
+) -> Optional[Dict[str, Any]]:
+    """Dispatch applicable non-SQLi/XSS classes after the main fireteam wave.
+
+    Continue only while a previous wave completed evidence-backed work. A
+    failed or inconclusive wave leaves the gap visible instead of looping.
+    """
+    from app.services.agent.coverage_cells import CELL_OPEN, CELL_TERMINAL
+
+    all_cells = [
+        row for row in ((state.get("engagement_brain") or {}).get("coverage_cells") or [])
+        if isinstance(row, dict)
+        and row.get("source") in {"parameter_inventory", "surface_applicability"}
+        and row.get("test_type") not in {"xss", "sqli"}
+    ]
+    cells = [
+        row for row in all_cells
+        if row.get("status") in CELL_OPEN
+    ]
+    if not cells:
+        return None
+    prior_waves = [
+        step for step in trace
+        if step.get("tool_name") == "fireteam_dispatch"
+        and (step.get("tool_args") or {}).get("mode") == "coverage_followup"
+    ]
+    if len(prior_waves) >= 12:
+        return None
+    if prior_waves:
+        previous = (prior_waves[-1].get("tool_args") or {}).get("completed_coverage_count")
+        completed = sum(row.get("status") in CELL_TERMINAL for row in all_cells)
+        if not isinstance(previous, int) or completed <= previous:
+            return None
+    classes_by_specialist: Dict[str, set[str]] = {}
+    for row in cells:
+        specialist = str(row.get("specialist") or "")
+        if specialist and specialist not in {"sqli", "js_secrets"}:
+            classes_by_specialist.setdefault(specialist, set()).add(
+                str(row.get("test_type") or "")
+            )
+    specialists = sorted(classes_by_specialist)[:6]
+    if not specialists:
+        return None
+    classes = sorted({kind for name in specialists for kind in classes_by_specialist[name]})
+    return {
+        "tool_name": "fireteam_dispatch",
+        "tool_args": {
+            "specialists": specialists,
+            "mode": "coverage_followup",
+            "targets": [target],
+            "pending_coverage_count": len(cells),
+            "completed_coverage_count": sum(
+                row.get("status") in CELL_TERMINAL for row in all_cells
+            ),
+            "mission": (
+                "Execute the leased, observed request for its assigned vulnerability "
+                "class. Use a baseline and a class-specific discriminating control; "
+                "record a live evidence ID on the exact coverage cell. An unexecuted, "
+                "blocked, or inconclusive probe stays open. Applicable classes: "
+                + ", ".join(classes)
+            ),
+        },
+        "thought": "Dispatch specialists on untested applicable vulnerability classes.",
     }
 
 
@@ -965,6 +1034,10 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
                 "xss, sqli, ssrf, …). Fingerprints are not an assessment."
             ),
         }
+
+    followup = _coverage_followup_wave(state, trace, target)
+    if followup:
+        return followup
 
     try:
         from app.services.agent.wordpress_surface import wordpress_forced_step

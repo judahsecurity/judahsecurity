@@ -10,6 +10,8 @@ import json
 import re
 from urllib.parse import parse_qsl, urljoin, urlsplit
 
+from app.services.agent.static_assets import is_static_asset
+
 MAX_PARAMETERS = 4000
 _NAME = re.compile(r"[A-Za-z_/][A-Za-z0-9_./*\[\]-]{0,79}\Z")
 _PROTECTED = re.compile(r"csrf|xsrf|nonce|session|token|secret|api[_-]?key|authorization|jwt|bearer", re.I)
@@ -61,6 +63,8 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
                 or location not in _LOCATIONS):
             return
         path, _ = _resolved(url, base)
+        if is_static_asset(path):
+            return
         if not path:
             return
         method = str(method or "GET").upper()
@@ -113,13 +117,15 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
         action = str(form.get("action") or form.get("page") or cmap.get("target") or "")
         if not action:
             continue
-        query(action, method, "form_action")
+        form_identity = str(form.get("identity") or "")
+        query(action, method, "form_action", identity=form_identity)
         for field in (form.get("fields") or form.get("inputs") or [])[:60]:
             name = field.get("name") if isinstance(field, dict) else field
             value_type = field.get("control_type", "") if isinstance(field, dict) else ""
             add(method=method, url=action, name=name,
                 location="query" if method == "GET" else "form",
-                source="observed_form", value_type=value_type)
+                source="observed_form", value_type=value_type,
+                identity=form_identity)
 
     for endpoint in (cmap.get("api_endpoints") or [])[:300]:
         if not isinstance(endpoint, dict):
@@ -137,7 +143,9 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
             continue
         method = str(sample.get("method") or "GET")
         url = str(sample.get("url") or "")
-        query(url, method, "captured_api")
+        sample_identity = str(sample.get("identity") or "")
+        query(url, method, "captured_api", identity=sample_identity,
+              artifact_id=sample.get("artifact_id", ""))
         body = sample.get("body")
         headers = sample.get("headers") if isinstance(sample.get("headers"), dict) else {}
         request_type = str(sample.get("request_content_type") or next(
@@ -147,7 +155,8 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
             mime in request_type for mime in ("application/xml", "text/xml", "+xml")
         ):
             add(method=method, url=url, name="document", location="body_xml",
-                source="captured_api", artifact_id=sample.get("artifact_id", ""))
+                source="captured_api", identity=sample_identity,
+                artifact_id=sample.get("artifact_id", ""))
         if isinstance(body, str) and len(body) <= 16_000:
             try:
                 body = json.loads(body)
@@ -155,7 +164,8 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
                 if "application/x-www-form-urlencoded" in request_type:
                     try:
                         for name, _ in parse_qsl(body, keep_blank_values=True, max_num_fields=100)[:40]:
-                            add(method=method, url=url, name=name, location="body_form", source="captured_api")
+                            add(method=method, url=url, name=name, location="body_form",
+                                source="captured_api", identity=sample_identity)
                     except ValueError:
                         pass
                 body = None
@@ -170,7 +180,8 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
                     if isinstance(child, dict):
                         walk_json(child, name, depth + 1)
                     else:
-                        add(method=method, url=url, name=name, location="body_json", source="captured_api")
+                        add(method=method, url=url, name=name, location="body_json",
+                            source="captured_api", identity=sample_identity)
             walk_json(body)
 
     for raw in (cmap.get("parameter_inventory") or [])[:MAX_PARAMETERS]:

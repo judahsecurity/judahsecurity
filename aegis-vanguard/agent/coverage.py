@@ -29,7 +29,7 @@ COVERAGE_STATES = frozenset({
 })
 
 _TESTED_STATES = frozenset({"tested_negative", "candidate", "validated", "rejected"})
-_IDENTITY_CLASSES = frozenset({"auth", "authz", "csrf", "business_logic"})
+_IDENTITY_CLASSES = frozenset({"auth", "authz", "csrf", "business_logic", "oauth", "saml_sso"})
 
 _URLISH_RE = re.compile(
     r"(?:url|uri|href|src|callback|webhook|fetch|proxy|remote|avatar|image|feed)", re.I
@@ -46,6 +46,11 @@ _AUTH_RE = re.compile(
 _WORKFLOW_RE = re.compile(
     r"(?:cart|checkout|order|payment|coupon|promo|redeem|transfer|balance|inventory|approve|workflow)", re.I
 )
+_DATA_RE = re.compile(r"(?:query|search|filter|where|user|email|login|account|id|sort)", re.I)
+_TEMPLATE_RE = re.compile(r"(?:template|render|view|theme|layout|message|subject|body|content)", re.I)
+_TEXT_RE = re.compile(r"(?:comment|review|post|message|body|content|description|bio|profile|name|text)", re.I)
+_UPLOAD_RE = re.compile(r"(?:upload|attachment|avatar|image|document|import)", re.I)
+_AI_RE = re.compile(r"(?:/chat|/completions|/messages|/mcp|chatbot|copilot|assistant|prompt)", re.I)
 
 
 def _now() -> str:
@@ -67,6 +72,8 @@ def _parameter_spec(value: Any, method: str = "GET", content_type: str = "") -> 
     raw = str(value or "").strip()
     if not raw:
         return ""
+    if raw == "endpoint":
+        return raw
     if ":" in raw:
         location, name = raw.split(":", 1)
         if location.lower() in {"query", "form", "json", "graphql", "header", "cookie", "path"}:
@@ -80,11 +87,18 @@ def _parameter_spec(value: Any, method: str = "GET", content_type: str = "") -> 
     return f"{location}:{raw}"
 
 
-def _vuln_classes(endpoint: str, method: str, parameter: str) -> List[str]:
-    """Infer a bounded, high-value plan from a request input."""
+def _vuln_classes(endpoint: str, method: str, parameter: str, content_type: str = "") -> List[str]:
+    """Plan classes with matching input probes or an observed sink signal."""
+    location = parameter.split(":", 1)[0]
     name = parameter.split(":", 1)[-1]
     blob = f"{endpoint} {name}"
     classes = {"sqli", "xss"}
+    if location in {"json", "graphql"} or _DATA_RE.search(blob):
+        classes.add("nosql")
+    if _TEMPLATE_RE.search(blob):
+        classes.add("ssti")
+    if location == "header" or _REDIRECT_RE.search(blob) or _PATH_RE.search(blob):
+        classes.add("crlf")
     if _URLISH_RE.search(blob):
         classes.add("ssrf")
     if _REDIRECT_RE.search(blob):
@@ -99,8 +113,35 @@ def _vuln_classes(endpoint: str, method: str, parameter: str) -> List[str]:
         classes.add("auth")
     if method.upper() in {"POST", "PUT", "PATCH", "DELETE"}:
         classes.add("csrf")
+        if _TEXT_RE.search(blob):
+            classes.add("stored_xss")
     if _WORKFLOW_RE.search(blob):
         classes.add("business_logic")
+    return sorted(classes)
+
+
+def _endpoint_classes(endpoint: str, method: str, content_type: str) -> List[str]:
+    """Plan request or workflow checks once per observed endpoint."""
+    blob = f"{endpoint} {content_type}".lower()
+    classes = set()
+    if "xml" in content_type.lower() or re.search(r"(?:/soap|/xml|\.xml\b)", endpoint, re.I):
+        classes.add("xxe")
+    if "json" in content_type.lower():
+        classes.add("prototype_pollution")
+    if "multipart" in content_type.lower() or _UPLOAD_RE.search(endpoint):
+        classes.add("file_upload")
+    if "/api/" in endpoint.lower() or "graphql" in blob:
+        classes.add("cors")
+    if "graphql" in blob:
+        classes.add("graphql")
+    if "oauth" in blob or "oidc" in blob or "/authorize" in blob:
+        classes.add("oauth")
+    if "saml" in blob or "/sso" in blob:
+        classes.add("saml_sso")
+    if _AI_RE.search(endpoint):
+        classes.add("llm_ai")
+    if method in {"POST", "PUT", "PATCH", "DELETE"} and _WORKFLOW_RE.search(endpoint):
+        classes.add("race_condition")
     return sorted(classes)
 
 
@@ -113,6 +154,13 @@ def _normalize_class(value: Any) -> str:
         "broken_access_control": "authz",
         "path_traversal_lfi": "path_traversal",
         "os_command_injection": "command_injection",
+        "nosql_injection": "nosql",
+        "server_side_template_injection": "ssti",
+        "http_response_splitting": "crlf",
+        "crlf_injection": "crlf",
+        "xml_external_entity": "xxe",
+        "xml_external_entities": "xxe",
+        "unrestricted_file_upload": "file_upload",
     }
     return aliases.get(raw, raw)
 
@@ -151,11 +199,26 @@ class CoverageLedger:
             endpoint = _endpoint(item.get("action_url") or item.get("url"))
             method = str(item.get("method") or "GET").upper()
             content_type = str(item.get("content_type") or "")
+            if not endpoint:
+                continue
+            for vuln_class in _endpoint_classes(endpoint, method, content_type):
+                row_identities = labels if labels and vuln_class in _IDENTITY_CLASSES else [default_identity]
+                for identity in row_identities:
+                    ledger._upsert({
+                        "endpoint": endpoint,
+                        "method": method,
+                        "identity": identity,
+                        "parameter": "endpoint",
+                        "vulnerability_class": vuln_class,
+                        "state": "pending",
+                        "planned": True,
+                        "source": "input_surface",
+                    }, planned=True)
             for raw_param in item.get("eligible_parameters") or []:
                 parameter = _parameter_spec(raw_param, method, content_type)
-                if not endpoint or not parameter:
+                if not parameter:
                     continue
-                for vuln_class in _vuln_classes(endpoint, method, parameter):
+                for vuln_class in _vuln_classes(endpoint, method, parameter, content_type):
                     row_identities = labels if labels and vuln_class in _IDENTITY_CLASSES else [default_identity]
                     for identity in row_identities:
                         ledger._upsert({
@@ -269,7 +332,8 @@ class CoverageLedger:
         if not isinstance(payload, dict):
             return 0
         endpoint = _endpoint(
-            payload.get("target") or payload.get("url") or payload.get("endpoint")
+            payload.get("target") or payload.get("inject_url")
+            or payload.get("url") or payload.get("endpoint")
         )
         method = str(payload.get("method") or "GET").upper()
         vuln_class = _normalize_class(
@@ -402,10 +466,22 @@ class CoverageLedger:
                 copy.deepcopy(row) for row in self._records.values()
                 if row.get("planned") and row.get("state") in {"pending", "in_progress", "error"}
             ]
-        rows.sort(key=lambda row: (
-            row["vulnerability_class"], row["endpoint"], row["parameter"], row["identity"]
-        ))
-        return rows[:max(0, limit)]
+        # Interleave classes so a large SQLi/XSS surface cannot hide every
+        # other pending class from the bounded hunter prompt.
+        by_class: Dict[str, List[dict]] = {}
+        for row in rows:
+            by_class.setdefault(row["vulnerability_class"], []).append(row)
+        for group in by_class.values():
+            group.sort(key=lambda row: (row["endpoint"], row["parameter"], row["identity"]))
+        result: List[dict] = []
+        while by_class and len(result) < max(0, limit):
+            for vuln_class in sorted(list(by_class)):
+                result.append(by_class[vuln_class].pop(0))
+                if not by_class[vuln_class]:
+                    del by_class[vuln_class]
+                if len(result) >= limit:
+                    break
+        return result
 
     def snapshot(self, limit: Optional[int] = None) -> List[dict]:
         with self._lock:
