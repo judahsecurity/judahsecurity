@@ -243,7 +243,7 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
                       "execute_katana", "execute_feroxbuster", "fingerprint_api",
                       "probe_pilot_ports",
                       "fetch_lazy_chunks", "extract_js_endpoints", "discover_parameters",
-                      "parameter_discovery", "parameter_reflection_check",
+                      "parameter_discovery", "link_discovery", "parameter_reflection_check",
                       "execute_arjun", "ingest_urls_into_map"):
             stage = "surface_mapping"
         elif tool in ("assessment_kickoff", "spawn_recon_workers") or tool.startswith("recon_worker:"):

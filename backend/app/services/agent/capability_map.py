@@ -26,6 +26,7 @@ class CapabilityMap:
     scope: str = ""
     authenticated: Optional[bool] = None
     pages_visited: List[str] = field(default_factory=list)
+    discovered_links: List[Dict[str, Any]] = field(default_factory=list)
     forms: List[Dict[str, Any]] = field(default_factory=list)
     api_endpoints: List[Dict[str, str]] = field(default_factory=list)  # method, path, host
     js_endpoints: List[str] = field(default_factory=list)
@@ -107,6 +108,7 @@ def build_capability_map_from_crawl(crawl: Any) -> CapabilityMap:
     target = getattr(crawl, "target", "") or ""
     scope = getattr(crawl, "scope", "") or ""
     pages = list(getattr(crawl, "pages_visited", []) or [])
+    discovered_links = list(getattr(crawl, "discovered_links", []) or [])
     forms = list(getattr(crawl, "forms", []) or [])
     js_files = sorted(getattr(crawl, "js_files", set()) or [])
     js_endpoints = sorted(getattr(crawl, "endpoints_from_js", set()) or [])
@@ -133,6 +135,7 @@ def build_capability_map_from_crawl(crawl: Any) -> CapabilityMap:
             scope=scope,
             authenticated=authenticated,
             pages_visited=pages[:80],
+            discovered_links=discovered_links[:500],
             forms=forms[:60],
             api_endpoints=api_endpoints[:200],
             js_endpoints=js_endpoints[:200],
@@ -759,7 +762,8 @@ def format_capability_map_for_prompt(cmap: Optional[CapabilityMap | Dict[str, An
         f"Target: {cmap.target or '(unknown)'}  scope={cmap.scope or '?'}",
         f"Quality: {cmap.quality_score:.2f}  ready_for_attack={cmap.ready_for_attack}  "
         f"authenticated={cmap.authenticated}",
-        f"Pages browsed: {len(cmap.pages_visited)}  forms={len(cmap.forms)}  "
+        f"Pages browsed: {len(cmap.pages_visited)}  links observed={len(cmap.discovered_links)}  "
+        f"forms={len(cmap.forms)}  "
         f"APIs={len(cmap.api_endpoints)}  JS bundles={len(cmap.js_files)}",
         f"Capabilities: {', '.join(cmap.capabilities) or '(none)'}",
     ]
@@ -767,6 +771,12 @@ def format_capability_map_for_prompt(cmap: Optional[CapabilityMap | Dict[str, An
         lines.append("Sample pages:")
         for p in cmap.pages_visited[:8]:
             lines.append(f"  - {p}")
+    if cmap.discovered_links:
+        lines.append("Observed same-origin links (query names only):")
+        for row in cmap.discovered_links[:8]:
+            names = row.get("query_keys") or []
+            suffix = f" query_keys=[{','.join(names)}]" if names else ""
+            lines.append(f"  - {row.get('url')}{suffix}")
     if cmap.api_endpoints:
         lines.append("Sample APIs:")
         for e in cmap.api_endpoints[:10]:
@@ -866,11 +876,30 @@ def merge_capability_maps(
             out.append(item)
         return out
 
+    links_by_url: Dict[str, Dict[str, Any]] = {}
+    for row in list(old.discovered_links) + list(new.discovered_links):
+        if not isinstance(row, dict) or not isinstance(row.get("url"), str):
+            continue
+        url = row["url"]
+        if not url:
+            continue
+        prior = links_by_url.get(url)
+        if prior is None:
+            if len(links_by_url) >= 500:
+                continue
+            prior = {"url": url, "query_keys": [],
+                     "source_path": str(row.get("source_path") or "")}
+            links_by_url[url] = prior
+        prior["query_keys"] = sorted(set(prior["query_keys"]) |
+                                         {name for name in (row.get("query_keys") or [])
+                                          if isinstance(name, str)})[:20]
+
     merged = CapabilityMap(
         target=new.target or old.target,
         scope=new.scope or old.scope,
         authenticated=new.authenticated if new.authenticated is not None else old.authenticated,
         pages_visited=_uniq(list(old.pages_visited) + list(new.pages_visited))[:120],
+        discovered_links=list(links_by_url.values()),
         forms=_uniq(list(old.forms) + list(new.forms))[:80],
         api_endpoints=_uniq(list(old.api_endpoints) + list(new.api_endpoints))[:300],
         js_endpoints=_uniq(list(old.js_endpoints) + list(new.js_endpoints))[:300],

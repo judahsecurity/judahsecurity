@@ -2612,6 +2612,7 @@ class AgentOrchestrator:
                 "ranked_hunt_queue": (updates["capability_map"].get("ranked_hunt_queue") or [])[:8],
                 "authenticated": updates["capability_map"].get("authenticated"),
                 "api_sample_count": len(updates["capability_map"].get("api_samples") or []),
+                "discovered_link_count": len(updates["capability_map"].get("discovered_links") or []),
             })
             spawned_enrich = await self._maybe_spawn_dir_brute(state, updates["capability_map"])
             if spawned_enrich:

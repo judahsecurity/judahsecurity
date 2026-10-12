@@ -70,6 +70,18 @@ def project_scenario_surface(capability_map: object, engagement_brain: object = 
         for name in names:
             add("parameter", name, origin, path, location="query")
 
+    for row in (cmap.get("discovered_links") or [])[:100]:
+        if not isinstance(row, dict):
+            continue
+        origin, path, _ = _location(row.get("url"), default_origin)
+        if default_origin and origin != default_origin:
+            continue
+        add("directory" if path != "/" and path.endswith("/") else "page",
+            path, origin, path, source="observed_link")
+        for name in (row.get("query_keys") or [])[:20]:
+            if isinstance(name, str) and _PARAM_NAME.fullmatch(name):
+                add("parameter", name, origin, path, location="query")
+
     for row in (cmap.get("api_endpoints") or [])[:100]:
         if not isinstance(row, dict):
             continue

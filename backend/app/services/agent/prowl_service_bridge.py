@@ -148,9 +148,31 @@ def capability_map_from_observation(observation: dict) -> dict | None:
         and (path := in_origin_path(row.get("path")))
     ]
     parameters = []
+    discovered_links: dict[str, dict] = {}
+
+    def add_link(value: object, source_path: str = "", query_keys: object = None) -> None:
+        path = in_origin_path(value)
+        if not path:
+            return
+        url = scope + path
+        row = discovered_links.get(url)
+        if row is None:
+            if len(discovered_links) >= 500:
+                return
+            row = {"url": url, "query_keys": [], "source_path": source_path}
+            discovered_links[url] = row
+        names = ([name for name in query_keys[:20] if isinstance(name, str)]
+                 if isinstance(query_keys, list) else [])
+        row["query_keys"] = sorted(set(row["query_keys"]) | set(names))[:20]
+
+    for value in (result.get("links") or [])[:300]:
+        add_link(value, str(result.get("final_path") or "/"))
     link_inputs = list(result.get("link_query_inputs") or [])
     for page in (result.get("pages") or [])[:80]:
         if isinstance(page, dict):
+            source_path = urlsplit(str(page.get("url") or "")).path or "/"
+            for value in (page.get("links") or [])[:300]:
+                add_link(value, source_path)
             link_inputs.extend(page.get("link_query_inputs") or [])
     for row in link_inputs[:300]:
         if not isinstance(row, dict):
@@ -158,6 +180,7 @@ def capability_map_from_observation(observation: dict) -> dict | None:
         path = in_origin_path(row.get("path"))
         if not path:
             continue
+        add_link(scope + path, query_keys=row.get("query_keys"))
         for name in (row.get("query_keys") or [])[:20]:
             if isinstance(name, str):
                 parameters.append({"method": "GET", "path": path, "name": name,
@@ -207,7 +230,8 @@ def capability_map_from_observation(observation: dict) -> dict | None:
                                    "location": "query", "source": "javascript_static"})
     cmap = CapabilityMap(
         target=str(result.get("target_template") or scope), scope=scope,
-        pages_visited=pages, forms=forms, api_endpoints=api_endpoints,
+        pages_visited=pages, discovered_links=list(discovered_links.values()),
+        forms=forms, api_endpoints=api_endpoints,
         js_endpoints=list(dict.fromkeys(js_endpoints)), js_files=js_files,
         js_sources=js_sources,
         parameter_inventory=parameters[:4000],

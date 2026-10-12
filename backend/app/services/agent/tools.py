@@ -812,6 +812,35 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 capability_map = capability_map_from_observation(result)
                 if capability_map:
                     payload["capability_map"] = capability_map
+                    prior_map = getattr(self, "_capability_map", None)
+                    if not isinstance(prior_map, dict):
+                        prior_map = {}
+                    prior_links = {
+                        (str(row.get("url")), tuple(sorted(row.get("query_keys") or [])))
+                        for row in (prior_map.get("discovered_links") or []) if isinstance(row, dict)
+                    }
+                    new_links = [row for row in (capability_map.get("discovered_links") or [])
+                                 if isinstance(row, dict) and
+                                 (str(row.get("url")), tuple(sorted(row.get("query_keys") or [])))
+                                 not in prior_links]
+                    if new_links:
+                        try:
+                            from app.services.agent.action_ledger import active_run_id, append_action
+                            from app.services.agent.evidence_store import evidence_store
+
+                            link_id = evidence_store(self).record(
+                                "link_discovery", {"count": len(new_links), "links": new_links[:100]},
+                                target=capability_map.get("scope") or "",
+                            )
+                            payload["evidence_ids"] = [link_id]
+                            append_action(
+                                active_run_id.get(), os.urandom(16).hex(), "completed", "link_discovery",
+                                target=capability_map.get("scope") or "", phase="surface_mapping",
+                                detail=f"{len(new_links)} in-scope links observed; query values omitted",
+                                evidence_ids=[link_id],
+                            )
+                        except Exception:
+                            logger.exception("Could not record scoped browser link evidence")
                     from app.services.agent.capability_map import merge_capability_maps
                     from app.services.agent.engagement_brain import (
                         engagement_brain_from_dict, seed_hypotheses_from_capability_map,
@@ -1496,6 +1525,29 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
                         run_id = active_run_id.get()
                         target_origin = str(capability_map.get("target") or "")
+                        prior_map = getattr(self, "_capability_map", None)
+                        if not isinstance(prior_map, dict):
+                            prior_map = {}
+                        prior_links = {
+                            (str(row.get("url")), tuple(sorted(row.get("query_keys") or [])))
+                            for row in (prior_map.get("discovered_links") or []) if isinstance(row, dict)
+                        }
+                        links = [row for row in (capability_map.get("discovered_links") or [])
+                                 if isinstance(row, dict) and
+                                 (str(row.get("url")), tuple(sorted(row.get("query_keys") or [])))
+                                 not in prior_links]
+                        if links:
+                            link_id = evidence_store(self).record(
+                                "link_discovery", {"count": len(links), "links": links[:100]},
+                                target=target_origin,
+                            )
+                            evidence_ids.append(link_id)
+                            append_action(
+                                run_id, os.urandom(16).hex(), "completed", "link_discovery",
+                                target=target_origin, phase="surface_mapping",
+                                detail=f"{len(links)} in-scope links observed; query values omitted",
+                                evidence_ids=[link_id],
+                            )
                         parameters = capability_map.get("parameter_inventory") or []
                         if parameters:
                             parameter_id = evidence_store(self).record(

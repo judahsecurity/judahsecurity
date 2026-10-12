@@ -6,7 +6,9 @@ import pytest
 
 from app.models.asset import AssetType
 from app.services.agent import prowl_service_bridge as bridge
-from app.services.agent.scoped_assessment.browser import _link_query_inputs, _private_link_baselines
+from app.services.agent.scoped_assessment.browser import (
+    _crawl_links, _link_query_inputs, _private_link_baselines,
+)
 
 
 def _asset(value="app.example", kind=AssetType.DOMAIN, in_scope=True):
@@ -92,6 +94,8 @@ def test_browser_link_query_names_reach_parameter_inventory_without_values():
             "target_template": "https://app.example/",
             "final_origin": "https://app.example",
             "pages": [{"url": "https://app.example/", "status": 200,
+                       "links": ["https://app.example/catalog", "https://app.example/blog",
+                                 "https://other.example/offscope"],
                        "link_query_inputs": inputs}],
         },
     }
@@ -100,7 +104,21 @@ def test_browser_link_query_names_reach_parameter_inventory_without_values():
     assert {(row["name"], row["source"]) for row in catalog} == {
         ("category", "browser_link"), ("searchTerm", "browser_link"),
     }
+    assert {row["url"] for row in cmap["discovered_links"]} == {
+        "https://app.example/catalog", "https://app.example/blog",
+    }
+    assert next(row for row in cmap["discovered_links"]
+                if row["url"].endswith("/catalog"))["query_keys"] == ["category", "searchTerm"]
     assert "private-value" not in str(cmap)
+
+
+def test_browser_link_inventory_includes_links_after_first_hundred():
+    hrefs = [f"https://app.example/article/{index}" for index in range(140)]
+    hrefs.append("https://app.example/catalog?category=Gifts")
+    assert "https://app.example/catalog" in _crawl_links(hrefs, ["https://app.example"])
+    assert _link_query_inputs(hrefs, ["https://app.example"]) == [
+        {"path": "/catalog", "query_keys": ["category"]},
+    ]
 
 
 @pytest.mark.asyncio

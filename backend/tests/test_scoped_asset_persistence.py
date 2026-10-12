@@ -68,6 +68,12 @@ def test_scoped_map_updates_url_asset_and_related_sitemap():
     cmap = {
         "target": "https://app.test/", "scope": "https://app.test",
         "pages_visited": ["https://app.test/search?q=private-value"],
+        "discovered_links": [
+            {"url": "https://app.test/catalog", "query_keys": ["category"],
+             "source_path": "/"},
+            {"url": "https://evil.test/offscope", "query_keys": ["outside"],
+             "source_path": "/"},
+        ],
         "js_files": ["https://app.test/static/app.js?v=secret-value",
                      "https://evil.test/offscope.js"],
         "api_endpoints": [
@@ -91,12 +97,15 @@ def test_scoped_map_updates_url_asset_and_related_sitemap():
     assert count > 0
     assert "/existing" in asset.endpoints
     assert "/search" in asset.endpoints and "/api/items" in asset.endpoints
+    assert "/catalog" in asset.endpoints and "/offscope" not in asset.endpoints
     assert "/api/evil" not in asset.endpoints
     assert "/api/proxy" not in asset.endpoints
     assert "/api/claimed" not in asset.endpoints
     assert "/api/other-port" not in asset.endpoints
     assert asset.js_files == ["https://app.test/static/app.js"]
-    assert {"existing_param", "q", "id"}.issubset(set(asset.parameters))
+    assert {"existing_param", "q", "id", "category"}.issubset(set(asset.parameters))
+    assert any(isinstance(row, SitemapEntry) and row.path.startswith("/catalog")
+               for row in db.added)
     assert any(row["path"] == "/api/items" and row["parameters"] == ["id"]
                and row["status"] == 200 for row in asset.rest_endpoints)
     assert not any(row["path"] == "/api/write" for row in asset.rest_endpoints)

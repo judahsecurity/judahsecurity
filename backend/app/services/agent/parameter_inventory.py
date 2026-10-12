@@ -98,6 +98,14 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
         if isinstance(page, str):
             query(page, "GET", "page_url")
 
+    for link in (cmap.get("discovered_links") or [])[:500]:
+        if not isinstance(link, dict):
+            continue
+        url = str(link.get("url") or "")
+        for name in (link.get("query_keys") or [])[:20]:
+            add(method="GET", url=url, name=name, location="query",
+                source="browser_link")
+
     for form in (cmap.get("forms") or [])[:80]:
         if not isinstance(form, dict):
             continue

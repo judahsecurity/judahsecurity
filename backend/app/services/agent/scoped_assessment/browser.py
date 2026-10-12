@@ -14,6 +14,7 @@ from .browser_runtime import launch_options
 
 
 NONCE_MARKER = "__PROWL_NONCE__"
+MAX_LINKS_PER_PAGE = 300
 FORM_INVENTORY_JS = """els => els.slice(0, 30).map(form => {
   const action = new URL(form.action);
   const fields = Array.from(form.querySelectorAll('input[name], textarea[name], select[name]'))
@@ -70,7 +71,7 @@ def _crawl_links(hrefs: list[str], allowed_origins: list[str]) -> list[str]:
     from .browser_actions import allowed_discovery_path
 
     found: list[str] = []
-    for href in hrefs[:100]:
+    for href in hrefs[:MAX_LINKS_PER_PAGE]:
         try:
             assert_in_scope(href, allowed_origins)
             parts = urlsplit(href)
@@ -91,7 +92,7 @@ def _link_query_inputs(hrefs: list[str], allowed_origins: list[str]) -> list[dic
     from .browser_actions import allowed_discovery_path
 
     by_path: dict[str, set[str]] = {}
-    for href in hrefs[:100]:
+    for href in hrefs[:MAX_LINKS_PER_PAGE]:
         try:
             assert_in_scope(href, allowed_origins)
             parts = urlsplit(href)
@@ -114,7 +115,7 @@ def _private_link_baselines(hrefs: list[str], allowed_origins: list[str]) -> lis
     from .browser_actions import allowed_discovery_path
 
     found: list[str] = []
-    for href in hrefs[:100]:
+    for href in hrefs[:MAX_LINKS_PER_PAGE]:
         try:
             assert_in_scope(href, allowed_origins)
             parts = urlsplit(href)
@@ -420,7 +421,7 @@ async def check_browser(
                         response = await page.goto(page_url, wait_until="domcontentloaded", timeout=20_000)
                         assert_in_scope(page.url, allowed_origins)
                         hrefs = await page.locator("a[href]").evaluate_all(
-                            "els => els.slice(0, 100).map(e => e.href)"
+                            f"els => els.slice(0, {MAX_LINKS_PER_PAGE}).map(e => e.href)"
                         )
                         if link_baselines is not None:
                             link_baselines.extend(_private_link_baselines(hrefs, [expected_origin]))
@@ -514,7 +515,7 @@ async def check_browser(
                 await settle_capture()
                 page_paths = [urlsplit(page.url).path or "/"]
                 hrefs = await page.locator("a[href]").evaluate_all(
-                    "els => els.slice(0, 100).map(e => e.href)"
+                    f"els => els.slice(0, {MAX_LINKS_PER_PAGE}).map(e => e.href)"
                 )
                 if link_baselines is not None:
                     link_baselines.extend(_private_link_baselines(hrefs, [expected_origin]))
@@ -545,7 +546,7 @@ async def check_browser(
                         actions.append(await checkpoint(ref, "navigate_link", start, path=page_path,
                                                         navigation_mode=navigation_mode, status="completed"))
                         hrefs = await page.locator("a[href]").evaluate_all(
-                            "els => els.slice(0, 100).map(e => e.href)"
+                            f"els => els.slice(0, {MAX_LINKS_PER_PAGE}).map(e => e.href)"
                         )
                         if link_baselines is not None:
                             link_baselines.extend(_private_link_baselines(hrefs, [expected_origin]))
@@ -569,7 +570,7 @@ async def check_browser(
             }
             if operation == "map":
                 hrefs = await page.locator("a[href]").evaluate_all(
-                    "els => els.slice(0, 100).map(e => e.href)"
+                    f"els => els.slice(0, {MAX_LINKS_PER_PAGE}).map(e => e.href)"
                 )
                 if link_baselines is not None:
                     link_baselines.extend(_private_link_baselines(hrefs, [expected_origin]))

@@ -163,6 +163,41 @@ def test_merge_and_format():
     assert text.index("</UNTRUSTED_APPLICATION_DATA>") < text.index("Suggested fireteam")
 
 
+def test_observed_links_feed_unvisited_paths_and_query_parameter_queue():
+    from app.services.deep_crawl_service import _observed_link
+
+    target = "https://app.example.com/"
+    link = _observed_link(
+        "/catalog?category=private-value&searchTerm=secret-value", target, target,
+    )
+    assert link == {"url": "https://app.example.com/catalog",
+                    "query_keys": ["category", "searchTerm"], "source_path": "/"}
+    assert _observed_link("https://other.example/catalog?q=1", target, target) is None
+    assert _observed_link("/delete?item=1", target, target) is None
+    assert _observed_link("/image/logo.png", target, target) is None
+
+    cmap = build_capability_map_from_crawl(_fake_crawl(
+        pages_visited=[target], discovered_links=[link], forms=[], api_calls={},
+        js_files=set(), endpoints_from_js=set(), websockets=set(),
+    )).to_dict()
+    assert cmap["discovered_links"] == [link]
+    assert {row["name"] for row in cmap["parameter_inventory"]
+            if row["path"] == "/catalog"} == {"category", "searchTerm"}
+    assert any(row["path"] == "/catalog" and "browser_link" in row["sources"]
+               for row in cmap["surface_inventory"]["endpoints"])
+    assert "private-value" not in str(cmap)
+    assert "secret-value" not in str(cmap)
+
+    later = build_capability_map_from_dict({
+        "target": target, "scope": "https://app.example.com",
+        "discovered_links": [{"url": link["url"], "query_keys": ["sort"],
+                              "source_path": "/catalog"}],
+    })
+    merged = merge_capability_maps(cmap, later)
+    assert len(merged["discovered_links"]) == 1
+    assert merged["discovered_links"][0]["query_keys"] == ["category", "searchTerm", "sort"]
+
+
 def test_openapi_schema_surfaces_unauth_account_lookup_hunt():
     cmap = build_capability_map_from_crawl(
         _fake_crawl(

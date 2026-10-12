@@ -973,6 +973,7 @@ function AgentPageContent() {
         ranked_hunt_queue: data.ranked_hunt_queue as CapabilityMapState['ranked_hunt_queue'],
         authenticated: data.authenticated as boolean | null | undefined,
         api_sample_count: data.api_sample_count as number | undefined,
+        discovered_link_count: data.discovered_link_count as number | undefined,
       });
     } else if (msgType === 'auth_session_update') {
       setAuthSessionInfo({

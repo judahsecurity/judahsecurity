@@ -20,6 +20,7 @@ export type CapabilityMapState = {
   authenticated?: boolean | null;
   api_sample_count?: number;
   pages_visited?: string[];
+  discovered_link_count?: number;
 };
 
 type Props = {
@@ -79,6 +80,9 @@ export function CapabilityMapPanel({
             )}
             {typeof map.api_sample_count === 'number' && map.api_sample_count > 0 && (
               <span>· {map.api_sample_count} replay samples</span>
+            )}
+            {typeof map.discovered_link_count === 'number' && (
+              <span>· {map.discovered_link_count} links observed</span>
             )}
           </div>
 

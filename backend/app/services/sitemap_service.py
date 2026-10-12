@@ -238,6 +238,11 @@ def _merge_asset_inventory(asset: Asset, cmap: Dict[str, Any]) -> None:
         path = same_origin_path(value)
         if path:
             endpoints.append(path)
+    for row in (cmap.get("discovered_links") or [])[:500]:
+        if isinstance(row, dict):
+            path = same_origin_path(row.get("url"))
+            if path:
+                endpoints.append(path)
     for value in (cmap.get("js_endpoints") or [])[:160]:
         path = same_origin_path(value)
         if path:
@@ -638,14 +643,23 @@ def persist_capability_map(
             row.get("action") or row.get("page"), allow_relative=True,
         )
     ]
+    link_rows = [
+        row for row in (cmap.get("discovered_links") or [])[:500]
+        if isinstance(row, dict) and on_assessed_host(row.get("url"))
+    ]
     asset_map = {**cmap, "api_endpoints": api_eps,
-                 "api_samples": api_samples, "forms": forms}
+                 "api_samples": api_samples, "forms": forms,
+                 "discovered_links": link_rows}
     _merge_asset_inventory(asset, asset_map)
     js_files = list(cmap.get("js_files") or [])
 
     scoped_host = host if source == "scoped_assessment" else None
     n = ingest_urls_for_asset(
-        db, organization_id, asset, pages + js_endpoints + js_files,
+        db, organization_id, asset, pages + [
+            {"url": row["url"], "method": "GET",
+             "parameters": row.get("query_keys") or []}
+            for row in link_rows
+        ] + js_endpoints + js_files,
         source=source, asset_host_override=scoped_host,
     )
 

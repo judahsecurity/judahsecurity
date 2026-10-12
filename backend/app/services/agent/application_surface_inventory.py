@@ -155,6 +155,30 @@ def build_application_surface_inventory(crawl) -> dict:
             add_parameter(path, method, field["location"], field["name"],
                           field["value_type"], "live_browser", ref)
 
+    for link in (getattr(crawl, "discovered_links", []) or [])[:500]:
+        if not isinstance(link, dict):
+            continue
+        parsed = urlsplit(str(link.get("url") or ""))
+        if (parsed.scheme.lower(), parsed.netloc.lower()) != expected_origin:
+            continue
+        path = parsed.path or "/"
+        source_path = str(link.get("source_path") or "")
+        if not _valid_path(source_path):
+            source_path = ""
+        add_endpoint(path, "GET", "browser_link", source_ref=source_path)
+        if not _safe_replay_path(path):
+            continue
+        for name in (link.get("query_keys") or [])[:20]:
+            if not isinstance(name, str) or _CREDENTIAL_NAME.search(name):
+                continue
+            add_parameter(path, "GET", "query", name, "unknown", "browser_link")
+            if _SAFE_NAME.fullmatch(name):
+                suggestions.setdefault((path, name), {
+                    "kind": "query_input_review", "path": path, "method": "GET",
+                    "parameter": name, "action_ref": "", "priority": 2,
+                    "requires_fresh_proof": True, "finding": False,
+                })
+
     sources = getattr(crawl, "js_endpoint_sources", {}) or {}
     for value in sorted(getattr(crawl, "endpoints_from_js", set()) or [])[:200]:
         if not isinstance(value, str):

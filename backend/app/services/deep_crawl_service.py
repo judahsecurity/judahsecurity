@@ -66,7 +66,7 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qsl, urljoin, urlparse, urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -371,6 +371,9 @@ class CrawlResult:
     scope: str = ""
     authenticated: Optional[bool] = None
     pages_visited: List[str] = field(default_factory=list)
+    # Value-free, same-origin links observed in page markup, including pages
+    # that the crawl budget did not permit us to visit.
+    discovered_links: List[Dict[str, Any]] = field(default_factory=list)
     js_files: Set[str] = field(default_factory=set)
     source_maps: Set[str] = field(default_factory=set)
     # host -> {"METHOD path" : True}
@@ -427,6 +430,39 @@ def _in_scope(host: str, scope_apex: str) -> bool:
         return False
     host = host.lower()
     return host == scope_apex or host.endswith("." + scope_apex)
+
+
+def _observed_link(href: str, page_url: str, allowed_origin: str) -> Optional[Dict[str, Any]]:
+    """Return a same-origin link path and query names without query values."""
+    if not isinstance(href, str) or not href or len(href) > 4096:
+        return None
+    try:
+        parsed = urlsplit(urljoin(page_url, href))
+        allowed = urlsplit(allowed_origin)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        allowed_port = allowed.port or (443 if allowed.scheme == "https" else 80)
+        if (parsed.scheme not in {"http", "https"} or parsed.username or parsed.password
+                or (parsed.scheme, parsed.hostname, port) !=
+                (allowed.scheme, allowed.hostname, allowed_port)):
+            return None
+        path = parsed.path or "/"
+        if len(path) > 300 or not path.startswith("/") or path.startswith("//"):
+            return None
+        if _STATIC_SKIP.search(path):
+            return None
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        if not allowed_discovery_path(path):
+            return None
+        names = sorted({name for name, _ in parse_qsl(
+            parsed.query[:2048], keep_blank_values=True, max_num_fields=100,
+        ) if re.fullmatch(r"[A-Za-z_/][A-Za-z0-9_./*\[\]-]{0,79}", name)})[:20]
+        authority = parsed.hostname.lower()
+        if port != (443 if parsed.scheme == "https" else 80):
+            authority += f":{port}"
+        return {"url": f"{parsed.scheme}://{authority}{path}", "query_keys": names,
+                "source_path": urlsplit(page_url).path or "/"}
+    except (TypeError, ValueError):
+        return None
 
 
 def _functionality_score(url: str) -> int:
@@ -861,6 +897,7 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                 # products/APIs before static marketing spam). Seed = depth 0.
                 queue: List[tuple] = [(-_functionality_score(seed), 0, seed)]
                 seen: Set[str] = set()
+                link_rows: Dict[str, Dict[str, Any]] = {}
                 from app.services.crawl_priority import next_crawl_index, route_family
                 visited_families: Dict[tuple[str, tuple[str, ...]], int] = {}
 
@@ -875,11 +912,22 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                             result.forms.append(row)
                     for link in links:
                         absu = urljoin(page_url, link).split("#")[0]
+                        observed = _observed_link(
+                            link, page_url, str(opts.get("allowed_origin") or seed)
+                        )
+                        if observed:
+                            prior = link_rows.get(observed["url"])
+                            if prior is not None:
+                                prior["query_keys"] = sorted(set(prior["query_keys"]) |
+                                                             set(observed["query_keys"]))[:20]
+                            elif len(link_rows) < 500:
+                                link_rows[observed["url"]] = observed
                         host = urlparse(absu).netloc
                         if absu.startswith("http") and _in_scope(host, scope_apex):
                             _enqueue_func(
                                 queue, seen, absu, child_depth, max_depth, HARD_MAX_PAGES * 4
                             )
+                    result.discovered_links = list(link_rows.values())
 
                 while queue and len(result.pages_visited) < max_pages:
                     if time.monotonic() >= navigation_deadline:
@@ -1495,6 +1543,13 @@ def _format_output(r: CrawlResult) -> str:
     lines.append(f"Pages visited: {len(r.pages_visited)}")
     for p in r.pages_visited[:25]:
         lines.append(f"  - {p}")
+
+    if r.discovered_links:
+        lines.append(f"\nSame-origin links observed: {len(r.discovered_links)} ")
+        for row in r.discovered_links[:20]:
+            names = row.get("query_keys") or []
+            suffix = f" parameters={','.join(names)}" if names else ""
+            lines.append(f"  - {row['url']}{suffix}")
 
     total_api = sum(len(v) for v in r.api_calls.values())
     if r.api_calls:
