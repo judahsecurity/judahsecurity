@@ -12,6 +12,13 @@ from typing import Dict
 
 # specialist name → skill-pack body (appended after system_prompt_suffix)
 SPECIALIST_SKILL_PACKS: Dict[str, str] = {
+    "cms_followup": (
+        "SKILL PACK — fingerprinted CMS follow-up:\n"
+        "- Use the observed CMS fingerprint and scoped host to select core, plugin, "
+        "theme, and configuration checks.\n"
+        "- Treat version matches as leads; submit only live, reproducible evidence.\n"
+        "- Keep probes bounded and preserve the original request and response IDs."
+    ),
     "app_mapper": (
         "SKILL PACK — map first:\n"
         "- Prefer execute_deep_crawl / execute_browser to capture forms, APIs, auth surfaces.\n"

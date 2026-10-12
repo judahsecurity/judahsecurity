@@ -11,6 +11,8 @@ import re
 from collections import Counter
 from urllib.parse import parse_qsl, urljoin, urlsplit
 
+from app.services.agent.static_assets import is_static_asset
+
 
 _POSITIVE_INTEGER = re.compile(r"[1-9][0-9]{0,8}\Z")
 _SAFE_NAME = re.compile(r"[A-Za-z0-9_.\[\]/~-]{1,80}\Z")
@@ -19,8 +21,9 @@ _CREDENTIAL_NAME = re.compile(r"token|secret|password|api[_-]?key|authorization|
 _STATE_PATH = re.compile(r"^(?:delete|remove|logout|signout|purchase|pay|submit|save|send|create|update|reset|confirm)(?:$|[-_])", re.I)
 
 
-def _valid_path(path: str) -> bool:
+def _valid_path(path: str, *, allow_static: bool = False) -> bool:
     return (path.startswith("/") and not path.startswith("//") and len(path) <= 300
+            and (allow_static or not is_static_asset(path))
             and not any(len(part) >= 32 and re.fullmatch(r"[A-Za-z0-9_=-]+", part)
                         for part in path.split("/")))
 
@@ -191,7 +194,7 @@ def build_application_surface_inventory(crawl) -> dict:
         source_refs = [parsed_source.path for item in source_urls
                        if (parsed_source := urlsplit(item)).scheme.lower() == target.scheme.lower()
                        and parsed_source.netloc.lower() == target.netloc.lower()
-                       and _valid_path(parsed_source.path or "/")]
+                       and _valid_path(parsed_source.path or "/", allow_static=True)]
         for source_ref in source_refs or [""]:
             add_endpoint(path, "UNKNOWN", "javascript_static", source_ref=source_ref)
         for field in _query_fields(parsed.query):

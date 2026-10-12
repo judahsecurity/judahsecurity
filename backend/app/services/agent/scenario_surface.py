@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from urllib.parse import parse_qsl, urlsplit
 
+from app.services.agent.static_assets import is_static_asset
+
 _PARAM_NAME = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 _OPAQUE_SEGMENT = re.compile(r"(?<=/)[A-Za-z0-9_-]{32,}(?=/|$)")
 
@@ -65,6 +67,8 @@ def project_scenario_surface(capability_map: object, engagement_brain: object = 
     ]
     for page in pages[:120]:
         origin, path, names = _location(page, default_origin)
+        if is_static_asset(path):
+            continue
         add("directory" if path != "/" and path.endswith("/") else "page",
             path, origin, path)
         for name in names:
@@ -74,6 +78,8 @@ def project_scenario_surface(capability_map: object, engagement_brain: object = 
         if not isinstance(row, dict):
             continue
         origin, path, _ = _location(row.get("url"), default_origin)
+        if is_static_asset(path):
+            continue
         if default_origin and origin != default_origin:
             continue
         add("directory" if path != "/" and path.endswith("/") else "page",
@@ -91,6 +97,8 @@ def project_scenario_surface(capability_map: object, engagement_brain: object = 
         if host_origin and default_origin and "://" not in host:
             host_origin = host_origin.replace("https://", f"{urlsplit(default_origin).scheme}://", 1)
         origin, path, names = _location(raw_path, host_origin or default_origin)
+        if is_static_asset(path):
+            continue
         method = str(row.get("method") or "GET").upper()[:8]
         add("endpoint", f"{method} {path}", origin, path, method=method)
         for name in names:

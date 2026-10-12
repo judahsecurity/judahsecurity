@@ -156,7 +156,7 @@ def test_registry_hunt_note_sees_kickoff_host():
     assert "contoso.azurecr.io" in note
 
 
-def test_wordpress_hunt_note_sees_wp_admin_path():
+def test_wordpress_hunt_note_ignores_unverified_wp_admin_prose():
     from app.services.agent.orchestrator import AgentOrchestrator
 
     note = AgentOrchestrator._wordpress_hunt_note(
@@ -170,7 +170,7 @@ def test_wordpress_hunt_note_sees_wp_admin_path():
             "kickoff_brief": "Notable paths: [302] /wp-admin",
         },
     )
-    assert "WordPress detected" in note
+    assert note == ""  # kickoff prose is not a verified WordPress fingerprint
 
 
 def test_appsmith_spa_catchall_is_not_wordpress():

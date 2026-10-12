@@ -95,6 +95,14 @@ def test_wordpress_probes_still_win_after_crawl_without_org():
         "execution_trace": [{"tool_name": "execute_deep_crawl", "success": True}],
     }
     step = forced_next_step(state)
+    assert step and step["tool_name"] == "spawn_recon_workers"
+    state["execution_trace"].extend([
+        {"tool_name": "spawn_recon_workers", "tool_args": {"pack": "enrich", "target": url},
+         "success": True},
+        {"tool_name": "fireteam_dispatch", "tool_args": {"specialists": ["cms_followup"],
+                                            "mode": "cms_followup"}, "success": True},
+    ])
+    step = forced_next_step(state)
     assert step and step["tool_name"] == "check_cve_applicability"
     assert "emulate3d.com" in (step.get("tool_args") or {}).get("url", "")
 

@@ -87,12 +87,24 @@ class OperationDirective:
                 f"{self.coverage_cell_id}. When closing it, also pass coverage_lease_id="
                 f"{self.coverage_lease_id}."
             )
-        if self.parameter_work:
+        if self.parameter_work and self.parameter_work.get("location") == "endpoint":
+            work = self.parameter_work
+            block += (
+                "\nAssigned observed endpoint check for this wave: "
+                f"{work.get('method', 'GET')} {work.get('host', '')}{work.get('path', '/')} "
+                f"class={work.get('test_type', '')} "
+                f"identity={work.get('identity', 'anonymous')}. "
+                "Use a class-specific baseline and bounded control on this request. "
+                "Cite a live exchange ID when closing its coverage cell; leave it "
+                "open if the check did not execute or the result is ambiguous."
+            )
+        elif self.parameter_work:
             work = self.parameter_work
             block += (
                 "\nAssigned observed input for this wave: "
                 f"{work.get('method', 'GET')} {work.get('host', '')}{work.get('path', '/')} "
                 f"{work.get('location', 'query')}:{work.get('name', '')} "
+                f"class={work.get('test_type', '')} "
                 f"identity={work.get('identity', 'anonymous')}. "
                 + ("A PROWL private browser capture is available; use scoped_assessment_probe_assigned "
                    "with this cell and lease. " if work.get("scoped_capture_id") else
@@ -227,14 +239,17 @@ def directives_from_hypotheses(
             {},
         )
         parameter_work: Dict[str, str] = {}
-        if coverage_cell.get("source") == "parameter_inventory":
+        if coverage_cell.get("source") in {"parameter_inventory", "surface_applicability"}:
             location, _, parameter_name = str(coverage_cell.get("parameter") or "").partition(":")
-            if parameter_name:
+            if parameter_name or coverage_cell.get("source") == "surface_applicability":
                 parameter_work = {
                     "method": str(coverage_cell.get("method") or "GET"),
                     "host": str(coverage_cell.get("host") or ""),
                     "path": str(coverage_cell.get("path") or "/"),
-                    "location": location,
+                    "location": (
+                        "endpoint" if coverage_cell.get("source") == "surface_applicability"
+                        else location
+                    ),
                     "name": parameter_name,
                     "identity": str(coverage_cell.get("identity") or "anonymous"),
                     "capture_id": str(coverage_cell.get("capture_id") or ""),

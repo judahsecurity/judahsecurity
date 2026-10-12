@@ -8885,9 +8885,14 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 str(cell.get("specialist") or "")
                 for cell in (brain.coverage_cells or [])
                 if isinstance(cell, dict)
-                and cell.get("source") in {"parameter_inventory", "js_inventory"}
+                and cell.get("source") in {
+                    "parameter_inventory", "surface_applicability", "js_inventory",
+                }
                 and cell.get("status") in CELL_OPEN
-                and cell.get("specialist") in {"xss", "sqli", "js_secrets"}
+                and (
+                    cell.get("specialist") in {"xss", "sqli", "js_secrets"}
+                    or mode == "coverage_followup"
+                )
             }
             if auto:
                 chosen = list(dict.fromkeys([
@@ -8985,7 +8990,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         profiles = {n: get_specialist(n) for n in chosen if get_specialist(n)}
         default_target = target_list[0] if target_list else (cmap.target if cmap else "")
-        task_leases = claim_task_leases(graph, chosen)
+        # A class-coverage follow-up owns a coverage cell, not an arbitrary
+        # methodology card of the same specialist. Claiming that card would
+        # let a class probe close unrelated hypothesis work.
+        task_leases = (
+            {} if mode == "coverage_followup" else claim_task_leases(graph, chosen)
+        )
         represented_specialists = {
             node.specialist for node in graph.nodes.values() if node.specialist
         }
@@ -9029,6 +9039,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             denominator=denominator_surfaces(brain),
             allowed_observation_sources=(
                 OBSERVED_INPUT_SOURCES if mode == "observed_inputs" else None
+            ),
+            allowed_sources=(
+                frozenset({"parameter_inventory", "surface_applicability"})
+                if mode == "coverage_followup" else None
+            ),
+            excluded_test_types=(
+                frozenset({"xss", "sqli"}) if mode == "coverage_followup" else None
             ),
         )
         directives = directives_from_hypotheses(

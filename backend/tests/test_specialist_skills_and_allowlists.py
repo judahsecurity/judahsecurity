@@ -87,8 +87,8 @@ def test_injection_and_auth_have_new_arsenal_tools():
     allowlists = _specialist_allowlists_from_ast()
     for name in ("execute_dalfox", "execute_commix", "execute_xsstrike", "execute_sqlmap", "execute_interactsh"):
         assert name in allowlists["injection"]
-    assert "execute_hydra" in allowlists["auth_logic"]
-    assert "test_credential_spray" in allowlists["auth_logic"]
+    assert "execute_hydra" in allowlists["credential_assault"]
+    assert "test_credential_spray" in allowlists["credential_assault"]
     assert "execute_feroxbuster" in allowlists["web_recon"]
     assert "execute_feroxbuster" in allowlists["content_api"]
     assert "mutate_list" in allowlists["content_api"]

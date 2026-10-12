@@ -12,6 +12,8 @@ import re
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Dict, Iterable, List, Optional, Set
 
+from app.services.agent.static_assets import is_static_asset
+
 
 # ---------------------------------------------------------------------------
 # Structured map
@@ -127,6 +129,8 @@ def build_capability_map_from_crawl(crawl: Any) -> CapabilityMap:
             parts = str(key).split(" ", 1)
             method = parts[0] if len(parts) == 2 else "GET"
             path = parts[1] if len(parts) == 2 else parts[0]
+            if is_static_asset(path):
+                continue
             api_endpoints.append({"host": host, "method": method, "path": path})
 
     return finalize_capability_map(
@@ -944,6 +948,10 @@ def ingest_passive_urls(
 
     for raw in url_list[:400]:
         u = raw
+        if is_static_asset(u):
+            if u.lower().split("?", 1)[0].endswith((".js", ".mjs")):
+                js_files.append(u)
+            continue
         if not u.startswith(("http://", "https://", "/")):
             # bare path
             if u.startswith("api/") or "/api/" in u:

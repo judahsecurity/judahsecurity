@@ -12,6 +12,8 @@ import re
 from urllib.parse import parse_qs, urlsplit, urlunsplit
 import xml.etree.ElementTree as ET
 
+from app.services.agent.static_assets import is_static_asset
+
 MAX_BODY = 262144
 MAX_OPERATIONS = 1000
 
@@ -40,6 +42,8 @@ def normalize_request(
     if port and port != (443 if url.scheme in ("https", "wss") else 80):
         authority += f":{port}"
     path = url.path or "/"
+    if is_static_asset(path):
+        return []
     endpoint = urlunsplit((url.scheme, authority, path, "", ""))
     method = str(request.get("method") or "GET").upper()
     headers = {
@@ -173,6 +177,8 @@ def ingest_capability_map_operations(brain, cmap: dict) -> list[dict]:
             continue
         method = str(endpoint.get("method") or "GET").upper()
         path = str(endpoint.get("path") or "")
+        if is_static_asset(path):
+            continue
         host = str(endpoint.get("host") or root.netloc).lower()
         if method not in {"GET", "POST", "PUT", "PATCH", "DELETE"} or not path.startswith("/") or path.startswith("//"):
             continue
