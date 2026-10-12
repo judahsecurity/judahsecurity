@@ -597,6 +597,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "run_intruder_batch",
             "mutate_captured_request",
             "run_custom_probe",
+            "record_surface_coverage",
             "update_hypothesis",
             "log_engagement_approach",
             "validate_finding",
@@ -612,6 +613,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "scoped_input_probe_assigned with its coverage cell and lease IDs. "
             "This records an execution-owned browser receipt on the exact cell. "
             "Choose html_body, html_attribute, js_single, or js_double from the observed reflection context. "
+            "After a negative probe, call record_surface_coverage with this cell, its lease, "
+            "and the evidence ID only when the browser completed a context-appropriate check; "
+            "otherwise record inconclusive so the input remains open. "
             "When it confirms execution, submit_finding_candidate with the receipt and coverage cell; "
             "an independent verifier must repeat the proof. "
             "If the directive has "
@@ -654,6 +658,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "run_intruder_batch",
             "mutate_captured_request",
             "run_custom_probe",
+            "record_surface_coverage",
             "update_hypothesis",
             "log_engagement_approach",
             "validate_finding",
@@ -678,8 +683,10 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "positive value and the numeric Boolean proof. For a confirmed local receipt, "
             "submit_finding_candidate with its evidence ID and coverage cell so an independent "
             "verifier can repeat it. "
-            "For a mapped string GET input, use scoped_string_sqli on the observed "
-            "path and parameter. It can recover a private same-origin browser link "
+            "Use scoped_string_sqli directly only for exploratory mapped inputs without "
+            "an assigned coverage lease; it does not attach evidence to a coverage cell. "
+            "For an assigned string GET input, use scoped_input_probe_assigned instead. "
+            "The string proof can recover a private same-origin browser link "
             "or preflight a one-field observed GET form; if neither exists, mark "
             "the cell inconclusive and request more capture. Its quote, escaped-quote, true, false, and repeat "
             "controls produce an execution-owned proof receipt. Submit a candidate "
