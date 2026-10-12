@@ -231,7 +231,8 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
         if fingerprint and item["status"] != "skipped":
             exact[fingerprint] = exact.get(fingerprint, 0) + 1
         tool = item["tool_name"]
-        if tool != "http_exchange" and not tool.startswith("agent_"):
+        # A skipped duplicate records the reuse decision, not another tool run.
+        if item["status"] != "skipped" and tool != "http_exchange" and not tool.startswith("agent_"):
             key = (tool, item["target"])
             repeated[key] = repeated.get(key, 0) + 1
         if tool == "http_exchange":

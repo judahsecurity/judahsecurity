@@ -11,6 +11,7 @@ import os
 import re as _re
 import signal
 from collections import deque
+from copy import deepcopy
 from typing import List, Optional, Dict, Any
 from contextvars import ContextVar
 from sqlalchemy.orm import Session
@@ -518,6 +519,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     def __init__(self):
         self.tools = self._register_tools()
         self._mcp_server = None
+        from app.services.agent.tool_singleflight import ToolSingleFlight
+
+        self._tool_singleflight = ToolSingleFlight()
         # Solomon judge receipts: validate_finding SUBMIT → create_finding gate
         self._finding_receipts: Dict[str, Dict[str, Any]] = {}
         # Independent verifier receipts: confirmed → create_finding when fireteam is in play
@@ -1160,6 +1164,44 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             logger.debug("record_invocation skipped", exc_info=True)
 
     async def execute(self, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
+        """Execute once for concurrent identical recon calls in this run."""
+        from app.services.agent.action_fingerprint import action_fingerprint
+        from app.services.agent.action_ledger import active_run_id, append_action
+        from app.services.agent.evidence_store import verification_run
+        from app.services.agent.tool_singleflight import SHAREABLE_TOOLS
+
+        run_id = active_run_id.get()
+        if not run_id or verification_run.get() or tool_name not in SHAREABLE_TOOLS:
+            return await self._execute_recorded(tool_name, tool_args)
+
+        args_dict = tool_args if isinstance(tool_args, dict) else {}
+        target = str(args_dict.get("target") or args_dict.get("url") or
+                     current_seed_target.get() or "")
+        fingerprint = action_fingerprint(
+            run_id=run_id, tool_name=tool_name, target=target,
+            tool_args=args_dict, secret_key=settings.SECRET_KEY,
+        )
+        if not fingerprint:
+            return await self._execute_recorded(tool_name, tool_args)
+        user_id, org_id = get_tenant_context()
+        key = f"{org_id}:{user_id}:{current_session_id.get()}:{fingerprint}"
+        result, reused = await self._tool_singleflight.run(
+            key, lambda: self._execute_recorded(tool_name, tool_args),
+        )
+        if not reused:
+            return result
+        referenced = result.get("evidence_ids")
+        evidence_ids = list(referenced) if isinstance(referenced, list) else []
+        if result.get("artifact_id"):
+            evidence_ids.append(result["artifact_id"])
+        append_action(
+            run_id, os.urandom(16).hex(), "skipped", tool_name,
+            target=target, detail="Reused identical in-flight result",
+            fingerprint=fingerprint, evidence_ids=evidence_ids,
+        )
+        return deepcopy(result)
+
+    async def _execute_recorded(self, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool with the given arguments."""
         from app.services.agent.action_fingerprint import action_fingerprint
         from app.services.agent.action_ledger import active_run_id, append_action
