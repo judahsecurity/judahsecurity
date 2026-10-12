@@ -253,7 +253,8 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
                       "replay_http_request", "independent_verify", "run_assessment_workflow",
                       "mutate_captured_request", "run_intruder_batch", "browser_xss_check",
                       "scoped_assessment_probe_assigned", "scoped_input_probe_assigned", "scoped_query_probe",
-                      "scoped_numeric_sqli", "scoped_string_sqli", "scoped_body_probe"):
+                      "scoped_numeric_sqli", "scoped_string_sqli", "scoped_body_probe",
+                      "probe_observed_input_batch"):
             stage = "logic_testing"
         elif tool in ("execute_nuclei", "execute_nikto", "execute_ffuf", "execute_wpscan"):
             stage = "scanner_coverage"

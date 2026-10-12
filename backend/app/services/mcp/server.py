@@ -858,16 +858,15 @@ class MCPServer:
         self.registry.register(MCPTool(
             name="execute_sqlmap",
             description=(
-                "Run SQLMap for automated SQL injection detection and exploitation. "
-                "Supports detection of all major SQL injection types: error-based, boolean-based blind, "
-                "time-based blind, UNION query, stacked queries, and out-of-band. "
-                "Example: '-u \"http://target.com/page?id=1\" --batch --level=3 --risk=2 --dbs'."
+                "Run SQLMap as a bounded confirmation step for a specific observed request "
+                "and parameter after a response-driven SQLi lead. Use detection-only flags "
+                "and preserve the captured request shape; database enumeration is not proof."
             ),
             tool_type=ToolType.EXPLOIT,
             parameters={
                 "args": {
                     "type": "string",
-                    "description": "SQLMap CLI arguments (e.g., '-u \"http://target.com/page?id=1\" --batch --dbs')"
+                    "description": "SQLMap detection arguments for the exact observed URL/request and parameter."
                 }
             },
             required_params=["args"],
@@ -1065,9 +1064,9 @@ class MCPServer:
         self.registry.register(MCPTool(
             name="execute_xsstrike",
             description=(
-                "Run XSStrike for advanced XSS vulnerability detection. Uses fuzzy matching, "
-                "context analysis, and payload generation to find reflected, stored, and DOM XSS. "
-                "Example: '-u \"https://target.com/search?q=test\"' or '-u \"https://target.com/search?q=test\" --crawl'."
+                "Run XSStrike on a specific observed, browser-reachable XSS input after "
+                "a reflection or DOM-sink lead. Its output is a lead until a fresh browser "
+                "execution proof confirms the exact context."
             ),
             tool_type=ToolType.EXPLOIT,
             parameters={

@@ -299,6 +299,32 @@ async def test_assigned_link_sqli_probe_records_proof_without_closing_sibling(mo
 
 
 @pytest.mark.asyncio
+async def test_assigned_probe_uses_current_origin_with_explicit_default_port(monkeypatch):
+    brain = EngagementBrain(target="https://ginandjuice.shop:443")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "path": "/catalog", "host": "ginandjuice.shop",
+        "name": "category", "location": "query", "source": "browser_link",
+        "identity": "anonymous", "testable": True,
+    }])
+    lease = claim_coverage_cell_leases(brain, ["sqli"])["sqli"]
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://ginandjuice.shop:443"
+    manager._capability_map = {"target": "https://ginandjuice.shop:443"}
+    manager._engagement_brain = brain.to_dict()
+    register_scope(manager, "ginandjuice.shop")
+    calls = []
+
+    async def fake_sqli(url, parameter, identity):
+        calls.append((url, parameter, identity))
+        return json.dumps({"evidence_id": "sqli-proof", "proof_confirmed": False})
+
+    monkeypatch.setattr(manager, "scoped_string_sqli", fake_sqli)
+    result = await manager.scoped_input_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert result["success"]
+    assert calls == [("https://ginandjuice.shop/catalog", "category", "anonymous")]
+
+
+@pytest.mark.asyncio
 async def test_assigned_numeric_input_rejects_string_proof(monkeypatch):
     brain = EngagementBrain(target="https://app.test")
     seed_parameter_coverage_cells(brain, [{

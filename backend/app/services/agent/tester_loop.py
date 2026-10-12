@@ -44,7 +44,8 @@ _404_TEXT_RE = re.compile(
 )
 _WEB_HINT_RE = re.compile(r"https?://|\bwww\.|\.(com|net|io|org|app)\b", re.I)
 OBSERVED_INPUT_SOURCES = frozenset({
-    "observed_form", "captured_api", "browser_traffic", "page_url", "api_endpoint",
+    "observed_form", "form_action", "captured_api", "browser_traffic",
+    "browser_request", "page_url", "browser_link", "api_endpoint",
 })
 
 
@@ -182,7 +183,12 @@ def observed_input_signature(state: Optional[Dict[str, Any]] = None) -> str:
     cmap = (state or {}).get("capability_map") or {}
     if not isinstance(cmap, dict) or not cmap.get("target"):
         return ""
-    from app.services.agent.parameter_inventory import collect_parameter_inventory
+    from app.services.agent.parameter_inventory import _origin, collect_parameter_inventory
+
+    active_origin = _origin(primary_web_target(state))
+    if (not active_origin or _origin(str(cmap.get("target") or "")) != active_origin
+            or (cmap.get("scope") and _origin(str(cmap["scope"])) != active_origin)):
+        return ""
 
     inputs = sorted({
         (
@@ -257,6 +263,67 @@ def _untested_observed_input_count(state: Dict[str, Any]) -> int:
         and cell.get("specialist") in {"xss", "sqli"}
         and cell.get("status") == "untested"
     )
+
+
+def _pending_first_pass_count(state: Dict[str, Any]) -> int:
+    from app.services.agent.observed_input_batch import pending_first_pass_cells
+
+    return len(pending_first_pass_cells(
+        state.get("engagement_brain") or {}, target=primary_web_target(state),
+    ))
+
+
+def _observed_input_batch_step(
+    state: Dict[str, Any], trace: List[Dict[str, Any]], signature: str,
+) -> Optional[Dict[str, Any]]:
+    pending = _pending_first_pass_count(state)
+    if not signature or not pending:
+        return None
+    prior = next((
+        step for step in reversed(trace)
+        if step.get("tool_name") == "probe_observed_input_batch"
+        and (step.get("tool_args") or {}).get("surface_signature") == signature
+    ), None)
+    # If a tool failed without changing the queue, let a specialist diagnose
+    # it instead of forcing the same batch forever.
+    if prior and (
+        prior.get("success") is False
+        or pending >= int((prior.get("tool_args") or {}).get("pending_input_count") or 0)
+    ):
+        return None
+    return {
+        "tool_name": "probe_observed_input_batch",
+        "tool_args": {
+            "max_checks": 8, "max_seconds": 180,
+            "target": primary_web_target(state),
+            "surface_signature": signature, "pending_input_count": pending,
+        },
+        "thought": "Run bounded SQLi and XSS first passes across observed inputs before deeper specialist work.",
+    }
+
+
+def _pending_candidate_verify_step(
+    state: Dict[str, Any], trace: List[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    for candidate in ((state.get("engagement_brain") or {}).get("candidates") or []):
+        if not isinstance(candidate, dict) or candidate.get("status") != "pending":
+            continue
+        if (candidate.get("vulnerability_class") not in {"sql_injection", "xss"}
+                and candidate.get("specialist") not in {"sqli", "xss"}):
+            continue
+        candidate_id = str(candidate.get("id") or "")
+        if not candidate_id or any(
+            step.get("tool_name") == "independent_verify"
+            and (step.get("tool_args") or {}).get("candidate_id") == candidate_id
+            for step in trace
+        ):
+            continue
+        return {
+            "tool_name": "independent_verify",
+            "tool_args": {"candidate_id": candidate_id, "max_parallel": 1},
+            "thought": "Repeat the positive input proof independently before more discovery work.",
+        }
+    return None
 
 
 def _observed_input_specialists(state: Dict[str, Any]) -> List[str]:
@@ -566,6 +633,13 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
     except Exception:
         pass
     if state.get("assessment_resume") and pipeline:
+        pending = (_pending_first_pass_count(state)
+                   if observed_input_signature(state) else 0)
+        missing = ([{
+            "id": "observed_input_first_pass",
+            "title": f"{pending} observed SQLi/XSS checks need a first pass",
+            "next": "probe_observed_input_batch on the current assessment target",
+        }] if pending else [])
         return {
             "is_web": web,
             "surface_empty": empty,
@@ -575,10 +649,12 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
             "params": True,
             "fireteam": True,
             "brain": True,
-            "missing": [],
-            "ready_to_complete": True,
-            "next_action": "Test the latest scoped follow-up objective with saved evidence",
-            "summary": "Resumed mapped assessment; first-turn surface loop already ran",
+            "missing": missing,
+            "ready_to_complete": not missing,
+            "next_action": (missing[0]["next"] if missing else
+                            "Test the latest scoped follow-up objective with saved evidence"),
+            "summary": (f"Resumed mapped assessment; {pending} observed first-pass "
+                        "checks remain on the current target"),
         }
     if pipeline and not crawled:
         missing.append({
@@ -673,12 +749,16 @@ def format_tester_loop_for_prompt(progress: Dict[str, Any], state: Optional[Dict
     if not progress or not progress.get("is_web"):
         return ""
     if (state or {}).get("assessment_resume") and not progress.get("cve_applicability_only"):
-        return (
+        message = (
             "### Resumed assessment\n"
             "The first-turn surface loop already ran. Use the saved map and "
             "evidence to test the latest scoped objective. Do not restart broad "
             "discovery or fireteam dispatch solely because this turn's trace is empty."
         )
+        if progress.get("missing"):
+            message += ("\n" + progress["summary"] + ". Run "
+                        "probe_observed_input_batch before completing.")
+        return message
     if progress.get("cve_applicability_only"):
         lines = [
             "### CVE applicability (Glasswing observe — do this before Interceptor)",
@@ -860,7 +940,14 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
     publication = _confirmed_candidate_publication_step(state, trace, target)
     if publication:
         return publication
+    verification = _pending_candidate_verify_step(state, trace)
+    if verification:
+        return verification
     if state.get("assessment_resume"):
+        signature = observed_input_signature(state)
+        batch = _observed_input_batch_step(state, trace, signature)
+        if batch:
+            return batch
         return None
     ran = normalized_tools_run(trace)
     crawled = bool(ran & _CRAWL_TOOLS)
@@ -947,6 +1034,9 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
                 "tool_args": {},
                 "thought": "Seed observed input hypotheses while enrichment continues.",
             }
+        batch = _observed_input_batch_step(state, trace, input_signature)
+        if batch:
+            return batch
         return _observed_input_wave(
             target, input_signature, _untested_observed_input_count(state),
             _observed_input_specialists(state),
@@ -955,6 +1045,11 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
 
     if cms_product and not cms_dispatched:
         return _cms_followup_wave(target, cms_product)
+
+    if input_signature:
+        batch = _observed_input_batch_step(state, trace, input_signature)
+        if batch:
+            return batch
 
     if input_signature and _input_wave_made_progress(state, trace, input_signature):
         return _observed_input_wave(

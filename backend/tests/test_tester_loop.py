@@ -381,7 +381,7 @@ def test_static_js_endpoint_without_observed_input_does_not_start_early_hunt():
     assert forced_next_step(state)["tool_name"] == "wait_recon_workers"
 
 
-def test_observed_input_queue_advances_only_after_progress_then_runs_full_wave():
+def test_observed_input_queue_batches_first_pass_before_specialist_wave():
     target = "https://app.example.com"
     state = {
         "mode": "agent",
@@ -391,10 +391,10 @@ def test_observed_input_queue_advances_only_after_progress_then_runs_full_wave()
             "forms": [{"method": "GET", "action": "/search", "inputs": ["q", "sort"]}],
         },
         "engagement_brain": {"coverage_cells": [
-            {"source": "parameter_inventory", "observation_source": "observed_form",
-             "specialist": "xss", "status": "untested"},
-            {"source": "parameter_inventory", "observation_source": "observed_form",
-             "specialist": "sqli", "status": "untested"},
+            {"host": "app.example.com", "source": "parameter_inventory", "observation_source": "observed_form",
+             "specialist": "xss", "test_type": "xss", "status": "untested"},
+            {"host": "app.example.com", "source": "parameter_inventory", "observation_source": "observed_form",
+             "specialist": "sqli", "test_type": "sqli", "status": "untested"},
         ]},
         "execution_trace": [
             {"tool_name": name, "success": True}
@@ -405,28 +405,87 @@ def test_observed_input_queue_advances_only_after_progress_then_runs_full_wave()
         ],
     }
     signature = observed_input_signature(state)
+    first_batch = forced_next_step(state)
+    assert first_batch["tool_name"] == "probe_observed_input_batch"
+    assert first_batch["tool_args"]["pending_input_count"] == 2
     state["execution_trace"].append({
-        "tool_name": "fireteam_dispatch", "success": True,
-        "tool_args": {"surface_signature": signature, "pending_input_count": 4},
+        "tool_name": "probe_observed_input_batch", "success": True,
+        "tool_args": first_batch["tool_args"],
     })
-    next_wave = forced_next_step(state)
-    assert next_wave["tool_name"] == "fireteam_dispatch"
-    assert next_wave["tool_args"]["pending_input_count"] == 2
-
+    state["engagement_brain"]["coverage_cells"][0]["first_pass_outcome"] = "inconclusive"
+    state["engagement_brain"]["coverage_cells"][0]["status"] = "inconclusive"
+    second_batch = forced_next_step(state)
+    assert second_batch["tool_name"] == "probe_observed_input_batch"
+    assert second_batch["tool_args"]["pending_input_count"] == 1
+    state["execution_trace"].append({
+        "tool_name": "probe_observed_input_batch", "success": True,
+        "tool_args": second_batch["tool_args"],
+    })
+    state["engagement_brain"]["coverage_cells"][1]["first_pass_outcome"] = "tested_clean"
     state["engagement_brain"]["coverage_cells"][1]["status"] = "tested_clean"
-    narrowed = forced_next_step(state)
-    assert narrowed["tool_args"]["specialists"] == ["xss"]
-    state["engagement_brain"]["coverage_cells"][1]["status"] = "untested"
-
+    wave = forced_next_step(state)
+    assert wave["tool_name"] == "fireteam_dispatch"
+    assert wave["tool_args"]["specialists"] == ["xss", "sqli"]
     state["execution_trace"].append({
         "tool_name": "fireteam_dispatch", "success": True,
-        "tool_args": next_wave["tool_args"],
+        "tool_args": wave["tool_args"],
     })
     assert loop_progress(state)["fireteam"] is False
     full_wave = forced_next_step(state)
     assert full_wave["tool_name"] == "fireteam_dispatch"
     assert full_wave["tool_args"]["specialists"] == "auto"
     assert not full_wave["tool_args"].get("surface_signature")
+
+
+def test_link_discovered_input_enters_observed_first_pass():
+    target = "https://app.example.com"
+    state = {
+        "target_info": {"primary_target": target},
+        "capability_map": {
+            "target": target, "scope": target,
+            "discovered_links": [{"url": target + "/catalog", "query_keys": ["searchTerm"]}],
+        },
+        "engagement_brain": {"coverage_cells": [{
+            "host": "app.example.com", "source": "parameter_inventory", "observation_source": "browser_link",
+            "specialist": "xss", "test_type": "xss", "status": "untested",
+        }]},
+        "execution_trace": [
+            {"tool_name": "execute_deep_crawl", "success": True},
+            {"tool_name": "spawn_recon_workers", "success": True,
+             "tool_args": {"pack": "enrich"}},
+            {"tool_name": "sync_engagement_brain", "success": True},
+        ],
+    }
+    assert observed_input_signature(state)
+    assert forced_next_step(state)["tool_name"] == "probe_observed_input_batch"
+
+
+def test_pending_proof_is_verified_before_next_input_batch():
+    target = "https://app.example.com"
+    state = {
+        "target_info": {"primary_target": target},
+        "capability_map": {
+            "target": target, "scope": target,
+            "discovered_links": [{"url": target + "/catalog", "query_keys": ["q"]}],
+        },
+        "engagement_brain": {
+            "candidates": [{"id": "candidate-1", "status": "pending",
+                            "vulnerability_class": "sql_injection"}],
+            "coverage_cells": [{
+                "source": "parameter_inventory", "observation_source": "browser_link",
+                "specialist": "xss", "test_type": "xss", "status": "untested",
+            }],
+        },
+        "execution_trace": [{"tool_name": "execute_deep_crawl", "success": True}],
+    }
+    first = forced_next_step(state)
+    assert first["tool_name"] == "independent_verify"
+    assert first["tool_args"]["candidate_id"] == "candidate-1"
+    state["execution_trace"].append({
+        "tool_name": "independent_verify", "success": False,
+        "tool_args": first["tool_args"],
+    })
+    assert forced_next_step(state)["tool_name"] != "independent_verify"
 
 
 def test_mapped_assessment_follow_up_skips_first_turn_pipeline():
@@ -444,6 +503,33 @@ def test_mapped_assessment_follow_up_skips_first_turn_pipeline():
     assert progress["missing"] == []
     assert "Do not restart broad discovery" in format_tester_loop_for_prompt(progress, state)
     assert complete_blocked_reason(state) is None
+
+
+def test_resumed_assessment_tests_observed_inputs_on_its_current_target():
+    target = "https://ginandjuice.shop"
+    state = {
+        "mode": "agent", "assessment_resume": True,
+        "target_info": {"primary_target": target},
+        "capability_map": {
+            "target": target, "scope": target,
+            "discovered_links": [{"url": target + "/catalog?searchTerm=gin",
+                                  "query_keys": ["searchTerm"]}],
+        },
+        "engagement_brain": {"coverage_cells": [{
+            "host": "ginandjuice.shop", "source": "parameter_inventory",
+            "observation_source": "browser_link", "specialist": "xss",
+            "test_type": "xss", "status": "untested",
+        }]},
+        "execution_trace": [],
+    }
+    step = forced_next_step(state)
+    assert step["tool_name"] == "probe_observed_input_batch"
+    assert step["tool_args"]["target"] == target
+    assert loop_progress(state)["ready_to_complete"] is False
+    assert "observed_input_first_pass" in complete_blocked_reason(state)
+
+    state["target_info"]["primary_target"] = "https://old.example.com"
+    assert forced_next_step(state) is None
 
 
 def test_interceptor_job_forces_attach_not_second_crawl():

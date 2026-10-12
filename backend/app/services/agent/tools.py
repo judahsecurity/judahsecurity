@@ -507,6 +507,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _verify_receipts = SessionValue(dict)
     _finding_receipts = SessionValue(dict)
     _recent_invocations = SessionValue(lambda: deque(maxlen=48))
+    _nonretryable_failures = SessionValue(dict)
     _auth_session = SessionValue(lambda: None)
     _engagement_brain = SessionValue(dict)
     _capability_map = SessionValue(lambda: None)
@@ -719,6 +720,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "scoped_assessment_probe": self.scoped_assessment_probe,
             "scoped_assessment_probe_assigned": self.scoped_assessment_probe_assigned,
             "scoped_input_probe_assigned": self.scoped_input_probe_assigned,
+            "probe_observed_input_batch": self.probe_observed_input_batch,
             "scoped_assessment_candidate": self.scoped_assessment_candidate,
             "scoped_assessment_publish": self.scoped_assessment_publish,
             "scoped_assessment_status": self.scoped_assessment_status,
@@ -914,6 +916,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         from app.services.agent.coverage_cells import parameter_test_funnel
         from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.parameter_inventory import _origin
         from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
 
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
@@ -927,8 +930,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "lease_expired" if float(cell.get("lease_deadline") or 0) <= time.time() else
             "not_observed_input" if cell.get("source") != "parameter_inventory" or
                 cell.get("observation_source") not in {
-                    "browser_link", "browser_request", "observed_form", "browser_traffic",
-                    "page_url", "captured_api",
+                    "browser_link", "browser_request", "observed_form", "form_action",
+                    "browser_traffic", "page_url", "captured_api", "api_endpoint",
                 } else
             "unsupported_input" if cell.get("test_type") not in {"xss", "sqli"} or
                 str(cell.get("method") or "").upper() != "GET" or
@@ -945,11 +948,14 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         cmap = getattr(self, "_capability_map", None) or {}
         target = str(cmap.get("target") or cmap.get("scope") or
                      getattr(self, "_fallback_target", "") or "")
-        parts = urlsplit(target)
-        if parts.scheme not in {"http", "https"} or parts.netloc.lower() != str(cell.get("host") or "").lower():
+        scoped_origin = _origin(target)
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(
+            f"{parts.scheme}://{cell.get('host') or ''}"
+        ) != scoped_origin):
             return {"success": False, "error": "scope_mismatch",
                     "output": "Assigned input does not match the assessment origin"}
-        url = f"{parts.scheme}://{parts.netloc}{cell['path']}"
+        url = f"{scoped_origin}{cell['path']}"
         self._scoped_origin(url)
         identity = str(cell.get("identity") or "anonymous")
 
@@ -1002,7 +1008,22 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "evidence_id": artifact_id, "proof_confirmed": confirmed,
                 "probe_result": {key: proof[key] for key in (
                     "executed", "proof_confirmed", "requests_sent", "baseline_source",
+                    "reflection_contexts",
                 ) if key in proof}, "funnel": parameter_test_funnel(live)}
+
+    async def probe_observed_input_batch(
+        self, max_checks: int = 8, max_seconds: int = 180,
+        surface_signature: str = "", pending_input_count: int = 0,
+        target: str = "",
+    ) -> Dict[str, Any]:
+        """Run a bounded first pass over queued observed SQLi and XSS checks."""
+        from app.services.agent.observed_input_batch import run_observed_input_batch
+
+        result = await run_observed_input_batch(
+            self, target=target, max_checks=max_checks, max_seconds=max_seconds,
+        )
+        result["surface_signature"] = surface_signature
+        return result
 
     async def scoped_assessment_probe_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
@@ -1200,6 +1221,43 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.tool_singleflight import SHAREABLE_TOOLS
 
         run_id = active_run_id.get()
+        if (run_id and not verification_run.get() and tool_name in {
+            "execute_browser", "scoped_input_probe_assigned",
+            "scoped_assessment_probe_assigned",
+        }):
+            import time as _time
+
+            args_dict = tool_args if isinstance(tool_args, dict) else {}
+            target = str(args_dict.get("target") or args_dict.get("url") or
+                         current_seed_target.get() or "")
+            fingerprint = action_fingerprint(
+                run_id=run_id, tool_name=tool_name, target=target,
+                tool_args=args_dict, secret_key=settings.SECRET_KEY,
+            )
+            if fingerprint:
+                scope_revision = (
+                    tuple(sorted(self._assessment_scope)), self._fallback_target
+                ) if tool_name == "execute_browser" else ()
+                key = (run_id, fingerprint, scope_revision)
+                cached = self._nonretryable_failures.get(key)
+                if cached and (
+                    tool_name != "execute_browser" or _time.time() - cached[0] < 60
+                ):
+                    append_action(
+                        run_id, os.urandom(16).hex(), "skipped", tool_name,
+                        target=target, detail="Suppressed exact repeat of non-retryable failure",
+                    )
+                    repeated = deepcopy(cached[1])
+                    repeated["suppressed_repeat"] = True
+                    return repeated
+                result = await self._execute_recorded(tool_name, tool_args)
+                inner = result.get("output") if isinstance(result.get("output"), dict) else result
+                error = str(inner.get("error") or "") if isinstance(inner, dict) else ""
+                if error in {"invalid_coverage_lease", "assessment_scope_denied"}:
+                    self._nonretryable_failures[key] = (_time.time(), deepcopy(result))
+                    if len(self._nonretryable_failures) > 128:
+                        self._nonretryable_failures.pop(next(iter(self._nonretryable_failures)))
+                return result
         if not run_id or verification_run.get() or tool_name not in SHAREABLE_TOOLS:
             return await self._execute_recorded(tool_name, tool_args)
 
@@ -1733,10 +1791,15 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         
         try:
             result = await tool(**tool_args)
+            assigned_failure = (
+                tool_name == "scoped_input_probe_assigned"
+                and isinstance(result, dict)
+                and result.get("success") is False
+            )
             payload = {
-                "success": True,
+                "success": not assigned_failure,
                 "output": result,
-                "error": None
+                "error": result.get("error") if assigned_failure else None,
             }
             if tool_name == "scoped_browser_assessment" and self._capability_map:
                 payload["capability_map"] = self._capability_map

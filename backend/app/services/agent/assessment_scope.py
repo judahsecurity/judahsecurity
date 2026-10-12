@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
-from urllib.parse import urlsplit
+from urllib.parse import urljoin, urlsplit
 
 
 def _host(value: str) -> str:
@@ -75,11 +75,31 @@ def prepare_browser_scope(manager, spec: dict, *, fallback_target: str = "") -> 
     """Bind an Agent mode browser call to one registered HTTP origin."""
     if not isinstance(spec, dict) or not isinstance(spec.get("actions"), list):
         raise ValueError("Browser actions require a JSON object with an actions array")
-    urls = [action.get("url") for action in spec["actions"]
-            if isinstance(action, dict) and action.get("url")]
-    login = spec.get("login")
+    bounded = dict(spec)
+    bounded["actions"] = [dict(action) if isinstance(action, dict) else action
+                          for action in spec["actions"]]
+    base = str(fallback_target or getattr(manager, "_fallback_target", "") or "")
+
+    def normalize_url(value: str) -> str:
+        raw = str(value)
+        # Browser agents commonly use /path after navigating the approved
+        # target. Resolve that form, then apply the same exact scope checks.
+        if raw.startswith("/") and not raw.startswith("//"):
+            if not base:
+                raise ValueError("A relative browser URL requires an assessment target")
+            return urljoin(base, raw)
+        return raw
+
+    urls = []
+    for action in bounded["actions"]:
+        if isinstance(action, dict) and action.get("url"):
+            action["url"] = normalize_url(action["url"])
+            urls.append(action["url"])
+    login = bounded.get("login")
     if isinstance(login, dict) and login.get("url"):
-        urls.append(login["url"])
+        bounded["login"] = dict(login)
+        bounded["login"]["url"] = normalize_url(login["url"])
+        urls.append(bounded["login"]["url"])
     if not urls and fallback_target:
         urls.append(fallback_target)
     if not urls:
@@ -92,6 +112,5 @@ def prepare_browser_scope(manager, spec: dict, *, fallback_target: str = "") -> 
                      (443 if parsed.scheme == "https" else 80)))
     if len(origins) != 1:
         raise ValueError("Browser actions must stay on one origin per call")
-    bounded = dict(spec)
     bounded["allowed_origin"] = str(urls[0])
     return bounded

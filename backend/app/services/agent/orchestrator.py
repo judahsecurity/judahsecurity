@@ -2129,6 +2129,7 @@ class AgentOrchestrator:
         # Inject session capability map + engagement brain into fireteam / brain tools
         if tool_name in (
             "fireteam_dispatch",
+            "probe_observed_input_batch",
             "sync_engagement_brain",
             "compare_requests",
             "update_hypothesis",
@@ -2655,6 +2656,7 @@ class AgentOrchestrator:
             "log_engagement_approach",
             "compare_requests",
             "fireteam_dispatch",
+            "probe_observed_input_batch",
             "get_engagement_brain",
             "get_methodology_progress",
             "ingest_urls_into_map",

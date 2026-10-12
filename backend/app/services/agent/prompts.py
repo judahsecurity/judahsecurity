@@ -360,10 +360,10 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **execute_nmap**: Port/service scan (exploitation phase). Example: execute_nmap(args="-sV -sC -p 80,443 target.com")
 - **execute_masscan**: Fast port scan (exploitation phase). Example: execute_masscan(args="192.168.1.0/24 -p80,443 --rate=1000")
 - **execute_ffuf**: Bounded path fuzz after the browser crawl. Prefer `/opt/wordlists/app-dirs-common.txt` (not huge SecLists DirBuster). Example: execute_ffuf(args="-u https://target.com/FUZZ -w /opt/wordlists/app-dirs-common.txt -mc 200,204,301,302,401,403 -t 20 -rate 50")
-- **execute_sqlmap**: SQL injection automation (exploitation phase). Detects and exploits all major SQLi types: error-based, boolean-blind, time-blind, UNION, stacked queries. Always runs with --batch (non-interactive). Example: execute_sqlmap(args='-u "https://target.com/page?id=1" --dbs') or execute_sqlmap(args='-u "https://target.com/page?id=1" --level=3 --risk=2')
+- **execute_sqlmap**: SQL injection confirmation (exploitation phase). Run only on an observed request and exact parameter after controlled baseline/true/false probes show a repeatable lead. Use bounded detection-only arguments; database enumeration is not proof.
 - **execute_nikto**: Web server vulnerability scanner (exploitation phase). Checks 6,700+ dangerous CGIs, outdated servers, insecure configs, and default files. Example: execute_nikto(args="-h https://target.com -Format json")
 - **execute_wpscan**: WordPress vulnerability scanner. Runs as soon as WordPress is detected (informational phase OK — this is targeted CMS recon, not a broad spray). Detects WP version, plugins, users, and known CVEs. The WPScan API token is configured server-side (enables vulnerable-plugin CVE mapping). Prefer fast passive plugin detection so it fits the turn budget. Example: execute_wpscan(args="--url https://target.com --enumerate vp,u --plugins-detection passive --random-user-agent")
-- **execute_xsstrike**: Advanced XSS scanner (exploitation phase). Uses fuzzy matching, context analysis, and smart payload generation to find reflected, stored, and DOM XSS. Example: execute_xsstrike(args='-u "https://target.com/search?q=test"') or execute_xsstrike(args='-u "https://target.com/search?q=test" --crawl')
+- **execute_xsstrike**: Context-aware XSS lead scanner (exploitation phase). Run on a specific observed input or DOM-sink lead; require fresh browser execution evidence before submitting a finding.
 - **execute_dalfox**: Fast XSS scanner/verifier (exploitation). Prefer for confirmation after xsstrike or on reflected params. Example: execute_dalfox(args='url "https://target.com/search?q=test" --skip-bav')
 - **execute_commix**: OS command-injection automation (exploitation). Use only on high-signal params. Example: execute_commix(args='--url="https://target.com/ping?host=1" --batch')
 - **execute_hydra**: Bounded credential testing (exploitation). Always use tiny lists + -f. Prefer test_credential_spray for light web sprays.
@@ -447,7 +447,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 **Step 2: Generate payloads** — Run `generate_injection_payloads(vuln_type="sqli")` (or xss, ssti, etc.) to get payloads with detection hints.
 **Step 3: Test with payloads** — Choose the right tool:
   - **SQLi**: Use structured `compare_requests` or `mutate_captured_request` for controlled baseline/true/false probes; use `execute_sqlmap` only on a candidate input with a bounded, non-extractive configuration.
-  - **XSS**: Use `execute_xsstrike(args='-u "https://target.com/search?q=test"')` for automated XSS, OR `execute_browser` (check_xss action) for manual testing.
+  - **XSS**: Use `execute_xsstrike` on an observed reflection or DOM-sink lead, then require fresh browser execution proof in the matched context.
   - **General**: Use `execute_curl`, `execute_browser` (submit_form), or `execute_ffuf` for other vuln types.
 **Step 4: Analyze responses** — Use the `detection_hints` from Step 2 to evaluate whether the payload succeeded. Look for SQL error messages, reflected payloads, timing differences, or unexpected content.
 **Step 4b (BLIND / no visible response): use the OOB collaborator** — If a sink is a candidate for blind SSRF/XXE/SQLi/RCE (no reflected output, but the server may make an outbound request), register an Interactsh session first: `execute_interactsh(args="register")`, take the `payload_url`, pass it as `collaborator_url` to `generate_injection_payloads` (or plant it directly in the header/param/entity), then `execute_interactsh(args="poll <session_id>")`. Any DNS/HTTP callback confirms the vuln.
@@ -466,8 +466,8 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 **Quick-test workflow for a single page:**
 1. `execute_wafw00f(args="...")` → check for WAF
 2. `discover_parameters(url="...")` + `execute_arjun(args="-u ...")` → find params
-3. `execute_sqlmap(args='-u "https://target.com/page?id=1" --batch --dbs')` → automated SQLi
-4. `execute_xsstrike(args='-u "https://target.com/page?q=test"')` → automated XSS
+3. Run controlled SQLi comparisons on each observed input; use `execute_sqlmap` on a repeatable lead with the exact request and parameter.
+4. Use `execute_xsstrike` on an observed XSS lead, then prove execution in the browser.
 5. `execute_nikto(args="-h https://target.com")` → web server vulns
 6. `execute_browser(args='{"actions": [{"action": "check_xss", "url": "https://target.com/search?q=<img src=x onerror=alert(1)>"}]}')` → headless browser XSS verification after a canary establishes HTML body context
 7. `create_finding(...)` for confirmed vulns
@@ -487,7 +487,7 @@ The `execute_browser` tool uses Playwright with a real Chromium browser. Use it 
    - headers: `Content-Type: application/x-www-form-urlencoded`
    - baseline body: `action=loadmore&page=1&query={{"tax_query":{{"0":{{"terms":["1"]}}}}}}`
    - mutant body: same with `terms=["1) AND (SELECT 1 FROM (SELECT SLEEP(2))x)-- -"]`
-   - timeout=20. A ≥1.5s elapsed delta is `TIME_BASED_INJECTION_CANDIDATE`. Confirm SLEEP(4), then `execute_sqlmap --technique=BT`, then `create_finding` with the timing table.
+   - timeout=20. A ≥1.5s elapsed delta is only a timing lead. Repeat against interleaved controls, use bounded SQLMap confirmation if the lead persists, then submit a candidate for fresh independent verification before publication.
 4. Login oracle (ONE attempt per username, no brute force): POST `/wp-login.php`.
 5. OPTIONAL: `execute_wpscan` for known plugin CVEs. Skip if it aborts (quota/token). Never block steps 2–3 on WPScan.
 
@@ -667,6 +667,7 @@ TOOL_PHASE_MAP = {
     "scoped_assessment_probe": ["exploitation", "post_exploitation"],
     "scoped_assessment_probe_assigned": ["exploitation", "post_exploitation"],
     "scoped_input_probe_assigned": ["exploitation", "post_exploitation"],
+    "probe_observed_input_batch": ["exploitation", "post_exploitation"],
     "scoped_assessment_candidate": ["exploitation", "post_exploitation"],
     "scoped_assessment_publish": ["exploitation", "post_exploitation"],
     # Informational tools - available in all phases

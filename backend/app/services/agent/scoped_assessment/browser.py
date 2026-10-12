@@ -583,6 +583,30 @@ async def check_browser(
                 result["executed"] = any(nonce in message for message in dialogs)
                 result["dialog_count"] = len(dialogs)
                 result["nonce"] = nonce
+                # Give the specialist context without exposing page source or
+                # mistaking reflection for execution. Scan a bounded DOM slice.
+                try:
+                    result["reflection_contexts"] = await page.evaluate("""token => {
+                        const contexts = new Set();
+                        const walker = document.createTreeWalker(document, NodeFilter.SHOW_TEXT);
+                        let node, seen = 0;
+                        while ((node = walker.nextNode()) && seen++ < 3000) {
+                            if (!node.textContent.includes(token)) continue;
+                            const tag = node.parentElement?.tagName;
+                            contexts.add(tag === 'SCRIPT' ? 'javascript' :
+                                         tag === 'STYLE' ? 'css' : 'html_text');
+                        }
+                        seen = 0;
+                        for (const element of document.querySelectorAll('*')) {
+                            if (seen++ >= 3000) break;
+                            for (const attribute of element.attributes) {
+                                if (attribute.value.includes(token)) contexts.add('html_attribute');
+                            }
+                        }
+                        return [...contexts].sort();
+                    }""", nonce)
+                except Exception:
+                    result["reflection_contexts"] = []
             else:
                 result["script_count"] = len(javascript_sources)
                 result["collection_limit"] = MAX_SOURCES

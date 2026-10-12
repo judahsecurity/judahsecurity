@@ -113,6 +113,10 @@ Specialists return `hypothesis_results`, one entry per hypothesis, citing HTTP e
 
 Clean coverage records now cite live HTTP/browser evidence and name the test type. Identity, parameter, methodology, and evidence are retained as separate checks on the surface. Browser-derived capability maps and retrieved memories are delimited as untrusted data. Tool output containing indirect prompt-injection patterns is not promoted into durable memory.
 
+Observed link, form, and browser request parameters enter a bounded SQLi/XSS first-pass queue before the specialist wave. Each batch uses fresh coverage leases and records an outcome per input and class. A failed or unsupported probe is `unattempted` or `inconclusive` with a reason; leasing a cell alone no longer counts as an attempted test. A complete negative SQLi control sequence can close its exact cell. A negative XSS browser check remains inconclusive when other rendering contexts are possible. Browser XSS evidence reports only reflection context categories, and the queue tries the matching attribute or JavaScript context before escalating a positive proof to an independent verifier. Exact repeats of stale-lease and scope-denied calls are suppressed; a changed browser scope can be retried. The parameter funnel reports attempted, unattempted, probed, blocked, candidate, verified, and published counts.
+
+The first-pass batch receives the active assessment target from the scheduler. It runs only when the saved capability map names that origin and leases only cells on that origin; a stale map returns `assessment_target_mismatch` without network probes. Resumed assessments continue pending first passes on their current target before completion, without restarting the broad crawl.
+
 Chromium runs with its sandbox enabled by default. Containers that cannot support it must opt in with `AEGIS_BROWSER_DISABLE_SANDBOX=true`; prefer fixing the container runtime and seccomp/user-namespace configuration instead.
 
 ## Evaluate the in-product execution path

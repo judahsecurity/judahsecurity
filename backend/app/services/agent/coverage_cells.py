@@ -530,8 +530,8 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
         if isinstance(row, dict) and row.get("coverage_cell_id")
     }
     counts = {key: 0 for key in (
-        "checks", "attempted", "probed", "tested_clean", "candidates",
-        "verified", "published", "open",
+        "checks", "attempted", "unattempted", "probed", "tested_clean",
+        "candidates", "verified", "published", "open", "blocked",
     )}
     by_class: dict[str, dict[str, int]] = {}
     inputs: set[tuple[str, str, str, str, str]] = set()
@@ -541,20 +541,26 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
         group = by_class.setdefault(kind, {key: 0 for key in counts})
         candidate = candidates.get(str(cell.get("id") or ""), {})
         status = str(cell.get("status") or "untested")
+        has_probe = bool(cell.get("service_probe_artifact_ids") or
+                         cell.get("probe_artifact_ids") or
+                         cell.get("first_pass_evidence_id") or
+                         candidate.get("evidence_ids"))
+        attempted = has_probe or cell.get("first_pass_outcome") in {
+            "proof_signal", "tested_clean", "inconclusive",
+        } or (status in {"tested_clean", "finding"} and bool(cell.get("evidence_ids")))
         checks = {
             "checks": True,
-            "attempted": bool(cell.get("attempts")) or status in {
-                "leased", "in_focus", "inconclusive", "tested_clean", "finding",
-            },
-            "probed": bool(cell.get("service_probe_artifact_ids") or
-                           cell.get("probe_artifact_ids")) or (
+            "attempted": attempted,
+            "unattempted": not attempted,
+            "probed": has_probe or (
                 status in {"tested_clean", "finding"} and bool(cell.get("evidence_ids"))
-            ) or bool(candidate.get("evidence_ids")),
+            ),
             "tested_clean": status == "tested_clean",
             "candidates": bool(candidate),
             "verified": candidate.get("status") == "confirmed",
             "published": bool(cell.get("finding_id") or candidate.get("finding_id")),
             "open": status not in CELL_TERMINAL,
+            "blocked": status == "blocked",
         }
         for key, matched in checks.items():
             if matched:
@@ -802,6 +808,9 @@ def claim_coverage_cell_leases(
     allowed_observation_sources: frozenset[str] | None = None,
     allowed_sources: frozenset[str] | None = None,
     excluded_test_types: frozenset[str] | None = None,
+    allowed_test_types: frozenset[str] | None = None,
+    allowed_cell_ids: frozenset[str] | None = None,
+    first_pass_only: bool = False,
     lease_seconds: int = 3600,
     now: float | None = None,
 ) -> dict[str, CoverageCellLease]:
@@ -827,6 +836,12 @@ def claim_coverage_cell_leases(
             and not cell.get("lease_id")
             and (not allowed_sources or cell.get("source") in allowed_sources)
             and (not excluded_test_types or cell.get("test_type") not in excluded_test_types)
+            and (allowed_cell_ids is None or cell.get("id") in allowed_cell_ids)
+            and (not first_pass_only or not (
+                cell.get("first_pass_outcome") or cell.get("candidate_id")
+                or cell.get("probe_artifact_ids") or cell.get("service_probe_artifact_ids")
+            ))
+            and (allowed_test_types is None or cell.get("test_type") in allowed_test_types)
             and (
                 allowed_observation_sources is None
                 or (
@@ -841,6 +856,10 @@ def claim_coverage_cell_leases(
         ]
         candidates.sort(
             key=lambda cell: (
+                # A first pass should reach every observed input before
+                # revisiting a promising but inconclusive parameter.
+                int(cell.get("attempts") or 0) if first_pass_only else 0,
+                0 if cell.get("first_pass_outcome") == "proof_signal" else 1,
                 int(cell.get("priority_rank", 2)),
                 0 if specialist in {"xss", "sqli"} and scoped_replay_eligible(cell) else 1,
                 0
