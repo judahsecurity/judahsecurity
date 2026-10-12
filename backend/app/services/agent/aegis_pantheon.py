@@ -19,6 +19,7 @@ PANTHEON: Dict[str, tuple[str, str]] = {
     "app_mapper": ("Raphael", "Guide of the road — maps apps, forms, and APIs"),
     "web_recon": ("Caleb", "Scout of the land — passive recon and inventory"),
     "content_api": ("Baruch", "Scribe of surfaces — crawl, fuzz, parameter mine"),
+    "cms_followup": ("Hiram", "Craftsman of the site — fingerprinted CMS follow-up"),
     "js_secrets": ("Uri", "Light in the bundles — JS secrets and sinks"),
     "secrets_hunter": ("Uriel", "Flame of God — verified credential exposure"),
     "vuln_triage": ("Solomon", "Judge of severity — triage without exploitation"),
