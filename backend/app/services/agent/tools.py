@@ -1220,6 +1220,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "error": result.get("error") or "",
                 "exit_code": result.get("exit_code"),
                 "success": bool(result.get("success")),
+                "artifact_id": result.get("artifact_id") or "",
+                "evidence_ids": result.get("evidence_ids") or [],
             })
         except Exception:
             logger.debug("record_invocation skipped", exc_info=True)
@@ -3183,10 +3185,18 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             from app.services.agent.demonstrated_chain import (
                 build_agent_detection,
                 parse_references,
+                select_verified_proof_invocations,
             )
+            proof_invocations = list(getattr(self, "_recent_invocations", []))
+            if verified is not None and not chain_raw:
+                proof_invocations = select_verified_proof_invocations(
+                    proof_invocations,
+                    receipt.get("evidence_ids") or [],
+                    target=target,
+                )
             agent_detection = build_agent_detection(
                 chain=chain_raw,
-                invocations=list(getattr(self, "_recent_invocations", [])),
+                invocations=proof_invocations,
                 target=target_clean or target,
                 context=context_text,
                 not_demonstrated=not_demo,

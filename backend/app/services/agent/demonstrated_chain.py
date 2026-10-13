@@ -41,6 +41,17 @@ PROOF_TOOLS = frozenset({
     "execute_interactsh",
     "run_oob_callback_workflow",
     "execute_interceptor",
+    "scoped_string_sqli",
+    "scoped_numeric_sqli",
+    "scoped_browser_assessment",
+    "scoped_http_get",
+    "scoped_http_compare",
+    "scoped_query_probe",
+    "scoped_body_probe",
+    "scoped_owner_only",
+    "scoped_assessment_probe",
+    "scoped_input_probe_assigned",
+    "scoped_assessment_probe_assigned",
 })
 
 _SKIP_RECORD = frozenset({
@@ -224,6 +235,20 @@ def _clip(text: Optional[str], limit: int) -> str:
 def summarize_output(tool: str, args: Sequence[str], stdout: str, stderr: str, exit_code: Any) -> tuple[str, str]:
     """Return (summary, outcome) one-liners for a chain step."""
     blob = stdout or stderr or ""
+    if tool == "scoped_string_sqli":
+        proof = _coerce_json(blob)
+        if isinstance(proof, dict) and proof.get("operation") == "sqli_boolean_string":
+            target = str(proof.get("target") or "")
+            parameter = str(proof.get("parameter") or "")
+            try:
+                count = int(proof.get("total_requests_sent") or proof.get("requests_sent") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            verdict = "confirmed" if proof.get("proof_confirmed") is True else "inconclusive"
+            return (
+                f"Scoped SQLi proof on {target} ({parameter})"[:MAX_SUMMARY],
+                f"{verdict}; {count} controlled requests; recipe={proof.get('proof_recipe') or 'unknown'}"[:MAX_OUTCOME],
+            )
     status_m = _HTTP_STATUS_RE.search(blob)
     status = status_m.group(1) if status_m else None
     err_m = _JSON_ERROR_RE.search(blob)
@@ -694,6 +719,35 @@ def select_proof_invocations(
     chosen = targeted or pool
     # Keep chronological order, take the last `limit` (closest to the finding).
     return list(chosen)[-limit:]
+
+
+def select_verified_proof_invocations(
+    invocations: Iterable[Dict[str, Any]], evidence_ids: Iterable[str],
+    *, target: Optional[str] = None, limit: int = 8,
+) -> List[Dict[str, Any]]:
+    """Attach only tool outputs that produced this candidate's verifier receipts."""
+    receipts = {str(value) for value in evidence_ids if re.fullmatch(r"[0-9a-f]{32}", str(value))}
+    if not receipts:
+        return []
+
+    def has_receipt(invocation: Dict[str, Any]) -> bool:
+        linked = invocation.get("evidence_ids")
+        linked = linked if isinstance(linked, list) else []
+        linked_ids = {str(invocation.get("artifact_id") or ""), *(str(value) for value in linked)}
+        if receipts.intersection(linked_ids):
+            return True
+        output = str(invocation.get("output") or invocation.get("stdout") or "")
+        return any(receipt in output for receipt in receipts)
+
+    matched = [
+        invocation for invocation in invocations
+        if isinstance(invocation, dict)
+        and invocation.get("success") is True
+        and str(invocation.get("tool") or invocation.get("tool_name") or "") in PROOF_TOOLS
+        and _mentions_target(invocation, target or "")
+        and has_receipt(invocation)
+    ]
+    return matched[-limit:]
 
 
 def parse_asset_urls(raw: Any, fallback: Optional[str] = None) -> List[str]:
