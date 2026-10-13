@@ -385,11 +385,14 @@ def _upsert_asset(
 
     org_id = integration.organization_id
     device_group = source_scope or integration.device_group or "shared"
-    existing = (
-        db.query(Asset)
-        .filter(Asset.organization_id == org_id, Asset.value == value)
-        .first()
-    )
+    candidates = db.query(Asset).filter(
+        Asset.organization_id == org_id, Asset.value == value,
+    ).all()
+    existing = next((asset for asset in candidates if (
+        (asset.metadata_ or {}).get("panorama_integration_id") == integration.id
+        and (asset.metadata_ or {}).get("panorama_device_group") == device_group
+        and (asset.metadata_ or {}).get("panorama_object_name") == object_name
+    )), None)
 
     meta_patch = {
         "panorama_integration_id": integration.id,
@@ -410,6 +413,7 @@ def _upsert_asset(
 
     if existing:
         existing.last_seen = datetime.utcnow()
+        existing.status = AssetStatus.DISCOVERED
         tags = [t for t in (existing.tags or []) if t != "panorama:removed"]
         for t in desired_tags:
             if t not in tags:
@@ -814,6 +818,7 @@ def _import_address_entries(
     addresses: List[Dict],
     groups: List[Dict],
     stats: _Stats,
+    seen_asset_ids: set[int],
 ) -> set[str]:
     stats.address_groups_seen = len(groups)
     stats.addresses_seen = len(addresses)
@@ -845,6 +850,7 @@ def _import_address_entries(
         )
         if asset:
             seen_values.add(value)
+            seen_asset_ids.add(asset.id)
             _bump_kind(stats, kind)
     return seen_values
 
@@ -852,9 +858,10 @@ def _import_address_entries(
 def _mark_missing_assets(
     db: Session,
     integration: PanoramaIntegration,
-    seen_values: set[str],
+    seen_asset_ids: set[int],
     stats: _Stats,
-) -> None:
+) -> set[str]:
+    missing_values: set[str] = set()
     prior = (
         db.query(Asset)
         .filter(
@@ -867,12 +874,15 @@ def _mark_missing_assets(
         meta = asset.metadata_ or {}
         if meta.get("panorama_integration_id") != integration.id:
             continue
-        if asset.value not in seen_values:
+        if asset.id not in seen_asset_ids:
             stats.assets_missing_from_source += 1
+            asset.status = AssetStatus.INACTIVE
+            missing_values.add(asset.value)
             tags = list(asset.tags or [])
             if "panorama:removed" not in tags:
                 tags.append("panorama:removed")
                 asset.tags = tags
+    return missing_values
 
 
 async def sync_integration(db: Session, integration: PanoramaIntegration) -> Dict[str, Any]:
@@ -880,6 +890,7 @@ async def sync_integration(db: Session, integration: PanoramaIntegration) -> Dic
     org_id = integration.organization_id
     mode = integration.connection_mode or CONNECTION_MODE_API
     stats = _Stats()
+    seen_asset_ids: set[int] = set()
 
     try:
         if mode == CONNECTION_MODE_CONFIG_EXPORT:
@@ -898,7 +909,8 @@ async def sync_integration(db: Session, integration: PanoramaIntegration) -> Dic
                 device_group=integration.device_group,
             )
             seen = _import_address_entries(
-                db, integration, parsed["addresses"], parsed["address_groups"], stats
+                db, integration, parsed["addresses"], parsed["address_groups"], stats,
+                seen_asset_ids,
             )
             source_label = "config export"
         else:
@@ -926,10 +938,12 @@ async def sync_integration(db: Session, integration: PanoramaIntegration) -> Dic
             )
             groups = await client.list_address_groups()
             addresses = await client.list_addresses()
-            seen = _import_address_entries(db, integration, addresses, groups, stats)
+            seen = _import_address_entries(
+                db, integration, addresses, groups, stats, seen_asset_ids
+            )
             source_label = "Panorama API"
 
-        _mark_missing_assets(db, integration, seen, stats)
+        seen.update(_mark_missing_assets(db, integration, seen_asset_ids, stats))
 
         integration.last_sync_at = datetime.utcnow()
         integration.last_sync_ok = True

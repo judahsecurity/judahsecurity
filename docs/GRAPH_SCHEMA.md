@@ -54,18 +54,30 @@ IP    ──[HOSTED_BY]──────> HostingProvider
 | **Asset**       | **SIGNED_BY**     | **Certificate**   | **TLS certificate linkage**                 |
 | **Certificate** | **ALSO_COVERS**   | **Subdomain**     | **SAN expansion → shadow IT discovery**     |
 | **IP**          | **FORWARDS_TO**   | **IP**            | **LB reachability: VIP → pool member (F5)** |
+| Asset           | IN_CLOUD_SUBSCRIPTION | CloudSubscription | Wiz-reported cloud account context |
+| Asset           | IN_CLOUD_REGION | CloudRegion | Wiz-reported location context |
 
 **Bold rows** are the discovery provenance relationships added in the June 2026 update.
 
 **SAME_IP_AS** is created between Subdomains that resolve to the same IP (per organization). Use it to answer "what else is on this IP?" and to reason about shared infrastructure (RedAmon-style graph robustness).
 
-**FORWARDS_TO** links an internet-facing VIP IP to internal pool-member IPs discovered via the F5 BIG-IP integration. Edge properties: `source` (`f5`), `pool`, `virtual`, `port`, `organization_id`. Use it to answer "what internal IPs are reachable from the internet through this VIP?"
+**FORWARDS_TO** links a specific VIP asset's IP to a specific pool-member asset's IP discovered via F5 BIG-IP. Edge properties include `source` (`f5`), `vip_asset_id`, `member_asset_id`, `pool`, `virtual`, `port`, and `organization_id`. Use it to answer "what pool members does this VIP forward to?" An enabled VIP supplies the internet-facing entry point.
 
-`IP`, `ASN`, `Certificate`, `DiscoverySource`, `HostingProvider`, `Service`, and
-`Technology` are shared references. Do not stamp an organization's scan state on
-them. Put the organization ID and observed details on the relationship from a
-tenant-owned asset or on an organization-keyed relationship between references.
-Graph traversals must check both node and relationship organization IDs.
+Wiz cloud subscription and region edges provide context, not network reachability.
+Attack-path queries currently use direct internet exposure reported by Wiz or
+one F5 VIP-to-member forwarding hop. Internal multi-hop routing awaits a network
+integration with VRF, route, interface, and policy evidence.
+
+`ASN`, `Certificate`, `DiscoverySource`, `HostingProvider`, `Service`, and
+`Technology` are shared references. Globally routable `IP` addresses are shared
+by default. An explicit `metadata.network_scope_id` takes precedence for any
+address, including a public address reused in a separate route domain. Assets
+in the same organization with the same scope ID and address share an IP node.
+For non-global addresses without a scope ID, the asset ID is the scope, so
+overlapping RFC 1918, IPv6 ULA, link-local, and CGNAT addresses cannot create
+false graph joins. Put observed details on an asset relationship or an
+organization-keyed relationship between references. Graph traversals check
+both node and relationship organization IDs.
 
 ## Logical connections (query patterns)
 
@@ -106,6 +118,8 @@ Graph traversals must check both node and relationship organization IDs.
 ### IP
 - `address` (string)
 - `type` (string) – ipv4, ipv6
+- `ip_key` (string, unique) – scope plus normalized address
+- `scope_id` (string) – `global`, explicit organization network scope, or asset scope
 - `is_cdn`, `is_internet_facing`, and `is_live` are observations on the
   `Asset → IP` `RESOLVES_TO` relationship, with `organization_id`.
 
@@ -150,6 +164,13 @@ Graph traversals must check both node and relationship organization IDs.
 - `name` (string) – e.g. `cloudflare`, `aws`, `azure`
 - `hosting_type` belongs to the `Asset → HostingProvider` observation edge.
 
+### CloudSubscription and CloudRegion
+- `key` (string, unique) – organization, cloud platform, and subscription or region
+- `organization_id` (number) – tenant boundary
+- `platform` (string) – cloud provider reported by Wiz
+- `name` (string) – subscription display name or region
+- `IN_CLOUD_SUBSCRIPTION` and `IN_CLOUD_REGION` carry `source = wiz`.
+
 ### Certificate *(new)*
 - `fingerprint` (string) – SHA-256 fingerprint (unique key)
 - `common_name` (string) – certificate CN
@@ -162,7 +183,9 @@ Graph traversals must check both node and relationship organization IDs.
 Start queries at an organization-owned asset, domain, subdomain, port, or finding.
 When traversing shared nodes, check `organization_id` on each tenant-owned node
 and on organization-keyed relationships such as `FORWARDS_TO`, `BELONGS_TO_ASN`,
-and `HOSTED_BY`. A shared reference node has no `organization_id`.
+and `HOSTED_BY`. A globally shared reference node has no `organization_id`.
+For an address found in multiple scopes, the shared-infrastructure
+API requires an `asset_id` to choose the intended network context.
 
 ## Implementation notes
 
@@ -170,7 +193,7 @@ and `HOSTED_BY`. A shared reference node has no `organization_id`.
 - **ASN**: Created from `asset.asn` and linked to all resolved IPs via `BELONGS_TO_ASN`.
 - **HostingProvider**: Created from `asset.hosting_provider` and linked to both the asset and its IPs via `HOSTED_BY`.
 - **Certificate**: Created from `asset.ssl_info` JSON. SAN entries are expanded into `Subdomain` nodes via `ALSO_COVERS` — this surfaces shadow IT not yet in the asset inventory.
-- **is_internet_facing** on `IP` nodes: derived from `asset.is_public`. This is the boundary marker for internal-hop modeling (e.g. F5 VIP → pool member via `FORWARDS_TO`).
+- **is_internet_facing** on `Asset → IP` observations: derived from `asset.is_public`. This is the boundary marker for internal-hop modeling (e.g. F5 VIP → pool member via `FORWARDS_TO`).
 
 ## Troubleshooting: graphs not working on /graph
 

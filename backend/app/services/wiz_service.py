@@ -312,11 +312,43 @@ class _Stats:
         return vars(self).copy()
 
 
+def _wiz_resource_key(source: Dict[str, Any]) -> str:
+    return "|".join(str(source.get(field) or "") for field in (
+        "id", "cloudPlatform", "subscriptionExternalId", "subscriptionId",
+        "providerUniqueId", "name",
+    ))
+
+
+def _find_wiz_asset(db: Session, org_id: int, source: Dict[str, Any]) -> Optional[Asset]:
+    value = _asset_value(source)
+    if not value:
+        return None
+    candidates = db.query(Asset).filter(
+        Asset.organization_id == org_id, Asset.value == value
+    ).all()
+    source_id = source.get("id")
+    subscription = source.get("subscriptionExternalId") or source.get("subscriptionId")
+    for candidate in candidates:
+        wiz = (candidate.metadata_ or {}).get("wiz") or {}
+        if not isinstance(wiz, dict):
+            continue
+        if source_id and wiz.get("id") == source_id:
+            return candidate
+        existing_subscription = wiz.get("subscription_external_id") or wiz.get("subscription_id")
+        if (not source_id and not wiz.get("id") and
+            source.get("providerUniqueId") and subscription and
+            wiz.get("provider_unique_id") == source.get("providerUniqueId") and
+            wiz.get("cloud_platform") == source.get("cloudPlatform") and
+            existing_subscription == subscription):
+            return candidate
+    return None
+
+
 def _upsert_asset(db: Session, org_id: int, source: Dict[str, Any], stats: _Stats) -> Asset:
     value = _asset_value(source)
     if not value:
         raise ValueError("Wiz virtual machine has no stable identifier")
-    asset = db.query(Asset).filter(Asset.organization_id == org_id, Asset.value == value).first()
+    asset = _find_wiz_asset(db, org_id, source)
     ips = [str(ip) for ip in (source.get("ipAddresses") or []) if ip]
     metadata = dict(asset.metadata_ or {}) if asset else {}
     metadata["wiz"] = {
@@ -493,17 +525,15 @@ async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str
             if not value:
                 stats.findings_filtered += 1
                 continue
-            asset = asset_cache.get(value)
+            cache_key = _wiz_resource_key(source)
+            asset = asset_cache.get(cache_key)
             if asset is None:
-                existing = db.query(Asset).filter(
-                    Asset.organization_id == integration.organization_id,
-                    Asset.value == value,
-                ).first()
+                existing = _find_wiz_asset(db, integration.organization_id, source)
                 if not integration.import_assets and existing is None:
                     stats.findings_filtered += 1
                     continue
                 asset = _upsert_asset(db, integration.organization_id, source, stats)
-                asset_cache[value] = asset
+                asset_cache[cache_key] = asset
             if integration.import_vulnerabilities:
                 _upsert_vulnerability(db, asset, finding, stats)
 

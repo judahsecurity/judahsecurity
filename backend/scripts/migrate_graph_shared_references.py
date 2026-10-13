@@ -1,4 +1,4 @@
-"""Remove legacy tenant observations from shared graph nodes.
+"""Replace legacy address-only IP identities and clean shared graph evidence.
 
 Run during a graph maintenance window, then refresh every organization with
 backfill_graph.py --refresh-existing. PostgreSQL remains the source of truth.
@@ -17,6 +17,10 @@ from app.services.graph_service import get_graph_service
 # Each query returns the number changed and stops matching after its cleanup.
 # Keeping the batches small avoids one transaction spanning a large graph.
 CLEANUPS = (
+    ("legacy F5 forwarding links without asset evidence",
+     "MATCH ()-[r:FORWARDS_TO]->() "
+     "WHERE r.source = 'f5' AND (r.vip_asset_id IS NULL OR r.member_asset_id IS NULL) "
+     "WITH r LIMIT $batch_size DELETE r RETURN count(r) AS changed"),
     ("unsupported service-technology links",
      "MATCH (:Service)-[r:USES_TECHNOLOGY]->(:Technology) "
      "WITH r LIMIT $batch_size DELETE r RETURN count(r) AS changed"),
@@ -72,6 +76,61 @@ def main() -> None:
     if not graph._connected:
         parser.exit(1, "Neo4j is not connected\n")
     with graph.session() as session:
+        migration_done = session.run(
+            "MATCH (m:GraphMigration {name: 'scoped-ip-v1'}) RETURN count(m) AS count"
+        ).single()["count"] > 0
+        if not migration_done:
+            # IP nodes are projections of PostgreSQL assets. Recreate legacy
+            # address-only nodes from the source of truth after this cleanup.
+            session.run("DROP CONSTRAINT ip_address IF EXISTS").consume()
+            # Older writers sometimes added :IP to an inventory :Asset node.
+            # Preserve its asset ID and non-IP evidence for the full refresh.
+            while True:
+                row = session.run(
+                    "MATCH (:Asset:IP)-[r:FORWARDS_TO|BELONGS_TO_ASN]->() "
+                    "WITH r LIMIT $batch_size DELETE r RETURN count(r) AS changed",
+                    {"batch_size": args.batch_size},
+                ).single()
+                if not row or not row["changed"]:
+                    break
+            retained_assets = 0
+            while True:
+                row = session.run(
+                    "MATCH (n:Asset:IP) WHERE n.ip_key IS NULL "
+                    "WITH n LIMIT $batch_size "
+                    "REMOVE n:IP, n.address, n.scope_id "
+                    "RETURN count(n) AS changed",
+                    {"batch_size": args.batch_size},
+                ).single()
+                changed = int(row["changed"]) if row else 0
+                retained_assets += changed
+                if not changed:
+                    break
+            print(f"legacy dual-label assets preserved: {retained_assets}", flush=True)
+            total_ips = 0
+            while True:
+                row = session.run(
+                    "MATCH (n:IP) WHERE n.ip_key IS NULL WITH n LIMIT $batch_size "
+                    "DETACH DELETE n RETURN count(n) AS changed",
+                    {"batch_size": args.batch_size},
+                ).single()
+                changed = int(row["changed"]) if row else 0
+                total_ips += changed
+                if not changed:
+                    break
+            print(f"legacy address-only IP nodes: {total_ips}", flush=True)
+            total_links = 0
+            while True:
+                row = session.run(
+                    "MATCH ()-[r:SAME_IP_AS]->() WITH r LIMIT $batch_size "
+                    "DELETE r RETURN count(r) AS changed",
+                    {"batch_size": args.batch_size},
+                ).single()
+                changed = int(row["changed"]) if row else 0
+                total_links += changed
+                if not changed:
+                    break
+            print(f"legacy same-IP links: {total_links}", flush=True)
         for name, statement in CLEANUPS:
             total = 0
             while True:
@@ -81,6 +140,8 @@ def main() -> None:
                 if not changed:
                     break
             print(f"{name}: {total}", flush=True)
+        if not migration_done:
+            session.run("MERGE (:GraphMigration {name: 'scoped-ip-v1'})").consume()
     print("Cleanup complete. Refresh every organization from PostgreSQL.", flush=True)
 
 
