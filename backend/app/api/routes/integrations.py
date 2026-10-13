@@ -1,12 +1,15 @@
 """Integrations router — ticketing, exposure, vulnerability, and network providers."""
 
 import logging
+import hashlib
+import json
+import secrets
 from datetime import datetime
 from typing import List
 
 from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Header, HTTPException, Query, Request, UploadFile, status
 from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
@@ -26,6 +29,7 @@ from app.models.panorama_integration import (
     PanoramaIntegration,
 )
 from app.models.f5_integration import F5Integration
+from app.models.zpa_integration import ZpaIntegration
 from app.models.netbrain_integration import NetBrainIntegration
 from app.models.cloudflare_integration import CloudflareWafIntegration
 from app.models.user import User
@@ -99,6 +103,10 @@ from app.schemas.f5_schemas import (
     F5SyncResult,
     F5TestConnectionResponse,
 )
+from app.schemas.zpa_schemas import (
+    ZpaIntegrationCreate, ZpaIntegrationResponse, ZpaIntegrationSecret,
+    ZpaIntegrationUpdate, ZpaIngestResult,
+)
 from app.schemas.netbrain_schemas import (
     NetBrainAssessmentResult,
     NetBrainIntegrationCreate,
@@ -124,7 +132,9 @@ from app.services import (
     netbrain_service,
     cloudflare_waf_service,
     servicenow_service,
+    zpa_service,
 )
+from app.services.zpa_graph_service import project_zpa_integration
 
 router = APIRouter(prefix="/integrations", tags=["Integrations"])
 
@@ -1755,6 +1765,138 @@ async def sync_f5_integration(
 
     result = await f5_service.sync_integration(db, integration)
     return F5SyncResult(**result)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ZPA LSS — observed private application and microsegmentation flows
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_zpa_integration(db: Session, org_id: int, integration_id: int) -> ZpaIntegration:
+    integration = db.query(ZpaIntegration).filter(
+        ZpaIntegration.id == integration_id,
+        ZpaIntegration.organization_id == org_id,
+    ).first()
+    if integration is None:
+        raise HTTPException(status_code=404, detail="ZPA connection not found.")
+    return integration
+
+
+@router.get("/zpa", response_model=List[ZpaIntegrationResponse])
+def list_zpa_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    return db.query(ZpaIntegration).filter(
+        ZpaIntegration.organization_id == _get_org_id(current_user)
+    ).order_by(ZpaIntegration.created_at.desc()).all()
+
+
+@router.post("/zpa", response_model=ZpaIntegrationSecret, status_code=status.HTTP_201_CREATED)
+def create_zpa_integration(
+    payload: ZpaIntegrationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    name = payload.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Connection name is required.")
+    if db.query(ZpaIntegration.id).filter(
+        ZpaIntegration.organization_id == org_id,
+        ZpaIntegration.name == name,
+    ).first():
+        raise HTTPException(status_code=409, detail="A ZPA connection with that name already exists.")
+    token = "zpa_" + secrets.token_urlsafe(32)
+    integration = ZpaIntegration(
+        organization_id=org_id,
+        name=name,
+        token_hash=hashlib.sha256(token.encode()).hexdigest(),
+        is_active=True,
+    )
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return ZpaIntegrationSecret(**ZpaIntegrationResponse.model_validate(integration).model_dump(), ingest_token=token)
+
+
+@router.put("/zpa/{integration_id}", response_model=ZpaIntegrationResponse)
+def update_zpa_integration(
+    integration_id: int,
+    payload: ZpaIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    integration = _get_zpa_integration(db, _get_org_id(current_user), integration_id)
+    integration.is_active = payload.is_active
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.post("/zpa/{integration_id}/rotate-token", response_model=ZpaIntegrationSecret)
+def rotate_zpa_token(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    integration = _get_zpa_integration(db, _get_org_id(current_user), integration_id)
+    token = "zpa_" + secrets.token_urlsafe(32)
+    integration.token_hash = hashlib.sha256(token.encode()).hexdigest()
+    db.commit()
+    db.refresh(integration)
+    return ZpaIntegrationSecret(**ZpaIntegrationResponse.model_validate(integration).model_dump(), ingest_token=token)
+
+
+@router.post("/zpa/{integration_id}/events", response_model=ZpaIngestResult)
+async def ingest_zpa_events(
+    integration_id: int,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    x_zpa_ingest_token: str | None = Header(None, alias="X-ZPA-Ingest-Token"),
+    db: Session = Depends(get_db),
+):
+    """Receive collector-forwarded ZPA LSS JSON or newline-delimited JSON."""
+    integration = db.query(ZpaIntegration).filter(ZpaIntegration.id == integration_id).first()
+    supplied = hashlib.sha256((x_zpa_ingest_token or "").encode()).hexdigest()
+    if integration is None or not integration.is_active or not secrets.compare_digest(integration.token_hash, supplied):
+        raise HTTPException(status_code=401, detail="Invalid ZPA ingestion credentials.")
+    chunks = []
+    body_size = 0
+    async for chunk in request.stream():
+        body_size += len(chunk)
+        if body_size > 1024 * 1024:
+            raise HTTPException(status_code=413, detail="ZPA batch must be at most 1 MiB.")
+        chunks.append(chunk)
+    body = b"".join(chunks)
+    if not body:
+        raise HTTPException(status_code=400, detail="ZPA batch is empty.")
+    try:
+        if "ndjson" in request.headers.get("content-type", ""):
+            events = [json.loads(line) for line in body.splitlines() if line.strip()]
+        else:
+            decoded = json.loads(body)
+            events = decoded.get("events") if isinstance(decoded, dict) and "events" in decoded else decoded
+            if isinstance(events, dict):
+                events = [events]
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="Expected JSON or NDJSON ZPA events.")
+    if not isinstance(events, list) or not 1 <= len(events) <= 500 or not all(isinstance(item, dict) for item in events):
+        raise HTTPException(status_code=422, detail="Send 1 to 500 JSON event objects per batch.")
+    result = zpa_service.ingest_events(db, integration, events)
+    if result["accepted"]:
+        background_tasks.add_task(project_zpa_integration, integration.id, integration.organization_id)
+    return ZpaIngestResult(**result)
+
+
+@router.post("/zpa/{integration_id}/project")
+def project_zpa_events(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    integration = _get_zpa_integration(db, _get_org_id(current_user), integration_id)
+    return project_zpa_integration(integration.id, integration.organization_id)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

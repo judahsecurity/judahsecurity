@@ -398,6 +398,7 @@ export default function GraphPage() {
       CVE: 'cve',
       CWE: 'cwe',
       DiscoverySource: 'discovery_source',
+      ZpaSource: 'zpa_source',
       ASN: 'asn',
       HostingProvider: 'hosting_provider',
       CloudSubscription: 'cloud_subscription',

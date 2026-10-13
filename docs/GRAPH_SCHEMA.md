@@ -56,6 +56,8 @@ IP    ──[HOSTED_BY]──────> HostingProvider
 | **IP**          | **FORWARDS_TO**   | **IP**            | **LB reachability: VIP → pool member (F5)** |
 | Asset           | IN_CLOUD_SUBSCRIPTION | CloudSubscription | Wiz-reported cloud account context |
 | Asset           | IN_CLOUD_REGION | CloudRegion | Wiz-reported location context |
+| ZpaSource       | OBSERVED_OUTBOUND_TO / ATTEMPTED_OUTBOUND_TO | Asset | ZPA Microsegmentation connected/blocked outbound flow evidence |
+| ZpaSource       | OBSERVED_ACCESS_TO / REPORTED_ACCESS_TO | Asset | ZPA User Activity private-application session evidence |
 
 **Bold rows** are the discovery provenance relationships added in the June 2026 update.
 
@@ -67,6 +69,11 @@ Wiz cloud subscription and region edges provide context, not network reachabilit
 Attack-path queries currently use direct internet exposure reported by Wiz or
 one F5 VIP-to-member forwarding hop. Internal multi-hop routing awaits a network
 integration with VRF, route, interface, and policy evidence.
+
+ZPA observation edges include `source=zpa`, `organization_id`, `port`,
+`protocol`, `observation_count`, and first/last timestamps. A ZPA destination
+is an unverified candidate asset; these edges are not used as attack-path
+reachability. See [ZPA integration](ZPA_INTEGRATION.md).
 
 `ASN`, `Certificate`, `DiscoverySource`, `HostingProvider`, `Service`, and
 `Technology` are shared references. Globally routable `IP` addresses are shared

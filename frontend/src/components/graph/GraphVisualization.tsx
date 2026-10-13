@@ -35,7 +35,7 @@ const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), {
 export interface GraphNode {
   id: string;
   label: string;
-  type: 'domain' | 'subdomain' | 'ip' | 'port' | 'service' | 'service_observation' | 'technology' | 'vulnerability' | 'cve' | 'cwe' | 'discovery_source' | 'asn' | 'hosting_provider' | 'cloud_subscription' | 'cloud_region' | 'certificate' | 'script' | 'endpoint' | 'source_file' | 'source_route' | 'code_symbol' | 'package' | 'source_commit' | 'source_repository' | 'memory';
+  type: 'domain' | 'subdomain' | 'ip' | 'port' | 'service' | 'service_observation' | 'technology' | 'vulnerability' | 'cve' | 'cwe' | 'discovery_source' | 'zpa_source' | 'asn' | 'hosting_provider' | 'cloud_subscription' | 'cloud_region' | 'certificate' | 'script' | 'endpoint' | 'source_file' | 'source_route' | 'code_symbol' | 'package' | 'source_commit' | 'source_repository' | 'memory';
   properties?: Record<string, any>;
   x?: number;
   y?: number;
@@ -79,6 +79,7 @@ const NODE_COLORS: Record<string, string> = {
   cwe: '#f97316',             // orange
   // Discovery provenance layer
   discovery_source: '#84cc16', // lime green
+  zpa_source: '#22c55e',
   asn: '#14b8a6',             // teal
   hosting_provider: '#6366f1', // indigo
   cloud_subscription: '#0ea5e9',
@@ -108,6 +109,7 @@ const NODE_SIZES: Record<string, number> = {
   cve: 8,
   cwe: 7,
   discovery_source: 12,  // larger — anchor nodes in provenance view
+  zpa_source: 10,
   asn: 11,
   hosting_provider: 11,
   cloud_subscription: 11,
@@ -137,6 +139,7 @@ const NODE_ICONS: Record<string, React.ElementType> = {
   cve: Shield,
   cwe: AlertTriangle,
   discovery_source: Search,
+  zpa_source: Network,
   asn: Network,
   hosting_provider: Server,
   cloud_subscription: Globe,
@@ -167,6 +170,7 @@ export function GraphVisualization({
   const graphRef = useRef<any>(null);
   const [dimensions, setDimensions] = useState({ width: 800, height });
   const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
+  const [hoveredLink, setHoveredLink] = useState<GraphLink | null>(null);
 
   // Update dimensions on resize
   useEffect(() => {
@@ -257,7 +261,7 @@ export function GraphVisualization({
       ctx.moveTo(link.source.x, link.source.y);
       ctx.lineTo(link.target.x, link.target.y);
       
-      ctx.strokeStyle = isHighlighted ? '#ef4444' : '#4b5563';
+      ctx.strokeStyle = isHighlighted ? '#ef4444' : link.type?.startsWith('OBSERVED_') ? '#22c55e' : link.type?.startsWith('ATTEMPTED_') ? '#f59e0b' : '#4b5563';
       ctx.lineWidth = isHighlighted ? 2 / globalScale : 1 / globalScale;
       ctx.stroke();
     },
@@ -406,6 +410,15 @@ export function GraphVisualization({
         </div>
       )}
 
+      {hoveredLink?.properties?.source === 'zpa' && (
+        <div className="absolute top-4 left-4 z-10 bg-background/95 backdrop-blur rounded-lg p-3 max-w-xs text-xs">
+          <div className="font-medium">{hoveredLink.type.replaceAll('_', ' ')}</div>
+          <div>Port: {hoveredLink.properties.port || 'unknown'} · Protocol: {hoveredLink.properties.protocol || 'unknown'}</div>
+          <div>Observed events: {hoveredLink.properties.observation_count}</div>
+          <div>Last seen: {hoveredLink.properties.last_seen}</div>
+        </div>
+      )}
+
       {/* Loading overlay */}
       {loading && (
         <div className="absolute inset-0 bg-background/50 flex items-center justify-center z-20">
@@ -426,7 +439,12 @@ export function GraphVisualization({
           onNodeClick={(node: any) => onNodeClick?.(node as GraphNode)}
           onNodeHover={(node: any) => {
             setHoveredNode(node as GraphNode | null);
+            if (node) setHoveredLink(null);
             onNodeHover?.(node as GraphNode | null);
+          }}
+          onLinkHover={(link: any) => {
+            setHoveredLink(link as GraphLink | null);
+            if (link) setHoveredNode(null);
           }}
           cooldownTicks={100}
           onEngineStop={() => graphRef.current?.zoomToFit(400, 50)}
