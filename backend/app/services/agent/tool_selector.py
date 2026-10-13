@@ -709,14 +709,15 @@ class ToolSelector:
                 if "ssrf" in vulns:
                     ssrf_params.append(name)
 
-            # Blind/OOB-prone params (SSRF, or blind SQLi/RCE) — Interactsh, not Canarytokens
-            if (ssrf_params or sqli_params) and "execute_interactsh" not in self._tools_already_run:
+            # A parameter name alone is not a blind SQLi/OOB lead. Reserve
+            # callbacks for an observed URL-fetching surface and its approval.
+            if ssrf_params and "execute_interactsh" not in self._tools_already_run:
                 recs.append(ToolRecommendation(
                     tool_name="execute_interactsh",
                     args_template="register",
                     priority=5,
                     rationale=(
-                        "Params prone to blind SSRF/SQLi/RCE — execute_interactsh register, "
+                        "Observed URL-fetching inputs may need a scoped SSRF callback: register, "
                         "plant payload_url (or payload_email for mail), then poll. "
                         "Do not use Canarytokens. A DNS/HTTP/SMTP callback is the proof."
                     ),
@@ -735,24 +736,13 @@ class ToolSelector:
                     category="injection_testing",
                 ))
 
-            if sqli_params:
-                first_param = sqli_params[0]
+            if sqli_params or xss_params:
                 recs.append(ToolRecommendation(
-                    tool_name="execute_sqlmap",
-                    args_template=f'-u "https://{{target}}/?{first_param}=1" --batch --dbs --level=3 --risk=2',
+                    tool_name="probe_observed_input_batch",
+                    args_template="max_checks=8",
                     priority=7,
-                    rationale=f"SQLi-prone params found ({', '.join(sqli_params[:3])}) — automated SQL injection testing.",
-                    phase_required="exploitation",
-                    category="injection_testing",
-                ))
-
-            if xss_params:
-                first_param = xss_params[0]
-                recs.append(ToolRecommendation(
-                    tool_name="execute_xsstrike",
-                    args_template=f'-u "https://{{target}}/?{first_param}=test" --crawl',
-                    priority=7,
-                    rationale=f"XSS-prone params found ({', '.join(xss_params[:3])}) — advanced XSS scanning.",
+                    rationale=("Test mapped SQLi/XSS inputs with their observed request shape and "
+                               "execution-owned proof controls before escalating a specific lead."),
                     phase_required="exploitation",
                     category="injection_testing",
                 ))

@@ -13,20 +13,12 @@ from typing import Dict, List, Optional
 # SQL Injection
 # ---------------------------------------------------------------------------
 SQLI_ERROR_BASED: List[str] = [
-    "' OR '1'='1",
-    "' OR '1'='1' --",
-    "' OR '1'='1' /*",
-    "\" OR \"1\"=\"1",
-    "\" OR \"1\"=\"1\" --",
-    "1' ORDER BY 1--",
-    "1' ORDER BY 10--",
-    "1' UNION SELECT NULL--",
-    "1' UNION SELECT NULL,NULL--",
-    "1' UNION SELECT NULL,NULL,NULL--",
-    "1 UNION SELECT username,password FROM users--",
-    "' AND 1=CONVERT(int,(SELECT @@version))--",
-    "' AND extractvalue(1,concat(0x7e,(SELECT version())))--",
-    "1; SELECT pg_sleep(0)--",
+    "'",
+    "''",
+    '"',
+    '""',
+    "')",
+    "'))",
 ]
 
 SQLI_TIME_BASED: List[str] = [
@@ -63,10 +55,14 @@ SQLI_AUTH_BYPASS: List[str] = [
 ]
 
 SQLI_STACKED: List[str] = [
-    "'; DROP TABLE test--",
     "'; SELECT 1--",
-    "1; SELECT * FROM information_schema.tables--",
+    "1; SELECT 1--",
 ]
+
+# A broad payload encyclopedia is useful for research, but the agent's
+# default worklist should only suggest low-impact controls. Technique-specific
+# payloads are opt-in and still require an observed request and proof recipe.
+SQLI_DEFAULT_TECHNIQUES = ("error_based", "boolean_based")
 
 # ---------------------------------------------------------------------------
 # Cross-Site Scripting (XSS)
@@ -256,7 +252,8 @@ def generate_payloads(
         vuln_type: One of sqli, xss, ssti, cmdi, path_traversal, xxe, ssrf,
                    crlf, open_redirect.
         technique: Sub-technique (e.g. "time_based" for sqli, "encoded" for xss).
-                   If omitted, returns payloads from all sub-techniques.
+                   SQLi defaults to error and Boolean controls; other classes
+                   return all sub-techniques when omitted.
         max_payloads: Cap on number of payloads returned.
         collaborator_url: If provided, replaces COLLABORATOR placeholder in
                           out-of-band payloads. If omitted and payloads still
@@ -284,8 +281,9 @@ def generate_payloads(
         payloads = list(sub[technique])
     else:
         payloads = []
-        for v in sub.values():
-            payloads.extend(v)
+        selected = (SQLI_DEFAULT_TECHNIQUES if vuln_type == "sqli" else sub.keys())
+        for name in selected:
+            payloads.extend(sub[name])
 
     payloads = payloads[:max_payloads]
 
@@ -313,6 +311,8 @@ def generate_payloads(
         "payloads": payloads,
         "detection_hints": detection_hints,
     }
+    if vuln_type == "sqli":
+        out["reference_url"] = "https://github.com/swisskyrepo/PayloadsAllTheThings/tree/master/SQL%20Injection"
     if collaborator_url:
         out["collaborator_url"] = collaborator_url
     if oob_meta and oob_meta.get("success"):
@@ -335,9 +335,9 @@ def _get_detection_hints(vuln_type: str) -> Dict:
                 "Microsoft OLE DB Provider", "ODBC SQL Server Driver",
                 "pg_query()", "syntax error at or near",
             ],
-            "time_based": "Compare response times: vulnerable param adds 5+ seconds delay",
-            "boolean_based": "Compare response length/content between 1=1 (true) and 1=2 (false) payloads",
-            "union_based": "Look for extra data rows appearing in the response from UNION SELECT",
+            "time_based": "A single slow request is a lead; alternate repeated delay and normal controls against baseline latency.",
+            "boolean_based": "Repeat matched true/false requests with one changed input and an independent verifier.",
+            "union_based": "Use only a fixed marker in a bounded proof; do not query application tables or enumerate data.",
         },
         "xss": {
             "reflected": "Locate a unique canary in the response, identify its HTML/attribute/JavaScript context, and compare encoding. Reflection is a lead, not an XSS finding.",

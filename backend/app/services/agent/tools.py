@@ -3936,7 +3936,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         Args:
             vuln_type: sqli, xss, ssti, cmdi, path_traversal, xxe, ssrf, crlf, open_redirect
             technique: Sub-technique (e.g. "time_based" for sqli, "encoded" for xss).
-                       Omit to get payloads from all sub-techniques.
+                       SQLi defaults to low-impact error and Boolean controls.
             max_payloads: Max payloads to return (default 20).
             collaborator_url: Replace COLLABORATOR placeholder for out-of-band payloads.
         """
