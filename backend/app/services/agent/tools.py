@@ -7723,12 +7723,41 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 )
                 update_hypothesis(brain, hypothesis_id, status=status, evidence=evidence)
                 self._engagement_brain = brain.to_dict()
-                out["engagement_brain"] = self._engagement_brain
                 out["hypothesis_update"] = {"id": hypothesis_id, "status": status}
             except Exception as exc:
                 out["hypothesis_update_error"] = str(exc)
 
-        return json.dumps(out, indent=2)[:_tool_output_max_chars()]
+        # The orchestrator reads the updated brain from this manager. Embedding
+        # the entire brain in the comparison result can cut the JSON mid-object
+        # at the tool-output limit, making the proof result unreadable.
+        serialized = json.dumps(out, indent=2)
+        if len(serialized) > _tool_output_max_chars():
+            for key in ("baseline", "mutant"):
+                exchange = out.get(key) or {}
+                request = exchange.get("request") or {}
+                response = exchange.get("response") or {}
+                out[key] = {
+                    "evidence_id": exchange.get("evidence_id"),
+                    "request": {field: request.get(field) for field in ("method", "url", "identity")},
+                    "response": {field: response.get(field) for field in ("status", "length", "elapsed_s")},
+                    "trace": exchange.get("trace") or {},
+                }
+            out["output_compacted"] = True
+            serialized = json.dumps(out, indent=2)
+        if len(serialized) > _tool_output_max_chars():
+            escalation = out.get("proof_escalation") or {}
+            serialized = json.dumps({
+                "verdict": out["verdict"],
+                "signals": [str(value)[:200] for value in out["signals"][:8]],
+                "baseline_evidence_id": out["baseline"].get("evidence_id"),
+                "mutant_evidence_id": out["mutant"].get("evidence_id"),
+                "proof_escalation": {
+                    field: escalation.get(field) for field in ("id", "status", "strategy", "evidence_ids")
+                } if escalation else None,
+                "next_action": str(out.get("next_action") or "")[:300],
+                "output_compacted": True,
+            })
+        return serialized
 
     async def sync_engagement_brain(
         self,

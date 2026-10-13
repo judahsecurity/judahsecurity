@@ -218,7 +218,21 @@ async def test_compare_requests_automatically_queues_proof(monkeypatch):
         assert result["proof_escalation"]["strategy"] == "authorization_differential"
         assert len(result["proof_escalation"]["evidence_ids"]) == 2
         assert result["next_action"].startswith("Complete the structured proof")
+        assert "engagement_brain" not in result
         assert manager._engagement_brain["proof_escalations"][0]["status"] == "pending"
+        monkeypatch.setattr("app.services.agent.tools._tool_output_max_chars", lambda: 1200)
+        compacted_output = await manager.compare_requests(
+            {"method": "GET", "url": "https://app.test/owner"},
+            {"method": "GET", "url": "https://app.test/orders"},
+            interest_fields=["owner_id"],
+            hypothesis_id=cell["hypothesis_id"],
+            coverage_cell_id=cell["id"],
+        )
+        assert len(compacted_output) <= 1200
+        compacted = json.loads(compacted_output)
+        assert compacted["output_compacted"] is True
+        assert compacted["verdict"] == "LIKELY_IMPACT"
+        assert compacted.get("mutant_evidence_id") or compacted["mutant"]["evidence_id"]
     finally:
         current_session_id.reset(session_token)
         current_organization_id.reset(org_token)
