@@ -146,16 +146,23 @@ def validate_proof(
             return True, ""
         if kind == "string_boolean_sqli":
             from app.services.agent.scoped_assessment.sqli_string import string_sql_proof_valid
+            same_recipe = first.get("proof_recipe") == second.get("proof_recipe")
+            matching_keys = (
+                ("baseline_first", "true_first", "false_first")
+                if first.get("proof_recipe") == "string_and_boolean_v1" else
+                ("baseline_first", "escaped_quote", "true_first", "false_first")
+            )
             if (not string_sql_proof_valid(first) or not string_sql_proof_valid(second)
                     or first.get("proof_confirmed") is not True
                     or second.get("proof_confirmed") is not True
+                    or not same_recipe
                     or first.get("parameter") != second.get("parameter")
                     or first.get("nonce") == second.get("nonce")
                     or any(abs(first["checks"][key]["bytes_captured"]
                                - second["checks"][key]["bytes_captured"])
                            > max(64, max(first["checks"][key]["bytes_captured"],
                                          second["checks"][key]["bytes_captured"]) // 100)
-                           for key in ("baseline_first", "escaped_quote", "true_first", "false_first"))
+                           for key in matching_keys)
                     or hunter["identity"] != verifier["identity"]):
                 return False, "Independent matching string Boolean SQLi proof is required"
             return True, ""

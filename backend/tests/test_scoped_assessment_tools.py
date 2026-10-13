@@ -253,6 +253,31 @@ async def test_sqli_clean_coverage_requires_complete_stable_controls():
 
 
 @pytest.mark.asyncio
+async def test_negative_boolean_recipe_cannot_close_class_level_sqli_coverage():
+    from app.services.agent.engagement_brain import EngagementBrain
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.scoped_assessment.sqli_string import CHECK_ORDER
+
+    manager = ASMToolsManager()
+    manager._engagement_brain = EngagementBrain(target="https://app.example.test").to_dict()
+    checks = {key: {"status": 200, "bytes_captured": 4000,
+                    "redirected": False, "truncated": False} for key in CHECK_ORDER}
+    receipt = evidence_store(manager).record(
+        "scoped_string_sqli",
+        {"operation": "sqli_boolean_string", "proof_recipe": "string_or_boolean_v1",
+         "parameter": "category", "proof_confirmed": False,
+         "requests_sent": len(CHECK_ORDER), "checks": checks},
+        target="https://app.example.test/catalog", identity="anonymous",
+    )
+    result = json.loads(await manager.record_surface_coverage(
+        path="/catalog", host="app.example.test", identity="anonymous",
+        parameter="query:category", test_type="sqli", status="tested_clean",
+        evidence_id=receipt,
+    ))
+    assert "does not establish clean SQLi coverage" in result["error"]
+
+
+@pytest.mark.asyncio
 async def test_observed_directory_becomes_assessment_coverage(monkeypatch):
     manager = ASMToolsManager()
     manager._fallback_target = "https://app.example.test"

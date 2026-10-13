@@ -254,6 +254,14 @@ async def run_observed_input_batch(
                                     and row.get("coverage_cell_id") == cell["id"]
                                     and row.get("status") == "pending"
                                 ), "")
+                    elif (specialist == "sqli" and result.get("evidence_id")
+                          and (result.get("probe_result") or {}).get("proof_recipe")
+                              in {"string_or_boolean_v1", "string_and_boolean_v1"}):
+                        # A bounded Boolean recipe is a proof attempt, not
+                        # complete SQLi coverage. Preserve negative receipts
+                        # without closing the input as tested_clean.
+                        outcome = "inconclusive"
+                        reason = "Bounded Boolean controls did not independently prove SQLi"
                     elif specialist == "sqli" and result.get("evidence_id"):
                         receipt = await _invoke(manager, "record_surface_coverage", {
                             "path": cell["path"], "method": method, "host": cell.get("host", ""),
