@@ -94,7 +94,7 @@ def test_select_proof_prefers_target_and_curl():
 
 
 def test_verified_detection_claim_links_sql_proof_receipt_not_recon():
-    receipt = "b8a3e91f0b9046b5871719074e51c9de"
+    receipt = "b" * 32
     other_receipt = "a" * 32
     target = "https://ginandjuice.shop/catalog?category="
     invocations = [
