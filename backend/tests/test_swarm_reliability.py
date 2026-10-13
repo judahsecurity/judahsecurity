@@ -10,10 +10,12 @@ from app.services.agent.engagement_brain import EngagementBrain
 from app.services.agent.fireteam_service import (
     SpecialistProfile,
     SpecialistReport,
+    ToolInvocation,
     run_fireteam,
 )
 from app.services.agent.penetration_task_graph import (
     NODE_BLOCKED,
+    NODE_READY,
     NODE_RUNNING,
     PenetrationTaskGraph,
     TaskNode,
@@ -24,8 +26,10 @@ from app.services.agent.penetration_task_graph import (
 
 @pytest.mark.asyncio
 async def test_fireteam_returns_completed_report_when_another_member_times_out(monkeypatch):
-    async def specialist(profile, mission, targets, llm, tools_manager, directive=None):
+    async def specialist(profile, mission, targets, llm, tools_manager,
+                         directive=None, execution_progress=None):
         if profile.name == "slow":
+            execution_progress["tool_inflight"] = True
             await asyncio.sleep(1)
         return SpecialistReport(
             specialist=profile.name,
@@ -71,7 +75,8 @@ async def test_fireteam_returns_completed_report_when_another_member_times_out(m
 
 @pytest.mark.asyncio
 async def test_member_deadline_returns_even_if_cancellation_is_slow(monkeypatch):
-    async def slow_cancel(profile, mission, targets, llm, tools_manager, directive=None):
+    async def slow_cancel(profile, mission, targets, llm, tools_manager,
+                          directive=None, execution_progress=None):
         try:
             await asyncio.sleep(1)
         except asyncio.CancelledError:
@@ -95,13 +100,71 @@ async def test_member_deadline_returns_even_if_cancellation_is_slow(monkeypatch)
         wave_timeout_sec=0.1,
     )
     assert time.monotonic() - started < 0.15
-    assert result.reports[0].verdict == "blocked"
+    assert result.reports[0].verdict == "retry"
+    assert result.reports[0].rewrite_hint == "execution_timeout_no_inflight_tool"
     await asyncio.sleep(0.25)  # Allow the deliberately slow cancellation to settle.
 
 
 @pytest.mark.asyncio
+async def test_model_only_timeout_releases_lease_without_recovery_block(monkeypatch):
+    async def waiting_on_model(profile, mission, targets, llm, tools_manager,
+                               directive=None, execution_progress=None):
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr("app.services.agent.fireteam_service._run_specialist", waiting_on_model)
+    result = await run_fireteam(
+        mission="test", targets=["https://example.test"],
+        specialists=[SpecialistProfile(name="slow", role="slow", allowed_tools=[])],
+        llm=None, tools_manager=None,
+        directives={"slow": SimpleNamespace(hypothesis_ids=["h1"], lease_id="lease1")},
+        member_timeout_sec=0.02, wave_timeout_sec=0.1,
+    )
+    graph = PenetrationTaskGraph(nodes={
+        "h1": TaskNode(id="h1", title="test", specialist="slow", status=NODE_RUNNING,
+                       lease_id="lease1", max_attempts=2),
+    })
+    apply_executor_summary(graph, EngagementBrain(), parse_executor_summary(result.reports[0]))
+    assert graph.nodes["h1"].status == NODE_READY
+    assert graph.nodes["h1"].recovery_required is False
+    assert graph.nodes["h1"].lease_id == ""
+
+
+@pytest.mark.asyncio
+async def test_timeout_after_completed_tool_keeps_receipt_and_retries(monkeypatch):
+    async def completed_then_waiting(profile, mission, targets, llm, tools_manager,
+                                     directive=None, execution_progress=None):
+        execution_progress["completed_calls"].append(ToolInvocation(
+            tool="query_assets", args={"hypothesis_id": "h1"}, success=True,
+            summary="Completed inventory query",
+        ))
+        await asyncio.sleep(1)
+
+    monkeypatch.setattr(
+        "app.services.agent.fireteam_service._run_specialist", completed_then_waiting
+    )
+    result = await run_fireteam(
+        mission="test", targets=["https://example.test"],
+        specialists=[SpecialistProfile(name="slow", role="slow", allowed_tools=[])],
+        llm=None, tools_manager=None,
+        directives={"slow": SimpleNamespace(hypothesis_ids=["h1"], lease_id="lease1")},
+        member_timeout_sec=0.02, wave_timeout_sec=0.1,
+    )
+    report = result.reports[0]
+    assert report.verdict == "retry"
+    assert [call.tool for call in report.tool_calls] == ["query_assets"]
+    graph = PenetrationTaskGraph(nodes={
+        "h1": TaskNode(id="h1", title="test", specialist="slow", status=NODE_RUNNING,
+                       lease_id="lease1", max_attempts=2),
+    })
+    apply_executor_summary(graph, EngagementBrain(), parse_executor_summary(report))
+    assert graph.nodes["h1"].status == NODE_READY
+    assert graph.nodes["h1"].recovery_required is False
+
+
+@pytest.mark.asyncio
 async def test_wave_deadline_keeps_completed_member(monkeypatch):
-    async def specialist(profile, mission, targets, llm, tools_manager, directive=None):
+    async def specialist(profile, mission, targets, llm, tools_manager,
+                         directive=None, execution_progress=None):
         if profile.name == "slow":
             await asyncio.sleep(1)
         return SpecialistReport(
@@ -131,7 +194,8 @@ async def test_completed_hunter_can_start_verification_before_sibling_finishes(m
     release_slow = asyncio.Event()
     verified_early = asyncio.Event()
 
-    async def specialist(profile, mission, targets, llm, tools_manager, directive=None):
+    async def specialist(profile, mission, targets, llm, tools_manager,
+                         directive=None, execution_progress=None):
         if profile.name == "slow":
             await release_slow.wait()
         return SpecialistReport(

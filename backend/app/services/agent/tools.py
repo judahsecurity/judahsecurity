@@ -1551,6 +1551,71 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
                 from app.services.agent.evidence_store import evidence_store
                 evidence_ids = []
+                traffic_tools = {"execute_browser", "execute_deep_crawl", "execute_interceptor"}
+                if tool_name in traffic_tools:
+                    # A later action can fail after the browser has already
+                    # observed useful traffic. Persist the request shapes and
+                    # ingest in-scope operations regardless of overall success.
+                    from app.services.agent.evidence_store import origin
+
+                    browser_spec = {}
+                    expected_origin = None
+                    try:
+                        raw_spec = tool_args.get("args") or "{}"
+                        if isinstance(raw_spec, str) and raw_spec.startswith(("http://", "https://")):
+                            browser_spec = {"url": raw_spec}
+                        else:
+                            browser_spec = json.loads(raw_spec) if isinstance(raw_spec, str) else raw_spec
+                        target = (browser_spec.get("allowed_origin") or browser_spec.get("url")
+                                  or browser_spec.get("target") or self._fallback_target)
+                        candidate_origin = origin(target)
+                        if candidate_origin[1] in self._assessment_scope:
+                            expected_origin = candidate_origin
+                    except (ValueError, TypeError, AttributeError):
+                        pass
+                    operations = []
+                    for operation in result.get("application_operations") or []:
+                        if not isinstance(operation, dict):
+                            continue
+                        try:
+                            if expected_origin and origin(operation.get("url") or "") == expected_origin:
+                                operations.append(operation)
+                        except ValueError:
+                            continue
+                    if operations:
+                        self._ingest_observed_operations(operations)
+                    requests = [row for row in (result.get("network_requests") or [])
+                                if isinstance(row, dict)]
+                    if requests:
+                        traffic_id = evidence_store(self).record(
+                            "browser_traffic",
+                            {
+                                "requests": requests,
+                                "observed_total": result.get("network_requests_total") or len(requests),
+                                "metadata_rows_omitted": result.get("network_requests_dropped") or 0,
+                                "operations_ingested": len(operations),
+                            },
+                            target=(browser_spec.get("allowed_origin") or browser_spec.get("url")
+                                    or browser_spec.get("target") or "") if isinstance(browser_spec, dict) else "",
+                            success=bool(result.get("success")),
+                        )
+                        evidence_ids.append(traffic_id)
+                        try:
+                            from app.services.agent.action_ledger import active_run_id, append_action
+
+                            in_scope_count = sum(bool(row.get("in_scope")) for row in requests)
+                            append_action(
+                                active_run_id.get(), os.urandom(16).hex(), "completed",
+                                "browser_traffic_capture", phase="surface_mapping",
+                                target=(browser_spec.get("allowed_origin") or browser_spec.get("url")
+                                        or browser_spec.get("target") or "") if isinstance(browser_spec, dict) else "",
+                                detail=(f"{in_scope_count} in-scope request records; "
+                                        f"{len(requests) - in_scope_count} blocked or external; "
+                                        f"{result.get('network_requests_dropped') or 0} metadata rows omitted"),
+                                evidence_ids=[traffic_id],
+                            )
+                        except Exception:
+                            logger.exception("Could not record browser traffic capture")
                 if tool_name == "execute_interactsh" and result.get("success"):
                     try:
                         observation = json.loads(result.get("output") or "{}")
@@ -1701,7 +1766,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         payload["augur"] = augur_block
                     if capability_map:
                         payload["capability_map"] = capability_map
-                    if result.get("application_operations"):
+                    if tool_name not in traffic_tools and result.get("application_operations"):
                         self._ingest_observed_operations(result["application_operations"])
                     if capability_map and capability_map.get("api_samples"):
                         await self.map_application_traffic(capability_map["api_samples"], identity=browser_identity or "legacy", source="crawl")
@@ -1754,6 +1819,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         "success": False,
                         "output": combined,
                         "error": err,
+                        "evidence_ids": evidence_ids,
                     }
                     if result.get("exit_code") is not None:
                         fail_payload["exit_code"] = result.get("exit_code")
@@ -4045,6 +4111,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         page = [{key: row.get(key) for key in (
             "id", "method", "url", "path", "protocol", "operation", "parameters",
             "identities", "sources", "capture_ids", "status", "content_type",
+            "request_content_type",
             "discovery_only",
         ) if key in row} for row in rows[start:start + page_size]]
         return json.dumps({"total": len(rows), "offset": start,
@@ -9418,7 +9485,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         rewrites: list = []
         for summary, report in zip(executor_summaries, result.reports):
             spawned.extend(apply_executor_summary(graph, brain, summary))
-            if summary.rewrite_hint == "execution_timeout":
+            if summary.rewrite_hint.startswith("execution_timeout"):
                 continue
             rewrite = should_rewrite(graph, summary, report)
             if rewrite:

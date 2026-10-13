@@ -1213,6 +1213,7 @@ async def _run_specialist(
     llm: Any,
     tools_manager: Any,
     directive: Any = None,
+    execution_progress: Optional[Dict[str, Any]] = None,
 ) -> SpecialistReport:
     start = datetime.utcnow()
     target_list = list(targets) if targets else []
@@ -1396,10 +1397,17 @@ async def _run_specialist(
             ))
             continue
 
+        if execution_progress is not None:
+            # Cancellation while a tool is in flight may leave an unknown
+            # effect. Completed batches are safe to resume from the ledger.
+            execution_progress["tool_inflight"] = True
         tool_results = await asyncio.gather(*(
             _safe_invoke(tools_manager, tc.get("tool", ""), tc.get("args") or {})
             for tc in tool_calls
         ))
+        if execution_progress is not None:
+            execution_progress["tool_inflight"] = False
+            execution_progress["completed_calls"].extend(tool_results)
 
         for tc, tr in zip(tool_calls, tool_results):
             report.tool_calls.append(tr)
@@ -1556,23 +1564,30 @@ async def run_fireteam(
     targets_list = [t for t in targets if t]
     sem = asyncio.Semaphore(max(1, max_parallel))
 
-    def _interrupted_report(p: SpecialistProfile, reason: str) -> SpecialistReport:
+    def _interrupted_report(
+        p: SpecialistProfile, reason: str, *, execution_progress: Dict[str, Any]
+    ) -> SpecialistReport:
         directive = directives.get(p.name)
         hypothesis_ids = list(getattr(directive, "hypothesis_ids", None) or [])
         return SpecialistReport(
             specialist=p.name,
             role=f"{p.epithet}: {p.role}",
             mission=mission,
-            summary=f"Execution interrupted: {reason}. Reconcile tool effects before retrying.",
+            summary=(f"Execution interrupted: {reason}. "
+                     + ("Reconcile the in-flight tool before retrying."
+                        if execution_progress["tool_inflight"] else
+                        "No tool call is in flight; the task can be retried.")),
             error=reason,
-            verdict="blocked",
-            rewrite_hint="execution_timeout",
+            verdict="blocked" if execution_progress["tool_inflight"] else "retry",
+            rewrite_hint=("execution_timeout" if execution_progress["tool_inflight"]
+                          else "execution_timeout_no_inflight_tool"),
+            tool_calls=list(execution_progress["completed_calls"]),
             hypothesis_ids=hypothesis_ids,
             assigned_hypothesis_id=hypothesis_ids[0] if len(hypothesis_ids) == 1 else "",
             lease_id=str(getattr(directive, "lease_id", "") or ""),
         )
 
-    async def _run(p: SpecialistProfile) -> SpecialistReport:
+    async def _run(p: SpecialistProfile, execution_progress: Dict[str, Any]) -> SpecialistReport:
         async with sem:
             from app.services.agent.action_ledger import active_run_id, append_action
 
@@ -1600,6 +1615,7 @@ async def run_fireteam(
                 spec_llm,
                 tools_manager,
                 directive=directives.get(p.name),
+                execution_progress=execution_progress,
             ))
             try:
                 done, _ = await asyncio.wait(
@@ -1611,7 +1627,8 @@ async def run_fireteam(
                     member_task.cancel()
                     member_task.add_done_callback(_log_late_failure)
                     rep = _interrupted_report(
-                        p, f"specialist timed out after {member_timeout_sec:g}s"
+                        p, f"specialist timed out after {member_timeout_sec:g}s",
+                        execution_progress=execution_progress,
                     )
             except asyncio.CancelledError:
                 member_task.cancel()
@@ -1622,7 +1639,10 @@ async def run_fireteam(
                 raise
             except Exception as exc:
                 logger.exception("Fireteam specialist %s failed", p.name)
-                rep = _interrupted_report(p, f"specialist failed: {exc}")
+                rep = _interrupted_report(
+                    p, f"specialist failed: {exc}",
+                    execution_progress=execution_progress,
+                )
             if progress_callback:
                 try:
                     await progress_callback(label, "error" if rep.error else "done")
@@ -1630,7 +1650,7 @@ async def run_fireteam(
                     pass
             append_action(
                 run_id, action_id,
-                "interrupted" if rep.rewrite_hint == "execution_timeout" else
+                "interrupted" if rep.rewrite_hint.startswith("execution_timeout") else
                 "failed" if rep.error else "completed",
                 f"specialist:{p.name}", target=targets_list[0] if targets_list else "",
                 detail=rep.error or rep.verdict or "",
@@ -1652,7 +1672,10 @@ async def run_fireteam(
         except Exception:
             logger.exception("Fireteam task failed after its deadline")
 
-    tasks = [asyncio.create_task(_run(p)) for p in resolved]
+    execution_progress = [{"tool_inflight": False, "completed_calls": []}
+                          for _ in resolved]
+    tasks = [asyncio.create_task(_run(p, progress))
+             for p, progress in zip(resolved, execution_progress)]
     try:
         _, pending = await asyncio.wait(
             tasks, timeout=max(0.01, wave_timeout_sec)
@@ -1667,10 +1690,11 @@ async def run_fireteam(
         task.add_done_callback(_log_late_failure)
 
     reports = []
-    for profile, task in zip(resolved, tasks):
+    for profile, task, progress in zip(resolved, tasks, execution_progress):
         if task in pending:
             reports.append(_interrupted_report(
-                profile, f"fireteam wave timed out after {wave_timeout_sec:g}s"
+                profile, f"fireteam wave timed out after {wave_timeout_sec:g}s",
+                execution_progress=progress,
             ))
             if progress_callback:
                 try:
@@ -1682,7 +1706,10 @@ async def run_fireteam(
             try:
                 reports.append(task.result())
             except BaseException as exc:
-                reports.append(_interrupted_report(profile, f"specialist failed: {exc}"))
+                reports.append(_interrupted_report(
+                    profile, f"specialist failed: {exc}",
+                    execution_progress=progress,
+                ))
 
     merged = _merge_reports(mission, reports)
 

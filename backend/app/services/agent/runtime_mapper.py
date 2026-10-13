@@ -134,6 +134,7 @@ def normalize_request(
             content_type=content_type[:100],
             identities=[identity],
             sources=[source],
+            request_content_type=content_type.split(";", 1)[0][:100] if content_type else "",
             fidelity=("truncated_body:" if truncated else "") + fidelity,
             discovery_only=True,
         )
@@ -151,7 +152,7 @@ def merge_operations(existing: list[dict], incoming: list[dict]) -> list[dict]:
         row = rows[item["id"]]
         for key in ("identities", "sources", "parameters", "capture_ids"):
             row[key] = sorted(set(row.get(key, [])) | set(item.get(key, [])))
-        for key in ("status", "content_type"):
+        for key in ("status", "content_type", "request_content_type"):
             if item.get(key) is not None and not row.get(key):
                 row[key] = item[key]
     return list(rows.values())

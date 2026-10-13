@@ -171,3 +171,27 @@ def test_agent_browser_scope_requires_registered_host_and_one_origin():
             {"action": "navigate", "url": "https://ginandjuice.shop/"},
             {"action": "check_response", "url": "http://ginandjuice.shop/"},
         ]})
+
+
+def test_browser_scope_resolves_relative_and_bare_same_host_urls_without_expanding_scope():
+    manager = SimpleNamespace(
+        _assessment_scope={"ginandjuice.shop"},
+        _fallback_target="https://ginandjuice.shop/",
+        _identity_registry=SimpleNamespace(identities={}),
+    )
+    bounded = prepare_browser_scope(manager, {"actions": [
+        {"action": "navigate", "url": "catalog?category=Gifts"},
+        {"action": "check_xss", "url": "ginandjuice.shop/catalog?searchTerm=canary"},
+    ]}, fallback_target="https://ginandjuice.shop/")
+    assert [action["url"] for action in bounded["actions"]] == [
+        "https://ginandjuice.shop/catalog?category=Gifts",
+        "https://ginandjuice.shop/catalog?searchTerm=canary",
+    ]
+    with pytest.raises(ValueError, match="Out-of-scope"):
+        prepare_browser_scope(manager, {"actions": [
+            {"action": "navigate", "url": "other.example/catalog"},
+        ]}, fallback_target="https://ginandjuice.shop/")
+    with pytest.raises(ValueError, match="Protocol-relative"):
+        prepare_browser_scope(manager, {"actions": [
+            {"action": "navigate", "url": "//other.example/catalog"},
+        ]}, fallback_target="https://ginandjuice.shop/")

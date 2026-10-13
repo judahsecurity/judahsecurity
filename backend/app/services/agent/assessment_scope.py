@@ -81,14 +81,21 @@ def prepare_browser_scope(manager, spec: dict, *, fallback_target: str = "") -> 
     base = str(fallback_target or getattr(manager, "_fallback_target", "") or "")
 
     def normalize_url(value: str) -> str:
-        raw = str(value)
-        # Browser agents commonly use /path after navigating the approved
-        # target. Resolve that form, then apply the same exact scope checks.
-        if raw.startswith("/") and not raw.startswith("//"):
-            if not base:
-                raise ValueError("A relative browser URL requires an assessment target")
-            return urljoin(base, raw)
-        return raw
+        raw = str(value).strip()
+        if raw.startswith("//"):
+            raise ValueError("Protocol-relative browser URLs are not allowed")
+        parsed = urlsplit(raw)
+        if parsed.scheme:
+            return raw
+        if not base:
+            raise ValueError("A relative browser URL requires an assessment target")
+        # A bare FQDN is an explicit destination, while catalog?search=x is a
+        # path relative to the assessment seed. Keep that distinction before
+        # applying the exact-host check below.
+        first = raw.lstrip("/").split("/", 1)[0].split("?", 1)[0]
+        if not raw.startswith("/") and ("." in first or ":" in first):
+            return f"{urlsplit(base).scheme}://{raw}"
+        return urljoin(base, raw)
 
     urls = []
     for action in bounded["actions"]:
