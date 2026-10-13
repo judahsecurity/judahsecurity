@@ -14,6 +14,7 @@ from app.services.agent.fireteam_service import get_specialist
 from app.services.agent.independent_verify import apply_verdict, check_verify_receipt, submit_candidate
 from app.services.agent.proof_policy import validate_proof
 from app.services.agent.scoped_assessment import sqli_string
+from app.services.agent.scoped_assessment.http_observe import _sql_error_family
 from app.services.agent.scoped_assessment_tools import HUNTER_GET_BUDGET
 from app.services.agent.tools import ASMToolsManager
 
@@ -85,6 +86,125 @@ def _and_proof(monkeypatch, nonce):
     )
     assert proof["requests_sent"] == 6 and proof["proof_confirmed"]
     return proof
+
+
+def _observe_error(url, allowed_origins, storage_state):
+    assert allowed_origins == ["https://app.example.test"]
+    value = parse_qs(urlsplit(url).query)["category"][0]
+    if value == "gin'":
+        status, body, family = 500, b"PostgreSQL ERROR: unterminated string", "postgresql"
+    else:
+        status, body, family = 200, b"one product" * 180, ""
+    return {
+        "status": status, "content_type": "text/html", "bytes_captured": len(body),
+        "truncated": False, "redirected": False,
+        "body_sha256": hashlib.sha256(body).hexdigest(),
+        "sql_error_family": family,
+    }
+
+
+def _error_proof(monkeypatch):
+    monkeypatch.setattr(sqli_string, "observe_get", _observe_error)
+    baseline, variants, _ = sqli_string.plan_string_boolean(
+        URL, parameter="category", allowed_origins=["https://app.example.test"],
+    )
+    proof = sqli_string.probe_string_error(
+        baseline, variants, parameter="category",
+        allowed_origins=["https://app.example.test"], storage_state=None,
+        before_request=lambda: None,
+    )
+    assert proof["proof_confirmed"] and proof["requests_sent"] == 5
+    return proof
+
+
+def test_sql_error_classifier_returns_only_specific_family():
+    assert _sql_error_family(b"PostgreSQL ERROR: syntax error") == "postgresql"
+    assert _sql_error_family(b"You have an error in your SQL syntax") == "mysql"
+    assert _sql_error_family(b"PostgreSQL ERROR: invalid input syntax for type integer") == ""
+    assert _sql_error_family(b"sqlite3.OperationalError: database is locked") == ""
+    assert _sql_error_family(b"Internal Server Error") == ""
+
+
+def test_error_proof_requires_repeated_specific_diagnostic(monkeypatch):
+    proof = _error_proof(monkeypatch)
+    proof["checks"]["quote_second"]["sql_error_family"] = ""
+    assert not sqli_string.string_error_proof_valid(proof)
+    proof = _error_proof(monkeypatch)
+    proof["checks"]["baseline_first"]["sql_error_family"] = "postgresql"
+    assert not sqli_string.string_error_proof_valid(proof)
+
+
+def test_error_proof_requires_independent_matching_receipts(monkeypatch):
+    store = EvidenceStore()
+    hunter = store.record(
+        "scoped_string_sqli", _error_proof(monkeypatch),
+        target=TARGET, identity="anonymous",
+    )
+    token = verification_run.set(VerificationRun("verifier-run", "candidate", 1, "fresh"))
+    try:
+        verifier = store.record(
+            "scoped_string_sqli", _error_proof(monkeypatch),
+            target=TARGET, identity="anonymous",
+        )
+    finally:
+        verification_run.reset(token)
+    candidate = SimpleNamespace(target=TARGET, evidence_ids=[hunter],
+                                title="SQL injection in category")
+    receipt = {"kind": "string_error_sqli", "hunter_artifact_id": hunter,
+               "artifact_id": verifier}
+    assert validate_proof(store, candidate, receipt, [verifier])[0]
+    assert not validate_proof(store, candidate, receipt, [hunter])[0]
+
+
+def test_error_proof_issues_publication_receipt_after_fresh_verifier(monkeypatch):
+    manager = ASMToolsManager()
+    store = evidence_store(manager)
+    hunter = store.record(
+        "scoped_string_sqli", _error_proof(monkeypatch),
+        target=TARGET, identity="anonymous",
+    )
+    brain = EngagementBrain(target="https://app.example.test")
+    candidate = submit_candidate(
+        brain, title="SQL injection in category", target=TARGET,
+        evidence_ids=[hunter], severity="high",
+    )
+    manager._engagement_brain = brain.to_dict()
+    token = verification_run.set(VerificationRun("verifier-run", candidate.id, 1, candidate.nonce))
+    try:
+        verifier = store.record(
+            "scoped_string_sqli", _error_proof(monkeypatch),
+            target=TARGET, identity="anonymous",
+        )
+        verdict = apply_verdict(
+            manager, candidate_id=candidate.id, verdict="confirmed",
+            evidence="Repeated database-specific error under quote input",
+            evidence_ids=[verifier],
+            proof={"kind": "string_error_sqli", "hunter_artifact_id": hunter,
+                   "artifact_id": verifier},
+        )
+    finally:
+        verification_run.reset(token)
+    assert verdict.status == "confirmed", verdict.verifier_summary
+    assert check_verify_receipt(
+        manager._verify_receipts, title=candidate.title, target=TARGET,
+        tools_manager=manager,
+    )[0]
+
+
+@pytest.mark.asyncio
+async def test_string_tool_confirms_database_error_before_and_controls(monkeypatch):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    manager._capability_map = {"scope": "https://app.example.test", "pages_visited": [URL]}
+    monkeypatch.setattr(sqli_string, "observe_get", _observe_error)
+
+    result = json.loads(await manager.scoped_string_sqli(URL, "category"))
+    assert result["proof_confirmed"] is True
+    assert result["proof_recipe"] == "string_error_v1"
+    assert result["total_requests_sent"] == 13
+    assert result["prior_or_evidence_id"]
+    assert manager._scoped_get_count == 13
 
 
 def test_and_boolean_proof_requires_repeated_differential(monkeypatch):

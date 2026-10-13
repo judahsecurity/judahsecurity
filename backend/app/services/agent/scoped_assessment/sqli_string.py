@@ -25,6 +25,9 @@ AND_CHECK_ORDER = (
     "baseline_first", "true_first", "false_first", "true_second",
     "false_second", "baseline_last",
 )
+ERROR_CHECK_ORDER = (
+    "baseline_first", "quote_first", "escaped_quote", "quote_second", "baseline_last",
+)
 _SAFE_VALUE = re.compile(r"[A-Za-z][A-Za-z0-9 _-]{0,39}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -131,6 +134,57 @@ def and_fallback_eligible(result: dict) -> bool:
     )
 
 
+def error_followup_eligible(result: dict) -> bool:
+    """Repeat a quote-triggered database diagnostic before treating it as proof."""
+    if not and_fallback_eligible(result):
+        return False
+    checks = result["checks"]
+    family = checks.get("quote_error", {}).get("sql_error_family")
+    return (isinstance(family, str) and bool(family)
+            and not checks.get("baseline_first", {}).get("sql_error_family")
+            and not checks.get("escaped_quote", {}).get("sql_error_family")
+            and not checks.get("baseline_last", {}).get("sql_error_family"))
+
+
+def string_error_proof_valid(result: dict) -> bool:
+    if (result.get("operation") != "sqli_error_string"
+            or result.get("proof_recipe") != "string_error_v1"
+            or result.get("method") != "GET" or result.get("location") != "query"
+            or not result.get("target") or not result.get("parameter")
+            or result.get("requests_sent") != len(ERROR_CHECK_ORDER)):
+        return False
+    checks = result.get("checks")
+    if not isinstance(checks, dict) or any(not isinstance(checks.get(key), dict)
+                                            for key in ERROR_CHECK_ORDER):
+        return False
+    rows = {key: checks[key] for key in ERROR_CHECK_ORDER}
+    if any(row.get("truncated") is not False or row.get("redirected") is not False
+           or not _DIGEST.fullmatch(str(row.get("body_sha256", "")))
+           or not isinstance(row.get("bytes_captured"), int)
+           for row in rows.values()):
+        return False
+    normal = (rows["baseline_first"], rows["escaped_quote"], rows["baseline_last"])
+    errors = (rows["quote_first"], rows["quote_second"])
+    if any(row.get("status") != 200 or row.get("sql_error_family") for row in normal):
+        return False
+    family = errors[0].get("sql_error_family")
+    if family not in {"postgresql", "mysql", "sqlite", "oracle", "sqlserver"} \
+            or family != errors[1].get("sql_error_family"):
+        return False
+    if (errors[0].get("status") != errors[1].get("status")
+            or errors[0].get("status") not in {200, 500, 501, 502, 503, 504}):
+        return False
+    if not normal[0].get("content_type") or any(
+        row.get("content_type") != normal[0]["content_type"] for row in normal
+    ):
+        return False
+    if not errors[0].get("content_type") or errors[0]["content_type"] != errors[1].get("content_type"):
+        return False
+    stable = lambda a, b: abs(a - b) <= max(64, max(a, b) // 100)
+    return (stable(normal[0]["bytes_captured"], normal[2]["bytes_captured"])
+            and stable(errors[0]["bytes_captured"], errors[1]["bytes_captured"]))
+
+
 def _and_sql_proof_valid(result: dict) -> bool:
     checks = result.get("checks")
     if not isinstance(checks, dict) or not all(
@@ -221,6 +275,7 @@ def probe_string_boolean(
         checks[key] = {name: response[name] for name in (
             "status", "content_type", "bytes_captured", "truncated", "body_sha256", "redirected",
         )}
+        checks[key]["sql_error_family"] = response.get("sql_error_family", "")
     parts = urlsplit(baseline)
     result = {
         "operation": "sqli_boolean_string", "proof_recipe": "string_or_boolean_v1",
@@ -254,4 +309,32 @@ def probe_string_and_boolean(
         "identity_transport": "named_identity_cookies_only", "checks": checks,
     }
     result["proof_confirmed"] = string_sql_proof_valid(result)
+    return result
+
+
+def probe_string_error(
+    baseline: str, variants: dict[str, str], *, parameter: str,
+    allowed_origins: list[str], storage_state: dict | None,
+    before_request: Callable[[], object],
+) -> dict:
+    """Confirm a quote-only SQL diagnostic with two separated repetitions."""
+    urls = (baseline, variants["quote_error"], variants["escaped_quote"],
+            variants["quote_error"], baseline)
+    checks = {}
+    for key, url in zip(ERROR_CHECK_ORDER, urls, strict=True):
+        before_request()
+        response = observe_get(url, allowed_origins, storage_state)
+        checks[key] = {name: response[name] for name in (
+            "status", "content_type", "bytes_captured", "truncated", "body_sha256", "redirected",
+        )}
+        checks[key]["sql_error_family"] = response.get("sql_error_family", "")
+    parts = urlsplit(baseline)
+    result = {
+        "operation": "sqli_error_string", "proof_recipe": "string_error_v1",
+        "target": origin(baseline) + (parts.path or "/"),
+        "method": "GET", "location": "query", "parameter": parameter,
+        "requests_sent": len(ERROR_CHECK_ORDER),
+        "identity_transport": "named_identity_cookies_only", "checks": checks,
+    }
+    result["proof_confirmed"] = string_error_proof_valid(result)
     return result

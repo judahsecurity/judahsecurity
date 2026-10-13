@@ -644,7 +644,32 @@ class ScopedAssessmentTools:
         result["source"] = observed["source"]
         result["baseline_source"] = baseline_source
         result["finding"] = False  # One actor's proof is a candidate, never publication.
-        if result.get("proof_confirmed") is not True and sqli_string.and_fallback_eligible(result):
+        if result.get("proof_confirmed") is not True and sqli_string.error_followup_eligible(result):
+            # A database-specific diagnostic needs a second controlled run;
+            # one error response on its own is only a lead.
+            or_evidence_id = evidence_store(self).record(
+                "scoped_string_sqli", result, target=result["target"], identity=identity,
+                success=False,
+            )
+            try:
+                self._scoped_claim_gets(len(sqli_string.ERROR_CHECK_ORDER))
+                error_result = await asyncio.to_thread(
+                    sqli_string.probe_string_error,
+                    baseline, variants, parameter=parameter, allowed_origins=[allowed],
+                    storage_state=state, before_request=lambda: None,
+                )
+            except Exception as exc:
+                result["error_followup_error"] = type(exc).__name__
+                result["evidence_id"] = or_evidence_id
+                return json.dumps(result)
+            error_result["prior_or_evidence_id"] = or_evidence_id
+            error_result["total_requests_sent"] = (
+                int(result.get("requests_sent") or 0)
+                + int(error_result.get("requests_sent") or 0)
+                + int(needs_preflight)
+            )
+            result = error_result
+        elif result.get("proof_confirmed") is not True and sqli_string.and_fallback_eligible(result):
             # The second pattern shares the observed normal request but has
             # fresh true/false values. Reserve its own bounded request budget.
             or_evidence_id = evidence_store(self).record(

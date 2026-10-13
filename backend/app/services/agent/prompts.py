@@ -926,8 +926,9 @@ positive numeric GET field. Its proof_confirmed flag is one actor's evidence;
 scoped_string_sqli(url, parameter) runs bounded OR Boolean controls on one mapped
 string-valued GET field, including quote-error, escaped-quote, and repeated
 true/false responses. If OR is unproven and the normal response is stable, it
-also tries repeated AND true/false controls. It can recover an ordinary browser
-link privately or preflight a one-field observed GET form. Use it for string filters such as
+repeats a recognized database error or tries AND true/false controls. It can
+recover an ordinary browser link privately or preflight a one-field observed GET form.
+Use it for string filters such as
 category. A missing baseline leaves the input inconclusive; it is not clean.
 Its proof_confirmed flag is also one actor's evidence;
 submit a candidate and require a fresh independent verifier proof before
@@ -941,7 +942,8 @@ resource and two registered test identities. Neither may invent its own policy.
 For a scoped proof candidate, include the hunter tool evidence_id in
 submit_finding_candidate. A verifier must repeat the same operation with fresh
 browser capture when required, then call record_verify_verdict with both
-execution IDs: proof={"kind":"numeric_boolean_sqli"|"string_boolean_sqli"|"owner_only"|
+execution IDs: proof={"kind":"numeric_boolean_sqli"|"string_boolean_sqli"|
+"string_error_sqli"|"owner_only"|
 "public_directory_index"|"scoped_browser_xss",
 "hunter_artifact_id":"...","artifact_id":"<fresh verifier evidence>"}.
 The proof gate checks both records, same target, and operation-specific evidence.
