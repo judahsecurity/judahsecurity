@@ -44,7 +44,7 @@ def test_inventory_keeps_endpoint_location_and_drops_values_and_offscope_inputs(
     rows = collect_parameter_inventory(_map())
     keys = {(r["method"], r["path"], r["location"], r["name"]) for r in rows}
     assert ("GET", "/search", "query", "q") in keys
-    assert ("POST", "/comment", "form", "message") in keys
+    assert ("POST", "/comment", "body_form", "message") in keys
     assert ("GET", "/api/items", "query", "id") in keys
     assert ("POST", "/api/profile", "body_json", "user.display_name") in keys
     assert ("POST", "/api/order", "body_json", "/items/*/sku") in keys

@@ -462,9 +462,8 @@ def seed_parameter_coverage_cells(brain: Any, inventory: Iterable[dict[str, Any]
         parameter_test_classes,
     )
 
-    existing_cells = {row.get("id"): row for row in getattr(brain, "coverage_cells", [])
-                      if isinstance(row, dict) and row.get("id")}
-    existing = set(existing_cells)
+    existing = {row.get("id"): row for row in getattr(brain, "coverage_cells", [])
+                if isinstance(row, dict)}
     for raw in inventory:
         if not isinstance(raw, dict) or raw.get("testable") is not True:
             continue
@@ -491,20 +490,39 @@ def seed_parameter_coverage_cells(brain: Any, inventory: Iterable[dict[str, Any]
                 cell["priority_rank"] = 2
             cell["value_type"] = str(raw.get("value_type") or "")[:40]
             cell["observation_source"] = str(raw.get("source") or "")[:40]
+            prior = existing.get(cell["id"])
+            if (prior and prior.get("status") in CELL_OPEN
+                    and not prior.get("lease_id")
+                    and _SOURCE_RANK.get(cell["observation_source"], 0)
+                    > _SOURCE_RANK.get(str(prior.get("observation_source") or ""), 0)):
+                prior["observation_source"] = cell["observation_source"]
+            if (prior and prior.get("status") in CELL_OPEN
+                    and not prior.get("lease_id")
+                    and cell["observation_source"] == "browser_traffic"
+                    and cell.get("capture_id")
+                    and (prior.get("observation_source") != "browser_traffic"
+                         or prior.get("capture_id") != cell["capture_id"])):
+                # Mapping often sees a form or link before its private browser
+                # exchange. Upgrade the same work item when a replayable
+                # capture arrives; never reset a completed or leased verdict.
+                prior["capture_id"] = cell["capture_id"]
+                prior["observation_source"] = "browser_traffic"
+                prior["value_type"] = cell["value_type"] or prior.get("value_type", "")
+                prior["priority_rank"] = min(
+                    int(prior.get("priority_rank", 2)), cell["priority_rank"],
+                )
+                if (prior.get("first_pass_outcome") in {"unattempted", "inconclusive"}
+                        and not (prior.get("first_pass_evidence_id")
+                                 or prior.get("probe_artifact_ids")
+                                 or prior.get("service_probe_artifact_ids"))):
+                    prior.pop("first_pass_outcome", None)
+                    prior.pop("first_pass_reason", None)
+                    prior.pop("first_pass_at", None)
+                    if prior["status"] == "inconclusive":
+                        prior["status"] = "untested"
             if cell["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
                 brain.coverage_cells.append(cell)
-                existing.add(cell["id"])
-                existing_cells[cell["id"]] = cell
-            elif cell["id"] in existing_cells:
-                current = existing_cells[cell["id"]]
-                if _SOURCE_RANK.get(cell["observation_source"], 0) > _SOURCE_RANK.get(
-                    str(current.get("observation_source") or ""), 0
-                ):
-                    current["observation_source"] = cell["observation_source"]
-                if cell["capture_id"] and not current.get("capture_id"):
-                    current["capture_id"] = cell["capture_id"]
-                if cell["value_type"] and not current.get("value_type"):
-                    current["value_type"] = cell["value_type"]
+                existing[cell["id"]] = cell
         for test_type in endpoint_test_classes(raw):
             specialist = _specialist_for(test_type, "", brain)
             hypothesis = next((
@@ -524,8 +542,23 @@ def seed_parameter_coverage_cells(brain: Any, inventory: Iterable[dict[str, Any]
             cell["observation_source"] = str(raw.get("source") or "")[:40]
             if cell["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
                 brain.coverage_cells.append(cell)
-                existing.add(cell["id"])
+                existing[cell["id"]] = cell
     return migrate_coverage_cells(brain)
+
+
+def verified_input_paths(brain: Any) -> set[str]:
+    """Return paths with an independently confirmed input finding in this run."""
+    cells = brain.get("coverage_cells", []) if isinstance(brain, dict) else getattr(brain, "coverage_cells", [])
+    candidates = brain.get("candidates", []) if isinstance(brain, dict) else getattr(brain, "candidates", [])
+    by_id = {row.get("id"): row for row in cells if isinstance(row, dict)}
+    return {
+        source["path"]
+        for candidate in candidates
+        if isinstance(candidate, dict)
+        and (candidate.get("status") == "confirmed" or candidate.get("finding_id"))
+        for source in [by_id.get(candidate.get("coverage_cell_id"), {})]
+        if source.get("source") == "parameter_inventory" and source.get("path")
+    }
 
 
 def parameter_test_funnel(brain: Any) -> dict[str, Any]:
@@ -884,6 +917,7 @@ def claim_coverage_cell_leases(
     migrate_coverage_cells(brain, denominator=denominator)
     current = time.time() if now is None else float(now)
     recover_expired_coverage_leases(brain, now=current)
+    focus_paths = verified_input_paths(brain)
     leases: dict[str, CoverageCellLease] = {}
     for specialist in dict.fromkeys(_text(item) for item in specialists if _text(item)):
         task = (task_leases or {}).get(specialist)
@@ -926,6 +960,7 @@ def claim_coverage_cell_leases(
                 # revisiting a promising but inconclusive parameter.
                 int(cell.get("attempts") or 0) if first_pass_only else 0,
                 0 if cell.get("first_pass_outcome") == "proof_signal" else 1,
+                0 if cell.get("path") in focus_paths else 1,
                 int(cell.get("priority_rank", 2)),
                 0 if specialist in {"xss", "sqli"} and scoped_replay_eligible(cell) else 1,
                 0

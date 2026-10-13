@@ -35,8 +35,8 @@ def test_observed_inputs_create_class_specific_work():
     assert ("sqli", "/catalog", "query:category") in observed
     assert ("xss", "/catalog", "query:searchTerm") in observed
     assert ("crlf", "/catalog", "query:searchTerm") in observed
-    assert ("stored_xss", "/blog/comment", "form:comment") in observed
-    assert ("command_injection", "/api/stock", "form:sku") in observed
+    assert ("stored_xss", "/blog/comment", "body_form:comment") in observed
+    assert ("command_injection", "/api/stock", "body_form:sku") in observed
     assert ("xxe", "/api/check-stock", "body_xml:document") in observed
     assert all(cell["status"] == "untested" for cell in cells
                if cell["test_type"] in {"stored_xss", "command_injection", "xxe"})

@@ -912,7 +912,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         this adapter binds their evidence to the assigned coverage cell.
         """
         import time
-        from urllib.parse import quote, urlsplit
+        from urllib.parse import urlsplit
 
         from app.services.agent.coverage_cells import parameter_test_funnel
         from app.services.agent.engagement_brain import engagement_brain_from_dict
@@ -978,7 +978,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             }
             if technique not in payloads:
                 return {"success": False, "error": "unsupported_technique"}
-            template = f"{url}?{quote(parameter, safe='')}={quote(payloads[technique], safe='')}"
+            template, request_context = self._observed_get_query_template(
+                url, parameter, payloads[technique], identity,
+            )
             proof = json.loads(await self.scoped_browser_assessment(
                 "check_xss", template, identity=identity,
             ))
@@ -1015,7 +1017,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "probe_result": {key: proof[key] for key in (
                     "executed", "proof_confirmed", "requests_sent", "baseline_source",
                     "reflection_contexts",
-                ) if key in proof}, "funnel": parameter_test_funnel(live)}
+                ) if key in proof} | ({"request_context": request_context}
+                                   if cell["test_type"] == "xss" else {}),
+                "funnel": parameter_test_funnel(live)}
 
     async def probe_observed_input_batch(
         self, max_checks: int = 8, max_seconds: int = 180,

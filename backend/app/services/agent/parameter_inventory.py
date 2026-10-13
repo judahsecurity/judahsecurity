@@ -89,6 +89,10 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
         if prior is None:
             if len(rows) < MAX_PARAMETERS:
                 rows[key] = row
+        elif (artifact_id and source == "browser_traffic"
+              and (prior.get("source") != "browser_traffic"
+                   or prior.get("artifact_id") != artifact_id)):
+            rows[key] = row
         elif ((artifact_id and not prior.get("artifact_id"))
               or (not prior.get("artifact_id") and
                   _SOURCE_RANK.get(source, 0) > _SOURCE_RANK.get(prior["source"], 0))):
@@ -132,7 +136,9 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
             name = field.get("name") if isinstance(field, dict) else field
             value_type = field.get("control_type", "") if isinstance(field, dict) else ""
             add(method=method, url=action, name=name,
-                location="query" if method == "GET" else "form",
+                # Use the same location as a later browser traffic capture so
+                # the observed form and its replayable request are one input.
+                location="query" if method == "GET" else "body_form",
                 source="observed_form", value_type=value_type,
                 identity=form_identity)
 

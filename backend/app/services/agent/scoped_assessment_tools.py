@@ -10,7 +10,7 @@ import asyncio
 import hashlib
 import json
 import secrets
-from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, unquote_plus, urlencode, urljoin, urlsplit, urlunsplit
 
 from app.services.agent.assessment_scope import assert_url_in_scope
 from app.services.agent.assessment_sessions import browser_storage_state, identity_registry
@@ -140,6 +140,53 @@ class ScopedAssessmentTools:
             return None
         session = identity_registry(self).resolve(identity, url)
         return browser_storage_state(session, url)
+
+    def _observed_get_query_template(
+        self, url: str, parameter: str, payload: str, identity: str,
+    ) -> tuple[str, str]:
+        """Replace one observed GET value while retaining its other query fields.
+
+        The raw baseline stays session local. Only the resulting scoped browser
+        request and a value-free source label enter the probe receipt.
+        """
+        target = urlsplit(url)
+        cmap = getattr(self, "_capability_map", None) or {}
+        private_links = (getattr(self, "_scoped_link_baselines", None) or {}).get(identity) or []
+        candidates = [("browser_link", value) for value in private_links]
+        if identity == "anonymous":
+            candidates.extend(("page_url", value) for value in (cmap.get("pages_visited") or []))
+        candidates.extend(
+            ("captured_api", sample.get("url"))
+            for sample in (cmap.get("api_samples") or [])
+            if isinstance(sample, dict)
+            and str(sample.get("method") or "GET").upper() == "GET"
+            and str(sample.get("identity") or "anonymous") == identity
+        )
+        for source, candidate in candidates:
+            if not isinstance(candidate, str) or len(candidate) > 2048:
+                continue
+            try:
+                parts = urlsplit(candidate)
+            except ValueError:
+                continue
+            if (parts.scheme, parts.netloc, parts.path or "/") != (
+                target.scheme, target.netloc, target.path or "/"
+            ) or parts.fragment or len(parts.query) > 2048:
+                continue
+            fields = parts.query.split("&")
+            if len(fields) > 40:
+                continue
+            matches = [index for index, field in enumerate(fields)
+                       if field and unquote_plus(field.split("=", 1)[0]) == parameter]
+            if len(matches) != 1:
+                continue
+            index = matches[0]
+            raw_name = fields[index].split("=", 1)[0]
+            fields[index] = raw_name + "=" + quote(payload, safe="")
+            template = urlunsplit(parts._replace(query="&".join(fields)))
+            if len(template) <= 2048:
+                return template, source
+        return f"{url}?{quote(parameter, safe='')}={quote(payload, safe='')}", "single_parameter"
 
     def _scoped_claim_gets(self, count: int) -> None:
         if count < 1 or count > 9:
