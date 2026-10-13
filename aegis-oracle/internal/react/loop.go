@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/your-org/aegis-oracle/pkg/module"
@@ -22,14 +23,14 @@ type TraceStep struct {
 	Thought     string
 	ToolName    string         // empty on final_answer
 	ToolArgs    map[string]any // empty on final_answer
-	Observation string        // tool output or error text
+	Observation string         // tool output or error text
 	ElapsedMS   int64
 }
 
 // Decision is the structured JSON the LLM emits on each iteration.
 type Decision struct {
 	Thought     string         `json:"thought"`
-	Action      string         `json:"action"`      // "use_tool" | "final_answer"
+	Action      string         `json:"action"` // "use_tool" | "final_answer"
 	ToolName    string         `json:"tool_name"`
 	ToolArgs    map[string]any `json:"tool_args"`
 	FinalAnswer *FinalAnswer   `json:"final_answer"`
@@ -43,11 +44,18 @@ type FinalAnswer struct {
 
 // LoopResult is returned to the caller after the loop terminates.
 type LoopResult struct {
-	Answer    string
-	Finding   *schema.Finding
-	Trace     []TraceStep
+	Answer     string
+	Finding    *schema.Finding
+	Trace      []TraceStep
 	Iterations int
-	ElapsedMS int64
+	ElapsedMS  int64
+}
+
+// ChatTurn supplies recent context for a follow-up question. The loop still
+// rechecks findings with its tools before treating them as current evidence.
+type ChatTurn struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
 }
 
 // ─────────────────────────── Loop ───────────────────────────────────────────
@@ -101,6 +109,11 @@ func New(cfg Config) *Loop {
 // Run executes the ReAct loop for the given user question.
 // It is safe to call concurrently — no shared mutable state.
 func (l *Loop) Run(ctx context.Context, question string) (*LoopResult, error) {
+	return l.RunWithHistory(ctx, question, nil)
+}
+
+// RunWithHistory executes the ReAct loop with bounded conversation context.
+func (l *Loop) RunWithHistory(ctx context.Context, question string, history []ChatTurn) (*LoopResult, error) {
 	start := time.Now()
 	var trace []TraceStep
 	var lastFinding *schema.Finding
@@ -111,7 +124,7 @@ func (l *Loop) Run(ctx context.Context, question string) (*LoopResult, error) {
 		iterStart := time.Now()
 
 		system := buildSystemPrompt(l.tools, trace, l.maxIterations)
-		user := buildUserPrompt(question, iter)
+		user := buildUserPrompt(question, iter, history)
 
 		resp, err := l.llm.CompleteJSON(ctx, module.JSONRequest{
 			Model:     l.model,
@@ -208,9 +221,9 @@ func (l *Loop) Run(ctx context.Context, question string) (*LoopResult, error) {
 	// Budget exhausted — synthesise a best-effort answer from the trace.
 	slog.Warn("react: iteration budget exhausted", "max", l.maxIterations)
 	return &LoopResult{
-		Answer: buildBudgetExhaustedAnswer(trace),
-		Finding: lastFinding,
-		Trace:  trace,
+		Answer:     buildBudgetExhaustedAnswer(trace),
+		Finding:    lastFinding,
+		Trace:      trace,
 		Iterations: l.maxIterations,
 		ElapsedMS:  time.Since(start).Milliseconds(),
 	}, nil
@@ -241,11 +254,34 @@ func toolNames(reg *Registry) []string {
 	return out
 }
 
-func buildUserPrompt(question string, iter int) string {
-	if iter == 0 {
-		return question
+func buildUserPrompt(question string, iter int, history []ChatTurn) string {
+	if len(history) == 0 {
+		if iter == 0 {
+			return question
+		}
+		return fmt.Sprintf("[Iteration %d] Continue working on: %s", iter+1, question)
 	}
-	return fmt.Sprintf("[Iteration %d] Continue working on: %s", iter+1, question)
+	if len(history) > 6 {
+		history = history[len(history)-6:]
+	}
+	var b strings.Builder
+	b.WriteString("Previous conversation for reference. Verify current findings with tools before answering.\n")
+	for _, turn := range history {
+		if turn.Role != "user" && turn.Role != "assistant" {
+			continue
+		}
+		content := []rune(strings.TrimSpace(turn.Content))
+		if len(content) > 2000 {
+			content = content[:2000]
+		}
+		encoded, _ := json.Marshal(string(content))
+		fmt.Fprintf(&b, "%s: %s\n", turn.Role, encoded)
+	}
+	if iter > 0 {
+		fmt.Fprintf(&b, "[Iteration %d] ", iter+1)
+	}
+	fmt.Fprintf(&b, "Current question: %s", question)
+	return b.String()
 }
 
 func buildBudgetExhaustedAnswer(trace []TraceStep) string {
@@ -279,8 +315,8 @@ func extractFindingFromObs(obs string) *schema.Finding {
 var decisionSchema = map[string]any{
 	"type": "object",
 	"properties": map[string]any{
-		"thought": map[string]any{"type": "string"},
-		"action":  map[string]any{"type": "string", "enum": []string{"use_tool", "final_answer"}},
+		"thought":   map[string]any{"type": "string"},
+		"action":    map[string]any{"type": "string", "enum": []string{"use_tool", "final_answer"}},
 		"tool_name": map[string]any{"type": "string"},
 		"tool_args": map[string]any{"type": "object"},
 		"final_answer": map[string]any{

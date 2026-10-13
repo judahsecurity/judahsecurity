@@ -12,11 +12,11 @@ directly to Oracle's JSON API through the ASM auth layer.
 
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_active_user, get_current_user
@@ -46,8 +46,14 @@ def _oracle_client() -> httpx.AsyncClient:
 
 # ─────────────────────────── Chat ──────────────────────────────────────
 
+class ChatTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str
+
+
 class ChatRequest(BaseModel):
     question: str
+    history: List[ChatTurn] = Field(default_factory=list)
 
 
 class AnalyzeRequest(BaseModel):
@@ -61,20 +67,19 @@ async def oracle_chat(
     current_user=Depends(get_current_user),
 ) -> Dict[str, Any]:
     """
-    Natural-language CVE query.
+    Natural-language CVE and findings query with recent conversation context.
 
-    Parses the question to detect a CVE ID + asset ID pair, calls
-    Oracle's /analyze endpoint, and returns a structured answer with
-    an optional OracleFinding payload for rich UI rendering.
+    Returns an answer and an optional finding payload for rich UI rendering.
     """
-    cve_id, asset_id = _parse_cve_asset(body.question)
-
     # Route everything through Oracle's ReAct /chat endpoint.
-    # The Go ReAct loop handles all question types: CVE+asset analysis,
-    # findings listing, KB lookups, and fallback explanations.
+    # The Go ReAct loop handles CVE+asset analysis, findings questions,
+    # KB lookups, and follow-ups using recent conversation context.
     async with _oracle_client() as client:
         try:
-            resp = await client.post("/chat", json={"question": body.question})
+            resp = await client.post("/chat", json={
+                "question": body.question,
+                "history": [turn.model_dump() for turn in body.history[-6:]],
+            })
             resp.raise_for_status()
             data = resp.json()
             return {
