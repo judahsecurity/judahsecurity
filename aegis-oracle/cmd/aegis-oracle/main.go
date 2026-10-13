@@ -244,7 +244,8 @@ func buildMux(
 	// This is the natural-language entry point — use /analyze for direct calls.
 	mux.HandleFunc("POST /chat", func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			Question string `json:"question"`
+			Question string           `json:"question"`
+			History  []react.ChatTurn `json:"history"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid request: "+err.Error())
@@ -255,7 +256,7 @@ func buildMux(
 			return
 		}
 
-		result, err := loop.Run(r.Context(), req.Question)
+		result, err := loop.RunWithHistory(r.Context(), req.Question, req.History)
 		if err != nil {
 			slog.Error("react loop failed", "error", err)
 			writeError(w, http.StatusInternalServerError, err.Error())

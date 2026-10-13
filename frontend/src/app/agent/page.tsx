@@ -161,6 +161,13 @@ interface Message {
   questionRequest?: Record<string, unknown>;
 }
 
+interface OpesMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  error?: boolean;
+}
+
 interface ConversationSummary {
   session_id: string;
   title: string | null;
@@ -665,10 +672,10 @@ function AgentPageContent() {
   const router = useRouter();
 
   // ── Tab state ────────────────────────────────────────────────────
-  const [activeTab, setActiveTab] = useState<'chat' | 'cve' | 'findings'>('chat');
+  const [activeTab, setActiveTab] = useState<'chat' | 'cve' | 'opes'>('chat');
 
   const handleTabChange = (value: string) => {
-    const tab = value as 'chat' | 'cve' | 'findings';
+    const tab = value as 'chat' | 'cve' | 'opes';
     setActiveTab(tab);
     router.push(`/agent?tab=${tab}`, { scroll: false } as Parameters<typeof router.push>[1]);
   };
@@ -733,6 +740,10 @@ function AgentPageContent() {
   const [findings, setFindings] = useState<OracleFinding[]>([]);
   const [findingsLoading, setFindingsLoading] = useState(false);
   const [filterCat, setFilterCat] = useState<string>('all');
+  const [opesQuestion, setOpesQuestion] = useState('');
+  const [opesMessages, setOpesMessages] = useState<OpesMessage[]>([]);
+  const [opesLoading, setOpesLoading] = useState(false);
+  const opesEndRef = useRef<HTMLDivElement>(null);
   const [cveLookupId, setCveLookupId] = useState('');
   const [cveLookup, setCveLookup] = useState<{ cve: unknown; analysis: unknown; exploitation: unknown; analysis_status?: string; analysis_error?: string } | null>(null);
   const [cveLookupLoading, setCveLookupLoading] = useState(false);
@@ -758,15 +769,18 @@ function AgentPageContent() {
     }
     if (auto === '1' || auto === 'true') setPendingAutostart(true);
     // Handle tab param
-    if (tab === 'cve' || tab === 'findings') setActiveTab(tab);
-    // Open findings tab if ?view=oracle (legacy redirect)
-    if (searchParams.get('view') === 'oracle') setActiveTab('findings');
+    if (tab === 'cve' || tab === 'opes') setActiveTab(tab);
+    // Preserve links to the former Findings tab.
+    if (tab === 'findings' || searchParams.get('view') === 'oracle') setActiveTab('opes');
   }, [searchParams]);
 
   const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   useEffect(() => { scrollToBottom(); }, [messages, liveSteps]);
   useEffect(() => { if (pendingConfirmation) scrollToBottom(); }, [pendingConfirmation]);
   useEffect(() => { liveStepsRef.current = liveSteps; }, [liveSteps]);
+  useEffect(() => {
+    if (activeTab === 'opes') opesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [activeTab, opesMessages, opesLoading]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -1553,6 +1567,32 @@ function AgentPageContent() {
     }
   };
 
+  const sendOpesQuestion = async (suggestion?: string) => {
+    const text = (suggestion ?? opesQuestion).trim();
+    if (!text || opesLoading) return;
+    const history = opesMessages
+      .filter((message, index) => !message.error && !(message.role === 'user' && opesMessages[index + 1]?.error))
+      .slice(-6)
+      .map(({ role, content }) => ({ role, content }));
+    setOpesMessages((current) => [...current, { id: crypto.randomUUID(), role: 'user', content: text }]);
+    setOpesQuestion('');
+    setOpesLoading(true);
+    try {
+      const result = await api.oracleChat(text, history);
+      setOpesMessages((current) => [...current, {
+        id: crypto.randomUUID(), role: 'assistant',
+        content: result.answer?.trim() || 'OPES did not return an answer. Please try again.',
+      }]);
+    } catch (err) {
+      setOpesMessages((current) => [...current, {
+        id: crypto.randomUUID(), role: 'assistant', error: true,
+        content: getApiErrorMessage(err, 'OPES is unavailable right now. Please try again.'),
+      }]);
+    } finally {
+      setOpesLoading(false);
+    }
+  };
+
   const filteredFindings = findings.filter((f) => filterCat === 'all' || f.opes.category === filterCat);
   const countByCategory = (cat: string) => findings.filter((f) => f.opes.category === cat).length;
 
@@ -1735,8 +1775,8 @@ function AgentPageContent() {
     <MainLayout>
       <div className="flex flex-col h-full">
         <Header
-          title="Prowl Agent"
-          subtitle="Autonomous security assessments, asset analysis, and vulnerability testing"
+          title="Agents"
+          subtitle="Work with Prowl on assessments and OPES on CVE findings"
         />
 
         <div className="flex-1 overflow-auto p-6">
@@ -1744,26 +1784,22 @@ function AgentPageContent() {
 
             {/* ── Tab bar ── */}
             <div className="flex items-center justify-between gap-4 mb-5">
-              <TabsList className="grid grid-cols-3 w-full max-w-md">
+              <TabsList className="grid grid-cols-[1fr_1.8fr_1fr] w-full max-w-lg">
                 <TabsTrigger value="chat" className="flex items-center gap-2">
                   <MessageSquare className="h-4 w-4" />
-                  Chat
+                  Prowl
                 </TabsTrigger>
                 <TabsTrigger value="cve" className="flex items-center gap-2">
                   <Search className="h-4 w-4" />
-                  CVE Lookup
+                  CVE Quick Lookup
                 </TabsTrigger>
-                <TabsTrigger value="findings" className="flex items-center gap-2">
-                  <ShieldAlert className="h-4 w-4" />
-                  Findings
-                  {findings.length > 0 && (
-                    <Badge variant="secondary" className="h-4 px-1 text-[10px] ml-1">{findings.length}</Badge>
-                  )}
+                <TabsTrigger value="opes" className="flex items-center gap-2">
+                  <Brain className="h-4 w-4" />
+                  OPES
                 </TabsTrigger>
               </TabsList>
 
-              {/* Connection badge always visible */}
-              <div className="shrink-0">{connectionBadge()}</div>
+              {activeTab === 'chat' && <div className="shrink-0">{connectionBadge()}</div>}
             </div>
 
             {/* ══════════════════════════════════════════════════
@@ -1853,6 +1889,9 @@ function AgentPageContent() {
                         </Button>
                       </div>
                     </div>
+                    <CardDescription className="text-xs">
+                      Autonomous security assessments, asset analysis, and vulnerability testing
+                    </CardDescription>
                   </CardHeader>
                   <CardContent className="flex flex-col gap-3 flex-1 min-h-0 pb-4">
                     {/* Message window */}
@@ -2322,85 +2361,168 @@ function AgentPageContent() {
             </TabsContent>
 
             {/* ══════════════════════════════════════════════════
-                TAB 3 — FINDINGS
+                TAB 3 — OPES
             ══════════════════════════════════════════════════ */}
-            <TabsContent value="findings" className="flex-1 mt-0">
+            <TabsContent value="opes" className="flex-1 mt-0 space-y-4">
               <Card>
-                <CardHeader>
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <CardTitle className="flex items-center gap-2 text-base">
-                        <ShieldAlert className="h-5 w-5 text-primary" />
-                        Open Findings
-                        {findings.length > 0 && (
-                          <Badge variant="secondary" className="h-5 px-1.5 text-[10px]">{findings.length}</Badge>
-                        )}
-                      </CardTitle>
-                      <CardDescription className="mt-1">
-                        Oracle-enriched CVE findings across your assets, ranked by OPES exploitability score.
-                      </CardDescription>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {/* Oracle OPES category strip */}
-                      {findings.length > 0 && (
-                        <div className="hidden sm:flex items-center gap-1.5">
-                          {(['urgent', 'critical', 'high', 'medium', 'low', 'informational'] as const).map((cat) => {
-                            const count = countByCategory(cat);
-                            if (count === 0) return null;
-                            return (
-                              <button
-                                key={cat}
-                                onClick={() => setFilterCat(cat)}
-                                className="flex items-center gap-1 hover:opacity-80 transition-opacity"
-                              >
-                                <CategoryBadge cat={cat} />
-                                <span className="text-xs font-semibold">{count}</span>
-                              </button>
-                            );
-                          })}
-                        </div>
-                      )}
-                      <Button
-                        variant="outline" size="sm" className="h-8 gap-1.5"
-                        onClick={loadFindings}
-                        disabled={findingsLoading}
-                      >
-                        <RefreshCw className={cn('h-3.5 w-3.5', findingsLoading && 'animate-spin')} />
-                        Refresh
-                      </Button>
-                    </div>
+                <CardHeader className="flex flex-row items-start justify-between gap-4">
+                  <div>
+                    <CardTitle className="flex items-center gap-2 text-base">
+                      <Brain className="h-5 w-5 text-primary" /> Chat with OPES
+                    </CardTitle>
+                    <CardDescription className="mt-1">
+                      Ask about open findings, OPES scores, exploitability, and what to fix first.
+                    </CardDescription>
                   </div>
+                  {opesMessages.length > 0 && (
+                    <Button variant="outline" size="sm" onClick={() => { setOpesMessages([]); setOpesQuestion(''); }} disabled={opesLoading}>
+                      <Plus className="h-4 w-4 mr-1" /> New conversation
+                    </Button>
+                  )}
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  {/* Category filter buttons */}
-                  <div className="flex gap-2 flex-wrap">
-                    {['all', 'urgent', 'critical', 'high', 'medium', 'low', 'informational'].map((c) => (
-                      <Button key={c} size="sm" variant={filterCat === c ? 'default' : 'outline'}
-                        onClick={() => setFilterCat(c)} className="h-7 px-2.5 text-xs">
-                        {c === 'all' ? `All (${findings.length})` : <><CategoryBadge cat={c} /><span className="ml-1">{countByCategory(c)}</span></>}
-                      </Button>
+                  <div role="log" aria-label="OPES conversation" aria-live="polite" className="min-h-[260px] max-h-[55vh] overflow-y-auto rounded-lg border bg-muted/10 p-4 space-y-4">
+                    {opesMessages.length === 0 && (
+                      <div className="flex min-h-[220px] flex-col items-center justify-center gap-4 text-center">
+                        <Brain className="h-8 w-8 text-primary" />
+                        <div>
+                          <p className="text-sm font-medium">Ask OPES about your findings</p>
+                          <p className="text-xs text-muted-foreground mt-1">Explore priorities, scores, and the evidence behind them.</p>
+                        </div>
+                        <div className="flex flex-wrap justify-center gap-2">
+                          {[
+                            'Which open findings should we prioritize first?',
+                            'Why are our highest OPES findings ranked that way?',
+                            'Which findings have unknown exploit preconditions?',
+                          ].map((prompt) => (
+                            <Button key={prompt} variant="outline" size="sm" className="h-auto max-w-full whitespace-normal text-left" onClick={() => sendOpesQuestion(prompt)} disabled={opesLoading}>
+                              {prompt}
+                            </Button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {opesMessages.map((message) => (
+                      <div key={message.id} className={cn('flex', message.role === 'user' && 'justify-end')}>
+                        <div className={cn(
+                          'max-w-[90%] rounded-lg px-4 py-3 text-sm whitespace-pre-wrap break-words',
+                          message.role === 'user' ? 'bg-primary text-primary-foreground' : 'border bg-background',
+                          message.error && 'border-destructive/50 text-destructive',
+                        )}>
+                          {message.role === 'assistant' && <p className="mb-1 text-xs font-semibold text-primary">OPES</p>}
+                          {message.content}
+                        </div>
+                      </div>
                     ))}
+                    {opesLoading && (
+                      <div className="flex items-center gap-2 text-sm text-muted-foreground" role="status">
+                        <Loader2 className="h-4 w-4 animate-spin" /> OPES is checking the findings…
+                      </div>
+                    )}
+                    <div ref={opesEndRef} />
                   </div>
-
-                  {findingsLoading && findings.length === 0 ? (
-                    <div className="flex items-center justify-center py-12 gap-2 text-muted-foreground">
-                      <Loader2 className="h-5 w-5 animate-spin" />
-                      <span className="text-sm">Loading findings…</span>
-                    </div>
-                  ) : findings.length === 0 ? (
-                    <div className="rounded-lg border border-dashed bg-muted/10 p-8 text-center space-y-2">
-                      <ShieldAlert className="h-8 w-8 text-muted-foreground mx-auto" />
-                      <p className="text-sm font-medium text-muted-foreground">No findings yet</p>
-                      <p className="text-xs text-muted-foreground">Oracle enrichment runs automatically after scans complete.</p>
-                    </div>
-                  ) : (
-                    <OpenFindingsTable
-                      findings={filteredFindings.sort((a, b) => b.opes.score - a.opes.score)}
-                      onSelect={() => {}}
+                  <form onSubmit={(event) => { event.preventDefault(); sendOpesQuestion(); }} className="flex items-end gap-2">
+                    <Textarea
+                      aria-label="Ask OPES"
+                      placeholder="Ask OPES about your findings…"
+                      value={opesQuestion}
+                      onChange={(event) => setOpesQuestion(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter' && !event.shiftKey) {
+                          event.preventDefault();
+                          sendOpesQuestion();
+                        }
+                      }}
+                      rows={2}
+                      disabled={opesLoading}
                     />
-                  )}
+                    <Button type="submit" disabled={opesLoading || !opesQuestion.trim()}>
+                      {opesLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                      <span className="ml-2">Send</span>
+                    </Button>
+                  </form>
                 </CardContent>
               </Card>
+
+              <details className="group rounded-lg border bg-card p-4">
+                <summary className="cursor-pointer text-sm font-medium">Browse findings ({findings.length})</summary>
+                <Card className="mt-4">
+                  <CardHeader>
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <CardTitle className="flex items-center gap-2 text-base">
+                          <ShieldAlert className="h-5 w-5 text-primary" />
+                          Browse Oracle findings
+                          {findings.length > 0 && (
+                            <Badge variant="secondary" className="h-5 px-1.5 text-[10px]">{findings.length}</Badge>
+                          )}
+                        </CardTitle>
+                        <CardDescription className="mt-1">
+                          Oracle-enriched CVE findings across your assets, ranked by OPES exploitability score.
+                        </CardDescription>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {/* Oracle OPES category strip */}
+                        {findings.length > 0 && (
+                          <div className="hidden sm:flex items-center gap-1.5">
+                            {(['urgent', 'critical', 'high', 'medium', 'low', 'informational'] as const).map((cat) => {
+                              const count = countByCategory(cat);
+                              if (count === 0) return null;
+                              return (
+                                <button
+                                  key={cat}
+                                  onClick={() => setFilterCat(cat)}
+                                  className="flex items-center gap-1 hover:opacity-80 transition-opacity"
+                                >
+                                  <CategoryBadge cat={cat} />
+                                  <span className="text-xs font-semibold">{count}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                        <Button
+                          variant="outline" size="sm" className="h-8 gap-1.5"
+                          onClick={loadFindings}
+                          disabled={findingsLoading}
+                        >
+                          <RefreshCw className={cn('h-3.5 w-3.5', findingsLoading && 'animate-spin')} />
+                          Refresh
+                        </Button>
+                      </div>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="space-y-4">
+                    {/* Category filter buttons */}
+                    <div className="flex gap-2 flex-wrap">
+                      {['all', 'urgent', 'critical', 'high', 'medium', 'low', 'informational'].map((c) => (
+                        <Button key={c} size="sm" variant={filterCat === c ? 'default' : 'outline'}
+                          onClick={() => setFilterCat(c)} className="h-7 px-2.5 text-xs">
+                          {c === 'all' ? `All (${findings.length})` : <><CategoryBadge cat={c} /><span className="ml-1">{countByCategory(c)}</span></>}
+                        </Button>
+                      ))}
+                    </div>
+
+                    {findingsLoading && findings.length === 0 ? (
+                      <div className="flex items-center justify-center py-12 gap-2 text-muted-foreground">
+                        <Loader2 className="h-5 w-5 animate-spin" />
+                        <span className="text-sm">Loading findings…</span>
+                      </div>
+                    ) : findings.length === 0 ? (
+                      <div className="rounded-lg border border-dashed bg-muted/10 p-8 text-center space-y-2">
+                        <ShieldAlert className="h-8 w-8 text-muted-foreground mx-auto" />
+                        <p className="text-sm font-medium text-muted-foreground">No findings yet</p>
+                        <p className="text-xs text-muted-foreground">Oracle enrichment runs automatically after scans complete.</p>
+                      </div>
+                    ) : (
+                      <OpenFindingsTable
+                        findings={filteredFindings.sort((a, b) => b.opes.score - a.opes.score)}
+                        onSelect={() => {}}
+                      />
+                    )}
+                  </CardContent>
+                </Card>
+              </details>
             </TabsContent>
 
           </Tabs>

@@ -438,7 +438,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **auto_select_tools**: Analyze the current assessment state and get prioritized tool recommendations based on discovered technologies, ports, parameters, and WAF presence. Call this EARLY in your assessment to get a smart tool chain tailored to the target. Returns ranked recommendations with rationale for each tool. Args: **target** (required — hostname or URL). Example: auto_select_tools(target="example.com"). The tool reads your accumulated target_info and execution trace automatically.
 
 ### Injection Testing Tools
-- **generate_injection_payloads**: Generate context-aware injection payloads. Args: **vuln_type** (required — sqli, xss, ssti, cmdi, path_traversal, xxe, ssrf, crlf, open_redirect), technique (optional sub-technique e.g. "time_based" for sqli, "encoded" for xss, "auth_bypass" for sqli — omit for all), max_payloads (optional, default 20), collaborator_url (optional — replaces COLLABORATOR placeholder for OOB testing). Returns payloads AND detection_hints to help you recognize a successful exploit. Example: generate_injection_payloads(vuln_type="sqli", technique="time_based")
+- **generate_injection_payloads**: Generate candidate payloads for an observed input. Args: **vuln_type** (required — sqli, xss, ssti, cmdi, path_traversal, xxe, ssrf, crlf, open_redirect), technique (optional sub-technique e.g. "time_based" for sqli, "encoded" for xss, "auth_bypass" for sqli; SQLi defaults to error and Boolean controls), max_payloads (optional, default 20), collaborator_url (optional — replaces COLLABORATOR placeholder for OOB testing). Generated strings are leads, not proof. Example: generate_injection_payloads(vuln_type="sqli")
 - **discover_parameters**: Fetch a URL and extract injectable parameters from HTML forms, query strings, hidden inputs, and JavaScript. Classifies parameters by vulnerability proneness (sqli, xss, ssrf, path_traversal, cmdi, redirect). Use this BEFORE generating payloads to know WHAT to test. Example: discover_parameters(url="https://target.com/search")
 
 ### Injection Testing Methodology (use this workflow when testing for vulnerabilities)
@@ -923,10 +923,12 @@ XHR/fetch sample. scoped_http_get and scoped_http_compare return bounded
 response metadata. scoped_query_probe is exploratory; changed responses are
 leads only. scoped_numeric_sqli runs six bounded requests on one observed
 positive numeric GET field. Its proof_confirmed flag is one actor's evidence;
-scoped_string_sqli(url, parameter) runs eight bounded requests on one mapped
-string-valued GET field, including quote-error, escaped-quote, and stable
-Boolean true/false controls. It can recover an ordinary browser link privately
-or preflight a one-field observed GET form. Use it for string filters such as
+scoped_string_sqli(url, parameter) runs bounded OR Boolean controls on one mapped
+string-valued GET field, including quote-error, escaped-quote, and repeated
+true/false responses. If OR is unproven and the normal response is stable, it
+repeats a recognized database error or tries AND true/false controls. It can
+recover an ordinary browser link privately or preflight a one-field observed GET form.
+Use it for string filters such as
 category. A missing baseline leaves the input inconclusive; it is not clean.
 Its proof_confirmed flag is also one actor's evidence;
 submit a candidate and require a fresh independent verifier proof before
@@ -940,7 +942,8 @@ resource and two registered test identities. Neither may invent its own policy.
 For a scoped proof candidate, include the hunter tool evidence_id in
 submit_finding_candidate. A verifier must repeat the same operation with fresh
 browser capture when required, then call record_verify_verdict with both
-execution IDs: proof={"kind":"numeric_boolean_sqli"|"string_boolean_sqli"|"owner_only"|
+execution IDs: proof={"kind":"numeric_boolean_sqli"|"string_boolean_sqli"|
+"string_error_sqli"|"owner_only"|
 "public_directory_index"|"scoped_browser_xss",
 "hunter_artifact_id":"...","artifact_id":"<fresh verifier evidence>"}.
 The proof gate checks both records, same target, and operation-specific evidence.

@@ -1016,7 +1016,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "evidence_id": artifact_id, "proof_confirmed": confirmed,
                 "probe_result": {key: proof[key] for key in (
                     "executed", "proof_confirmed", "requests_sent", "baseline_source",
-                    "reflection_contexts",
+                    "reflection_contexts", "proof_recipe", "total_requests_sent",
+                    "and_followup_error", "error_followup_error",
                 ) if key in proof} | ({"request_context": request_context}
                                    if cell["test_type"] == "xss" else {}),
                 "funnel": parameter_test_funnel(live)}
@@ -3941,7 +3942,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         Args:
             vuln_type: sqli, xss, ssti, cmdi, path_traversal, xxe, ssrf, crlf, open_redirect
             technique: Sub-technique (e.g. "time_based" for sqli, "encoded" for xss).
-                       Omit to get payloads from all sub-techniques.
+                       SQLi defaults to low-impact error and Boolean controls.
             max_payloads: Max payloads to return (default 20).
             collaborator_url: Replace COLLABORATOR placeholder for out-of-band payloads.
         """
@@ -8581,6 +8582,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
                         checks = payload.get("checks")
                         _, _, expected_parameter = parameter.partition(":")
+                        if payload.get("proof_recipe") in {
+                            "string_or_boolean_v1", "string_and_boolean_v1", "string_error_v1",
+                        }:
+                            raise ValueError(
+                                "A negative Boolean recipe does not establish clean SQLi coverage"
+                            )
                         if (test_type != "sqli" or expected_parameter != payload.get("parameter")
                                 or payload.get("operation") != "sqli_boolean_string"
                                 or payload.get("proof_confirmed") is not False

@@ -299,6 +299,38 @@ def test_clean_sqli_requires_coverage_validator_to_close_cell():
     assert result["funnel"]["tested_clean"] == 1
 
 
+def test_negative_boolean_receipt_keeps_input_inconclusive():
+    class Manager:
+        def __init__(self):
+            brain = EngagementBrain(target="https://app.test")
+            seed_parameter_coverage_cells(brain, [{
+                "method": "GET", "host": "app.test", "path": "/catalog",
+                "name": "category", "location": "query", "identity": "anonymous",
+                "source": "browser_link", "testable": True,
+            }])
+            for cell in brain.coverage_cells:
+                if cell["test_type"] == "xss":
+                    cell["status"] = "skipped"
+            self._engagement_brain = brain.to_dict()
+            self._capability_map = {"target": "https://app.test"}
+
+        async def scoped_input_probe_assigned(self, **_kwargs):
+            return {"success": True, "evidence_id": "negative-boolean",
+                    "proof_confirmed": False,
+                    "probe_result": {"proof_recipe": "string_and_boolean_v1"}}
+
+        async def record_surface_coverage(self, **_kwargs):
+            raise AssertionError("One negative Boolean recipe is not a clean verdict")
+
+    manager = Manager()
+    result = asyncio.run(run_observed_input_batch(manager, max_checks=1))
+    assert result["results"][0]["outcome"] == "inconclusive"
+    cell = next(row for row in manager._engagement_brain["coverage_cells"]
+                if row["test_type"] == "sqli")
+    assert cell["first_pass_evidence_id"] == "negative-boolean"
+    assert cell["status"] == "inconclusive"
+
+
 def test_eighteen_inputs_receive_both_class_first_pass_outcomes():
     class Manager:
         def __init__(self):

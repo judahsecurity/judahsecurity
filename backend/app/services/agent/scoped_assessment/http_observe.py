@@ -15,6 +15,19 @@ from .browser import assert_in_scope
 
 MAX_BODY = 64 * 1024
 STATIC_RESOURCE_TYPES = {"script", "stylesheet", "image", "font", "media"}
+_SQL_ERROR_PATTERNS = (
+    ("postgresql", re.compile(rb"(?:PostgreSQL.{0,100}(?:syntax error|unterminated (?:quoted )?string)|PG::SyntaxError|SQLSTATE\[42601\])", re.I)),
+    ("mysql", re.compile(rb"(?:You have an error in your SQL syntax|MySQLSyntaxErrorException)", re.I)),
+    ("sqlite", re.compile(rb"(?:sqlite3\.OperationalError:\s*near|SQLiteException.{0,100}syntax error|SQLite3::SQLException:\s*near)", re.I)),
+    ("oracle", re.compile(rb"\bORA-(?:00923|00933|01756)\b", re.I)),
+    ("sqlserver", re.compile(rb"(?:Unclosed quotation mark after the character string|SQLServerException.{0,100}syntax)", re.I)),
+)
+
+
+def _sql_error_family(data: bytes) -> str:
+    """Return a fixed diagnostic label; never expose database error text."""
+    return next((family for family, pattern in _SQL_ERROR_PATTERNS
+                 if pattern.search(data)), "")
 
 
 def observed_parent_directories(requests: list[dict], expected_origin: str, limit: int = 8) -> list[str]:
@@ -121,6 +134,7 @@ def observe_get(url: str, allowed_origins: list[str], storage_state: dict | None
             "truncated": truncated,
             "body_sha256": hashlib.sha256(data).hexdigest(),
             "json_shape": shape,
+            "sql_error_family": _sql_error_family(data),
             "directory_index": _directory_index_detected(data, content_type),
             "redirected": bool(location),
         }

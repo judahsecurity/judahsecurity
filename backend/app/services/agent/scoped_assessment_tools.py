@@ -37,8 +37,8 @@ SCOPED_ASSESSMENT_TOOLS = (
     "get_finding_candidate",
 )
 
-HUNTER_GET_BUDGET = 160
-VERIFIER_GET_BUDGET = 40
+HUNTER_GET_BUDGET = 320
+VERIFIER_GET_BUDGET = 80
 
 
 class ScopedAssessmentTools:
@@ -528,7 +528,7 @@ class ScopedAssessmentTools:
         return json.dumps(result)
 
     async def scoped_string_sqli(self, url: str, parameter: str, identity: str = "anonymous") -> str:
-        """Run an eight-request Boolean proof on an observed string GET input."""
+        """Try bounded OR and, if needed, AND controls on an observed GET input."""
         allowed = self._scoped_origin(url)
         parts = urlsplit(url)
         from app.services.agent.parameter_inventory import collect_parameter_inventory
@@ -641,6 +641,68 @@ class ScopedAssessmentTools:
             storage_state=state,
             before_request=lambda: None,
         )
+        result["source"] = observed["source"]
+        result["baseline_source"] = baseline_source
+        result["finding"] = False  # One actor's proof is a candidate, never publication.
+        if result.get("proof_confirmed") is not True and sqli_string.error_followup_eligible(result):
+            # A database-specific diagnostic needs a second controlled run;
+            # one error response on its own is only a lead.
+            or_evidence_id = evidence_store(self).record(
+                "scoped_string_sqli", result, target=result["target"], identity=identity,
+                success=False,
+            )
+            try:
+                self._scoped_claim_gets(len(sqli_string.ERROR_CHECK_ORDER))
+                error_result = await asyncio.to_thread(
+                    sqli_string.probe_string_error,
+                    baseline, variants, parameter=parameter, allowed_origins=[allowed],
+                    storage_state=state, before_request=lambda: None,
+                )
+            except Exception as exc:
+                result["error_followup_error"] = type(exc).__name__
+                result["evidence_id"] = or_evidence_id
+                return json.dumps(result)
+            error_result["prior_or_evidence_id"] = or_evidence_id
+            error_result["total_requests_sent"] = (
+                int(result.get("requests_sent") or 0)
+                + int(error_result.get("requests_sent") or 0)
+                + int(needs_preflight)
+            )
+            result = error_result
+        elif result.get("proof_confirmed") is not True and sqli_string.and_fallback_eligible(result):
+            # The second pattern shares the observed normal request but has
+            # fresh true/false values. Reserve its own bounded request budget.
+            or_evidence_id = evidence_store(self).record(
+                "scoped_string_sqli", result, target=result["target"], identity=identity,
+                success=False,
+            )
+            try:
+                self._scoped_claim_gets(len(sqli_string.AND_CHECK_ORDER))
+                _, and_variants, and_nonce = sqli_string.plan_string_and_boolean(
+                    baseline, parameter=parameter, allowed_origins=[allowed],
+                )
+                and_result = await asyncio.to_thread(
+                    sqli_string.probe_string_and_boolean,
+                    baseline, and_variants, and_nonce,
+                    parameter=parameter, allowed_origins=[allowed],
+                    storage_state=state,
+                    before_request=lambda: None,
+                )
+            except Exception as exc:
+                # Preserve the completed OR receipt if the optional second
+                # pattern cannot run. Never turn this into a clean verdict.
+                result["and_followup_error"] = type(exc).__name__
+                result["evidence_id"] = or_evidence_id
+                return json.dumps(result)
+            and_result["prior_or_evidence_id"] = or_evidence_id
+            and_result["total_requests_sent"] = (
+                int(result.get("requests_sent") or 0)
+                + int(and_result.get("requests_sent") or 0)
+                + int(needs_preflight)
+            )
+            result = and_result
+        else:
+            result["total_requests_sent"] = int(result.get("requests_sent") or 0) + int(needs_preflight)
         result["source"] = observed["source"]
         result["baseline_source"] = baseline_source
         result["finding"] = False
