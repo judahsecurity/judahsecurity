@@ -147,15 +147,43 @@ class OperationDirective:
                     "mutation blocks network callbacks; leave the proof inconclusive if no "
                     "approved replay path exists."
                 )
+            elif kind == "crlf":
+                block += (
+                    " Test this exact query input with a benign, unique X-Aegis-Probe "
+                    "response-header marker and an inert control. Inspect the raw response "
+                    "headers; body reflection or a status change is not header injection. "
+                    "Do not set cookies or alter application state for this first pass."
+                )
         if self.js_work:
             if self.js_work.get("test_type") == "dom_xss":
                 block += (
-                    "\nAssigned DOM XSS lead in first-party JavaScript: "
+                    "\nAssigned DOM XSS lead in observed JavaScript: "
                     f"{self.js_work.get('url', '')}. Source leads: "
                     f"{self.js_work.get('source_leads', '')}; sink leads: "
                     f"{self.js_work.get('sink_leads', '')}. Trace actual data flow from "
                     "query or fragment to an executable sink and prove it with a fresh browser "
                     "nonce in the target origin. Co-located regex matches alone are not a finding."
+                )
+            elif self.js_work.get("test_type") not in {"js_secret_review", "js_dependency_review"}:
+                block += (
+                    "\nAssigned client-side lead in observed JavaScript: "
+                    f"{self.js_work.get('url', '')} "
+                    f"class={self.js_work.get('test_type', '')} "
+                    f"kind={self.js_work.get('kind', '')}. Source leads: "
+                    f"{self.js_work.get('source_leads', '')}; candidate sinks: "
+                    f"{self.js_work.get('client_leads', '')}. Reproduce on an observed page "
+                    "in the allowed origin using a benign marker and an inert control. "
+                    "Show the resulting navigation, request change, DOM change, template "
+                    "execution, or prototype change and its security impact. Static pattern "
+                    "co-location alone cannot close this cell or support a finding."
+                )
+            elif self.js_work.get("test_type") == "js_dependency_review":
+                block += (
+                    "\nAssigned observed JavaScript dependency: "
+                    f"{self.js_work.get('url', '')}. Run execute_retirejs on this exact "
+                    "first-party URL, then verify its library/version identity and whether "
+                    "the reported vulnerable behavior is reachable. A filename or version "
+                    "match alone is a lead, not a finding."
                 )
             else:
                 block += (
@@ -267,8 +295,10 @@ def directives_from_hypotheses(
                 "url": str(coverage_cell["script_url"]),
                 "capture_id": str(coverage_cell.get("capture_id") or ""),
                 "test_type": str(coverage_cell.get("test_type") or ""),
+                "kind": str(coverage_cell.get("script_kind") or "external"),
                 "source_leads": str(coverage_cell.get("source_leads") or "")[:300],
                 "sink_leads": str(coverage_cell.get("sink_leads") or "")[:300],
+                "client_leads": str(coverage_cell.get("client_leads") or "")[:300],
             }
         proof_escalation_id = str(coverage_cell.get("proof_escalation_id") or "")
         proof_escalation = next(

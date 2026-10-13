@@ -18,6 +18,13 @@ _PROTECTED = re.compile(r"csrf|xsrf|nonce|session|token|secret|api[_-]?key|autho
 _XSS_HINT = re.compile(r"q|query|search|term|name|title|message|comment|content|text|html|redirect|url", re.I)
 _SQL_HINT = re.compile(r"id|key|category|filter|sort|page|limit|offset|search|query|email|user|order", re.I)
 _LOCATIONS = {"query", "form", "body_json", "body_form", "body_xml"}
+_SOURCE_RANK = {
+    "javascript_static": 0, "service": 0,
+    "page_url": 1, "browser_link": 1, "api_endpoint": 1,
+    "observed_form": 2, "form_action": 2,
+    "browser_request": 3, "application_operation": 3,
+    "captured_api": 4, "browser_traffic": 5,
+}
 
 
 def _origin(value: str) -> str:
@@ -82,7 +89,9 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
         if prior is None:
             if len(rows) < MAX_PARAMETERS:
                 rows[key] = row
-        elif artifact_id and not prior.get("artifact_id"):
+        elif ((artifact_id and not prior.get("artifact_id"))
+              or (not prior.get("artifact_id") and
+                  _SOURCE_RANK.get(source, 0) > _SOURCE_RANK.get(prior["source"], 0))):
             rows[key] = row
 
     def query(url: str, method: str, source: str, identity: str = "",
@@ -196,6 +205,54 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
     return sorted(rows.values(), key=lambda row: (
         row["host"], row["path"], row["method"], row["location"], row["name"], row["identity"],
     ))
+
+
+def inventory_with_operations(cmap: dict, operations: list[dict]) -> dict:
+    """Add value-free central-ledger input names to the scoped worklist."""
+    base = _base(cmap)
+    if not base:
+        return cmap
+    discovered = []
+    for operation in operations[:1000]:
+        if not isinstance(operation, dict):
+            continue
+        url = str(operation.get("url") or "")
+        if _origin(url) != base:
+            continue
+        method = str(operation.get("method") or "GET").upper()
+        content_type = str(operation.get("content_type") or "").lower()
+        identities = operation.get("identities") or ["anonymous"]
+        for parameter in (operation.get("parameters") or [])[:100]:
+            if not isinstance(parameter, str):
+                continue
+            kind, separator, name = parameter.partition(":")
+            if not separator or not _NAME.fullmatch(name):
+                continue
+            if kind == "query":
+                location = "query"
+            elif kind == "body" and "json" in content_type:
+                location = "body_json"
+            elif kind == "body" and "application/x-www-form-urlencoded" in content_type:
+                location = "body_form"
+            elif kind == "variable" and "json" in content_type:
+                location, name = "body_json", f"variables.{name}"
+            else:
+                continue
+            for identity in identities[:10]:
+                discovered.append({
+                    "url": url, "method": method, "name": name,
+                    "location": location, "identity": identity,
+                    "source": "application_operation",
+                })
+    if not discovered:
+        return cmap
+    merged = dict(cmap)
+    merged["parameter_inventory"] = collect_parameter_inventory({
+        **cmap, "parameter_inventory": [
+            *(cmap.get("parameter_inventory") or []), *discovered,
+        ][:MAX_PARAMETERS],
+    })
+    return merged
 
 
 def parameters_for_specialist(cmap: dict, specialist: str) -> list[dict]:

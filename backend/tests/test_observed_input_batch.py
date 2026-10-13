@@ -325,11 +325,12 @@ def test_eighteen_inputs_receive_both_class_first_pass_outcomes():
         asyncio.run(run_observed_input_batch(manager, max_checks=4))
     funnel = parameter_test_funnel(manager._engagement_brain)
     assert len(set(manager.calls)) == len(manager.calls) == 36
-    assert funnel["inputs"] == 18 and funnel["checks"] == 36
+    assert funnel["inputs"] == 18 and funnel["checks"] == 54
     assert funnel["attempted"] == funnel["probed"] == 36
     assert not pending_first_pass_cells(manager._engagement_brain)
     assert funnel["by_class"]["sqli"]["probed"] == 18
     assert funnel["by_class"]["xss"]["probed"] == 18
+    assert funnel["by_class"]["crlf"]["unattempted"] == 18
 
 
 def test_batch_probes_only_the_active_assessment_target():

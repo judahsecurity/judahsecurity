@@ -956,7 +956,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             return {"success": False, "error": "scope_mismatch",
                     "output": "Assigned input does not match the assessment origin"}
         url = f"{scoped_origin}{cell['path']}"
-        self._scoped_origin(url)
+        try:
+            self._scoped_origin(url)
+        except ValueError as exc:
+            return {"success": False, "error": "assessment_scope_denied",
+                    "output": str(exc)[:300]}
         identity = str(cell.get("identity") or "anonymous")
 
         if cell["test_type"] == "sqli":
@@ -983,8 +987,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         artifact_id = str(proof.get("evidence_id") or "")
         if not artifact_id:
-            return {"success": False, "error": "missing_probe_evidence",
-                    "output": "The probe returned no execution-owned evidence receipt"}
+            return {"success": False,
+                    "error": str(proof.get("error") or "missing_probe_evidence")[:100],
+                    "output": str(proof.get("output") or
+                                  "The probe returned no execution-owned evidence receipt")[:300]}
         live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         current = next((row for row in live.coverage_cells
                         if row.get("id") == coverage_cell_id and
@@ -3955,6 +3961,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             collect_parameter_inventory,
             parameters_for_specialist,
         )
+        from app.services.agent.coverage_cells import coverage_cell_id
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.vulnerability_catalog import parameter_test_classes
 
         if specialist not in {"all", "xss", "sqli", "injection"}:
             return json.dumps({"error": "specialist must be all, xss, sqli, or injection"})
@@ -3969,13 +3978,38 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         except (TypeError, ValueError):
             return json.dumps({"error": "offset and limit must be integers"})
         end = min(start + page_size, len(rows))
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cells = {cell.get("id"): cell for cell in brain.coverage_cells
+                 if isinstance(cell, dict) and cell.get("source") == "parameter_inventory"}
+        page = []
+        unscheduled = 0
+        for row in rows[start:end]:
+            checks = []
+            if row["testable"]:
+                for test_type in parameter_test_classes(row):
+                    cell_id = coverage_cell_id(
+                        method=row["method"], host=row["host"], path=row["path"],
+                        identity=row["identity"],
+                        parameter=f"{row['location']}:{row['name']}", test_type=test_type,
+                    )
+                    cell = cells.get(cell_id)
+                    if cell is None:
+                        unscheduled += 1
+                    checks.append({
+                        "test_type": test_type,
+                        "coverage_cell_id": cell_id if cell else None,
+                        "status": cell.get("status", "untested") if cell else "not_scheduled",
+                        "first_pass_outcome": cell.get("first_pass_outcome") if cell else None,
+                    })
+            page.append({**row, "checks": checks})
         return json.dumps({
             "specialist": specialist,
             "total": len(rows),
             "excluded_protected": sum(not row["testable"] for row in inventory),
+            "unscheduled_checks_on_page": unscheduled,
             "offset": start,
             "next_offset": end if end < len(rows) else None,
-            "parameters": rows[start:end],
+            "parameters": page,
         })
 
     async def get_api_operation_inventory(
@@ -9104,12 +9138,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 OBSERVED_INPUT_SOURCES if mode == "observed_inputs" else None
             ),
             allowed_sources=(
-                frozenset({"parameter_inventory", "surface_applicability"})
+                frozenset({"parameter_inventory", "surface_applicability", "js_inventory"})
                 if mode == "coverage_followup" else None
             ),
             excluded_test_types=(
                 frozenset({"xss", "sqli"}) if mode == "coverage_followup" else None
             ),
+            first_pass_only=mode == "coverage_followup",
         )
         directives = directives_from_hypotheses(
             brain=brain,

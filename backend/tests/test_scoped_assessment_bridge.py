@@ -75,6 +75,37 @@ def test_browser_observation_feeds_aegis_capability_map():
                 if row["name"] == "/comment/text")["artifact_id"] == "capture-9"
 
 
+def test_inspected_script_urls_and_inline_sources_reach_capability_map():
+    observation = {"signal": "browser_inspect_js", "result": {
+        "target_template": "https://app.example/", "final_origin": "https://app.example",
+        "final_path": "/", "status": 200,
+        "scripts": [
+            {"kind": "external", "url": "https://app.example/static/client.js",
+             "artifact_id": "external-1", "analysis": {
+                 "source_leads": [{"kind": "query", "line": 1}],
+                 "client_leads": [{"kind": "dom_open_redirect", "line": 2}]}},
+            {"kind": "inline", "url": "https://app.example/blog", "index": 1,
+             "artifact_id": "inline-1", "analysis": {
+                 "source_leads": [{"kind": "fragment", "line": 1}],
+                 "sink_leads": [{"kind": "html_assignment", "line": 2}]}},
+            {"kind": "external", "url": "https://outside.example/escape.js",
+             "analysis": {}},
+        ],
+    }}
+    cmap = bridge.capability_map_from_observation(observation)
+    assert cmap["js_files"] == ["https://app.example/static/client.js"]
+    assert {row["artifact_id"] for row in cmap["js_sources"]} == {"external-1", "inline-1"}
+    assert cmap["js_sources"][0]["client_leads"][0]["kind"] == "dom_open_redirect"
+    from app.services.agent.coverage_cells import seed_js_coverage_cells
+    from app.services.agent.engagement_brain import EngagementBrain
+
+    cells = seed_js_coverage_cells(EngagementBrain(target="https://app.example"), cmap)
+    assert any(cell["test_type"] == "dom_open_redirect"
+               and cell["path"] == "/static/client.js" for cell in cells)
+    assert any(cell["test_type"] == "dom_xss" and cell["path"] == "/blog"
+               and cell["script_kind"] == "inline" for cell in cells)
+
+
 def test_browser_link_query_names_reach_parameter_inventory_without_values():
     hrefs = [
         "https://app.example/catalog?category=Gifts&searchTerm=private-value",
