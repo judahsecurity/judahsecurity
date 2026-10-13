@@ -11,6 +11,7 @@ from app.services.agent.parameter_inventory import collect_parameter_inventory
 from app.services.agent.request_mutate import apply_one_mutation
 from app.services.agent.js_sinks import scan_body, scan_dom_sources
 from app.services.agent.scoped_assessment.javascript import analyze_javascript
+from app.services.agent.tester_loop import _coverage_followup_wave
 
 
 def test_observed_inputs_create_class_specific_work():
@@ -33,8 +34,9 @@ def test_observed_inputs_create_class_specific_work():
                 for cell in cells if cell["source"] == "parameter_inventory"}
     assert ("sqli", "/catalog", "query:category") in observed
     assert ("xss", "/catalog", "query:searchTerm") in observed
-    assert ("stored_xss", "/blog/comment", "form:comment") in observed
-    assert ("command_injection", "/api/stock", "form:sku") in observed
+    assert ("crlf", "/catalog", "query:searchTerm") in observed
+    assert ("stored_xss", "/blog/comment", "body_form:comment") in observed
+    assert ("command_injection", "/api/stock", "body_form:sku") in observed
     assert ("xxe", "/api/check-stock", "body_xml:document") in observed
     assert all(cell["status"] == "untested" for cell in cells
                if cell["test_type"] in {"stored_xss", "command_injection", "xxe"})
@@ -81,6 +83,55 @@ def test_dom_work_requires_both_browser_source_and_sink():
     source = target + "/risky.js"
     assert scan_dom_sources("const x = location.hash", source=source)[0]["source"] == source
     assert scan_body("document.body.innerHTML = x", source=source)[0]["source"] == source
+
+
+def test_client_script_leads_become_distinct_scheduled_review_work():
+    target = "https://app.test"
+    analysis = analyze_javascript(
+        b"const value = new URLSearchParams(location.search).get('next');\n"
+        b"location.href = value; anchor.href = value; label.textContent = value;\n"
+        b"fetch(value); Handlebars.compile(value); Object.assign(state, value);\n"
+        b"panel.innerHTML = value;",
+        source_url=target + "/client.js", expected_origin=target,
+    )
+    brain = EngagementBrain(target=target)
+    cells = seed_js_coverage_cells(brain, {
+        "target": target, "js_files": [target + "/client.js", target + "/angular_1-7-7.js"],
+        "js_sources": [{"url": target + "/client.js", **analysis}],
+    })
+    kinds = {cell["test_type"] for cell in cells}
+    assert {"dom_xss", "dom_open_redirect", "dom_link_manipulation",
+            "dom_data_manipulation", "request_url_override",
+            "client_template_injection", "client_prototype_pollution",
+            "js_dependency_review"} <= kinds
+    assert all(cell["status"] == "untested" for cell in cells)
+    assert all(cell["specialist"] == "spa_client" for cell in cells
+               if cell["test_type"].startswith("client_") or cell["test_type"] == "dom_open_redirect")
+    step = _coverage_followup_wave({"engagement_brain": brain.to_dict()}, [], target)
+    assert step is not None
+    assert "spa_client" in step["tool_args"]["specialists"]
+    assert "xss" in step["tool_args"]["specialists"]
+
+
+def test_inert_script_and_navigation_sink_do_not_create_dom_xss_work():
+    target = "https://app.test"
+    inert = analyze_javascript(
+        b"const value = location.hash; console.log(value);",
+        source_url=target + "/inert.js", expected_origin=target,
+    )
+    navigation = analyze_javascript(
+        b"const value = location.hash; location.href = value;",
+        source_url=target + "/navigation.js", expected_origin=target,
+    )
+    brain = EngagementBrain(target=target)
+    cells = seed_js_coverage_cells(brain, {
+        "target": target, "js_files": [target + "/inert.js", target + "/navigation.js"],
+        "js_sources": [{"url": target + "/inert.js", **inert},
+                       {"url": target + "/navigation.js", **navigation}],
+    })
+    assert not any(cell["test_type"] == "dom_xss" for cell in cells)
+    assert not any(cell["path"] == "/inert.js" and cell["specialist"] == "spa_client"
+                   for cell in cells)
 
 
 def test_xml_replay_preserves_observed_request_and_rejects_network_callbacks():

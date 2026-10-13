@@ -157,6 +157,47 @@ async def test_js_scan_changed_from_browser_capture_stays_inconclusive(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_coverage_followup_leases_observed_client_script(monkeypatch):
+    from app.services.agent.fireteam_service import FireteamResult, SpecialistReport
+
+    target = "https://app.test"
+    cmap = {"target": target, "scope": target,
+            "js_files": [target + "/client.js"],
+            "js_sources": [{"url": target + "/client.js",
+                            "source_leads": [{"kind": "query", "line": 1}],
+                            "client_leads": [{"kind": "dom_open_redirect", "line": 2}]}]}
+    manager = ASMToolsManager()
+    manager._capability_map = cmap
+    manager._engagement_brain = EngagementBrain(target=target).to_dict()
+    monkeypatch.setattr(manager, "_cheap_llm", lambda: object())
+    leased = []
+
+    async def fake_fireteam(*, mission, directives, **_kwargs):
+        if not directives:
+            return FireteamResult(mission=mission, specialists_run=[], reports=[])
+        directive = directives["spa_client"]
+        leased.append(directive.coverage_cell_id)
+        assert directive.js_work["url"] == target + "/client.js"
+        assert directive.js_work["test_type"] == "dom_open_redirect"
+        assert directive.coverage_lease_id
+        return FireteamResult(mission=mission, specialists_run=["spa_client"],
+                              reports=[SpecialistReport(
+                                  specialist="spa_client", role="Client", mission=mission,
+                                  summary="Browser proof not available", verdict="inconclusive",
+                              )])
+
+    monkeypatch.setattr("app.services.agent.fireteam_service.run_fireteam", fake_fireteam)
+    result = json.loads(await manager.fireteam_dispatch(
+        mission="Review observed client lead", targets=[target],
+        specialists=["spa_client"], mode="coverage_followup",
+    ))
+    assert leased
+    assert result["coverage_leases"]["spa_client"]["coverage_cell_id"]
+    assert any(row["test_type"] == "dom_open_redirect" and row["status"] == "inconclusive"
+               for row in manager._engagement_brain["coverage_cells"])
+
+
+@pytest.mark.asyncio
 async def test_assigned_probe_uses_private_capture_and_cannot_change_input(monkeypatch):
     brain = EngagementBrain(target="https://app.test")
     seed_parameter_coverage_cells(brain, [{
@@ -263,6 +304,50 @@ async def test_assigned_link_xss_probe_records_exact_cell_receipt(monkeypatch, e
     assert cell["probe_artifact_ids"] == cell["evidence_ids"] == ["browser-proof"]
     assert cell["status"] == ("in_focus" if executed else "leased")
     assert parameter_test_funnel(manager._engagement_brain)["probed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_assigned_xss_probe_preserves_scope_denial_for_queue_receipt(monkeypatch):
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "path": "/catalog", "host": "app.test",
+        "name": "searchTerm", "location": "query", "source": "browser_link",
+        "identity": "anonymous", "testable": True,
+    }])
+    lease = claim_coverage_cell_leases(brain, ["xss"])["xss"]
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.test"
+    manager._capability_map = {"target": "https://app.test"}
+    manager._engagement_brain = brain.to_dict()
+    register_scope(manager, "app.test")
+
+    async def denied_browser(*_args, **_kwargs):
+        return json.dumps({"error": "assessment_scope_denied", "output": "Scope expired"})
+
+    monkeypatch.setattr(manager, "scoped_browser_assessment", denied_browser)
+    result = await manager.scoped_input_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert result["error"] == "assessment_scope_denied"
+    assert result["output"] == "Scope expired"
+    assert not any(cell.get("evidence_ids") for cell in manager._engagement_brain["coverage_cells"])
+
+
+@pytest.mark.asyncio
+async def test_assigned_input_reports_missing_registered_scope(monkeypatch):
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "path": "/catalog", "host": "app.test",
+        "name": "searchTerm", "location": "query", "source": "browser_link",
+        "identity": "anonymous", "testable": True,
+    }])
+    lease = claim_coverage_cell_leases(brain, ["xss"])["xss"]
+    manager = ASMToolsManager()
+    manager._capability_map = {"target": "https://app.test"}
+    manager._engagement_brain = brain.to_dict()
+    monkeypatch.setattr(manager, "_scoped_origin", lambda _url: (_ for _ in ()).throw(
+        ValueError("No assessment network scope is registered")))
+    result = await manager.scoped_input_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert result["error"] == "assessment_scope_denied"
+    assert "scope" in result["output"]
 
 
 @pytest.mark.asyncio

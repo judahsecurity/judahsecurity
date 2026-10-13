@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
 import uuid
 from collections.abc import Iterable
@@ -455,7 +456,7 @@ def seed_parameter_coverage_cells(brain: Any, inventory: Iterable[dict[str, Any]
     carry authentication or anti-CSRF state remain in the inventory but are
     excluded from automatic injection work.
     """
-    from app.services.agent.parameter_inventory import parameter_priority
+    from app.services.agent.parameter_inventory import _SOURCE_RANK, parameter_priority
     from app.services.agent.vulnerability_catalog import (
         endpoint_test_classes,
         parameter_test_classes,
@@ -490,6 +491,11 @@ def seed_parameter_coverage_cells(brain: Any, inventory: Iterable[dict[str, Any]
             cell["value_type"] = str(raw.get("value_type") or "")[:40]
             cell["observation_source"] = str(raw.get("source") or "")[:40]
             prior = existing.get(cell["id"])
+            if (prior and prior.get("status") in CELL_OPEN
+                    and not prior.get("lease_id")
+                    and _SOURCE_RANK.get(cell["observation_source"], 0)
+                    > _SOURCE_RANK.get(str(prior.get("observation_source") or ""), 0)):
+                prior["observation_source"] = cell["observation_source"]
             if (prior and prior.get("status") in CELL_OPEN
                     and not prior.get("lease_id")
                     and cell["observation_source"] == "browser_traffic"
@@ -630,14 +636,15 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
 
 
 def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, Any]]:
-    """Keep one durable review cell for every observed first-party JS file."""
+    """Keep durable review cells for observed scripts and their passive leads."""
     target = urlsplit(str(cmap.get("target") or ""))
     if target.scheme not in {"http", "https"} or not target.netloc:
         return migrate_coverage_cells(brain)
     sources = {
         str(row.get("url")): row
         for row in (cmap.get("js_sources") or [])[:160]
-        if isinstance(row, dict) and isinstance(row.get("url"), str)
+        if isinstance(row, dict) and row.get("kind") != "inline"
+        and isinstance(row.get("url"), str)
     }
     existing = {row.get("id") for row in getattr(brain, "coverage_cells", []) if isinstance(row, dict)}
     hypothesis = next((
@@ -663,19 +670,70 @@ def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, A
         if cell["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
             brain.coverage_cells.append(cell)
             existing.add(cell["id"])
-        if source.get("source_leads") and source.get("sink_leads"):
+        if re.search(r"(?:^|[/_.-])\d+[._-]\d+(?:[._-]\d+)?(?:[._-]|\.js$)", parts.path, re.I):
+            dependency = _new_cell(
+                brain, method="GET", path=parts.path, host=parts.netloc,
+                identity="anonymous", parameter="script", test_type="js_dependency_review",
+                source="js_inventory", capture_id=source.get("artifact_id", ""),
+            )
+            dependency["script_url"] = script_url
+            dependency["priority_rank"] = 2
+            if dependency["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
+                brain.coverage_cells.append(dependency)
+                existing.add(dependency["id"])
+    client_classes = {
+        "dom_open_redirect": "dom_open_redirect",
+        "dom_link_manipulation": "dom_link_manipulation",
+        "dom_data_manipulation": "dom_data_manipulation",
+        "request_url_override": "request_url_override",
+        "client_template_injection": "client_template_injection",
+        "prototype_pollution": "client_prototype_pollution",
+    }
+    for source in (cmap.get("js_sources") or [])[:160]:
+        if not isinstance(source, dict):
+            continue
+        parts = urlsplit(str(source.get("url") or ""))
+        if (parts.scheme, parts.netloc) != (target.scheme, target.netloc) or not parts.path:
+            continue
+        script_url = f"{parts.scheme}://{parts.netloc}{parts.path}"
+        inline = source.get("kind") == "inline"
+        parameter = f"inline_script:{source.get('index', 0)}" if inline else "script"
+        source_leads = list(source.get("source_leads") or [])[:10]
+        sink_leads = list(source.get("sink_leads") or [])[:30]
+        if source_leads and any(
+            isinstance(lead, dict) and lead.get("kind") in {"html_assignment", "dynamic_code"}
+            for lead in sink_leads
+        ):
             dom = _new_cell(
                 brain, method="GET", path=parts.path, host=parts.netloc,
-                identity="anonymous", parameter="script", test_type="dom_xss",
+                identity="anonymous", parameter=parameter, test_type="dom_xss",
                 source="js_inventory", capture_id=source.get("artifact_id", ""),
             )
             dom["script_url"] = script_url
-            dom["source_leads"] = list(source.get("source_leads") or [])[:10]
-            dom["sink_leads"] = list(source.get("sink_leads") or [])[:30]
+            dom["script_kind"] = "inline" if inline else "external"
+            dom["source_leads"] = source_leads
+            dom["sink_leads"] = sink_leads
             dom["priority_rank"] = 2
             if dom["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
                 brain.coverage_cells.append(dom)
                 existing.add(dom["id"])
+        for lead in (source.get("client_leads") or [])[:18]:
+            kind = client_classes.get(lead.get("kind")) if isinstance(lead, dict) else None
+            if not kind or not source_leads:
+                continue
+            cell = _new_cell(
+                brain, method="GET", path=parts.path, host=parts.netloc,
+                identity="anonymous", parameter=parameter, test_type=kind,
+                source="js_inventory", capture_id=source.get("artifact_id", ""),
+            )
+            cell["script_url"] = script_url
+            cell["script_kind"] = "inline" if inline else "external"
+            cell["source_leads"] = source_leads
+            cell["client_leads"] = [lead]
+            cell["priority_rank"] = 2
+            if cell["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
+                brain.coverage_cells.append(cell)
+                existing.add(cell["id"])
     return migrate_coverage_cells(brain)
 
 

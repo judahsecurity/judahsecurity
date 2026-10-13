@@ -46,6 +46,7 @@ _WEB_HINT_RE = re.compile(r"https?://|\bwww\.|\.(com|net|io|org|app)\b", re.I)
 OBSERVED_INPUT_SOURCES = frozenset({
     "observed_form", "form_action", "captured_api", "browser_traffic",
     "browser_request", "page_url", "browser_link", "api_endpoint",
+    "application_operation",
 })
 
 
@@ -384,23 +385,23 @@ def _observed_input_wave(
 def _coverage_followup_wave(
     state: Dict[str, Any], trace: List[Dict[str, Any]], target: str,
 ) -> Optional[Dict[str, Any]]:
-    """Dispatch applicable non-SQLi/XSS classes after the main fireteam wave.
-
-    Continue only while a previous wave completed evidence-backed work. A
-    failed or inconclusive wave leaves the gap visible instead of looping.
-    """
+    """Give each applicable non-SQLi/XSS check one bounded first pass."""
     from app.services.agent.coverage_cells import CELL_OPEN, CELL_TERMINAL
 
     all_cells = [
         row for row in ((state.get("engagement_brain") or {}).get("coverage_cells") or [])
         if isinstance(row, dict)
-        and row.get("source") in {"parameter_inventory", "surface_applicability"}
-        and row.get("test_type") not in {"xss", "sqli"}
+        and row.get("source") in {"parameter_inventory", "surface_applicability", "js_inventory"}
+        and row.get("test_type") not in {"xss", "sqli", "js_secret_review"}
     ]
-    cells = [
+    unattempted = [
         row for row in all_cells
-        if row.get("status") in CELL_OPEN
+        if row.get("status") in {*CELL_OPEN, "leased"}
+        and not int(row.get("attempts") or 0)
+        and not (row.get("first_pass_outcome") or row.get("candidate_id")
+                 or row.get("probe_artifact_ids") or row.get("service_probe_artifact_ids"))
     ]
+    cells = [row for row in unattempted if row.get("status") in CELL_OPEN]
     if not cells:
         return None
     prior_waves = [
@@ -408,12 +409,11 @@ def _coverage_followup_wave(
         if step.get("tool_name") == "fireteam_dispatch"
         and (step.get("tool_args") or {}).get("mode") == "coverage_followup"
     ]
-    if len(prior_waves) >= 12:
+    if len(prior_waves) >= 64:
         return None
     if prior_waves:
-        previous = (prior_waves[-1].get("tool_args") or {}).get("completed_coverage_count")
-        completed = sum(row.get("status") in CELL_TERMINAL for row in all_cells)
-        if not isinstance(previous, int) or completed <= previous:
+        previous = (prior_waves[-1].get("tool_args") or {}).get("pending_coverage_count")
+        if not isinstance(previous, int) or len(unattempted) >= previous:
             return None
     classes_by_specialist: Dict[str, set[str]] = {}
     for row in cells:
@@ -432,13 +432,15 @@ def _coverage_followup_wave(
             "specialists": specialists,
             "mode": "coverage_followup",
             "targets": [target],
-            "pending_coverage_count": len(cells),
+            "pending_coverage_count": len(unattempted),
             "completed_coverage_count": sum(
                 row.get("status") in CELL_TERMINAL for row in all_cells
             ),
             "mission": (
-                "Execute the leased, observed request for its assigned vulnerability "
-                "class. Use a baseline and a class-specific discriminating control; "
+                "Execute the leased observed input, endpoint, or JavaScript lead "
+                "for its assigned vulnerability class. For JavaScript, reproduce "
+                "behavior on an observed page; the script URL is the source artifact. "
+                "Use a baseline and a class-specific discriminating control; "
                 "record a live evidence ID on the exact coverage cell. An unexecuted, "
                 "blocked, or inconclusive probe stays open. Applicable classes: "
                 + ", ".join(classes)

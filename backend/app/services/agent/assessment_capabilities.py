@@ -43,6 +43,24 @@ CAPABILITY_TOOLS = (
 
 
 class AssessmentCapabilities:
+    def _queue_operation_inputs(self, brain):
+        """Keep central-ledger parameters visible to class-specific test scheduling."""
+        from app.services.agent.coverage_cells import seed_parameter_coverage_cells
+        from app.services.agent.parameter_inventory import (
+            collect_parameter_inventory, inventory_with_operations,
+        )
+
+        cmap = getattr(self, "_capability_map", None) or {}
+        if not isinstance(cmap, dict):
+            cmap = {}
+        if not cmap.get("scope") and not cmap.get("target"):
+            target = str(getattr(brain, "target", "") or
+                         getattr(self, "_fallback_target", "") or "")
+            cmap = {**cmap, "target": target, "scope": target}
+        cmap = inventory_with_operations(cmap, brain.application_operations)
+        self._capability_map = cmap
+        seed_parameter_coverage_cells(brain, collect_parameter_inventory(cmap))
+
     def _capture_requests(self):
         from app.services.agent.request_capture import RequestCaptureStore
 
@@ -133,6 +151,7 @@ class AssessmentCapabilities:
             brain.application_operations, operations
         )
         ingest_operations(brain, [])
+        self._queue_operation_inputs(brain)
         self._engagement_brain = brain.to_dict()
 
     async def map_application_traffic(
@@ -141,6 +160,7 @@ class AssessmentCapabilities:
         """Normalize captured traffic into operations and assessment hypotheses; no requests are sent."""
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         incoming = ingest_operations(brain, requests, identity=identity, source=source)
+        self._queue_operation_inputs(brain)
         self._engagement_brain = brain.to_dict()
         return json.dumps(
             dict(operations=incoming, engagement_brain=self._engagement_brain)

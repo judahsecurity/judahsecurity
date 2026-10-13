@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import json
+
 from app.services.agent.demonstrated_chain import (
     build_agent_detection,
     normalize_chain,
     parse_args,
     select_proof_invocations,
+    select_verified_proof_invocations,
     should_record_tool,
     summarize_output,
 )
@@ -88,6 +91,44 @@ def test_select_proof_prefers_target_and_curl():
     chosen = select_proof_invocations(invocations, target="db.example.com", limit=8)
     tools = [c["tool"] for c in chosen]
     assert tools == ["execute_curl", "execute_curl"]
+
+
+def test_verified_detection_claim_links_sql_proof_receipt_not_recon():
+    receipt = "b" * 32
+    other_receipt = "a" * 32
+    target = "https://ginandjuice.shop/catalog?category="
+    invocations = [
+        {"tool": "execute_httpx", "args": {"url": target}, "output": "HTTP 200", "success": True},
+        {"tool": "scoped_string_sqli", "args": {"url": target, "parameter": "searchTerm"},
+         "output": json.dumps({"operation": "sqli_boolean_string", "target": target,
+                               "parameter": "searchTerm", "evidence_id": other_receipt}),
+         "success": True},
+        {"tool": "scoped_string_sqli", "args": {"url": target, "parameter": "category"},
+         "output": json.dumps({"operation": "sqli_boolean_string", "target": target,
+                               "parameter": "category", "evidence_id": receipt,
+                               "proof_confirmed": True, "proof_recipe": "string_and_boolean_v1",
+                               "total_requests_sent": 8}),
+         "success": True},
+        {"tool": "execute_feroxbuster", "args": {"url": target}, "output": "HTTP 200", "success": True},
+    ]
+    selected = select_verified_proof_invocations(invocations, [receipt], target=target)
+    detection = build_agent_detection(invocations=selected, target=target)
+    assert detection["step_count"] == 1
+    assert detection["chain"][0]["tool"] == "scoped_string_sqli"
+    assert "category" in detection["chain"][0]["summary"]
+    assert "confirmed; 8 controlled requests" in detection["chain"][0]["outcome"]
+    assert select_verified_proof_invocations(invocations, ["c" * 32], target=target) == []
+
+
+def test_verified_detection_claim_accepts_tool_artifact_receipt():
+    receipt = "d" * 32
+    invocation = {
+        "tool": "replay_http_request", "args": {"url": "https://app.example.com/item"},
+        "output": "HTTP 200", "artifact_id": receipt, "success": True,
+    }
+    assert select_verified_proof_invocations(
+        [invocation], [receipt], target="https://app.example.com/item",
+    ) == [invocation]
 
 
 def test_redact_keeps_username_strips_password():
