@@ -388,6 +388,11 @@ class CrawlResult:
     storage_state: Optional[Dict[str, Any]] = None
     # Sample first-party XHR for replay (method/url/headers/postData)
     api_samples: List[Dict[str, Any]] = field(default_factory=list)
+    # Value-free browser traffic and distinct first-party request operations.
+    network_requests: List[Dict[str, Any]] = field(default_factory=list)
+    network_requests_total: int = 0
+    network_requests_dropped: int = 0
+    application_operations: List[Dict[str, Any]] = field(default_factory=list)
     action_checkpoints: List[Dict[str, Any]] = field(default_factory=list)
     js_file_actions: Dict[str, str] = field(default_factory=dict)
     js_endpoint_sources: Dict[str, Set[str]] = field(default_factory=dict)
@@ -803,10 +808,32 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
 
                 # Playwright-level passive capture (covers navigations, images,
                 # scripts, and any traffic the JS hooks might miss).
+                from app.services.agent.runtime_mapper import normalize_request, merge_operations
+                from app.services.browser_automation_service import MAX_NETWORK_REQUESTS, _request_metadata
+                request_rows: Dict[int, int] = {}
+
                 def _on_request(req):
                     try:
                         url = req.url
                         _record_request(req.method, url)
+                        metadata = _request_metadata(req, opts.get("allowed_origin") or seed)
+                        if metadata is not None:
+                            result.network_requests_total += 1
+                            if metadata["in_scope"]:
+                                request = dict(method=req.method, url=req.url,
+                                               headers=req.headers, body=req.post_data)
+                                operations = normalize_request(
+                                    request, identity=str(opts.get("identity") or "anonymous"),
+                                    source="deep_crawl",
+                                )
+                                result.application_operations = merge_operations(
+                                    result.application_operations, operations
+                                )
+                            if len(result.network_requests) < MAX_NETWORK_REQUESTS:
+                                request_rows[id(req)] = len(result.network_requests)
+                                result.network_requests.append(metadata)
+                            else:
+                                result.network_requests_dropped += 1
                         rtype = req.resource_type
                         if rtype == "script" or url.split("?")[0].endswith(".js"):
                             if _in_scope(urlparse(url).netloc, scope_apex):
@@ -851,6 +878,25 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                 def _on_response(resp):
                     try:
                         req = resp.request
+                        index = request_rows.get(id(req))
+                        if index is not None:
+                            result.network_requests[index]["status"] = int(resp.status)
+                        metadata = _request_metadata(req, opts.get("allowed_origin") or seed)
+                        if metadata is not None and metadata["in_scope"]:
+                            request = dict(method=req.method, url=req.url,
+                                           headers=req.headers, body=req.post_data)
+                            operations = normalize_request(
+                                request, identity=str(opts.get("identity") or "anonymous"),
+                                source="deep_crawl",
+                            )
+                            for operation in operations:
+                                operation["status"] = int(resp.status)
+                                content_type = resp.headers.get("content-type") if resp.headers else None
+                                if content_type:
+                                    operation["content_type"] = str(content_type)[:100]
+                            result.application_operations = merge_operations(
+                                result.application_operations, operations
+                            )
                         if req.resource_type not in ("xhr", "fetch"):
                             return
                         url = (req.url or "")[:500]
@@ -882,6 +928,11 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
 
                 page.on("request", _on_request)
                 page.on("response", _on_response)
+                def _on_request_failed(req):
+                    index = request_rows.get(id(req))
+                    if index is not None:
+                        result.network_requests[index]["failed"] = True
+                page.on("requestfailed", _on_request_failed)
                 page.on("websocket", lambda ws: result.websockets.add(ws.url)
                         if len(result.websockets) < 100 else None)
 
@@ -1040,6 +1091,10 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
             "output": f"Deep crawl error: {str(e)[:400]}",
             "error": str(e),
             "exit_code": -1,
+            "network_requests": result.network_requests,
+            "network_requests_total": result.network_requests_total,
+            "network_requests_dropped": result.network_requests_dropped,
+            "application_operations": result.application_operations,
         }
 
     for checkpoint in result.action_checkpoints:
@@ -1084,6 +1139,10 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
         "exit_code": 0,
         "capability_map": cmap_dict,
         "auth_session": auth_session,
+        "network_requests": result.network_requests,
+        "network_requests_total": result.network_requests_total,
+        "network_requests_dropped": result.network_requests_dropped,
+        "application_operations": result.application_operations,
     }
 
 
@@ -1541,6 +1600,11 @@ def _format_output(r: CrawlResult) -> str:
     if r.authenticated is not None:
         lines.append(f"Authenticated session: {'yes' if r.authenticated else 'FAILED (crawled unauthenticated)'}")
     lines.append(f"Pages visited: {len(r.pages_visited)}")
+    lines.append(
+        f"Browser requests observed: {r.network_requests_total} "
+        f"({len(r.network_requests)} metadata rows saved; "
+        f"{r.network_requests_dropped} omitted)"
+    )
     for p in r.pages_visited[:25]:
         lines.append(f"  - {p}")
 

@@ -24,6 +24,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field, asdict
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ SCREENSHOTS_DIR = os.environ.get("SCREENSHOTS_DIR", "/app/data/screenshots")
 MAX_ACTIONS = 20
 PAGE_TIMEOUT_MS = 20000
 ACTION_TIMEOUT_MS = 10000
+MAX_NETWORK_REQUESTS = 1000
 
 
 @dataclass
@@ -47,7 +49,9 @@ class BrowserSessionResult:
     actions_executed: int
     results: List[Dict[str, Any]] = field(default_factory=list)
     console_logs: List[str] = field(default_factory=list)
-    network_requests: List[Dict[str, str]] = field(default_factory=list)
+    network_requests: List[Dict[str, Any]] = field(default_factory=list)
+    network_requests_total: int = 0
+    network_requests_dropped: int = 0
     application_operations: List[Dict[str, Any]] = field(default_factory=list)
     errors: List[str] = field(default_factory=list)
     final_url: Optional[str] = None
@@ -60,6 +64,32 @@ def _check_playwright() -> bool:
         return True
     except ImportError:
         return False
+
+
+def _request_metadata(request, allowed_origin: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Keep request shape and method without query values or credential material."""
+    from app.services.agent.evidence_store import origin
+
+    parsed = urlsplit(str(getattr(request, "url", "") or ""))
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return None
+    try:
+        port = parsed.port
+        in_scope = allowed_origin is None or origin(request.url) == origin(allowed_origin)
+    except ValueError:
+        return None
+    authority = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+    if port and port != (443 if parsed.scheme == "https" else 80):
+        authority += f":{port}"
+    return {
+        "method": str(getattr(request, "method", "GET") or "GET").upper(),
+        "url": urlunsplit((parsed.scheme, authority, parsed.path or "/", "", "")),
+        "query_keys": sorted({key[:80] for key, _ in parse_qsl(
+            parsed.query, keep_blank_values=True
+        )})[:50],
+        "resource_type": str(getattr(request, "resource_type", "") or "")[:32],
+        "in_scope": in_scope,
+    }
 
 
 async def execute_browser_actions(actions_json: str, *, capture_callback=None) -> Dict[str, Any]:
@@ -167,30 +197,62 @@ async def execute_browser_actions(actions_json: str, *, capture_callback=None) -
             page = await context.new_page()
 
             from app.services.agent.runtime_mapper import normalize_request, merge_operations
+            request_rows: Dict[int, int] = {}
+
             def capture_request(req):
-                if len(session.network_requests) >= 200:
-                    return
                 try:
-                    request = dict(method=req.method, url=req.url, headers=req.headers, body=req.post_data)
-                    identity = "anonymous" if isinstance(spec, list) else spec.get("identity", "anonymous")
-                    operations = normalize_request(request, identity=identity, source="browser")
-                    session.application_operations = merge_operations(session.application_operations, operations)
-                    from app.services.agent.pilot_policy import current_pilot
-                    captured_url = req.url if current_pilot() is not None else req.url.split("?", 1)[0]
-                    session.network_requests.append(dict(method=req.method, url=captured_url))
+                    metadata = _request_metadata(req, allowed_origin)
+                    if metadata is None:
+                        return
+                    session.network_requests_total += 1
+                    if metadata["in_scope"]:
+                        request = dict(method=req.method, url=req.url,
+                                       headers=req.headers, body=req.post_data)
+                        identity = "anonymous" if isinstance(spec, list) else spec.get("identity", "anonymous")
+                        operations = normalize_request(request, identity=identity, source="browser")
+                        session.application_operations = merge_operations(session.application_operations, operations)
+                    if len(session.network_requests) < MAX_NETWORK_REQUESTS:
+                        request_rows[id(req)] = len(session.network_requests)
+                        session.network_requests.append(metadata)
+                    else:
+                        session.network_requests_dropped += 1
                 except Exception:
                     session.errors.append("Request metadata capture failed")
             page.on("request", capture_request)
+
             def capture_response(response):
-                if capture_callback is None or not 200 <= response.status < 300:
-                    return
                 try:
                     req = response.request
+                    index = request_rows.get(id(req))
+                    if index is not None:
+                        session.network_requests[index]["status"] = int(response.status)
+                    metadata = _request_metadata(req, allowed_origin)
+                    if metadata is not None and metadata["in_scope"]:
+                        request = dict(method=req.method, url=req.url,
+                                       headers=req.headers, body=req.post_data)
+                        identity = "anonymous" if isinstance(spec, list) else spec.get("identity", "anonymous")
+                        operations = normalize_request(request, identity=identity, source="browser")
+                        for operation in operations:
+                            operation["status"] = int(response.status)
+                            content_type = response.headers.get("content-type") if response.headers else None
+                            if content_type:
+                                operation["content_type"] = str(content_type)[:100]
+                        session.application_operations = merge_operations(
+                            session.application_operations, operations
+                        )
+                    if capture_callback is None or not 200 <= response.status < 300:
+                        return
                     capture_callback(dict(method=req.method, url=req.url,
                                           headers=req.headers, body=req.post_data))
                 except Exception:
                     session.errors.append("Replay template capture failed")
             page.on("response", capture_response)
+
+            def capture_request_failed(request):
+                index = request_rows.get(id(request))
+                if index is not None:
+                    session.network_requests[index]["failed"] = True
+            page.on("requestfailed", capture_request_failed)
             def capture_socket(socket):
                 operations = normalize_request(dict(url=socket.url),
                     identity="anonymous" if isinstance(spec, list) else spec.get("identity", "anonymous"), source="browser")
@@ -271,6 +333,8 @@ async def execute_browser_actions(actions_json: str, *, capture_callback=None) -
         "exit_code": 0 if not session.errors else 1,
         "auth_session": auth_session,
         "network_requests": session.network_requests,
+        "network_requests_total": session.network_requests_total,
+        "network_requests_dropped": session.network_requests_dropped,
         "application_operations": session.application_operations,
         "browser_evidence": [r["data"] for r in session.results
                              if r.get("action") == "check_xss" and r.get("success") and r.get("data")],
@@ -538,8 +602,21 @@ def _format_session_output(session: BrowserSessionResult) -> str:
                 unique_domains.add(urlparse(r["url"]).netloc)
             except Exception:
                 pass
-        lines.append(f"\nNetwork: {len(outgoing)} requests to {len(unique_domains)} domains")
+        total = session.network_requests_total or len(outgoing)
+        lines.append(f"\nNetwork: {total} requests observed to {len(unique_domains)} domains"
+                     f" ({session.network_requests_dropped} metadata rows omitted)")
         for d in sorted(unique_domains)[:20]:
             lines.append(f"  - {d}")
+        interesting = [r for r in outgoing if r.get("in_scope", True) and (
+            r.get("query_keys") or r.get("method") != "GET"
+            or r.get("resource_type") in ("xhr", "fetch", "document")
+        )]
+        for row in interesting[:30]:
+            keys = ",".join(row.get("query_keys") or [])
+            status = row.get("status", "failed" if row.get("failed") else "pending")
+            lines.append(f"  {row['method']} {row['url']} status={status}"
+                         + (f" query_keys={keys}" if keys else ""))
+        if len(interesting) > 30:
+            lines.append(f"  ... ({len(interesting) - 30} more request shapes in evidence)")
 
     return "\n".join(lines)

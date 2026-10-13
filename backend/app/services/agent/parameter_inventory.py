@@ -226,7 +226,8 @@ def inventory_with_operations(cmap: dict, operations: list[dict]) -> dict:
         if _origin(url) != base:
             continue
         method = str(operation.get("method") or "GET").upper()
-        content_type = str(operation.get("content_type") or "").lower()
+        content_type = str(operation.get("request_content_type")
+                           or operation.get("content_type") or "").lower()
         identities = operation.get("identities") or ["anonymous"]
         for parameter in (operation.get("parameters") or [])[:100]:
             if not isinstance(parameter, str):
