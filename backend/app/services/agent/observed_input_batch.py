@@ -20,6 +20,7 @@ from app.services.agent.coverage_cells import (
     migrate_coverage_cells,
     parameter_test_funnel,
     release_coverage_cell_lease,
+    verified_input_paths,
 )
 from app.services.agent.engagement_brain import engagement_brain_from_dict
 from app.services.agent.parameter_inventory import _origin
@@ -44,6 +45,7 @@ def pending_first_pass_cells(brain: Any, *, target: str = "") -> list[dict[str, 
         return []
     scheme = urlsplit(active_origin).scheme if active_origin else ""
     cells = brain.get("coverage_cells", []) if isinstance(brain, dict) else getattr(brain, "coverage_cells", [])
+    focus_paths = verified_input_paths(brain)
     return sorted(
         (
             cell for cell in cells
@@ -67,6 +69,9 @@ def pending_first_pass_cells(brain: Any, *, target: str = "") -> list[dict[str, 
         ),
         key=lambda cell: (
             int(cell.get("attempts") or 0),
+            # A validated input makes other observed inputs on that same
+            # endpoint worth exercising before unrelated endpoints.
+            0 if cell.get("path") in focus_paths else 1,
             int(cell.get("priority_rank", 2)),
             cell.get("surface_key", ""),
             cell.get("parameter", ""),
@@ -121,11 +126,12 @@ async def run_observed_input_batch(
             {str(row["specialist"]) for row in pending},
             key=lambda name: (completed[name], 0 if name == "sqli" else 1),
         )
+        selected = next(row for row in pending if row["specialist"] == specialist)
         leases = claim_coverage_cell_leases(
             brain, [specialist],
             allowed_observation_sources=OBSERVED_INPUT_SOURCES,
             allowed_test_types=frozenset({"sqli", "xss"}),
-            allowed_cell_ids=frozenset(row["id"] for row in pending),
+            allowed_cell_ids=frozenset({selected["id"]}),
             first_pass_only=True,
             lease_seconds=max_seconds + 60,
         )
@@ -168,6 +174,9 @@ async def run_observed_input_batch(
                     manager, "scoped_assessment_probe_assigned",
                     {"coverage_cell_id": cell["id"], "coverage_lease_id": lease.id},
                 )
+            elif method == "POST" and location in {"body_json", "body_form"}:
+                operation = None
+                reason = "POST input needs a private browser capture and approved replay"
             else:
                 operation = None
             if operation is not None:
