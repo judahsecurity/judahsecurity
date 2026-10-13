@@ -12,7 +12,7 @@ from pydantic import BaseModel
 
 from app.api.deps import get_current_user
 from app.models.user import User
-from app.services.graph_service import get_graph_service
+from app.services.graph_service import get_graph_service, graph_node_properties
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
@@ -253,6 +253,10 @@ async def get_attack_paths(
               AND ($org_id IS NULL OR source.organization_id = $org_id)
               AND all(n IN nodes(path) WHERE
                   n.organization_id IS NULL OR n.organization_id = source.organization_id)
+              AND all(r IN relationships(path) WHERE
+                  CASE WHEN type(r) IN ['FORWARDS_TO', 'BELONGS_TO_ASN', 'HOSTED_BY']
+                       THEN r.organization_id = source.organization_id
+                       ELSE r.organization_id IS NULL OR r.organization_id = source.organization_id END)
             RETURN path
             LIMIT $max_paths
             """
@@ -265,6 +269,10 @@ async def get_attack_paths(
             WHERE vuln.severity IN ['critical', 'high']
               AND all(n IN nodes(path) WHERE
                   n.organization_id IS NULL OR n.organization_id = $org_id)
+              AND all(r IN relationships(path) WHERE
+                  CASE WHEN type(r) IN ['FORWARDS_TO', 'BELONGS_TO_ASN', 'HOSTED_BY']
+                       THEN r.organization_id = $org_id
+                       ELSE r.organization_id IS NULL OR r.organization_id = $org_id END)
             RETURN path
             LIMIT $max_paths
             """
@@ -285,7 +293,7 @@ async def get_attack_paths(
                         nodes.append({
                             "id": node.element_id if hasattr(node, 'element_id') else str(node.id),
                             "labels": list(node.labels) if hasattr(node, 'labels') else [],
-                            "properties": dict(node) if node else {},
+                            "properties": graph_node_properties(node) if node else {},
                         })
                 
                 if hasattr(path_data, 'relationships'):
@@ -537,7 +545,7 @@ async def get_assets_by_technology(
         # Query for technologies and their associated assets
         if category:
             cypher = """
-                MATCH (a:Asset)-[:USES_TECHNOLOGY]->(t:Technology)
+                MATCH (a:Asset)-[observed:USES_TECHNOLOGY]->(t:Technology)
                 WHERE a.organization_id = $org_id
                   AND t.categories CONTAINS $category
                 WITH t, collect(DISTINCT {
@@ -545,11 +553,13 @@ async def get_assets_by_technology(
                     value: a.value,
                     is_live: a.is_live,
                     risk_score: a.risk_score,
-                    has_login_portal: a.has_login_portal
-                }) AS assets
+                    has_login_portal: a.has_login_portal,
+                    version: observed.version,
+                    cpe: observed.cpe
+                }) AS assets, collect(DISTINCT observed.cpe) AS cpes
                 RETURN t.name AS technology,
                        t.categories AS categories,
-                       t.cpe AS cpe,
+                       CASE WHEN size(cpes) = 1 THEN head(cpes) ELSE null END AS cpe,
                        size(assets) AS asset_count,
                        assets
                 ORDER BY asset_count DESC
@@ -557,18 +567,20 @@ async def get_assets_by_technology(
             params = {"org_id": org_id, "category": category}
         else:
             cypher = """
-                MATCH (a:Asset)-[:USES_TECHNOLOGY]->(t:Technology)
+                MATCH (a:Asset)-[observed:USES_TECHNOLOGY]->(t:Technology)
                 WHERE a.organization_id = $org_id
                 WITH t, collect(DISTINCT {
                     id: a.asset_id,
                     value: a.value,
                     is_live: a.is_live,
                     risk_score: a.risk_score,
-                    has_login_portal: a.has_login_portal
-                }) AS assets
+                    has_login_portal: a.has_login_portal,
+                    version: observed.version,
+                    cpe: observed.cpe
+                }) AS assets, collect(DISTINCT observed.cpe) AS cpes
                 RETURN t.name AS technology,
                        t.categories AS categories,
-                       t.cpe AS cpe,
+                       CASE WHEN size(cpes) = 1 THEN head(cpes) ELSE null END AS cpe,
                        size(assets) AS asset_count,
                        assets
                 ORDER BY asset_count DESC
@@ -742,12 +754,15 @@ async def get_attack_surface_overview(
         
         # Technology attack vectors - technologies with known issues
         tech_vectors = graph.query("""
-            MATCH (a:Asset)-[:USES_TECHNOLOGY]->(t:Technology)
+            MATCH (a:Asset)-[observed:USES_TECHNOLOGY]->(t:Technology)
             WHERE a.organization_id = $org_id
-            WITH t.name AS technology, t.categories AS categories, t.cpe AS cpe,
+            WITH t.name AS technology, t.categories AS categories,
+                 collect(DISTINCT observed.cpe) AS cpes,
                  count(DISTINCT a) AS usage_count
             WHERE usage_count > 1
-            RETURN technology, categories, cpe, usage_count
+            RETURN technology, categories,
+                   CASE WHEN size(cpes) = 1 THEN head(cpes) ELSE null END AS cpe,
+                   usage_count
             ORDER BY usage_count DESC
             LIMIT 15
         """, {"org_id": org_id})

@@ -773,6 +773,9 @@ async def sync_integration(db: Session, integration: F5Integration) -> Dict[str,
         integration.last_sync_stats = stats.as_dict()
         db.commit()
 
+        from app.services.integration_graph_sync import sync_integration_assets_to_graph
+        await sync_integration_assets_to_graph(org_id, seen_values)
+
         return {
             "ok": True,
             "message": (

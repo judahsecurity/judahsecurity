@@ -41,6 +41,38 @@ successful fetch. The new JS and source nodes do not copy raw JS or secret
 values into Neo4j. Source files are identified by organization, repository, commit and
 path; they store hashes, symbol names and line numbers, not source text.
 
+IP, ASN, Certificate, DiscoverySource, HostingProvider, Service, and Technology
+are shared reference nodes. Tenant observations are stored on edges from an
+organization-owned asset or on organization-keyed edges between shared nodes.
+In particular, a finding on an asset is not automatically attributed to every
+technology or service on that asset.
+
+Successful Censys ASM, Wiz, HackerOne, Panorama, F5, Akamai WAF, and NetBrain
+imports now project their touched PostgreSQL assets and findings into Neo4j
+after commit, for both manual and scheduled runs. The import still succeeds if
+Neo4j is unavailable; the next graph refresh can catch up. Cloudflare's scanner
+whitelist and Jira/ServiceNow ticket operations do not currently create graph
+entities because they do not import topology or new findings.
+
+### Upgrade an existing graph
+
+Before deploying the new graph writer, pause graph sync and back up Neo4j. Run
+the bounded, idempotent cleanup once, then refresh **every** organization's
+assets from PostgreSQL. The cleanup removes legacy tenant properties from
+shared nodes, unscoped links between shared nodes, and unsupported inferred
+service/technology/finding edges. A refresh restores organization-keyed links
+and per-asset technology observations. Run it for every organization that has
+assets; refreshing just one leaves the others' shared links incomplete.
+
+```sh
+docker exec asm_backend python /app/scripts/migrate_graph_shared_references.py --apply
+docker exec asm_backend python /app/scripts/backfill_graph.py --organization-id 1 --refresh-existing
+```
+
+Repeat the second command with each real organization ID. Use its batch and
+resume flags for a large organization. Do not run the cleanup concurrently
+with scans or graph reads; the graph is partial until all refreshes complete.
+
 Existing PostgreSQL data can be backfilled with the authenticated
 `POST /api/v1/graph/sync` endpoint for the current organization. Later
 jsluice scans attach all extracted paths to their source JS resource after the

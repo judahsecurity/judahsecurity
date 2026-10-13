@@ -512,6 +512,10 @@ async def sync_integration(db: Session, integration: WizIntegration) -> Dict[str
         integration.last_error = None
         integration.last_sync_stats = stats.as_dict()
         db.commit()
+        from app.services.integration_graph_sync import sync_integration_assets_to_graph
+        await sync_integration_assets_to_graph(
+            integration.organization_id, {asset.value for asset in asset_cache.values()}
+        )
         return {
             "ok": True,
             "message": (

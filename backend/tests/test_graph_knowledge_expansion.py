@@ -3,6 +3,7 @@
 import sys
 import types
 import unittest
+import re
 
 try:
     import neo4j  # noqa: F401
@@ -18,7 +19,7 @@ try:
 except ModuleNotFoundError:
     GraphService = None
 else:
-    from app.services.graph_service import GraphService
+    from app.services.graph_service import GraphService, graph_node_properties
     from app.models.asset import AssetType
 
 
@@ -149,6 +150,42 @@ class GraphKnowledgeTests(unittest.TestCase):
             GraphService()._sync_asset(session, asset, 7)
         self.assertIn("REMOVE a:Domain:Subdomain:IP:URL:Certificate", session.statement)
         self.assertNotIn("SET a:Domain", session.statement)
+
+    @unittest.skipIf(GraphService is None, "backend dependencies not installed")
+    def test_shared_reference_properties_hide_tenant_observations(self):
+        class Node(dict):
+            labels = {"IP"}
+
+        node = Node(address="203.0.113.10", organization_id=8, is_live=True)
+        self.assertEqual(graph_node_properties(node), {"address": "203.0.113.10"})
+
+    @unittest.skipIf(GraphService is None, "backend dependencies not installed")
+    def test_asset_projection_scopes_shared_observations(self):
+        class AssetStub(types.SimpleNamespace):
+            def __getattr__(self, _name):
+                return None
+
+        asset = AssetStub(
+            id=42, name="203.0.113.10", value="203.0.113.10",
+            asset_type=AssetType.IP_ADDRESS, status=None, parent_id=None,
+            first_seen=None, root_domain=None, ip_addresses=["203.0.113.10"],
+            hosting_provider="Example Cloud", hosting_type="cloud", asn="64500",
+            technologies=[types.SimpleNamespace(
+                name="Example Server", slug="example-server", categories=["server"],
+                cpe="cpe:2.3:a:example:server:1", website=None, version="1",
+            )],
+        )
+        session = FakeSession()
+        GraphService()._sync_asset(session, asset, 7)
+        for statement, params in session.calls:
+            missing = set(re.findall(r"\$([a-zA-Z_]\w*)", statement)) - set(params)
+            self.assertFalse(missing, (statement, missing))
+        ip_write = next(s for s, _ in session.calls if "MERGE (ip:IP {address: $ip_address})" in s and "resolution:RESOLVES_TO" in s)
+        self.assertIn("REMOVE ip.organization_id", ip_write)
+        self.assertIn("resolution.organization_id = $org_id", ip_write)
+        tech_write = next(s for s, _ in session.calls if "MERGE (t:Technology {name: $name})" in s)
+        self.assertIn("observed.version = $version", tech_write)
+        self.assertIn("REMOVE t.version, t.cpe", tech_write)
 
 
 if __name__ == "__main__":

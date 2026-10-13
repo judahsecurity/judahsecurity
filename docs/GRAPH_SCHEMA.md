@@ -10,8 +10,10 @@ The graph has two layers:
 ## Technical topology chain
 
 ```
-Domain → Subdomain → IP → Port → Service → Technology → Vulnerability → CVE
-                                                          Vulnerability → MITRE (CWE)
+Domain → Subdomain → IP → Port → Service
+Asset → Technology
+Asset → Vulnerability → CVE
+                       Vulnerability → MITRE (CWE)
 ```
 
 ## Discovery provenance chain
@@ -33,8 +35,8 @@ IP    ──[HOSTED_BY]──────> HostingProvider
 | Subdomain       | RESOLVES_TO       | IP                | DNS A/AAAA resolution                       |
 | IP              | HAS_PORT          | Port              | Canonical chain                             |
 | Port            | RUNS_SERVICE      | Service           | Canonical chain                             |
-| Service         | USES_TECHNOLOGY   | Technology        | Canonical chain                             |
-| Technology      | HAS_VULNERABILITY | Vulnerability     | Canonical chain                             |
+| Asset           | USES_TECHNOLOGY   | Technology        | Observed version and CPE live on the edge  |
+| Asset           | HAS_VULNERABILITY | Vulnerability     | A finding is not attributed to every technology on the asset |
 | Vulnerability   | REFERENCES        | CVE               | CVE linkage                                 |
 | Vulnerability   | MAPS_TO           | CWE               | Weakness mapping                            |
 | CVE             | EXPLOITS_WEAKNESS | CWE               | Cross-reference                             |
@@ -59,6 +61,12 @@ IP    ──[HOSTED_BY]──────> HostingProvider
 
 **FORWARDS_TO** links an internet-facing VIP IP to internal pool-member IPs discovered via the F5 BIG-IP integration. Edge properties: `source` (`f5`), `pool`, `virtual`, `port`, `organization_id`. Use it to answer "what internal IPs are reachable from the internet through this VIP?"
 
+`IP`, `ASN`, `Certificate`, `DiscoverySource`, `HostingProvider`, `Service`, and
+`Technology` are shared references. Do not stamp an organization's scan state on
+them. Put the organization ID and observed details on the relationship from a
+tenant-owned asset or on an organization-keyed relationship between references.
+Graph traversals must check both node and relationship organization IDs.
+
 ## Logical connections (query patterns)
 
 - **Same IP** – Subdomains that share an IP (co-hosted):
@@ -67,8 +75,9 @@ IP    ──[HOSTED_BY]──────> HostingProvider
 - **Same technology** – Assets using the same technology:
   `MATCH (t:Technology {name: 'WordPress'})<-[:USES_TECHNOLOGY]-(a:Asset) WHERE a.organization_id = $org_id RETURN a`
 
-- **Technology → CVE** – Technologies with critical CVEs:
-  `MATCH (t:Technology)-[:HAS_VULNERABILITY]->(v:Vulnerability)-[:REFERENCES]->(c:CVE) WHERE v.severity = 'critical' AND v.organization_id = $org_id RETURN t, c`
+- **Technology and findings on an asset** – This is co-occurrence, not proof
+  that the technology caused the finding:
+  `MATCH (a:Asset {organization_id: $org_id})-[:USES_TECHNOLOGY]->(t:Technology), (a)-[:HAS_VULNERABILITY]->(v:Vulnerability) RETURN a, t, v`
 
 - **Discovery chain** – How an asset was found:
   `MATCH (a:Asset {asset_id: $id})-[r:DISCOVERED_VIA]->(ds:DiscoverySource) RETURN ds.name, r.step, r.confidence`
@@ -97,27 +106,23 @@ IP    ──[HOSTED_BY]──────> HostingProvider
 ### IP
 - `address` (string)
 - `type` (string) – ipv4, ipv6
-- `is_cdn` (boolean)
-- `is_internet_facing` (boolean) – true for publicly routable IPs
-- `is_live` (boolean) – responded to probes
-- `organization_id` (number)
+- `is_cdn`, `is_internet_facing`, and `is_live` are observations on the
+  `Asset → IP` `RESOLVES_TO` relationship, with `organization_id`.
 
 ### Port
-- `number` (int)
+- `port` (int)
 - `protocol` (string) – tcp, udp
 - `state` (string) – open, closed, filtered
 - `is_risky` (boolean)
 
 ### Service
 - `name` (string)
-- `version` (string)
-- `banner` (string)
+- Version and banner belong to the tenant's `ServiceObservation` at a port.
 
 ### Technology
 - `name` (string)
-- `version` (string)
 - `category` (string)
-- `cpe` (string)
+- Version and CPE belong to the `Asset → Technology` observation edge.
 
 ### Vulnerability
 - `id` (string)
@@ -136,17 +141,14 @@ IP    ──[HOSTED_BY]──────> HostingProvider
 ### DiscoverySource *(new)*
 - `name` (string) – tool/method name: `subfinder`, `whoxy_reverse_whois`, `certspotter`, `manual`, etc.
 - `display_name` (string) – human-readable label
-- `organization_id` (number)
 
 ### ASN *(new)*
 - `asn_number` (string) – e.g. `AS15169`
-- `isp` (string) – ISP/org name
-- `country` (string)
-- `organization_id` (number)
+- ISP and country observations belong to the organization-keyed `IP → ASN` edge.
 
 ### HostingProvider *(new)*
 - `name` (string) – e.g. `cloudflare`, `aws`, `azure`
-- `hosting_type` (string) – cdn, cloud, owned, third_party
+- `hosting_type` belongs to the `Asset → HostingProvider` observation edge.
 
 ### Certificate *(new)*
 - `fingerprint` (string) – SHA-256 fingerprint (unique key)
@@ -154,11 +156,13 @@ IP    ──[HOSTED_BY]──────> HostingProvider
 - `issuer` (string) – issuing CA
 - `expiry` (string) – not-after date
 - `san_count` (number) – number of SANs
-- `organization_id` (number)
 
 ## Multi-tenant filtering
 
-All queries must filter by `organization_id` so indexes are used and data is tenant-isolated.
+Start queries at an organization-owned asset, domain, subdomain, port, or finding.
+When traversing shared nodes, check `organization_id` on each tenant-owned node
+and on organization-keyed relationships such as `FORWARDS_TO`, `BELONGS_TO_ASN`,
+and `HOSTED_BY`. A shared reference node has no `organization_id`.
 
 ## Implementation notes
 
