@@ -131,6 +131,7 @@ def normalize_request(
             protocol=protocol,
             operation=operation,
             parameters=sorted(parameters | extra),
+            content_type=content_type[:100],
             identities=[identity],
             sources=[source],
             fidelity=("truncated_body:" if truncated else "") + fidelity,

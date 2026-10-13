@@ -14,6 +14,7 @@ from app.services.agent.coverage_cells import (
 from app.services.agent.engagement_brain import EngagementBrain
 from app.services.agent.operation_directive import directives_from_hypotheses
 from app.services.agent.parameter_inventory import collect_parameter_inventory
+from app.services.agent.observed_input_batch import pending_first_pass_cells
 from app.services.agent.tools import ASMToolsManager
 
 
@@ -70,6 +71,82 @@ async def test_inventory_tool_pages_specialist_worklist():
     assert first["parameters"] != second["parameters"]
 
 
+@pytest.mark.asyncio
+async def test_inventory_tool_shows_exact_checks_and_unscheduled_work_without_values():
+    manager = ASMToolsManager()
+    manager._capability_map = _map()
+    brain = EngagementBrain(target="https://app.test")
+    inventory = collect_parameter_inventory(manager._capability_map)
+    seed_parameter_coverage_cells(brain, inventory)
+    manager._engagement_brain = brain.to_dict()
+
+    import json
+
+    result = json.loads(await manager.get_parameter_inventory())
+    search = next(row for row in result["parameters"] if row["path"] == "/search")
+    checks = {check["test_type"]: check for check in search["checks"]}
+    assert {"sqli", "xss", "crlf"} <= checks.keys()
+    assert all(check["status"] == "untested" and check["coverage_cell_id"]
+               for check in checks.values())
+    assert result["unscheduled_checks_on_page"] == 0
+    protected = next(row for row in result["parameters"] if row["name"] == "csrf_token")
+    assert protected["checks"] == []
+    assert "private-value" not in str(result)
+    assert "sensitive-value" not in str(result)
+
+    brain.coverage_cells = [cell for cell in brain.coverage_cells
+                            if cell["id"] != checks["sqli"]["coverage_cell_id"]]
+    manager._engagement_brain = brain.to_dict()
+    result = json.loads(await manager.get_parameter_inventory())
+    search = next(row for row in result["parameters"] if row["path"] == "/search")
+    sqli = next(check for check in search["checks"] if check["test_type"] == "sqli")
+    assert sqli["status"] == "not_scheduled"
+    assert sqli["coverage_cell_id"] is None
+    assert result["unscheduled_checks_on_page"] == 1
+
+
+@pytest.mark.asyncio
+async def test_central_operation_inputs_join_class_queue_without_request_values():
+    manager = ASMToolsManager()
+    manager._engagement_brain = EngagementBrain(target="https://app.test").to_dict()
+    manager._capability_map = {
+        "target": "https://app.test", "scope": "https://app.test",
+        "parameter_inventory": [{"method": "GET", "path": "/catalog",
+                                 "name": "category", "location": "query",
+                                 "source": "javascript_static"}],
+    }
+    before = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(before, collect_parameter_inventory(manager._capability_map))
+    manager._engagement_brain = before.to_dict()
+    import json
+
+    await manager.map_application_traffic([
+        {"method": "GET", "url": "https://app.test/catalog?category=private-value&csrf_token=secret"},
+        {"method": "POST", "url": "https://app.test/api/search",
+         "headers": {"Content-Type": "application/json"},
+         "body": {"searchTerm": "sensitive-value"}},
+        {"method": "GET", "url": "https://evil.test/catalog?offscope=1"},
+    ])
+    result = json.loads(await manager.get_parameter_inventory())
+    rows = result["parameters"]
+    category = next(row for row in rows if row["name"] == "category")
+    assert category["source"] == "application_operation"
+    assert {check["test_type"] for check in category["checks"]} >= {"sqli", "xss"}
+    assert all(check["coverage_cell_id"] and check["status"] == "untested"
+               for check in category["checks"])
+    search = next(row for row in rows if row["name"] == "searchTerm")
+    assert search["location"] == "body_json"
+    assert {check["test_type"] for check in search["checks"]} >= {"sqli", "xss"}
+    assert next(row for row in rows if row["name"] == "csrf_token")["checks"] == []
+    assert not any(row["name"] == "offscope" for row in rows)
+    assert result["unscheduled_checks_on_page"] == 0
+    queued = pending_first_pass_cells(manager._engagement_brain, target="https://app.test")
+    assert any(cell["path"] == "/catalog" and cell["parameter"] == "query:category"
+               for cell in queued)
+    assert "private-value" not in str(result)
+    assert "sensitive-value" not in str(result)
+
+
 def test_parameter_cells_are_leased_exactly_and_inconclusive_cells_survive_reseed():
     brain = EngagementBrain(target="https://app.test")
     inventory = collect_parameter_inventory(_map())
@@ -112,7 +189,7 @@ def test_parameter_funnel_counts_probes_and_verdicts_separately():
     }])
     report = parameter_test_funnel(brain)
     assert report["inputs"] == 1
-    assert report["checks"] == 2
+    assert report["checks"] == 3
     assert report["attempted"] == report["probed"] == 0
     sqli = next(row for row in brain.coverage_cells if row["test_type"] == "sqli")
     sqli.update(attempts=1, status="in_focus", service_probe_artifact_ids=["probe-1"])
@@ -122,7 +199,7 @@ def test_parameter_funnel_counts_probes_and_verdicts_separately():
     report = parameter_test_funnel(brain)
     assert report["attempted"] == report["probed"] == 1
     assert report["candidates"] == report["verified"] == report["published"] == 1
-    assert report["open"] == 2
+    assert report["open"] == 3
 
 
 def test_specialist_lease_prioritizes_likely_input_but_keeps_other_inputs_open():

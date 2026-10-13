@@ -33,6 +33,14 @@ _DOM_SOURCES = {
     "fragment": re.compile(r"(?:window\.)?location\.hash\b"),
     "query": re.compile(r"(?:window\.)?location\.search\b|\bURLSearchParams\s*\("),
 }
+_CLIENT_SINKS = {
+    "dom_open_redirect": re.compile(r"(?:window\.)?location\.(?:href\s*=|assign\s*\(|replace\s*\()|window\.open\s*\("),
+    "dom_link_manipulation": re.compile(r"\.href\s*=|\.setAttribute\s*\(\s*['\"]href['\"]\s*,"),
+    "dom_data_manipulation": re.compile(r"\.(?:textContent|innerText|value)\s*=|\.setAttribute\s*\("),
+    "request_url_override": re.compile(r"\bfetch\s*\(\s*(?!['\"`])|\.open\s*\(\s*['\"](?:GET|POST)['\"]\s*,\s*(?!['\"`])", re.I),
+    "client_template_injection": re.compile(r"\b(?:Handlebars\.compile|_\.template|\$compile|angular\.bootstrap)\s*\("),
+    "prototype_pollution": re.compile(r"\b(?:Object\.assign|(?:\$|jQuery)\.extend|_\.merge|lodash\.merge|deparam)\s*\("),
+}
 _MAP = re.compile(r"[#@]\s*sourceMappingURL=([^\s*]+)")
 _NOISE = (".js", ".mjs", ".css", ".png", ".jpg", ".svg", ".woff", ".map")
 
@@ -104,6 +112,12 @@ def analyze_javascript(data: bytes, *, source_url: str, expected_origin: str) ->
     for kind, pattern in _DOM_SOURCES.items():
         for match in islice(pattern.finditer(text), 5):
             sources.append({"kind": kind, "line": text.count("\n", 0, match.start()) + 1})
+    # Co-located source and sink patterns are review leads, never data-flow proof.
+    client_leads = []
+    if sources:
+        for kind, pattern in _CLIENT_SINKS.items():
+            for match in islice(pattern.finditer(text), 3):
+                client_leads.append({"kind": kind, "line": text.count("\n", 0, match.start()) + 1})
     maps = []
     for match in islice(_MAP.finditer(text), 3):
         value = match.group(1)
@@ -117,6 +131,7 @@ def analyze_javascript(data: bytes, *, source_url: str, expected_origin: str) ->
                    for path, methods in sorted(routes.items())[:80]],
         "sink_leads": sinks[:30],
         "source_leads": sources[:10],
+        "client_leads": client_leads[:18],
         "query_leads": [{"path": path, "method": method, "names": sorted(names)[:20]}
                         for (path, method), names in sorted(query_leads.items())[:40]],
         "source_map_paths": sorted(set(maps)),

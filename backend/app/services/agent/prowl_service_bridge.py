@@ -134,18 +134,20 @@ def capability_map_from_observation(observation: dict) -> dict | None:
             continue
         if row.get("resource_type") != "script" and row.get("kind") != "external":
             continue
-        path = in_origin_path(row.get("path"))
+        path = in_origin_path(row.get("path") or row.get("url"))
         if path:
             js_files.append(scope + path)
     js_files = list(dict.fromkeys(js_files))[:160]
     js_sources = [
-        {"url": scope + path, "artifact_id": row.get("artifact_id", ""),
+        {"url": scope + path, "kind": row.get("kind"), "index": row.get("index", 0),
+         "action_ref": row.get("action_ref", ""), "artifact_id": row.get("artifact_id", ""),
          "sha256": row.get("sha256", ""), "bytes": row.get("bytes", 0),
          "sink_leads": row["analysis"].get("sink_leads", []) if isinstance(row.get("analysis"), dict) else [],
-         "source_leads": row["analysis"].get("source_leads", []) if isinstance(row.get("analysis"), dict) else []}
+         "source_leads": row["analysis"].get("source_leads", []) if isinstance(row.get("analysis"), dict) else [],
+         "client_leads": row["analysis"].get("client_leads", []) if isinstance(row.get("analysis"), dict) else []}
         for row in (result.get("scripts") or [])[:20]
-        if isinstance(row, dict) and row.get("kind") == "external"
-        and (path := in_origin_path(row.get("path")))
+        if isinstance(row, dict) and row.get("kind") in {"external", "inline"}
+        and (path := in_origin_path(row.get("path") or row.get("url")))
     ]
     parameters = []
     discovered_links: dict[str, dict] = {}
