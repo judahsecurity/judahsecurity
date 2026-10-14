@@ -375,6 +375,38 @@ async def test_string_tool_requires_mapped_parameter_and_exact_scope(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_string_tool_preflights_mapped_application_operation(monkeypatch):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    manager._capability_map = {
+        "scope": "https://app.example.test",
+        "parameter_inventory": [{
+            "method": "GET", "path": "/catalog", "name": "category",
+            "location": "query", "source": "application_operation",
+        }],
+    }
+    preflights = []
+
+    def observe(url, allowed_origins, storage_state):
+        preflights.append(url)
+        assert allowed_origins == ["https://app.example.test"]
+        assert parse_qs(urlsplit(url).query)["category"][0].startswith("AegisProbe")
+        return {"status": 200, "redirected": False, "truncated": False}
+
+    def probe(baseline, variants, nonce, **_kwargs):
+        assert baseline == preflights[0]
+        return {"target": TARGET, "operation": "sqli_boolean_string",
+                "proof_confirmed": False, "nonce": nonce, "parameter": "category"}
+
+    monkeypatch.setattr("app.services.agent.scoped_assessment_tools.http_observe.observe_get", observe)
+    monkeypatch.setattr(sqli_string, "probe_string_boolean", probe)
+    result = json.loads(await manager.scoped_string_sqli(TARGET, "category"))
+    assert result["baseline_source"] == "observed_parameter_preflight"
+    assert len(preflights) == 1
+
+
+@pytest.mark.asyncio
 async def test_string_tool_uses_private_browser_link_and_reserves_verifier_budget(monkeypatch):
     manager = ASMToolsManager()
     manager._fallback_target = "https://app.example.test"

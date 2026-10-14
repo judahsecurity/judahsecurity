@@ -2469,7 +2469,7 @@ class AgentOrchestrator:
         # retry the same network operation. Preserve the failed step in the
         # trace and finish with an explicit partial-coverage explanation.
         pilot_stop_errors = {
-            "confirmation_denied", "policy_denied",
+            "confirmation_denied", "confirmation_expired", "policy_denied",
             "confirmation_policy_unavailable", "pilot_policy_denied",
         }
         error_code = str(step_data.get("error_message") or "")

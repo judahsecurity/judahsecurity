@@ -756,7 +756,7 @@ def remember_tool_result(
         err = str(result.get("error") or "")
         if any(
             s in output or s in err
-            for s in ("Missing required parameter", "policy_denied", "confirmation_denied")
+            for s in ("Missing required parameter", "policy_denied", "confirmation_denied", "confirmation_expired")
         ):
             return
 

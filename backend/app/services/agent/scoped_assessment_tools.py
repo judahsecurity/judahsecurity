@@ -543,6 +543,7 @@ class ScopedAssessmentTools:
             and row.get("source") in {
                 "page_url", "observed_form", "captured_api", "browser_traffic",
                 "browser_link", "browser_request", "api_endpoint",
+                "application_operation",
             }), None)
         if observed is None:
             raise ValueError("String SQLi proof requires a mapped GET query parameter")
@@ -602,7 +603,7 @@ class ScopedAssessmentTools:
                     break
                 if not baseline and observed["source"] in {
                     "browser_link", "browser_request", "browser_traffic",
-                    "page_url", "captured_api",
+                    "page_url", "captured_api", "application_operation",
                 }:
                     # Browser maps intentionally expose parameter names without
                     # link values. A fresh, harmless value can still establish

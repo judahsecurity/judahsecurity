@@ -3,10 +3,35 @@
 import pytest
 import time
 import json
+import asyncio
 
 from app.models.project_settings import default_agent_config
 from app.services.agent import confirmation_service as confirmation
 from app.services.agent.pilot_policy import PilotPolicy, reset_pilot, set_pilot
+
+
+@pytest.mark.asyncio
+async def test_confirmation_decision_from_worker_thread_wakes_agent():
+    asyncio.get_running_loop().set_debug(True)
+    store = confirmation.ConfirmationStore()
+    item = store.create("execute_nuclei", {"args": "-u https://app.test"}, 7, "run")
+    waiting = asyncio.create_task(store.wait_for(item.token, timeout=1))
+    await asyncio.sleep(0)
+    decided = await asyncio.to_thread(store.decide, item.token, True, "analyst")
+    assert decided.status == "approved"
+    assert await asyncio.wait_for(waiting, timeout=1) is True
+    assert store.decide(item.token, False) is None
+    assert store.get(item.token).status == "approved"
+
+
+@pytest.mark.asyncio
+async def test_expired_confirmation_cannot_be_approved_late():
+    store = confirmation.ConfirmationStore()
+    item = store.create("execute_nuclei", {}, 7, "run", timeout_seconds=300)
+    item.created_at -= 301
+    assert store.decide(item.token, True) is None
+    assert store.get(item.token).status == "expired"
+    assert await store.wait_for(item.token) is False
 
 
 def test_confirmation_preview_redacts_nested_browser_cookies():

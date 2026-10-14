@@ -79,7 +79,7 @@ async def test_duplicate_passive_browser_action_is_skipped_before_tool_execution
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("error", ["confirmation_denied", "pilot_policy_denied"])
+@pytest.mark.parametrize("error", ["confirmation_denied", "confirmation_expired", "pilot_policy_denied"])
 async def test_denied_pilot_action_stops_without_more_model_calls(error):
     orchestrator = AgentOrchestrator()
     step = {

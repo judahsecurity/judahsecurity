@@ -918,6 +918,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.engagement_brain import engagement_brain_from_dict
         from app.services.agent.parameter_inventory import _origin
         from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
 
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         cell = next((row for row in brain.coverage_cells
@@ -929,10 +930,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "lease_mismatch" if cell.get("lease_id") != coverage_lease_id else
             "lease_expired" if float(cell.get("lease_deadline") or 0) <= time.time() else
             "not_observed_input" if cell.get("source") != "parameter_inventory" or
-                cell.get("observation_source") not in {
-                    "browser_link", "browser_request", "observed_form", "form_action",
-                    "browser_traffic", "page_url", "captured_api", "api_endpoint",
-                } else
+                cell.get("observation_source") not in OBSERVED_INPUT_SOURCES else
             "unsupported_input" if cell.get("test_type") not in {"xss", "sqli"} or
                 str(cell.get("method") or "").upper() != "GET" or
                 location != "query" or not separator or not parameter else
@@ -1518,13 +1516,17 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 from app.services.agent.confirmation_service import wait_for_decision
                 approved = await wait_for_decision(token)
                 if not approved:
+                    from app.services.agent.confirmation_service import get_store
+                    confirmation = get_store().get(token)
+                    confirmation_status = confirmation.status if confirmation else "expired"
                     return {
                         "success": False,
                         "output": (
-                            f"Operator denied or confirmation timed out for '{tool_name}'."
+                            f"Confirmation {confirmation_status} for '{tool_name}'."
                         ),
-                        "error": "confirmation_denied",
-                        "confirmation": {**gate_result, "status": "denied"},
+                        "error": ("confirmation_expired" if confirmation_status == "expired"
+                                  else "confirmation_denied"),
+                        "confirmation": {**gate_result, "status": confirmation_status},
                     }
                 # Approved — fall through and execute the tool.
         except Exception as _gate_err:
