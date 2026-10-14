@@ -180,6 +180,11 @@ class Settings(BaseSettings):
     # Hard USD spend cap for one agent session (CAI CAI_PRICE_LIMIT analog).
     # 0 disables the cap. Checked before each LLM think so we stop before overspend.
     AGENT_PRICE_LIMIT_USD: float = 20.0
+    # Observed-input hunt waves lease up to this many coverage cells per
+    # specialist, so one wave drains several inputs instead of one. Larger
+    # values cover the inventory in fewer (but heavier) waves; 1 restores the
+    # legacy one-input-per-wave behavior.
+    AGENT_OBSERVED_INPUTS_CELLS_PER_WAVE: int = 4
     # Auto-compact the execution trace once it exceeds this many steps.
     AGENT_COMPACT_TRACE_STEPS: int = 24
     # Timeout for attaching an external MCP server (Burp/Caido).

@@ -40,6 +40,7 @@ class OperationDirective:
     coverage_cell_id: str = ""
     coverage_lease_id: str = ""
     parameter_work: Dict[str, str] = field(default_factory=dict)
+    additional_inputs: List[Dict[str, str]] = field(default_factory=list)
     js_work: Dict[str, str] = field(default_factory=dict)
     proof_escalation_id: str = ""
     proof_strategy: str = ""
@@ -135,6 +136,29 @@ class OperationDirective:
                     "mutation blocks network callbacks; leave the proof inconclusive if no "
                     "approved replay path exists."
                 )
+        if self.additional_inputs:
+            block += (
+                f"\nThis wave also leased {len(self.additional_inputs)} more observed "
+                "input(s) to you — probe each with the same discipline and close its own "
+                "coverage cell before the wave ends; do not defer them to a later wave:"
+            )
+            for work in self.additional_inputs:
+                block += (
+                    f"\n  • {work.get('method', 'GET')} {work.get('host', '')}"
+                    f"{work.get('path', '/')} {work.get('location', 'query')}:"
+                    f"{work.get('name', '')} identity={work.get('identity', 'anonymous')} "
+                    f"[{work.get('test_type', '')}] — coverage_cell_id="
+                    f"{work.get('coverage_cell_id', '')}, coverage_lease_id="
+                    f"{work.get('coverage_lease_id', '')}; "
+                    + ("scoped_assessment_probe_assigned"
+                       if work.get("scoped_capture_id")
+                       else "scoped_input_probe_assigned"
+                       if work.get("method") == "GET" and work.get("location") == "query"
+                       and work.get("test_type") in {"xss", "sqli"}
+                       and not (work.get("test_type") == "sqli" and
+                                work.get("value_type") in {"positive_integer", "number"})
+                       else "structured request replay and browser tools")
+                )
         if self.js_work:
             if self.js_work.get("test_type") == "dom_xss":
                 block += (
@@ -177,6 +201,53 @@ class OperationDirective:
         return block
 
 
+def _lease_cell_and_id(lease: Any) -> "tuple[str, str]":
+    """Return (coverage_cell_id, coverage_lease_id) from a lease object or dict."""
+    cell_id = str(
+        getattr(lease, "coverage_cell_id", "")
+        or (lease.get("coverage_cell_id", "") if isinstance(lease, dict) else "")
+    )
+    lease_id = str(
+        getattr(lease, "id", "")
+        or (lease.get("id", "") if isinstance(lease, dict) else "")
+    )
+    return cell_id, lease_id
+
+
+def _cell_by_id(brain: Any, cell_id: str) -> Dict[str, Any]:
+    if not cell_id:
+        return {}
+    return next(
+        (cell for cell in (getattr(brain, "coverage_cells", None) or [])
+         if cell.get("id") == cell_id),
+        {},
+    )
+
+
+def _parameter_work_for_cell(cell: Dict[str, Any]) -> Dict[str, str]:
+    """Scoped observed-input work dict for one parameter_inventory cell."""
+    if cell.get("source") != "parameter_inventory":
+        return {}
+    location, _, parameter_name = str(cell.get("parameter") or "").partition(":")
+    if not parameter_name:
+        return {}
+    return {
+        "method": str(cell.get("method") or "GET"),
+        "host": str(cell.get("host") or ""),
+        "path": str(cell.get("path") or "/"),
+        "location": location,
+        "name": parameter_name,
+        "identity": str(cell.get("identity") or "anonymous"),
+        "capture_id": str(cell.get("capture_id") or ""),
+        "test_type": str(cell.get("test_type") or ""),
+        "value_type": str(cell.get("value_type") or ""),
+        "scoped_capture_id": (
+            str(cell.get("capture_id") or "")
+            if scoped_replay_eligible(cell) else ""
+        ),
+    }
+
+
 def directives_from_hypotheses(
     *,
     brain: Any,
@@ -206,46 +277,19 @@ def directives_from_hypotheses(
             or (lease.get("id", "") if isinstance(lease, dict) else "")
         )
         coverage_lease = (coverage_leases or {}).get(name)
-        coverage_cell_id = str(
-            getattr(coverage_lease, "coverage_cell_id", "")
-            or (
-                coverage_lease.get("coverage_cell_id", "")
-                if isinstance(coverage_lease, dict)
-                else ""
-            )
+        # A value may be a single lease (legacy one-per-specialist) or a list
+        # (batched observed-input wave). Normalize to a list; lease[0] is the
+        # primary front, the rest become additional_inputs probed this wave.
+        lease_list = (
+            list(coverage_lease) if isinstance(coverage_lease, list)
+            else [coverage_lease] if coverage_lease else []
         )
-        coverage_lease_id = str(
-            getattr(coverage_lease, "id", "")
-            or (coverage_lease.get("id", "") if isinstance(coverage_lease, dict) else "")
+        primary_lease = lease_list[0] if lease_list else None
+        coverage_cell_id, coverage_lease_id = (
+            _lease_cell_and_id(primary_lease) if primary_lease is not None else ("", "")
         )
-        coverage_cell = next(
-            (
-                cell
-                for cell in (getattr(brain, "coverage_cells", None) or [])
-                if cell.get("id") == coverage_cell_id
-            ),
-            {},
-        )
-        parameter_work: Dict[str, str] = {}
-        if coverage_cell.get("source") == "parameter_inventory":
-            location, _, parameter_name = str(coverage_cell.get("parameter") or "").partition(":")
-            if parameter_name:
-                parameter_work = {
-                    "method": str(coverage_cell.get("method") or "GET"),
-                    "host": str(coverage_cell.get("host") or ""),
-                    "path": str(coverage_cell.get("path") or "/"),
-                    "location": location,
-                    "name": parameter_name,
-                    "identity": str(coverage_cell.get("identity") or "anonymous"),
-                    "capture_id": str(coverage_cell.get("capture_id") or ""),
-                    "test_type": str(coverage_cell.get("test_type") or ""),
-                    "value_type": str(coverage_cell.get("value_type") or ""),
-                    "scoped_capture_id": (
-                        str(coverage_cell.get("capture_id") or "")
-                        if scoped_replay_eligible(coverage_cell)
-                        else ""
-                    ),
-                }
+        coverage_cell = _cell_by_id(brain, coverage_cell_id)
+        parameter_work = _parameter_work_for_cell(coverage_cell)
         js_work: Dict[str, str] = {}
         if coverage_cell.get("source") == "js_inventory" and coverage_cell.get("script_url"):
             js_work = {
@@ -255,6 +299,16 @@ def directives_from_hypotheses(
                 "source_leads": str(coverage_cell.get("source_leads") or "")[:300],
                 "sink_leads": str(coverage_cell.get("sink_leads") or "")[:300],
             }
+        additional_inputs: List[Dict[str, str]] = []
+        for extra in lease_list[1:]:
+            extra_cell_id, extra_lease_id = _lease_cell_and_id(extra)
+            extra_work = _parameter_work_for_cell(_cell_by_id(brain, extra_cell_id))
+            if extra_work:
+                additional_inputs.append({
+                    **extra_work,
+                    "coverage_cell_id": extra_cell_id,
+                    "coverage_lease_id": extra_lease_id,
+                })
         proof_escalation_id = str(coverage_cell.get("proof_escalation_id") or "")
         proof_escalation = next(
             (
@@ -361,6 +415,7 @@ def directives_from_hypotheses(
             coverage_cell_id=coverage_cell_id,
             coverage_lease_id=coverage_lease_id,
             parameter_work=parameter_work,
+            additional_inputs=additional_inputs,
             js_work=js_work,
             proof_escalation_id=proof_escalation_id,
             proof_strategy=str(proof_escalation.get("strategy") or ""),

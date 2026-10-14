@@ -9018,26 +9018,57 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 },
                 indent=2,
             )
-        from app.services.agent.coverage_cells import claim_coverage_cell_leases
+        from app.services.agent.coverage_cells import (
+            claim_coverage_cell_lease_batch,
+            claim_coverage_cell_leases,
+        )
         from app.services.agent.engagement_brain import denominator_surfaces
         from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
 
-        coverage_leases = claim_coverage_cell_leases(
-            brain,
-            chosen,
-            task_leases=task_leases,
-            denominator=denominator_surfaces(brain),
-            allowed_observation_sources=(
-                OBSERVED_INPUT_SOURCES if mode == "observed_inputs" else None
-            ),
-        )
+        # An observed-input wave batches several inputs to each specialist so one
+        # wave drains much of the inventory instead of a single input per wave;
+        # other modes keep the one-cell-per-specialist contract. Each cell is
+        # leased independently, so an input the specialist does not reach simply
+        # expires back to `inconclusive` for a later wave.
+        if mode == "observed_inputs":
+            cells_per_wave = max(1, int(
+                getattr(settings, "AGENT_OBSERVED_INPUTS_CELLS_PER_WAVE", 4) or 4
+            ))
+            lease_batch = claim_coverage_cell_lease_batch(
+                brain,
+                chosen,
+                max_per_specialist=cells_per_wave,
+                task_leases=task_leases,
+                denominator=denominator_surfaces(brain),
+                allowed_observation_sources=OBSERVED_INPUT_SOURCES,
+            )
+        else:
+            lease_batch = {
+                specialist: [lease]
+                for specialist, lease in claim_coverage_cell_leases(
+                    brain,
+                    chosen,
+                    task_leases=task_leases,
+                    denominator=denominator_surfaces(brain),
+                ).items()
+            }
+        # Primary lease per specialist keeps the legacy single-lease shape for
+        # the release loop and telemetry; extras ride alongside this wave.
+        coverage_leases = {
+            specialist: leases[0]
+            for specialist, leases in lease_batch.items() if leases
+        }
+        coverage_lease_extras = {
+            specialist: leases[1:]
+            for specialist, leases in lease_batch.items() if len(leases) > 1
+        }
         directives = directives_from_hypotheses(
             brain=brain,
             profiles_by_name=profiles,
             specialists=chosen,
             default_target=default_target or "",
             task_leases=task_leases,
-            coverage_leases=coverage_leases,
+            coverage_leases=lease_batch,
         )
 
         persist_graph(brain, graph)
@@ -9347,7 +9378,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         reports_by_specialist = {}
         for report in result.reports:
             reports_by_specialist.setdefault(report.specialist, []).append(report)
-        for specialist, lease in coverage_leases.items():
+        # Release the primary lease and every batched extra; a cell the
+        # specialist already closed is no longer `leased`, so release only
+        # frees it, while one left open settles to `inconclusive` for retry.
+        lease_pairs = [(specialist, lease) for specialist, lease in coverage_leases.items()]
+        lease_pairs += [
+            (specialist, lease)
+            for specialist, extras in coverage_lease_extras.items()
+            for lease in extras
+        ]
+        for specialist, lease in lease_pairs:
             reports = reports_by_specialist.get(specialist, [])
             final_report = reports[-1] if reports else None
             evidence_ids = [

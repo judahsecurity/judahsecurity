@@ -771,6 +771,88 @@ def recover_expired_coverage_leases(
     return recovered
 
 
+def _lease_one_cell(
+    brain: Any,
+    specialist: str,
+    *,
+    hypothesis_id: str,
+    task_lease_id: str,
+    current: float,
+    lease_seconds: int,
+    allowed_observation_sources: frozenset[str] | None,
+) -> CoverageCellLease | None:
+    """Lease the single best open, unleased cell for one specialist, or None."""
+    candidates = [
+        cell
+        for cell in brain.coverage_cells
+        if cell.get("status") in CELL_OPEN
+        and not cell.get("lease_id")
+        and (
+            allowed_observation_sources is None
+            or (
+                cell.get("source") == "parameter_inventory"
+                and cell.get("observation_source") in allowed_observation_sources
+            )
+        )
+        and (
+            cell.get("specialist") == specialist
+            or (hypothesis_id and cell.get("hypothesis_id") == hypothesis_id)
+        )
+    ]
+    candidates.sort(
+        key=lambda cell: (
+            int(cell.get("priority_rank", 2)),
+            0 if specialist in {"xss", "sqli"} and scoped_replay_eligible(cell) else 1,
+            0
+            if hypothesis_id and cell.get("hypothesis_id") == hypothesis_id
+            else 1,
+            0 if cell.get("proof_escalation_id") else 1,
+            int(cell.get("attempts") or 0),
+            cell.get("surface_key", ""),
+            cell.get("identity", ""),
+            cell.get("parameter", ""),
+        )
+    )
+    if not candidates:
+        return None
+    cell = candidates[0]
+    lease_id = uuid.uuid4().hex
+    cell.update(
+        status="leased",
+        lease_id=lease_id,
+        lease_owner=specialist,
+        lease_started_at=current,
+        lease_deadline=current + max(60, int(lease_seconds)),
+        task_lease_id=task_lease_id,
+        attempts=int(cell.get("attempts") or 0) + 1,
+    )
+    return CoverageCellLease(
+        id=lease_id,
+        coverage_cell_id=cell["id"],
+        specialist=specialist,
+        hypothesis_id=_text(cell.get("hypothesis_id") or hypothesis_id),
+        task_lease_id=task_lease_id,
+        attempt=cell["attempts"],
+        started_at=current,
+        deadline=cell["lease_deadline"],
+    )
+
+
+def _specialist_hypothesis_ids(
+    specialist: str, task_leases: dict[str, Any] | None
+) -> tuple[str, str]:
+    task = (task_leases or {}).get(specialist)
+    hypothesis_id = _text(
+        getattr(task, "hypothesis_id", "")
+        or (task.get("hypothesis_id", "") if isinstance(task, dict) else "")
+    )
+    task_lease_id = _text(
+        getattr(task, "id", "")
+        or (task.get("id", "") if isinstance(task, dict) else "")
+    )
+    return hypothesis_id, task_lease_id
+
+
 def claim_coverage_cell_leases(
     brain: Any,
     specialists: Iterable[str],
@@ -787,70 +869,59 @@ def claim_coverage_cell_leases(
     recover_expired_coverage_leases(brain, now=current)
     leases: dict[str, CoverageCellLease] = {}
     for specialist in dict.fromkeys(_text(item) for item in specialists if _text(item)):
-        task = (task_leases or {}).get(specialist)
-        hypothesis_id = _text(
-            getattr(task, "hypothesis_id", "")
-            or (task.get("hypothesis_id", "") if isinstance(task, dict) else "")
+        hypothesis_id, task_lease_id = _specialist_hypothesis_ids(specialist, task_leases)
+        lease = _lease_one_cell(
+            brain, specialist,
+            hypothesis_id=hypothesis_id, task_lease_id=task_lease_id,
+            current=current, lease_seconds=lease_seconds,
+            allowed_observation_sources=allowed_observation_sources,
         )
-        task_lease_id = _text(
-            getattr(task, "id", "")
-            or (task.get("id", "") if isinstance(task, dict) else "")
-        )
-        candidates = [
-            cell
-            for cell in brain.coverage_cells
-            if cell.get("status") in CELL_OPEN
-            and not cell.get("lease_id")
-            and (
-                allowed_observation_sources is None
-                or (
-                    cell.get("source") == "parameter_inventory"
-                    and cell.get("observation_source") in allowed_observation_sources
-                )
-            )
-            and (
-                cell.get("specialist") == specialist
-                or (hypothesis_id and cell.get("hypothesis_id") == hypothesis_id)
-            )
-        ]
-        candidates.sort(
-            key=lambda cell: (
-                int(cell.get("priority_rank", 2)),
-                0 if specialist in {"xss", "sqli"} and scoped_replay_eligible(cell) else 1,
-                0
-                if hypothesis_id and cell.get("hypothesis_id") == hypothesis_id
-                else 1,
-                0 if cell.get("proof_escalation_id") else 1,
-                int(cell.get("attempts") or 0),
-                cell.get("surface_key", ""),
-                cell.get("identity", ""),
-                cell.get("parameter", ""),
-            )
-        )
-        if not candidates:
-            continue
-        cell = candidates[0]
-        lease_id = uuid.uuid4().hex
-        cell.update(
-            status="leased",
-            lease_id=lease_id,
-            lease_owner=specialist,
-            lease_started_at=current,
-            lease_deadline=current + max(60, int(lease_seconds)),
-            task_lease_id=task_lease_id,
-            attempts=int(cell.get("attempts") or 0) + 1,
-        )
-        leases[specialist] = CoverageCellLease(
-            id=lease_id,
-            coverage_cell_id=cell["id"],
-            specialist=specialist,
-            hypothesis_id=_text(cell.get("hypothesis_id") or hypothesis_id),
-            task_lease_id=task_lease_id,
-            attempt=cell["attempts"],
-            started_at=current,
-            deadline=cell["lease_deadline"],
-        )
+        if lease is not None:
+            leases[specialist] = lease
     return leases
+
+
+def claim_coverage_cell_lease_batch(
+    brain: Any,
+    specialists: Iterable[str],
+    *,
+    max_per_specialist: int = 1,
+    task_leases: dict[str, Any] | None = None,
+    denominator: Iterable[dict[str, Any]] | None = None,
+    allowed_observation_sources: frozenset[str] | None = None,
+    lease_seconds: int = 3600,
+    now: float | None = None,
+) -> dict[str, list[CoverageCellLease]]:
+    """Lease up to ``max_per_specialist`` distinct open cells per specialist.
+
+    One hunt wave then drains several observed inputs instead of a single one,
+    so a full inventory is covered in a few waves rather than one wave per
+    input. Fewer than the cap are returned when fewer open cells remain; a
+    specialist with no open cell is omitted. Each cell is leased independently,
+    so an unfinished lease still expires back to ``inconclusive`` for a later
+    wave — the cap only bounds how much one wave hands out.
+    """
+    migrate_coverage_cells(brain, denominator=denominator)
+    current = time.time() if now is None else float(now)
+    recover_expired_coverage_leases(brain, now=current)
+    cap = max(1, int(max_per_specialist))
+    batches: dict[str, list[CoverageCellLease]] = {}
+    for specialist in dict.fromkeys(_text(item) for item in specialists if _text(item)):
+        hypothesis_id, task_lease_id = _specialist_hypothesis_ids(specialist, task_leases)
+        leased: list[CoverageCellLease] = []
+        for _ in range(cap):
+            lease = _lease_one_cell(
+                brain, specialist,
+                hypothesis_id=hypothesis_id, task_lease_id=task_lease_id,
+                current=current, lease_seconds=lease_seconds,
+                allowed_observation_sources=allowed_observation_sources,
+            )
+            if lease is None:
+                break
+            leased.append(lease)
+        if leased:
+            batches[specialist] = leased
+    return batches
 
 
 def release_coverage_cell_lease(

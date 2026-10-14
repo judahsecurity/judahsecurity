@@ -1,12 +1,16 @@
 from types import SimpleNamespace
 
 from app.services.agent.coverage_cells import (
+    CoverageCellLease,
+    claim_coverage_cell_lease_batch,
     claim_coverage_cell_leases,
     coverage_cell_id,
     migrate_coverage_cells,
     recover_expired_coverage_leases,
     release_coverage_cell_lease,
+    seed_parameter_coverage_cells,
 )
+from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
 from app.services.agent.engagement_brain import (
     EngagementBrain,
     Hypothesis,
@@ -226,6 +230,81 @@ def test_expired_cell_lease_is_requeued_as_inconclusive():
     )
     assert cell["status"] == "inconclusive"
     assert cell["lease_id"] == ""
+
+
+def _observed_input_brain(count: int) -> EngagementBrain:
+    brain = EngagementBrain(target="https://app.test")
+    inventory = [
+        {
+            "method": "GET", "host": "app.test", "path": f"/p{i}",
+            "name": f"q{i}", "location": "query", "source": "browser_traffic",
+            "value_type": "string", "identity": "anonymous",
+            "artifact_id": f"cap{i}", "testable": True,
+        }
+        for i in range(count)
+    ]
+    seed_parameter_coverage_cells(brain, inventory)
+    return brain
+
+
+def test_observed_input_wave_leases_multiple_cells_per_specialist():
+    brain = _observed_input_brain(5)  # 5 sqli + 5 xss observed-input cells
+
+    batch = claim_coverage_cell_lease_batch(
+        brain, ["sqli"], max_per_specialist=4,
+        allowed_observation_sources=OBSERVED_INPUT_SOURCES, now=100,
+    )
+    assert len(batch["sqli"]) == 4                       # capped below the 5 available
+    assert len({lease.coverage_cell_id for lease in batch["sqli"]}) == 4  # distinct cells
+    assert all(isinstance(lease, CoverageCellLease) for lease in batch["sqli"])
+
+    # Leases are exclusive: a second wave only picks up the remaining cell.
+    batch2 = claim_coverage_cell_lease_batch(
+        brain, ["sqli"], max_per_specialist=4,
+        allowed_observation_sources=OBSERVED_INPUT_SOURCES, now=101,
+    )
+    assert len(batch2["sqli"]) == 1
+
+
+def test_single_lease_api_still_leases_one_cell_per_specialist():
+    brain = _observed_input_brain(5)
+
+    leases = claim_coverage_cell_leases(
+        brain, ["sqli"],
+        allowed_observation_sources=OBSERVED_INPUT_SOURCES, now=100,
+    )
+    assert isinstance(leases["sqli"], CoverageCellLease)
+    leased = [cell for cell in brain.coverage_cells if cell.get("status") == "leased"]
+    assert len(leased) == 1
+
+
+def test_directive_batches_additional_observed_inputs():
+    brain = _observed_input_brain(3)
+    batch = claim_coverage_cell_lease_batch(
+        brain, ["sqli"], max_per_specialist=3,
+        allowed_observation_sources=OBSERVED_INPUT_SOURCES, now=100,
+    )
+    profile = SimpleNamespace(
+        role="SQL injection specialist.",
+        allowed_tools=["scoped_input_probe_assigned"],
+        max_iterations=4,
+        epithet="Solomon",
+    )
+    directives = directives_from_hypotheses(
+        brain=brain,
+        profiles_by_name={"sqli": profile},
+        specialists=["sqli"],
+        default_target="https://app.test",
+        coverage_leases=batch,
+    )
+    directive = directives["sqli"]
+    # Primary front plus the rest of the batch as additional inputs.
+    assert directive.coverage_cell_id == batch["sqli"][0].coverage_cell_id
+    assert len(directive.additional_inputs) == len(batch["sqli"]) - 1
+    block = directive.to_prompt_block()
+    for extra in directive.additional_inputs:
+        assert extra["coverage_lease_id"] in block
+        assert extra["coverage_cell_id"] in block
 
 
 def test_directive_carries_task_and_coverage_leases():
