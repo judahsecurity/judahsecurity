@@ -922,7 +922,8 @@ surface_inventory. Use list_scoped_browser_exchanges to locate an observed
 XHR/fetch sample. scoped_http_get and scoped_http_compare return bounded
 response metadata. scoped_query_probe is exploratory; changed responses are
 leads only. scoped_numeric_sqli runs six bounded requests on one observed
-positive numeric GET field. Its proof_confirmed flag is one actor's evidence;
+positive numeric GET field from a capture or private browser link. Its
+proof_confirmed flag is one actor's evidence;
 scoped_string_sqli(url, parameter) runs bounded OR Boolean controls on one mapped
 string-valued GET field, including quote-error, escaped-quote, and repeated
 true/false responses. If OR is unproven and the normal response is stable, it

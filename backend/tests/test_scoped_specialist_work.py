@@ -1,10 +1,12 @@
 """Browser captures, scripts, and APIs become bounded, durable specialist work."""
 
 import json
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from app.services.agent.assessment_scope import register_scope
+from app.services.agent.scoped_assessment.browser_traffic import package_exchange
 from app.services.agent.api_fingerprint import fingerprint_from_map
 from app.services.agent.coverage_cells import (
     claim_coverage_cell_leases, parameter_test_funnel,
@@ -307,6 +309,44 @@ async def test_assigned_link_xss_probe_records_exact_cell_receipt(monkeypatch, e
 
 
 @pytest.mark.asyncio
+async def test_assigned_xss_preserves_captured_get_query_context(monkeypatch):
+    observed = "https://app.test/catalog?searchTerm=ordinary&view=compact"
+    public, private = package_exchange(
+        url=observed, expected_origin="https://app.test", action_ref="search",
+        method="GET", resource_type="xhr", status=200,
+        content_type="text/html", request_body=b"", response_body=b"ok",
+    )
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "path": "/catalog", "host": "app.test",
+        "name": "searchTerm", "location": "query", "source": "browser_traffic",
+        "artifact_id": "capture-search", "identity": "anonymous", "testable": True,
+    }])
+    lease = claim_coverage_cell_leases(brain, ["xss"])["xss"]
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.test"
+    manager._capability_map = {"target": "https://app.test"}
+    manager._engagement_brain = brain.to_dict()
+    manager._scoped_browser_exchanges = {
+        "capture-search": {"identity": "anonymous", "private": private,
+                           "public": public, "verifier_run_id": None},
+    }
+    register_scope(manager, "app.test")
+
+    async def browser(operation, url, identity="anonymous"):
+        query = parse_qs(urlsplit(url).query)
+        assert query["view"] == ["compact"]
+        assert "__PROWL_NONCE__" in query["searchTerm"][0]
+        assert "ordinary" not in query["searchTerm"][0]
+        return json.dumps({"evidence_id": "xss-proof", "executed": True})
+
+    monkeypatch.setattr(manager, "scoped_browser_assessment", browser)
+    result = await manager.scoped_input_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert result["proof_confirmed"] is True
+    assert result["probe_result"]["request_context"] == "browser_traffic"
+
+
+@pytest.mark.asyncio
 async def test_assigned_xss_probe_preserves_scope_denial_for_queue_receipt(monkeypatch):
     brain = EngagementBrain(target="https://app.test")
     seed_parameter_coverage_cells(brain, [{
@@ -463,7 +503,7 @@ async def test_assigned_probe_uses_current_origin_with_explicit_default_port(mon
 
 
 @pytest.mark.asyncio
-async def test_assigned_numeric_input_rejects_string_proof(monkeypatch):
+async def test_assigned_numeric_link_uses_numeric_proof(monkeypatch):
     brain = EngagementBrain(target="https://app.test")
     seed_parameter_coverage_cells(brain, [{
         "method": "GET", "path": "/catalog", "host": "app.test",
@@ -472,13 +512,59 @@ async def test_assigned_numeric_input_rejects_string_proof(monkeypatch):
     }])
     lease = claim_coverage_cell_leases(brain, ["sqli"])["sqli"]
     manager = ASMToolsManager()
+    manager._fallback_target = "https://app.test"
     manager._capability_map = {"target": "https://app.test"}
     manager._engagement_brain = brain.to_dict()
+    register_scope(manager, "app.test")
 
     async def forbidden(*_args):
         pytest.fail("String SQLi proof must not run on a numeric input")
 
+    async def numeric(*, parameter, identity, url):
+        assert (parameter, identity, url) == (
+            "productId", "anonymous", "https://app.test/catalog",
+        )
+        return json.dumps({"evidence_id": "numeric-proof", "proof_confirmed": True,
+                           "proof_recipe": "numeric_and_boolean_v1"})
+
+    monkeypatch.setattr(manager, "scoped_string_sqli", forbidden)
+    monkeypatch.setattr(manager, "scoped_numeric_sqli", numeric)
+    result = await manager.scoped_input_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert result["success"] and result["proof_confirmed"]
+    assert result["operation"] == "scoped_numeric_sqli"
+    assert parameter_test_funnel(manager._engagement_brain)["probed"] == 1
+
+
+@pytest.mark.asyncio
+async def test_numeric_link_without_public_value_type_still_uses_numeric_proof(monkeypatch):
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "path": "/catalog", "host": "app.test",
+        "name": "productId", "location": "query", "source": "browser_link",
+        "identity": "anonymous", "testable": True,
+    }])
+    lease = claim_coverage_cell_leases(brain, ["sqli"])["sqli"]
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.test"
+    manager._capability_map = {
+        "target": "https://app.test",
+        "discovered_links": [{"url": "https://app.test/catalog",
+                              "query_keys": ["productId"]}],
+    }
+    manager._scoped_link_baselines = {
+        "anonymous": ["https://app.test/catalog?productId=7"],
+    }
+    manager._engagement_brain = brain.to_dict()
+    register_scope(manager, "app.test")
+
+    async def numeric(*, parameter, identity, url):
+        return json.dumps({"evidence_id": "numeric-proof", "proof_confirmed": True,
+                           "proof_recipe": "numeric_and_boolean_v1"})
+
+    async def forbidden(*_args):
+        pytest.fail("String SQLi proof must not run on a numeric observed link")
+
+    monkeypatch.setattr(manager, "scoped_numeric_sqli", numeric)
     monkeypatch.setattr(manager, "scoped_string_sqli", forbidden)
     result = await manager.scoped_input_probe_assigned(lease.coverage_cell_id, lease.id)
-    assert result["error"] == "numeric_capture_required"
-    assert parameter_test_funnel(manager._engagement_brain)["probed"] == 0
+    assert result["success"] and result["operation"] == "scoped_numeric_sqli"

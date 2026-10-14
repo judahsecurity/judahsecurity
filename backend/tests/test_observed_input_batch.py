@@ -126,7 +126,7 @@ def test_batch_reaches_all_link_inputs_once_with_live_receipts():
     assert len(manager.calls) == 4
 
 
-def test_unsupported_numeric_input_is_accounted_without_fabricated_probe():
+def test_numeric_link_reaches_bounded_first_pass():
     class Manager:
         def __init__(self):
             brain = EngagementBrain(target="https://app.test")
@@ -142,17 +142,18 @@ def test_unsupported_numeric_input_is_accounted_without_fabricated_probe():
         async def scoped_input_probe_assigned(self, coverage_cell_id, **_kwargs):
             cell = next(row for row in self._engagement_brain["coverage_cells"]
                         if row["id"] == coverage_cell_id)
-            assert cell["test_type"] == "xss", "Numeric SQLi must use a captured value"
-            return {"success": True, "evidence_id": "xss-check", "proof_confirmed": False}
+            return {"success": True, "evidence_id": "check-" + cell["test_type"],
+                    "proof_confirmed": False,
+                    "probe_result": {"proof_recipe": "numeric_and_boolean_v1"}}
 
     manager = Manager()
     result = asyncio.run(run_observed_input_batch(manager, max_checks=2))
     assert result["processed"] == 2 and result["remaining"] == 0
     sqli = next(row for row in manager._engagement_brain["coverage_cells"]
                 if row["test_type"] == "sqli")
-    assert sqli["first_pass_outcome"] == "unattempted"
+    assert sqli["first_pass_outcome"] == "inconclusive"
     assert sqli["status"] == "inconclusive"
-    assert not sqli.get("first_pass_evidence_id")
+    assert sqli["first_pass_evidence_id"] == "check-sqli"
 
 
 def test_positive_first_pass_submits_candidate_for_fresh_verification():
