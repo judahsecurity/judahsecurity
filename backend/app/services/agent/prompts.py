@@ -926,7 +926,8 @@ positive numeric GET field from a capture or private browser link. Its
 proof_confirmed flag is one actor's evidence;
 scoped_string_sqli(url, parameter) runs bounded OR Boolean controls on one mapped
 string-valued GET field, including quote-error, escaped-quote, and repeated
-true/false responses. If OR is unproven and the normal response is stable, it
+true/false responses. Small JSON result arrays use exact repeated body and
+result-count controls. If OR is unproven and the normal response is stable, it
 repeats a recognized database error or tries AND true/false controls. It can
 recover an ordinary browser link privately or preflight a one-field observed GET form.
 Use it for string filters such as

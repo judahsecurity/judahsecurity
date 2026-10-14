@@ -115,11 +115,17 @@ def observe_get(url: str, allowed_origins: list[str], storage_state: dict | None
         content_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()[:100]
         location = response.headers.get("Location", "")
         shape: dict = {}
+        json_array_lengths: dict[str, int] = {}
         if content_type == "application/json" and not truncated:
             try:
                 parsed = json.loads(data)
                 if isinstance(parsed, dict):
                     shape = {"type": "object", "keys": sorted(str(key)[:100] for key in parsed)[:50]}
+                    json_array_lengths = {
+                        key: min(len(parsed[key]), 1000)
+                        for key in ("results", "items", "records", "data")
+                        if isinstance(parsed.get(key), list)
+                    }
                 elif isinstance(parsed, list):
                     shape = {"type": "array", "items": min(len(parsed), 1000)}
             except (UnicodeDecodeError, ValueError):
@@ -134,6 +140,7 @@ def observe_get(url: str, allowed_origins: list[str], storage_state: dict | None
             "truncated": truncated,
             "body_sha256": hashlib.sha256(data).hexdigest(),
             "json_shape": shape,
+            "json_array_lengths": json_array_lengths,
             "sql_error_family": _sql_error_family(data),
             "directory_index": _directory_index_detected(data, content_type),
             "redirected": bool(location),

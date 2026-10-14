@@ -153,10 +153,22 @@ def validate_proof(
                 if first.get("proof_recipe") == "string_and_boolean_v1" else
                 ("baseline_first", "escaped_quote", "true_first", "false_first")
             )
-            if (not string_sql_proof_valid(first) or not string_sql_proof_valid(second)
+            valid_first = string_sql_proof_valid(first)
+            valid_second = string_sql_proof_valid(second)
+            json_rows_match = (
+                all(first["checks"][key].get("json_array_lengths")
+                    == second["checks"][key].get("json_array_lengths")
+                    for key in matching_keys)
+                if first.get("proof_recipe") == "string_or_json_rows_v1"
+                and second.get("proof_recipe") == "string_or_json_rows_v1"
+                and valid_first and valid_second
+                else first.get("proof_recipe") != "string_or_json_rows_v1"
+            )
+            if (not valid_first or not valid_second
                     or first.get("proof_confirmed") is not True
                     or second.get("proof_confirmed") is not True
                     or not same_recipe
+                    or not json_rows_match
                     or first.get("parameter") != second.get("parameter")
                     or first.get("nonce") == second.get("nonce")
                     or any(abs(first["checks"][key]["bytes_captured"]

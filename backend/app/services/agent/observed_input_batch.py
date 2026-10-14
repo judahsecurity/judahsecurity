@@ -260,6 +260,7 @@ async def run_observed_input_batch(
                     elif (specialist == "sqli" and result.get("evidence_id")
                           and (result.get("probe_result") or {}).get("proof_recipe")
                               in {"numeric_and_boolean_v1", "string_or_boolean_v1",
+                                  "string_or_json_rows_v1",
                                   "string_and_boolean_v1", "string_error_v1"}):
                         # A bounded Boolean recipe is a proof attempt, not
                         # complete SQLi coverage. Preserve negative receipts
