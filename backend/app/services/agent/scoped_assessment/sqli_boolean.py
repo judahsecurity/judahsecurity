@@ -11,7 +11,8 @@ import secrets
 from collections.abc import Callable
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
-from .browser import origin
+from .browser import assert_in_scope, origin
+from .browser_actions import allowed_discovery_path
 from .http_observe import observe_get
 from .query_probe import plan_observed_query
 
@@ -25,8 +26,24 @@ def plan_numeric_boolean(private_exchange: bytes, *, parameter: str,
     baseline, _ = plan_observed_query(
         private_exchange, parameter=parameter, allowed_origins=allowed_origins,
     )
-    parts = urlsplit(baseline)
+    return plan_numeric_boolean_url(
+        baseline, parameter=parameter, allowed_origins=allowed_origins,
+    )
+
+
+def plan_numeric_boolean_url(url: str, *, parameter: str,
+                             allowed_origins: list[str]) -> tuple[str, str, str, str]:
+    """Plan a proof from an exact, privately retained observed GET URL."""
+    if not isinstance(url, str) or not isinstance(parameter, str) or not 0 < len(parameter) <= 80:
+        raise ValueError("Observed URL and parameter name are required")
+    assert_in_scope(url, allowed_origins)
+    parts = urlsplit(url)
+    if (parts.fragment or len(url) > 2048 or len(parts.query) > 2048
+            or not allowed_discovery_path(parts.path or "/")):
+        raise ValueError("A bounded, safe observed GET URL is required")
     fields = parts.query.split("&")
+    if len(fields) > 40:
+        raise ValueError("Observed query has too many fields")
     matches = [index for index, field in enumerate(fields)
                if field and unquote_plus(field.split("=", 1)[0]) == parameter]
     if len(matches) != 1:
@@ -43,7 +60,10 @@ def plan_numeric_boolean(private_exchange: bytes, *, parameter: str,
         changed[index] = name + "=" + raw_value + "%20AND%20" + nonce + "%3D" + str(other)
         return urlunsplit(parts._replace(query="&".join(changed)))
 
-    return baseline, variant(int(nonce)), variant(int(nonce) + 1), nonce
+    true_url, false_url = variant(int(nonce)), variant(int(nonce) + 1)
+    assert_in_scope(true_url, allowed_origins)
+    assert_in_scope(false_url, allowed_origins)
+    return url, true_url, false_url, nonce
 
 
 def numeric_sql_proof_valid(result: dict) -> bool:

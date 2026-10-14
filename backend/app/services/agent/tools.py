@@ -939,10 +939,6 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if reason:
             return {"success": False, "error": "invalid_coverage_lease",
                     "reason": reason, "output": f"An active lease on an observed GET input is required ({reason})"}
-        if cell["test_type"] == "sqli" and cell.get("value_type") in {"positive_integer", "number"}:
-            return {"success": False, "error": "numeric_capture_required",
-                    "output": "Numeric SQLi requires an observed positive numeric value and the numeric Boolean proof"}
-
         cmap = getattr(self, "_capability_map", None) or {}
         target = str(cmap.get("target") or cmap.get("scope") or
                      getattr(self, "_fallback_target", "") or "")
@@ -964,8 +960,21 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if cell["test_type"] == "sqli":
             if technique != "html_body":
                 return {"success": False, "error": "unsupported_technique"}
-            proof = json.loads(await self.scoped_string_sqli(url, parameter, identity))
-            operation = "scoped_string_sqli"
+            numeric = cell.get("value_type") in {"positive_integer", "number"}
+            if not numeric:
+                try:
+                    self._observed_numeric_baseline(url, parameter, identity, scoped_origin)
+                    numeric = True
+                except ValueError:
+                    pass
+            if numeric:
+                proof = json.loads(await self.scoped_numeric_sqli(
+                    parameter=parameter, identity=identity, url=url,
+                ))
+                operation = "scoped_numeric_sqli"
+            else:
+                proof = json.loads(await self.scoped_string_sqli(url, parameter, identity))
+                operation = "scoped_string_sqli"
             confirmed = proof.get("proof_confirmed") is True
         else:
             payloads = {
@@ -978,6 +987,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 return {"success": False, "error": "unsupported_technique"}
             template, request_context = self._observed_get_query_template(
                 url, parameter, payloads[technique], identity,
+                capture_id=str(cell.get("capture_id") or ""),
             )
             proof = json.loads(await self.scoped_browser_assessment(
                 "check_xss", template, identity=identity,

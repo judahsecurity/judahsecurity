@@ -159,8 +159,11 @@ async def run_observed_input_batch(
                             {"coverage_cell_id": cell["id"], "coverage_lease_id": lease.id},
                         )
                     else:
-                        operation = None
-                        reason = "Numeric SQLi needs a captured positive value"
+                        operation = _invoke(
+                            manager, "scoped_input_probe_assigned",
+                            {"coverage_cell_id": cell["id"], "coverage_lease_id": lease.id,
+                             "technique": "html_body"},
+                        )
                 else:
                     operation = _invoke(
                         manager, "scoped_input_probe_assigned",
@@ -256,8 +259,8 @@ async def run_observed_input_batch(
                                 ), "")
                     elif (specialist == "sqli" and result.get("evidence_id")
                           and (result.get("probe_result") or {}).get("proof_recipe")
-                              in {"string_or_boolean_v1", "string_and_boolean_v1",
-                                  "string_error_v1"}):
+                              in {"numeric_and_boolean_v1", "string_or_boolean_v1",
+                                  "string_and_boolean_v1", "string_error_v1"}):
                         # A bounded Boolean recipe is a proof attempt, not
                         # complete SQLi coverage. Preserve negative receipts
                         # without closing the input as tested_clean.

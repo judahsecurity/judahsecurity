@@ -143,6 +143,7 @@ class ScopedAssessmentTools:
 
     def _observed_get_query_template(
         self, url: str, parameter: str, payload: str, identity: str,
+        capture_id: str = "",
     ) -> tuple[str, str]:
         """Replace one observed GET value while retaining its other query fields.
 
@@ -151,8 +152,19 @@ class ScopedAssessmentTools:
         """
         target = urlsplit(url)
         cmap = getattr(self, "_capability_map", None) or {}
+        private_captures = []
+        available = getattr(self, "_scoped_browser_exchanges", None) or {}
+        capture_ids = [capture_id] if capture_id else list(available)[:40]
+        for artifact_id in capture_ids:
+            try:
+                captured = json.loads(self._scoped_exchange(artifact_id, identity))
+            except (TypeError, ValueError):
+                continue
+            if (isinstance(captured, dict) and captured.get("method") == "GET"
+                    and captured.get("resource_type") in {"xhr", "fetch"}):
+                private_captures.append(("browser_traffic", captured.get("url")))
         private_links = (getattr(self, "_scoped_link_baselines", None) or {}).get(identity) or []
-        candidates = [("browser_link", value) for value in private_links]
+        candidates = [*private_captures, *(("browser_link", value) for value in private_links)]
         if identity == "anonymous":
             candidates.extend(("page_url", value) for value in (cmap.get("pages_visited") or []))
         candidates.extend(
@@ -503,14 +515,73 @@ class ScopedAssessmentTools:
         )
         return json.dumps(result)
 
-    async def scoped_numeric_sqli(self, artifact_id: str, parameter: str, identity: str = "anonymous") -> str:
-        """Run a six-request numeric Boolean proof on a browser-observed GET."""
-        private = self._scoped_exchange(artifact_id, identity)
-        self._scoped_assessment_started = True
-        allowed = self._scoped_origin(browser.origin(json.loads(private)["url"]))
-        baseline, true_url, false_url, nonce = sqli_boolean.plan_numeric_boolean(
-            private, parameter=parameter, allowed_origins=[allowed],
+    def _observed_numeric_baseline(
+        self, url: str, parameter: str, identity: str, allowed: str,
+    ) -> tuple[str, str, str, str]:
+        from app.services.agent.parameter_inventory import collect_parameter_inventory
+
+        parts = urlsplit(url)
+        cmap = getattr(self, "_capability_map", None) or {}
+        observed = any(
+            row.get("method") == "GET" and row.get("host") == parts.netloc
+            and row.get("path") == (parts.path or "/")
+            and row.get("name") == parameter and row.get("location") == "query"
+            and row.get("identity") == identity and row.get("testable")
+            for row in collect_parameter_inventory(cmap)
         )
+        if not observed:
+            raise ValueError("Numeric SQLi proof requires a mapped GET query parameter")
+        candidates = [
+            *(page for page in cmap.get("pages_visited", [])
+              if identity == "anonymous" and isinstance(page, str)),
+            *(sample.get("url") for sample in cmap.get("api_samples", [])
+              if isinstance(sample, dict)
+              and str(sample.get("method") or "GET").upper() == "GET"
+              and str(sample.get("identity") or "anonymous") == identity),
+            *((getattr(self, "_scoped_link_baselines", None) or {}).get(identity) or []),
+        ]
+        for candidate in candidates:
+            if not isinstance(candidate, str):
+                continue
+            try:
+                candidate_parts = urlsplit(candidate)
+            except ValueError:
+                continue
+            if (candidate_parts.scheme, candidate_parts.netloc,
+                    candidate_parts.path or "/") != (
+                    parts.scheme, parts.netloc, parts.path or "/"):
+                continue
+            if parts.query and candidate != url:
+                continue
+            try:
+                return sqli_boolean.plan_numeric_boolean_url(
+                    candidate, parameter=parameter, allowed_origins=[allowed],
+                )
+            except ValueError:
+                continue
+        raise ValueError("Numeric SQLi proof needs an observed positive numeric GET value")
+
+    async def scoped_numeric_sqli(
+        self, artifact_id: str = "", parameter: str = "", identity: str = "anonymous",
+        url: str = "",
+    ) -> str:
+        """Prove an observed numeric GET input from a capture or mapped link."""
+        if bool(artifact_id) == bool(url):
+            raise ValueError("Provide exactly one captured artifact or mapped URL")
+        baseline_source = "browser_traffic"
+        if artifact_id:
+            private = self._scoped_exchange(artifact_id, identity)
+            allowed = self._scoped_origin(browser.origin(json.loads(private)["url"]))
+            baseline, true_url, false_url, nonce = sqli_boolean.plan_numeric_boolean(
+                private, parameter=parameter, allowed_origins=[allowed],
+            )
+        else:
+            allowed = self._scoped_origin(url)
+            baseline, true_url, false_url, nonce = self._observed_numeric_baseline(
+                url, parameter, identity, allowed,
+            )
+            baseline_source = "observed_url"
+        self._scoped_assessment_started = True
         self._scoped_claim_gets(6)
         result = await asyncio.to_thread(
             sqli_boolean.probe_numeric_boolean,
@@ -519,7 +590,9 @@ class ScopedAssessmentTools:
             storage_state=self._scoped_state(identity, baseline),
             before_request=lambda: None,
         )
-        result["source_artifact_id"] = artifact_id
+        if artifact_id:
+            result["source_artifact_id"] = artifact_id
+        result["baseline_source"] = baseline_source
         result["finding"] = False  # One actor's proof is a candidate, never publication.
         result["evidence_id"] = evidence_store(self).record(
             "scoped_numeric_sqli", result, target=result["target"], identity=identity,
