@@ -4,6 +4,11 @@ import json
 
 from app.services.agent.assessment_kickoff import root_needs_dir_brute
 from app.services.agent.tester_loop import (
+    MAX_OBSERVED_INPUT_ATTEMPTS,
+    _cell_is_pending_input,
+    _observed_input_specialists,
+    _pending_observed_input_count,
+    _untested_observed_input_count,
     cms_followup_product,
     complete_blocked_reason,
     forced_next_step,
@@ -379,6 +384,80 @@ def test_static_js_endpoint_without_observed_input_does_not_start_early_hunt():
     }
     assert observed_input_signature(state) == ""
     assert forced_next_step(state)["tool_name"] == "wait_recon_workers"
+
+
+def _inconclusive_input_state(attempts: int) -> dict:
+    """One untested xss cell and one inconclusive sqli cell at `attempts` tries."""
+    return {
+        "engagement_brain": {"coverage_cells": [
+            {"source": "parameter_inventory", "observation_source": "observed_form",
+             "specialist": "xss", "status": "untested"},
+            {"source": "parameter_inventory", "observation_source": "observed_form",
+             "specialist": "sqli", "status": "inconclusive", "attempts": attempts},
+        ]},
+    }
+
+
+def test_retriable_inconclusive_input_counts_as_pending():
+    """An inconclusive cell under its retry budget is still owed a probe.
+
+    The old untested-only counter dropped it the moment a wave failed to drive
+    it terminal, silently abandoning the input; it must now count as pending
+    and keep its specialist active so the queue re-leases it.
+    """
+    state = _inconclusive_input_state(attempts=1)
+    sqli_cell = state["engagement_brain"]["coverage_cells"][1]
+
+    assert _cell_is_pending_input(sqli_cell) is True
+    assert _untested_observed_input_count(state) == 1          # xss only
+    assert _pending_observed_input_count(state) == 2           # xss + retriable sqli
+    assert _observed_input_specialists(state) == ["xss", "sqli"]
+
+
+def test_inconclusive_input_rests_after_exhausting_retries():
+    """Past the retry budget the cell stops being pending so nothing loops forever."""
+    state = _inconclusive_input_state(attempts=MAX_OBSERVED_INPUT_ATTEMPTS)
+    sqli_cell = state["engagement_brain"]["coverage_cells"][1]
+
+    assert _cell_is_pending_input(sqli_cell) is False
+    assert _pending_observed_input_count(state) == 1           # xss only
+    assert _observed_input_specialists(state) == ["xss"]
+
+
+def test_input_wave_continues_to_drain_retriable_inconclusive_inputs():
+    """A wave that left an input inconclusive is re-dispatched, not abandoned."""
+    target = "https://app.example.com"
+    state = {
+        "mode": "agent",
+        "target_info": {"primary_target": target},
+        "capability_map": {
+            "target": target, "scope": target,
+            "forms": [{"method": "GET", "action": "/search", "inputs": ["q", "sort"]}],
+        },
+        "engagement_brain": {"coverage_cells": [
+            {"source": "parameter_inventory", "observation_source": "observed_form",
+             "specialist": "xss", "status": "untested"},
+            {"source": "parameter_inventory", "observation_source": "observed_form",
+             "specialist": "sqli", "status": "inconclusive", "attempts": 1},
+        ]},
+        "execution_trace": [
+            {"tool_name": name, "success": True}
+            for name in (
+                "execute_deep_crawl", "recon_worker:ferox_dirs", "fingerprint_api",
+                "fetch_lazy_chunks", "extract_js_endpoints", "sync_engagement_brain",
+            )
+        ],
+    }
+    signature = observed_input_signature(state)
+    state["execution_trace"].append({
+        "tool_name": "fireteam_dispatch", "success": True,
+        "tool_args": {"surface_signature": signature, "pending_input_count": 4},
+    })
+    next_wave = forced_next_step(state)
+    assert next_wave["tool_name"] == "fireteam_dispatch"
+    # Both the fresh xss input and the retriable inconclusive sqli input remain.
+    assert next_wave["tool_args"]["pending_input_count"] == 2
+    assert next_wave["tool_args"]["specialists"] == ["xss", "sqli"]
 
 
 def test_observed_input_queue_advances_only_after_progress_then_runs_full_wave():

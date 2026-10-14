@@ -46,6 +46,14 @@ _WEB_HINT_RE = re.compile(r"https?://|\bwww\.|\.(com|net|io|org|app)\b", re.I)
 OBSERVED_INPUT_SOURCES = frozenset({
     "observed_form", "captured_api", "browser_traffic", "page_url", "api_endpoint",
 })
+# A browser-observed input cell that a wave could not drive to a terminal
+# result (no stable baseline, replay could not rebuild a usable request,
+# transient noise) lands in ``inconclusive`` — an *open* state that the old
+# ``untested``-only counter ignored, so the queue stopped at ``untested == 0``
+# and silently abandoned those inputs. Count such a cell as still-pending for a
+# bounded number of re-attempts so it is re-leased and either resolves or rests
+# honestly, without letting a permanently-stuck input loop forever.
+MAX_OBSERVED_INPUT_ATTEMPTS = 2
 
 
 def _steps(trace: Optional[Iterable[Any]]) -> List[Dict[str, Any]]:
@@ -244,28 +252,50 @@ def _cms_followup_dispatched(trace: List[Dict[str, Any]]) -> bool:
     )
 
 
-def _untested_observed_input_count(state: Dict[str, Any]) -> int:
+def _observed_input_cells(state: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Browser-observed XSS/SQLi injection cells, regardless of status."""
     brain = state.get("engagement_brain") or {}
-    return sum(
-        1
+    return [
+        cell
         for cell in (brain.get("coverage_cells") or [])
         if isinstance(cell, dict)
         and cell.get("source") == "parameter_inventory"
         and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
         and cell.get("specialist") in {"xss", "sqli"}
-        and cell.get("status") == "untested"
-    )
+    ]
+
+
+def _cell_is_pending_input(cell: Dict[str, Any]) -> bool:
+    """A cell still owed probing: never attempted, or inconclusive with retries.
+
+    ``in_focus`` (a signal awaiting independent verification) and the terminal
+    statuses are deliberately excluded — they are not re-probe work.
+    """
+    status = cell.get("status")
+    if status == "untested":
+        return True
+    if status == "inconclusive":
+        return int(cell.get("attempts") or 0) < MAX_OBSERVED_INPUT_ATTEMPTS
+    return False
+
+
+def _untested_observed_input_count(state: Dict[str, Any]) -> int:
+    """Cells never yet attempted (freshly seeded, attempts == 0)."""
+    return sum(1 for cell in _observed_input_cells(state)
+               if cell.get("status") == "untested")
+
+
+def _pending_observed_input_count(state: Dict[str, Any]) -> int:
+    """Cells still owed a probe: untested plus retriable inconclusive."""
+    return sum(1 for cell in _observed_input_cells(state)
+               if _cell_is_pending_input(cell))
 
 
 def _observed_input_specialists(state: Dict[str, Any]) -> List[str]:
-    cells = (state.get("engagement_brain") or {}).get("coverage_cells") or []
     pending = {
         cell.get("specialist")
-        for cell in cells
-        if isinstance(cell, dict)
-        and cell.get("source") == "parameter_inventory"
-        and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
-        and cell.get("status") == "untested"
+        for cell in _observed_input_cells(state)
+        if _cell_is_pending_input(cell)
     }
     return [name for name in ("xss", "sqli") if name in pending] or ["xss", "sqli"]
 
@@ -273,7 +303,14 @@ def _observed_input_specialists(state: Dict[str, Any]) -> List[str]:
 def _input_wave_made_progress(
     state: Dict[str, Any], trace: List[Dict[str, Any]], signature: str
 ) -> bool:
-    """Continue a leased input queue only when the last wave consumed work."""
+    """Continue a leased input queue only when the last wave consumed work.
+
+    Progress is measured on the pending count (untested + retriable
+    inconclusive), so a wave that resolves an inconclusive input to a terminal
+    or verification-pending state keeps the queue draining, while a genuinely
+    stalled queue still hands off to the broader fireteam wave. The bounded
+    retry budget in :func:`_cell_is_pending_input` guarantees termination.
+    """
     prior = next((
         step for step in reversed(trace)
         if step.get("tool_name") == "fireteam_dispatch"
@@ -282,7 +319,7 @@ def _input_wave_made_progress(
     if not prior:
         return False
     previous = (prior.get("tool_args") or {}).get("pending_input_count")
-    current = _untested_observed_input_count(state)
+    current = _pending_observed_input_count(state)
     return isinstance(previous, int) and 0 < current < previous
 
 
@@ -879,7 +916,7 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
                 "thought": "Seed observed input hypotheses while enrichment continues.",
             }
         return _observed_input_wave(
-            target, input_signature, _untested_observed_input_count(state),
+            target, input_signature, _pending_observed_input_count(state),
             _observed_input_specialists(state),
             cms_product if not cms_dispatched else "",
         )
@@ -889,7 +926,7 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
 
     if input_signature and _input_wave_made_progress(state, trace, input_signature):
         return _observed_input_wave(
-            target, input_signature, _untested_observed_input_count(state),
+            target, input_signature, _pending_observed_input_count(state),
             _observed_input_specialists(state),
         )
 
