@@ -329,7 +329,7 @@ async def run_observed_input_batch(
             )
             if (outcome == "unattempted" and current.get("status") == "inconclusive"
                     and reason.split(":", 1)[0] in {
-                        "policy_denied", "confirmation_denied",
+                        "policy_denied", "confirmation_denied", "confirmation_expired",
                         "assessment_scope_denied", "scope_mismatch",
                     }):
                 current["status"] = "blocked"

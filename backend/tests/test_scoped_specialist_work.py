@@ -384,6 +384,59 @@ async def test_assigned_link_sqli_probe_records_proof_without_closing_sibling(mo
 
 
 @pytest.mark.asyncio
+async def test_assigned_application_operation_input_reaches_sqli_probe(monkeypatch):
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "path": "/catalog", "host": "app.test",
+        "name": "category", "location": "query", "source": "application_operation",
+        "identity": "anonymous", "testable": True,
+    }])
+    lease = claim_coverage_cell_leases(brain, ["sqli"])["sqli"]
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.test"
+    manager._capability_map = {"target": "https://app.test"}
+    manager._engagement_brain = brain.to_dict()
+    register_scope(manager, "app.test")
+    calls = []
+
+    async def fake_sqli(url, parameter, identity):
+        calls.append((url, parameter, identity))
+        return json.dumps({"evidence_id": "operation-proof", "proof_confirmed": False})
+
+    monkeypatch.setattr(manager, "scoped_string_sqli", fake_sqli)
+    result = await manager.scoped_input_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert result["success"] is True
+    assert calls == [("https://app.test/catalog", "category", "anonymous")]
+
+
+@pytest.mark.asyncio
+async def test_assigned_application_operation_input_reaches_xss_probe(monkeypatch):
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "path": "/catalog", "host": "app.test",
+        "name": "searchTerm", "location": "query", "source": "application_operation",
+        "identity": "anonymous", "testable": True,
+    }])
+    lease = claim_coverage_cell_leases(brain, ["xss"])["xss"]
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.test"
+    manager._capability_map = {"target": "https://app.test"}
+    manager._engagement_brain = brain.to_dict()
+    register_scope(manager, "app.test")
+    calls = []
+
+    async def fake_browser(operation, url, **kwargs):
+        calls.append((operation, url, kwargs))
+        return json.dumps({"evidence_id": "xss-proof", "executed": False})
+
+    monkeypatch.setattr(manager, "scoped_browser_assessment", fake_browser)
+    result = await manager.scoped_input_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert result["success"] is True
+    assert calls[0][0] == "check_xss"
+    assert calls[0][1].startswith("https://app.test/catalog?searchTerm=")
+
+
+@pytest.mark.asyncio
 async def test_assigned_probe_uses_current_origin_with_explicit_default_port(monkeypatch):
     brain = EngagementBrain(target="https://ginandjuice.shop:443")
     seed_parameter_coverage_cells(brain, [{

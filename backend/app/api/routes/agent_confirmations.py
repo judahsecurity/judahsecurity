@@ -74,7 +74,7 @@ def decide_confirmation(
         reason=payload.reason or "",
     )
     if not decided:
-        raise HTTPException(status_code=404, detail="Token missing")
+        raise HTTPException(status_code=409, detail="Confirmation is no longer pending; refresh the approval queue")
     return {
         "token": decided.token,
         "status": decided.status,

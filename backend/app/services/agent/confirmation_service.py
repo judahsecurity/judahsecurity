@@ -202,35 +202,43 @@ class ConfirmationStore:
             pc = self._items.get(token)
             if not pc:
                 return None
+            if pc.status != "pending" or time.time() >= pc.created_at + pc.timeout_seconds:
+                if pc.status == "pending":
+                    pc.status = "expired"
+                return None
             pc.status = "approved" if approved else "denied"
             pc.decided_by = decided_by
             pc.decided_at = time.time()
             pc.reason = reason
-            for fut in pc.waiters:
-                if not fut.done():
-                    fut.set_result(approved)
+            waiters = list(pc.waiters)
             pc.waiters.clear()
-            return pc
+        # The FastAPI decision route is synchronous and runs in a worker
+        # thread. asyncio futures must be completed on their owning loop.
+        for fut in waiters:
+            fut.get_loop().call_soon_threadsafe(
+                lambda waiter=fut: waiter.set_result(approved)
+                if not waiter.done() else None
+            )
+        return pc
 
     def list_pending(
         self, organization_id: Optional[int] = None, session_id: Optional[str] = None
     ) -> list[PendingConfirmation]:
         with self._lock:
-            items = list(self._items.values())
-        out = []
-        now = time.time()
-        for pc in items:
-            if pc.status != "pending":
-                continue
-            if (now - pc.created_at) > pc.timeout_seconds:
-                pc.status = "expired"
-                continue
-            if organization_id is not None and pc.organization_id != organization_id:
-                continue
-            if session_id is not None and pc.session_id != session_id:
-                continue
-            out.append(pc)
-        return out
+            out = []
+            now = time.time()
+            for pc in self._items.values():
+                if pc.status != "pending":
+                    continue
+                if now >= pc.created_at + pc.timeout_seconds:
+                    pc.status = "expired"
+                    continue
+                if organization_id is not None and pc.organization_id != organization_id:
+                    continue
+                if session_id is not None and pc.session_id != session_id:
+                    continue
+                out.append(pc)
+            return out
 
     async def wait_for(self, token: str, timeout: Optional[float] = None) -> Optional[bool]:
         with self._lock:
@@ -241,15 +249,24 @@ class ConfirmationStore:
                 return True
             if pc.status in ("denied", "expired"):
                 return False
+            if time.time() >= pc.created_at + pc.timeout_seconds:
+                pc.status = "expired"
+                return False
             fut: asyncio.Future = asyncio.get_event_loop().create_future()
             pc.waiters.append(fut)
-            effective = timeout if timeout is not None else pc.timeout_seconds
+            remaining = max(0.0, pc.created_at + pc.timeout_seconds - time.time())
+            effective = min(timeout, remaining) if timeout is not None else remaining
         try:
             return await asyncio.wait_for(fut, timeout=effective)
         except asyncio.TimeoutError:
             with self._lock:
-                pc.status = "expired"
-            return False
+                if pc.status == "pending":
+                    pc.status = "expired"
+                return pc.status == "approved"
+        finally:
+            with self._lock:
+                if fut in pc.waiters:
+                    pc.waiters.remove(fut)
 
 
 _STORE: Optional[ConfirmationStore] = None
