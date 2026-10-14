@@ -219,9 +219,54 @@ def _and_sql_proof_valid(result: dict) -> bool:
             and rows["true_first"]["body_sha256"] != rows["false_first"]["body_sha256"])
 
 
+def _json_rows_sql_proof_valid(result: dict) -> bool:
+    """Confirm a small JSON result-set expansion with exact negative controls."""
+    if result.get("requests_sent") != len(CHECK_ORDER):
+        return False
+    checks = result.get("checks")
+    if not isinstance(checks, dict) or not all(
+        isinstance(checks.get(key), dict) for key in CHECK_ORDER
+    ):
+        return False
+    rows = {key: checks[key] for key in CHECK_ORDER}
+    normal = [row for key, row in rows.items() if key != "quote_error"]
+    if any(row.get("status") != 200 or row.get("content_type") != "application/json"
+           or row.get("truncated") is not False or row.get("redirected") is not False
+           or not _DIGEST.fullmatch(str(row.get("body_sha256", "")))
+           or not isinstance(row.get("json_array_lengths"), dict)
+           for row in normal):
+        return False
+    quote = rows["quote_error"]
+    if (quote.get("status") not in {400, 422, 500, 501, 502, 503, 504}
+            or quote.get("truncated") is not False or quote.get("redirected") is not False
+            or not _DIGEST.fullmatch(str(quote.get("body_sha256", "")))):
+        return False
+    hashes = {key: row["body_sha256"] for key, row in rows.items()}
+    if (hashes["baseline_first"] != hashes["baseline_last"]
+            or hashes["baseline_first"] != hashes["false_first"]
+            or hashes["false_first"] != hashes["false_second"]
+            or hashes["true_first"] != hashes["true_second"]
+            or hashes["true_first"] == hashes["baseline_first"]):
+        return False
+    for collection in ("results", "items", "records", "data"):
+        counts = [row.get("json_array_lengths", {}).get(collection) for row in normal]
+        if not all(type(count) is int and 0 <= count < 1000 for count in counts):
+            continue
+        baseline = rows["baseline_first"]["json_array_lengths"][collection]
+        if (rows["baseline_last"]["json_array_lengths"][collection] == baseline
+                and rows["false_first"]["json_array_lengths"][collection] == baseline
+                and rows["false_second"]["json_array_lengths"][collection] == baseline
+                and rows["escaped_quote"]["json_array_lengths"][collection] <= baseline
+                and rows["true_first"]["json_array_lengths"][collection] > baseline
+                and rows["true_second"]["json_array_lengths"][collection]
+                    == rows["true_first"]["json_array_lengths"][collection]):
+            return True
+    return False
+
+
 def string_sql_proof_valid(result: dict) -> bool:
     if result.get("operation") != "sqli_boolean_string" or result.get("proof_recipe") not in {
-        "string_or_boolean_v1", "string_and_boolean_v1",
+        "string_or_boolean_v1", "string_and_boolean_v1", "string_or_json_rows_v1",
     }:
         return False
     if (result.get("method") != "GET" or result.get("location") != "query"
@@ -230,6 +275,8 @@ def string_sql_proof_valid(result: dict) -> bool:
         return False
     if result["proof_recipe"] == "string_and_boolean_v1":
         return _and_sql_proof_valid(result)
+    if result["proof_recipe"] == "string_or_json_rows_v1":
+        return _json_rows_sql_proof_valid(result)
     checks = result.get("checks")
     if not isinstance(checks, dict) or not all(isinstance(checks.get(key), dict) for key in CHECK_ORDER):
         return False
@@ -276,6 +323,7 @@ def probe_string_boolean(
             "status", "content_type", "bytes_captured", "truncated", "body_sha256", "redirected",
         )}
         checks[key]["sql_error_family"] = response.get("sql_error_family", "")
+        checks[key]["json_array_lengths"] = response.get("json_array_lengths", {})
     parts = urlsplit(baseline)
     result = {
         "operation": "sqli_boolean_string", "proof_recipe": "string_or_boolean_v1",
@@ -285,6 +333,11 @@ def probe_string_boolean(
         "identity_transport": "named_identity_cookies_only", "checks": checks,
     }
     result["proof_confirmed"] = string_sql_proof_valid(result)
+    if not result["proof_confirmed"]:
+        result["proof_recipe"] = "string_or_json_rows_v1"
+        result["proof_confirmed"] = string_sql_proof_valid(result)
+        if not result["proof_confirmed"]:
+            result["proof_recipe"] = "string_or_boolean_v1"
     return result
 
 

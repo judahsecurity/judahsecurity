@@ -8701,7 +8701,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         checks = payload.get("checks")
                         _, _, expected_parameter = parameter.partition(":")
                         if payload.get("proof_recipe") in {
-                            "string_or_boolean_v1", "string_and_boolean_v1", "string_error_v1",
+                            "string_or_boolean_v1", "string_or_json_rows_v1",
+                            "string_and_boolean_v1", "string_error_v1",
                         }:
                             raise ValueError(
                                 "A negative Boolean recipe does not establish clean SQLi coverage"
