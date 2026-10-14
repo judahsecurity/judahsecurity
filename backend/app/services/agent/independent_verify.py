@@ -476,9 +476,23 @@ async def run_independent_verifiers(
                 )
                 live = _candidate(_brain(tools_manager), cand.id)
                 if live and live.status == "pending":
-                    # Narrative text cannot promote a candidate to confirmed.
-                    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
-                                  evidence="Verifier did not record a supported verdict")
+                    # Narrative text cannot promote a candidate to confirmed, but
+                    # preserve the verifier's own account so the drop reason is not
+                    # lost. A verifier that returns prose instead of a structured
+                    # record_verify_verdict(proof=...) call is the most common cause
+                    # of a real candidate being silently downgraded, so the operator
+                    # needs to see what it said rather than a generic placeholder.
+                    narrative = (report.summary or "").strip()
+                    if report.error:
+                        narrative = (narrative + f"\n[verifier error] {report.error}").strip()
+                    apply_verdict(
+                        tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                        evidence=(
+                            "Verifier did not record a structured verdict "
+                            "(record_verify_verdict with proof=...); narrative only."
+                        ),
+                        summary=(narrative or "Verifier did not record a supported verdict"),
+                    )
                     live = _candidate(_brain(tools_manager), cand.id)
             finally:
                 verification_run.reset(token)
@@ -614,12 +628,22 @@ def apply_verdict(
             )
             if cand.proof_run_id:
                 cell["proof_run_id"] = cand.proof_run_id
+            # Surface the specific "why" on the cell so the operator-facing
+            # parameter_test_funnel shows the real drop reason (e.g. "reflection
+            # is only a lead", "different nonces required") instead of only a
+            # generic verdict line. This changes no gate decision — it only keeps
+            # the diagnostic reason that already lives on candidate.verifier_summary.
+            detail = " ".join((cand.verifier_summary or "").split()).strip()
+            if len(detail) > 240:
+                detail = detail[:237] + "…"
             if verdict == "refuted":
-                cell.update(status="tested_clean", reason="Independent verification refuted the candidate")
+                reason = "Independent verification refuted the candidate"
+                cell.update(status="tested_clean", reason=(reason + ": " + detail) if detail else reason)
             elif verdict == "confirmed":
                 cell.update(status="in_focus", reason="Confirmed candidate awaits publication")
             else:
-                cell.update(status="inconclusive", reason="Independent verification was inconclusive")
+                reason = "Independent verification was inconclusive"
+                cell.update(status="inconclusive", reason=(reason + ": " + detail) if detail else reason)
     if cand.proof_escalation_id:
         from app.services.agent.signal_escalation import apply_verifier_result
 
