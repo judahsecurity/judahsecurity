@@ -1,5 +1,6 @@
 """Discovered inputs must become exact, durable specialist work items."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -11,10 +12,11 @@ from app.services.agent.coverage_cells import (
     release_coverage_cell_lease,
     seed_parameter_coverage_cells,
 )
-from app.services.agent.engagement_brain import EngagementBrain
+from app.services.agent.engagement_brain import EngagementBrain, engagement_brain_from_dict
 from app.services.agent.operation_directive import directives_from_hypotheses
 from app.services.agent.parameter_inventory import collect_parameter_inventory
 from app.services.agent.observed_input_batch import pending_first_pass_cells
+from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES, forced_next_step
 from app.services.agent.tools import ASMToolsManager
 
 
@@ -53,6 +55,79 @@ def test_inventory_keeps_endpoint_location_and_drops_values_and_offscope_inputs(
     assert next(r for r in rows if r["name"] == "author_id")["testable"]
     assert "private-value" not in str(rows)
     assert "sensitive-value" not in str(rows)
+
+
+@pytest.mark.asyncio
+async def test_discover_parameters_hands_observed_inputs_to_injection_queue(monkeypatch):
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, _url):
+            return SimpleNamespace(
+                url="https://app.test/catalog?category=&sort=private-value",
+                status_code=200,
+                text=(
+                    '<form action="/search" method="GET"><input name="searchTerm"></form>'
+                    '<form action="/comment" method="POST"><textarea name="message"></textarea>'
+                    '<input name="csrf_token"></form>'
+                    '<form action="https://evil.test/elsewhere" method="GET">'
+                    '<input name="offscope"></form>'
+                    '<script>const data = {"phantom": "guess"}</script>'
+                ),
+            )
+
+    monkeypatch.setattr("app.services.agent.tools.httpx.AsyncClient", lambda **_kwargs: Client())
+    manager = ASMToolsManager()
+    manager._capability_map = {
+        "target": "https://app.test", "scope": "https://app.test",
+        "parameter_inventory": [{"method": "GET", "path": "/catalog",
+                                 "name": "category", "location": "query",
+                                 "source": "javascript_static"}],
+    }
+    manager._engagement_brain = EngagementBrain(target="https://app.test").to_dict()
+
+    result = await manager._execute_impl("discover_parameters", {
+        "url": "https://app.test/catalog?category=&sort=private-value",
+    })
+    assert result["success"] is True
+    assert result["capability_map"] == manager._capability_map
+    assert json.loads(result["output"])["queued_inputs"] >= 4
+    rows = collect_parameter_inventory(manager._capability_map)
+    keys = {(row["method"], row["path"], row["location"], row["name"]) for row in rows}
+    assert {("GET", "/catalog", "query", "category"),
+            ("GET", "/catalog", "query", "sort"),
+            ("GET", "/search", "query", "searchTerm"),
+            ("POST", "/comment", "body_form", "message")} <= keys
+    assert next(row for row in rows if row["name"] == "category")["source"] == "page_url"
+    assert next(row for row in rows if row["name"] == "csrf_token")["testable"] is False
+    assert not any(row["name"] in {"offscope", "phantom"} for row in rows)
+    assert "private-value" not in str(result["capability_map"])
+
+    queued = pending_first_pass_cells(manager._engagement_brain, target="https://app.test")
+    assert {cell["parameter"] for cell in queued if cell["path"] == "/catalog"} >= {
+        "query:category", "query:sort",
+    }
+    state = {
+        "mode": "agent", "assessment_resume": True,
+        "target_info": {"primary_target": "https://app.test"},
+        "capability_map": manager._capability_map,
+        "engagement_brain": manager._engagement_brain,
+        "execution_trace": [],
+    }
+    assert forced_next_step(state)["tool_name"] == "probe_observed_input_batch"
+    leases = claim_coverage_cell_leases(
+        engagement_brain_from_dict(manager._engagement_brain), ["sqli", "xss"],
+        allowed_observation_sources=OBSERVED_INPUT_SOURCES,
+        allowed_test_types=frozenset({"sqli", "xss"}),
+    )
+    assert set(leases) == {"sqli", "xss"}
+    assert {lease.coverage_cell_id for lease in leases.values()} <= {
+        cell["id"] for cell in queued
+    }
 
 
 @pytest.mark.asyncio
