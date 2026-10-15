@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.services.agent import evograph
+from app.services.agent import orchestrator as orchestrator_module
 from app.services.agent.orchestrator import AgentOrchestrator
 
 
@@ -93,3 +94,69 @@ async def test_denied_pilot_action_stops_without_more_model_calls(error):
     assert result["task_complete"] is True
     assert result["execution_trace"] == [step]
     assert error in result["completion_reason"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [
+    ValueError({"message": "We were unable to start processing within the 900-second timeout limit."}),
+    TimeoutError(),
+])
+async def test_model_analysis_failure_keeps_tool_observation_and_continues(monkeypatch, failure):
+    timeouts = []
+
+    async def unavailable(*_args, **_kwargs):
+        timeouts.append(_kwargs.get("timeout"))
+        raise failure
+
+    recorded_findings = []
+    monkeypatch.setattr(orchestrator_module, "_ledger_llm_call", unavailable)
+    monkeypatch.setattr(evograph, "record_finding", lambda **kwargs: recorded_findings.append(kwargs))
+    orchestrator = AgentOrchestrator()
+    orchestrator._resolve_llm = lambda *_args: object()
+    orchestrator._emit_status = AsyncMock()
+    step = {
+        "tool_name": "execute_interceptor",
+        "tool_output": "13 named inputs observed",
+        "success": True,
+        "iteration": 2,
+    }
+
+    result = await orchestrator._analyze_output_node({
+        "mode": "agent", "execution_trace": [], "_current_step": step,
+        "current_phase": "informational", "session_id": "analysis-provider-timeout",
+        "target_info": {"primary_target": "https://ginandjuice.shop"},
+    })
+
+    assert result["execution_trace"] == [step]
+    assert result["_current_step"]["analysis_error"] == type(failure).__name__
+    assert result["_current_step"]["actionable_findings"] == []
+    assert result["target_info"]["primary_target"] == "https://ginandjuice.shop"
+    assert "task_complete" not in result
+    assert recorded_findings == []
+    assert timeouts == [orchestrator_module.settings.AGENT_ANALYZE_TIMEOUT_SECONDS]
+
+
+@pytest.mark.asyncio
+async def test_structured_browser_map_skips_advisory_model_call(monkeypatch):
+    async def unexpected_call(*_args, **_kwargs):
+        pytest.fail("structured browser results must not call the analysis model")
+
+    monkeypatch.setattr(orchestrator_module, "_ledger_llm_call", unexpected_call)
+    monkeypatch.setattr(evograph, "record_finding", lambda **_kwargs: None)
+    orchestrator = AgentOrchestrator()
+    orchestrator._emit_status = AsyncMock()
+    orchestrator._maybe_spawn_dir_brute = AsyncMock(return_value=False)
+    cmap = {"target": "https://ginandjuice.shop", "capabilities": [], "quality_score": 0}
+
+    result = await orchestrator._analyze_output_node({
+        "mode": "agent", "execution_trace": [],
+        "_current_step": {"tool_name": "execute_interceptor", "tool_output": "browser traffic",
+                          "success": True, "iteration": 2, "capability_map": cmap},
+        "current_phase": "informational", "session_id": "structured-browser-map",
+        "target_info": {"primary_target": "https://ginandjuice.shop"},
+    })
+
+    assert result["_current_step"]["analysis_skipped"] == "structured_capability_map"
+    assert result["execution_trace"][0]["tool_name"] == "execute_interceptor"
+    assert result["capability_map"]["target"] == "https://ginandjuice.shop"
+    assert "task_complete" not in result
