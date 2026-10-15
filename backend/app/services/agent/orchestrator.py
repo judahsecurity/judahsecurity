@@ -213,6 +213,47 @@ async def _ledger_llm_call(llm, messages, *, kind: str, target: str = "",
     return response
 
 
+_PLAN_UNAVAILABLE_REASON = "Planning model unavailable; assessment coverage remains incomplete"
+
+
+def _is_plan_provider_timeout(exc: Exception) -> bool:
+    """Recognize the provider's queued-request timeout without hiding code errors."""
+    if isinstance(exc, TimeoutError):
+        return True
+    message = str(exc).lower()
+    return isinstance(exc, ValueError) and (
+        "unable to start processing" in message
+        and "timeout" in message
+    )
+
+
+async def _bounded_planning_call(llm, messages, *, target: str, phase: str):
+    """Try one configured alternate when the preferred planner is queued."""
+    timeout = float(getattr(settings, "AGENT_PLAN_TIMEOUT_SECONDS", 90))
+    try:
+        response = await _ledger_llm_call(
+            llm, messages, kind="agent_plan", target=target, phase=phase,
+            timeout=timeout,
+        )
+        return response, llm
+    except Exception as exc:
+        if not _is_plan_provider_timeout(exc):
+            raise
+        fallbacks = list(getattr(llm, "fallbacks", ()) or ())
+        if not fallbacks:
+            raise
+        alternate = fallbacks[0]
+        response = await _ledger_llm_call(
+            alternate, messages, kind="agent_plan", target=target, phase=phase,
+            timeout=timeout,
+        )
+        from app.services.agent.model_router import note_llm_degraded
+        labels = list(getattr(llm, "fallback_labels", ()) or ())
+        label = labels[0] if labels else "configured alternate provider"
+        note_llm_degraded(f"Planner provider timed out. Continuing with {label}.")
+        return response, alternate
+
+
 class AgentOrchestrator:
     """
     ReAct-style agent orchestrator for security analysis.
@@ -1552,11 +1593,37 @@ class AgentOrchestrator:
             ]
 
             llm = self._resolve_llm(state, LLMTask.REASONING)
-            response = await _ledger_llm_call(
-                llm, messages, kind="agent_plan",
-                target=(state.get("target_info") or {}).get("primary_target") or "",
-                phase=phase,
-            )
+            try:
+                response, llm = await _bounded_planning_call(
+                    llm, messages,
+                    target=(state.get("target_info") or {}).get("primary_target") or "",
+                    phase=phase,
+                )
+            except Exception as exc:
+                if not _is_plan_provider_timeout(exc):
+                    raise
+                logger.warning(
+                    "[%s/%s] Planning model timed out; preserving partial assessment",
+                    user_id, session_id,
+                )
+                await self._emit_status({
+                    "type": "thinking",
+                    "iteration": iteration,
+                    "phase": phase,
+                    "thought": _PLAN_UNAVAILABLE_REASON,
+                    "action": "complete",
+                })
+                unavailable = {
+                    "task_complete": True,
+                    "completion_reason": _PLAN_UNAVAILABLE_REASON,
+                    "current_iteration": iteration,
+                    "execution_trace": merged_trace,
+                    "messages": [AIMessage(content=_PLAN_UNAVAILABLE_REASON)],
+                }
+                if recon_map_update is not None:
+                    unavailable["capability_map"] = recon_map_update
+                    unavailable["engagement_brain"] = recon_brain_update
+                return unavailable
             from app.services.agent.observability import model_id, record_llm_usage
             step_usage = record_llm_usage(
                 state, response, task=LLMTask.REASONING, model=model_id(llm),
@@ -2953,6 +3020,17 @@ class AgentOrchestrator:
             completion_reason = "Iteration budget reached; reporting partial coverage"
         completion_reason = completion_reason or "Session ended"
 
+        if completion_reason == _PLAN_UNAVAILABLE_REASON:
+            from app.services.agent.action_ledger import active_run_id, partial_report
+            return {
+                "messages": [AIMessage(content=partial_report(
+                    active_run_id.get(), completion_reason,
+                ))],
+                "task_complete": True,
+                "completion_reason": completion_reason,
+                "token_usage": state.get("token_usage"),
+            }
+
         report_prompt = FINAL_REPORT_PROMPT.format(
             objective=state.get("original_objective", ""),
             iteration_count=state.get("current_iteration", 0),
@@ -3385,6 +3463,7 @@ class AgentOrchestrator:
             completion_reason = str(final_state.get("completion_reason") or "")
             partial = any(phrase in completion_reason.lower() for phrase in (
                 "time budget", "spend cap", "iteration budget", "no schedulable hypotheses",
+                "planning model unavailable",
             )) or completion_reason.startswith("Pilot stopped after ")
             finish_run(run_id, "partial" if partial else ("completed" if response.task_complete else "paused"),
                        completion_reason)
@@ -3507,6 +3586,7 @@ class AgentOrchestrator:
             reason = str(final_state.get("completion_reason") or "")
             partial = any(phrase in reason.lower() for phrase in (
                 "time budget", "spend cap", "iteration budget", "no schedulable hypotheses",
+                "planning model unavailable",
             ))
             finish_run(run_id, "partial" if partial else ("completed" if result.task_complete else "paused"), reason)
             return result
@@ -3577,6 +3657,7 @@ class AgentOrchestrator:
             reason = str(final_state.get("completion_reason") or "")
             partial = any(phrase in reason.lower() for phrase in (
                 "time budget", "spend cap", "iteration budget", "no schedulable hypotheses",
+                "planning model unavailable",
             ))
             finish_run(run_id, "partial" if partial else ("completed" if result.task_complete else "paused"), reason)
             return result
