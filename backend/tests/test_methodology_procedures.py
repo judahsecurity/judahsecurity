@@ -2,9 +2,11 @@
 
 from app.services.agent.methodology_catalog import methodologies_from_capability_map
 from app.services.agent.methodology_procedures import (
+    applicable_topic_ids,
     format_procedures_for_prompt,
     list_procedure_ids,
     load_procedure,
+    topic_ids_for_test_type,
 )
 from app.services.agent.operation_directive import OperationDirective
 
@@ -46,6 +48,39 @@ def test_format_procedures_for_prompt():
     assert "PROCEDURE PACK" in text
     assert "csrf_state_changing" in text
     assert "api_idor_bola" in text
+
+
+def test_academy_topics_are_retrievable_and_routed_from_observations():
+    topic_ids = {item for item in list_procedure_ids() if item.startswith("web_")}
+    assert topic_ids == {
+        "web_sqli", "web_authentication", "web_path_traversal", "web_command_injection",
+        "web_business_logic", "web_information_disclosure", "web_access_control",
+        "web_file_upload", "web_race_conditions", "web_ssrf", "web_xxe", "web_nosql",
+        "web_api_testing", "web_cache_deception", "web_xss", "web_csrf", "web_cors",
+        "web_clickjacking", "web_dom_based", "web_websockets", "web_deserialization",
+        "web_llm_attacks", "web_graphql", "web_ssti", "web_cache_poisoning",
+        "web_host_header", "web_request_smuggling", "web_oauth", "web_jwt",
+        "web_prototype_pollution", "web_essential_skills",
+    }
+    for topic_id in topic_ids:
+        card = load_procedure(topic_id)
+        assert card["steps"] and card["pass_signals"] and card["kill_signals"]
+        assert card["references"][0].startswith("https://portswigger.net/web-security/")
+    assert "web_sqli" in topic_ids_for_test_type("sqli")
+    assert "web_xss" in topic_ids_for_test_type("dom_xss")
+    assert "web_cache_deception" in applicable_topic_ids({"headers": {"X-Cache": "HIT"}})
+    assert "web_llm_attacks" not in applicable_topic_ids({"path": "/products"})
+
+
+def test_assigned_coverage_class_includes_matching_topic_card():
+    directive = OperationDirective(
+        specialist="injection", epithet="Ezra", target="https://example.com",
+        goal="Test observed input", parameter_work={
+            "method": "GET", "path": "/search", "location": "query",
+            "name": "q", "test_type": "sqli", "identity": "anonymous",
+        },
+    )
+    assert "web_sqli" in directive.to_prompt_block()
 
 
 def test_directive_includes_procedure_pack():

@@ -1,0 +1,941 @@
+[
+  {
+    "id": "web_sqli",
+    "title": "SQL injection",
+    "summary": "Untrusted input can alter a database query when the application builds SQL text unsafely. Look for: general web input.",
+    "hunter": "injection",
+    "signals": [],
+    "test_types": [
+      "sqli"
+    ],
+    "methodology_ids": [
+      "param_injection",
+      "login_injection"
+    ],
+    "steps": [
+      "Replay an observed input with a stable baseline and one harmless syntax change.",
+      "Compare true and false conditions or repeated timing controls without reading unrelated data.",
+      "Confirm that the input changes database query behavior, then preserve the exact request and response evidence."
+    ],
+    "pass_signals": [
+      "Repeatable query-specific response or timing differential against controls."
+    ],
+    "kill_signals": [
+      "Only generic errors, WAF blocks, or unstable timing remain."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/sql-injection"
+    ]
+  },
+  {
+    "id": "web_authentication",
+    "title": "Authentication",
+    "summary": "A flaw in login, recovery, MFA, or session transitions can let a caller act as another user. Look for: login, session, password, mfa.",
+    "hunter": "auth",
+    "signals": [
+      "login",
+      "session",
+      "password",
+      "mfa"
+    ],
+    "test_types": [],
+    "methodology_ids": [
+      "auth_session_boundary",
+      "session_token_quality",
+      "password_reset_abuse"
+    ],
+    "steps": [
+      "Map login, recovery, MFA, and logout transitions using supplied test identities.",
+      "Compare unauthenticated, invalid-session, and valid-session behavior at each transition.",
+      "For a suspected bypass, repeat from a clean session and verify the resulting identity or protected action."
+    ],
+    "pass_signals": [
+      "A lower-trust session reaches a protected identity or action reproducibly."
+    ],
+    "kill_signals": [
+      "The server rejects the transition consistently or impact cannot be shown."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/authentication"
+    ]
+  },
+  {
+    "id": "web_path_traversal",
+    "title": "Path traversal",
+    "summary": "A file path escapes its intended directory when untrusted path segments are not constrained. Look for: file, path, download, template.",
+    "hunter": "injection",
+    "signals": [
+      "file",
+      "path",
+      "download",
+      "template"
+    ],
+    "test_types": [
+      "path_traversal"
+    ],
+    "methodology_ids": [
+      "file_path_traversal"
+    ],
+    "steps": [
+      "Locate an observed file or path parameter and establish the normal file response.",
+      "Change only that parameter to a test-owned canary path and compare with an invalid-path control.",
+      "Confirm a response from outside the intended directory without reading unrelated files."
+    ],
+    "pass_signals": [
+      "A test-owned out-of-directory file is returned."
+    ],
+    "kill_signals": [
+      "Only error text or an in-directory file is returned."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/file-path-traversal"
+    ]
+  },
+  {
+    "id": "web_command_injection",
+    "title": "OS command injection",
+    "summary": "Input reaches an operating-system command interpreter as syntax instead of data. Look for: command, ping, lookup, host.",
+    "hunter": "injection",
+    "signals": [
+      "command",
+      "ping",
+      "lookup",
+      "host"
+    ],
+    "test_types": [
+      "command_injection"
+    ],
+    "methodology_ids": [
+      "param_injection"
+    ],
+    "steps": [
+      "Identify an input plausibly passed to a server command and capture its normal result.",
+      "Use a benign output marker or bounded timing change with an inert control.",
+      "Repeat the effect and distinguish shell execution from validation or network latency."
+    ],
+    "pass_signals": [
+      "Unique marker or repeatable command-specific timing appears."
+    ],
+    "kill_signals": [
+      "A status change or generic timeout is the only signal."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/os-command-injection"
+    ]
+  },
+  {
+    "id": "web_business_logic",
+    "title": "Business logic",
+    "summary": "Valid operations combine in an unintended sequence that violates a business rule. Look for: checkout, order, payment, coupon, workflow.",
+    "hunter": "business_logic",
+    "signals": [
+      "checkout",
+      "order",
+      "payment",
+      "coupon",
+      "workflow"
+    ],
+    "test_types": [
+      "business_logic"
+    ],
+    "methodology_ids": [
+      "business_logic_workflow"
+    ],
+    "steps": [
+      "Write down the intended workflow and state invariants for a test-owned object.",
+      "Vary one allowed step, value, or sequence at a time using reversible test data.",
+      "Re-read independent state to prove an invariant was broken, then restore it."
+    ],
+    "pass_signals": [
+      "The server accepts a state transition or value forbidden by the intended workflow."
+    ],
+    "kill_signals": [
+      "Only client-side display changes or expected business rules are observed."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/logic-flaws"
+    ]
+  },
+  {
+    "id": "web_information_disclosure",
+    "title": "Information disclosure",
+    "summary": "A response or public artifact exposes information to an identity that should not receive it. Look for: general web input.",
+    "hunter": "injection",
+    "signals": [],
+    "test_types": [
+      "js_secret_review"
+    ],
+    "methodology_ids": [
+      "js_secrets_retire"
+    ],
+    "steps": [
+      "Review observed responses, public files, errors, JavaScript, and metadata for unintended sensitive content.",
+      "Verify the same content is reachable without a privileged session and is not deliberately public.",
+      "Record only a redacted sample and the exact exposure path."
+    ],
+    "pass_signals": [
+      "A sensitive value or internal detail is exposed to an unauthorized identity."
+    ],
+    "kill_signals": [
+      "The content is public by design or contains no sensitive information."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/information-disclosure"
+    ]
+  },
+  {
+    "id": "web_access_control",
+    "title": "Access control",
+    "summary": "A server operation trusts a caller for an object or function it should reject. Look for: id, tenant, admin, role.",
+    "hunter": "authz",
+    "signals": [
+      "id",
+      "tenant",
+      "admin",
+      "role"
+    ],
+    "test_types": [
+      "authz"
+    ],
+    "methodology_ids": [
+      "api_authz_generic",
+      "api_idor_bola",
+      "host_tenant_isolation"
+    ],
+    "steps": [
+      "Use supplied identities and test-owned objects to establish who should access each resource.",
+      "Replay the same request across anonymous, peer, role, and tenant contexts where available.",
+      "Compare response fields or independently observed state, not status codes alone."
+    ],
+    "pass_signals": [
+      "A lower-privilege identity sees or changes another identity's protected data."
+    ],
+    "kill_signals": [
+      "Every comparison is authorized or lacks a valid peer control."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/access-control"
+    ]
+  },
+  {
+    "id": "web_file_upload",
+    "title": "File upload",
+    "summary": "An uploaded file crosses a storage, execution, content-type, or ownership boundary. Look for: upload, attachment, multipart, import.",
+    "hunter": "file_upload",
+    "signals": [
+      "upload",
+      "attachment",
+      "multipart",
+      "import"
+    ],
+    "test_types": [
+      "file_upload"
+    ],
+    "methodology_ids": [
+      "unsafe_file_upload"
+    ],
+    "steps": [
+      "Upload a harmless test-owned file through the observed workflow and locate its retrieval URL.",
+      "Vary one filename, type, or storage property at a time within approved reversible writes.",
+      "Confirm unsafe interpretation or unauthorized access, then delete the test file and verify cleanup."
+    ],
+    "pass_signals": [
+      "The uploaded canary is executed, served with an unsafe active type, or crosses access boundaries."
+    ],
+    "kill_signals": [
+      "Only safe storage and authorized retrieval occur; cleanup fails or is unavailable."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/file-upload"
+    ]
+  },
+  {
+    "id": "web_race_conditions",
+    "title": "Race conditions",
+    "summary": "Concurrent requests can pass a check before either request commits the state change. Look for: redeem, transfer, checkout, inventory.",
+    "hunter": "race_condition",
+    "signals": [
+      "redeem",
+      "transfer",
+      "checkout",
+      "inventory"
+    ],
+    "test_types": [
+      "race_condition"
+    ],
+    "methodology_ids": [],
+    "steps": [
+      "Select a reversible test-owned transaction with a clear one-time invariant.",
+      "Compare sequential requests with a small, approved concurrent pair.",
+      "Read final state independently and reconcile every side effect before reporting."
+    ],
+    "pass_signals": [
+      "Concurrent requests violate an invariant that sequential controls preserve."
+    ],
+    "kill_signals": [
+      "No stable differential or reliable reset exists."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/race-conditions"
+    ]
+  },
+  {
+    "id": "web_ssrf",
+    "title": "Server-side request forgery",
+    "summary": "The server fetches an attacker-chosen destination across a network trust boundary. Look for: url, webhook, fetch, preview, proxy.",
+    "hunter": "ssrf",
+    "signals": [
+      "url",
+      "webhook",
+      "fetch",
+      "preview",
+      "proxy"
+    ],
+    "test_types": [
+      "ssrf"
+    ],
+    "methodology_ids": [
+      "ssrf_url_fetch"
+    ],
+    "steps": [
+      "Identify an observed URL-fetch feature and send a unique test-owned callback URL.",
+      "Correlate the callback to the request and distinguish server fetches from browser fetches.",
+      "Use only approved, bounded destinations for any follow-up access-control proof."
+    ],
+    "pass_signals": [
+      "The server makes a correlated fetch to the test-owned callback or returns an approved internal canary."
+    ],
+    "kill_signals": [
+      "No correlated server-side interaction appears after the callback window."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/ssrf"
+    ]
+  },
+  {
+    "id": "web_xxe",
+    "title": "XML external entity injection",
+    "summary": "An XML parser resolves attacker-controlled entities beyond the intended document. Look for: xml, soap, svg.",
+    "hunter": "injection",
+    "signals": [
+      "xml",
+      "soap",
+      "svg"
+    ],
+    "test_types": [
+      "xxe"
+    ],
+    "methodology_ids": [
+      "xxe_xml_parser"
+    ],
+    "steps": [
+      "Confirm the endpoint actually parses an observed XML body.",
+      "Compare a harmless local entity or approved callback marker with an inert XML control.",
+      "Prove parser expansion or correlated callback without retrieving sensitive files."
+    ],
+    "pass_signals": [
+      "The server expands the controlled entity or makes the uniquely correlated callback."
+    ],
+    "kill_signals": [
+      "The body is not parsed as XML or the effect cannot be separated from normal behavior."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/xxe"
+    ]
+  },
+  {
+    "id": "web_nosql",
+    "title": "NoSQL injection",
+    "summary": "A structured input changes NoSQL query operators or types rather than remaining a value. Look for: json, filter, search, mongo.",
+    "hunter": "injection",
+    "signals": [
+      "json",
+      "filter",
+      "search",
+      "mongo"
+    ],
+    "test_types": [
+      "nosql"
+    ],
+    "methodology_ids": [
+      "param_injection"
+    ],
+    "steps": [
+      "Find an observed structured filter or search input and capture normal behavior.",
+      "Change only its type or operator shape using a bounded false/true pair.",
+      "Verify backend query semantics changed while avoiding broad data retrieval."
+    ],
+    "pass_signals": [
+      "A repeatable operator-specific result differs from inert controls."
+    ],
+    "kill_signals": [
+      "Only schema rejection or a generic error appears."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/nosql-injection"
+    ]
+  },
+  {
+    "id": "web_api_testing",
+    "title": "API testing",
+    "summary": "API operations may expose objects, fields, or actions beyond the caller's role. Look for: api, openapi, swagger.",
+    "hunter": "authz",
+    "signals": [
+      "api",
+      "openapi",
+      "swagger"
+    ],
+    "test_types": [
+      "authz"
+    ],
+    "methodology_ids": [
+      "openapi_schema_authz",
+      "api_authz_generic"
+    ],
+    "steps": [
+      "Inventory documented and observed API operations, identities, and object IDs.",
+      "Compare method, object, and role behavior on test-owned records; include undocumented fields only when reversible.",
+      "Confirm any bypass through independent response or state evidence."
+    ],
+    "pass_signals": [
+      "An API operation violates its documented authorization or object boundary."
+    ],
+    "kill_signals": [
+      "An endpoint is merely discoverable or introspectable without impact."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/api-testing"
+    ]
+  },
+  {
+    "id": "web_cache_deception",
+    "title": "Web cache deception",
+    "summary": "A shared cache may store a private response under a URL mistaken for a public resource. Look for: cache, cdn, account, profile.",
+    "hunter": "cache_poison",
+    "signals": [
+      "cache",
+      "cdn",
+      "account",
+      "profile"
+    ],
+    "test_types": [],
+    "methodology_ids": [],
+    "steps": [
+      "Identify an authenticated GET response and evidence of a shared cache.",
+      "Use a unique test-owned URL variation that might be cached as a static resource.",
+      "Request it from a separate unauthenticated context and compare the body and cache headers."
+    ],
+    "pass_signals": [
+      "A private canary response is served from the shared cache to the wrong identity."
+    ],
+    "kill_signals": [
+      "No shared cache exists or the private response remains identity-bound."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/web-cache-deception"
+    ]
+  },
+  {
+    "id": "web_xss",
+    "title": "Cross-site scripting",
+    "summary": "Untrusted content is interpreted as script in another user's browser origin. Look for: general web input.",
+    "hunter": "xss",
+    "signals": [],
+    "test_types": [
+      "xss",
+      "stored_xss",
+      "dom_xss"
+    ],
+    "methodology_ids": [
+      "reflected_xss"
+    ],
+    "steps": [
+      "Trace an observed input through its HTML, attribute, script, or DOM output context.",
+      "Use a unique harmless browser marker matched to that context.",
+      "Confirm execution in the target origin; for stored cases, re-read with a second supplied identity and clean up."
+    ],
+    "pass_signals": [
+      "A fresh browser execution marker fires in the target origin."
+    ],
+    "kill_signals": [
+      "Only reflection or static markup appears without executable context."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/cross-site-scripting"
+    ]
+  },
+  {
+    "id": "web_csrf",
+    "title": "Cross-site request forgery",
+    "summary": "A browser can send an authenticated state-changing request from an attacker-controlled origin. Look for: post, account, settings, payment.",
+    "hunter": "csrf",
+    "signals": [
+      "post",
+      "account",
+      "settings",
+      "payment"
+    ],
+    "test_types": [
+      "csrf"
+    ],
+    "methodology_ids": [
+      "csrf_state_changing"
+    ],
+    "steps": [
+      "Select an approved reversible state-changing action in a cookie-authenticated session.",
+      "Compare valid, missing-token, and cross-origin requests while preserving browser cookie behavior.",
+      "Confirm the state change from an independent read and restore it."
+    ],
+    "pass_signals": [
+      "A cross-origin request changes protected state without the victim's intent."
+    ],
+    "kill_signals": [
+      "The browser omits credentials or server-side origin/token checks reject the action."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/csrf"
+    ]
+  },
+  {
+    "id": "web_cors",
+    "title": "Cross-origin resource sharing",
+    "summary": "A cross-origin page can read protected responses when the server grants excessive origin access. Look for: cors, origin, api.",
+    "hunter": "cors",
+    "signals": [
+      "cors",
+      "origin",
+      "api"
+    ],
+    "test_types": [
+      "cors"
+    ],
+    "methodology_ids": [
+      "cors_acao_credentials"
+    ],
+    "steps": [
+      "Send one untrusted Origin to an observed endpoint returning test-owned sensitive data.",
+      "Check allow-origin, allow-credentials, Vary, and actual browser credential behavior.",
+      "Confirm a cross-origin browser can read the protected response."
+    ],
+    "pass_signals": [
+      "An untrusted origin reads credentialed protected data."
+    ],
+    "kill_signals": [
+      "Headers alone suggest misconfiguration but browser access to protected data fails."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/cors"
+    ]
+  },
+  {
+    "id": "web_clickjacking",
+    "title": "Clickjacking",
+    "summary": "An attacker-controlled page can frame a sensitive action and misdirect a user's click. Look for: login, account, settings, admin.",
+    "hunter": "auth",
+    "signals": [
+      "login",
+      "account",
+      "settings",
+      "admin"
+    ],
+    "test_types": [],
+    "methodology_ids": [],
+    "steps": [
+      "Identify a sensitive, user-initiated action exposed in a browser page.",
+      "Frame that exact page from a controlled origin and observe actual frame and cookie behavior.",
+      "Demonstrate a harmless test-owned action can be induced, then restore state."
+    ],
+    "pass_signals": [
+      "The sensitive action is operable in an attacker-controlled frame."
+    ],
+    "kill_signals": [
+      "Framing is blocked or only non-sensitive content can be clicked."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/clickjacking"
+    ]
+  },
+  {
+    "id": "web_dom_based",
+    "title": "DOM-based vulnerabilities",
+    "summary": "Browser-side code carries untrusted data from a source into a security-sensitive sink. Look for: javascript, location, postmessage, hash.",
+    "hunter": "xss",
+    "signals": [
+      "javascript",
+      "location",
+      "postmessage",
+      "hash"
+    ],
+    "test_types": [
+      "dom_xss",
+      "dom_open_redirect",
+      "dom_link_manipulation",
+      "dom_data_manipulation"
+    ],
+    "methodology_ids": [],
+    "steps": [
+      "Trace attacker-controlled browser sources to a concrete DOM, navigation, or request sink.",
+      "Exercise one in-scope source with a harmless marker and inert control.",
+      "Confirm a security-relevant DOM or request effect in the browser."
+    ],
+    "pass_signals": [
+      "Observed source-to-sink flow causes a controlled security-relevant effect."
+    ],
+    "kill_signals": [
+      "Static source and sink strings have no executable path between them."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/dom-based"
+    ]
+  },
+  {
+    "id": "web_websockets",
+    "title": "WebSockets",
+    "summary": "A WebSocket handshake or message handler may omit origin or per-message authorization checks. Look for: websocket, wss, socket.io.",
+    "hunter": "websocket",
+    "signals": [
+      "websocket",
+      "wss",
+      "socket.io"
+    ],
+    "test_types": [],
+    "methodology_ids": [
+      "realtime_channel_auth",
+      "socketio_unauth_stream_idor"
+    ],
+    "steps": [
+      "Capture an observed handshake and message flow using supplied identities.",
+      "Compare Origin, session, channel subscription, and per-message authorization one variable at a time.",
+      "Prove unauthorized receipt or state change with a test-owned message."
+    ],
+    "pass_signals": [
+      "An unauthorized client receives or changes a protected channel."
+    ],
+    "kill_signals": [
+      "The handshake succeeds but protected messages remain authorized."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/websockets"
+    ]
+  },
+  {
+    "id": "web_deserialization",
+    "title": "Insecure deserialization",
+    "summary": "The server reconstructs attacker-controlled objects with unsafe type or behavior assumptions. Look for: serialized, pickle, viewstate, object.",
+    "hunter": "deserialization",
+    "signals": [
+      "serialized",
+      "pickle",
+      "viewstate",
+      "object"
+    ],
+    "test_types": [],
+    "methodology_ids": [],
+    "steps": [
+      "Identify a serialized value the server actually accepts and establish a normal response.",
+      "Use a benign type or integrity marker in an isolated or explicitly approved test path.",
+      "Confirm server-side object handling differs from a malformed control without executing commands."
+    ],
+    "pass_signals": [
+      "A controlled object property reaches an unintended server-side behavior."
+    ],
+    "kill_signals": [
+      "The value is rejected before deserialization or only a parser error occurs."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/deserialization"
+    ]
+  },
+  {
+    "id": "web_llm_attacks",
+    "title": "Web LLM attacks",
+    "summary": "Lower-trust text can be mistaken for instructions and drive an agent across a tool or data boundary. Look for: chat, assistant, mcp, tool.",
+    "hunter": "llm_ai",
+    "signals": [
+      "chat",
+      "assistant",
+      "mcp",
+      "tool"
+    ],
+    "test_types": [
+      "llm_ai"
+    ],
+    "methodology_ids": [
+      "agent_tool_enumeration"
+    ],
+    "steps": [
+      "Map trusted instructions, retrieved content, user input, and available agent tools.",
+      "Place a harmless conflicting instruction in a lower-trust, test-owned surface.",
+      "Check whether the agent crosses a tool, data, or instruction boundary using a test canary."
+    ],
+    "pass_signals": [
+      "The agent performs a disallowed test-owned action or reveals a protected canary due to lower-trust content."
+    ],
+    "kill_signals": [
+      "The model merely repeats the text or refuses the boundary crossing."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/llm-attacks"
+    ]
+  },
+  {
+    "id": "web_graphql",
+    "title": "GraphQL API vulnerabilities",
+    "summary": "GraphQL resolvers may apply different authorization rules to fields, objects, and mutations. Look for: graphql.",
+    "hunter": "graphql",
+    "signals": [
+      "graphql"
+    ],
+    "test_types": [
+      "graphql"
+    ],
+    "methodology_ids": [
+      "graphql_authz"
+    ],
+    "steps": [
+      "Inventory observed operations, arguments, mutations, and authorization context.",
+      "Compare a test-owned object query across peer identities and one bounded alias or batching case.",
+      "Verify a protected field or mutation succeeds outside its intended role."
+    ],
+    "pass_signals": [
+      "A lower-privilege identity obtains a protected field or changes protected state."
+    ],
+    "kill_signals": [
+      "Introspection alone or parser behavior is the only finding."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/graphql"
+    ]
+  },
+  {
+    "id": "web_ssti",
+    "title": "Server-side template injection",
+    "summary": "Untrusted text is evaluated by a server template engine rather than rendered literally. Look for: template, render, theme.",
+    "hunter": "injection",
+    "signals": [
+      "template",
+      "render",
+      "theme"
+    ],
+    "test_types": [
+      "ssti"
+    ],
+    "methodology_ids": [
+      "param_injection"
+    ],
+    "steps": [
+      "Identify an observed input rendered by a server template and establish literal output.",
+      "Compare a harmless expression with an escaped or inert control.",
+      "Prove evaluation by the server without reading files or invoking commands."
+    ],
+    "pass_signals": [
+      "A unique arithmetic or string expression is evaluated server-side."
+    ],
+    "kill_signals": [
+      "The expression is reflected literally or evaluated only in the browser."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/server-side-template-injection"
+    ]
+  },
+  {
+    "id": "web_cache_poisoning",
+    "title": "Web cache poisoning",
+    "summary": "An unkeyed input can change a shared cached response served to other clients. Look for: cache, cdn, x-cache.",
+    "hunter": "cache_poison",
+    "signals": [
+      "cache",
+      "cdn",
+      "x-cache"
+    ],
+    "test_types": [],
+    "methodology_ids": [],
+    "steps": [
+      "Confirm a shared cache and establish its cache key using harmless canaries.",
+      "Vary one unkeyed input on a test-owned URL and wait for the response to be cached.",
+      "Request from a second client to verify the modified response is served across identities."
+    ],
+    "pass_signals": [
+      "The shared cache serves attacker-controlled content to another client."
+    ],
+    "kill_signals": [
+      "The response is uncacheable or the variant remains isolated by cache key."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/web-cache-poisoning"
+    ]
+  },
+  {
+    "id": "web_host_header",
+    "title": "HTTP Host header attacks",
+    "summary": "A proxy or application may trust a caller-supplied host when generating security-sensitive URLs or context. Look for: host, password, absolute, proxy.",
+    "hunter": "host_header",
+    "signals": [
+      "host",
+      "password",
+      "absolute",
+      "proxy"
+    ],
+    "test_types": [],
+    "methodology_ids": [
+      "host_tenant_isolation",
+      "password_reset_abuse"
+    ],
+    "steps": [
+      "Establish the normal origin and any generated absolute URL on a test-owned flow.",
+      "Change Host or forwarded-host inputs one at a time with an approved canary domain.",
+      "Confirm a security-relevant generated URL, tenant context, or cached response changes."
+    ],
+    "pass_signals": [
+      "The changed host crosses a reset-link, tenant, or cache trust boundary."
+    ],
+    "kill_signals": [
+      "Only harmless reflection or virtual-host rejection occurs."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/host-header"
+    ]
+  },
+  {
+    "id": "web_request_smuggling",
+    "title": "HTTP request smuggling",
+    "summary": "Front-end and back-end parsers may disagree about HTTP request boundaries. Look for: reverse proxy, transfer-encoding, http/1.1.",
+    "hunter": "http_smuggling",
+    "signals": [
+      "reverse proxy",
+      "transfer-encoding",
+      "http/1.1"
+    ],
+    "test_types": [],
+    "methodology_ids": [],
+    "steps": [
+      "Confirm front-end/back-end HTTP parsing conditions in an isolated benchmark or explicitly approved path.",
+      "Use a bounded harmless desync marker and compare repeated controls.",
+      "Stop on shared-user effects; do not poison other users' requests."
+    ],
+    "pass_signals": [
+      "Repeatable parser desynchronization is demonstrated with a harmless controlled request."
+    ],
+    "kill_signals": [
+      "Only malformed-request rejection or a single timing anomaly appears."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/request-smuggling"
+    ]
+  },
+  {
+    "id": "web_oauth",
+    "title": "OAuth authentication",
+    "summary": "OAuth flow parameters or account binding may fail to preserve the initiating user's intent. Look for: oauth, oidc, redirect_uri, pkce.",
+    "hunter": "oauth",
+    "signals": [
+      "oauth",
+      "oidc",
+      "redirect_uri",
+      "pkce"
+    ],
+    "test_types": [
+      "oauth"
+    ],
+    "methodology_ids": [
+      "oauth_sso_misconfig"
+    ],
+    "steps": [
+      "Map the observed authorization flow, redirect allowlist, state, PKCE, and account-linking path.",
+      "Compare one parameter at a time using supplied test accounts and controlled redirects.",
+      "Confirm token/code acceptance or account binding in the wrong security context."
+    ],
+    "pass_signals": [
+      "A controlled flow binds or authorizes the wrong account or redirect."
+    ],
+    "kill_signals": [
+      "The provider rejects the altered flow or no sensitive token/action crosses the boundary."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/oauth"
+    ]
+  },
+  {
+    "id": "web_jwt",
+    "title": "JWT attacks",
+    "summary": "A server may accept tampered token claims when signature or claim validation is weak. Look for: jwt, bearer, token.",
+    "hunter": "auth",
+    "signals": [
+      "jwt",
+      "bearer",
+      "token"
+    ],
+    "test_types": [],
+    "methodology_ids": [
+      "auth_header_bypass",
+      "session_token_quality"
+    ],
+    "steps": [
+      "Identify a JWT actually used by the application and decode its non-secret header and claims.",
+      "Compare an invalid signature, changed claim, and normal token in a bounded test-owned request.",
+      "Verify whether the server accepts a forged identity or privilege change."
+    ],
+    "pass_signals": [
+      "The server accepts an invalid or attacker-controlled token as a protected identity."
+    ],
+    "kill_signals": [
+      "Only client-side decoding or parser errors are observed."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/jwt"
+    ]
+  },
+  {
+    "id": "web_prototype_pollution",
+    "title": "Prototype pollution",
+    "summary": "A merge operation may let input modify properties inherited by unrelated objects. Look for: json, javascript, merge.",
+    "hunter": "injection",
+    "signals": [
+      "json",
+      "javascript",
+      "merge"
+    ],
+    "test_types": [
+      "prototype_pollution",
+      "client_prototype_pollution"
+    ],
+    "methodology_ids": [],
+    "steps": [
+      "Locate an observed deep merge, parser, or object assignment boundary.",
+      "Use a non-persistent canary property in a test-owned object and an inert key control.",
+      "Confirm the property reaches an unrelated object or a security-sensitive sink, then reset state."
+    ],
+    "pass_signals": [
+      "A controlled property crosses object boundaries and affects behavior."
+    ],
+    "kill_signals": [
+      "Only the submitted object contains the canary or no reachable sink exists."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/prototype-pollution"
+    ]
+  },
+  {
+    "id": "web_essential_skills",
+    "title": "Essential web testing skills",
+    "summary": "Reliable tests isolate one changed variable and preserve a baseline, evidence, and cleanup record. Look for: general web input.",
+    "hunter": "all",
+    "signals": [],
+    "test_types": [],
+    "methodology_ids": [],
+    "steps": [
+      "Record scope, identities, and a baseline request before any mutation.",
+      "Change one variable at a time and compare meaningful response fields or state.",
+      "Label each applicable topic tested, inconclusive, blocked, or untested; cite evidence and clean up test data."
+    ],
+    "pass_signals": [
+      "A reproducible, authorized observation supports the conclusion."
+    ],
+    "kill_signals": [
+      "A guess, status code, or unexecuted checklist is the only support."
+    ],
+    "references": [
+      "https://portswigger.net/web-security/essential-skills"
+    ]
+  }
+]

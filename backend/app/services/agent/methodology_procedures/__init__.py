@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Sequence
 logger = logging.getLogger(__name__)
 
 _PACKS_DIR = os.path.join(os.path.dirname(__file__), "packs")
+_WEB_TOPICS_PATH = os.path.join(os.path.dirname(__file__), "web_security_topics.json")
 
 # Soft cap so specialists don't drown in procedure text
 _MAX_PACKS_IN_PROMPT = 3
@@ -33,18 +34,53 @@ def packs_dir() -> str:
 @lru_cache(maxsize=1)
 def list_procedure_ids() -> tuple:
     """Return sorted methodology ids that have a procedure pack on disk."""
-    if not os.path.isdir(_PACKS_DIR):
-        return tuple()
     ids = []
-    for name in os.listdir(_PACKS_DIR):
-        if name.endswith(".json") and not name.startswith("_"):
-            ids.append(name[:-5])
+    if os.path.isdir(_PACKS_DIR):
+        for name in os.listdir(_PACKS_DIR):
+            if name.endswith(".json") and not name.startswith("_"):
+                ids.append(name[:-5])
+    ids.extend(_web_topic_catalog())
     return tuple(sorted(ids))
+
+
+@lru_cache(maxsize=1)
+def _web_topic_catalog() -> Dict[str, Dict[str, Any]]:
+    with open(_WEB_TOPICS_PATH, encoding="utf-8") as fh:
+        rows = json.load(fh)
+    return {row["id"]: row for row in rows}
+
+
+def topic_ids_for_test_type(test_type: str) -> tuple[str, ...]:
+    """Find Web Security Academy cards for an observed coverage class."""
+    kind = (test_type or "").strip().lower()
+    return tuple(
+        topic_id for topic_id, row in _web_topic_catalog().items()
+        if kind and kind in row.get("test_types", ())
+    )
+
+
+def topic_ids_for_methodologies(methodology_ids: Sequence[str]) -> tuple[str, ...]:
+    methods = set(methodology_ids)
+    return tuple(
+        topic_id for topic_id, row in _web_topic_catalog().items()
+        if methods.intersection(row.get("methodology_ids", ()))
+    )
+
+
+def applicable_topic_ids(observations: Any) -> tuple[str, ...]:
+    """Suggest topic cards from observations without claiming they were tested."""
+    observed = json.dumps(observations, default=str).lower()
+    return tuple(
+        topic_id for topic_id, row in _web_topic_catalog().items()
+        if not row.get("signals")
+        or any(cue in observed for cue in row["signals"])
+    )
 
 
 def clear_procedure_cache() -> None:
     list_procedure_ids.cache_clear()
     load_procedure.cache_clear()
+    _web_topic_catalog.cache_clear()
 
 
 @lru_cache(maxsize=128)
@@ -53,6 +89,9 @@ def load_procedure(methodology_id: str) -> Optional[Dict[str, Any]]:
     mid = (methodology_id or "").strip()
     if not mid or "/" in mid or ".." in mid:
         return None
+    topic = _web_topic_catalog().get(mid)
+    if topic is not None:
+        return topic
     path = os.path.join(_PACKS_DIR, f"{mid}.json")
     if not os.path.isfile(path):
         return None
