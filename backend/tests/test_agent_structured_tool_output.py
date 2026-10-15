@@ -160,3 +160,80 @@ async def test_structured_browser_map_skips_advisory_model_call(monkeypatch):
     assert result["execution_trace"][0]["tool_name"] == "execute_interceptor"
     assert result["capability_map"]["target"] == "https://ginandjuice.shop"
     assert "task_complete" not in result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [
+    TimeoutError(),
+    ValueError({"message": "We were unable to start processing your request within the 900-second timeout limit."}),
+])
+async def test_planner_provider_timeout_reports_partial_coverage(monkeypatch, failure):
+    from app.services.agent import action_ledger, recon_workers, tester_loop
+
+    seen = []
+
+    async def unavailable(*_args, **kwargs):
+        seen.append(kwargs)
+        raise failure
+
+    async def no_recon(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(orchestrator_module, "_ledger_llm_call", unavailable)
+    monkeypatch.setattr(recon_workers, "drain_completed", no_recon)
+    monkeypatch.setattr(tester_loop, "forced_next_step", lambda _state: None)
+    monkeypatch.setattr(action_ledger, "partial_report", lambda _run_id, reason: f"Partial: {reason}")
+    orchestrator = AgentOrchestrator()
+    orchestrator._resolve_llm = lambda *_args: object()
+    orchestrator._emit_status = AsyncMock()
+    state = {
+        "user_id": "1", "session_id": "planner-provider-timeout",
+        "mode": "agent", "current_iteration": 4,
+        "current_phase": "informational", "execution_trace": [],
+        "target_info": {"primary_target": "https://ginandjuice.shop"},
+    }
+
+    result = await orchestrator._think_node(state)
+
+    assert result["task_complete"] is True
+    assert "Planning model unavailable" in result["completion_reason"]
+    assert result["execution_trace"] == []
+    assert seen[0]["timeout"] == orchestrator_module.settings.AGENT_PLAN_TIMEOUT_SECONDS
+    assert orchestrator._route_after_think(result) == "generate_response"
+    report = await orchestrator._generate_response_node(result)
+    assert report["messages"][0].content.startswith("Partial: Planning model unavailable")
+    assert len(seen) == 1
+
+
+def test_planner_timeout_classifier_does_not_hide_code_errors():
+    assert not orchestrator_module._is_plan_provider_timeout(ValueError("invalid tool args"))
+
+
+@pytest.mark.asyncio
+async def test_planner_tries_configured_alternate_after_queue_timeout(monkeypatch):
+    from app.services.agent.model_router import consume_llm_degrade_notice
+
+    alternate = object()
+    preferred = SimpleNamespace(fallbacks=[alternate], fallback_labels=["alternate:model"])
+    attempted = []
+
+    async def planning_call(model, _messages, **kwargs):
+        attempted.append((model, kwargs["timeout"]))
+        if model is preferred:
+            raise TimeoutError()
+        return "planned"
+
+    monkeypatch.setattr(orchestrator_module, "_ledger_llm_call", planning_call)
+    consume_llm_degrade_notice()
+
+    response, chosen = await orchestrator_module._bounded_planning_call(
+        preferred, [], target="https://ginandjuice.shop", phase="informational",
+    )
+
+    assert response == "planned"
+    assert chosen is alternate
+    assert attempted == [
+        (preferred, orchestrator_module.settings.AGENT_PLAN_TIMEOUT_SECONDS),
+        (alternate, orchestrator_module.settings.AGENT_PLAN_TIMEOUT_SECONDS),
+    ]
+    assert "alternate:model" in (consume_llm_degrade_notice() or "")
