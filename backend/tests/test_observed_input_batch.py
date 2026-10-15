@@ -4,6 +4,8 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from app.services.agent.assessment_scope import prepare_browser_scope
 from app.services.agent.coverage_cells import (
     claim_coverage_cell_leases, parameter_test_funnel,
@@ -14,6 +16,7 @@ from app.services.agent.observed_input_batch import (
     pending_first_pass_cells, run_observed_input_batch,
 )
 from app.services.agent.prompts import is_tool_allowed_in_phase
+from app.services.agent.tester_loop import forced_next_step, tester_loop_progress as loop_progress
 
 
 def _brain():
@@ -180,6 +183,7 @@ def test_positive_first_pass_submits_candidate_for_fresh_verification():
             self._engagement_brain["candidates"] = [{
                 "id": "candidate-1", "status": "pending",
                 "coverage_cell_id": kwargs["coverage_cell_id"],
+                "evidence_ids": kwargs["evidence_ids"],
             }]
             return "truncated output is allowed"
 
@@ -237,6 +241,140 @@ def test_cancelled_probe_releases_lease_for_fresh_retry():
     assert len(pending_first_pass_cells(manager._engagement_brain)) == 4
 
 
+def test_stale_lease_is_reclaimed_once_before_recording_probe_receipt():
+    class Manager:
+        def __init__(self):
+            brain = EngagementBrain(target="https://app.test")
+            seed_parameter_coverage_cells(brain, [{
+                "method": "GET", "host": "app.test", "path": "/catalog",
+                "name": "category", "location": "query", "identity": "anonymous",
+                "source": "browser_link", "testable": True,
+            }])
+            for cell in brain.coverage_cells:
+                if cell["test_type"] == "xss":
+                    cell["status"] = "skipped"
+            self._engagement_brain = brain.to_dict()
+            self._capability_map = {"target": "https://app.test"}
+            self.lease_ids = []
+
+        async def scoped_input_probe_assigned(self, coverage_lease_id, **_kwargs):
+            self.lease_ids.append(coverage_lease_id)
+            if len(self.lease_ids) == 1:
+                return {"success": False, "error": "invalid_coverage_lease",
+                        "reason": "lease_expired"}
+            return {"success": True, "evidence_id": "boolean-receipt",
+                    "proof_confirmed": False,
+                    "probe_result": {"proof_recipe": "string_and_boolean_v1"}}
+
+    manager = Manager()
+    result = asyncio.run(run_observed_input_batch(manager, max_checks=1))
+    assert len(manager.lease_ids) == 2
+    assert manager.lease_ids[0] != manager.lease_ids[1]
+    assert result["results"][0]["outcome"] == "inconclusive"
+    assert result["results"][0]["evidence_id"] == "boolean-receipt"
+    assert result["handoff_failures"] == 0
+    assert not any(cell.get("lease_id") for cell in manager._engagement_brain["coverage_cells"])
+
+
+def test_unrepaired_mapping_handoff_is_visible_and_not_counted_as_a_probe():
+    class Manager:
+        def __init__(self):
+            self._engagement_brain = _brain().to_dict()
+            self._capability_map = {"target": "https://app.test"}
+            self.calls = 0
+
+        async def scoped_input_probe_assigned(self, **_kwargs):
+            self.calls += 1
+            return {"success": False, "error": "invalid_coverage_lease",
+                    "reason": "not_observed_input"}
+
+    manager = Manager()
+    result = asyncio.run(run_observed_input_batch(manager, max_checks=1))
+    assert manager.calls == 1
+    assert result["handoff_failures"] == 1
+    assert result["results"][0]["handoff_failed"] is True
+    assert result["results"][0]["evidence_id"] == ""
+    cell = next(row for row in manager._engagement_brain["coverage_cells"]
+                if row["id"] == result["results"][0]["coverage_cell_id"])
+    assert cell["first_pass_outcome"] == "unattempted"
+    assert cell["first_pass_handoff_error"] == "invalid_coverage_lease: not_observed_input"
+    progress = loop_progress({
+        "mode": "agent", "assessment_resume": True,
+        "target_info": {"primary_target": "https://app.test"},
+        "engagement_brain": manager._engagement_brain,
+        "execution_trace": [],
+    })
+    assert any(item["id"] == "first_pass_handoff" for item in progress["missing"])
+    assert progress["ready_to_complete"] is False
+
+
+def test_stale_handoff_does_not_overwrite_another_executors_lease():
+    class Manager:
+        def __init__(self):
+            self._engagement_brain = _brain().to_dict()
+            self._capability_map = {"target": "https://app.test"}
+
+        async def scoped_input_probe_assigned(self, coverage_cell_id, **_kwargs):
+            current = next(row for row in self._engagement_brain["coverage_cells"]
+                           if row["id"] == coverage_cell_id)
+            current["lease_id"] = "another-executor"
+            return {"success": False, "error": "invalid_coverage_lease",
+                    "reason": "lease_mismatch"}
+
+    manager = Manager()
+    result = asyncio.run(run_observed_input_batch(manager, max_checks=1))
+    assert result["handoff_failures"] == 1
+    cell = next(row for row in manager._engagement_brain["coverage_cells"]
+                if row["id"] == result["results"][0]["coverage_cell_id"])
+    assert cell["lease_id"] == "another-executor"
+    assert not cell.get("first_pass_outcome")
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_positive_probe_survives_failed_candidate_submission_for_scheduler_retry(raises):
+    class Manager:
+        def __init__(self):
+            brain = EngagementBrain(target="https://app.test")
+            seed_parameter_coverage_cells(brain, [{
+                "method": "GET", "host": "app.test", "path": "/catalog",
+                "name": "category", "location": "query", "identity": "anonymous",
+                "source": "browser_link", "testable": True,
+            }])
+            for cell in brain.coverage_cells:
+                if cell["test_type"] == "xss":
+                    cell["status"] = "skipped"
+            self._engagement_brain = brain.to_dict()
+            self._capability_map = {"target": "https://app.test"}
+
+        async def scoped_input_probe_assigned(self, **_kwargs):
+            return {"success": True, "evidence_id": "positive-sql-receipt",
+                    "proof_confirmed": True}
+
+        async def submit_finding_candidate(self, **_kwargs):
+            if raises:
+                raise RuntimeError("temporary_candidate_failure")
+            return {"success": False, "error": "temporary_candidate_failure"}
+
+    manager = Manager()
+    result = asyncio.run(run_observed_input_batch(manager, max_checks=1))
+    assert result["handoff_failures"] == 0
+    assert result["candidate_handoffs_pending"] == 1
+    cell = next(row for row in manager._engagement_brain["coverage_cells"]
+                if row["test_type"] == "sqli")
+    assert cell["first_pass_outcome"] == "proof_signal"
+    assert cell["first_pass_evidence_id"] == "positive-sql-receipt"
+    state = {
+        "mode": "agent", "assessment_resume": True,
+        "target_info": {"primary_target": "https://app.test"},
+        "capability_map": manager._capability_map,
+        "engagement_brain": manager._engagement_brain,
+        "execution_trace": [],
+    }
+    next_step = forced_next_step(state)
+    assert next_step["tool_name"] == "submit_finding_candidate"
+    assert next_step["tool_args"]["evidence_ids"] == ["positive-sql-receipt"]
+
+
 def test_xss_first_pass_uses_reflection_context_before_proof_candidate():
     class Manager:
         def __init__(self):
@@ -264,6 +402,7 @@ def test_xss_first_pass_uses_reflection_context_before_proof_candidate():
             self._engagement_brain["candidates"] = [{
                 "id": "xss-candidate", "status": "pending",
                 "coverage_cell_id": kwargs["coverage_cell_id"],
+                "evidence_ids": kwargs["evidence_ids"],
             }]
             return "candidate queued"
 
