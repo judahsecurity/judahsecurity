@@ -518,6 +518,7 @@ def seed_parameter_coverage_cells(brain: Any, inventory: Iterable[dict[str, Any]
                     prior.pop("first_pass_outcome", None)
                     prior.pop("first_pass_reason", None)
                     prior.pop("first_pass_at", None)
+                    prior.pop("first_pass_handoff_error", None)
                     if prior["status"] == "inconclusive":
                         prior["status"] = "untested"
             if cell["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:

@@ -1,6 +1,7 @@
 """Curious-tester loop: crawl, dir brute, params, fireteam — not fingerprint-and-stop."""
 
 import json
+import pytest
 
 from app.services.agent.assessment_kickoff import root_needs_dir_brute
 from app.services.agent.tester_loop import (
@@ -486,6 +487,74 @@ def test_pending_proof_is_verified_before_next_input_batch():
         "tool_args": first["tool_args"],
     })
     assert forced_next_step(state)["tool_name"] != "independent_verify"
+
+
+@pytest.mark.parametrize("specialist,vulnerability_class", [
+    ("sqli", "sql_injection"), ("xss", "xss"),
+])
+def test_positive_first_pass_receipt_is_handed_to_candidate_before_more_work(
+    specialist, vulnerability_class,
+):
+    target = "https://app.example.com"
+    evidence_id = specialist + "-proof-receipt"
+    cell = {
+        "id": "cov-proof", "source": "parameter_inventory",
+        "host": "app.example.com", "method": "GET", "path": "/catalog",
+        "parameter": "query:category", "specialist": specialist, "test_type": specialist,
+        "status": "in_focus", "first_pass_outcome": "proof_signal",
+        "first_pass_evidence_id": evidence_id,
+    }
+    state = {
+        "mode": "agent", "assessment_resume": True,
+        "target_info": {"primary_target": target},
+        "capability_map": {"target": target, "scope": target},
+        "engagement_brain": {"coverage_cells": [cell], "candidates": []},
+        "execution_trace": [],
+    }
+    step = forced_next_step(state)
+    assert step["tool_name"] == "submit_finding_candidate"
+    assert step["tool_args"]["coverage_cell_id"] == cell["id"]
+    assert step["tool_args"]["evidence_ids"] == [evidence_id]
+    assert step["tool_args"]["vulnerability_class"] == vulnerability_class
+    assert step["tool_args"]["target"] == target + "/catalog"
+    assert "candidate_handoff" in complete_blocked_reason(state)
+
+    state["engagement_brain"]["candidates"] = [{
+        "id": "old-candidate", "status": "refuted",
+        "coverage_cell_id": cell["id"], "evidence_ids": ["old-proof"],
+    }]
+    assert forced_next_step(state)["tool_name"] == "submit_finding_candidate"
+    state["engagement_brain"]["candidates"] = []
+
+    state["execution_trace"].extend([{
+        "tool_name": "submit_finding_candidate", "success": False,
+        "tool_args": step["tool_args"],
+    }] * 2)
+    assert forced_next_step(state) is None  # no unbounded candidate retry
+    state["engagement_brain"]["candidates"] = [{
+        "id": "candidate-1", "status": "pending",
+        "coverage_cell_id": cell["id"], "vulnerability_class": vulnerability_class,
+        "evidence_ids": [evidence_id],
+    }]
+    assert forced_next_step(state)["tool_name"] == "independent_verify"
+    assert complete_blocked_reason(state) is None
+
+
+def test_saved_proof_cannot_handoff_to_another_origin():
+    state = {
+        "mode": "agent", "assessment_resume": True,
+        "target_info": {"primary_target": "https://app.example.com"},
+        "engagement_brain": {"coverage_cells": [{
+            "id": "cov-other", "source": "parameter_inventory",
+            "host": "other.example.com", "path": "/catalog",
+            "specialist": "sqli", "test_type": "sqli",
+            "first_pass_outcome": "proof_signal",
+            "first_pass_evidence_id": "other-proof",
+        }]},
+        "execution_trace": [],
+    }
+    assert forced_next_step(state) is None
+    assert complete_blocked_reason(state) is None
 
 
 def test_mapped_assessment_follow_up_skips_first_turn_pipeline():

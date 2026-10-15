@@ -27,6 +27,9 @@ from app.services.agent.parameter_inventory import _origin
 from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
 
 logger = logging.getLogger(__name__)
+_STALE_LEASE_REASONS = frozenset({
+    "not_leased", "lease_mismatch", "lease_expired", "lease_changed",
+})
 
 
 async def _invoke(manager: Any, name: str, kwargs: dict[str, Any]) -> Any:
@@ -36,6 +39,30 @@ async def _invoke(manager: Any, name: str, kwargs: dict[str, Any]) -> Any:
         output = wrapped.get("output") if isinstance(wrapped, dict) else None
         return output if isinstance(output, dict) else wrapped
     return await getattr(manager, name)(**kwargs)
+
+
+def _renew_stale_first_pass_lease(
+    manager: Any, lease: Any, specialist: str, lease_seconds: int,
+) -> Any | None:
+    """Reclaim only the same input after a stale handoff; never take another lease."""
+    brain = engagement_brain_from_dict(getattr(manager, "_engagement_brain", None))
+    current = next((row for row in brain.coverage_cells
+                    if row.get("id") == lease.coverage_cell_id), None)
+    if current is None:
+        return None
+    if current.get("lease_id") == lease.id:
+        release_coverage_cell_lease(
+            brain, lease, reason="Stale first-pass lease; renewing once",
+        )
+    renewed = claim_coverage_cell_leases(
+        brain, [specialist],
+        allowed_observation_sources=OBSERVED_INPUT_SOURCES,
+        allowed_test_types=frozenset({"sqli", "xss"}),
+        allowed_cell_ids=frozenset({lease.coverage_cell_id}),
+        first_pass_only=True, lease_seconds=lease_seconds,
+    ).get(specialist)
+    manager._engagement_brain = brain.to_dict()
+    return renewed
 
 
 def pending_first_pass_cells(brain: Any, *, target: str = "") -> list[dict[str, Any]]:
@@ -149,41 +176,45 @@ async def run_observed_input_batch(
         result: dict[str, Any] = {}
         followup_failure = ""
 
+        operation_name = ""
         try:
             remaining = max(1.0, deadline - time.monotonic() - 2)
+            probe_args = {"coverage_cell_id": cell["id"], "coverage_lease_id": lease.id}
             if method == "GET" and location == "query" and parameter:
                 if specialist == "sqli" and cell.get("value_type") in {"positive_integer", "number"}:
                     if cell.get("observation_source") == "browser_traffic" and cell.get("capture_id"):
-                        operation = _invoke(
-                            manager, "scoped_assessment_probe_assigned",
-                            {"coverage_cell_id": cell["id"], "coverage_lease_id": lease.id},
-                        )
+                        operation_name = "scoped_assessment_probe_assigned"
                     else:
-                        operation = _invoke(
-                            manager, "scoped_input_probe_assigned",
-                            {"coverage_cell_id": cell["id"], "coverage_lease_id": lease.id,
-                             "technique": "html_body"},
-                        )
+                        operation_name = "scoped_input_probe_assigned"
+                        probe_args["technique"] = "html_body"
                 else:
-                    operation = _invoke(
-                        manager, "scoped_input_probe_assigned",
-                        {"coverage_cell_id": cell["id"], "coverage_lease_id": lease.id,
-                         "technique": "html_body"},
-                    )
+                    operation_name = "scoped_input_probe_assigned"
+                    probe_args["technique"] = "html_body"
             elif (cell.get("observation_source") == "browser_traffic"
                   and cell.get("capture_id") and method == "POST"
                   and location in {"body_json", "body_form"}):
-                operation = _invoke(
-                    manager, "scoped_assessment_probe_assigned",
-                    {"coverage_cell_id": cell["id"], "coverage_lease_id": lease.id},
-                )
+                operation_name = "scoped_assessment_probe_assigned"
             elif method == "POST" and location in {"body_json", "body_form"}:
-                operation = None
                 reason = "POST input needs a private browser capture and approved replay"
-            else:
-                operation = None
-            if operation is not None:
-                result = await asyncio.wait_for(operation, timeout=min(remaining, 50.0))
+            if operation_name:
+                result = await asyncio.wait_for(
+                    _invoke(manager, operation_name, probe_args),
+                    timeout=min(remaining, 50.0),
+                )
+                if (isinstance(result, dict)
+                        and result.get("error") == "invalid_coverage_lease"
+                        and result.get("reason") in _STALE_LEASE_REASONS):
+                    renewed = _renew_stale_first_pass_lease(
+                        manager, lease, specialist, max_seconds + 60,
+                    )
+                    if renewed is not None:
+                        lease = renewed
+                        probe_args["coverage_lease_id"] = lease.id
+                        remaining = max(1.0, deadline - time.monotonic() - 2)
+                        result = await asyncio.wait_for(
+                            _invoke(manager, operation_name, probe_args),
+                            timeout=min(remaining, 50.0),
+                        )
                 evidence_id = str(result.get("evidence_id") or next(
                     iter(result.get("service_artifact_ids") or []), ""
                 ))
@@ -237,16 +268,21 @@ async def run_observed_input_batch(
                                 f"{origin.scheme}://{cell.get('host') or ''}"
                             ) == active_origin):
                                 scoped_target = f"{origin.scheme}://{origin.netloc}{cell['path']}"
-                                await _invoke(manager, "submit_finding_candidate", {
-                                    "title": f"{specialist.upper()} proof on {method} {cell['path']} ({parameter})",
-                                    "description": "Bounded observed-input probe returned an execution-owned proof signal.",
-                                    "target": scoped_target,
-                                    "evidence": f"First-pass proof receipt: {evidence_id}",
-                                    "specialist": specialist,
-                                    "coverage_cell_id": cell["id"],
-                                    "evidence_ids": [evidence_id],
-                                    "vulnerability_class": "sql_injection" if specialist == "sqli" else "xss",
-                                })
+                                try:
+                                    await _invoke(manager, "submit_finding_candidate", {
+                                        "title": f"{specialist.upper()} proof on {method} {cell['path']} ({parameter})",
+                                        "description": "Bounded observed-input probe returned an execution-owned proof signal.",
+                                        "target": scoped_target,
+                                        "evidence": f"First-pass proof receipt: {evidence_id}",
+                                        "specialist": specialist,
+                                        "coverage_cell_id": cell["id"],
+                                        "evidence_ids": [evidence_id],
+                                        "vulnerability_class": "sql_injection" if specialist == "sqli" else "xss",
+                                    })
+                                except Exception:
+                                    # Keep the proof receipt available for the
+                                    # deterministic candidate retry in tester_loop.
+                                    logger.exception("First-pass candidate handoff failed for %s", cell["id"])
                                 submitted_brain = engagement_brain_from_dict(
                                     getattr(manager, "_engagement_brain", None)
                                 )
@@ -255,8 +291,10 @@ async def run_observed_input_batch(
                                     for row in submitted_brain.candidates
                                     if isinstance(row, dict)
                                     and row.get("coverage_cell_id") == cell["id"]
-                                    and row.get("status") == "pending"
+                                    and evidence_id in (row.get("evidence_ids") or [])
                                 ), "")
+                                if not candidate_id:
+                                    reason = "Proof receipt exists; candidate handoff pending"
                     elif (specialist == "sqli" and result.get("evidence_id")
                           and (result.get("probe_result") or {}).get("proof_recipe")
                               in {"numeric_and_boolean_v1", "string_or_boolean_v1",
@@ -318,10 +356,18 @@ async def run_observed_input_batch(
 
         live = engagement_brain_from_dict(getattr(manager, "_engagement_brain", None))
         current = next((row for row in live.coverage_cells if row.get("id") == cell["id"]), None)
-        if current:
+        owns_lease = current and current.get("lease_id") == lease.id
+        closed_with_receipt = (current and outcome == "tested_clean"
+                               and current.get("status") == "tested_clean"
+                               and not current.get("lease_id"))
+        if owns_lease or closed_with_receipt:
             current["first_pass_outcome"] = outcome
             current["first_pass_reason"] = reason[:300]
             current["first_pass_at"] = time.time()
+            if outcome == "unattempted" and operation_name:
+                current["first_pass_handoff_error"] = reason[:300]
+            else:
+                current.pop("first_pass_handoff_error", None)
             if evidence_id:
                 current["first_pass_evidence_id"] = evidence_id
             if candidate_id:
@@ -342,6 +388,8 @@ async def run_observed_input_batch(
             "coverage_cell_id": cell["id"], "test_type": cell.get("test_type"),
             "outcome": outcome, "reason": reason, "evidence_id": evidence_id,
             "candidate_id": candidate_id,
+            "handoff_failed": outcome == "unattempted" and bool(operation_name),
+            "candidate_handoff_pending": outcome == "proof_signal" and bool(evidence_id) and not candidate_id,
         })
 
     brain = engagement_brain_from_dict(getattr(manager, "_engagement_brain", None))
@@ -349,5 +397,7 @@ async def run_observed_input_batch(
         "processed": len(results), "remaining": len(pending_first_pass_cells(
             brain, target=active_target,
         )),
+        "handoff_failures": sum(bool(row["handoff_failed"]) for row in results),
+        "candidate_handoffs_pending": sum(bool(row["candidate_handoff_pending"]) for row in results),
         "results": results, "funnel": parameter_test_funnel(brain),
     }
