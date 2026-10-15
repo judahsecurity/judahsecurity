@@ -8970,6 +8970,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         mode: str = "attack",
         surface_signature: str = "",
         pending_input_count: int = 0,
+        pending_coverage_count: int = 0,
+        completed_coverage_count: int = 0,
     ) -> str:
         """Scatter-gather: spawn N parallel specialist sub-agents on the same mission.
 
@@ -8987,6 +8989,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 ``cms_followup`` (fingerprinted CMS), or ``recon`` (legacy triad).
             surface_signature: Value-free observed-input inventory revision for scheduling.
             pending_input_count: Number of untested observed input cells when queued.
+            pending_coverage_count: Number of unattempted non-SQLi/XSS checks when queued.
+            completed_coverage_count: Number of completed coverage checks when queued.
         """
         from app.services.agent.capability_map import (
             build_capability_map_from_dict,
