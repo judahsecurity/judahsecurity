@@ -8144,7 +8144,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             format_methodology_progress_for_prompt,
         )
         from app.services.agent.methodology_procedures import (
+            applicable_topic_ids,
             list_procedure_ids,
+            load_procedure,
             procedures_summary_for_brain,
         )
         from app.services.agent.penetration_task_graph import (
@@ -8171,6 +8173,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "task_graph_prompt": format_graph_for_scheduler(graph),
                 "ready_specialists": ready_wave(graph),
                 "open_procedure_packs": procedures_summary_for_brain(open_mids, limit=6),
+                "applicable_web_security_topics": [
+                    {"id": topic_id, "title": (load_procedure(topic_id) or {}).get("title", "")}
+                    for topic_id in applicable_topic_ids(cmap)
+                ],
                 "available_procedure_ids": list(list_procedure_ids()),
             },
             indent=2,

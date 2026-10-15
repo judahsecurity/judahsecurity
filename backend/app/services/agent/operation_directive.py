@@ -207,11 +207,25 @@ class OperationDirective:
         try:
             from app.services.agent.methodology_procedures import (
                 format_procedures_for_prompt,
+                topic_ids_for_methodologies,
+                topic_ids_for_test_type,
             )
 
             procs = format_procedures_for_prompt(self.methodology_ids, limit=3)
             if procs:
                 block = f"{block}\n\n{procs}"
+            assigned_type = (
+                self.parameter_work.get("test_type")
+                or self.js_work.get("test_type")
+                or ""
+            )
+            topic_ids = (
+                topic_ids_for_test_type(assigned_type)
+                if assigned_type else topic_ids_for_methodologies(self.methodology_ids)
+            )
+            topic_procs = format_procedures_for_prompt(topic_ids, limit=2)
+            if topic_procs:
+                block = f"{block}\n\n{topic_procs}"
         except Exception:
             pass
         return block

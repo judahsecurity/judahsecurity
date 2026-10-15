@@ -48,6 +48,7 @@ from agent.hunt_patterns import (
     XSS_PATTERNS,
     pack,
 )
+from agent.web_security_playbooks import format_hunter_playbooks
 
 # =============================================================================
 # Shared methodology constants injected into every hunter
@@ -1532,6 +1533,14 @@ def create_hunters_for_engagement(
     for hunter in hunters:
         if "## Adaptive Request Protocol" not in hunter.instructions:
             hunter.instructions += "\n\n" + _ADAPTIVE_REQUEST_PROTOCOL
+        observations = "\n".join((
+            recon_brief,
+            app_profile,
+            str(input_surface or {}),
+        ))
+        topic_cards = format_hunter_playbooks(hunter.name, observations)
+        if topic_cards:
+            hunter.instructions += "\n\n" + topic_cards
     return hunters
 
 
