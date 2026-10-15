@@ -2501,15 +2501,42 @@ class AgentOrchestrator:
             current_target_info=json_dumps_safe(state.get("target_info") or {}, indent=2),
         )
         
-        llm = self._resolve_llm(state, LLMTask.OFFENSIVE)
-        response = await _ledger_llm_call(
-            llm, [HumanMessage(content=analysis_prompt)], kind="agent_analyze",
-            target=(state.get("target_info") or {}).get("primary_target") or "",
-            phase=state.get("current_phase", "informational"),
-        )
-        from app.services.agent.observability import model_id, record_llm_usage
-        record_llm_usage(state, response, task=LLMTask.OFFENSIVE, model=model_id(llm))
-        analysis = self._parse_analysis_response(llm_text(response.content))
+        if (step_data.get("success") and step_data.get("capability_map")
+                and tool_name in ("execute_interceptor", "execute_deep_crawl")):
+            # The browser tools already returned a structured surface map. A
+            # second model pass adds latency but is not needed to hand those
+            # observations to the tester loop.
+            analysis = OutputAnalysis(
+                interpretation="Structured browser observations recorded for follow-up.",
+                extracted_info=ExtractedTargetInfo(),
+                actionable_findings=[],
+                recommended_next_steps=[],
+            )
+            step_data["analysis_skipped"] = "structured_capability_map"
+        else:
+            try:
+                llm = self._resolve_llm(state, LLMTask.OFFENSIVE)
+                response = await _ledger_llm_call(
+                    llm, [HumanMessage(content=analysis_prompt)], kind="agent_analyze",
+                    target=(state.get("target_info") or {}).get("primary_target") or "",
+                    phase=state.get("current_phase", "informational"),
+                    timeout=float(settings.AGENT_ANALYZE_TIMEOUT_SECONDS),
+                )
+            except Exception as exc:
+                # Tool-output analysis is advisory. Keep the observed tool
+                # result and continue when the model provider stalls or fails.
+                logger.warning("Tool-output analysis unavailable for %s: %s", tool_name, type(exc).__name__)
+                step_data["analysis_error"] = type(exc).__name__
+                analysis = OutputAnalysis(
+                    interpretation="Model analysis unavailable; tool observations retained for follow-up.",
+                    extracted_info=ExtractedTargetInfo(),
+                    actionable_findings=[],
+                    recommended_next_steps=[],
+                )
+            else:
+                from app.services.agent.observability import model_id, record_llm_usage
+                record_llm_usage(state, response, task=LLMTask.OFFENSIVE, model=model_id(llm))
+                analysis = self._parse_analysis_response(llm_text(response.content))
         
         # Update step with analysis
         step_data["output_analysis"] = analysis.interpretation
