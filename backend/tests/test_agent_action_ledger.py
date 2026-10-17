@@ -120,6 +120,21 @@ def test_batch_probes_and_network_scanners_are_visible_as_testing(monkeypatch):
     assert report["coverage"]["completed_by_stage"]["scanner_coverage"] == 4
 
 
+def test_scoped_browser_walkthrough_counts_as_surface_mapping(monkeypatch):
+    factory = _isolated_ledger(monkeypatch)
+    run_id = action_ledger.start_run(
+        session_id="browser-walkthrough", organization_id=12, user_id=7,
+        objective="https://demo.example", mode="agent", budget_seconds=60,
+    )
+    action_ledger.append_action(run_id, "walk", "completed", "scoped_browser_assessment",
+                                target="https://demo.example")
+    with factory() as db:
+        report = action_ledger.latest_run(
+            db, session_id="browser-walkthrough", organization_id=12, user_id=7,
+        )
+    assert report["coverage"]["completed_by_stage"]["surface_mapping"] == 1
+
+
 def test_exact_repeat_metric_uses_fingerprint_not_shared_host(monkeypatch):
     factory = _isolated_ledger(monkeypatch)
     run_id = action_ledger.start_run(

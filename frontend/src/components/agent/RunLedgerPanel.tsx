@@ -58,6 +58,15 @@ export type AgentRunLedger = {
     open_rows: Array<{ method: string; path: string; parameter: string; test_type: string; status: string; reason: string }>;
   };
   scenario_surface?: ScenarioSurface;
+  exploration?: {
+    pages_observed: number;
+    page_paths: string[];
+    forms_observed: number;
+    links_observed: number;
+    browser_actions: number;
+    safe_interactions: number;
+    recent_actions: Array<{ kind: string; path: string; status: string; request_count: number }>;
+  };
 };
 
 export function RunLedgerPanel({ run }: { run: AgentRunLedger | null }) {

@@ -34,6 +34,7 @@ import { EngagementReplay, ReplayStep, TokenUsage } from '@/components/agent/Eng
 import { RunLedgerPanel, AgentRunLedger } from '@/components/agent/RunLedgerPanel';
 import { AssessmentStatusStrip } from '@/components/agent/AssessmentStatusStrip';
 import { ManualTestingPanel } from '@/components/agent/ManualTestingPanel';
+import { ExplorationStatusPanel } from '@/components/agent/ExplorationStatusPanel';
 import {
   CapabilityMapPanel,
   CapabilityMapState,
@@ -1828,6 +1829,7 @@ function AgentPageContent() {
               )}
 
               <AssessmentStatusStrip run={runLedger} />
+              <ExplorationStatusPanel run={runLedger} />
               <ManualTestingPanel
                 run={runLedger}
                 currentTarget={target}

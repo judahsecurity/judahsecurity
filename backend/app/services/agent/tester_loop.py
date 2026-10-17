@@ -560,6 +560,13 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
     ran = normalized_tools_run(state.get("execution_trace"))
     empty = surface_looks_empty(state)
     crawled = bool(ran & _CRAWL_TOOLS)
+    explored = any(
+        step.get("tool_name") == "scoped_browser_assessment"
+        and isinstance(step.get("tool_args"), dict)
+        and step["tool_args"].get("operation") == "inspect_js"
+        and step.get("success") is not False
+        for step in _steps(state.get("execution_trace"))
+    )
     waits = sum(
         1 for s in _steps(state.get("execution_trace"))
         if s.get("tool_name") == "wait_recon_workers"
@@ -664,6 +671,12 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
             "title": "Walk the app (execute_interceptor or execute_deep_crawl)",
             "next": "execute_interceptor (or execute_deep_crawl) on the primary URL",
         })
+    if pipeline and crawled and state.get("mode") == "agent" and not explored:
+        missing.append({
+            "id": "browser_exploration",
+            "title": "Safe browser walkthrough not completed",
+            "next": "scoped_browser_assessment(operation='inspect_js', max_pages=6, max_actions=6)",
+        })
     if pipeline and (empty or not dir_brute):
         why = (
             "Root looks empty/404 — directory brute-force is mandatory"
@@ -731,6 +744,7 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
         "is_web": web,
         "surface_empty": empty,
         "crawled": crawled,
+        "explored": explored,
         "dir_brute": dir_brute,
         "js_surface": js_surface,
         "params": params or fireteam,
@@ -740,7 +754,7 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
         "ready_to_complete": (not web) or (not missing),
         "next_action": next_action,
         "summary": (
-            f"Tester loop: crawl={crawled} dir_brute={dir_brute} "
+            f"Tester loop: crawl={crawled} browser_exploration={explored} dir_brute={dir_brute} "
             f"js_surface={js_surface} params={params or fireteam} "
             f"fireteam={fireteam} empty_surface={empty} missing={len(missing)}"
         ),
@@ -1008,17 +1022,23 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             ),
         }
 
-    if state.get("mode") == "agent" and not input_signature and not any(
-        step.get("tool_name") == "scoped_browser_assessment"
+    # A crawl can find one query parameter and still miss most user journeys.
+    # Always run one bounded, interaction-first browser inspection before
+    # scheduling input probes or specialist waves.
+    inspection_attempts = [
+        step for step in trace
+        if step.get("tool_name") == "scoped_browser_assessment"
         and isinstance(step.get("tool_args"), dict)
         and step["tool_args"].get("operation") == "inspect_js"
-        for step in trace
+    ]
+    if state.get("mode") == "agent" and len(inspection_attempts) < 2 and not any(
+        step.get("success") is not False for step in inspection_attempts
     ):
         return {
             "tool_name": "scoped_browser_assessment",
             "tool_args": {"operation": "inspect_js", "url": target,
-                          "max_pages": 4, "max_actions": 3},
-            "thought": "Prowl: capture browser actions, inputs, and first-party API traffic for specialist work.",
+                          "max_pages": 6, "max_actions": 6},
+            "thought": "Prowl: walk linked pages and safe controls, then capture forms and first-party API traffic before hunting.",
         }
 
     # Launch enrichment without waiting for it before testing real browser inputs.

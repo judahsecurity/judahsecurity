@@ -106,6 +106,36 @@ def test_inspected_script_urls_and_inline_sources_reach_capability_map():
                and cell["script_kind"] == "inline" for cell in cells)
 
 
+def test_interactive_walkthrough_pages_and_forms_reach_capability_map():
+    observation = {"signal": "browser_inspect_js", "result": {
+        "target_template": "https://app.example/?search=private-value",
+        "final_origin": "https://app.example", "final_path": "/products",
+        "pages": [
+            {"url": "https://app.example/", "status": 200, "dom_observed": True,
+             "links": ["https://app.example/products"], "forms": []},
+            {"url": "https://app.example/products?session=private-value",
+             "dom_observed": True, "status": None,
+             "forms": [{"method": "GET", "action": "https://app.example/search",
+                        "fields": [{"name": "term", "control_type": "search"}]}],
+             "link_query_inputs": [{"path": "/products", "query_keys": ["category"]}]},
+        ],
+        "actions": [
+            {"ref": "ui-1", "kind": "tab", "before_path": "/products",
+             "after_path": "/products", "status": "completed",
+             "request_count": 2, "label": "Private customer text"},
+        ],
+    }}
+    cmap = bridge.capability_map_from_observation(observation)
+    assert cmap["pages_visited"] == ["https://app.example/", "https://app.example/products"]
+    assert {row["name"] for row in cmap["parameter_inventory"]} >= {"term", "category"}
+    assert cmap["action_checkpoints"] == [{
+        "ref": "ui-1", "kind": "tab", "before_path": "/products",
+        "after_path": "/products", "status": "completed", "request_count": 2,
+    }]
+    assert "private-value" not in str(cmap)
+    assert "Private customer text" not in str(cmap)
+
+
 def test_browser_link_query_names_reach_parameter_inventory_without_values():
     hrefs = [
         "https://app.example/catalog?category=Gifts&searchTerm=private-value",

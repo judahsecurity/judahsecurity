@@ -9,8 +9,19 @@ case. The work record groups class coverage and pages recent actions. Generic
 finding rechecks report endpoint reachability as inconclusive, and the Findings
 page labels a reproduced Nuclei match as detector reproduction.
 
+Agent assessments also run a bounded browser walkthrough after the first crawl,
+even when that crawl found inputs. The built-in browser visits up to six linked
+same-origin pages and clicks up to six safe tabs or disclosures across those
+pages. It observes rendered forms, link parameter names, first-party scripts,
+and XHR/fetch traffic after interactions. The Agent page shows persisted page,
+form, link, and safe interaction counts with recent browser actions. Failed
+walkthroughs remain incomplete in the tester loop. Discovery does not submit
+forms or perform state-changing actions.
+
 The durable lead inbox, captured-request test workbench, new proof recipes, and
 server-enforced publication flow below are the next implementation steps.
+Deeper authenticated journeys and form submissions need explicit identities,
+approved fixtures, readback, and cleanup before the agent can exercise them.
 
 ## Problem observed
 

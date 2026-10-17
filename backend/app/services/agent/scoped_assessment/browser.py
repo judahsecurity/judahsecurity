@@ -189,8 +189,8 @@ async def check_browser(
             raise ValueError("JavaScript inspection requires private source and traffic collectors")
         if not 0 <= max_actions <= MAX_DISCOVERY_ACTIONS:
             raise ValueError("Discovery action limit must be between 0 and 6")
-        if not 1 <= max_pages <= 4:
-            raise ValueError("JavaScript inspection page limit must be between 1 and 4")
+        if not 1 <= max_pages <= 8:
+            raise ValueError("JavaScript inspection page limit must be between 1 and 8")
     if operation == "crawl" and not 1 <= max_pages <= 10:
         raise ValueError("Crawl page limit must be between 1 and 10")
     assert_in_scope(url, allowed_origins)
@@ -407,6 +407,26 @@ async def check_browser(
                                                    "kind": "inline", "index": row["index"],
                                                    "action_ref": current_action_ref, "data": data})
 
+            async def observe_surface(status: int | None = None) -> dict:
+                """Snapshot a rendered page after safe interactions, without URL values."""
+                assert_in_scope(page.url, allowed_origins)
+                hrefs = await page.locator("a[href]").evaluate_all(
+                    f"els => els.slice(0, {MAX_LINKS_PER_PAGE}).map(e => e.href)"
+                )
+                if link_baselines is not None:
+                    link_baselines.extend(_private_link_baselines(hrefs, [expected_origin]))
+                path = urlsplit(page.url).path or "/"
+                return {
+                    "url": expected_origin + path,
+                    "final_path": path,
+                    "status": status,
+                    "dom_observed": True,
+                    "title": (await page.title())[:200],
+                    "links": _crawl_links(hrefs, [expected_origin]),
+                    "link_query_inputs": _link_query_inputs(hrefs, [expected_origin]),
+                    "forms": await _forms(page, expected_origin),
+                }
+
             if operation == "crawl":
                 queue = [final_target]
                 visited: set[str] = set()
@@ -464,62 +484,65 @@ async def check_browser(
                 actions.append(await checkpoint("scroll", "scroll", start,
                                                 path=urlsplit(page.url).path or "/", status="completed"))
                 seen_controls: set[tuple[str, str, str, str]] = set()
-                while len(actions) - 2 < max_actions:
-                    selected = None
-                    controls = await page.query_selector_all(
-                        "[role=tab], button[aria-expanded='false'][aria-controls], summary"
-                    )
-                    for index, control in enumerate(controls[:24]):
-                        try:
-                            if not await control.is_visible():
+                interaction_count = 0
+
+                async def explore_controls():
+                    nonlocal current_action_ref, interaction_count
+                    while interaction_count < max_actions:
+                        selected = None
+                        controls = await page.query_selector_all(
+                            "[role=tab], button[aria-expanded='false'][aria-controls], summary"
+                        )
+                        for index, control in enumerate(controls[:24]):
+                            try:
+                                if not await control.is_visible():
+                                    continue
+                                role = (await control.get_attribute("role") or "").lower()
+                                tag = await control.evaluate("el => el.tagName.toLowerCase()")
+                                kind = "tab" if role == "tab" else "summary" if tag == "summary" else "disclosure"
+                                label = " ".join((await control.inner_text()).split())[:80]
+                                in_form = await control.evaluate("el => Boolean(el.closest('form'))")
+                                button_type = await control.get_attribute("type") or ""
+                                controls_id = (await control.get_attribute("aria-controls") or "")[:80]
+                                page_path = urlsplit(page.url).path or "/"
+                                fingerprint = (page_path, kind, label, controls_id)
+                                if fingerprint in seen_controls or not allowed_discovery_control(
+                                    kind=kind, label=label, in_form=in_form, button_type=button_type,
+                                ):
+                                    continue
+                                selected = (control, index, kind, label, controls_id, page_path, fingerprint)
+                                break
+                            except Exception:
                                 continue
-                            role = (await control.get_attribute("role") or "").lower()
-                            tag = await control.evaluate("el => el.tagName.toLowerCase()")
-                            kind = "tab" if role == "tab" else "summary" if tag == "summary" else "disclosure"
-                            label = " ".join((await control.inner_text()).split())[:80]
-                            in_form = await control.evaluate("el => Boolean(el.closest('form'))")
-                            button_type = await control.get_attribute("type") or ""
-                            controls_id = (await control.get_attribute("aria-controls") or "")[:80]
-                            page_path = urlsplit(page.url).path or "/"
-                            fingerprint = (page_path, kind, label, controls_id)
-                            if fingerprint in seen_controls or not allowed_discovery_control(
-                                kind=kind, label=label, in_form=in_form, button_type=button_type,
-                            ):
-                                continue
-                            selected = (control, index, kind, label, controls_id, page_path, fingerprint)
+                        if selected is None:
                             break
-                        except Exception:
-                            continue
-                    if selected is None:
-                        break
-                    control, index, kind, label, controls_id, before_path, fingerprint = selected
-                    seen_controls.add(fingerprint)
-                    ref = f"ui-{len(actions) - 1}"
-                    current_action_ref = ref
-                    start = (len(requests), len(javascript_sources), len(traffic_exchanges))
-                    try:
-                        await control.click(timeout=1500, no_wait_after=True)
-                        await page.wait_for_timeout(400)
-                        status = "completed"
-                    except Exception as exc:
-                        status = type(exc).__name__
-                    assert_in_scope(page.url, allowed_origins)
-                    await collect_inline()
-                    actions.append(await checkpoint(
-                        ref, kind, start, label=label, aria_controls=controls_id,
-                        control_index=index, before_path=before_path,
-                        after_path=urlsplit(page.url).path or "/", status=status,
-                    ))
+                        control, index, kind, label, controls_id, before_path, fingerprint = selected
+                        seen_controls.add(fingerprint)
+                        interaction_count += 1
+                        ref = f"ui-{interaction_count}"
+                        current_action_ref = ref
+                        start = (len(requests), len(javascript_sources), len(traffic_exchanges))
+                        try:
+                            await control.click(timeout=1500, no_wait_after=True)
+                            await page.wait_for_timeout(400)
+                            status = "completed"
+                        except Exception as exc:
+                            status = type(exc).__name__
+                        assert_in_scope(page.url, allowed_origins)
+                        await collect_inline()
+                        actions.append(await checkpoint(
+                            ref, kind, start, label=label, aria_controls=controls_id,
+                            control_index=index, before_path=before_path,
+                            after_path=urlsplit(page.url).path or "/", status=status,
+                        ))
+
+                await explore_controls()
                 current_action_ref = "settle"
                 await page.wait_for_timeout(300)
                 await settle_capture()
                 page_paths = [urlsplit(page.url).path or "/"]
-                hrefs = await page.locator("a[href]").evaluate_all(
-                    f"els => els.slice(0, {MAX_LINKS_PER_PAGE}).map(e => e.href)"
-                )
-                if link_baselines is not None:
-                    link_baselines.extend(_private_link_baselines(hrefs, [expected_origin]))
-                queue = _crawl_links(hrefs, [expected_origin])
+                observed_pages = [await observe_surface(response.status if response else None)]
+                queue = list(observed_pages[0]["links"])
                 visited = {expected_origin + page_paths[0]}
                 while queue and len(page_paths) < max_pages:
                     next_url = queue.pop(0)
@@ -541,16 +564,16 @@ async def check_browser(
                         await page.wait_for_timeout(450)
                         await settle_capture()
                         await collect_inline()
+                        await explore_controls()
                         page_path = urlsplit(page.url).path or "/"
                         page_paths.append(page_path)
+                        observed = await observe_surface(
+                            response.status if navigation_mode == "direct" and response else None
+                        )
+                        observed_pages.append(observed)
                         actions.append(await checkpoint(ref, "navigate_link", start, path=page_path,
                                                         navigation_mode=navigation_mode, status="completed"))
-                        hrefs = await page.locator("a[href]").evaluate_all(
-                            f"els => els.slice(0, {MAX_LINKS_PER_PAGE}).map(e => e.href)"
-                        )
-                        if link_baselines is not None:
-                            link_baselines.extend(_private_link_baselines(hrefs, [expected_origin]))
-                        queue.extend(link for link in _crawl_links(hrefs, [expected_origin])
+                        queue.extend(link for link in observed["links"]
                                      if link not in visited and link not in queue)
                     except ValueError:
                         raise
@@ -616,6 +639,7 @@ async def check_browser(
                 result["max_pages"] = max_pages
                 result["page_paths"] = page_paths
                 result["pages_inspected"] = len(page_paths)
+                result["pages"] = observed_pages
             screenshot = await page.screenshot(full_page=True)
             await context.close()
             return result, screenshot

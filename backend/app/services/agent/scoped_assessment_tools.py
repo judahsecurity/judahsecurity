@@ -229,7 +229,7 @@ class ScopedAssessmentTools:
 
     async def scoped_browser_assessment(
         self, operation: str, url: str, identity: str = "anonymous",
-        max_pages: int = 1, max_actions: int = 3,
+        max_pages: int = 6, max_actions: int = 6,
     ) -> str:
         """Run scoped map, crawl, JS inspection, or nonce XSS execution in Chromium."""
         if operation not in ("map", "crawl", "inspect_js", "check_xss"):

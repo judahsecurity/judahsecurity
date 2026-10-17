@@ -87,6 +87,41 @@ def test_prowl_uses_built_in_browser_after_crawl_and_as_fallback():
     assert forced_next_step(inspected)["tool_name"] == "spawn_recon_workers"
 
 
+def test_agent_inspects_more_pages_even_when_initial_crawl_found_inputs(monkeypatch):
+    from app.services.agent import tester_loop
+
+    monkeypatch.setattr(tester_loop, "observed_input_signature", lambda _state: "some-inputs")
+    target = "https://ginandjuice.shop"
+    state = {
+        "mode": "agent", "target_info": {"primary_target": target},
+        "execution_trace": [{"tool_name": "execute_deep_crawl", "success": True}],
+    }
+    step = forced_next_step(state)
+    assert step["tool_name"] == "scoped_browser_assessment"
+    assert step["tool_args"] == {
+        "operation": "inspect_js", "url": target,
+        "max_pages": 6, "max_actions": 6,
+    }
+
+
+def test_failed_browser_exploration_retries_once_and_remains_incomplete():
+    target = "https://ginandjuice.shop"
+    state = {
+        "mode": "agent", "target_info": {"primary_target": target},
+        "execution_trace": [{"tool_name": "execute_deep_crawl", "success": True}],
+    }
+    first = forced_next_step(state)
+    for _ in range(2):
+        state["execution_trace"].append({
+            "tool_name": "scoped_browser_assessment", "success": False,
+            "tool_args": first["tool_args"],
+        })
+        if len(state["execution_trace"]) == 2:
+            assert forced_next_step(state)["tool_name"] == "scoped_browser_assessment"
+    assert forced_next_step(state)["tool_name"] == "spawn_recon_workers"
+    assert "browser_exploration" in {row["id"] for row in loop_progress(state)["missing"]}
+
+
 def test_forced_pipeline_crawl_then_enrich_then_fireteam():
     url = "https://appsmith-dmpc.unifytwin.com"
     empty = {
@@ -275,6 +310,12 @@ def test_observed_input_hunt_starts_before_enrichment_join_and_js_pipeline():
     }
     signature = observed_input_signature(state)
     assert signature
+    inspection = forced_next_step(state)
+    assert inspection["tool_name"] == "scoped_browser_assessment"
+    state["execution_trace"].append({
+        "tool_name": "scoped_browser_assessment", "success": True,
+        "tool_args": inspection["tool_args"],
+    })
     assert forced_next_step(state)["tool_name"] == "sync_engagement_brain"
 
     state["execution_trace"].append({"tool_name": "sync_engagement_brain", "success": True})
@@ -405,6 +446,12 @@ def test_observed_input_queue_batches_first_pass_before_specialist_wave():
         ],
     }
     signature = observed_input_signature(state)
+    inspection = forced_next_step(state)
+    assert inspection["tool_name"] == "scoped_browser_assessment"
+    state["execution_trace"].append({
+        "tool_name": "scoped_browser_assessment", "success": True,
+        "tool_args": inspection["tool_args"],
+    })
     first_batch = forced_next_step(state)
     assert first_batch["tool_name"] == "probe_observed_input_batch"
     assert first_batch["tool_args"]["pending_input_count"] == 2
