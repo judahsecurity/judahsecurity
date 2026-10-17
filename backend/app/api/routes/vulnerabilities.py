@@ -1807,6 +1807,11 @@ def validate_finding(
         return _validation_to_dict(in_flight)
 
     asset = db.query(Asset).filter(Asset.id == vuln.asset_id).first()
+    if vuln.detected_by == "crowdstrike" and asset and not asset.in_scope:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Approve this imported asset for Judah scan scope before validating its finding.",
+        )
     organization_id = asset.organization_id if asset else current_user.organization_id
 
     validation = FindingValidation(
