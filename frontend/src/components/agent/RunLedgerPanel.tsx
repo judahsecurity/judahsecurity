@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import type { ScenarioSurface } from "./TrustBoundaryMap";
@@ -8,6 +9,7 @@ export type AgentRunLedger = {
   run_id: string | null;
   status: string;
   reason?: string;
+  objective?: string;
   started_at?: string;
   coverage: {
     actions: number;
@@ -59,8 +61,10 @@ export type AgentRunLedger = {
 };
 
 export function RunLedgerPanel({ run }: { run: AgentRunLedger | null }) {
+  const [visibleActions, setVisibleActions] = useState(40);
   if (!run?.run_id) return null;
   const counts = run.coverage?.by_status || {};
+  const recentActions = run.actions.slice(-visibleActions).reverse();
   return (
     <Card>
       <CardHeader className="pb-2">
@@ -96,11 +100,14 @@ export function RunLedgerPanel({ run }: { run: AgentRunLedger | null }) {
             <p className="text-muted-foreground">
               {run.input_testing!.inputs} inputs · {run.input_testing!.checks} class checks · {run.input_testing!.attempted} attempted · {run.input_testing!.probed} with probe evidence · {run.input_testing!.candidates} candidates · {run.input_testing!.verified} verified · {run.input_testing!.published} published · {run.input_testing!.open} open
             </p>
-            <p className="text-muted-foreground">
-              {Object.entries(run.input_testing!.by_class).map(([kind, row]) =>
-                `${kind.replaceAll('_', ' ')} ${row.probed}/${row.checks} probed`
-              ).join(' · ')}
-            </p>
+            <div className="grid gap-1 sm:grid-cols-2">
+              {Object.entries(run.input_testing!.by_class).map(([kind, row]) => (
+                <div key={kind} className="flex justify-between gap-2 rounded border border-border/50 px-2 py-1 text-muted-foreground">
+                  <span className="capitalize">{kind.replaceAll('_', ' ')}</span>
+                  <span className="tabular-nums">{row.probed}/{row.checks} probed · {row.verified} verified</span>
+                </div>
+              ))}
+            </div>
             {run.input_testing!.open_rows.slice(0, 5).map((row, index) => (
               <p key={`${row.method}-${row.path}-${row.parameter}-${row.test_type}-${index}`} className="text-amber-400">
                 Open: {row.method} {row.path} {row.parameter} · {row.test_type} · {row.status}{row.reason ? ` · ${row.reason}` : ''}
@@ -138,8 +145,9 @@ export function RunLedgerPanel({ run }: { run: AgentRunLedger | null }) {
         {!run.coverage?.test_actions && (
           <p className="text-amber-400">No test action was recorded. The run may have stopped during planning.</p>
         )}
-        <div className="max-h-80 overflow-y-auto space-y-1">
-          {run.actions.map((action) => (
+        <div className="space-y-1">
+          <p className="font-medium text-foreground">Recent actions ({recentActions.length} of {run.actions.length})</p>
+          {recentActions.map((action) => (
             <div key={action.id} className="rounded-md border border-border/60 px-2.5 py-2">
               <div className="flex items-center gap-2">
                 <span className="font-mono text-foreground">{action.tool_name}</span>
@@ -152,6 +160,11 @@ export function RunLedgerPanel({ run }: { run: AgentRunLedger | null }) {
               ) : null}
             </div>
           ))}
+          {visibleActions < run.actions.length && (
+            <button type="button" className="text-primary hover:underline" onClick={() => setVisibleActions((count) => count + 40)}>
+              Show 40 earlier actions
+            </button>
+          )}
         </div>
         <p className="text-muted-foreground">Completed actions show execution coverage. Evidence IDs may expire with the session. This record does not establish that the target is free of vulnerabilities.</p>
       </CardContent>

@@ -32,6 +32,8 @@ import { useRouter } from 'next/navigation';
 import { AttackScenarioPanel, ChainData } from '@/components/agent/AttackScenarioPanel';
 import { EngagementReplay, ReplayStep, TokenUsage } from '@/components/agent/EngagementReplay';
 import { RunLedgerPanel, AgentRunLedger } from '@/components/agent/RunLedgerPanel';
+import { AssessmentStatusStrip } from '@/components/agent/AssessmentStatusStrip';
+import { ManualTestingPanel } from '@/components/agent/ManualTestingPanel';
 import {
   CapabilityMapPanel,
   CapabilityMapState,
@@ -1825,6 +1827,19 @@ function AgentPageContent() {
                 </Card>
               )}
 
+              <AssessmentStatusStrip run={runLedger} />
+              <ManualTestingPanel
+                run={runLedger}
+                currentTarget={target}
+                onDraft={(testTarget, prompt) => {
+                  setMode('agent');
+                  setSelectedPlaybookId('custom');
+                  setTarget(testTarget);
+                  setQuestion(prompt);
+                  document.getElementById('agent-prompt')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }}
+              />
+
               {/* Main chat area */}
               <div className="flex gap-4">
                 {/* Conversation history sidebar */}
@@ -2213,6 +2228,7 @@ function AgentPageContent() {
                     {/* Input row */}
                     <div className="flex gap-2">
                       <Textarea
+                        id="agent-prompt"
                         placeholder={
                           loading
                             ? 'Steer this hunt — e.g. stop fuzzing /admin, the app is GraphQL…'
@@ -2258,7 +2274,7 @@ function AgentPageContent() {
                 </Card>
 
                 {runLedger?.run_id && (
-                  <div className="mt-4 w-full">
+                  <div id="agent-work-performed" className="mt-4 w-full">
                     <RunLedgerPanel run={runLedger} />
                   </div>
                 )}
