@@ -2250,33 +2250,49 @@ export default function FindingsPage() {
         )}
 
         {/* Findings Table */}
-        <Card>
-          <Table>
-            <TableHeader>
+        <Card className="overflow-hidden border-border/70">
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border/70 bg-muted/20 px-4 py-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold">Finding queue</span>
+              <span className="rounded-full bg-secondary px-2 py-0.5 text-xs tabular-nums text-muted-foreground">
+                {filteredFindings.length} shown
+              </span>
+            </div>
+            <span className="text-xs text-muted-foreground">Select a row to review evidence and remediation</span>
+          </div>
+          <Table className="min-w-[1120px] table-fixed">
+            <colgroup>
+              <col className="w-[4%]" />
+              <col className="w-[9%]" />
+              <col className="w-[32%]" />
+              <col className="w-[18%]" />
+              <col className="w-[13%]" />
+              <col className="w-[12%]" />
+              <col className="w-[9%]" />
+              <col className="w-[3%]" />
+            </colgroup>
+            <TableHeader className="bg-muted/30 [&_th]:h-10 [&_th]:px-3 [&_th]:text-[11px] [&_th]:font-semibold [&_th]:uppercase [&_th]:tracking-wider">
               <TableRow>
-                <TableHead className="w-[40px]">
+                <TableHead>
                   <Checkbox
                     checked={filteredFindings.length > 0 && selectedFindingIds.size === filteredFindings.length}
                     onCheckedChange={toggleAllFindings}
                     aria-label="Select all"
                   />
                 </TableHead>
-                <TableHead className="w-[110px]">Priority</TableHead>
-                <TableHead className="w-[110px]">Risk</TableHead>
-                <TableHead className="w-[120px]">Triage</TableHead>
+                <TableHead>Priority</TableHead>
                 <TableHead>Finding</TableHead>
                 <TableHead>Host / App</TableHead>
-                <TableHead className="w-[140px]">Status</TableHead>
-                <TableHead>Assigned</TableHead>
-                <TableHead>CVSS</TableHead>
+                <TableHead>Assessment</TableHead>
+                <TableHead>Workflow</TableHead>
                 <TableHead>Detected</TableHead>
-                <TableHead className="w-[50px]"></TableHead>
+                <TableHead><span className="sr-only">Open finding</span></TableHead>
               </TableRow>
             </TableHeader>
-            <TableBody>
+            <TableBody className="[&_td]:px-3 [&_td]:py-3">
               {loading ? (
                 <TableRow>
-                  <TableCell colSpan={11} className="text-center py-12">
+                  <TableCell colSpan={8} className="text-center !py-12">
                     <div className="flex flex-col items-center gap-2">
                       <Loader2 className="h-8 w-8 animate-spin text-primary" />
                       <p className="text-muted-foreground">Loading findings...</p>
@@ -2285,7 +2301,7 @@ export default function FindingsPage() {
                 </TableRow>
               ) : filteredFindings.length === 0 ? (
                 <TableRow>
-                  <TableCell colSpan={11} className="text-center py-12">
+                  <TableCell colSpan={8} className="text-center !py-12">
                     <div className="flex flex-col items-center gap-2">
                       <Shield className="h-12 w-12 text-muted-foreground/50" />
                       <p className="text-muted-foreground">
@@ -2301,8 +2317,8 @@ export default function FindingsPage() {
                   <TableRow
                     key={finding.id}
                     className={cn(
-                      "cursor-pointer hover:bg-muted/50",
-                      selectedFindingIds.has(finding.id) && "bg-primary/5"
+                      "group cursor-pointer border-border/50 transition-colors hover:bg-primary/[0.04]",
+                      selectedFindingIds.has(finding.id) && "bg-primary/[0.07]"
                     )}
                     onClick={() => handleSelectFinding(finding)}
                   >
@@ -2324,12 +2340,12 @@ export default function FindingsPage() {
                           scanner !== label &&
                           !(scanner === 'info' && label === 'info');
                         return (
-                          <div className="flex flex-col gap-0.5">
-                            <Badge className={getSeverityBadgeClass(label === 'info' ? 'info' : label)}>
+                          <div className="flex flex-col items-start gap-1">
+                            <Badge className={cn('w-fit capitalize', getSeverityBadgeClass(label === 'info' ? 'info' : label))}>
                               {label}
                             </Badge>
                             {diverges && (
-                              <span className="text-[10px] text-muted-foreground truncate">
+                              <span className="text-[10px] leading-tight text-muted-foreground" title={`Scanner severity: ${finding.severity}`}>
                                 Scanner: {finding.severity}
                               </span>
                             )}
@@ -2338,48 +2354,29 @@ export default function FindingsPage() {
                       })()}
                     </TableCell>
                     <TableCell>
-                      {finding.sev_level ? (
-                        <div className="flex flex-col gap-0.5">
-                          <Badge variant="outline" className={cn('capitalize w-fit', RISK_LEVEL_STYLE[finding.sev_level])}>
-                            {finding.sev_level === 'informational' ? 'info' : finding.sev_level}
-                          </Badge>
-                          <span className="text-[10px] text-muted-foreground font-mono">
-                            {(finding.sev_score ?? 0).toFixed(1)}/100
-                          </span>
-                        </div>
-                      ) : (
-                        <span className="text-muted-foreground text-xs">Not evaluated</span>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      {finding.sev_status === 'triaged' ? (
-                        <Badge variant="outline" className="border-green-500/40 text-green-400">Triaged</Badge>
-                      ) : finding.sev_status ? (
-                        <Badge
-                          variant="outline"
-                          className="border-amber-500/40 text-amber-400"
-                          title="Risk factors the rules could not measure — open the finding to score them"
-                        >
-                          {finding.sev_pending ?? 0} to score
-                        </Badge>
-                      ) : (
-                        <span className="text-muted-foreground text-xs">—</span>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex flex-col gap-1">
-                        <div className="flex items-center gap-2">
-                          <Shield className="h-4 w-4 text-muted-foreground shrink-0" />
-                          <span className="font-medium line-clamp-1">
+                      <div className="min-w-0 space-y-1.5">
+                        <div>
+                          <button
+                            type="button"
+                            className="line-clamp-2 break-words text-left font-medium leading-5 text-foreground hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                            title={finding.title || finding.name || finding.template_id}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              handleSelectFinding(finding);
+                            }}
+                          >
                             {finding.title || finding.name || finding.template_id}
-                          </span>
+                          </button>
                         </div>
-                        <div className="flex items-center gap-2 flex-wrap">
+                        <div className="flex flex-wrap items-center gap-1.5">
                           {finding.cve_id && (
-                            <span className="text-xs text-primary font-mono">{finding.cve_id}</span>
+                            <span className="text-[11px] font-mono text-primary">{finding.cve_id}</span>
                           )}
                           <OracleBadge oracle={finding.oracle} compact />
                           <DelphiBadges delphi={finding.delphi} compact />
+                          {finding.cvss_score != null && (
+                            <span className="text-[11px] tabular-nums text-muted-foreground">CVSS {finding.cvss_score.toFixed(1)}</span>
+                          )}
                           {(finding.detected_by || '').toLowerCase() === 'agent' && (
                             <Badge
                               variant="outline"
@@ -2394,16 +2391,17 @@ export default function FindingsPage() {
                         </div>
                       </div>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="min-w-0">
                       {finding.host ? (
                         <a
                           href={`https://${finding.host}`}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="text-primary hover:underline flex items-center gap-1"
+                          className="flex min-w-0 items-center gap-1 text-primary hover:underline"
                           onClick={(e) => e.stopPropagation()}
+                          title={finding.host}
                         >
-                          <span className="truncate max-w-[200px]">{finding.host}</span>
+                          <span className="truncate">{finding.host}</span>
                           <ExternalLink className="h-3 w-3 shrink-0" />
                         </a>
                       ) : (
@@ -2411,19 +2409,44 @@ export default function FindingsPage() {
                       )}
                       {finding.business_app && (
                         <span
-                          className="text-[11px] text-muted-foreground block truncate max-w-[220px]"
+                          className="block truncate text-[11px] text-muted-foreground"
                           title={`${finding.business_app.name}${finding.business_app.inherited_from_asset ? ' (from asset)' : ''}`}
                         >
                           {finding.business_app.app_id ?? ''} {finding.business_app.name}
                         </span>
                       )}
                     </TableCell>
+                    <TableCell>
+                      <div className="space-y-1.5">
+                        {finding.sev_level ? (
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <Badge variant="outline" className={cn('w-fit capitalize', RISK_LEVEL_STYLE[finding.sev_level])}>
+                              {finding.sev_level === 'informational' ? 'info' : finding.sev_level}
+                            </Badge>
+                            <span className="text-[11px] font-mono tabular-nums text-muted-foreground">
+                              {(finding.sev_score ?? 0).toFixed(1)}/100
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-xs text-muted-foreground">Not evaluated</span>
+                        )}
+                        <div>
+                          {finding.sev_status === 'triaged' ? (
+                            <span className="text-xs text-green-400">Triaged</span>
+                          ) : finding.sev_status ? (
+                            <span className="text-xs text-amber-400" title="Risk factors the rules could not measure — open the finding to score them">
+                              {finding.sev_pending ?? 0} to score
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+                    </TableCell>
                     <TableCell onClick={(e) => e.stopPropagation()}>
                       <Select
                         value={finding.status || 'open'}
                         onValueChange={(value) => handleInlineStatusChange(finding.id, value)}
                       >
-                        <SelectTrigger className="h-8 w-[130px] text-xs">
+                        <SelectTrigger className="h-8 w-full max-w-[130px] text-xs">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -2465,37 +2488,20 @@ export default function FindingsPage() {
                           </SelectItem>
                         </SelectContent>
                       </Select>
-                    </TableCell>
-                    <TableCell>
                       {finding.assigned_to ? (
-                        <span className="text-sm flex items-center gap-1">
-                          <User className="h-3 w-3" />
-                          {finding.assigned_to}
+                        <span className="mt-1.5 flex items-center gap-1 text-[11px] text-muted-foreground" title={finding.assigned_to}>
+                          <User className="h-3 w-3 shrink-0" />
+                          <span className="truncate">{finding.assigned_to}</span>
                         </span>
                       ) : (
-                        <span className="text-muted-foreground text-sm">-</span>
+                        <span className="mt-1.5 block text-[11px] text-muted-foreground">Unassigned</span>
                       )}
                     </TableCell>
-                    <TableCell>
-                      {finding.cvss_score ? (
-                        <span className={cn(
-                          'font-mono font-medium',
-                          finding.cvss_score >= 9 ? 'text-red-400' :
-                          finding.cvss_score >= 7 ? 'text-orange-400' :
-                          finding.cvss_score >= 4 ? 'text-yellow-400' :
-                          'text-green-400'
-                        )}>
-                          {finding.cvss_score.toFixed(1)}
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground">-</span>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-muted-foreground text-sm">
-                      {formatDate(finding.first_detected || finding.created_at)}
+                    <TableCell className="text-xs tabular-nums text-muted-foreground" title={formatDate(finding.first_detected || finding.created_at)}>
+                      {new Date(finding.first_detected || finding.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
                     </TableCell>
                     <TableCell>
-                      <ChevronRight className="h-4 w-4 text-muted-foreground" />
+                      <ChevronRight className="h-4 w-4 text-muted-foreground/60 transition-transform group-hover:translate-x-0.5 group-hover:text-primary" />
                     </TableCell>
                   </TableRow>
                 ))
