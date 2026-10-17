@@ -710,6 +710,7 @@ def _import_report(
     if asset is None:
         stats.reports_skipped += 1
         return
+    asset_index[asset.value] = asset
 
     # Dedup by HackerOne report id in metadata.
     existing = None
@@ -898,6 +899,11 @@ async def sync_integration(
         integration.last_error = None
         integration.last_sync_stats = stats.as_dict()
         db.commit()
+
+        from app.services.integration_graph_sync import sync_integration_assets_to_graph
+        await sync_integration_assets_to_graph(
+            org_id, {asset.value for asset in asset_index.values()}
+        )
 
         return {
             "ok": True,

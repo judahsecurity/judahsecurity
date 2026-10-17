@@ -2,13 +2,14 @@
 Neo4j Graph Database Service
 
 Stores the canonical chain:
-  Domain → Subdomain → IP → Port → Service → Technology → Vulnerability → CVE
-                                                              Vulnerability → MITRE (CWE)
+  Domain → Subdomain → IP → Port → Service
+  Asset → Technology; Asset → Vulnerability → CVE / CWE
 
 Also keeps Asset nodes for API compatibility (get_asset_relationships, get_attack_paths).
 """
 
 import hashlib
+import ipaddress
 import logging
 import re
 from typing import Optional, List, Dict, Any
@@ -22,13 +23,36 @@ from sqlalchemy.orm import selectinload
 
 from app.core.config import settings
 from app.db.database import SessionLocal
-from app.models.asset import Asset, AssetType
+from app.models.asset import Asset, AssetStatus, AssetType
 from app.models.vulnerability import Vulnerability
 from app.models.port_service import PortService
 from app.models.technology import Technology
 from app.services.graph_identity import canonical_script_url, script_key
+from app.services.graph_ip_identity import graph_ip_identity
 
 logger = logging.getLogger(__name__)
+
+# These nodes are shared references. A prior sync may have left another
+# organization's observation properties on them, so never return those fields.
+_SHARED_REFERENCE_FIELDS = {
+    "IP": {"address", "type", "scope_id"},
+    "ASN": {"asn_number"},
+    "Certificate": {"fingerprint", "common_name", "issuer", "expiry", "san_count"},
+    "DiscoverySource": {"name", "display_name"},
+    "HostingProvider": {"name"},
+    "Service": {"name"},
+    "Technology": {"name", "slug", "category", "categories", "website"},
+}
+
+
+def graph_node_properties(node) -> Dict[str, Any]:
+    """Expose only invariant properties of shared reference nodes."""
+    properties = dict(node)
+    for label in getattr(node, "labels", ()):
+        allowed = _SHARED_REFERENCE_FIELDS.get(label)
+        if allowed is not None:
+            return {key: value for key, value in properties.items() if key in allowed}
+    return properties
 
 
 class GraphService:
@@ -37,8 +61,9 @@ class GraphService:
 
     Canonical chain (see docs/GRAPH_SCHEMA.md):
     - Domain -[:HAS_SUBDOMAIN]-> Subdomain -[:RESOLVES_TO]-> IP -[:HAS_PORT]-> Port
-      -[:RUNS_SERVICE]-> Service -[:USES_TECHNOLOGY]-> Technology -[:HAS_VULNERABILITY]-> Vulnerability
-      -[:REFERENCES]-> CVE, Vulnerability -[:MAPS_TO]-> MITRE (CWE)
+      -[:RUNS_SERVICE]-> Service; Asset -[:USES_TECHNOLOGY]-> Technology
+    - Asset -[:HAS_VULNERABILITY]-> Vulnerability -[:REFERENCES]-> CVE
+      and Vulnerability -[:MAPS_TO]-> MITRE (CWE)
 
     Asset nodes and Asset-based edges are kept for API compatibility.
     """
@@ -116,7 +141,10 @@ class GraphService:
                 "CREATE CONSTRAINT subdomain_org_name IF NOT EXISTS FOR (s:Subdomain) REQUIRE (s.organization_id, s.name) IS UNIQUE",
                 # Core asset nodes
                 "CREATE CONSTRAINT asset_id IF NOT EXISTS FOR (a:Asset) REQUIRE a.asset_id IS UNIQUE",
-                "CREATE CONSTRAINT ip_address IF NOT EXISTS FOR (i:IP) REQUIRE i.address IS UNIQUE",
+                "CREATE CONSTRAINT ip_key IF NOT EXISTS FOR (i:IP) REQUIRE i.ip_key IS UNIQUE",
+                "CREATE CONSTRAINT cloud_subscription_key IF NOT EXISTS FOR (c:CloudSubscription) REQUIRE c.key IS UNIQUE",
+                "CREATE CONSTRAINT cloud_region_key IF NOT EXISTS FOR (c:CloudRegion) REQUIRE c.key IS UNIQUE",
+                "CREATE CONSTRAINT zpa_source_key IF NOT EXISTS FOR (s:ZpaSource) REQUIRE s.key IS UNIQUE",
                 "CREATE CONSTRAINT port_id IF NOT EXISTS FOR (p:Port) REQUIRE p.port_id IS UNIQUE",
                 "CREATE CONSTRAINT service_name IF NOT EXISTS FOR (s:Service) REQUIRE s.name IS UNIQUE",
                 "CREATE CONSTRAINT service_observation_id IF NOT EXISTS FOR (s:ServiceObservation) REQUIRE s.port_id IS UNIQUE",
@@ -157,8 +185,6 @@ class GraphService:
                 "CREATE INDEX asset_root_domain IF NOT EXISTS FOR (a:Asset) ON (a.root_domain)",
                 "CREATE INDEX asset_risk IF NOT EXISTS FOR (a:Asset) ON (a.ars_score)",
                 "CREATE INDEX asset_live IF NOT EXISTS FOR (a:Asset) ON (a.is_live)",
-                # IP indexes
-                "CREATE INDEX ip_org IF NOT EXISTS FOR (i:IP) ON (i.organization_id)",
                 # Port indexes
                 "CREATE INDEX port_number IF NOT EXISTS FOR (p:Port) ON (p.port)",
                 "CREATE INDEX port_risky IF NOT EXISTS FOR (p:Port) ON (p.is_risky)",
@@ -177,11 +203,7 @@ class GraphService:
                 "CREATE TEXT INDEX js_resource_url_text IF NOT EXISTS FOR (j:JSResource) ON (j.url)",
                 "CREATE INDEX parameter_org IF NOT EXISTS FOR (p:Parameter) ON (p.organization_id)",
                 # Discovery provenance layer
-                "CREATE INDEX discovery_source_org IF NOT EXISTS FOR (ds:DiscoverySource) ON (ds.organization_id)",
-                "CREATE INDEX asn_org IF NOT EXISTS FOR (a:ASN) ON (a.organization_id)",
                 "CREATE INDEX hosting_provider_name_idx IF NOT EXISTS FOR (h:HostingProvider) ON (h.name)",
-                "CREATE INDEX cert_org IF NOT EXISTS FOR (c:Certificate) ON (c.organization_id)",
-                "CREATE INDEX ip_internet_facing IF NOT EXISTS FOR (i:IP) ON (i.is_internet_facing)",
                 "CREATE FULLTEXT INDEX graph_knowledge_text IF NOT EXISTS FOR (n:JSResource|Endpoint|SourceFile|Vulnerability) ON EACH [n.url, n.path, n.title]",
             ]
             
@@ -239,11 +261,15 @@ class GraphService:
             
             with self.session() as session:
                 for asset in assets:
-                    self._sync_asset(session, asset, organization_id)
+                    session.execute_write(
+                        lambda tx, item=asset: self._sync_asset(tx, item, organization_id)
+                    )
                     synced += 1
-                # RedAmon-style: logical links between subdomains on same IP
-                if asset_values is None:
-                    self._create_same_ip_links(session, organization_id)
+                # New or updated subdomains can share an IP even in a partial sync.
+                if synced:
+                    session.execute_write(
+                        lambda tx: self._create_same_ip_links(tx, organization_id)
+                    )
             
             logger.info(f"Synced {synced} assets for organization {organization_id}")
             return {"synced": synced, "error": None}
@@ -259,12 +285,18 @@ class GraphService:
         Sync a single asset and all its relationships to the graph.
         
         Creates the full relationship chain:
-        Domain → Subdomain → IP → Port → Service → Technology → Vulnerability → CVE
+        Domain → Subdomain → IP → Port → Service, with asset-scoped technology
+        and vulnerability observations linked only when supported by evidence.
         """
         # Asset is an inventory identity. Domain, Subdomain and IP below are
         # canonical topology identities with their own uniqueness constraints.
         # Remove legacy subtype labels before updating a previously synced
         # Asset so a duplicate inventory row cannot violate those constraints.
+        asset_is_active = getattr(asset, "is_active", None)
+        if asset_is_active is None:
+            asset_is_active = getattr(asset, "status", None) not in (
+                AssetStatus.INACTIVE, AssetStatus.ARCHIVED
+            )
         session.run("""
             MERGE (a:Asset {asset_id: $id})
             REMOVE a:Domain:Subdomain:IP:URL:Certificate
@@ -274,6 +306,7 @@ class GraphService:
                 a.organization_id = $org_id,
                 a.root_domain = $root_domain,
                 a.is_active = $is_active,
+                a.is_public = $is_public,
                 a.is_live = $is_live,
                 a.first_seen = $first_seen,
                 a.ars_score = $ars_score,
@@ -297,7 +330,8 @@ class GraphService:
             "type": asset.asset_type.value if asset.asset_type else None,
             "org_id": org_id,
             "root_domain": asset.root_domain,
-            "is_active": getattr(asset, 'is_active', True),
+            "is_active": asset_is_active,
+            "is_public": bool(getattr(asset, 'is_public', False)),
             "is_live": getattr(asset, 'is_live', False),
             "first_seen": asset.first_seen.isoformat() if asset.first_seen else None,
             "ars_score": getattr(asset, 'ars_score', None),
@@ -372,33 +406,59 @@ class GraphService:
             and asset.value.strip()
         ):
             ip_addresses = [asset.value.strip()]
+        # Reprojection may change an address's network scope. Retire links
+        # created by this asset before writing its current observations.
+        session.run("""
+            MATCH (:Asset {asset_id: $asset_id})-[r:RESOLVES_TO]->(:IP)
+            DELETE r
+        """, {"asset_id": asset.id})
+        session.run("""
+            MATCH (:Subdomain {organization_id: $org_id})
+                  -[r:RESOLVES_TO {source_asset_id: $asset_id}]->(:IP)
+            DELETE r
+        """, {"asset_id": asset.id, "org_id": org_id})
         for ip in ip_addresses:
             if ip:
-                ip_type = "ipv6" if ":" in ip else "ipv4"
+                try:
+                    identity = graph_ip_identity(ip, org_id, asset)
+                except ValueError:
+                    logger.warning("Skipping invalid IP %r on asset %s", ip, asset.id)
+                    continue
                 is_cdn = bool(getattr(asset, 'hosting_type', None) in ("cdn", "cloud") or getattr(asset, 'hosting_provider', None))
                 session.run("""
                     MATCH (a:Asset {asset_id: $asset_id})
-                    MERGE (ip:IP {address: $ip_address})
-                    SET ip.organization_id = $org_id,
-                        ip.type = $ip_type,
-                        ip.is_cdn = $is_cdn
-                    MERGE (a)-[:RESOLVES_TO]->(ip)
+                    MERGE (ip:IP {ip_key: $ip_key})
+                    SET ip.address = $ip_address,
+                        ip.scope_id = $scope_id,
+                        ip.type = $ip_type
+                    REMOVE ip.organization_id, ip.is_cdn, ip.is_live, ip.is_internet_facing
+                    MERGE (a)-[resolution:RESOLVES_TO]->(ip)
+                    SET resolution.organization_id = $org_id,
+                        resolution.is_cdn = $is_cdn,
+                        resolution.is_live = $is_live,
+                        resolution.is_internet_facing = $is_internet_facing
                 """, {
                     "asset_id": asset.id,
-                    "ip_address": ip,
+                    "ip_key": identity.key,
+                    "ip_address": identity.address,
+                    "scope_id": identity.scope_id,
                     "org_id": org_id,
-                    "ip_type": ip_type,
+                    "ip_type": identity.ip_type,
                     "is_cdn": is_cdn,
+                    "is_live": bool(getattr(asset, 'is_live', False)),
+                    "is_internet_facing": bool(getattr(asset, 'is_public', True)),
                 })
                 if root_domain and subdomain_name:
                     session.run("""
                         MERGE (s:Subdomain {organization_id: $org_id, name: $subdomain_name})
-                        MERGE (ip:IP {address: $ip_address})
-                        MERGE (s)-[:RESOLVES_TO]->(ip)
+                        MATCH (ip:IP {ip_key: $ip_key})
+                        MERGE (s)-[resolution:RESOLVES_TO {source_asset_id: $asset_id}]->(ip)
+                        SET resolution.organization_id = $org_id
                     """, {
                         "org_id": org_id,
+                        "asset_id": asset.id,
                         "subdomain_name": subdomain_name,
-                        "ip_address": ip,
+                        "ip_key": identity.key,
                     })
         
         # ===== 3. PORT/SERVICE: IP HAS_PORT Port, Port RUNS_SERVICE Service =====
@@ -432,11 +492,17 @@ class GraphService:
             })
 
             if ip_for_port:
-                session.run("""
-                    MATCH (ip:IP {address: $ip_address})
-                    MATCH (p:Port {port_id: $port_id})
-                    MERGE (ip)-[:HAS_PORT]->(p)
-                """, {"ip_address": ip_for_port, "port_id": ps.id})
+                try:
+                    port_ip = graph_ip_identity(ip_for_port, org_id, asset)
+                    session.run("""
+                        MATCH (a:Asset {asset_id: $asset_id, organization_id: $org_id})
+                              -[:RESOLVES_TO]->(ip:IP {ip_key: $ip_key})
+                        MATCH (p:Port {port_id: $port_id})
+                        MERGE (ip)-[:HAS_PORT]->(p)
+                    """, {"asset_id": asset.id, "org_id": org_id,
+                          "ip_key": port_ip.key, "port_id": ps.id})
+                except ValueError:
+                    logger.warning("Skipping invalid scanned IP %r on port %s", ip_for_port, ps.id)
 
             session.run("""
                 MATCH (p:Port {port_id: $port_id})
@@ -470,15 +536,18 @@ class GraphService:
                 MATCH (a:Asset {asset_id: $asset_id})
                 MERGE (t:Technology {name: $name})
                 SET t.slug = $slug,
-                    t.version = $version,
                     t.category = $category,
                     t.categories = $categories,
-                    t.cpe = $cpe,
                     t.website = $website
-                MERGE (a)-[:USES_TECHNOLOGY]->(t)
+                REMOVE t.version, t.cpe, t.organization_id
+                MERGE (a)-[observed:USES_TECHNOLOGY]->(t)
+                SET observed.organization_id = $org_id,
+                    observed.version = $version,
+                    observed.cpe = $cpe
             """, {
                 "asset_id": asset.id,
                 "name": tech.name,
+                "org_id": org_id,
                 "slug": tech.slug,
                 "version": getattr(tech, 'version', None),
                 "category": categories[0] if categories else None,
@@ -486,11 +555,6 @@ class GraphService:
                 "cpe": tech.cpe,
                 "website": tech.website,
             })
-            session.run("""
-                MATCH (a:Asset {asset_id: $asset_id})-[:HAS_PORT]->(p:Port)-[:RUNS_SERVICE]->(s:Service)
-                MATCH (t:Technology {name: $name})
-                MERGE (s)-[:USES_TECHNOLOGY]->(t)
-            """, {"asset_id": asset.id, "name": tech.name})
         
         # ===== 5. VULNERABILITY: Technology HAS_VULNERABILITY, REFERENCES CVE, MAPS_TO MITRE =====
         vulnerabilities = getattr(asset, 'vulnerabilities', None) or []
@@ -521,12 +585,6 @@ class GraphService:
                 "detected_by": vuln.detected_by,
                 "org_id": org_id,
             })
-            if technologies:
-                session.run("""
-                    MATCH (a:Asset {asset_id: $asset_id})-[:USES_TECHNOLOGY]->(t:Technology)
-                    MATCH (v:Vulnerability {vuln_id: $vuln_id})
-                    MERGE (t)-[:HAS_VULNERABILITY]->(v)
-                """, {"asset_id": asset.id, "vuln_id": vuln.id})
             if vuln.cve_id:
                 session.run("""
                     MATCH (v:Vulnerability {vuln_id: $vuln_id})
@@ -677,10 +735,11 @@ class GraphService:
                 session.run("""
                     MATCH (a:Asset {asset_id: $asset_id})
                     MERGE (ds:DiscoverySource {name: $source_name})
-                    SET ds.organization_id = $org_id,
-                        ds.display_name = $display_name
+                    SET ds.display_name = $display_name
+                    REMOVE ds.organization_id
                     MERGE (a)-[r:DISCOVERED_VIA]->(ds)
-                    SET r.step = $step,
+                    SET r.organization_id = $org_id,
+                        r.step = $step,
                         r.found_value = $found_value,
                         r.query = $query_value,
                         r.confidence = $confidence
@@ -704,22 +763,28 @@ class GraphService:
                 session.run("""
                     MATCH (a:Asset {asset_id: $asset_id})
                     MERGE (h:HostingProvider {name: $name})
-                    SET h.hosting_type = $hosting_type
-                    MERGE (a)-[:HOSTED_BY]->(h)
+                    REMOVE h.hosting_type, h.organization_id
+                    MERGE (a)-[hosted:HOSTED_BY]->(h)
+                    SET hosted.organization_id = $org_id,
+                        hosted.hosting_type = $hosting_type
                 """, {
                     "asset_id": asset.id,
                     "name": hosting_provider.lower(),
+                    "org_id": org_id,
                     "hosting_type": getattr(asset, 'hosting_type', 'unknown'),
                 })
                 # Also link IPs to the hosting provider
                 for ip in ip_addresses:
                     if ip:
                         try:
+                            ip_key = graph_ip_identity(ip, org_id, asset).key
                             session.run("""
-                                MATCH (ip:IP {address: $ip})
+                                MATCH (a:Asset {asset_id: $asset_id, organization_id: $org_id})
+                                      -[:RESOLVES_TO]->(ip:IP {ip_key: $ip_key})
                                 MATCH (h:HostingProvider {name: $name})
-                                MERGE (ip)-[:HOSTED_BY]->(h)
-                            """, {"ip": ip, "name": hosting_provider.lower()})
+                                MERGE (ip)-[:HOSTED_BY {organization_id: $org_id}]->(h)
+                            """, {"asset_id": asset.id, "ip_key": ip_key,
+                                  "name": hosting_provider.lower(), "org_id": org_id})
                         except Exception:
                             pass
             except Exception as e:
@@ -732,9 +797,7 @@ class GraphService:
             try:
                 session.run("""
                     MERGE (asn:ASN {asn_number: $asn_number})
-                    SET asn.organization_id = $org_id,
-                        asn.isp = $isp,
-                        asn.country = $country
+                    REMOVE asn.organization_id, asn.isp, asn.country
                 """, {
                     "asn_number": str(asn_value),
                     "org_id": org_id,
@@ -744,11 +807,18 @@ class GraphService:
                 for ip in ip_addresses:
                     if ip:
                         try:
+                            ip_key = graph_ip_identity(ip, org_id, asset).key
                             session.run("""
-                                MATCH (ip:IP {address: $ip})
+                                MATCH (a:Asset {asset_id: $asset_id, organization_id: $org_id})
+                                      -[:RESOLVES_TO]->(ip:IP {ip_key: $ip_key})
                                 MATCH (asn:ASN {asn_number: $asn_number})
-                                MERGE (ip)-[:BELONGS_TO_ASN]->(asn)
-                            """, {"ip": ip, "asn_number": str(asn_value)})
+                                MERGE (ip)-[association:BELONGS_TO_ASN {organization_id: $org_id}]->(asn)
+                                SET association.isp = $isp,
+                                    association.country = $country
+                            """, {"asset_id": asset.id, "ip_key": ip_key,
+                                  "asn_number": str(asn_value),
+                                  "org_id": org_id, "isp": isp_value,
+                                  "country": getattr(asset, 'country', None)})
                         except Exception:
                             pass
             except Exception as e:
@@ -778,9 +848,10 @@ class GraphService:
                         SET cert.common_name = $common_name,
                             cert.issuer = $issuer,
                             cert.expiry = $expiry,
-                            cert.organization_id = $org_id,
                             cert.san_count = $san_count
-                        MERGE (a)-[:SIGNED_BY]->(cert)
+                        REMOVE cert.organization_id
+                        MERGE (a)-[signed:SIGNED_BY]->(cert)
+                        SET signed.organization_id = $org_id
                     """, {
                         "asset_id": asset.id,
                         "cert_id": cert_id,
@@ -799,7 +870,8 @@ class GraphService:
                             session.run("""
                                 MATCH (cert:Certificate {fingerprint: $cert_id})
                                 MERGE (s:Subdomain {organization_id: $org_id, name: $san_name})
-                                MERGE (cert)-[:ALSO_COVERS]->(s)
+                                MERGE (cert)-[covers:ALSO_COVERS]->(s)
+                                SET covers.organization_id = $org_id
                             """, {
                                 "cert_id": cert_id,
                                 "org_id": org_id,
@@ -810,20 +882,23 @@ class GraphService:
                 except Exception as e:
                     logger.debug(f"Certificate sync error for asset {asset.id}: {e}")
 
-        # ===== 15. INTERNET FACING: tag IP nodes with is_internet_facing =====
+        # ===== 15. INTERNET FACING: record asset-to-IP observations =====
         # Marks which IPs are publicly reachable — the boundary for internal hop modeling.
         is_public = getattr(asset, 'is_public', True)
         is_live = getattr(asset, 'is_live', False)
         for ip in ip_addresses:
             if ip:
                 try:
+                    ip_key = graph_ip_identity(ip, org_id, asset).key
                     session.run("""
-                        MATCH (ip:IP {address: $ip})
-                        SET ip.is_internet_facing = $is_internet_facing,
-                            ip.is_live = $is_live,
-                            ip.organization_id = coalesce(ip.organization_id, $org_id)
+                        MATCH (a:Asset {asset_id: $asset_id, organization_id: $org_id})
+                              -[resolution:RESOLVES_TO]->(ip:IP {ip_key: $ip_key})
+                        SET resolution.is_internet_facing = $is_internet_facing,
+                            resolution.is_live = $is_live
+                        REMOVE ip.organization_id, ip.is_internet_facing, ip.is_live
                     """, {
-                        "ip": ip,
+                        "asset_id": asset.id,
+                        "ip_key": ip_key,
                         "is_internet_facing": is_public,
                         "is_live": is_live,
                         "org_id": org_id,
@@ -832,7 +907,71 @@ class GraphService:
                     pass
 
         # ===== 16. F5 REACHABILITY: VIP IP FORWARDS_TO pool-member IP =====
+        self._sync_wiz_cloud_context(session, asset, org_id)
         self._sync_f5_forwards_to(session, asset, org_id, ip_addresses)
+
+    def _sync_wiz_cloud_context(self, session, asset: Asset, org_id: int) -> None:
+        """Project Wiz's asserted cloud identity and location, not reachability."""
+        session.run("""
+            MATCH (:Asset {asset_id: $asset_id})
+                  -[r:IN_CLOUD_SUBSCRIPTION|IN_CLOUD_REGION]->()
+            DELETE r
+        """, {"asset_id": asset.id})
+        session.run("""
+            MATCH (a:Asset {asset_id: $asset_id})
+            REMOVE a.wiz_resource_id, a.cloud_provider_id,
+                   a.cloud_platform, a.wiz_internet_exposure
+        """, {"asset_id": asset.id})
+        metadata = getattr(asset, "metadata_", None) or {}
+        wiz = metadata.get("wiz") if isinstance(metadata, dict) else None
+        if not isinstance(wiz, dict):
+            return
+        platform = str(wiz.get("cloud_platform") or "").strip().lower()
+        subscription = str(
+            wiz.get("subscription_external_id") or wiz.get("subscription_id") or ""
+        ).strip()
+        region = str(wiz.get("region") or "").strip()
+        session.run("""
+            MATCH (a:Asset {asset_id: $asset_id, organization_id: $org_id})
+            SET a.wiz_resource_id = $wiz_id,
+                a.cloud_provider_id = $provider_id,
+                a.cloud_platform = $platform,
+                a.wiz_internet_exposure = $exposure
+        """, {
+            "asset_id": asset.id, "org_id": org_id,
+            "wiz_id": wiz.get("id"), "provider_id": wiz.get("provider_unique_id"),
+            "platform": platform or None,
+            "exposure": ("wide" if wiz.get("has_wide_internet_exposure") else
+                         "limited" if wiz.get("has_limited_internet_exposure") else "none"),
+        })
+        if subscription:
+            session.run("""
+                MATCH (a:Asset {asset_id: $asset_id, organization_id: $org_id})
+                MERGE (s:CloudSubscription {key: $key})
+                SET s.organization_id = $org_id, s.platform = $platform,
+                    s.subscription_id = $subscription,
+                    s.name = $subscription_name
+                MERGE (a)-[r:IN_CLOUD_SUBSCRIPTION]->(s)
+                SET r.source = 'wiz', r.organization_id = $org_id
+            """, {
+                "asset_id": asset.id, "org_id": org_id,
+                "key": f"{org_id}|{platform}|{subscription}",
+                "platform": platform, "subscription": subscription,
+                "subscription_name": wiz.get("subscription_name") or subscription,
+            })
+        if region:
+            session.run("""
+                MATCH (a:Asset {asset_id: $asset_id, organization_id: $org_id})
+                MERGE (r:CloudRegion {key: $key})
+                SET r.organization_id = $org_id, r.platform = $platform,
+                    r.name = $region
+                MERGE (a)-[observed:IN_CLOUD_REGION]->(r)
+                SET observed.source = 'wiz', observed.organization_id = $org_id
+            """, {
+                "asset_id": asset.id, "org_id": org_id,
+                "key": f"{org_id}|{platform}|{region}",
+                "platform": platform, "region": region,
+            })
 
     def _sync_js_resources(self, session, asset: Asset, org_id: int) -> None:
         """Link observed JS URLs to the asset, endpoints and finding evidence."""
@@ -933,89 +1072,83 @@ class GraphService:
         return len(rows)
 
     def _sync_f5_forwards_to(self, session, asset: Asset, org_id: int, ip_addresses: list) -> None:
-        """Create FORWARDS_TO edges from F5 VIP metadata or member reachable-via fields."""
+        """Link only the specific VIP and member assets named by F5 evidence."""
         meta = getattr(asset, "metadata_", None) or {}
         if not isinstance(meta, dict):
             return
 
-        try:
-            # VIP side: metadata.f5_pool_members → edges from this VIP to each member
-            members = meta.get("f5_pool_members")
-            vip_ip = None
-            if isinstance(members, list) and members:
-                vip_ip = (
-                    (ip_addresses[0] if ip_addresses else None)
-                    or meta.get("f5_destination")
-                    or (asset.value if asset.asset_type == AssetType.IP_ADDRESS else None)
-                )
-                if isinstance(vip_ip, str) and ":" in vip_ip and vip_ip.count(":") == 1 and "." in vip_ip:
-                    # destination may still include :port
-                    vip_ip = vip_ip.split(":", 1)[0]
-                if vip_ip:
-                    pool = meta.get("f5_pool")
-                    virtual = meta.get("f5_virtual_name")
-                    for member in members:
-                        if not isinstance(member, dict):
-                            continue
-                        member_ip = member.get("ip")
-                        if not member_ip or member_ip == vip_ip:
-                            continue
-                        session.run("""
-                            MERGE (vip:IP {address: $vip_ip})
-                            SET vip.organization_id = coalesce(vip.organization_id, $org_id)
-                            MERGE (member:IP {address: $member_ip})
-                            SET member.organization_id = coalesce(member.organization_id, $org_id),
-                                member.is_internet_facing = coalesce(member.is_internet_facing, false)
-                            MERGE (vip)-[r:FORWARDS_TO]->(member)
-                            SET r.source = 'f5',
-                                r.pool = $pool,
-                                r.virtual = $virtual,
-                                r.port = $port,
-                                r.organization_id = $org_id
-                        """, {
-                            "vip_ip": vip_ip,
-                            "member_ip": member_ip,
-                            "org_id": org_id,
-                            "pool": pool,
-                            "virtual": virtual,
-                            "port": member.get("port"),
-                        })
+        if meta.get("f5_integration_id"):
+            session.run("""
+                MATCH ()-[r:FORWARDS_TO {organization_id: $org_id}]->()
+                WHERE r.source = 'f5' AND
+                      (r.vip_asset_id = $asset_id OR r.member_asset_id = $asset_id)
+                DELETE r
+            """, {"org_id": org_id, "asset_id": asset.id})
+        if getattr(asset, "status", None) in (AssetStatus.INACTIVE, AssetStatus.ARCHIVED):
+            return
 
-            # Member side: ensure edge exists from f5_reachable_via_vip / vips
-            via_list = []
-            if isinstance(meta.get("f5_reachable_via_vips"), list):
-                via_list.extend([v for v in meta["f5_reachable_via_vips"] if isinstance(v, str)])
-            via_one = meta.get("f5_reachable_via_vip")
-            if isinstance(via_one, str) and via_one not in via_list:
-                via_list.append(via_one)
-            member_ip = (
-                (ip_addresses[0] if ip_addresses else None)
-                or (asset.value if asset.asset_type == AssetType.IP_ADDRESS else None)
-            )
-            if member_ip and via_list:
-                for vip in via_list:
-                    if not vip or vip == member_ip:
+        try:
+            members = meta.get("f5_pool_members")
+            vip_ip = (ip_addresses[0] if ip_addresses else None) or asset.value
+            if isinstance(members, list) and vip_ip:
+                vip_address = graph_ip_identity(vip_ip, org_id, asset).address
+                for member in members:
+                    if not isinstance(member, dict) or not member.get("asset_id") or not member.get("ip"):
                         continue
+                    member_address = graph_ip_identity(member["ip"], org_id, asset).address
                     session.run("""
-                        MERGE (vip:IP {address: $vip_ip})
-                        SET vip.organization_id = coalesce(vip.organization_id, $org_id),
-                            vip.is_internet_facing = coalesce(vip.is_internet_facing, true)
-                        MERGE (member:IP {address: $member_ip})
-                        SET member.organization_id = coalesce(member.organization_id, $org_id),
-                            member.is_internet_facing = coalesce(member.is_internet_facing, false)
-                        MERGE (vip)-[r:FORWARDS_TO]->(member)
-                        SET r.source = 'f5',
-                            r.pool = $pool,
-                            r.virtual = $virtual,
-                            r.port = $port,
-                            r.organization_id = $org_id
+                        MATCH (vip_asset:Asset {asset_id: $vip_asset_id, organization_id: $org_id})
+                              -[:RESOLVES_TO]->(vip:IP {address: $vip_ip})
+                        MATCH (member_asset:Asset {asset_id: $member_asset_id, organization_id: $org_id})
+                              -[:RESOLVES_TO]->(member:IP {address: $member_ip})
+                        MERGE (vip)-[r:FORWARDS_TO {
+                            organization_id: $org_id, vip_asset_id: $vip_asset_id,
+                            member_asset_id: $member_asset_id, port_key: $port_key
+                        }]->(member)
+                        SET r.source = 'f5', r.pool = $pool,
+                            r.virtual = $virtual, r.port = $port
+                    """, {"vip_asset_id": asset.id, "member_asset_id": member["asset_id"],
+                          "vip_ip": vip_address, "member_ip": member_address,
+                          "org_id": org_id, "pool": meta.get("f5_pool"),
+                          "virtual": meta.get("f5_virtual_name"), "port": member.get("port"),
+                          "port_key": str(member.get("port") or "")})
+
+            member_ip = (ip_addresses[0] if ip_addresses else None) or asset.value
+            vip_links = meta.get("f5_vip_links")
+            if not isinstance(vip_links, list):
+                vip_links = []
+            if not vip_links:
+                legacy_vip = meta.get("f5_reachable_via_vip")
+                legacy_id = meta.get("f5_vip_asset_id") or getattr(asset, "parent_id", None)
+                if legacy_vip and legacy_id:
+                    vip_links = [{"ip": legacy_vip, "asset_id": legacy_id}]
+            if member_ip and vip_links:
+                member_address = graph_ip_identity(member_ip, org_id, asset).address
+                for link in vip_links:
+                    if not isinstance(link, dict) or not link.get("ip") or not link.get("asset_id"):
+                        continue
+                    vip_address = graph_ip_identity(link["ip"], org_id, asset).address
+                    session.run("""
+                        MATCH (vip_asset:Asset {asset_id: $vip_asset_id, organization_id: $org_id})
+                              -[:RESOLVES_TO]->(vip:IP {address: $vip_ip})
+                        MATCH (member_asset:Asset {asset_id: $member_asset_id, organization_id: $org_id})
+                              -[:RESOLVES_TO]->(member:IP {address: $member_ip})
+                        MERGE (vip)-[r:FORWARDS_TO {
+                            organization_id: $org_id, vip_asset_id: $vip_asset_id,
+                            member_asset_id: $member_asset_id, port_key: $port_key
+                        }]->(member)
+                        SET r.source = 'f5', r.pool = $pool,
+                            r.virtual = $virtual, r.port = $port
                     """, {
-                        "vip_ip": vip,
-                        "member_ip": member_ip,
+                        "vip_asset_id": link["asset_id"],
+                        "member_asset_id": asset.id,
+                        "vip_ip": vip_address,
+                        "member_ip": member_address,
                         "org_id": org_id,
                         "pool": meta.get("f5_pool"),
                         "virtual": meta.get("f5_virtual_name"),
                         "port": meta.get("f5_member_port"),
+                        "port_key": str(meta.get("f5_member_port") or ""),
                     })
         except Exception as e:
             logger.debug(f"F5 FORWARDS_TO sync error for asset {getattr(asset, 'id', None)}: {e}")
@@ -1027,11 +1160,23 @@ class GraphService:
         """
         try:
             session.run("""
-                MATCH (s1:Subdomain {organization_id: $org_id})-[:RESOLVES_TO]->(ip:IP)
-                MATCH (s2:Subdomain {organization_id: $org_id})-[:RESOLVES_TO]->(ip)
+                MATCH (:Subdomain {organization_id: $org_id})-[r:SAME_IP_AS]->()
+                DELETE r
+            """, {"org_id": org_id})
+            session.run("""
+                MATCH (s1:Subdomain {organization_id: $org_id})-[r1:RESOLVES_TO]->(ip:IP)
+                MATCH (s2:Subdomain {organization_id: $org_id})-[r2:RESOLVES_TO]->(ip)
                 WHERE s1.name < s2.name
-                MERGE (s1)-[:SAME_IP_AS]->(s2)
-                MERGE (s2)-[:SAME_IP_AS]->(s1)
+                  AND EXISTS { MATCH (a1:Asset)
+                               WHERE a1.asset_id = r1.source_asset_id
+                                 AND a1.organization_id = $org_id AND a1.is_active = true }
+                  AND EXISTS { MATCH (a2:Asset)
+                               WHERE a2.asset_id = r2.source_asset_id
+                                 AND a2.organization_id = $org_id AND a2.is_active = true }
+                MERGE (s1)-[forward:SAME_IP_AS]->(s2)
+                SET forward.organization_id = $org_id
+                MERGE (s2)-[reverse:SAME_IP_AS]->(s1)
+                SET reverse.organization_id = $org_id
             """, {"org_id": org_id})
         except Exception as e:
             logger.debug(f"SAME_IP_AS links: {e}")
@@ -1088,9 +1233,10 @@ class GraphService:
                 LIMIT $limit
             """,
             "technology": """
-                MATCH (a:Asset {organization_id: $org_id})-[:USES_TECHNOLOGY]->(t:Technology)
+                MATCH (a:Asset {organization_id: $org_id})-[observed:USES_TECHNOLOGY]->(t:Technology)
                 WHERE t.name CONTAINS $value
-                RETURN a.value AS asset, t.name AS technology, t.cpe AS cpe,
+                RETURN a.value AS asset, t.name AS technology,
+                       observed.version AS version, observed.cpe AS cpe,
                        a.last_seen AS last_seen
                 LIMIT $limit
             """,
@@ -1209,36 +1355,35 @@ class GraphService:
         if not self._connected:
             return []
         
-        if target_asset_id:
-            # Find paths to a specific asset
-            cypher = """
-                MATCH path = (start:Asset)-[*1..""" + str(max_depth) + """]->(target:Asset {asset_id: $target_id})
-                WHERE start.organization_id = $org_id
-                  AND target.organization_id = $org_id
-                  AND (target)-[:HAS_VULNERABILITY]->(:Vulnerability)
-                RETURN path,
-                       [node IN nodes(path) | node.value] AS assets,
-                       [rel IN relationships(path) | type(rel)] AS relationships
-                LIMIT 20
-            """
-            params = {"org_id": organization_id, "target_id": target_asset_id}
-        else:
-            # Find paths to any vulnerable asset
-            cypher = """
-                MATCH path = (start:Asset)-[*1..""" + str(max_depth) + """]->(target:Asset)-[:HAS_VULNERABILITY]->(v:Vulnerability)
-                WHERE start.organization_id = $org_id
-                  AND target.organization_id = $org_id
+        cypher = """
+            CALL {
+                MATCH path = (target:Asset {organization_id: $org_id})
+                    -[:HAS_VULNERABILITY]->(v:Vulnerability)
+                WHERE target.is_active = true AND target.is_public = true
+                  AND ($target_id IS NULL OR target.asset_id = $target_id)
                   AND v.severity IN ['critical', 'high']
-                RETURN path,
-                       [node IN nodes(path) | node.value] AS assets,
-                       [rel IN relationships(path) | type(rel)] AS relationships,
-                       v.cve_id AS target_cve,
-                       v.severity AS severity
-                LIMIT 20
-            """
-            params = {"org_id": organization_id}
-        
-        return self.query(cypher, params)
+                RETURN path, v
+                UNION
+                MATCH path = (start:Asset {organization_id: $org_id})
+                    -[:RESOLVES_TO]->(:IP)-[forward:FORWARDS_TO]->(:IP)
+                    <-[:RESOLVES_TO]-(target:Asset {organization_id: $org_id})
+                    -[:HAS_VULNERABILITY]->(v:Vulnerability)
+                WHERE start.is_active = true AND start.is_public = true
+                  AND target.is_active = true
+                  AND ($target_id IS NULL OR target.asset_id = $target_id)
+                  AND v.severity IN ['critical', 'high']
+                  AND forward.organization_id = $org_id AND forward.source = 'f5'
+                  AND forward.vip_asset_id = start.asset_id
+                  AND forward.member_asset_id = target.asset_id
+                RETURN path, v
+            }
+            RETURN path,
+                   [node IN nodes(path) | node.value] AS assets,
+                   [rel IN relationships(path) | type(rel)] AS relationships,
+                   v.cve_id AS target_cve, v.severity AS severity
+            LIMIT 20
+        """
+        return self.query(cypher, {"org_id": organization_id, "target_id": target_asset_id})
     
     def get_asset_relationships(
         self,
@@ -1272,6 +1417,10 @@ class GraphService:
               AND ($org_id IS NULL OR center.organization_id = $org_id)
               AND all(n IN nodes(path) WHERE
                   n.organization_id IS NULL OR n.organization_id = center.organization_id)
+              AND all(r IN relationships(path) WHERE
+                  CASE WHEN type(r) IN ['FORWARDS_TO', 'BELONGS_TO_ASN', 'HOSTED_BY']
+                       THEN r.organization_id = center.organization_id
+                       ELSE r.organization_id IS NULL OR r.organization_id = center.organization_id END)
             RETURN path
             LIMIT 200
         """
@@ -1292,15 +1441,16 @@ class GraphService:
                         nodes_out.append({
                             "id": nid,
                             "labels": list(node.labels),
-                            "properties": dict(node),
+                            "properties": graph_node_properties(node),
                         })
                 for rel in path.relationships:
                     sid = rel.start_node.element_id
                     tid = rel.end_node.element_id
-                    key = (sid, tid, rel.type)
+                    key = rel.element_id
                     if key not in seen_edges:
                         seen_edges.add(key)
-                        edges_out.append({"source": sid, "target": tid, "type": rel.type})
+                        edges_out.append({"source": sid, "target": tid, "type": rel.type,
+                                          "properties": dict(rel)})
         return {"nodes": nodes_out, "edges": edges_out}
     
     def get_discovery_tree(self, asset_id: int, organization_id: int) -> Dict[str, Any]:
@@ -1320,10 +1470,15 @@ class GraphService:
             MATCH (a:Asset {asset_id: $asset_id})
             WHERE a.organization_id = $org_id
             OPTIONAL MATCH (a)-[r1:DISCOVERED_VIA]->(ds:DiscoverySource)
+            WHERE r1.organization_id IS NULL OR r1.organization_id = $org_id
             OPTIONAL MATCH (a)-[r2:HOSTED_BY]->(h:HostingProvider)
+            WHERE r2.organization_id IS NULL OR r2.organization_id = $org_id
             OPTIONAL MATCH (a)-[:RESOLVES_TO]->(ip:IP)-[r3:BELONGS_TO_ASN]->(asn:ASN)
-            OPTIONAL MATCH (a)-[r4:SIGNED_BY]->(cert:Certificate)-[r5:ALSO_COVERS]->(san:Subdomain)
-            OPTIONAL MATCH (a)-[:RESOLVES_TO]->(ip2:IP)-[r6:SAME_IP_AS]-(sibling:Subdomain)
+            WHERE r3.organization_id = $org_id
+            OPTIONAL MATCH (a)-[r4:SIGNED_BY]->(cert:Certificate)-[r5:ALSO_COVERS]->(san:Subdomain {organization_id: $org_id})
+            WHERE (r4.organization_id IS NULL OR r4.organization_id = $org_id)
+              AND r5.organization_id = $org_id
+            OPTIONAL MATCH (a)-[:RESOLVES_TO]->(ip2:IP)<-[r6:RESOLVES_TO]-(sibling:Subdomain {organization_id: $org_id})
             RETURN a, ds, r1, h, r2, ip, asn, r3, cert, r4, san, r5, ip2, sibling, r6
             LIMIT 200
         """
@@ -1346,7 +1501,7 @@ class GraphService:
                             nodes_out.append({
                                 "id": nid,
                                 "labels": list(getattr(node, "labels", [])),
-                                "properties": dict(node),
+                                "properties": graph_node_properties(node),
                             })
                     for rel_key in ["r1", "r2", "r3", "r4", "r5", "r6"]:
                         rel = record.get(rel_key)
@@ -1366,27 +1521,63 @@ class GraphService:
 
         return {"nodes": nodes_out, "edges": edges_out}
 
-    def get_shared_infrastructure(self, ip_address: str, organization_id: int) -> Dict[str, Any]:
+    def get_shared_infrastructure(
+        self, ip_address: str, organization_id: int, asset_id: int | None = None
+    ) -> Dict[str, Any]:
         """
-        For a given IP, return all assets that share the same IP, ASN, or hosting provider.
-        Uses SAME_IP_AS, BELONGS_TO_ASN, and HOSTED_BY to cluster co-hosted assets.
+        Return in-org assets for one IP identity and its ASN/provider neighbors.
+        Addresses present in multiple scopes require an asset ID to select one.
         """
         if not self._connected:
             self.connect()
         if not self._connected:
             return {"nodes": [], "edges": [], "summary": {}}
 
+        try:
+            normalized_ip = str(ipaddress.ip_address(ip_address.strip()))
+        except ValueError:
+            return {"nodes": [], "edges": [], "summary": {}}
+
+        candidates = self.query("""
+            MATCH (a:Asset {organization_id: $org_id})-[:RESOLVES_TO]->(ip:IP {address: $ip_address})
+            WHERE a.is_active = true AND ($asset_id IS NULL OR a.asset_id = $asset_id)
+            RETURN min(a.asset_id) AS asset_id, ip.scope_id AS scope_id,
+                   ip.ip_key AS ip_key
+            LIMIT 101
+        """, {"org_id": organization_id, "ip_address": normalized_ip,
+              "asset_id": asset_id})
+        if asset_id is None and len({row.get("ip_key") for row in candidates}) > 1:
+            return {
+                "nodes": [], "edges": [], "summary": {}, "ambiguous": True,
+                "scope_options": [
+                    {"asset_id": row.get("asset_id"), "scope_id": row.get("scope_id")}
+                    for row in candidates
+                ],
+            }
+
         cypher = """
-            MATCH (ip:IP {address: $ip_address})
+            MATCH (seed:Asset {organization_id: $org_id})-[:RESOLVES_TO]->(ip:IP {address: $ip_address})
+            WHERE seed.is_active = true AND ($asset_id IS NULL OR seed.asset_id = $asset_id)
             OPTIONAL MATCH (ip)<-[:RESOLVES_TO]-(direct:Asset {organization_id: $org_id})
-            OPTIONAL MATCH (ip)-[:BELONGS_TO_ASN]->(asn:ASN)
-            OPTIONAL MATCH (ip2:IP)-[:BELONGS_TO_ASN]->(asn)
-            WHERE ip2 <> ip
+            WHERE direct.is_active = true
+            OPTIONAL MATCH (ip)-[asn_link:BELONGS_TO_ASN]->(asn:ASN)
+            WHERE asn_link.organization_id = $org_id
+            OPTIONAL MATCH (ip2:IP)-[asn_link2:BELONGS_TO_ASN]->(asn)
+            WHERE ip2 <> ip AND asn_link2.organization_id = $org_id
+              AND (ip.scope_id = 'global' OR ip2.scope_id = ip.scope_id)
+              AND EXISTS { MATCH (owner:Asset {organization_id: $org_id})-[:RESOLVES_TO]->(ip2)
+                           WHERE owner.is_active = true }
             OPTIONAL MATCH (ip2)<-[:RESOLVES_TO]-(asn_sibling:Asset {organization_id: $org_id})
-            OPTIONAL MATCH (ip)-[:HOSTED_BY]->(hp:HostingProvider)
-            OPTIONAL MATCH (ip3:IP)-[:HOSTED_BY]->(hp)
-            WHERE ip3 <> ip
+            WHERE asn_sibling.is_active = true
+            OPTIONAL MATCH (ip)-[host_link:HOSTED_BY]->(hp:HostingProvider)
+            WHERE host_link.organization_id = $org_id
+            OPTIONAL MATCH (ip3:IP)-[host_link2:HOSTED_BY]->(hp)
+            WHERE ip3 <> ip AND host_link2.organization_id = $org_id
+              AND (ip.scope_id = 'global' OR ip3.scope_id = ip.scope_id)
+              AND EXISTS { MATCH (owner:Asset {organization_id: $org_id})-[:RESOLVES_TO]->(ip3)
+                           WHERE owner.is_active = true }
             OPTIONAL MATCH (ip3)<-[:RESOLVES_TO]-(hp_sibling:Asset {organization_id: $org_id})
+            WHERE hp_sibling.is_active = true
             RETURN ip, direct, asn, ip2, asn_sibling, hp, ip3, hp_sibling
             LIMIT 150
         """
@@ -1397,7 +1588,9 @@ class GraphService:
 
         try:
             with self.session() as session:
-                result = session.run(cypher, {"ip_address": ip_address, "org_id": organization_id})
+                result = session.run(cypher, {"ip_address": normalized_ip,
+                                              "org_id": organization_id,
+                                              "asset_id": asset_id})
                 for record in result:
                     for key in ["ip", "direct", "asn", "ip2", "asn_sibling", "hp", "ip3", "hp_sibling"]:
                         node = record.get(key)
@@ -1409,7 +1602,7 @@ class GraphService:
                             nodes_out.append({
                                 "id": nid,
                                 "labels": list(getattr(node, "labels", [])),
-                                "properties": dict(node),
+                                "properties": graph_node_properties(node),
                             })
         except Exception as e:
             logger.error(f"Shared infrastructure query error: {e}")
@@ -1433,7 +1626,8 @@ class GraphService:
         cypher = """
             MATCH (a:Asset {organization_id: $org_id})
             WHERE a.value = $domain OR a.name = $domain
-            MATCH (a)-[:SIGNED_BY]->(cert:Certificate)-[:ALSO_COVERS]->(san:Subdomain)
+            MATCH (a)-[:SIGNED_BY]->(cert:Certificate)-[covers:ALSO_COVERS]->(san:Subdomain {organization_id: $org_id})
+            WHERE covers.organization_id = $org_id
             RETURN a, cert, san
             LIMIT 200
         """
@@ -1457,7 +1651,7 @@ class GraphService:
                             nodes_out.append({
                                 "id": nid,
                                 "labels": list(getattr(node, "labels", [])),
-                                "properties": dict(node),
+                                "properties": graph_node_properties(node),
                             })
                     san_node = record.get("san")
                     if san_node and dict(san_node).get("name") not in sans:
@@ -1516,8 +1710,9 @@ class GraphService:
         cypher = """
             MATCH (v:Vulnerability {vuln_id: $vuln_id})<-[:HAS_VULNERABILITY]-(direct:Asset)
             WHERE direct.organization_id = $org_id
-            OPTIONAL MATCH (direct)<-[:DISCOVERED_FROM|RESOLVES_TO*1..3]-(indirect:Asset)
+            OPTIONAL MATCH path = (direct)<-[:DISCOVERED_FROM|RESOLVES_TO*1..3]-(indirect:Asset)
             WHERE indirect.organization_id = $org_id
+              AND all(n IN nodes(path) WHERE n.organization_id = $org_id)
             RETURN 
                 collect(DISTINCT {id: direct.asset_id, value: direct.value, type: direct.asset_type}) AS direct_assets,
                 collect(DISTINCT {id: indirect.asset_id, value: indirect.value, type: indirect.asset_type}) AS indirect_assets
@@ -1579,7 +1774,9 @@ def sync_asset_to_graph(asset_id: int, organization_id: int) -> bool:
                 return False
             
             with graph.session() as session:
-                graph._sync_asset(session, asset, organization_id)
+                session.execute_write(
+                    lambda tx: graph._sync_asset(tx, asset, organization_id)
+                )
             
             logger.info(f"Synced asset {asset_id} to graph")
             return True
