@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.models.asset import Asset, AssetStatus, AssetType
 from app.models.crowdstrike_integration import CrowdStrikeAssetLink, CrowdStrikeIntegration
+from app.models.exposure_evidence import FindingSourceEvidence
 from app.models.port_service import PortService, PortState, Protocol
 from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus
 
@@ -341,6 +342,46 @@ def _severity(value: Any) -> Severity:
     return {"critical": Severity.CRITICAL, "high": Severity.HIGH, "medium": Severity.MEDIUM, "low": Severity.LOW, "informational": Severity.INFO}.get(name, Severity.MEDIUM)
 
 
+def _upsert_detection_evidence(
+    db: Session, integration: CrowdStrikeIntegration, vuln: Vulnerability,
+    source: dict[str, Any], finding_id: str, aid: str, cve_id: str | None,
+) -> None:
+    """Keep Falcon's detection basis visible without treating it as Judah proof."""
+    evidence = (db.query(FindingSourceEvidence).filter_by(
+        vulnerability_id=vuln.id, source=SOURCE, evidence_key="spotlight_assessment",
+    ).first() if vuln.id is not None else None)
+    if evidence is None:
+        evidence = FindingSourceEvidence(
+            organization_id=integration.organization_id, vulnerability=vuln,
+            source=SOURCE, source_finding_id=finding_id,
+            evidence_key="spotlight_assessment", detection_method="falcon_spotlight",
+            basis="provider_assertion",
+        )
+        db.add(evidence)
+    evidence.source_status = str(source.get("status") or "unknown")[:50]
+    evidence.summary = (
+        f"Falcon Spotlight reported {cve_id or 'a vulnerability'} on host {aid}. "
+        "The provider assessment has not been independently reproduced by Judah."
+    )
+    evidence.details = {
+        "assessment_status": source.get("assessment_status"),
+        "assessment_reason": source.get("assessment_reason"),
+        "evaluation_logic": source.get("evaluation_logic"),
+        "exploit_validation_status": source.get("exploit_validation_status"),
+        "rule": source.get("rule"),
+        "data_providers": source.get("data_providers"),
+        "services": source.get("services"),
+        "host": {
+            key: _as_dict(source.get("host_info")).get(key)
+            for key in ("platform_name", "product_type_desc", "internet_exposure", "asset_criticality")
+        },
+        "aid": aid,
+        "cid": str(source.get("cid") or ""),
+    }
+    evidence.observed_at = _utc(source.get("updated_timestamp")) or _utc(source.get("created_timestamp"))
+    evidence.last_ingested_at = datetime.utcnow()
+
+
 def _upsert_finding(db: Session, integration: CrowdStrikeIntegration, source: dict[str, Any], host_assets: dict[tuple[str, str], Asset], stats: dict[str, int]) -> None:
     finding_id = str(source.get("id") or source.get("vulnerability_id") or "")
     aid = str(source.get("aid") or "")
@@ -378,7 +419,8 @@ def _upsert_finding(db: Session, integration: CrowdStrikeIntegration, source: di
         vuln.resolved_at = None
     if closed and not created and old_status != VulnerabilityStatus.RESOLVED:
         stats["vulns_resolved"] += 1
-    vuln.detection_confidence = "version_only"
+    if vuln.detection_confidence in (None, "version_only"):
+        vuln.detection_confidence = "unknown"
     vuln.first_detected = _utc(source.get("created_timestamp")) or vuln.first_detected or datetime.utcnow()
     vuln.last_detected = _utc(source.get("updated_timestamp")) or datetime.utcnow()
     tags = list(vuln.tags or [])
@@ -395,6 +437,7 @@ def _upsert_finding(db: Session, integration: CrowdStrikeIntegration, source: di
         "services": source.get("services"),
     }
     vuln.metadata_ = metadata
+    _upsert_detection_evidence(db, integration, vuln, source, finding_id, aid, cve_id)
     stats["vulns_created" if created else "vulns_updated"] += 1
 
 

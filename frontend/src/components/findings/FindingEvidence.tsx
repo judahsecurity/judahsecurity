@@ -106,12 +106,26 @@ export function FindingScreenshot({ finding, onCite }: { finding: FindingRecord;
 }
 
 export function FindingTechnicalEvidence({ finding, onCite }: { finding: FindingRecord; onCite?: (reference: string) => void }) {
-  const hasEvidence = Boolean(hasScannerDetection(finding.detection) || finding.agent_detection?.chain?.length || finding.netbrain_exposure || finding.evidence || finding.proof_of_concept);
+  const hasEvidence = Boolean(hasScannerDetection(finding.detection) || finding.agent_detection?.chain?.length || finding.netbrain_exposure || finding.evidence || finding.proof_of_concept || finding.source_evidence?.length);
   return <div className="space-y-5">
     <div className="flex gap-2 justify-between items-start"><div><h4 className="text-sm font-semibold">Detection evidence</h4><p className="text-xs text-muted-foreground">{finding.detected_by || 'Unknown source'} · Last detected {formatDate(finding.last_detected || finding.created_at || '')}</p></div>
       {onCite && hasEvidence && <Button size="sm" variant="outline" onClick={() => onCite(`Finding #${finding.id}: detection evidence from ${finding.detected_by || 'unknown source'}, last detected ${finding.last_detected || finding.created_at || 'unknown'}`)}>Cite evidence</Button>}
     </div>
     {!hasEvidence && <p className="rounded-md border border-dashed p-4 text-sm text-muted-foreground">No technical evidence is attached. Record the missing evidence before confirming the claim.</p>}
+    {finding.source_evidence?.map(item => <section key={item.id} className="space-y-2 rounded-md border p-3">
+      <div className="flex items-start justify-between gap-3">
+        <div><h5 className="text-sm font-medium">{item.source} detection record</h5><p className="text-xs text-muted-foreground">Method: {item.detection_method.replaceAll('_', ' ')} · Basis: {item.basis.replaceAll('_', ' ')} · Provider status: {item.source_status || 'unknown'}</p></div>
+        {onCite && <Button size="sm" variant="outline" onClick={() => onCite(`${item.source} evidence #${item.id}, source finding ${item.source_finding_id}; observed ${item.observed_at || 'undated'}; basis ${item.basis}`)}>Cite</Button>}
+      </div>
+      {item.summary && <p className="text-sm">{item.summary}</p>}
+      <p className="text-xs text-muted-foreground">Observed {item.observed_at ? formatDate(item.observed_at) : 'date unknown'} · Imported {item.last_ingested_at ? formatDate(item.last_ingested_at) : 'date unknown'}</p>
+      {(['assessment_status', 'assessment_reason', 'evaluation_logic', 'exploit_validation_status', 'rule', 'data_providers', 'services'] as const).map(key => {
+        const value = item.details?.[key];
+        if (value === undefined || value === null || value === '') return null;
+        return <div key={key}><p className="text-xs font-medium">{key.replaceAll('_', ' ')}</p><pre className="max-h-60 overflow-auto rounded-md bg-muted/30 p-2 text-xs whitespace-pre-wrap break-words">{typeof value === 'string' ? value : JSON.stringify(value, null, 2)}</pre></div>;
+      })}
+      <p className="text-xs text-muted-foreground">Provider detection and Judah validation are separate records.</p>
+    </section>)}
     <DetectionPanel detection={finding.detection} />
     <DemonstratedChain detection={finding.agent_detection} />
     {finding.netbrain_exposure && <section className="space-y-2 rounded-md border p-3">

@@ -100,6 +100,23 @@ class FindingTriageTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "evidence changed"):
             record_decision(self.finding, current, self.user)
 
+    def test_provider_detection_change_reopens_review_but_reimport_time_does_not(self):
+        original = triage_state(self.finding)["evidence_version"]
+        self.finding.source_evidence = []
+        self.assertEqual(triage_state(self.finding)["evidence_version"], original)
+        source = SimpleNamespace(
+            source="crowdstrike", source_finding_id="finding-1", source_status="open",
+            detection_method="falcon_spotlight", basis="provider_assertion",
+            summary="Provider reports a vulnerable package", details={"assessment_reason": "version match"},
+            observed_at="2026-10-17", last_ingested_at="2026-10-17",
+        )
+        self.finding.source_evidence = [source]
+        self.save()
+        source.last_ingested_at = "2026-10-18"
+        self.assertFalse(next(item for item in triage_state(self.finding)["items"] if item["id"] == "evidence")["stale"])
+        source.details = {"assessment_reason": "new evaluation rule"}
+        self.assertTrue(next(item for item in triage_state(self.finding)["items"] if item["id"] == "evidence")["stale"])
+
     def test_review_history_is_immutable_and_identity_cannot_be_spoofed(self):
         self.save()
         first = deepcopy(triage_state(self.finding)["history"][0])

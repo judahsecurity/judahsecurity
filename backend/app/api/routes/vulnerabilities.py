@@ -138,11 +138,13 @@ def build_vuln_response(
 ) -> dict:
     """Build vulnerability response with computed fields. Ensures required fields are never None."""
     d = {k: v for k, v in vuln.__dict__.items() if k != "_sa_instance_state" and k != "metadata_"}
+    d.pop("source_evidence", None)
     d["name"] = vuln.title
     d["host"] = vuln.asset.value if vuln.asset else None
     d["organization_id"] = vuln.asset.organization_id if vuln.asset else None
     if include_detection_dumps:
         d["analyst_triage"] = triage_state(vuln)
+        d["source_evidence"] = vuln.source_evidence
         if db is not None:
             from app.models.business_application import BusinessApplication
             app_id = vuln.business_app_id or (getattr(vuln.asset, "business_app_id", None) if vuln.asset else None)

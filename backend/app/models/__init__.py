@@ -65,6 +65,7 @@ from app.models.workflow import (
 )
 from app.models.wiz_integration import WizIntegration
 from app.models.crowdstrike_integration import CrowdStrikeIntegration, CrowdStrikeAssetLink
+from app.models.exposure_evidence import FindingSourceEvidence, ExposurePath, ExposurePathStep
 from app.models.netbrain_integration import NetBrainIntegration
 
 __all__ = [
@@ -148,6 +149,9 @@ __all__ = [
     "WizIntegration",
     "CrowdStrikeIntegration",
     "CrowdStrikeAssetLink",
+    "FindingSourceEvidence",
+    "ExposurePath",
+    "ExposurePathStep",
     "NetBrainIntegration",
     "ScriptLanguage",
 ]

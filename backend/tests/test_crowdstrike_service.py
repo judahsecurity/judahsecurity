@@ -9,10 +9,12 @@ from sqlalchemy.orm import Session
 from app.db.database import Base
 from app.models.asset import Asset, AssetType
 from app.models.crowdstrike_integration import CrowdStrikeIntegration
+from app.models.exposure_evidence import ExposurePath, ExposurePathStep, FindingSourceEvidence
 from app.models.organization import Organization
 from app.models.port_service import PortService
 from app.models.vulnerability import Vulnerability, VulnerabilityStatus
 from app.schemas.crowdstrike_schemas import CrowdStrikeIntegrationUpdate
+from app.schemas.vulnerability import FindingSourceEvidenceResponse
 from app.services.crowdstrike_service import (
     CrowdStrikeClient,
     CrowdStrikeError,
@@ -21,6 +23,7 @@ from app.services.crowdstrike_service import (
     _upsert_finding,
     _upsert_host,
 )
+from app.services.exposure_path_mapping import map_crowdstrike_path_assets, resolve_crowdstrike_asset_ref
 
 
 @pytest.fixture
@@ -103,13 +106,20 @@ def test_spotlight_finding_preserves_analyst_state_and_reopens_provider_resolved
     host = db.query(Asset).filter_by(organization_id=integration.organization_id).one()
     mapping = {("cid-1", "aid-1"): host}
     source = {"id": "finding-1", "aid": "aid-1", "cid": "cid-1", "status": "open",
-              "cve": {"id": "CVE-2026-1234", "severity": "HIGH", "base_score": 8.1}}
+              "cve": {"id": "CVE-2026-1234", "severity": "HIGH", "base_score": 8.1},
+              "assessment_reason": "installed package detected", "evaluation_logic": {"rule": "package-version"}}
     _upsert_finding(db, integration, source, mapping, _stats())
     db.flush()
     finding = db.query(Vulnerability).one()
     assert finding.asset_id == host.id
     assert finding.cve_id == "CVE-2026-1234"
-    assert finding.detection_confidence == "version_only"
+    assert finding.detection_confidence == "unknown"
+    evidence = db.query(FindingSourceEvidence).one()
+    assert evidence.vulnerability_id == finding.id
+    assert evidence.organization_id == integration.organization_id
+    assert evidence.basis == "provider_assertion"
+    assert evidence.details["evaluation_logic"] == {"rule": "package-version"}
+    assert FindingSourceEvidenceResponse.model_validate(evidence).details["assessment_reason"] == "installed package detected"
     finding.status = VulnerabilityStatus.ACCEPTED
     finding.tags = ["analyst:reviewed"]
     _upsert_finding(db, integration, source, mapping, _stats())
@@ -122,6 +132,44 @@ def test_spotlight_finding_preserves_analyst_state_and_reopens_provider_resolved
     _upsert_finding(db, integration, source, mapping, _stats())
     assert finding.status == VulnerabilityStatus.OPEN
     assert db.query(Vulnerability).count() == 1
+    assert db.query(FindingSourceEvidence).count() == 1
+
+
+def test_path_steps_keep_unmatched_source_nodes_and_separate_proof(db):
+    integration = _integration(db, "tenant")
+    _upsert_host(db, integration, {"device_id": "aid-1", "cid": "cid-1", "hostname": "server-1"}, _stats())
+    db.flush()
+    host = db.query(Asset).one()
+    path = ExposurePath(
+        organization_id=integration.organization_id, source="crowdstrike",
+        source_instance_id=str(integration.id),
+        source_path_id="path-1", title="External entry to server",
+        source_status="open", details={"source_type": "falcon_attack_path_analysis"},
+    )
+    path.steps.append(ExposurePathStep(
+        position=0, from_source_ref="external:unmatched-id", to_source_ref="host:aid-1",
+        to_asset_id=host.id, edge_type="network_reachability", source_claim="Provider-reported edge",
+        proof_state="asserted", evidence=[{"source": "crowdstrike", "kind": "path_edge"}],
+    ))
+    db.add(path)
+    db.flush()
+    db.expire_all()
+    saved = db.query(ExposurePath).one()
+    assert saved.steps[0].from_asset_id is None
+    assert saved.steps[0].from_source_ref == "external:unmatched-id"
+    assert saved.steps[0].to_asset_id == host.id
+    assert saved.steps[0].proof_state == "asserted"
+    assert map_crowdstrike_path_assets(db, integration_id=integration.id, path=saved) == 1
+    assert saved.steps[0].from_asset_id is None
+    assert saved.steps[0].to_asset_id == host.id
+
+    other_integration = _integration(db, "another tenant")
+    assert resolve_crowdstrike_asset_ref(
+        db, organization_id=other_integration.organization_id, integration_id=integration.id,
+        source_ref="host:aid-1",
+    ) is None
+    with pytest.raises(ValueError, match="different CrowdStrike connection"):
+        map_crowdstrike_path_assets(db, integration_id=other_integration.id, path=saved)
 
 
 def test_update_rejects_null_required_columns():

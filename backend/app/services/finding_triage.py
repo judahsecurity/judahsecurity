@@ -35,6 +35,17 @@ def evidence_fingerprint(vuln):
         "agent_detection", "risk_assessment", "oracle", "nuclei_matched_at", "detection",
         "risk_overrides", "netbrain_exposure",
     )})
+    source_evidence = getattr(vuln, "source_evidence", None) or []
+    if source_evidence:
+        payload["source_evidence"] = [
+            {
+                "source": item.source, "source_finding_id": item.source_finding_id,
+                "source_status": item.source_status, "detection_method": item.detection_method,
+                "basis": item.basis, "summary": item.summary, "details": item.details,
+                "observed_at": item.observed_at,
+            }
+            for item in source_evidence
+        ]
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 
 
