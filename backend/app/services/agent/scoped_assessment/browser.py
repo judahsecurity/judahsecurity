@@ -153,13 +153,14 @@ async def _forms(page, expected_origin: str) -> list[dict]:
     return found
 
 
-async def _discovery_anchor(page, target: str):
-    """Find a visible link for a path without carrying URL query values."""
+async def _discovery_anchor(page, target: str, navigation_url: str):
+    """Find the visible link for a safe browser-private navigation URL."""
     for anchor in (await page.query_selector_all("a[href]"))[:100]:
         try:
             href = await anchor.evaluate("el => el.href")
             parts = urlsplit(href)
-            if (origin(href) + (parts.path or "/") != target or parts.query or parts.fragment
+            if (origin(href) + (parts.path or "/") != target or href != navigation_url
+                    or parts.fragment
                     or await anchor.get_attribute("download") is not None
                     or (await anchor.get_attribute("target") or "").lower() not in ("", "_self")
                     or not await anchor.is_visible()):
@@ -210,6 +211,7 @@ async def check_browser(
     seen_inline: set[tuple[str, int]] = set()
     request_actions: dict[object, str] = {}
     request_rows: dict[object, dict] = {}
+    private_navigation: dict[str, str] = {}
     current_action_ref = "navigate"
     actions: list[dict] = []
 
@@ -427,10 +429,14 @@ async def check_browser(
 
             async def visible_hrefs() -> list[str]:
                 """Follow rendered navigation, including links revealed by controls."""
-                return await page.locator("a[href]").evaluate_all(
+                hrefs = await page.locator("a[href]").evaluate_all(
                     f"els => els.filter(e => e.getClientRects().length > 0)"
                     f".slice(0, {MAX_LINKS_PER_PAGE}).map(e => e.href)"
                 )
+                for href in _private_link_baselines(hrefs, allowed_origins):
+                    parts = urlsplit(href)
+                    private_navigation.setdefault(origin(href) + (parts.path or "/"), href)
+                return hrefs
 
             if operation == "crawl":
                 queue = [final_target]
@@ -565,13 +571,14 @@ async def check_browser(
                     current_action_ref = ref
                     start = (len(requests), len(javascript_sources), len(traffic_exchanges))
                     try:
-                        anchor = await _discovery_anchor(page, next_url)
+                        navigation_url = private_navigation.get(next_url, next_url)
+                        anchor = await _discovery_anchor(page, next_url, navigation_url)
                         if anchor:
                             navigation_mode = "click"
                             await anchor.click(timeout=8_000)
                         else:
                             navigation_mode = "direct"
-                            response = await page.goto(next_url, wait_until="domcontentloaded", timeout=20_000)
+                            response = await page.goto(navigation_url, wait_until="domcontentloaded", timeout=20_000)
                         assert_in_scope(page.url, allowed_origins)
                         await page.wait_for_timeout(450)
                         await settle_capture()

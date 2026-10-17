@@ -13,7 +13,8 @@ Agent assessments also run a bounded browser walkthrough after the first crawl,
 even when that crawl found inputs. The built-in browser visits up to six linked
 same-origin pages and clicks up to six safe tabs or disclosures across those
 pages. It can open navigation menus and follows newly revealed links before
-older queued links. It observes rendered forms, link parameter names,
+older queued links. Safe link query values stay inside the browser for
+navigation; the agent sees paths and parameter names. It observes rendered forms, link parameter names,
 first-party scripts, and XHR/fetch traffic after interactions. The Agent page
 distinguishes browser-observed pages from pages mapped by other crawlers and
 shows mapped form and link counts with recent browser actions. Failed

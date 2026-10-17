@@ -129,7 +129,7 @@ async def test_browser_walkthrough_visits_linked_pages_and_safe_controls():
         def do_GET(self):
             requests.append(self.path)
             if self.path == "/":
-                body = """<a href='/catalog'>Catalog</a>
+                body = """<a href='/catalog'>Catalog</a><a href='/item?id=7'>Item</a>
                 <button role='tab' onclick="fetch('/api/root')">Overview</button>
                 <button type='button' aria-haspopup='menu' aria-expanded='false'
                   onclick='document.getElementById("navigation").innerHTML=`<a href="/account">Account page</a>`; this.setAttribute("aria-expanded","true")'>More</button>
@@ -141,6 +141,8 @@ async def test_browser_walkthrough_visits_linked_pages_and_safe_controls():
                 <div id='extra'></div>"""
             elif self.path == "/account":
                 body = "<h1>Account</h1><form method='get' action='/profile'><input name='name'></form>"
+            elif self.path == "/item?id=7":
+                body = "<h1>Item 7</h1><form method='get' action='/items'><input name='quantity'></form>"
             else:
                 body = '{"ok":true}'
             data = body.encode()
@@ -165,13 +167,15 @@ async def test_browser_walkthrough_visits_linked_pages_and_safe_controls():
         controls = [action["kind"] for action in result["actions"]]
         fields = {field["name"] for page in result["pages"]
                   for form in page["forms"] for field in form["fields"]}
-        assert {"/", "/catalog", "/account"}.issubset(paths)
+        assert {"/", "/catalog", "/account", "/item"}.issubset(paths)
         assert {"tab", "menu", "disclosure"}.issubset(controls)
         assert any(action.get("path") == "/account" and action.get("navigation_mode") == "click"
                    for action in result["actions"])
-        assert {"q", "filter", "name"}.issubset(fields)
+        assert {"q", "filter", "name", "quantity"}.issubset(fields)
         assert len(exchanges) >= 2
         assert screenshot
+        assert "/item?id=7" in requests
+        assert "id=7" not in json.dumps(result)
         assert all(not path.startswith("/advanced") for path in requests)
     finally:
         server.shutdown()
