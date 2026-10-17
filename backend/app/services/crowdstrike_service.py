@@ -185,9 +185,11 @@ def _as_dict(value: Any) -> dict[str, Any]:
 
 
 def _external_identity(source: dict[str, Any]) -> tuple[AssetType, str] | None:
-    domain = str(_as_dict(source.get("dns_domain")).get("fqdn") or "").strip().lower().rstrip(".")
+    dns_domain = _as_dict(source.get("dns_domain"))
+    domain = str(dns_domain.get("fqdn") or "").strip().lower().rstrip(".")
     if domain:
-        return AssetType.DOMAIN, domain
+        parent = str(dns_domain.get("parent_domain") or "").strip().lower().rstrip(".")
+        return (AssetType.SUBDOMAIN if parent and parent != domain else AssetType.DOMAIN), domain
     address = str(_as_dict(source.get("ip")).get("ip_address") or "").strip()
     try:
         if address:
@@ -248,6 +250,9 @@ def _upsert_external(db: Session, integration: CrowdStrikeIntegration, source: d
     asset, created = _link_asset(db, integration, "external", source_id, cid, value=value, asset_type=asset_type, name=value, allow_match=True)
     stats["assets_created" if created else "assets_updated"] += 1
     _merge_source_metadata(asset, "external", source_id, cid, source)
+    parent_domain = str(_as_dict(source.get("dns_domain")).get("parent_domain") or "").strip().lower().rstrip(".")
+    if asset_type == AssetType.SUBDOMAIN and parent_domain:
+        asset.root_domain = parent_domain[:255]
     exposure = str(source.get("internet_exposure") or "").lower()
     if exposure in {"yes", "true", "exposed", "internet"}:
         asset.is_public = True

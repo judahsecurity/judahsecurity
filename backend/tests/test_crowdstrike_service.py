@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from app.db.database import Base
-from app.models.asset import Asset
+from app.models.asset import Asset, AssetType
 from app.models.crowdstrike_integration import CrowdStrikeIntegration
 from app.models.organization import Organization
 from app.models.port_service import PortService
@@ -83,6 +83,17 @@ def test_external_import_is_tenant_scoped_and_idempotent(db):
     assert {asset.organization_id for asset in assets} == {first.organization_id, second.organization_id}
     assert all(asset.in_scope is False for asset in assets)
     assert db.query(PortService).count() == 4
+
+
+def test_external_subdomain_retains_parent_for_graph(db):
+    integration = _integration(db, "tenant")
+    _upsert_external(db, integration, {
+        "id": "subdomain-1", "dns_domain": {"fqdn": "app.example.org", "parent_domain": "example.org"},
+    }, _stats())
+    db.flush()
+    asset = db.query(Asset).one()
+    assert asset.asset_type == AssetType.SUBDOMAIN
+    assert asset.root_domain == "example.org"
 
 
 def test_spotlight_finding_preserves_analyst_state_and_reopens_provider_resolved(db):
