@@ -327,6 +327,94 @@ def _pending_candidate_verify_step(
     return None
 
 
+def _unsubmitted_first_pass_proofs(
+    state: Dict[str, Any], target: str,
+) -> List[Dict[str, Any]]:
+    """Find proof receipts that never made it across the candidate handoff."""
+    from app.services.agent.parameter_inventory import _origin
+
+    active_origin = _origin(target)
+    if not active_origin:
+        return []
+    scheme = urlparse(active_origin).scheme
+    brain = state.get("engagement_brain") or {}
+    candidates = [row for row in (brain.get("candidates") or [])
+                  if isinstance(row, dict)]
+    return [
+        cell for cell in (brain.get("coverage_cells") or [])
+        if isinstance(cell, dict)
+        and cell.get("source") == "parameter_inventory"
+        and cell.get("test_type") in {"sqli", "xss"}
+        and cell.get("specialist") == cell.get("test_type")
+        and cell.get("first_pass_outcome") == "proof_signal"
+        and cell.get("first_pass_evidence_id")
+        and cell.get("id")
+        and not any(
+            row.get("coverage_cell_id") == cell["id"]
+            and cell["first_pass_evidence_id"] in (row.get("evidence_ids") or [])
+            for row in candidates
+        )
+        and str(cell.get("path") or "").startswith("/")
+        and _origin(f"{scheme}://{cell.get('host') or ''}") == active_origin
+    ]
+
+
+def _failed_first_pass_handoffs(
+    state: Dict[str, Any], target: str,
+) -> List[Dict[str, Any]]:
+    """Find attempted probe handoffs that never produced a proof receipt."""
+    from app.services.agent.parameter_inventory import _origin
+
+    active_origin = _origin(target)
+    if not active_origin:
+        return []
+    scheme = urlparse(active_origin).scheme
+    return [
+        cell for cell in ((state.get("engagement_brain") or {}).get("coverage_cells") or [])
+        if isinstance(cell, dict)
+        and cell.get("source") == "parameter_inventory"
+        and cell.get("test_type") in {"sqli", "xss"}
+        and cell.get("first_pass_outcome") == "unattempted"
+        and cell.get("first_pass_handoff_error")
+        and _origin(f"{scheme}://{cell.get('host') or ''}") == active_origin
+    ]
+
+
+def _pending_first_pass_candidate_step(
+    state: Dict[str, Any], trace: List[Dict[str, Any]], target: str,
+) -> Optional[Dict[str, Any]]:
+    from app.services.agent.parameter_inventory import _origin
+
+    active_origin = _origin(target)
+    for cell in _unsubmitted_first_pass_proofs(state, target):
+        attempts = sum(
+            step.get("tool_name") == "submit_finding_candidate"
+            and (step.get("tool_args") or {}).get("coverage_cell_id") == cell["id"]
+            for step in trace
+        )
+        if attempts >= 2:
+            continue
+        method = str(cell.get("method") or "GET").upper()
+        _, _, parameter = str(cell.get("parameter") or "").partition(":")
+        specialist = str(cell["specialist"])
+        evidence_id = str(cell["first_pass_evidence_id"])
+        return {
+            "tool_name": "submit_finding_candidate",
+            "tool_args": {
+                "title": f"{specialist.upper()} proof on {method} {cell['path']} ({parameter})",
+                "description": "Bounded observed-input probe returned an execution-owned proof signal.",
+                "target": f"{active_origin}{cell['path']}",
+                "evidence": f"First-pass proof receipt: {evidence_id}",
+                "specialist": specialist,
+                "coverage_cell_id": cell["id"],
+                "evidence_ids": [evidence_id],
+                "vulnerability_class": "sql_injection" if specialist == "sqli" else "xss",
+            },
+            "thought": "Hand the saved positive input proof to independent verification.",
+        }
+    return None
+
+
 def _observed_input_specialists(state: Dict[str, Any]) -> List[str]:
     cells = (state.get("engagement_brain") or {}).get("coverage_cells") or []
     pending = {
@@ -582,6 +670,8 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
     except Exception:
         pass
     pipeline = web and not registry_only
+    handoff_failures = (_failed_first_pass_handoffs(state, primary_web_target(state))
+                        if pipeline else [])
 
     missing: List[Dict[str, str]] = []
     try:
@@ -642,6 +732,19 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
             "title": f"{pending} observed SQLi/XSS checks need a first pass",
             "next": "probe_observed_input_batch on the current assessment target",
         }] if pending else [])
+        unsubmitted = _unsubmitted_first_pass_proofs(state, primary_web_target(state))
+        if unsubmitted:
+            missing.append({
+                "id": "candidate_handoff",
+                "title": f"{len(unsubmitted)} positive input proofs lack finding candidates",
+                "next": "submit_finding_candidate with each saved proof receipt",
+            })
+        if handoff_failures:
+            missing.append({
+                "id": "first_pass_handoff",
+                "title": f"{len(handoff_failures)} observed inputs failed before probing",
+                "next": "Inspect first_pass_handoff_error and repair the exact input mapping or lease",
+            })
         return {
             "is_web": web,
             "surface_empty": empty,
@@ -713,6 +816,20 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
             "title": "Threat model / methodology cards not seeded",
             "next": "sync_engagement_brain (or build_threat_model) — aim before fireteam",
         })
+    if pipeline:
+        unsubmitted = _unsubmitted_first_pass_proofs(state, primary_web_target(state))
+        if unsubmitted:
+            missing.append({
+                "id": "candidate_handoff",
+                "title": f"{len(unsubmitted)} positive input proofs lack finding candidates",
+                "next": "submit_finding_candidate with each saved proof receipt",
+            })
+        if handoff_failures:
+            missing.append({
+                "id": "first_pass_handoff",
+                "title": f"{len(handoff_failures)} observed inputs failed before probing",
+                "next": "Inspect first_pass_handoff_error and repair the exact input mapping or lease",
+            })
     try:
         from app.services.agent.registry_surface import registry_missing_probes
 
@@ -758,8 +875,8 @@ def format_tester_loop_for_prompt(progress: Dict[str, Any], state: Optional[Dict
             "discovery or fireteam dispatch solely because this turn's trace is empty."
         )
         if progress.get("missing"):
-            message += ("\n" + progress["summary"] + ". Run "
-                        "probe_observed_input_batch before completing.")
+            message += ("\n" + progress["summary"] + ". Next: "
+                        + progress["next_action"] + ".")
         return message
     if progress.get("cve_applicability_only"):
         lines = [
@@ -942,6 +1059,9 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
     publication = _confirmed_candidate_publication_step(state, trace, target)
     if publication:
         return publication
+    candidate_handoff = _pending_first_pass_candidate_step(state, trace, target)
+    if candidate_handoff:
+        return candidate_handoff
     verification = _pending_candidate_verify_step(state, trace)
     if verification:
         return verification

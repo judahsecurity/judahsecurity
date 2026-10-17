@@ -1881,6 +1881,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             }
         
         try:
+            prior_parameter_map = self._capability_map if tool_name == "discover_parameters" else None
             result = await tool(**tool_args)
             assigned_failure = (
                 tool_name == "scoped_input_probe_assigned"
@@ -1892,7 +1893,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "output": result,
                 "error": result.get("error") if assigned_failure else None,
             }
-            if tool_name == "scoped_browser_assessment" and self._capability_map:
+            if ((tool_name == "scoped_browser_assessment" and self._capability_map) or
+                    (tool_name == "discover_parameters"
+                     and self._capability_map != prior_parameter_map)):
                 payload["capability_map"] = self._capability_map
             return payload
         except TypeError as e:
@@ -4163,10 +4166,17 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         params_found: Dict[str, Dict[str, Any]] = {}
 
         # 1. Query string params from the final URL
-        from urllib.parse import urlparse, parse_qs
+        from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit, parse_qs
         parsed = urlparse(str(resp.url))
-        for name in parse_qs(parsed.query):
+        observed_inputs: List[Dict[str, str]] = []
+        response_url = str(resp.url)
+        value_free_url = urlunsplit(urlsplit(response_url)._replace(query="", fragment=""))
+        for name in parse_qs(parsed.query, keep_blank_values=True):
             params_found[name] = {"source": "query_string", "method": "GET"}
+            observed_inputs.append({
+                "url": value_free_url, "method": "GET", "name": name,
+                "location": "query", "source": "page_url",
+            })
 
         # 2. HTML form inputs
         form_pattern = _re_local.compile(
@@ -4188,6 +4198,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             method = method_pattern.search(form_html)
             form_action = action.group(1) if action else ""
             form_method = (method.group(1) if method else "GET").upper()
+            action_url = urljoin(response_url, form_action) if form_action else value_free_url
+            action_url = urlunsplit(urlsplit(action_url)._replace(query="", fragment=""))
 
             for inp in input_pattern.finditer(form_html):
                 name = inp.group(1)
@@ -4196,6 +4208,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     "method": form_method,
                     "form_action": form_action,
                 }
+                if form_method in {"GET", "POST"}:
+                    observed_inputs.append({
+                        "url": action_url, "method": form_method, "name": name,
+                        "location": "query" if form_method == "GET" else "body_form",
+                        "source": "observed_form",
+                    })
 
         # 3. Hidden inputs (sometimes outside forms)
         hidden_pattern = _re_local.compile(
@@ -4227,10 +4245,31 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             if prone_to:
                 info["likely_vulnerable_to"] = prone_to
 
+        queued_inputs = 0
+        cmap = getattr(self, "_capability_map", None) or {}
+        if isinstance(cmap, dict) and observed_inputs:
+            from app.services.agent.coverage_cells import seed_parameter_coverage_cells
+            from app.services.agent.engagement_brain import engagement_brain_from_dict
+            from app.services.agent.parameter_inventory import collect_parameter_inventory
+
+            prior = collect_parameter_inventory(cmap)
+            inventory = collect_parameter_inventory({
+                **cmap, "parameter_inventory": [
+                    *(cmap.get("parameter_inventory") or []), *observed_inputs,
+                ],
+            })
+            queued_inputs = sum(row not in prior for row in inventory)
+            if queued_inputs:
+                self._capability_map = {**cmap, "parameter_inventory": inventory}
+                brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+                seed_parameter_coverage_cells(brain, inventory)
+                self._engagement_brain = brain.to_dict()
+
         return json.dumps({
             "url": str(resp.url),
             "status_code": resp.status_code,
             "parameter_count": len(params_found),
+            "queued_inputs": queued_inputs,
             "parameters": params_found,
         }, indent=2)
 
