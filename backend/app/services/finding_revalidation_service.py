@@ -7,7 +7,8 @@ the Aegis Vanguard Docker image. Strategies:
   1. Nuclei findings  → re-run the matched template against the live target
   2. Port / network   → TCP (and light HTTP) probes of claimed host:ports
   3. Agent / manual   → parse steps_to_reproduce, evidence, and description for
-                        URLs / host:port pairs, then re-probe those endpoints
+                        URLs / host:port pairs, then report reachability only.
+                        An endpoint response does not prove the claimed flaw.
 
 Returns a verdict dict compatible with FindingValidation / handle_validate_finding.
 """
@@ -307,53 +308,17 @@ def _verdict_from_probes(
         for p in probes if not p.get("reachable")
     ]
 
-    if open_n == 0:
-        return {
-            "verdict": "false_positive",
-            "confidence": "high" if len(probes) >= 2 else "medium",
-            "is_false_positive": True,
-            "still_open": False,
-            "logical_mismatch": False,
-            "recommended_severity": "info",
-            "reasoning": (
-                f"Re-probed {len(probes)} reproduction endpoint(s) from the original "
-                f"detection; none are reachable now (ports closed or URLs gone)."
-            ),
-            "evidence": f"closed={closed_list[:15]}",
-            "template_logic_issue": None,
-            "method": method,
-            "probes": probes,
-        }
-
-    if closed_n == 0 or open_n >= max(1, len(probes) // 2):
-        return {
-            "verdict": "confirmed",
-            "confidence": "high" if closed_n == 0 else "medium",
-            "is_false_positive": False,
-            "still_open": True,
-            "logical_mismatch": False,
-            "recommended_severity": finding.get("severity") or "medium",
-            "reasoning": (
-                f"Re-probed endpoints from the original detection steps: "
-                f"{open_n}/{len(probes)} still reachable "
-                f"(e.g. {', '.join(open_list[:5])}{'…' if len(open_list) > 5 else ''})."
-            ),
-            "evidence": f"open={open_list[:20]}; closed={closed_list[:10]}",
-            "template_logic_issue": None,
-            "method": method,
-            "probes": probes,
-        }
-
     return {
         "verdict": "needs_more_evidence",
-        "confidence": "medium",
+        "confidence": "low",
         "is_false_positive": False,
-        "still_open": True,
+        "still_open": None,
         "logical_mismatch": False,
         "recommended_severity": finding.get("severity") or "medium",
         "reasoning": (
-            f"Mixed results on reproduction endpoints ({open_n} open / {closed_n} closed). "
-            "Some claimed services still respond; manual review recommended."
+            f"Re-probed {len(probes)} endpoint(s): {open_n} reachable, "
+            f"{closed_n} unreachable. Reachability alone cannot confirm or refute "
+            "the claimed vulnerability; reproduce its class-specific proof."
         ),
         "evidence": f"open={open_list[:15]}; closed={closed_list[:15]}",
         "template_logic_issue": None,

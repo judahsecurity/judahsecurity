@@ -240,7 +240,8 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
         elif tool in ("recon_worker:katana_urls", "recon_worker:ferox_dirs",
                       "recon_worker:archive_params",
                       "execute_interceptor", "execute_deep_crawl", "execute_browser",
-                      "browser_traffic_capture",
+                      "browser_traffic_capture", "scoped_browser_assessment",
+                      "scoped_assessment_observe",
                       "execute_katana", "execute_feroxbuster", "fingerprint_api",
                       "probe_pilot_ports",
                       "fetch_lazy_chunks", "extract_js_endpoints", "discover_parameters",
@@ -257,7 +258,8 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
                       "scoped_numeric_sqli", "scoped_string_sqli", "scoped_body_probe",
                       "probe_observed_input_batch"):
             stage = "logic_testing"
-        elif tool in ("execute_nuclei", "execute_nikto", "execute_ffuf", "execute_wpscan"):
+        elif tool in ("execute_nuclei", "execute_nikto", "execute_ffuf", "execute_wpscan",
+                      "execute_naabu", "execute_testssl", "execute_sqlmap", "execute_dalfox"):
             stage = "scanner_coverage"
         else:
             stage = ""
@@ -286,7 +288,8 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
                                              "replay_http_request", "independent_verify",
                                              "run_assessment_workflow", "mutate_captured_request",
                                              "run_intruder_batch", "execute_nuclei", "execute_nikto",
-                                             "execute_wpscan", "execute_sqlmap",
+                                             "execute_wpscan", "execute_sqlmap", "execute_naabu",
+                                             "execute_testssl", "execute_dalfox", "probe_observed_input_batch",
                                              "scoped_assessment_probe_assigned", "scoped_input_probe_assigned", "scoped_query_probe",
                                              "scoped_numeric_sqli", "scoped_string_sqli", "scoped_body_probe",
                                          )),

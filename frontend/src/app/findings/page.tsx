@@ -1455,7 +1455,7 @@ export default function FindingsPage() {
       toast({
         title: 'Validation queued',
         description:
-          'Replaying the original detection steps against the live target on the scanner.',
+          'Rechecking the detector or endpoint. A reachable URL alone cannot prove a vulnerability.',
       });
       await pollValidation(findingId);
     } catch (err: any) {
@@ -2945,16 +2945,15 @@ export default function FindingsPage() {
                     ) : (
                       <>
                         <ShieldCheck className="h-4 w-4 mr-2" />
-                        Re-validate finding
+                        Recheck detection
                       </>
                     )}
                   </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Replays the original detection path on the live target: nuclei
-                  template re-run, port probes, or the finding’s steps to reproduce.
-                  Confirms whether the issue is still open and catches bad matches
-                  (e.g. LDAP on port 443).
+                  Re-runs a Nuclei template or port check when available. For manual
+                  and agent findings without a class-specific proof recipe, it checks
+                  endpoint reachability only and returns Needs More Evidence.
                 </p>
 
                 {templatePattern && (
@@ -2998,7 +2997,7 @@ export default function FindingsPage() {
                   validationResult?.status === 'running') && (
                   <div className="flex items-center gap-2 text-sm text-muted-foreground">
                     <Loader2 className="h-4 w-4 animate-spin" />
-                    Agent is re-testing the target…
+                    Rechecking the detection path…
                   </div>
                 )}
 
@@ -3014,7 +3013,12 @@ export default function FindingsPage() {
                     <div className="flex items-center gap-2 flex-wrap">
                       {validationResult.verdict === 'confirmed' && (
                         <Badge className="bg-red-600/20 text-red-400 border-red-600/30">
-                          <CheckCircle className="h-3 w-3 mr-1" /> Confirmed
+                          <CheckCircle className="h-3 w-3 mr-1" />
+                          {validationResult.method === 'nuclei_template_replay'
+                            ? 'Detector reproduced'
+                            : validationResult.method === 'nmap_port_verify'
+                            ? 'Port exposure confirmed'
+                            : 'Confirmed'}
                         </Badge>
                       )}
                       {validationResult.verdict === 'false_positive' && (
@@ -3029,7 +3033,7 @@ export default function FindingsPage() {
                       )}
                       {validationResult.still_open === true && (
                         <Badge className="bg-orange-600/20 text-orange-300 border-orange-600/30">
-                          Still open
+                          {validationResult.method === 'nuclei_template_replay' ? 'Template still matches' : 'Still open'}
                         </Badge>
                       )}
                       {validationResult.still_open === false && (

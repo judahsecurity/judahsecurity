@@ -114,3 +114,70 @@ async def test_real_browser_identity_capture_and_origin_block(monkeypatch):
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_browser_walkthrough_visits_linked_pages_and_safe_controls():
+    from app.services.agent.scoped_assessment.browser import check_browser
+
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            requests.append(self.path)
+            if self.path == "/":
+                body = """<a href='/catalog'>Catalog</a><a href='/item?id=7'>Item</a>
+                <button role='tab' onclick="fetch('/api/root')">Overview</button>
+                <button type='button' aria-haspopup='menu' aria-expanded='false'
+                  onclick='document.getElementById("navigation").innerHTML=`<a href="/account">Account page</a>`; this.setAttribute("aria-expanded","true")'>More</button>
+                <nav id='navigation'></nav>"""
+            elif self.path == "/catalog":
+                body = """<form method='get' action='/search'><input name='q'></form>
+                <button type='button' aria-expanded='false' aria-controls='extra'
+                  onclick='document.getElementById("extra").innerHTML=`<form method="get" action="/advanced"><input name="filter"></form>`; this.setAttribute("aria-expanded","true"); fetch("/api/catalog")'>Advanced</button>
+                <div id='extra'></div>"""
+            elif self.path == "/account":
+                body = "<h1>Account</h1><form method='get' action='/profile'><input name='name'></form>"
+            elif self.path == "/item?id=7":
+                body = "<h1>Item 7</h1><form method='get' action='/items'><input name='quantity'></form>"
+            else:
+                body = '{"ok":true}'
+            data = body.encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json" if self.path.startswith("/api/") else "text/html")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        target = f"http://127.0.0.1:{server.server_port}"
+        scripts, exchanges, links = [], [], []
+        result, screenshot = await check_browser(
+            operation="inspect_js", url=target + "/", allowed_origins=[target],
+            max_pages=6, max_actions=6, javascript_sources=scripts,
+            traffic_exchanges=exchanges, link_baselines=links,
+        )
+        paths = [page["final_path"] for page in result["pages"]]
+        controls = [action["kind"] for action in result["actions"]]
+        fields = {field["name"] for page in result["pages"]
+                  for form in page["forms"] for field in form["fields"]}
+        assert {"/", "/catalog", "/account", "/item"}.issubset(paths)
+        assert {"tab", "menu", "disclosure"}.issubset(controls)
+        assert any(action.get("path") == "/account" and action.get("navigation_mode") == "click"
+                   for action in result["actions"])
+        assert {"q", "filter", "name", "quantity"}.issubset(fields)
+        assert len(exchanges) >= 2
+        assert screenshot
+        assert "/item?id=7" in requests
+        assert "id=7" not in json.dumps(result)
+        assert all(not path.startswith("/advanced") for path in requests)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

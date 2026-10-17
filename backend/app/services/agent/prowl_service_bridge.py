@@ -78,9 +78,12 @@ def capability_map_from_observation(observation: dict) -> dict | None:
 
     pages = []
     if isinstance(result.get("pages"), list):
-        pages = [row["url"] for row in result["pages"][:80]
+        pages = [scope + path for row in result["pages"][:80]
                  if isinstance(row, dict) and isinstance(row.get("url"), str)
-                 and isinstance(row.get("status"), int) and 200 <= row["status"] < 400]
+                 and (row.get("dom_observed") is True
+                      or isinstance(row.get("status"), int) and 200 <= row["status"] < 400)
+                 and (path := in_origin_path(row["url"]))]
+        pages = list(dict.fromkeys(pages))
     elif isinstance(result.get("status"), int) and 200 <= result["status"] < 400:
         pages = [scope + str(result.get("final_path") or "/")]
 
@@ -230,13 +233,23 @@ def capability_map_from_observation(observation: dict) -> dict | None:
             for name in (lead.get("names") or [])[:20]:
                 parameters.append({"method": method, "path": path, "name": name,
                                    "location": "query", "source": "javascript_static"})
+    target_path = in_origin_path(result.get("target_template"))
     cmap = CapabilityMap(
-        target=str(result.get("target_template") or scope), scope=scope,
+        target=scope + target_path if target_path else scope, scope=scope,
         pages_visited=pages, discovered_links=list(discovered_links.values()),
         forms=forms, api_endpoints=api_endpoints,
         js_endpoints=list(dict.fromkeys(js_endpoints)), js_files=js_files,
         js_sources=js_sources,
         parameter_inventory=parameters[:4000],
+        action_checkpoints=[
+            {"source": "scoped_" + observation["signal"],
+             **{key: action[key] for key in (
+                "ref", "kind", "path", "before_path", "after_path", "status",
+                "request_count", "scripts_added", "traffic_count", "navigation_mode",
+            ) if key in action}}
+            for action in (result.get("actions") or [])[:80]
+            if isinstance(action, dict)
+        ],
         notes=["Source: scoped browser observation"],
     )
     return finalize_capability_map(cmap).to_dict()
