@@ -12,11 +12,11 @@ export function ExplorationStatusPanel({ run }: { run: AgentRunLedger | null }) 
       <div className="flex flex-wrap items-baseline gap-2">
         <h2 className="text-sm font-semibold">Browser exploration</h2>
         <span className="text-muted-foreground">
-          {exploration.pages_observed} pages · {exploration.safe_interactions} safe interactions · {exploration.forms_observed} forms · {exploration.links_observed} links
+          {exploration.pages_observed} browser pages · {exploration.safe_interactions} safe interactions · {exploration.forms_observed} mapped forms · {exploration.links_observed} mapped links
         </span>
       </div>
       {exploration.pages_observed === 0 ? (
-        <p className="text-amber-400">No browser page has been recorded for this run yet.</p>
+        <p className="text-amber-400">No browser page has been recorded for this run yet. {exploration.mapped_pages} pages are in the application map from other sources.</p>
       ) : (
         <div className="space-y-1">
           <p className="text-muted-foreground">Observed paths: {exploration.page_paths.slice(0, 8).join(" · ")}{exploration.page_paths.length > 8 ? " …" : ""}</p>

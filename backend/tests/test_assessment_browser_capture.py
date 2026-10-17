@@ -130,12 +130,17 @@ async def test_browser_walkthrough_visits_linked_pages_and_safe_controls():
             requests.append(self.path)
             if self.path == "/":
                 body = """<a href='/catalog'>Catalog</a>
-                <button role='tab' onclick="fetch('/api/root')">Overview</button>"""
+                <button role='tab' onclick="fetch('/api/root')">Overview</button>
+                <button type='button' aria-haspopup='menu' aria-expanded='false'
+                  onclick='document.getElementById("navigation").innerHTML=`<a href="/account">Account page</a>`; this.setAttribute("aria-expanded","true")'>More</button>
+                <nav id='navigation'></nav>"""
             elif self.path == "/catalog":
                 body = """<form method='get' action='/search'><input name='q'></form>
                 <button type='button' aria-expanded='false' aria-controls='extra'
                   onclick='document.getElementById("extra").innerHTML=`<form method="get" action="/advanced"><input name="filter"></form>`; this.setAttribute("aria-expanded","true"); fetch("/api/catalog")'>Advanced</button>
                 <div id='extra'></div>"""
+            elif self.path == "/account":
+                body = "<h1>Account</h1><form method='get' action='/profile'><input name='name'></form>"
             else:
                 body = '{"ok":true}'
             data = body.encode()
@@ -160,9 +165,11 @@ async def test_browser_walkthrough_visits_linked_pages_and_safe_controls():
         controls = [action["kind"] for action in result["actions"]]
         fields = {field["name"] for page in result["pages"]
                   for form in page["forms"] for field in form["fields"]}
-        assert "/" in paths and "/catalog" in paths
-        assert "tab" in controls and "disclosure" in controls
-        assert {"q", "filter"}.issubset(fields)
+        assert {"/", "/catalog", "/account"}.issubset(paths)
+        assert {"tab", "menu", "disclosure"}.issubset(controls)
+        assert any(action.get("path") == "/account" and action.get("navigation_mode") == "click"
+                   for action in result["actions"])
+        assert {"q", "filter", "name"}.issubset(fields)
         assert len(exchanges) >= 2
         assert screenshot
         assert all(not path.startswith("/advanced") for path in requests)

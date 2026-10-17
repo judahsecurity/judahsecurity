@@ -61,6 +61,7 @@ export type AgentRunLedger = {
   exploration?: {
     pages_observed: number;
     page_paths: string[];
+    mapped_pages: number;
     forms_observed: number;
     links_observed: number;
     browser_actions: number;

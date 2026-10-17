@@ -23,9 +23,9 @@ def allowed_discovery_path(path: str) -> bool:
 
 def allowed_discovery_control(*, kind: str, label: str, in_form: bool,
                               button_type: str = "") -> bool:
-    """Allow only tab or disclosure controls outside forms during discovery."""
+    """Allow navigation and content reveal controls outside forms."""
     return (
-        kind in {"tab", "disclosure", "summary"}
+        kind in {"tab", "disclosure", "summary", "menu"}
         and not in_form
         and button_type.lower() != "submit"
         and bool(label.strip())

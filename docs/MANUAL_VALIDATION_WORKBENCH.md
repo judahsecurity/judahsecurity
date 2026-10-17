@@ -12,9 +12,11 @@ page labels a reproduced Nuclei match as detector reproduction.
 Agent assessments also run a bounded browser walkthrough after the first crawl,
 even when that crawl found inputs. The built-in browser visits up to six linked
 same-origin pages and clicks up to six safe tabs or disclosures across those
-pages. It observes rendered forms, link parameter names, first-party scripts,
-and XHR/fetch traffic after interactions. The Agent page shows persisted page,
-form, link, and safe interaction counts with recent browser actions. Failed
+pages. It can open navigation menus and follows newly revealed links before
+older queued links. It observes rendered forms, link parameter names,
+first-party scripts, and XHR/fetch traffic after interactions. The Agent page
+distinguishes browser-observed pages from pages mapped by other crawlers and
+shows mapped form and link counts with recent browser actions. Failed
 walkthroughs remain incomplete in the tester loop. Discovery does not submit
 forms or perform state-changing actions.
 

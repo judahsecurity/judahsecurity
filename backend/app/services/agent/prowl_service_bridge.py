@@ -242,10 +242,11 @@ def capability_map_from_observation(observation: dict) -> dict | None:
         js_sources=js_sources,
         parameter_inventory=parameters[:4000],
         action_checkpoints=[
-            {key: action[key] for key in (
+            {"source": "scoped_" + observation["signal"],
+             **{key: action[key] for key in (
                 "ref", "kind", "path", "before_path", "after_path", "status",
                 "request_count", "scripts_added", "traffic_count", "navigation_mode",
-            ) if key in action}
+            ) if key in action}}
             for action in (result.get("actions") or [])[:80]
             if isinstance(action, dict)
         ],

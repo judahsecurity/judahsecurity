@@ -410,9 +410,7 @@ async def check_browser(
             async def observe_surface(status: int | None = None) -> dict:
                 """Snapshot a rendered page after safe interactions, without URL values."""
                 assert_in_scope(page.url, allowed_origins)
-                hrefs = await page.locator("a[href]").evaluate_all(
-                    f"els => els.slice(0, {MAX_LINKS_PER_PAGE}).map(e => e.href)"
-                )
+                hrefs = await visible_hrefs()
                 if link_baselines is not None:
                     link_baselines.extend(_private_link_baselines(hrefs, [expected_origin]))
                 path = urlsplit(page.url).path or "/"
@@ -426,6 +424,13 @@ async def check_browser(
                     "link_query_inputs": _link_query_inputs(hrefs, [expected_origin]),
                     "forms": await _forms(page, expected_origin),
                 }
+
+            async def visible_hrefs() -> list[str]:
+                """Follow rendered navigation, including links revealed by controls."""
+                return await page.locator("a[href]").evaluate_all(
+                    f"els => els.filter(e => e.getClientRects().length > 0)"
+                    f".slice(0, {MAX_LINKS_PER_PAGE}).map(e => e.href)"
+                )
 
             if operation == "crawl":
                 queue = [final_target]
@@ -491,7 +496,8 @@ async def check_browser(
                     while interaction_count < max_actions:
                         selected = None
                         controls = await page.query_selector_all(
-                            "[role=tab], button[aria-expanded='false'][aria-controls], summary"
+                            "[role=tab], button[aria-expanded='false'][aria-controls], "
+                            "button[aria-expanded='false'][aria-haspopup='menu'], summary"
                         )
                         for index, control in enumerate(controls[:24]):
                             try:
@@ -499,8 +505,11 @@ async def check_browser(
                                     continue
                                 role = (await control.get_attribute("role") or "").lower()
                                 tag = await control.evaluate("el => el.tagName.toLowerCase()")
-                                kind = "tab" if role == "tab" else "summary" if tag == "summary" else "disclosure"
-                                label = " ".join((await control.inner_text()).split())[:80]
+                                popup = (await control.get_attribute("aria-haspopup") or "").lower()
+                                kind = ("tab" if role == "tab" else "summary" if tag == "summary"
+                                        else "menu" if popup == "menu" else "disclosure")
+                                label = " ".join((await control.inner_text()
+                                                  or await control.get_attribute("aria-label") or "").split())[:80]
                                 in_form = await control.evaluate("el => Boolean(el.closest('form'))")
                                 button_type = await control.get_attribute("type") or ""
                                 controls_id = (await control.get_attribute("aria-controls") or "")[:80]
@@ -536,13 +545,16 @@ async def check_browser(
                             after_path=urlsplit(page.url).path or "/", status=status,
                         ))
 
+                original_links = _crawl_links(await visible_hrefs(), allowed_origins)
                 await explore_controls()
                 current_action_ref = "settle"
                 await page.wait_for_timeout(300)
                 await settle_capture()
                 page_paths = [urlsplit(page.url).path or "/"]
                 observed_pages = [await observe_surface(response.status if response else None)]
-                queue = list(observed_pages[0]["links"])
+                revealed = [link for link in observed_pages[0]["links"]
+                            if link not in original_links]
+                queue = revealed + original_links
                 visited = {expected_origin + page_paths[0]}
                 while queue and len(page_paths) < max_pages:
                     next_url = queue.pop(0)
@@ -564,6 +576,7 @@ async def check_browser(
                         await page.wait_for_timeout(450)
                         await settle_capture()
                         await collect_inline()
+                        original_links = _crawl_links(await visible_hrefs(), allowed_origins)
                         await explore_controls()
                         page_path = urlsplit(page.url).path or "/"
                         page_paths.append(page_path)
@@ -573,7 +586,11 @@ async def check_browser(
                         observed_pages.append(observed)
                         actions.append(await checkpoint(ref, "navigate_link", start, path=page_path,
                                                         navigation_mode=navigation_mode, status="completed"))
-                        queue.extend(link for link in observed["links"]
+                        revealed = [link for link in observed["links"]
+                                    if link not in original_links and link not in visited
+                                    and link not in queue]
+                        queue = revealed + queue
+                        queue.extend(link for link in original_links
                                      if link not in visited and link not in queue)
                     except ValueError:
                         raise

@@ -108,6 +108,7 @@ def test_inspected_script_urls_and_inline_sources_reach_capability_map():
 
 def test_interactive_walkthrough_pages_and_forms_reach_capability_map():
     observation = {"signal": "browser_inspect_js", "result": {
+        "operation": "inspect_js",
         "target_template": "https://app.example/?search=private-value",
         "final_origin": "https://app.example", "final_path": "/products",
         "pages": [
@@ -129,6 +130,7 @@ def test_interactive_walkthrough_pages_and_forms_reach_capability_map():
     assert cmap["pages_visited"] == ["https://app.example/", "https://app.example/products"]
     assert {row["name"] for row in cmap["parameter_inventory"]} >= {"term", "category"}
     assert cmap["action_checkpoints"] == [{
+        "source": "scoped_browser_inspect_js",
         "ref": "ui-1", "kind": "tab", "before_path": "/products",
         "after_path": "/products", "status": "completed", "request_count": 2,
     }]
