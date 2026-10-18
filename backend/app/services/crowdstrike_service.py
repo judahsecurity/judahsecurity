@@ -422,7 +422,8 @@ def _upsert_finding(db: Session, integration: CrowdStrikeIntegration, source: di
     if vuln.detection_confidence in (None, "version_only"):
         vuln.detection_confidence = "unknown"
     vuln.first_detected = _utc(source.get("created_timestamp")) or vuln.first_detected or datetime.utcnow()
-    vuln.last_detected = _utc(source.get("updated_timestamp")) or datetime.utcnow()
+    # A resync without a provider observation timestamp is not a new detection.
+    vuln.last_detected = _utc(source.get("updated_timestamp")) or vuln.last_detected or datetime.utcnow()
     tags = list(vuln.tags or [])
     if "source:crowdstrike" not in tags:
         vuln.tags = tags + ["source:crowdstrike"]

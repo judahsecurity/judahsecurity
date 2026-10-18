@@ -44,7 +44,9 @@ def evidence_fingerprint(vuln):
                 "basis": item.basis, "summary": item.summary, "details": item.details,
                 "observed_at": item.observed_at,
             }
-            for item in source_evidence
+            for item in sorted(source_evidence, key=lambda item: (
+                item.source, item.source_finding_id, getattr(item, "evidence_key", ""),
+            ))
         ]
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
 

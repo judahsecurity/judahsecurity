@@ -122,8 +122,10 @@ def test_spotlight_finding_preserves_analyst_state_and_reopens_provider_resolved
     assert FindingSourceEvidenceResponse.model_validate(evidence).details["assessment_reason"] == "installed package detected"
     finding.status = VulnerabilityStatus.ACCEPTED
     finding.tags = ["analyst:reviewed"]
+    last_detected = finding.last_detected
     _upsert_finding(db, integration, source, mapping, _stats())
     assert finding.status == VulnerabilityStatus.ACCEPTED
+    assert finding.last_detected == last_detected
     assert "analyst:reviewed" in finding.tags
     source["status"] = "closed"
     _upsert_finding(db, integration, source, mapping, _stats())

@@ -116,6 +116,11 @@ class FindingTriageTests(unittest.TestCase):
         self.assertFalse(next(item for item in triage_state(self.finding)["items"] if item["id"] == "evidence")["stale"])
         source.details = {"assessment_reason": "new evaluation rule"}
         self.assertTrue(next(item for item in triage_state(self.finding)["items"] if item["id"] == "evidence")["stale"])
+        another_source = SimpleNamespace(**{**vars(source), "source_finding_id": "finding-2"})
+        self.finding.source_evidence = [source, another_source]
+        ordered_version = triage_state(self.finding)["evidence_version"]
+        self.finding.source_evidence.reverse()
+        self.assertEqual(triage_state(self.finding)["evidence_version"], ordered_version)
 
     def test_review_history_is_immutable_and_identity_cannot_be_spoofed(self):
         self.save()
