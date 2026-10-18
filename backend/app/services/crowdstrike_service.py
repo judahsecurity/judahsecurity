@@ -361,7 +361,7 @@ def _upsert_detection_evidence(
     evidence.source_status = str(source.get("status") or "unknown")[:50]
     evidence.summary = (
         f"Falcon Spotlight reported {cve_id or 'a vulnerability'} on host {aid}. "
-        "The provider assessment has not been independently reproduced by Judah."
+        "Judah validation results are recorded separately."
     )
     evidence.details = {
         "assessment_status": source.get("assessment_status"),
