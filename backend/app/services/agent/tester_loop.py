@@ -277,27 +277,37 @@ def _pending_first_pass_count(state: Dict[str, Any]) -> int:
 def _observed_input_batch_step(
     state: Dict[str, Any], trace: List[Dict[str, Any]], signature: str,
 ) -> Optional[Dict[str, Any]]:
-    pending = _pending_first_pass_count(state)
-    if not signature or not pending:
+    from app.services.agent.observed_input_batch import pending_first_pass_cells
+
+    pending_cells = pending_first_pass_cells(
+        state.get("engagement_brain") or {}, target=primary_web_target(state),
+    )
+    if not signature or not pending_cells:
         return None
+    # The queue count can stay flat or grow when crawling discovers new inputs
+    # while a batch is running. Compare the actual pending work instead.
+    pending_signature = hashlib.sha256(json.dumps(sorted(
+        str(cell.get("id") or "|".join(str(cell.get(key) or "") for key in (
+            "host", "method", "path", "parameter", "test_type",
+        ))) for cell in pending_cells
+    ), separators=(",", ":")).encode()).hexdigest()[:16]
     prior = next((
         step for step in reversed(trace)
         if step.get("tool_name") == "probe_observed_input_batch"
         and (step.get("tool_args") or {}).get("surface_signature") == signature
     ), None)
-    # If a tool failed without changing the queue, let a specialist diagnose
-    # it instead of forcing the same batch forever.
-    if prior and (
-        prior.get("success") is False
-        or pending >= int((prior.get("tool_args") or {}).get("pending_input_count") or 0)
-    ):
+    # Avoid a tight retry loop only when the same exact queue failed or made
+    # no progress. A newly discovered input deserves its own first pass.
+    if prior and (prior.get("tool_args") or {}).get("pending_batch_signature") == pending_signature:
         return None
     return {
         "tool_name": "probe_observed_input_batch",
         "tool_args": {
             "max_checks": 8, "max_seconds": 180,
             "target": primary_web_target(state),
-            "surface_signature": signature, "pending_input_count": pending,
+            "surface_signature": signature,
+            "pending_batch_signature": pending_signature,
+            "pending_input_count": len(pending_cells),
         },
         "thought": "Run bounded SQLi and XSS first passes across observed inputs before deeper specialist work.",
     }
@@ -313,15 +323,19 @@ def _pending_candidate_verify_step(
                 and candidate.get("specialist") not in {"sqli", "xss"}):
             continue
         candidate_id = str(candidate.get("id") or "")
-        if not candidate_id or any(
+        revision = max(1, int(candidate.get("revision") or 1))
+        attempts = sum(
             step.get("tool_name") == "independent_verify"
             and (step.get("tool_args") or {}).get("candidate_id") == candidate_id
+            and int((step.get("tool_args") or {}).get("candidate_revision") or 1) == revision
             for step in trace
-        ):
+        )
+        if not candidate_id or attempts >= 2:
             continue
         return {
             "tool_name": "independent_verify",
-            "tool_args": {"candidate_id": candidate_id, "max_parallel": 1},
+            "tool_args": {"candidate_id": candidate_id,
+                          "candidate_revision": revision, "max_parallel": 1},
             "thought": "Repeat the positive input proof independently before more discovery work.",
         }
     return None

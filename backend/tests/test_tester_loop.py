@@ -5,6 +5,7 @@ import pytest
 
 from app.services.agent.assessment_kickoff import root_needs_dir_brute
 from app.services.agent.tester_loop import (
+    _observed_input_batch_step,
     cms_followup_product,
     complete_blocked_reason,
     forced_next_step,
@@ -438,6 +439,35 @@ def test_observed_input_queue_batches_first_pass_before_specialist_wave():
     assert not full_wave["tool_args"].get("surface_signature")
 
 
+@pytest.mark.parametrize("prior_success", [True, False])
+def test_new_inputs_keep_first_pass_running_when_pending_count_is_unchanged(prior_success):
+    target = "https://app.example.com"
+    def cell(cell_id):
+        return {
+            "id": cell_id, "host": "app.example.com", "method": "GET",
+            "path": "/catalog", "parameter": f"query:{cell_id}",
+            "source": "parameter_inventory", "observation_source": "browser_link",
+            "specialist": "xss", "test_type": "xss", "status": "untested",
+        }
+
+    state = {
+        "target_info": {"primary_target": target},
+        "engagement_brain": {"coverage_cells": [cell("a"), cell("b")]},
+    }
+    first = _observed_input_batch_step(state, [], "surface-a")
+    assert first["tool_args"]["pending_input_count"] == 2
+    trace = [{"tool_name": "probe_observed_input_batch", "success": prior_success,
+              "tool_args": first["tool_args"]}]
+    # A completed batch with the same exact queue must not spin.
+    assert _observed_input_batch_step(state, trace, "surface-a") is None
+
+    state["engagement_brain"]["coverage_cells"][0]["first_pass_outcome"] = "inconclusive"
+    state["engagement_brain"]["coverage_cells"].append(cell("c"))
+    second = _observed_input_batch_step(state, trace, "surface-a")
+    assert second["tool_args"]["pending_input_count"] == 2
+    assert second["tool_args"]["pending_batch_signature"] != first["tool_args"]["pending_batch_signature"]
+
+
 def test_link_discovered_input_enters_observed_first_pass():
     target = "https://app.example.com"
     state = {
@@ -482,11 +512,20 @@ def test_pending_proof_is_verified_before_next_input_batch():
     first = forced_next_step(state)
     assert first["tool_name"] == "independent_verify"
     assert first["tool_args"]["candidate_id"] == "candidate-1"
+    assert first["tool_args"]["candidate_revision"] == 1
     state["execution_trace"].append({
         "tool_name": "independent_verify", "success": False,
         "tool_args": first["tool_args"],
     })
+    retry = forced_next_step(state)
+    assert retry["tool_name"] == "independent_verify"
+    state["execution_trace"].append({
+        "tool_name": "independent_verify", "success": False,
+        "tool_args": retry["tool_args"],
+    })
     assert forced_next_step(state)["tool_name"] != "independent_verify"
+    state["engagement_brain"]["candidates"][0]["revision"] = 2
+    assert forced_next_step(state)["tool_args"]["candidate_revision"] == 2
 
 
 @pytest.mark.parametrize("specialist,vulnerability_class", [

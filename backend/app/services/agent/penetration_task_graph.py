@@ -461,6 +461,34 @@ def parse_executor_summary(report: Any) -> ExecutorSummary:
         verdict = "retry"
         rewrite_hint = rewrite_hint or "soliloquy: no tool calls — do not invent output"
 
+    assigned_hypothesis = str(getattr(report, "assigned_hypothesis_id", "") or "")
+    assigned_cell = str(getattr(report, "coverage_cell_id", "") or "")
+    assigned_cell_lease = str(getattr(report, "coverage_lease_id", "") or "")
+    backed_results = []
+    for row in (getattr(report, "hypothesis_results", None) or []):
+        if not isinstance(row, dict) or not row.get("evidence_ids"):
+            continue
+        hypothesis_id = row.get("hypothesis_id")
+        direct_ids = {i for call in tool_calls
+                      if getattr(call, "success", False)
+                      and getattr(call, "args", {}).get("hypothesis_id") == hypothesis_id
+                      for i in getattr(call, "evidence_ids", [])}
+        scoped_ids = {i for call in tool_calls
+                      if getattr(call, "success", False)
+                      and getattr(call, "tool", "") == "scoped_input_probe_assigned"
+                      and assigned_hypothesis == hypothesis_id
+                      and assigned_cell and assigned_cell_lease
+                      and getattr(call, "args", {}).get("coverage_cell_id") == assigned_cell
+                      and getattr(call, "args", {}).get("coverage_lease_id") == assigned_cell_lease
+                      for i in getattr(call, "evidence_ids", [])}
+        if set(row["evidence_ids"]).issubset(direct_ids | scoped_ids):
+            backed = dict(row)
+            if backed.get("verdict") == "killed" and scoped_ids and not direct_ids:
+                # One scoped probe only covers its chosen technique. Preserve
+                # the receipt without declaring the whole hypothesis clean.
+                backed["verdict"] = "inconclusive"
+            backed_results.append(backed)
+
     return ExecutorSummary(
         specialist=specialist,
         hypothesis_ids=hyp_ids,
@@ -472,12 +500,7 @@ def parse_executor_summary(report: Any) -> ExecutorSummary:
         key_findings=findings,
         summary=summary,
         soliloquy=soliloquy,
-        hypothesis_results=[r for r in (getattr(report, "hypothesis_results", None) or [])
-                            if isinstance(r, dict) and r.get("evidence_ids")
-                            and set(r["evidence_ids"]).issubset({i for t in tool_calls
-                                if getattr(t, "success", False)
-                                and getattr(t, "args", {}).get("hypothesis_id") == r.get("hypothesis_id")
-                                for i in getattr(t, "evidence_ids", [])})],
+        hypothesis_results=backed_results,
         assigned_hypothesis_id=str(
             getattr(report, "assigned_hypothesis_id", "") or ""
         ),

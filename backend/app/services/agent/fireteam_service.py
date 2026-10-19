@@ -1166,7 +1166,7 @@ INSTRUCTIONS:
      "key_findings": ["bullet", "bullet", "bullet"],
      "verdict": "proven|killed|blocked|retry|inconclusive",
      "hypothesis_ids": ["id from the directive"],
-     "hypothesis_results": [{{"hypothesis_id": "one id", "verdict": "killed|blocked|inconclusive|retry", "evidence_ids": ["HTTP evidence_id"], "evidence": "what this specific test established"}}],
+     "hypothesis_results": [{{"hypothesis_id": "one id", "verdict": "killed|blocked|inconclusive|retry", "evidence_ids": ["execution-owned evidence_id"], "evidence": "what this specific test established"}}],
      "evidence": "tool-backed proof only — quote tool output, never imagined",
      "spawn": ["optional specialist names to enqueue, e.g. graphql_api"],
      "rewrite_hint": "if retry: what to try differently"
@@ -1176,7 +1176,7 @@ INSTRUCTIONS:
    Write demonstrated-compromise reports (description + impact + assets + remediation),
    not 'login worked' or template-match-only.
 7. Do not exceed {max_iter} iterations. If unsure, finish with done=true.
-8. Work only on the single leased hypothesis or exact parameter coverage cell in the directive. Return one hypothesis_results entry when a hypothesis ID is leased; sibling tests stay open. Pass hypothesis_id and coverage_cell_id to replay_http_request/compare_requests when available. Only independent verification marks proven.
+8. Work only on the single leased hypothesis or exact parameter coverage cell in the directive. Return one hypothesis_results entry when a hypothesis ID is leased; sibling tests stay open. Pass hypothesis_id and coverage_cell_id to replay_http_request/compare_requests when available. A scoped_input_probe_assigned receipt belongs to its exact coverage cell and lease; a negative receipt for one technique is inconclusive for the whole input. Only independent verification marks proven.
 9. Imagining tool output is a failure (soliloquy). If you did not call a tool, verdict=retry.
 9. save_note(category='hunt') with URL/param/hypothesis/next mutation — not raw httpx.
 
@@ -1469,6 +1469,28 @@ async def _safe_invoke(tools_manager: Any, tool_name: str, args: dict) -> ToolIn
         ids = [i for i in ids if i in store.records and store.records[i]["kind"] == "http_exchange"
                and store.records[i]["hypothesis_id"] == (args or {}).get("hypothesis_id", "")
                and store.records[i]["payload"].get("response", {}).get("status", 500) < 500]
+        if success and tool_name == "scoped_input_probe_assigned":
+            # This tool receives a leased coverage cell, rather than a
+            # hypothesis ID. Its proof artifact is attached to that cell by
+            # the executor. Keep the receipt available to the specialist only
+            # when the returned cell and lease match this invocation.
+            output = result.get("output")
+            if (isinstance(output, dict) and output.get("success") is True
+                    and output.get("coverage_cell_id") == args.get("coverage_cell_id")
+                    and output.get("coverage_lease_id") == args.get("coverage_lease_id")
+                    and args.get("coverage_cell_id") and args.get("coverage_lease_id")):
+                receipt_id = str(output.get("evidence_id") or "")
+                record = store.records.get(receipt_id)
+                from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+                brain = engagement_brain_from_dict(getattr(tools_manager, "_engagement_brain", None))
+                cell = next((row for row in brain.coverage_cells
+                             if row.get("id") == args["coverage_cell_id"]), None)
+                if (record and record.get("kind") in {
+                        "scoped_numeric_sqli", "scoped_string_sqli", "scoped_browser_check_xss",
+                    } and cell and cell.get("lease_id") == args["coverage_lease_id"]
+                        and receipt_id in (cell.get("probe_artifact_ids") or [])):
+                    ids = list(dict.fromkeys([*ids, receipt_id]))
         if result.get("artifact_id"):
             summary = f"artifact_id={result['artifact_id']} (read_evidence for full output)\n" + summary
         return ToolInvocation(

@@ -11,6 +11,7 @@ from app.services.agent.fireteam_service import (
     SpecialistProfile,
     SpecialistReport,
     ToolInvocation,
+    _safe_invoke,
     run_fireteam,
 )
 from app.services.agent.penetration_task_graph import (
@@ -187,6 +188,78 @@ async def test_wave_deadline_keeps_completed_member(monkeypatch):
     )
     assert result.reports[0].summary == "completed"
     assert "wave timed out" in result.reports[1].error
+
+
+@pytest.mark.asyncio
+async def test_scoped_probe_receipt_handoffs_to_its_leased_hypothesis(monkeypatch):
+    receipt_id = "a" * 32
+    cell_id = "cell-1"
+    lease_id = "lease-1"
+    record = {"kind": "scoped_string_sqli", "payload": {"proof_confirmed": False}}
+    monkeypatch.setattr(
+        "app.services.agent.evidence_store.evidence_store",
+        lambda manager: SimpleNamespace(records={receipt_id: record}),
+    )
+
+    class Manager:
+        _engagement_brain = {"coverage_cells": [{
+            "id": cell_id, "lease_id": lease_id,
+            "probe_artifact_ids": [receipt_id],
+        }]}
+
+        async def execute(self, name, args):
+            return {"success": True, "output": {
+                "success": True, "coverage_cell_id": cell_id,
+                "coverage_lease_id": lease_id, "evidence_id": receipt_id,
+            }}
+
+    call = await _safe_invoke(Manager(), "scoped_input_probe_assigned", {
+        "coverage_cell_id": cell_id, "coverage_lease_id": lease_id,
+    })
+    assert call.evidence_ids == [receipt_id]
+    report = SpecialistReport(
+        specialist="sqli", role="sqli", mission="test", summary="bounded probe",
+        assigned_hypothesis_id="hyp-1", coverage_cell_id=cell_id,
+        coverage_lease_id=lease_id, tool_calls=[call],
+        hypothesis_results=[{"hypothesis_id": "hyp-1", "verdict": "killed",
+                             "evidence_ids": [receipt_id], "evidence": "negative control"}],
+    )
+    summary = parse_executor_summary(report)
+    assert summary.hypothesis_results[0]["evidence_ids"] == [receipt_id]
+    assert summary.hypothesis_results[0]["verdict"] == "inconclusive"
+
+    report.coverage_cell_id = "other-cell"
+    assert parse_executor_summary(report).hypothesis_results == []
+    report.coverage_cell_id = cell_id
+    report.assigned_hypothesis_id = "other-hypothesis"
+    assert parse_executor_summary(report).hypothesis_results == []
+
+
+@pytest.mark.asyncio
+async def test_scoped_probe_receipt_rejects_unlinked_artifact(monkeypatch):
+    receipt_id = "b" * 32
+    monkeypatch.setattr(
+        "app.services.agent.evidence_store.evidence_store",
+        lambda manager: SimpleNamespace(records={receipt_id: {
+            "kind": "scoped_string_sqli", "payload": {},
+        }}),
+    )
+
+    class Manager:
+        _engagement_brain = {"coverage_cells": [{
+            "id": "cell-1", "lease_id": "lease-1", "probe_artifact_ids": [],
+        }]}
+
+        async def execute(self, name, args):
+            return {"success": True, "output": {
+                "success": True, "coverage_cell_id": "cell-1",
+                "coverage_lease_id": "lease-1", "evidence_id": receipt_id,
+            }}
+
+    call = await _safe_invoke(Manager(), "scoped_input_probe_assigned", {
+        "coverage_cell_id": "cell-1", "coverage_lease_id": "lease-1",
+    })
+    assert call.evidence_ids == []
 
 
 @pytest.mark.asyncio

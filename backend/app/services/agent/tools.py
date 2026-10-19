@@ -1033,6 +1033,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     async def probe_observed_input_batch(
         self, max_checks: int = 8, max_seconds: int = 180,
         surface_signature: str = "", pending_input_count: int = 0,
+        pending_batch_signature: str = "",
         target: str = "",
     ) -> Dict[str, Any]:
         """Run a bounded first pass over queued observed SQLi and XSS checks."""
@@ -1042,6 +1043,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             self, target=target, max_checks=max_checks, max_seconds=max_seconds,
         )
         result["surface_signature"] = surface_signature
+        result["pending_batch_signature"] = pending_batch_signature
         return result
 
     async def scoped_assessment_probe_assigned(
@@ -8616,6 +8618,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         self,
         candidate_id: str = "",
         max_parallel: int = 3,
+        candidate_revision: int = 0,
     ) -> str:
         """Spawn a fresh verifier agent per pending candidate (no hunter transcript)."""
         from app.services.agent.engagement_brain import engagement_brain_from_dict
@@ -8634,6 +8637,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if candidate_id:
             wanted = candidate_id.strip()
             cands = [c for c in cands if c.id == wanted or c.title == wanted]
+        if candidate_revision and any(c.revision != candidate_revision for c in cands):
+            return json.dumps({"error": "candidate_revision_changed",
+                               "candidate_id": candidate_id})
         threat_slice = ""
         if brain.threat_model:
             try:
