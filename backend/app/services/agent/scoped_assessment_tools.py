@@ -138,6 +138,17 @@ class ScopedAssessmentTools:
     def _scoped_state(self, identity: str, url: str) -> dict | None:
         if identity == "anonymous":
             return None
+        if identity == "legacy":
+            from app.services.agent.evidence_store import origin
+
+            session = getattr(self, "_auth_session", None) or {}
+            try:
+                same_origin = origin(str(session.get("target") or "")) == origin(url)
+            except ValueError:
+                same_origin = False
+            if session.get("authenticated") is not True or not same_origin:
+                raise ValueError("Legacy test identity requires an authenticated session on this origin")
+            return browser_storage_state(session, url)
         session = identity_registry(self).resolve(identity, url)
         return browser_storage_state(session, url)
 

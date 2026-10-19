@@ -12,6 +12,23 @@ from app.services.agent.tools import ASMToolsManager
 from app.services.agent.prompts import is_tool_allowed_in_phase
 
 
+def test_legacy_scoped_identity_requires_proven_auth_on_exact_origin():
+    manager = ASMToolsManager()
+    manager._auth_session = {
+        "target": "https://app.example.test",
+        "authenticated": False,
+        "cookies": [{"name": "session", "value": "private", "domain": "app.example.test"}],
+    }
+    with pytest.raises(ValueError, match="requires an authenticated session"):
+        manager._scoped_state("legacy", "https://app.example.test/catalog")
+
+    manager._auth_session["authenticated"] = True
+    with pytest.raises(ValueError, match="requires an authenticated session"):
+        manager._scoped_state("legacy", "https://elsewhere.test/catalog")
+    state = manager._scoped_state("legacy", "https://app.example.test/catalog")
+    assert state["cookies"][0]["name"] == "session"
+
+
 @pytest.mark.asyncio
 async def test_agent_browser_inventory_keeps_private_exchange_values_out_of_tool_output(monkeypatch):
     manager = ASMToolsManager()

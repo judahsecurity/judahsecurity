@@ -1669,6 +1669,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 max_chars = _tool_output_max_chars()
                 augur_block = result.get("augur")  # Augur reading: kept/dropped/next_steps/signals
                 capability_map = result.get("capability_map")  # deep_crawl / interceptor map
+                received_capability_map = isinstance(capability_map, dict)
+                if (not capability_map and tool_name in traffic_tools and operations):
+                    # Browser actions may return observed operations without a
+                    # full crawl map. Their parameter inventory still needs to
+                    # reach the orchestrator's durable state.
+                    capability_map = getattr(self, "_capability_map", None)
                 if tool_name in {"execute_deep_crawl", "execute_interceptor"} and result.get("success") and isinstance(capability_map, dict):
                     try:
                         from app.services.agent.action_ledger import active_run_id, append_action
@@ -1778,12 +1784,55 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         payload["exit_code"] = result.get("exit_code")
                     if augur_block:
                         payload["augur"] = augur_block
-                    if capability_map:
-                        payload["capability_map"] = capability_map
                     if tool_name not in traffic_tools and result.get("application_operations"):
                         self._ingest_observed_operations(result["application_operations"])
-                    if capability_map and capability_map.get("api_samples"):
-                        await self.map_application_traffic(capability_map["api_samples"], identity=browser_identity or "legacy", source="crawl")
+                    if (received_capability_map and capability_map
+                            and capability_map.get("api_samples")):
+                        from app.services.agent.capability_map import merge_capability_maps
+
+                        # A crawl can export browser storage without logging in.
+                        # Those requests belong to the anonymous test identity.
+                        # Reserve "legacy" for an actual or explicitly supplied
+                        # authenticated browser context.
+                        prior_auth = getattr(self, "_auth_session", None)
+                        prior_auth = prior_auth if isinstance(prior_auth, dict) else {}
+                        crawl_auth = auth_session if isinstance(auth_session, dict) else {}
+                        try:
+                            crawl_spec = json.loads(tool_args.get("args") or "{}")
+                        except (TypeError, ValueError):
+                            crawl_spec = {}
+                        explicit_auth = False
+                        if isinstance(crawl_spec, dict):
+                            inherited_storage = bool(prior_auth) and any(
+                                crawl_spec.get(key) == prior_auth.get(key)
+                                for key in ("cookies", "storage_state")
+                                if crawl_spec.get(key)
+                            )
+                            explicit_auth = (
+                                any(crawl_spec.get(key) for key in (
+                                    "login", "basic_auth", "headers", "extra_headers",
+                                ))
+                                or (not inherited_storage and any(
+                                    crawl_spec.get(key) for key in ("cookies", "storage_state")
+                                ))
+                            )
+                        capture_identity = browser_identity or (
+                            "legacy" if (crawl_auth.get("authenticated") is True
+                                         or prior_auth.get("authenticated") is True
+                                         or explicit_auth)
+                            else "anonymous"
+                        )
+                        self._capability_map = merge_capability_maps(
+                            getattr(self, "_capability_map", None), capability_map,
+                        )
+                        await self.map_application_traffic(
+                            capability_map["api_samples"], identity=capture_identity,
+                            source="crawl",
+                        )
+                        # The queue and scoped probes must use the same map.
+                        capability_map = self._capability_map
+                    if capability_map:
+                        payload["capability_map"] = capability_map
                     if auth_session:
                         payload["auth_session"] = auth_session
                     if tool_name in ("execute_katana", "execute_feroxbuster"):
@@ -1835,6 +1884,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         "error": err,
                         "evidence_ids": evidence_ids,
                     }
+                    if capability_map:
+                        fail_payload["capability_map"] = capability_map
                     if result.get("exit_code") is not None:
                         fail_payload["exit_code"] = result.get("exit_code")
                     return fail_payload

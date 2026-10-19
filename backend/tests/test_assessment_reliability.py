@@ -1275,6 +1275,67 @@ async def test_named_crawl_preserves_separate_capture_and_does_not_replace_legac
     assert manager._identity_captures["A"]["target"] == "https://app.test"
 
 
+@pytest.mark.parametrize(
+    ("authenticated", "explicit_cookies", "expected_identity"),
+    [(False, False, "anonymous"), (True, False, "legacy"),
+     (False, True, "legacy")],
+)
+@pytest.mark.asyncio
+async def test_crawl_input_identity_matches_browser_auth_and_returned_map(
+    manager, monkeypatch, authenticated, explicit_cookies, expected_identity,
+):
+    import app.services.agent.confirmation_service as confirmation
+    from app.services.agent.parameter_inventory import collect_parameter_inventory
+
+    async def allow(*_args, **_kwargs):
+        return {"decision": "allow"}
+
+    async def call_tool(_name, _args):
+        return {
+            "success": True,
+            "output": "Crawled",
+            "capability_map": {
+                "target": "https://app.test",
+                "api_samples": [{
+                    "method": "GET",
+                    "url": "https://app.test/catalog?category=gin",
+                }],
+            },
+            # Browser storage is exported even for an anonymous crawl.
+            "auth_session": {
+                "target": "https://app.test",
+                "authenticated": authenticated,
+                "cookies": [],
+                "storage_state": {"cookies": [], "origins": []},
+            },
+        }
+
+    monkeypatch.setattr(confirmation, "gate", allow)
+    manager._mcp_server = SimpleNamespace(call_tool=call_tool)
+    manager._fallback_target = "https://app.test"
+    spec = {"url": "https://app.test"}
+    if explicit_cookies:
+        spec["cookies"] = [{"name": "session", "value": "private", "domain": "app.test"}]
+    result = await manager._execute_impl("execute_deep_crawl", {"args": json.dumps(spec)})
+
+    assert result["success"] is True
+    matching = [
+        row for row in manager._engagement_brain["coverage_cells"]
+        if row.get("source") == "parameter_inventory"
+        and row.get("path") == "/catalog"
+        and row.get("parameter") == "query:category"
+        and row.get("identity") == expected_identity
+    ]
+    assert {row["test_type"] for row in matching} >= {"sqli", "xss"}
+    if expected_identity == "anonymous":
+        assert not any(row.get("identity") == "legacy"
+                       for row in manager._engagement_brain["coverage_cells"])
+    assert any(
+        row["path"] == "/catalog" and row["name"] == "category"
+        for row in collect_parameter_inventory(result["capability_map"])
+    )
+
+
 def test_oversized_evidence_is_bounded_and_cannot_confirm(manager):
     store = evidence_store(manager)
     token = verification_run.set(VerificationRun("v", "candidate", 1, "nonce"))

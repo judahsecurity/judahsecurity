@@ -88,6 +88,12 @@ async def test_failed_browser_action_still_records_in_scope_traffic(monkeypatch,
         result = await manager._execute_impl(tool_name, {"args": json.dumps(spec)})
         assert result["success"] is False
         assert result["evidence_ids"]
+        assert any(
+            row["path"] == "/catalog/subscribe"
+            and row["name"] == "email"
+            and row["location"] == "query"
+            for row in result["capability_map"]["parameter_inventory"]
+        )
         traffic = evidence_store(manager).records[result["evidence_ids"][0]]["payload"]
         assert traffic["requests"][0]["status"] == 400
         assert traffic["requests"][0]["query_keys"] == ["email"]
