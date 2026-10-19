@@ -476,6 +476,9 @@ async def run_independent_verifiers(
             run = VerificationRun(uuid.uuid4().hex, cand.id, cand.revision, cand.nonce)
             token = verification_run.set(run)
             try:
+                replayed = await _verify_scoped_string_candidate(tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
                 report = await _run_specialist(
                     profile, mission, [cand.target], llm, tools_manager,
                 )
@@ -498,6 +501,103 @@ async def run_independent_verifiers(
             }
 
     return list(await asyncio.gather(*(_one(c) for c in pending)))
+
+
+async def _verify_scoped_string_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Repeat an exact mapped SQLi proof before spending a verifier model wave.
+
+    The candidate and its earlier receipt only select the observed input. The
+    fresh scoped probe must independently satisfy the existing two-actor proof
+    policy before this path can issue a confirmed verdict.
+    """
+    import logging
+    from urllib.parse import urlsplit
+
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.proof_policy import (
+        inferred_vulnerability_class, validate_proof,
+    )
+    from app.services.agent.scoped_assessment.sqli_string import (
+        string_error_proof_valid, string_sql_proof_valid,
+    )
+    from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
+
+    if (cand.vulnerability_class or inferred_vulnerability_class(cand)) != "sql_injection":
+        return None
+    brain = _brain(tools_manager)
+    cell = next((row for row in brain.coverage_cells
+                 if row.get("id") == cand.coverage_cell_id), None)
+    if not cell or cell.get("source") != "parameter_inventory" or (
+        cell.get("observation_source") not in OBSERVED_INPUT_SOURCES
+        or cell.get("test_type") != "sqli" or cell.get("method") != "GET"
+    ):
+        return None
+    location, separator, parameter = str(cell.get("parameter") or "").partition(":")
+    target = urlsplit(cand.target)
+    identity = str(cell.get("identity") or "anonymous")
+    if (location != "query" or not separator or not parameter
+            or target.scheme not in {"http", "https"}
+            or target.netloc != cell.get("host")
+            or (target.path or "/") != cell.get("path")
+            or target.query or target.fragment
+            or (cand.identity and cand.identity != identity)
+            or (cand.parameter and cand.parameter != cell.get("parameter"))):
+        return None
+    store = evidence_store(tools_manager)
+    hunter_ids = [artifact_id for artifact_id in cand.evidence_ids
+                  if (artifact_id in store.records
+                      and store.records[artifact_id]["kind"] == "scoped_string_sqli"
+                      and store.records[artifact_id]["target"] == cand.target
+                      and store.records[artifact_id]["identity"] == identity
+                      and store.records[artifact_id]["payload"].get("parameter") == parameter
+                      and store.records[artifact_id]["payload"].get("proof_confirmed") is True)]
+    if not hunter_ids:
+        return None
+    try:
+        wrapped = await tools_manager.execute("scoped_string_sqli", {
+            "url": cand.target, "parameter": parameter, "identity": identity,
+        })
+        output = wrapped.get("output") if isinstance(wrapped, dict) else None
+        result = json.loads(output) if isinstance(output, str) else output
+        if not isinstance(result, dict) or result.get("proof_confirmed") is not True:
+            return None
+        artifact_id = str(result.get("evidence_id") or "")
+        verifier = store.records.get(artifact_id)
+        if not verifier or verifier.get("run_id") != run.id:
+            return None
+        recipe = result.get("proof_recipe")
+        kind = "string_error_sqli" if recipe == "string_error_v1" else "string_boolean_sqli"
+        valid_recipe = (string_error_proof_valid(result) if kind == "string_error_sqli"
+                        else string_sql_proof_valid(result))
+        if not valid_recipe:
+            return None
+        for hunter_id in hunter_ids:
+            proof = {"kind": kind, "hunter_artifact_id": hunter_id,
+                     "artifact_id": artifact_id}
+            valid, _ = validate_proof(store, cand, proof, [artifact_id])
+            fresh, _ = store.validate(
+                [artifact_id], candidate_id=cand.id, revision=cand.revision,
+                run_id=run.id, target=cand.target,
+            )
+            if valid and fresh:
+                verified = apply_verdict(
+                    tools_manager, candidate_id=cand.id, verdict="confirmed",
+                    evidence="Fresh scoped SQLi controls reproduced the candidate on the exact observed input.",
+                    evidence_ids=[artifact_id], proof=proof,
+                )
+                if verified and verified.status == "confirmed":
+                    return {
+                        "candidate_id": cand.id, "title": cand.title,
+                        "status": "confirmed", "verifier_summary": "Fresh scoped SQLi proof matched the hunter receipt",
+                        "key_findings": [], "tool_calls": 1, "error": None,
+                    }
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Deterministic SQLi verifier could not replay candidate %s", cand.id,
+        )
+    return None
 
 
 def _brain(tools_manager: Any):

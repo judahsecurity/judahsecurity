@@ -10,8 +10,12 @@ import pytest
 from app.services.agent.assessment_scope import register_scope
 from app.services.agent.evidence_store import EvidenceStore, VerificationRun, evidence_store, verification_run
 from app.services.agent.engagement_brain import EngagementBrain
+from app.services.agent.coverage_cells import seed_parameter_coverage_cells
 from app.services.agent.fireteam_service import get_specialist
-from app.services.agent.independent_verify import apply_verdict, check_verify_receipt, submit_candidate
+from app.services.agent.independent_verify import (
+    apply_verdict, check_verify_receipt, run_independent_verifiers,
+    submit_candidate,
+)
 from app.services.agent.proof_policy import validate_proof
 from app.services.agent.scoped_assessment import sqli_string
 from app.services.agent.scoped_assessment.http_observe import _sql_error_family
@@ -588,3 +592,51 @@ def test_malformed_verifier_proof_is_inconclusive_not_a_crash(monkeypatch):
     finally:
         verification_run.reset(token)
     assert verdict.status == "inconclusive"
+
+
+@pytest.mark.asyncio
+async def test_independent_verifier_replays_exact_observed_string_sqli_before_model(monkeypatch):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    store = evidence_store(manager)
+    hunter = store.record(
+        "scoped_string_sqli", _proof(monkeypatch, "12345"),
+        target=TARGET, identity="anonymous",
+    )
+    brain = EngagementBrain(target="https://app.example.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "host": "app.example.test", "path": "/catalog",
+        "name": "category", "location": "query", "identity": "anonymous",
+        "source": "browser_link", "testable": True,
+    }])
+    cell = next(row for row in brain.coverage_cells if row.get("test_type") == "sqli")
+    candidate = submit_candidate(
+        brain, title="SQL injection in catalog category", target=TARGET,
+        vulnerability_class="sql_injection", coverage_cell_id=cell["id"],
+        identity="anonymous", parameter="query:category", evidence_ids=[hunter],
+    )
+    manager._engagement_brain = brain.to_dict()
+    calls = []
+
+    async def execute(name, args):
+        calls.append((name, args))
+        assert name == "scoped_string_sqli"
+        proof = _proof(monkeypatch, "67890")
+        artifact_id = store.record(
+            "scoped_string_sqli", proof, target=TARGET, identity="anonymous",
+        )
+        return {"success": True, "output": json.dumps({**proof, "evidence_id": artifact_id})}
+
+    manager.execute = execute
+    reports = await run_independent_verifiers(
+        [candidate], llm=None, tools_manager=manager, targets=[TARGET],
+    )
+    assert reports[0]["status"] == "confirmed"
+    assert calls == [("scoped_string_sqli", {
+        "url": TARGET, "parameter": "category", "identity": "anonymous",
+    })]
+    assert check_verify_receipt(
+        manager._verify_receipts, title=candidate.title, target=TARGET,
+        tools_manager=manager,
+    )[0]
