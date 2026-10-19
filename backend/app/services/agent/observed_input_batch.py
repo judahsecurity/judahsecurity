@@ -173,6 +173,8 @@ async def run_observed_input_batch(
         reason = "No supported scoped first-pass probe for this input shape"
         evidence_id = ""
         candidate_id = ""
+        evidence_source = ""
+        candidate_handoff_error = ""
         result: dict[str, Any] = {}
         followup_failure = ""
 
@@ -218,6 +220,8 @@ async def run_observed_input_batch(
                 evidence_id = str(result.get("evidence_id") or next(
                     iter(result.get("service_artifact_ids") or []), ""
                 ))
+                if evidence_id:
+                    evidence_source = "local" if result.get("evidence_id") else "service"
                 if (specialist == "xss" and result.get("success") is True
                         and result.get("evidence_id")
                         and result.get("proof_confirmed") is not True):
@@ -244,6 +248,8 @@ async def run_observed_input_batch(
                 evidence_id = str(result.get("evidence_id") or next(
                     iter(result.get("service_artifact_ids") or []), ""
                 ))
+                if evidence_id:
+                    evidence_source = "local" if result.get("evidence_id") else "service"
                 if result.get("success") is not True:
                     reason = str(result.get("error") or "probe_failed")[:160]
                     if result.get("reason"):
@@ -269,7 +275,7 @@ async def run_observed_input_batch(
                             ) == active_origin):
                                 scoped_target = f"{origin.scheme}://{origin.netloc}{cell['path']}"
                                 try:
-                                    await _invoke(manager, "submit_finding_candidate", {
+                                    submission = await _invoke(manager, "submit_finding_candidate", {
                                         "title": f"{specialist.upper()} proof on {method} {cell['path']} ({parameter})",
                                         "description": "Bounded observed-input probe returned an execution-owned proof signal.",
                                         "target": scoped_target,
@@ -279,10 +285,18 @@ async def run_observed_input_batch(
                                         "evidence_ids": [evidence_id],
                                         "vulnerability_class": "sql_injection" if specialist == "sqli" else "xss",
                                     })
-                                except Exception:
+                                    if isinstance(submission, str):
+                                        try:
+                                            submission = json.loads(submission)
+                                        except ValueError:
+                                            submission = {}
+                                    if isinstance(submission, dict) and submission.get("error"):
+                                        candidate_handoff_error = str(submission["error"])[:200]
+                                except Exception as exc:
                                     # Keep the proof receipt available for the
                                     # deterministic candidate retry in tester_loop.
                                     logger.exception("First-pass candidate handoff failed for %s", cell["id"])
+                                    candidate_handoff_error = type(exc).__name__
                                 submitted_brain = engagement_brain_from_dict(
                                     getattr(manager, "_engagement_brain", None)
                                 )
@@ -295,6 +309,12 @@ async def run_observed_input_batch(
                                 ), "")
                                 if not candidate_id:
                                     reason = "Proof receipt exists; candidate handoff pending"
+                                    candidate_handoff_error = candidate_handoff_error or "candidate_not_persisted"
+                                else:
+                                    candidate_handoff_error = ""
+                        else:
+                            reason = "Scoped service proof signal; service candidate handoff required"
+                            candidate_handoff_error = "service_candidate_handoff_required"
                     elif (specialist == "sqli" and result.get("evidence_id")
                           and (result.get("probe_result") or {}).get("proof_recipe")
                               in {"numeric_and_boolean_v1", "string_or_boolean_v1",
@@ -370,8 +390,13 @@ async def run_observed_input_batch(
                 current.pop("first_pass_handoff_error", None)
             if evidence_id:
                 current["first_pass_evidence_id"] = evidence_id
+                current["first_pass_evidence_source"] = evidence_source
             if candidate_id:
                 current["candidate_id"] = candidate_id
+            if candidate_handoff_error:
+                current["first_pass_candidate_handoff_error"] = candidate_handoff_error
+            else:
+                current.pop("first_pass_candidate_handoff_error", None)
             release_coverage_cell_lease(
                 live, lease, verdict="proven" if outcome == "proof_signal" else "inconclusive",
                 evidence_ids=[evidence_id] if evidence_id else [], candidate_id=candidate_id,
@@ -388,6 +413,8 @@ async def run_observed_input_batch(
             "coverage_cell_id": cell["id"], "test_type": cell.get("test_type"),
             "outcome": outcome, "reason": reason, "evidence_id": evidence_id,
             "candidate_id": candidate_id,
+            "evidence_source": evidence_source,
+            "candidate_handoff_error": candidate_handoff_error,
             "handoff_failed": outcome == "unattempted" and bool(operation_name),
             "candidate_handoff_pending": outcome == "proof_signal" and bool(evidence_id) and not candidate_id,
         })

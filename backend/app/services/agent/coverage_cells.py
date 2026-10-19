@@ -572,22 +572,35 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
              if isinstance(row, dict) and row.get("source") in {
                  "parameter_inventory", "surface_applicability",
              }]
-    candidates = {
-        str(row.get("coverage_cell_id") or ""): row
-        for row in (getattr(brain, "candidates", []) or [])
-        if isinstance(row, dict) and row.get("coverage_cell_id")
-    }
+    candidates: dict[str, list[dict[str, Any]]] = {}
+    for row in getattr(brain, "candidates", []) or []:
+        if isinstance(row, dict) and row.get("coverage_cell_id"):
+            candidates.setdefault(str(row["coverage_cell_id"]), []).append(row)
     counts = {key: 0 for key in (
         "checks", "attempted", "unattempted", "probed", "tested_clean",
+        "proof_signals", "candidate_handoffs_pending", "service_candidate_handoffs_pending",
         "candidates", "verified", "published", "open", "blocked",
     )}
     by_class: dict[str, dict[str, int]] = {}
     inputs: set[tuple[str, str, str, str, str]] = set()
     open_rows: list[dict[str, str]] = []
+    handoff_rows: list[dict[str, str]] = []
     for cell in cells:
         kind = str(cell.get("test_type") or "unknown")
         group = by_class.setdefault(kind, {key: 0 for key in counts})
-        candidate = candidates.get(str(cell.get("id") or ""), {})
+        proof_signal = cell.get("first_pass_outcome") == "proof_signal"
+        proof_id = str(cell.get("first_pass_evidence_id") or "")
+        matching_candidates = candidates.get(str(cell.get("id") or ""), [])
+        if proof_signal and proof_id:
+            matching_candidates = [row for row in matching_candidates
+                                   if proof_id in (row.get("evidence_ids") or [])]
+        candidate = matching_candidates[-1] if matching_candidates else {}
+        handoff_pending = bool(proof_signal and proof_id and not candidate)
+        service_handoff = handoff_pending and (
+            cell.get("first_pass_evidence_source") == "service"
+            or (not cell.get("first_pass_evidence_source")
+                and proof_id in (cell.get("service_probe_artifact_ids") or []))
+        )
         status = str(cell.get("status") or "untested")
         has_probe = bool(cell.get("service_probe_artifact_ids") or
                          cell.get("probe_artifact_ids") or
@@ -604,6 +617,9 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
                 status in {"tested_clean", "finding"} and bool(cell.get("evidence_ids"))
             ),
             "tested_clean": status == "tested_clean",
+            "proof_signals": proof_signal,
+            "candidate_handoffs_pending": handoff_pending,
+            "service_candidate_handoffs_pending": service_handoff,
             "candidates": bool(candidate),
             "verified": candidate.get("status") == "confirmed",
             "published": bool(cell.get("finding_id") or candidate.get("finding_id")),
@@ -626,13 +642,24 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
                 "status": status,
                 "reason": str(cell.get("reason") or "")[:160],
             })
+        if handoff_pending and len(handoff_rows) < 20:
+            handoff_rows.append({
+                "coverage_cell_id": str(cell.get("id") or ""),
+                "method": str(cell.get("method") or "GET"),
+                "path": str(cell.get("path") or "/"),
+                "parameter": str(cell.get("parameter") or ""),
+                "test_type": kind,
+                "evidence_id": proof_id,
+                "evidence_source": "service" if service_handoff else "local",
+                "error": str(cell.get("first_pass_candidate_handoff_error") or "")[:160],
+            })
     return {
         "inputs": len(inputs), **counts, "by_class": by_class,
         "classes_planned": len(by_class),
         "classes_without_probes": sorted(
             kind for kind, group in by_class.items() if group["probed"] == 0
         ),
-        "open_rows": open_rows,
+        "open_rows": open_rows, "handoff_rows": handoff_rows,
     }
 
 
