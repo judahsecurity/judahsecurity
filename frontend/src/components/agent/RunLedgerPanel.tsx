@@ -48,12 +48,16 @@ export type AgentRunLedger = {
     attempted: number;
     probed: number;
     tested_clean: number;
+    proof_signals?: number;
+    candidate_handoffs_pending?: number;
+    service_candidate_handoffs_pending?: number;
     candidates: number;
     verified: number;
     published: number;
     open: number;
     by_class: Record<string, { checks: number; probed: number; verified: number }>;
     open_rows: Array<{ method: string; path: string; parameter: string; test_type: string; status: string; reason: string }>;
+    handoff_rows?: Array<{ coverage_cell_id: string; method: string; path: string; parameter: string; test_type: string; evidence_id: string; evidence_source: string; error: string }>;
   };
   scenario_surface?: ScenarioSurface;
 };
@@ -96,6 +100,16 @@ export function RunLedgerPanel({ run }: { run: AgentRunLedger | null }) {
             <p className="text-muted-foreground">
               {run.input_testing!.inputs} inputs · {run.input_testing!.checks} class checks · {run.input_testing!.attempted} attempted · {run.input_testing!.probed} with probe evidence · {run.input_testing!.candidates} candidates · {run.input_testing!.verified} verified · {run.input_testing!.published} published · {run.input_testing!.open} open
             </p>
+            {Boolean(run.input_testing!.proof_signals) && (
+              <p className={run.input_testing!.candidate_handoffs_pending ? "text-amber-400" : "text-muted-foreground"}>
+                {run.input_testing!.proof_signals} positive proof signals · {run.input_testing!.candidate_handoffs_pending || 0} awaiting candidate handoff{run.input_testing!.service_candidate_handoffs_pending ? ` · ${run.input_testing!.service_candidate_handoffs_pending} require scoped service handoff` : ""}
+              </p>
+            )}
+            {(run.input_testing!.handoff_rows || []).slice(0, 5).map((row) => (
+              <p key={`${row.coverage_cell_id}-${row.evidence_id}`} className="text-amber-400">
+                Handoff pending: {row.method} {row.path} {row.parameter} · {row.test_type} · {row.evidence_source} receipt {row.evidence_id}{row.error ? ` · ${row.error}` : ""}
+              </p>
+            ))}
             <p className="text-muted-foreground">
               {Object.entries(run.input_testing!.by_class).map(([kind, row]) =>
                 `${kind.replaceAll('_', ' ')} ${row.probed}/${row.checks} probed`

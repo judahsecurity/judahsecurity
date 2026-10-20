@@ -8632,6 +8632,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             proof_escalation_id=proof_escalation_id or "",
             vulnerability_class=vulnerability_class or "",
         )
+        if coverage_cell_id and evidence_ids:
+            for cell in brain.coverage_cells:
+                if (cell.get("id") == coverage_cell_id
+                        and cell.get("first_pass_evidence_id") in cand.evidence_ids):
+                    cell.pop("first_pass_candidate_handoff_error", None)
+                    break
         self._engagement_brain = brain.to_dict()
         return json.dumps(
             {

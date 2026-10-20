@@ -5,18 +5,21 @@ import json
 from types import SimpleNamespace
 
 import pytest
-
 from app.services.agent.assessment_scope import prepare_browser_scope
 from app.services.agent.coverage_cells import (
-    claim_coverage_cell_leases, parameter_test_funnel,
+    claim_coverage_cell_leases,
+    parameter_test_funnel,
     seed_parameter_coverage_cells,
 )
 from app.services.agent.engagement_brain import EngagementBrain
 from app.services.agent.observed_input_batch import (
-    pending_first_pass_cells, run_observed_input_batch,
+    pending_first_pass_cells,
+    run_observed_input_batch,
 )
 from app.services.agent.prompts import is_tool_allowed_in_phase
-from app.services.agent.tester_loop import forced_next_step, tester_loop_progress as loop_progress
+from app.services.agent.tester_loop import forced_next_step
+from app.services.agent.tester_loop import tester_loop_progress as loop_progress
+from app.services.agent.tools import ASMToolsManager
 
 
 def _brain():
@@ -229,6 +232,8 @@ def test_positive_first_pass_submits_candidate_for_fresh_verification():
     assert result["results"][0]["outcome"] == "proof_signal"
     assert result["results"][0]["candidate_id"] == "candidate-1"
     assert manager._engagement_brain["candidates"][0]["status"] == "pending"
+    assert result["funnel"]["proof_signals"] == 1
+    assert result["funnel"]["candidate_handoffs_pending"] == 0
 
 
 def test_batch_honors_nested_tool_policy_denial():
@@ -396,10 +401,18 @@ def test_positive_probe_survives_failed_candidate_submission_for_scheduler_retry
     result = asyncio.run(run_observed_input_batch(manager, max_checks=1))
     assert result["handoff_failures"] == 0
     assert result["candidate_handoffs_pending"] == 1
+    assert result["results"][0]["candidate_handoff_error"] == (
+        "RuntimeError" if raises else "temporary_candidate_failure"
+    )
+    assert result["funnel"]["proof_signals"] == 1
+    assert result["funnel"]["candidate_handoffs_pending"] == 1
+    assert result["funnel"]["handoff_rows"][0]["evidence_id"] == "positive-sql-receipt"
     cell = next(row for row in manager._engagement_brain["coverage_cells"]
                 if row["test_type"] == "sqli")
     assert cell["first_pass_outcome"] == "proof_signal"
     assert cell["first_pass_evidence_id"] == "positive-sql-receipt"
+    assert cell["first_pass_evidence_source"] == "local"
+    assert cell["first_pass_candidate_handoff_error"] == result["results"][0]["candidate_handoff_error"]
     state = {
         "mode": "agent", "assessment_resume": True,
         "target_info": {"primary_target": "https://app.test"},
@@ -410,6 +423,88 @@ def test_positive_probe_survives_failed_candidate_submission_for_scheduler_retry
     next_step = forced_next_step(state)
     assert next_step["tool_name"] == "submit_finding_candidate"
     assert next_step["tool_args"]["evidence_ids"] == ["positive-sql-receipt"]
+    state["execution_trace"] = [
+        {"tool_name": "submit_finding_candidate", "tool_args": next_step["tool_args"],
+         "success": False},
+        {"tool_name": "submit_finding_candidate", "tool_args": next_step["tool_args"],
+         "success": False},
+    ]
+    assert forced_next_step(state) is None
+    progress = loop_progress(state)
+    assert any(item["id"] == "candidate_handoff_exhausted" for item in progress["missing"])
+
+
+def test_scoped_service_proof_does_not_enter_local_verifier_queue():
+    class Manager:
+        def __init__(self):
+            brain = EngagementBrain(target="https://app.test")
+            seed_parameter_coverage_cells(brain, [{
+                "method": "POST", "host": "app.test", "path": "/catalog",
+                "name": "category", "location": "body_form", "identity": "anonymous",
+                "source": "browser_traffic", "artifact_id": "capture-1", "testable": True,
+            }])
+            for cell in brain.coverage_cells:
+                if cell["test_type"] == "xss":
+                    cell["status"] = "skipped"
+            self._engagement_brain = brain.to_dict()
+            self._capability_map = {"target": "https://app.test"}
+
+        async def scoped_assessment_probe_assigned(self, **_kwargs):
+            return {"success": True, "service_artifact_ids": ["service-proof-1"],
+                    "proof_confirmed": True}
+
+        async def submit_finding_candidate(self, **_kwargs):
+            raise AssertionError("A service artifact is not a local verifier receipt")
+
+    manager = Manager()
+    result = asyncio.run(run_observed_input_batch(manager, max_checks=1))
+    assert result["results"][0]["outcome"] == "proof_signal"
+    assert result["results"][0]["evidence_source"] == "service"
+    assert result["funnel"]["service_candidate_handoffs_pending"] == 1
+    state = {
+        "mode": "agent", "assessment_resume": True,
+        "target_info": {"primary_target": "https://app.test"},
+        "capability_map": manager._capability_map,
+        "engagement_brain": manager._engagement_brain,
+        "execution_trace": [],
+    }
+    assert forced_next_step(state) is None
+    assert any(item["id"] == "service_candidate_handoff"
+               for item in loop_progress(state)["missing"])
+
+
+def test_successful_candidate_retry_clears_saved_handoff_error():
+    manager = ASMToolsManager()
+    brain = _brain()
+    cell = next(row for row in brain.coverage_cells if row["test_type"] == "sqli")
+    cell.update(first_pass_outcome="proof_signal",
+                first_pass_evidence_id="proof-retry-1",
+                first_pass_evidence_source="local",
+                first_pass_candidate_handoff_error="temporary_candidate_failure")
+    manager._engagement_brain = brain.to_dict()
+    response = asyncio.run(manager.submit_finding_candidate(
+        title="SQLi proof on GET /catalog (searchTerm)",
+        target="https://app.test/catalog",
+        specialist="sqli", vulnerability_class="sql_injection",
+        coverage_cell_id=cell["id"], evidence_ids=["proof-retry-1"],
+    ))
+    assert json.loads(response)["candidate"]["status"] == "pending"
+    saved = next(row for row in manager._engagement_brain["coverage_cells"]
+                 if row["id"] == cell["id"])
+    assert saved.get("first_pass_candidate_handoff_error") is None
+    assert parameter_test_funnel(manager._engagement_brain)["candidate_handoffs_pending"] == 0
+
+
+def test_old_candidate_on_same_cell_does_not_hide_new_proof_handoff():
+    brain = _brain()
+    cell = next(row for row in brain.coverage_cells if row["test_type"] == "sqli")
+    cell.update(first_pass_outcome="proof_signal",
+                first_pass_evidence_id="new-proof", first_pass_evidence_source="local")
+    brain.candidates = [{"id": "old-candidate", "coverage_cell_id": cell["id"],
+                         "evidence_ids": ["old-proof"], "status": "refuted"}]
+    funnel = parameter_test_funnel(brain)
+    assert funnel["candidate_handoffs_pending"] == 1
+    assert funnel["candidates"] == 0
 
 
 def test_xss_first_pass_uses_reflection_context_before_proof_candidate():

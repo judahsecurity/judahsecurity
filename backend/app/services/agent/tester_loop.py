@@ -374,6 +374,54 @@ def _unsubmitted_first_pass_proofs(
     ]
 
 
+def _first_pass_candidate_gaps(
+    state: Dict[str, Any], target: str,
+) -> List[Dict[str, str]]:
+    """Keep local retries and service proof handoffs distinct in the checklist."""
+    trace = _steps(state.get("execution_trace"))
+    local, service, exhausted = 0, 0, 0
+    for cell in _unsubmitted_first_pass_proofs(state, target):
+        proof_id = str(cell["first_pass_evidence_id"])
+        is_service = (
+            cell.get("first_pass_evidence_source") == "service"
+            or (not cell.get("first_pass_evidence_source")
+                and proof_id in (cell.get("service_probe_artifact_ids") or []))
+        )
+        if is_service:
+            service += 1
+            continue
+        attempts = sum(
+            step.get("tool_name") == "submit_finding_candidate"
+            and (step.get("tool_args") or {}).get("coverage_cell_id") == cell["id"]
+            and proof_id in ((step.get("tool_args") or {}).get("evidence_ids") or [])
+            for step in trace
+        )
+        if attempts >= 2:
+            exhausted += 1
+        else:
+            local += 1
+    gaps = []
+    if local:
+        gaps.append({
+            "id": "candidate_handoff",
+            "title": f"{local} positive input proofs lack finding candidates",
+            "next": "submit_finding_candidate with each saved local proof receipt",
+        })
+    if exhausted:
+        gaps.append({
+            "id": "candidate_handoff_exhausted",
+            "title": f"{exhausted} local proof handoffs failed twice",
+            "next": "Inspect the candidate submission errors and saved first_pass_evidence_id",
+        })
+    if service:
+        gaps.append({
+            "id": "service_candidate_handoff",
+            "title": f"{service} scoped service proof signals lack candidates",
+            "next": "Submit through scoped_assessment_candidate with the service artifact and verification recipe",
+        })
+    return gaps
+
+
 def _failed_first_pass_handoffs(
     state: Dict[str, Any], target: str,
 ) -> List[Dict[str, Any]]:
@@ -402,9 +450,15 @@ def _pending_first_pass_candidate_step(
 
     active_origin = _origin(target)
     for cell in _unsubmitted_first_pass_proofs(state, target):
+        proof_id = str(cell["first_pass_evidence_id"])
+        if (cell.get("first_pass_evidence_source") == "service"
+                or (not cell.get("first_pass_evidence_source")
+                    and proof_id in (cell.get("service_probe_artifact_ids") or []))):
+            continue
         attempts = sum(
             step.get("tool_name") == "submit_finding_candidate"
             and (step.get("tool_args") or {}).get("coverage_cell_id") == cell["id"]
+            and proof_id in ((step.get("tool_args") or {}).get("evidence_ids") or [])
             for step in trace
         )
         if attempts >= 2:
@@ -412,7 +466,7 @@ def _pending_first_pass_candidate_step(
         method = str(cell.get("method") or "GET").upper()
         _, _, parameter = str(cell.get("parameter") or "").partition(":")
         specialist = str(cell["specialist"])
-        evidence_id = str(cell["first_pass_evidence_id"])
+        evidence_id = proof_id
         return {
             "tool_name": "submit_finding_candidate",
             "tool_args": {
@@ -747,13 +801,7 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
             "title": f"{pending} observed SQLi/XSS checks need a first pass",
             "next": "probe_observed_input_batch on the current assessment target",
         }] if pending else [])
-        unsubmitted = _unsubmitted_first_pass_proofs(state, primary_web_target(state))
-        if unsubmitted:
-            missing.append({
-                "id": "candidate_handoff",
-                "title": f"{len(unsubmitted)} positive input proofs lack finding candidates",
-                "next": "submit_finding_candidate with each saved proof receipt",
-            })
+        missing.extend(_first_pass_candidate_gaps(state, primary_web_target(state)))
         if handoff_failures:
             missing.append({
                 "id": "first_pass_handoff",
@@ -832,13 +880,7 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
             "next": "sync_engagement_brain (or build_threat_model) — aim before fireteam",
         })
     if pipeline:
-        unsubmitted = _unsubmitted_first_pass_proofs(state, primary_web_target(state))
-        if unsubmitted:
-            missing.append({
-                "id": "candidate_handoff",
-                "title": f"{len(unsubmitted)} positive input proofs lack finding candidates",
-                "next": "submit_finding_candidate with each saved proof receipt",
-            })
+        missing.extend(_first_pass_candidate_gaps(state, primary_web_target(state)))
         if handoff_failures:
             missing.append({
                 "id": "first_pass_handoff",
