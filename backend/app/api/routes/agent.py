@@ -198,6 +198,13 @@ def _pilot_question(question: str, config: dict, playbook_id: Optional[str],
     )
 
 
+def _preset_question_with_note(objective: str, incoming: str) -> str:
+    """Keep the operator's note when a preset expands into its full objective."""
+    marker = "\nOperator note: "
+    note = incoming.split(marker, 1)[1].strip() if marker in incoming else ""
+    return f"{objective}\n\nOperator note: {note[:4000]}" if note else objective
+
+
 class AgentSteerRequest(BaseModel):
     session_id: str
     message: str
@@ -530,7 +537,7 @@ async def query_agent(
     if request.playbook_id:
         objective, initial_todos = build_initial_objective(request.playbook_id, request.target)
         if objective:
-            question = objective
+            question = _preset_question_with_note(objective, question)
 
     mode = request.mode or "assist"
     _check_pilot_session(db, session_id, current_user.id, mode)
@@ -1427,7 +1434,7 @@ async def agent_websocket(websocket: WebSocket, session_id: str):
                 if playbook_id:
                     objective, initial_todos = build_initial_objective(playbook_id, target)
                     if objective:
-                        question = objective
+                        question = _preset_question_with_note(objective, question)
 
                 if mode == "agent":
                     try:

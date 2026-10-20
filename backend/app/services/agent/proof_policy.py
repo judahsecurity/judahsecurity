@@ -166,18 +166,22 @@ def validate_proof(
             )
             if (not valid_first or not valid_second
                     or first.get("proof_confirmed") is not True
-                    or second.get("proof_confirmed") is not True
-                    or not same_recipe
-                    or not json_rows_match
-                    or first.get("parameter") != second.get("parameter")
-                    or first.get("nonce") == second.get("nonce")
-                    or any(abs(first["checks"][key]["bytes_captured"]
-                               - second["checks"][key]["bytes_captured"])
-                           > max(64, max(first["checks"][key]["bytes_captured"],
-                                         second["checks"][key]["bytes_captured"]) // 100)
-                           for key in matching_keys)
-                    or hunter["identity"] != verifier["identity"]):
+                    or second.get("proof_confirmed") is not True):
                 return False, "Independent matching string Boolean SQLi proof is required"
+            if not same_recipe:
+                return False, "Hunter and verifier used different SQLi proof recipes"
+            if not json_rows_match:
+                return False, "Independent SQLi JSON result counts changed"
+            if first.get("parameter") != second.get("parameter"):
+                return False, "Independent SQLi probe tested a different parameter"
+            if first.get("nonce") == second.get("nonce"):
+                return False, "Independent SQLi probe reused the hunter nonce"
+            if hunter["identity"] != verifier["identity"]:
+                return False, "Independent SQLi probe used a different identity"
+            # Each run already requires stable controls and a repeated Boolean
+            # differential. Absolute HTML sizes can legitimately change between
+            # runs as catalog content or page chrome changes; comparing them
+            # across actors rejects a fresh, independently valid proof.
             return True, ""
         if kind == "string_error_sqli":
             from app.services.agent.scoped_assessment.sqli_string import string_error_proof_valid

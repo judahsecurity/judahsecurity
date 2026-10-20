@@ -8,7 +8,30 @@ import pytest
 
 from app.services.agent import evograph
 from app.services.agent import orchestrator as orchestrator_module
-from app.services.agent.orchestrator import AgentOrchestrator
+from app.services.agent.orchestrator import (
+    AgentOrchestrator, _initial_operator_note, _operator_recon_limits,
+)
+
+
+@pytest.mark.asyncio
+async def test_manual_operator_note_blocks_automatic_directory_enrichment(monkeypatch):
+    note = "Focus on manual SQLi/XSS. Avoid automated scanners and directory brute forcing."
+    assert _initial_operator_note("Web App Assessment — https://example.test\nOperator note: " + note) == note
+    assert _operator_recon_limits([note]) == (True, True)
+
+    from app.services.agent import recon_workers
+    spawn = AsyncMock()
+    monkeypatch.setattr(recon_workers, "spawn_workers", spawn)
+    orchestrator = AgentOrchestrator()
+    state = {
+        "mode": "agent", "session_id": "manual-only", "needs_dir_brute": True,
+        "original_objective": "Web App Assessment — https://example.test",
+        "operator_steers": [note],
+        "target_info": {"primary_target": "https://example.test"},
+        "execution_trace": [],
+    }
+    assert await orchestrator._maybe_spawn_dir_brute(state, {"ready_for_attack": False}) is None
+    spawn.assert_not_awaited()
 
 
 @pytest.mark.asyncio

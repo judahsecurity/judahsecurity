@@ -468,7 +468,7 @@ async def spawn_workers(
 ) -> List[Dict[str, Any]]:
     """
     Fire-and-forget workers for this session. Returns metadata for each spawn.
-    Dedupes: will not start a second running worker of the same kind+url.
+    Dedupes: will not repeat an active or completed worker of the same kind+url.
     """
     target = _normalize_url(url)
     if not target:
@@ -490,6 +490,12 @@ async def spawn_workers(
     async with _reg_lock:
         bucket = _registry.setdefault(sid, {})
 
+        # A completed worker already supplied this exact enrichment during the
+        # session. Only failed/cancelled work is eligible for a fresh attempt.
+        completed_keys = {
+            (r.kind, _normalize_url(r.url))
+            for r in bucket.values() if r.status == "completed"
+        }
         # Dedupe active same kind+url
         active_keys = {
             (r.kind, _normalize_url(r.url))
@@ -498,6 +504,8 @@ async def spawn_workers(
         }
 
         for kind in wanted:
+            if (kind, target) in completed_keys:
+                continue
             if (kind, target) in active_keys:
                 existing = next(
                     (

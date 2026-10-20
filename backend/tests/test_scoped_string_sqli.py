@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
@@ -328,6 +329,34 @@ def test_string_boolean_publication_needs_independent_matching_receipts(monkeypa
     receipt = {"kind": "string_boolean_sqli", "hunter_artifact_id": hunter, "artifact_id": verifier}
     assert validate_proof(store, candidate, receipt, [verifier])[0]
     assert not validate_proof(store, candidate, receipt, [hunter])[0]
+
+
+def test_independent_string_proof_accepts_changed_page_size_with_valid_controls(monkeypatch):
+    store = EvidenceStore()
+    hunter = store.record(
+        "scoped_string_sqli", _proof(monkeypatch, "12345"),
+        target=TARGET, identity="anonymous",
+    )
+    verifier_proof = deepcopy(_proof(monkeypatch, "67890"))
+    for observation in verifier_proof["checks"].values():
+        observation["bytes_captured"] += 1200
+        observation["body_sha256"] = hashlib.sha256(
+            ("changed page chrome:" + observation["body_sha256"]).encode()
+        ).hexdigest()
+    assert sqli_string.string_sql_proof_valid(verifier_proof)
+    token = verification_run.set(VerificationRun("verifier-run", "candidate", 1, "fresh"))
+    try:
+        verifier = store.record(
+            "scoped_string_sqli", verifier_proof,
+            target=TARGET, identity="anonymous",
+        )
+    finally:
+        verification_run.reset(token)
+    candidate = SimpleNamespace(target=TARGET, evidence_ids=[hunter],
+                                title="SQL injection in category")
+    proof = {"kind": "string_boolean_sqli", "hunter_artifact_id": hunter,
+             "artifact_id": verifier}
+    assert validate_proof(store, candidate, proof, [verifier])[0]
 
 
 @pytest.mark.asyncio

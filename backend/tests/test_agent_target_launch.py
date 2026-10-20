@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.api.routes.agent import _agent_question_with_target
+from app.api.routes.agent import _agent_question_with_target, _preset_question_with_note
 from app.services.agent.tools import extract_seed_target
 
 
@@ -30,3 +30,16 @@ def test_selected_target_takes_priority_over_reference_urls():
         "ginandjuice.shop",
     )
     assert extract_seed_target(question) == "https://ginandjuice.shop"
+
+
+def test_preset_keeps_initial_manual_testing_note():
+    objective = "Run the web assessment.\n\nTarget: https://ginandjuice.shop"
+    question = _preset_question_with_note(
+        objective,
+        "Web App Assessment — https://ginandjuice.shop\nOperator note: "
+        "Avoid automated scanners and directory brute forcing; use manual checks.",
+    )
+    assert question == (
+        objective + "\n\nOperator note: "
+        "Avoid automated scanners and directory brute forcing; use manual checks."
+    )

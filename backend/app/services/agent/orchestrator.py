@@ -65,6 +65,26 @@ from app.services.agent.tool_selector import get_tool_recommendations
 
 logger = logging.getLogger(__name__)
 
+
+def _initial_operator_note(message: str) -> str:
+    """Preserve the free-text note supplied with a preset as a run constraint."""
+    marker = "\nOperator note: "
+    return message.split(marker, 1)[1].strip() if marker in message else ""
+
+
+def _operator_recon_limits(notes: List[str]) -> tuple[bool, bool]:
+    """Honor explicit no-scanner/no-directory instructions in automatic scheduling."""
+    text = " ".join(str(note or "") for note in notes).lower()
+    negative = r"(?:no|avoid|skip|without|disable|do not|don't)"
+    scanners = bool(re.search(
+        rf"\b{negative}\b.{{0,70}}\b(?:automated\s+)?scann?ers?\b", text,
+    ))
+    directories = scanners or bool(re.search(
+        rf"\b{negative}\b.{{0,90}}\b(?:directory|dir)[ -]?(?:brute|fuzz|enumerat)|"
+        rf"\b{negative}\b.{{0,70}}\b(?:ferox|ffuf)\b", text,
+    ))
+    return scanners, directories
+
 # Type alias for the optional WebSocket status callback
 StatusCallback = Optional[Callable[[Dict[str, Any]], Awaitable[None]]]
 
@@ -579,6 +599,10 @@ class AgentOrchestrator:
             if isinstance(msg, HumanMessage):
                 latest_message = msg.content
                 break
+        initial_note = _initial_operator_note(str(latest_message or ""))
+        no_scanners, no_directories = _operator_recon_limits([str(latest_message or "")])
+        initial_constraints = ([initial_note or str(latest_message)]
+                               if initial_note or no_scanners or no_directories else [])
         
         # Initialize conversation objectives
         objectives = state.get("conversation_objectives", [])
@@ -687,20 +711,27 @@ class AgentOrchestrator:
                         session_id=session_id,
                         organization_id=org_id,
                     )
-                    streams_coro = recon_workers.spawn_workers(
-                        url=seed,
-                        session_id=str(session_id or ""),
-                        pack="early",
-                        tools_manager=self.tool_manager,
-                        user_id=uid_int,
-                        organization_id=org_id if isinstance(org_id, int) else None,
-                    )
-                    kickoff, queued, streams = await asyncio.wait_for(
-                        asyncio.gather(
-                            kickoff_coro, queue_coro, streams_coro, return_exceptions=True
-                        ),
-                        timeout=28.0,
-                    )
+                    if no_scanners:
+                        kickoff, queued = await asyncio.wait_for(
+                            asyncio.gather(kickoff_coro, queue_coro, return_exceptions=True),
+                            timeout=28.0,
+                        )
+                        streams = []
+                    else:
+                        streams_coro = recon_workers.spawn_workers(
+                            url=seed,
+                            session_id=str(session_id or ""),
+                            pack="early",
+                            tools_manager=self.tool_manager,
+                            user_id=uid_int,
+                            organization_id=org_id if isinstance(org_id, int) else None,
+                        )
+                        kickoff, queued, streams = await asyncio.wait_for(
+                            asyncio.gather(
+                                kickoff_coro, queue_coro, streams_coro, return_exceptions=True
+                            ),
+                            timeout=28.0,
+                        )
                 if isinstance(kickoff, Exception):
                     logger.warning("assessment kickoff failed: %s", kickoff)
                     kickoff = {}
@@ -770,7 +801,7 @@ class AgentOrchestrator:
                     )
                     kickoff_brief = (kickoff_brief + snote) if kickoff_brief else snote.strip()
 
-                needs_dirs = bool((kickoff or {}).get("needs_dir_brute"))
+                needs_dirs = bool((kickoff or {}).get("needs_dir_brute")) and not no_directories
                 if needs_dirs:
                     try:
                         enrich = await recon_workers.spawn_workers(
@@ -828,10 +859,11 @@ class AgentOrchestrator:
                     else:
                         next_steps = [
                             "execute_interceptor (attaches to early job if queued)",
-                            "spawn_recon_workers(pack='enrich') for ferox+katana streams (auto on 404); archive_params is already running",
                             "ingest_urls_into_map → discover_parameters/arjun",
                             "sync_engagement_brain → fireteam_dispatch(specialists='auto')",
                         ]
+                        if not no_directories:
+                            next_steps.insert(1, "spawn_recon_workers(pack='enrich') for ferox+katana streams (auto on 404)")
                     execution_trace.append(
                         ExecutionStep(
                             iteration=0,
@@ -844,7 +876,7 @@ class AgentOrchestrator:
                                 "interceptor_job_id": interceptor_job_id,
                                 "streams": streams if isinstance(streams, list) else [],
                                 "root_status": (kickoff or {}).get("root_status"),
-                                "needs_dir_brute": bool((kickoff or {}).get("needs_dir_brute")),
+                                "needs_dir_brute": needs_dirs,
                             },
                             tool_output=kickoff_brief,
                             success=bool((kickoff or {}).get("success")) or bool(interceptor_job_id),
@@ -909,7 +941,8 @@ class AgentOrchestrator:
             "kickoff_brief": kickoff_brief or None,
             "interceptor_job_id": interceptor_job_id,
             "recon_worker_briefs": recon_worker_briefs,
-            "needs_dir_brute": bool((kickoff or {}).get("needs_dir_brute")) if isinstance(kickoff, dict) else False,
+            "needs_dir_brute": (bool((kickoff or {}).get("needs_dir_brute"))
+                                if isinstance(kickoff, dict) and not no_directories else False),
             "awaiting_user_approval": False,
             "phase_transition_pending": None,
             "qa_history": [],
@@ -921,7 +954,7 @@ class AgentOrchestrator:
                 "cost_usd": 0.0,
                 "calls": [],
             },
-            "operator_steers": [],
+            "operator_steers": initial_constraints,
             "prior_hunt_brief": None,
             "compacted_brief": None,
             "price_limit_usd": getattr(settings, "AGENT_PRICE_LIMIT_USD", 0) or 0,
@@ -3072,6 +3105,12 @@ class AgentOrchestrator:
         """After a thin/404 crawl, start ferox+katana without waiting for Joshua."""
         from app.services.agent.pilot_policy import current_pilot
         if current_pilot() is not None:
+            return None
+        _, no_directories = _operator_recon_limits([
+            str(state.get("original_objective") or ""),
+            *(state.get("operator_steers") or []),
+        ])
+        if no_directories:
             return None
         from app.services.agent.tester_loop import (
             normalized_tools_run,

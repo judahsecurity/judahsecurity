@@ -1292,11 +1292,11 @@ function AgentPageContent() {
     const displayContent = mode === 'pilot'
       ? `${q}\nTarget: ${target.trim()}`
       : usePreset
-      ? `${playbooks.find((p) => p.id === selectedPlaybookId)?.name ?? selectedPlaybookId}${target.trim() ? ` — ${target.trim()}` : ''}`
+      ? `${playbooks.find((p) => p.id === selectedPlaybookId)?.name ?? selectedPlaybookId}${target.trim() ? ` — ${target.trim()}` : ''}${q ? `\nOperator note: ${q}` : ''}`
       : q;
 
     setMessages((prev) => [...prev, { id: `user-${Date.now()}`, role: 'user', content: displayContent }]);
-    if (!usePreset) setQuestion('');
+    setQuestion('');
     setUrlPrefilled(false); activeRunIdRef.current = null; setLoading(true); setLiveSteps([]);
     stopRequestedRef.current = false;
 
