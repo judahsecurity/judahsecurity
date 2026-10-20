@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from app.services.agent.coverage_cells import (
     claim_coverage_cell_leases,
     coverage_cell_id,
@@ -128,6 +130,33 @@ def test_inventory_migration_preserves_legacy_skip_behavior():
     progress = coverage_progress(brain)
     assert progress["ready_to_complete_coverage"] is True
     assert progress["cell_counts"] == {"skipped": 1}
+
+
+def test_inconclusive_coverage_keeps_the_gap_open_and_rejects_unknown_status():
+    brain = EngagementBrain(surfaces=[{
+        "method": "GET", "path": "/search", "host": "app.test", "takes_input": True,
+    }])
+    seed_coverage_from_surfaces(brain)
+    with pytest.raises(ValueError, match="Unknown coverage status"):
+        record_surface_coverage(
+            brain, method="GET", path="/search", host="app.test",
+            status="tested_clena", reason="typo",
+        )
+    with pytest.raises(ValueError, match="inconclusive coverage requires a reason"):
+        record_surface_coverage(
+            brain, method="GET", path="/search", host="app.test",
+            status="inconclusive",
+        )
+    record_surface_coverage(
+        brain, method="GET", path="/search", host="app.test",
+        status="inconclusive", reason="baseline changed; repeat controlled probes",
+        test_type="sqli", parameter="query:q", identity="anonymous",
+    )
+    progress = coverage_progress(brain)
+    assert progress["inconclusive"] == 1
+    assert progress["tested_clean"] == 0
+    assert progress["untested"][0]["status"] == "inconclusive"
+    assert progress["ready_to_complete_coverage"] is False
 
 
 def test_old_snapshot_endpoint_update_closes_migrated_legacy_cell():

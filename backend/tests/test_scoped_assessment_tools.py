@@ -79,6 +79,13 @@ async def test_agent_browser_inventory_keeps_private_exchange_values_out_of_tool
     assert result["technology_detection"]["engine"] == "wappalyzer-offline"
     with pytest.raises(ValueError, match="unfinished coverage"):
         await manager.complete_scoped_assessment()
+    partial = json.loads(await manager.complete_scoped_assessment(
+        reason="Operator limited this run to anonymous manual checks",
+    ))
+    assert partial["status"] == "partial"
+    assert partial["complete"] is False
+    assert partial["coverage"]["open_cell_count"] > 0
+    assert manager._scoped_assessment_partial_reason == partial["reason"]
     assert is_tool_allowed_in_phase("scoped_numeric_sqli", "exploitation")
     assert not is_tool_allowed_in_phase("scoped_numeric_sqli", "informational")
 
@@ -110,6 +117,21 @@ async def test_scoped_assessment_cannot_complete_with_confirmed_unpublished_cand
     manager._engagement_brain = brain.to_dict()
     complete = json.loads(await manager.scoped_assessment_summary())
     assert complete["complete"] is True
+    closed = json.loads(await manager.complete_scoped_assessment())
+    assert closed["status"] == "completed"
+    assert closed["complete"] is True
+
+
+@pytest.mark.asyncio
+async def test_coverage_tool_cannot_turn_empty_or_unknown_status_into_clean():
+    manager = ASMToolsManager()
+    for status in ("", "tested_clena"):
+        result = json.loads(await manager.record_surface_coverage(
+            path="/search", status=status, host="app.example.test",
+        ))
+        assert "error" in result
+    brain = manager._engagement_brain
+    assert not brain.get("coverage")
 
 
 @pytest.mark.asyncio

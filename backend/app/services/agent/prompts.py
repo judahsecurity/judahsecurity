@@ -951,6 +951,11 @@ execution IDs: proof={"kind":"numeric_boolean_sqli"|"string_boolean_sqli"|
 The proof gate checks both records, same target, and operation-specific evidence.
 Use scoped_assessment_summary and complete_scoped_assessment before reporting that a full assessment is complete.
 It requires a threat model, accounted coverage, and no pending verifier work.
+If operator scope or an exhausted budget leaves checks open, call
+complete_scoped_assessment with a specific reason. Its status is partial and
+the open cells remain visible; never describe that result as full coverage.
+Record an inconclusive cell with the missing proof and next test instead of
+calling it tested_clean. Do not repeat a failed completion call unchanged.
 
 For capture-to-proof testing, browse_as_identity or replay_http_request with a named
 owner records supported successful REST requests. list_proof_captures exposes
