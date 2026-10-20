@@ -497,6 +497,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _scoped_body_replay_paths = SessionValue(set)
     _scoped_owner_expectations = SessionValue(dict)
     _scoped_assessment_started = SessionValue(lambda: False)
+    _scoped_assessment_partial_reason = SessionValue(lambda: "")
     _proof_engine = SessionValue(lambda: None)
     _js_intelligence = SessionValue(lambda: None)
     _secret_validation_policy = SessionValue(dict)
@@ -8801,7 +8802,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         verifier_run_id: str = "",
         finding_id: str = "",
     ) -> str:
-        """Record evidence-backed coverage for one surface/test/identity dimension."""
+        """Record one surface/test/identity result; inconclusive needs a proof gap.
+
+        Use tested_clean only with validated negative execution evidence.
+        """
         from app.services.agent.engagement_brain import (
             coverage_progress,
             engagement_brain_from_dict,
@@ -8812,6 +8816,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         try:
             if not isinstance(status, str):
                 raise ValueError("coverage status must be a string, not an HTTP status code")
+            status = status.strip().lower()
+            if not status:
+                raise ValueError("coverage status is required")
             if coverage_cell_id:
                 from app.services.agent.coverage_cells import (
                     migrate_coverage_cells,
@@ -8829,7 +8836,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 parameter = parameter or str(trace.get("parameter") or "")
                 operation_id = operation_id or str(trace.get("operation_id") or "")
                 hypothesis_id = hypothesis_id or str(trace.get("hypothesis_id") or "")
-            if (status or "").strip().lower() == "tested_clean":
+            if status == "tested_clean":
                 if not evidence_id or not test_type:
                     raise ValueError(
                         "tested_clean requires test_type and execution evidence_id"
@@ -8903,7 +8910,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 brain,
                 method=method or "GET",
                 path=path or "",
-                status=status or "tested_clean",
+                status=status,
                 reason=reason or "",
                 hypothesis_id=hypothesis_id or "",
                 finding_title=finding_title or "",

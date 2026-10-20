@@ -42,12 +42,21 @@ VERIFIER_GET_BUDGET = 80
 
 
 class ScopedAssessmentTools:
-    async def complete_scoped_assessment(self) -> str:
-        """Close the assessment only after its threat model and coverage gate pass."""
+    async def complete_scoped_assessment(self, reason: str = "") -> str:
+        """Close complete work, or record why an assessment ended partial.
+
+        A partial closure preserves open coverage and candidate counts. It must
+        never be represented as a fully completed assessment.
+        """
         summary = json.loads(await self.scoped_assessment_summary())
-        if not summary["complete"]:
+        if summary["complete"]:
+            self._scoped_assessment_partial_reason = ""
+            return json.dumps({**summary, "status": "completed"})
+        reason = str(reason or "").strip()
+        if not reason:
             raise ValueError("Assessment has no threat model or has unfinished coverage or candidates")
-        return json.dumps(summary)
+        self._scoped_assessment_partial_reason = reason[:500]
+        return json.dumps({**summary, "status": "partial", "reason": self._scoped_assessment_partial_reason})
 
     async def get_finding_candidate(self, candidate_id: str) -> str:
         """Read one Aegis agent finding candidate and its review state."""

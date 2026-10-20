@@ -3758,7 +3758,9 @@ def boost_methodologies_for_cwes(
 # ---------------------------------------------------------------------------
 
 
-_COVERAGE_STATUSES = ("untested", "in_focus", "finding", "tested_clean", "skipped")
+_COVERAGE_STATUSES = (
+    "untested", "in_focus", "inconclusive", "finding", "tested_clean", "skipped",
+)
 
 
 def surface_key(method: str = "GET", path: str = "", host: str = "") -> str:
@@ -3898,9 +3900,9 @@ def record_surface_coverage(
 ) -> Dict[str, Any]:
     status = (status or "tested_clean").strip().lower()
     if status not in _COVERAGE_STATUSES:
-        status = "tested_clean"
-    if status == "skipped" and not (reason or "").strip():
-        raise ValueError("skipped coverage requires a reason")
+        raise ValueError(f"Unknown coverage status: {status}")
+    if status in {"skipped", "inconclusive"} and not (reason or "").strip():
+        raise ValueError(f"{status} coverage requires a reason")
     path = (path or brain.target or "/").strip() or "/"
     host = (host or "").strip()
     key = surface_key(method, path, host)
@@ -4060,9 +4062,9 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
         if st in ("finding", "tested_clean", "skipped"):
             buckets[st].append(merged)
         else:
-            merged["status"] = "untested"
+            merged["status"] = st if st in _COVERAGE_STATUSES else "untested"
             untested.append(merged)
-            buckets["untested"].append(merged)
+            buckets["inconclusive" if st == "inconclusive" else "untested"].append(merged)
     accounted = (
         len(buckets["finding"])
         + len(buckets["tested_clean"])
@@ -4085,6 +4087,7 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
         "finding": len(buckets["finding"]),
         "tested_clean": len(buckets["tested_clean"]),
         "skipped": len(buckets["skipped"]),
+        "inconclusive": len(buckets["inconclusive"]),
         "untested_count": len(untested),
         "untested": untested[:20],
         "verified_checks": sum(1 for cell in cells if cell.get("evidence_ids")),

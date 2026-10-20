@@ -3476,31 +3476,42 @@ class AgentOrchestrator:
             
             final_state = await self.graph.ainvoke(input_data, config)
             response = self._build_response(final_state)
+            partial_closure = False
             if mode == "agent" and response.task_complete and self.tool_manager._scoped_assessment_started:
                 import json as _json
 
                 assessment = _json.loads(await self.tool_manager.scoped_assessment_summary())
                 if not assessment["complete"]:
-                    response.task_complete = False
                     coverage = assessment["coverage"]
-                    response.answer = (response.answer or "") + (
-                        "\n\nAssessment coverage is still open: "
-                        f"{coverage['untested_count']} untested surfaces, "
+                    partial_reason = self.tool_manager._scoped_assessment_partial_reason
+                    partial_closure = bool(partial_reason)
+                    coverage_gap = (
+                        f"{coverage['untested_count']} open surfaces, "
                         f"{coverage['open_cell_count']} open cells, "
                         f"{len(assessment['pending_candidates'])} pending candidates. "
-                        "Review the threat model and scoped_assessment_summary before closing."
                     )
+                    if partial_closure:
+                        suffix = f"\n\nAssessment ended partial: {coverage_gap}Reason: {partial_reason}."
+                    else:
+                        response.task_complete = False
+                        suffix = (
+                            "\n\nAssessment coverage is still open: " + coverage_gap
+                            + "Review the threat model and scoped_assessment_summary before closing."
+                        )
+                    response.answer = (response.answer or "") + suffix
 
             # EvoGraph: record chain end
             evograph.record_chain_end(
                 session_id=session_id,
-                status="completed" if response.task_complete else "paused",
+                status="partial" if partial_closure else ("completed" if response.task_complete else "paused"),
                 outcome=response.answer[:300] if response.answer else "",
                 final_phase=response.current_phase,
                 iteration_count=response.iteration_count,
             )
             completion_reason = str(final_state.get("completion_reason") or "")
-            partial = any(phrase in completion_reason.lower() for phrase in (
+            if partial_closure:
+                completion_reason = self.tool_manager._scoped_assessment_partial_reason
+            partial = partial_closure or any(phrase in completion_reason.lower() for phrase in (
                 "time budget", "spend cap", "iteration budget", "no schedulable hypotheses",
                 "planning model unavailable",
             )) or completion_reason.startswith("Pilot stopped after ")
