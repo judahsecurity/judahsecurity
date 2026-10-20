@@ -14,6 +14,8 @@ from app.services.agent.static_assets import is_static_asset
 
 MAX_PARAMETERS = 4000
 _NAME = re.compile(r"[A-Za-z_/][A-Za-z0-9_./*\[\]-]{0,79}\Z")
+_JSON_POINTER = re.compile(r"/[A-Za-z0-9_.\[\]/~*-]{1,119}\Z")
+_POSITIVE_INTEGER = re.compile(r"[1-9][0-9]{0,8}\Z")
 _PROTECTED = re.compile(r"csrf|xsrf|nonce|session|token|secret|api[_-]?key|authorization|jwt|bearer", re.I)
 _XSS_HINT = re.compile(r"q|query|search|term|name|title|message|comment|content|text|html|redirect|url", re.I)
 _SQL_HINT = re.compile(r"id|key|category|filter|sort|page|limit|offset|search|query|email|user|order", re.I)
@@ -66,8 +68,10 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
     def add(*, method: str, url: str, name: str, location: str,
             source: str, value_type: str = "", identity: str = "",
             artifact_id: str = "") -> None:
-        if (not isinstance(name, str) or not _NAME.fullmatch(name)
-                or location not in _LOCATIONS):
+        if not isinstance(name, str) or location not in _LOCATIONS:
+            return
+        matcher = _JSON_POINTER if location == "body_json" and name.startswith("/") else _NAME
+        if not matcher.fullmatch(name):
             return
         path, _ = _resolved(url, base)
         if is_static_asset(path):
@@ -89,14 +93,19 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
         if prior is None:
             if len(rows) < MAX_PARAMETERS:
                 rows[key] = row
-        elif (artifact_id and source == "browser_traffic"
-              and (prior.get("source") != "browser_traffic"
-                   or prior.get("artifact_id") != artifact_id)):
-            rows[key] = row
-        elif ((artifact_id and not prior.get("artifact_id"))
-              or (not prior.get("artifact_id") and
-                  _SOURCE_RANK.get(source, 0) > _SOURCE_RANK.get(prior["source"], 0))):
-            rows[key] = row
+        else:
+            if value_type and not prior.get("value_type"):
+                prior["value_type"] = row["value_type"]
+            if (artifact_id and source == "browser_traffic"
+                    and (prior.get("source") != "browser_traffic"
+                         or prior.get("artifact_id") != artifact_id)):
+                row["value_type"] = row["value_type"] or prior.get("value_type", "")
+                rows[key] = row
+            elif ((artifact_id and not prior.get("artifact_id"))
+                  or (not prior.get("artifact_id") and
+                      _SOURCE_RANK.get(source, 0) > _SOURCE_RANK.get(prior["source"], 0))):
+                row["value_type"] = row["value_type"] or prior.get("value_type", "")
+                rows[key] = row
 
     def query(url: str, method: str, source: str, identity: str = "",
               artifact_id: str = "") -> None:
@@ -107,9 +116,10 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
             pairs = parse_qsl(raw_query, keep_blank_values=True, max_num_fields=100)
         except ValueError:
             return
-        for name, _ in pairs[:40]:
+        for name, value in pairs[:40]:
             add(method=method, url=url, name=name, location="query",
-                source=source, identity=identity, artifact_id=artifact_id)
+                source=source, identity=identity, artifact_id=artifact_id,
+                value_type="positive_integer" if _POSITIVE_INTEGER.fullmatch(value) else "")
 
     for page in (cmap.get("pages_visited") or [])[:120]:
         if isinstance(page, str):
@@ -119,9 +129,11 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
         if not isinstance(link, dict):
             continue
         url = str(link.get("url") or "")
+        link_identity = str(link.get("identity") or "")
+        query(url, "GET", "browser_link", identity=link_identity)
         for name in (link.get("query_keys") or [])[:20]:
             add(method="GET", url=url, name=name, location="query",
-                source="browser_link")
+                source="browser_link", identity=link_identity)
 
     for form in (cmap.get("forms") or [])[:80]:
         if not isinstance(form, dict):
@@ -180,23 +192,37 @@ def collect_parameter_inventory(cmap: dict) -> list[dict]:
                     try:
                         for name, _ in parse_qsl(body, keep_blank_values=True, max_num_fields=100)[:40]:
                             add(method=method, url=url, name=name, location="body_form",
-                                source="captured_api", identity=sample_identity)
+                                source="captured_api", identity=sample_identity,
+                                artifact_id=sample.get("artifact_id", ""))
                     except ValueError:
                         pass
                 body = None
-        if isinstance(body, dict):
-            def walk_json(value: dict, prefix: str = "", depth: int = 0) -> None:
-                if depth > 3:
+        if isinstance(body, (dict, list)):
+            emitted = 0
+
+            def walk_json(value: object, pointer: str = "", depth: int = 0) -> None:
+                """Use the JSON pointer accepted by captured POST replay."""
+                nonlocal emitted
+                if depth > 5 or emitted >= 40:
                     return
-                for key, child in list(value.items())[:40]:
-                    if not isinstance(key, str):
-                        continue
-                    name = f"{prefix}.{key}" if prefix else key
-                    if isinstance(child, dict):
-                        walk_json(child, name, depth + 1)
-                    else:
-                        add(method=method, url=url, name=name, location="body_json",
-                            source="captured_api", identity=sample_identity)
+                if isinstance(value, dict):
+                    for key, child in list(value.items())[:40]:
+                        if isinstance(key, str) and key:
+                            escaped = key.replace("~", "~0").replace("/", "~1")
+                            walk_json(child, f"{pointer}/{escaped}", depth + 1)
+                elif isinstance(value, list):
+                    # Exact observed indexes can be replayed even when an
+                    # array has more than one element; a wildcard cannot.
+                    for index, child in enumerate(value[:3]):
+                        walk_json(child, f"{pointer}/{index}", depth + 1)
+                elif pointer:
+                    add(method=method, url=url, name=pointer, location="body_json",
+                        source="captured_api", identity=sample_identity,
+                        value_type=("positive_integer" if isinstance(value, int)
+                                    and not isinstance(value, bool) and 0 < value <= 999_999_999
+                                    else ""), artifact_id=sample.get("artifact_id", ""))
+                    emitted += 1
+
             walk_json(body)
 
     for raw in (cmap.get("parameter_inventory") or [])[:MAX_PARAMETERS]:
