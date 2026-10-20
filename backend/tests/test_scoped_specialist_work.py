@@ -309,6 +309,43 @@ async def test_assigned_link_xss_probe_records_exact_cell_receipt(monkeypatch, e
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("technique,encoded_fragment", [
+    ("xss_browser", "%3Cimg"),
+    ("xss_browser_attribute", "%22%3E%3Cimg"),
+    ("xss_browser_js_single", "%27%3Balert"),
+    ("xss_browser_js_double", "%22%3Balert"),
+])
+async def test_assigned_get_xss_accepts_service_technique_aliases(
+    monkeypatch, technique, encoded_fragment,
+):
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "path": "/catalog", "host": "app.test",
+        "name": "searchTerm", "location": "query", "source": "browser_link",
+        "identity": "anonymous", "testable": True,
+    }])
+    lease = claim_coverage_cell_leases(brain, ["xss"])["xss"]
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.test"
+    manager._capability_map = {"target": "https://app.test"}
+    manager._engagement_brain = brain.to_dict()
+    register_scope(manager, "app.test")
+    calls = []
+
+    async def fake_browser(operation, url, identity="anonymous"):
+        calls.append((operation, url, identity))
+        return json.dumps({"evidence_id": "browser-proof", "executed": False})
+
+    monkeypatch.setattr(manager, "scoped_browser_assessment", fake_browser)
+    result = await manager.scoped_input_probe_assigned(
+        lease.coverage_cell_id, lease.id, technique,
+    )
+    assert result["success"] is True, result
+    assert calls[0][0] == "check_xss"
+    assert encoded_fragment in calls[0][1]
+
+
+@pytest.mark.asyncio
 async def test_assigned_xss_preserves_captured_get_query_context(monkeypatch):
     observed = "https://app.test/catalog?searchTerm=ordinary&view=compact"
     public, private = package_exchange(

@@ -270,6 +270,20 @@ async def test_sqli_clean_coverage_requires_complete_stable_controls():
 
 
 @pytest.mark.asyncio
+async def test_coverage_rejects_http_status_without_mutating_ledger():
+    from app.services.agent.engagement_brain import EngagementBrain
+
+    manager = ASMToolsManager()
+    manager._engagement_brain = EngagementBrain(target="https://app.example.test").to_dict()
+    before = manager._engagement_brain
+    result = json.loads(await manager.record_surface_coverage(
+        path="/catalog", status=200,
+    ))
+    assert "coverage status must be a string" in result["error"]
+    assert manager._engagement_brain == before
+
+
+@pytest.mark.asyncio
 async def test_negative_boolean_recipe_cannot_close_class_level_sqli_coverage():
     from app.services.agent.engagement_brain import EngagementBrain
     from app.services.agent.evidence_store import evidence_store

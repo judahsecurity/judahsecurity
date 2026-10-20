@@ -977,6 +977,14 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 operation = "scoped_string_sqli"
             confirmed = proof.get("proof_confirmed") is True
         else:
+            # Both assigned probe adapters are exposed to specialists. Accept
+            # the browser service's equivalent names on observed GET inputs.
+            technique = {
+                "xss_browser": "html_body",
+                "xss_browser_attribute": "html_attribute",
+                "xss_browser_js_single": "js_single",
+                "xss_browser_js_double": "js_double",
+            }.get(technique, technique)
             payloads = {
                 "html_body": '<img src=x onerror=alert("__PROWL_NONCE__")>',
                 "html_attribute": '"><img src=x onerror=alert("__PROWL_NONCE__")>',
@@ -8748,6 +8756,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         try:
+            if not isinstance(status, str):
+                raise ValueError("coverage status must be a string, not an HTTP status code")
             if coverage_cell_id:
                 from app.services.agent.coverage_cells import (
                     migrate_coverage_cells,

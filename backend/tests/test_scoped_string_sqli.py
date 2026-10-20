@@ -18,6 +18,7 @@ from app.services.agent.independent_verify import (
 )
 from app.services.agent.proof_policy import validate_proof
 from app.services.agent.scoped_assessment import sqli_string
+from app.services.agent.scoped_assessment.browser_traffic import package_exchange
 from app.services.agent.scoped_assessment.http_observe import _sql_error_family
 from app.services.agent.scoped_assessment_tools import HUNTER_GET_BUDGET
 from app.services.agent.tools import ASMToolsManager
@@ -411,6 +412,42 @@ async def test_string_tool_preflights_mapped_application_operation(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_string_tool_prefers_private_observed_get_over_invented_baseline(monkeypatch):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    manager._capability_map = {
+        "scope": "https://app.example.test",
+        "parameter_inventory": [{
+            "method": "GET", "path": "/catalog", "name": "category",
+            "location": "query", "source": "browser_traffic",
+            "artifact_id": "capture-category",
+        }],
+    }
+    public, private = package_exchange(
+        url=URL, expected_origin="https://app.example.test",
+        action_ref="catalog-filter", method="GET", resource_type="fetch",
+        status=200, content_type="text/html", request_body=b"",
+        response_body=b"catalog",
+    )
+    manager._scoped_browser_exchanges = {
+        "capture-category": {"identity": "anonymous", "private": private,
+                             "public": public, "verifier_run_id": None},
+    }
+
+    def probe(baseline, variants, nonce, **_kwargs):
+        assert baseline == URL
+        return {"target": TARGET, "operation": "sqli_boolean_string",
+                "proof_confirmed": False, "nonce": nonce,
+                "parameter": "category", "requests_sent": 8}
+
+    monkeypatch.setattr(sqli_string, "probe_string_boolean", probe)
+    result = json.loads(await manager.scoped_string_sqli(TARGET, "category"))
+    assert result["baseline_source"] == "observed_url"
+    assert manager._scoped_get_count == 8
+
+
+@pytest.mark.asyncio
 async def test_string_tool_uses_private_browser_link_and_reserves_verifier_budget(monkeypatch):
     manager = ASMToolsManager()
     manager._fallback_target = "https://app.example.test"
@@ -443,7 +480,9 @@ async def test_string_tool_uses_private_browser_link_and_reserves_verifier_budge
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("source", ["browser_link", "page_url", "captured_api"])
+@pytest.mark.parametrize("source", [
+    "browser_link", "page_url", "captured_api", "observed_form", "api_endpoint",
+])
 async def test_string_tool_preflights_observed_link_when_browser_kept_only_names(monkeypatch, source):
     manager = ASMToolsManager()
     manager._fallback_target = "https://app.example.test"

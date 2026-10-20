@@ -636,7 +636,17 @@ class ScopedAssessmentTools:
         if not parts.query:
             # The public inventory is value-free. Keep ordinary link values in
             # session-local browser state, then recover only this exact input.
+            captured_urls = []
+            for artifact_id in list((getattr(self, "_scoped_browser_exchanges", None) or {}))[:40]:
+                try:
+                    captured = json.loads(self._scoped_exchange(artifact_id, identity))
+                except (TypeError, ValueError):
+                    continue
+                if (isinstance(captured, dict) and captured.get("method") == "GET"
+                        and captured.get("resource_type") in {"xhr", "fetch"}):
+                    captured_urls.append(captured.get("url"))
             candidates = [
+                *captured_urls,
                 *(page for page in cmap.get("pages_visited", []) if isinstance(page, str)),
                 *(sample.get("url") for sample in cmap.get("api_samples", [])
                   if isinstance(sample, dict) and str(sample.get("method", "GET")).upper() == "GET"),
@@ -688,6 +698,7 @@ class ScopedAssessmentTools:
                 if not baseline and observed["source"] in {
                     "browser_link", "browser_request", "browser_traffic",
                     "page_url", "captured_api", "application_operation",
+                    "observed_form", "api_endpoint",
                 }:
                     # Browser maps intentionally expose parameter names without
                     # link values. A fresh, harmless value can still establish
