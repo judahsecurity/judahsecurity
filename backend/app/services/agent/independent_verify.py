@@ -18,6 +18,7 @@ import uuid
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 
 VERDICTS = ("pending", "confirmed", "refuted", "inconclusive")
@@ -122,6 +123,49 @@ def observed_sql_cell_for_proof(
                     and (cell.get("identity") or "anonymous") == receipt.get("identity")):
                 matches[str(cell["id"])] = cell
     return next(iter(matches.values())) if len(matches) == 1 else None
+
+
+def resolve_observed_sql_candidate_proof(
+    brain: Any, store: Any, *, target: str, evidence_ids: Iterable[str],
+    claim: str = "",
+) -> Optional[tuple[str, Dict[str, Any], str]]:
+    """Recover one execution-owned SQLi receipt for an exact observed input.
+
+    Candidate authors sometimes cite a request URL (including its query) or
+    omit the evidence ID after a scoped probe. The scoped receipt already owns
+    the canonical path, parameter, and proof result. Only an unambiguous match
+    to the claim and inventory may repair that handoff.
+    """
+    parsed = urlsplit(str(target or ""))
+    if (parsed.scheme not in {"http", "https"} or not parsed.netloc
+            or parsed.username or parsed.password or parsed.fragment):
+        return None
+    canonical = urlunsplit((parsed.scheme, parsed.netloc, parsed.path or "/", "", ""))
+    cited = [str(item) for item in evidence_ids or []]
+    ids = cited or list(store.records)
+    query_names = {name for name, _ in parse_qsl(parsed.query, keep_blank_values=True)}
+    matches: list[tuple[str, Dict[str, Any], float]] = []
+    for artifact_id in ids:
+        receipt = store.records.get(artifact_id)
+        if (not receipt or receipt.get("kind") not in {"scoped_string_sqli", "scoped_numeric_sqli"}
+                or receipt.get("target") != canonical or receipt.get("run_id")):
+            continue
+        proof = receipt.get("payload") or {}
+        parameter = str(proof.get("parameter") or "")
+        if not parameter or (not cited and parameter not in query_names and not re.search(
+            rf"(?<![A-Za-z0-9_]){re.escape(parameter)}(?![A-Za-z0-9_])", claim,
+            re.IGNORECASE,
+        )):
+            continue
+        cell = observed_sql_cell_for_proof(
+            brain, store, target=canonical, evidence_ids=[artifact_id],
+        )
+        if cell:
+            matches.append((artifact_id, cell, float(receipt.get("created_at") or 0)))
+    if len({row[1]["id"] for row in matches}) != 1:
+        return None
+    artifact_id, cell, _ = max(matches, key=lambda row: row[2])
+    return canonical, cell, artifact_id
 
 
 def observed_xss_cell_for_proof(
@@ -231,6 +275,25 @@ def finding_publish_allowed(
         getattr(tools_manager, "_verify_receipts", None), title=title or "",
         target=target or "", tools_manager=tools_manager,
     )
+
+
+def verified_publication_claim(
+    candidate: FindingCandidate, *, title: str, target: str, severity: str,
+) -> tuple[bool, str, str]:
+    """Keep the verified claim fixed while allowing a separate report writeup.
+
+    The model's publication description often differs from its candidate
+    wording. Publish the verified description instead of invalidating a sound
+    verifier receipt or accepting an unverified change to the claim.
+    """
+    if (candidate.title != title or candidate.target != target
+            or candidate.severity.lower() != severity.lower()):
+        return False, (
+            "Verified title, target, or severity changed. Use the exact confirmed "
+            f"candidate: title={candidate.title!r}, target={candidate.target!r}, "
+            f"severity={candidate.severity!r}"
+        ), ""
+    return True, "", candidate.description
 
 
 def check_verify_receipt(

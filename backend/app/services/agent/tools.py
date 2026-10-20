@@ -3290,12 +3290,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         verified = None
         if str(gate_msg).startswith("verify_ok"):
-            from app.services.agent.independent_verify import _brain, _candidate, verify_receipt_key
+            from app.services.agent.independent_verify import (
+                _brain, _candidate, verified_publication_claim, verify_receipt_key,
+            )
             receipt = self._verify_receipts[verify_receipt_key(title, target)]
             verified = _candidate(_brain(self), receipt["candidate_id"])
-            if (verified.title != title or verified.target != target or verified.description != description
-                    or verified.severity.lower() != severity.lower()):
-                return "Verified claim changed; resubmit the candidate and reverify before publication"
+            valid_claim, mismatch, description = verified_publication_claim(
+                verified, title=title, target=target, severity=severity,
+            )
+            if not valid_claim:
+                return mismatch
 
         # Normalize target for asset lookup: strip scheme and path
         target_clean = (target or "").strip()
@@ -8551,12 +8555,42 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.engagement_brain import engagement_brain_from_dict
         from app.services.agent.independent_verify import (
             observed_sql_cell_for_proof, observed_xss_cell_for_proof,
-            submit_candidate,
+            resolve_observed_sql_candidate_proof, submit_candidate,
         )
+        from app.services.agent.proof_policy import inferred_vulnerability_class
+        from types import SimpleNamespace
 
         self._require_independent_verify = True
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         trace = {}
+        claim_class = vulnerability_class or inferred_vulnerability_class(
+            SimpleNamespace(title=title, description=description),
+        )
+        if claim_class == "sql_injection":
+            from app.services.agent.evidence_store import evidence_store
+
+            linked_proof = resolve_observed_sql_candidate_proof(
+                brain, evidence_store(self), target=target,
+                evidence_ids=evidence_ids or [],
+                claim=f"{title} {claimed_request}",
+            )
+            if linked_proof:
+                target, linked_cell, artifact_id = linked_proof
+                if coverage_cell_id and coverage_cell_id != linked_cell["id"]:
+                    return json.dumps({"error": "Candidate proof belongs to a different coverage cell"})
+                coverage_cell_id = str(linked_cell["id"])
+                evidence_ids = list(dict.fromkeys([*(evidence_ids or []), artifact_id]))
+                # One observed input and bug class represent one candidate. A
+                # new execution receipt revises it instead of creating another
+                # title-variant candidate for the same SQLi proof.
+                prior = next((row for row in brain.candidates
+                              if isinstance(row, dict)
+                              and row.get("coverage_cell_id") == coverage_cell_id
+                              and row.get("target") == target
+                              and row.get("vulnerability_class") == "sql_injection"), None)
+                if prior:
+                    title = str(prior["title"])
+                vulnerability_class = "sql_injection"
         if evidence_ids:
             from app.services.agent.evidence_store import evidence_store
 

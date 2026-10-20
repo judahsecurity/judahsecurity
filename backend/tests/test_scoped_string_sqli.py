@@ -713,6 +713,97 @@ async def test_candidate_handoff_links_real_sql_proof_to_observed_cell(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_candidate_handoff_recovers_uncited_exact_sql_proof(monkeypatch):
+    manager = ASMToolsManager()
+    brain = EngagementBrain(target="https://app.example.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "host": "app.example.test", "path": "/catalog",
+        "name": "category", "location": "query", "identity": "anonymous",
+        "source": "browser_link", "testable": True,
+    }])
+    manager._engagement_brain = brain.to_dict()
+    proof_id = evidence_store(manager).record(
+        "scoped_string_sqli", _proof(monkeypatch, "12345"),
+        target=TARGET, identity="anonymous",
+    )
+
+    await manager.submit_finding_candidate(
+        title="SQL injection in catalog category",
+        target=TARGET + "?category=gin", vulnerability_class="sql_injection",
+    )
+
+    candidate = manager._engagement_brain["candidates"][0]
+    cell = next(row for row in brain.coverage_cells if row.get("test_type") == "sqli")
+    assert candidate["target"] == TARGET
+    assert candidate["coverage_cell_id"] == cell["id"]
+    assert candidate["evidence_ids"] == [proof_id]
+
+
+@pytest.mark.asyncio
+async def test_uncited_sql_proof_is_not_borrowed_for_generic_claim(monkeypatch):
+    manager = ASMToolsManager()
+    brain = EngagementBrain(target="https://app.example.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "host": "app.example.test", "path": "/catalog",
+        "name": "category", "location": "query", "identity": "anonymous",
+        "source": "browser_link", "testable": True,
+    }])
+    manager._engagement_brain = brain.to_dict()
+    evidence_store(manager).record(
+        "scoped_string_sqli", _proof(monkeypatch, "12345"),
+        target=TARGET, identity="anonymous",
+    )
+
+    await manager.submit_finding_candidate(
+        title="Possible SQL injection in catalog", target=TARGET,
+        vulnerability_class="sql_injection",
+    )
+
+    candidate = manager._engagement_brain["candidates"][0]
+    assert candidate["coverage_cell_id"] == ""
+    assert candidate["evidence_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_fresh_sql_proof_revises_same_observed_candidate(monkeypatch):
+    manager = ASMToolsManager()
+    brain = EngagementBrain(target="https://app.example.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "host": "app.example.test", "path": "/catalog",
+        "name": "category", "location": "query", "identity": "anonymous",
+        "source": "browser_link", "testable": True,
+    }])
+    manager._engagement_brain = brain.to_dict()
+    store = evidence_store(manager)
+    first_id = store.record(
+        "scoped_string_sqli", _proof(monkeypatch, "12345"),
+        target=TARGET, identity="anonymous",
+    )
+    await manager.submit_finding_candidate(
+        title="SQL injection in catalog category", target=TARGET,
+        evidence_ids=[first_id], vulnerability_class="sql_injection",
+    )
+    first = manager._engagement_brain["candidates"][0]
+    manager._engagement_brain["candidates"][0]["status"] = "inconclusive"
+    second_id = store.record(
+        "scoped_string_sqli", _proof(monkeypatch, "67890"),
+        target=TARGET, identity="anonymous",
+    )
+
+    await manager.submit_finding_candidate(
+        title="Different wording for SQLi in category", target=TARGET,
+        evidence_ids=[second_id], vulnerability_class="sql_injection",
+    )
+
+    candidates = manager._engagement_brain["candidates"]
+    assert len(candidates) == 1
+    assert candidates[0]["id"] == first["id"]
+    assert candidates[0]["revision"] == 2
+    assert candidates[0]["status"] == "pending"
+    assert set(candidates[0]["evidence_ids"]) == {first_id, second_id}
+
+
+@pytest.mark.asyncio
 async def test_sql_verifier_inconclusive_replay_does_not_fall_into_model_loop(monkeypatch):
     manager = ASMToolsManager()
     store = evidence_store(manager)

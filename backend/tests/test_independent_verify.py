@@ -25,6 +25,7 @@ from app.services.agent.independent_verify import (
     publication_invariants,
     record_verify_receipt,
     submit_candidate,
+    verified_publication_claim,
     verify_receipt_key,
 )
 
@@ -272,6 +273,25 @@ def test_apply_verdict_requires_active_verifier_execution():
         target="https://app.example.com",
     )
     assert ok is False
+
+
+def test_publication_uses_verified_description_without_changing_claim():
+    candidate = FindingCandidate(
+        id="proof-1", title="SQL injection in category",
+        target="https://app.example.com/catalog", severity="high",
+        description="Verified Boolean response difference on category.",
+    )
+    valid, reason, description = verified_publication_claim(
+        candidate, title=candidate.title, target=candidate.target,
+        severity="high",
+    )
+    assert valid and not reason
+    assert description == candidate.description
+    valid, reason, _ = verified_publication_claim(
+        candidate, title=candidate.title, target="https://app.example.com/other",
+        severity="high",
+    )
+    assert not valid and "target" in reason
 
 
 def test_ingest_lifts_hunter_key_findings():
