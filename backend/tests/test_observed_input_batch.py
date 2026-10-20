@@ -159,6 +159,43 @@ def test_numeric_link_reaches_bounded_first_pass():
     assert sqli["first_pass_evidence_id"] == "check-sqli"
 
 
+def test_transient_first_pass_handoff_gets_one_delayed_retry():
+    class Manager:
+        def __init__(self):
+            brain = _brain()
+            for cell in brain.coverage_cells:
+                if cell["test_type"] != "xss" or cell["parameter"] != "query:searchTerm":
+                    cell["status"] = "skipped"
+            self._engagement_brain = brain.to_dict()
+            self._capability_map = {"target": "https://app.test"}
+            self.calls = 0
+
+        async def scoped_input_probe_assigned(self, **_kwargs):
+            self.calls += 1
+            if self.calls <= 2:
+                return {"success": False, "error": "invalid_coverage_lease",
+                        "reason": "lease_changed"}
+            return {"success": True, "evidence_id": "browser-receipt",
+                    "proof_confirmed": False}
+
+    manager = Manager()
+    first = asyncio.run(run_observed_input_batch(manager, max_checks=1))
+    assert first["results"][0]["outcome"] == "unattempted"
+    cell = next(row for row in manager._engagement_brain["coverage_cells"]
+                if row["test_type"] == "xss" and row["parameter"] == "query:searchTerm")
+    assert cell["first_pass_attempts"] == 1
+    assert pending_first_pass_cells(manager._engagement_brain) == []
+    cell["first_pass_retry_at"] = 0
+    assert len(pending_first_pass_cells(manager._engagement_brain)) == 1
+    second = asyncio.run(run_observed_input_batch(manager, max_checks=1))
+    assert second["results"][0]["outcome"] == "inconclusive"
+    assert manager.calls == 3
+    cell = next(row for row in manager._engagement_brain["coverage_cells"]
+                if row["test_type"] == "xss" and row["parameter"] == "query:searchTerm")
+    assert cell["first_pass_attempts"] == 2
+    assert pending_first_pass_cells(manager._engagement_brain) == []
+
+
 def test_positive_first_pass_submits_candidate_for_fresh_verification():
     class Manager:
         def __init__(self):

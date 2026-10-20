@@ -67,6 +67,106 @@ def candidate_from_dict(raw: Optional[Dict[str, Any]]) -> Optional[FindingCandid
     return FindingCandidate(**{k: v for k, v in raw.items() if k in allowed})
 
 
+def _same_observed_origin(scheme: str, host: str, target: str) -> bool:
+    from app.services.agent.evidence_store import origin
+
+    try:
+        return origin(f"{scheme}://{host}") == origin(target)
+    except (ValueError, TypeError):
+        return False
+
+
+def observed_sql_cell_for_proof(
+    brain: Any, store: Any, *, target: str, evidence_ids: Iterable[str],
+) -> Optional[Dict[str, Any]]:
+    """Link a real scoped SQLi receipt to one exact observed GET input.
+
+    Narrative claims and parameter-name guesses cannot create this link.
+    Ambiguous inventory rows are deliberately left for analyst review.
+    """
+    from urllib.parse import urlsplit
+    from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
+    from app.services.agent.scoped_assessment.sqli_boolean import numeric_sql_proof_valid
+    from app.services.agent.scoped_assessment.sqli_string import (
+        string_error_proof_valid, string_sql_proof_valid,
+    )
+
+    parsed = urlsplit(target)
+    if (parsed.scheme not in {"http", "https"} or not parsed.netloc
+            or parsed.username or parsed.password or parsed.query or parsed.fragment):
+        return None
+    matches: Dict[str, Dict[str, Any]] = {}
+    for evidence_id in evidence_ids:
+        receipt = store.records.get(str(evidence_id))
+        if (not receipt or receipt.get("kind") not in {"scoped_string_sqli", "scoped_numeric_sqli"}
+                or receipt.get("target") != target):
+            continue
+        proof = receipt.get("payload")
+        if (not isinstance(proof, dict) or proof.get("proof_confirmed") is not True
+                or proof.get("target") != target):
+            continue
+        valid = (numeric_sql_proof_valid(proof) if receipt.get("kind") == "scoped_numeric_sqli"
+                 else string_error_proof_valid(proof) if proof.get("proof_recipe") == "string_error_v1"
+                 else string_sql_proof_valid(proof))
+        if not valid:
+            continue
+        parameter = str(proof.get("parameter") or "")
+        for cell in getattr(brain, "coverage_cells", None) or []:
+            if (cell.get("source") == "parameter_inventory"
+                    and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
+                    and cell.get("test_type") == "sqli"
+                    and cell.get("method") == "GET"
+                    and _same_observed_origin(parsed.scheme, str(cell.get("host") or ""), target)
+                    and cell.get("path") == (parsed.path or "/")
+                    and cell.get("parameter") == f"query:{parameter}"
+                    and (cell.get("identity") or "anonymous") == receipt.get("identity")):
+                matches[str(cell["id"])] = cell
+    return next(iter(matches.values())) if len(matches) == 1 else None
+
+
+def observed_xss_cell_for_proof(
+    brain: Any, store: Any, *, target: str, evidence_ids: Iterable[str],
+) -> Optional[Dict[str, Any]]:
+    """Link browser execution to one mapped GET parameter, never to a guess."""
+    from urllib.parse import parse_qs, urlsplit
+    from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
+
+    parsed_target = urlsplit(target)
+    if (parsed_target.scheme not in {"http", "https"} or not parsed_target.netloc
+            or parsed_target.query or parsed_target.fragment):
+        return None
+    matches: Dict[str, Dict[str, Any]] = {}
+    for evidence_id in evidence_ids:
+        receipt = store.records.get(str(evidence_id))
+        if (not receipt or receipt.get("kind") != "scoped_browser_check_xss"
+                or receipt.get("target") != target):
+            continue
+        proof = receipt.get("payload")
+        if (not isinstance(proof, dict) or proof.get("operation") != "check_xss"
+                or proof.get("executed") is not True):
+            continue
+        template = str(proof.get("target_template") or "")
+        parsed = urlsplit(template)
+        if (not _same_observed_origin(parsed.scheme, parsed.netloc, target)
+                or (parsed.path or "/") != (parsed_target.path or "/")
+                or parsed.fragment):
+            continue
+        parameters = {
+            name for name, values in parse_qs(parsed.query).items()
+            if any("__PROWL_NONCE__" in value for value in values)
+        }
+        for cell in getattr(brain, "coverage_cells", None) or []:
+            if (cell.get("source") == "parameter_inventory"
+                    and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
+                    and cell.get("test_type") == "xss" and cell.get("method") == "GET"
+                    and _same_observed_origin(parsed_target.scheme, str(cell.get("host") or ""), target)
+                    and cell.get("path") == (parsed_target.path or "/")
+                    and cell.get("parameter") in {f"query:{name}" for name in parameters}
+                    and (cell.get("identity") or "anonymous") == receipt.get("identity")):
+                matches[str(cell["id"])] = cell
+    return next(iter(matches.values())) if len(matches) == 1 else None
+
+
 def candidate_id(title: str, target: str = "", coverage_cell_id: str = "") -> str:
     blob = f"{(title or '').strip().lower()}|{(target or '').strip()}"
     if coverage_cell_id:
@@ -476,7 +576,10 @@ async def run_independent_verifiers(
             run = VerificationRun(uuid.uuid4().hex, cand.id, cand.revision, cand.nonce)
             token = verification_run.set(run)
             try:
-                replayed = await _verify_scoped_string_candidate(tools_manager, cand, run)
+                replayed = await _verify_scoped_sql_candidate(tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
+                replayed = await _verify_scoped_browser_xss_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
                 report = await _run_specialist(
@@ -503,7 +606,7 @@ async def run_independent_verifiers(
     return list(await asyncio.gather(*(_one(c) for c in pending)))
 
 
-async def _verify_scoped_string_candidate(
+async def _verify_scoped_sql_candidate(
     tools_manager: Any, cand: FindingCandidate, run: Any,
 ) -> Optional[Dict[str, Any]]:
     """Repeat an exact mapped SQLi proof before spending a verifier model wave.
@@ -519,6 +622,7 @@ async def _verify_scoped_string_candidate(
     from app.services.agent.proof_policy import (
         inferred_vulnerability_class, validate_proof,
     )
+    from app.services.agent.scoped_assessment.sqli_boolean import numeric_sql_proof_valid
     from app.services.agent.scoped_assessment.sqli_string import (
         string_error_proof_valid, string_sql_proof_valid,
     )
@@ -529,6 +633,18 @@ async def _verify_scoped_string_candidate(
     brain = _brain(tools_manager)
     cell = next((row for row in brain.coverage_cells
                  if row.get("id") == cand.coverage_cell_id), None)
+    if not cell:
+        cell = observed_sql_cell_for_proof(
+            brain, evidence_store(tools_manager), target=cand.target,
+            evidence_ids=cand.evidence_ids,
+        )
+        if cell:
+            cand.coverage_cell_id = str(cell["id"])
+            for raw in brain.candidates:
+                if isinstance(raw, dict) and raw.get("id") == cand.id:
+                    raw["coverage_cell_id"] = cand.coverage_cell_id
+            cell["candidate_id"] = cand.id
+            tools_manager._engagement_brain = brain.to_dict()
     if not cell or cell.get("source") != "parameter_inventory" or (
         cell.get("observation_source") not in OBSERVED_INPUT_SOURCES
         or cell.get("test_type") != "sqli" or cell.get("method") != "GET"
@@ -539,7 +655,7 @@ async def _verify_scoped_string_candidate(
     identity = str(cell.get("identity") or "anonymous")
     if (location != "query" or not separator or not parameter
             or target.scheme not in {"http", "https"}
-            or target.netloc != cell.get("host")
+            or not _same_observed_origin(target.scheme, str(cell.get("host") or ""), cand.target)
             or (target.path or "/") != cell.get("path")
             or target.query or target.fragment
             or (cand.identity and cand.identity != identity)
@@ -548,56 +664,188 @@ async def _verify_scoped_string_candidate(
     store = evidence_store(tools_manager)
     hunter_ids = [artifact_id for artifact_id in cand.evidence_ids
                   if (artifact_id in store.records
-                      and store.records[artifact_id]["kind"] == "scoped_string_sqli"
+                      and store.records[artifact_id]["kind"] in {"scoped_string_sqli", "scoped_numeric_sqli"}
                       and store.records[artifact_id]["target"] == cand.target
                       and store.records[artifact_id]["identity"] == identity
                       and store.records[artifact_id]["payload"].get("parameter") == parameter
                       and store.records[artifact_id]["payload"].get("proof_confirmed") is True)]
     if not hunter_ids:
         return None
+    hunter_kind = store.records[hunter_ids[0]]["kind"]
+    hunter_ids = [item for item in hunter_ids if store.records[item]["kind"] == hunter_kind]
+    probe_name = "scoped_numeric_sqli" if hunter_kind == "scoped_numeric_sqli" else "scoped_string_sqli"
+    failure = "Fresh SQLi replay did not reproduce the hunter proof"
     try:
-        wrapped = await tools_manager.execute("scoped_string_sqli", {
+        wrapped = await tools_manager.execute(probe_name, {
             "url": cand.target, "parameter": parameter, "identity": identity,
         })
         output = wrapped.get("output") if isinstance(wrapped, dict) else None
         result = json.loads(output) if isinstance(output, str) else output
-        if not isinstance(result, dict) or result.get("proof_confirmed") is not True:
-            return None
-        artifact_id = str(result.get("evidence_id") or "")
-        verifier = store.records.get(artifact_id)
-        if not verifier or verifier.get("run_id") != run.id:
-            return None
-        recipe = result.get("proof_recipe")
-        kind = "string_error_sqli" if recipe == "string_error_v1" else "string_boolean_sqli"
-        valid_recipe = (string_error_proof_valid(result) if kind == "string_error_sqli"
-                        else string_sql_proof_valid(result))
-        if not valid_recipe:
-            return None
-        for hunter_id in hunter_ids:
-            proof = {"kind": kind, "hunter_artifact_id": hunter_id,
+        if not isinstance(result, dict):
+            failure = "SQLi replay returned no structured result"
+        elif result.get("proof_confirmed") is not True:
+            failure = str(result.get("error") or "Fresh SQLi controls did not confirm injection")[:300]
+        else:
+            artifact_id = str(result.get("evidence_id") or "")
+            verifier = store.records.get(artifact_id)
+            if not verifier or verifier.get("run_id") != run.id or verifier.get("kind") != hunter_kind:
+                failure = "SQLi replay had no fresh verifier evidence"
+            else:
+                recipe = result.get("proof_recipe")
+                kind = ("numeric_boolean_sqli" if hunter_kind == "scoped_numeric_sqli" else
+                        "string_error_sqli" if recipe == "string_error_v1" else "string_boolean_sqli")
+                valid_recipe = (numeric_sql_proof_valid(result) if kind == "numeric_boolean_sqli" else
+                                string_error_proof_valid(result) if kind == "string_error_sqli" else
+                                string_sql_proof_valid(result))
+                if not valid_recipe:
+                    failure = "SQLi replay receipt failed recipe validation"
+                else:
+                    for hunter_id in hunter_ids:
+                        proof = {"kind": kind, "hunter_artifact_id": hunter_id,
+                                 "artifact_id": artifact_id}
+                        valid, why = validate_proof(store, cand, proof, [artifact_id])
+                        fresh, fresh_why = store.validate(
+                            [artifact_id], candidate_id=cand.id, revision=cand.revision,
+                            run_id=run.id, target=cand.target,
+                        )
+                        if valid and fresh:
+                            verified = apply_verdict(
+                                tools_manager, candidate_id=cand.id, verdict="confirmed",
+                                evidence="Fresh scoped SQLi controls reproduced the candidate on the exact observed input.",
+                                evidence_ids=[artifact_id], proof=proof,
+                            )
+                            if verified and verified.status == "confirmed":
+                                return {
+                                    "candidate_id": cand.id, "title": cand.title,
+                                    "status": "confirmed", "verifier_summary": "Fresh scoped SQLi proof matched the hunter receipt",
+                                    "key_findings": [], "tool_calls": 1, "error": None,
+                                }
+                        failure = why or fresh_why or "SQLi proof policy rejected the replay"
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Deterministic SQLi verifier could not replay candidate %s", cand.id,
+        )
+        failure = "Scoped SQLi replay failed before verification completed"
+    apply_verdict(
+        tools_manager, candidate_id=cand.id, verdict="inconclusive",
+        evidence=failure, summary=failure,
+    )
+    return {
+        "candidate_id": cand.id, "title": cand.title, "status": "inconclusive",
+        "verifier_summary": failure, "key_findings": [], "tool_calls": 1,
+        "error": None,
+    }
+
+
+async def _verify_scoped_browser_xss_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Replay a browser-executed XSS receipt against its exact observed input."""
+    import logging
+    from urllib.parse import parse_qs, urlsplit
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.proof_policy import inferred_vulnerability_class, validate_proof
+    from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
+
+    if (cand.vulnerability_class or inferred_vulnerability_class(cand)) != "xss":
+        return None
+    brain = _brain(tools_manager)
+    cell = next((row for row in brain.coverage_cells
+                 if row.get("id") == cand.coverage_cell_id), None)
+    if not cell:
+        cell = observed_xss_cell_for_proof(
+            brain, evidence_store(tools_manager), target=cand.target,
+            evidence_ids=cand.evidence_ids,
+        )
+        if cell:
+            cand.coverage_cell_id = str(cell["id"])
+            for raw in brain.candidates:
+                if isinstance(raw, dict) and raw.get("id") == cand.id:
+                    raw["coverage_cell_id"] = cand.coverage_cell_id
+            cell["candidate_id"] = cand.id
+            tools_manager._engagement_brain = brain.to_dict()
+    if not cell or (cell.get("source") != "parameter_inventory"
+                    or cell.get("observation_source") not in OBSERVED_INPUT_SOURCES
+                    or cell.get("test_type") != "xss" or cell.get("method") != "GET"):
+        return None
+    location, separator, parameter = str(cell.get("parameter") or "").partition(":")
+    target = urlsplit(cand.target)
+    identity = str(cell.get("identity") or "anonymous")
+    if (location != "query" or not separator or not parameter
+            or target.scheme not in {"http", "https"}
+            or not _same_observed_origin(target.scheme, str(cell.get("host") or ""), cand.target)
+            or (target.path or "/") != cell.get("path")
+            or target.query or target.fragment
+            or (cand.identity and cand.identity != identity)
+            or (cand.parameter and cand.parameter != cell.get("parameter"))):
+        return None
+    store = evidence_store(tools_manager)
+    hunter = []
+    for evidence_id in cand.evidence_ids:
+        receipt = store.records.get(evidence_id)
+        if (not receipt or receipt.get("kind") != "scoped_browser_check_xss"
+                or receipt.get("target") != cand.target
+                or receipt.get("identity") != identity):
+            continue
+        proof = receipt.get("payload")
+        if not isinstance(proof, dict) or proof.get("executed") is not True:
+            continue
+        template = str(proof.get("target_template") or "")
+        parsed = urlsplit(template)
+        if (not _same_observed_origin(parsed.scheme, parsed.netloc, cand.target)
+                or (parsed.path or "/") != (target.path or "/")
+                or parsed.fragment or "__PROWL_NONCE__" not in template
+                or not any("__PROWL_NONCE__" in value
+                           for value in parse_qs(parsed.query).get(parameter, []))):
+            continue
+        hunter.append((evidence_id, template))
+    if not hunter:
+        return None
+    failure = "Fresh browser replay did not execute the XSS canary"
+    try:
+        for hunter_id, template in hunter[:3]:
+            wrapped = await tools_manager.execute("scoped_browser_assessment", {
+                "operation": "check_xss", "url": template, "identity": identity,
+            })
+            output = wrapped.get("output") if isinstance(wrapped, dict) else None
+            result = json.loads(output) if isinstance(output, str) else output
+            if not isinstance(result, dict):
+                failure = "XSS replay returned no structured result"
+                continue
+            if result.get("executed") is not True:
+                failure = str(result.get("error") or "Fresh browser canary did not execute")[:300]
+                continue
+            artifact_id = str(result.get("evidence_id") or "")
+            verifier = store.records.get(artifact_id)
+            if (not verifier or verifier.get("run_id") != run.id
+                    or verifier.get("identity") != identity):
+                failure = "XSS replay had no fresh verifier evidence"
+                continue
+            proof = {"kind": "scoped_browser_xss", "hunter_artifact_id": hunter_id,
                      "artifact_id": artifact_id}
-            valid, _ = validate_proof(store, cand, proof, [artifact_id])
-            fresh, _ = store.validate(
+            valid, why = validate_proof(store, cand, proof, [artifact_id])
+            fresh, fresh_why = store.validate(
                 [artifact_id], candidate_id=cand.id, revision=cand.revision,
                 run_id=run.id, target=cand.target,
             )
             if valid and fresh:
                 verified = apply_verdict(
                     tools_manager, candidate_id=cand.id, verdict="confirmed",
-                    evidence="Fresh scoped SQLi controls reproduced the candidate on the exact observed input.",
+                    evidence="Fresh browser execution reproduced the XSS candidate on the observed input.",
                     evidence_ids=[artifact_id], proof=proof,
                 )
                 if verified and verified.status == "confirmed":
-                    return {
-                        "candidate_id": cand.id, "title": cand.title,
-                        "status": "confirmed", "verifier_summary": "Fresh scoped SQLi proof matched the hunter receipt",
-                        "key_findings": [], "tool_calls": 1, "error": None,
-                    }
+                    return {"candidate_id": cand.id, "title": cand.title,
+                            "status": "confirmed", "verifier_summary": "Fresh browser XSS proof matched the hunter receipt",
+                            "key_findings": [], "tool_calls": 1, "error": None}
+            failure = why or fresh_why or "XSS proof policy rejected the replay"
     except Exception:
-        logging.getLogger(__name__).exception(
-            "Deterministic SQLi verifier could not replay candidate %s", cand.id,
-        )
-    return None
+        logging.getLogger(__name__).exception("Deterministic XSS verifier could not replay candidate %s", cand.id)
+        failure = "Scoped XSS replay failed before verification completed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title, "status": "inconclusive",
+            "verifier_summary": failure, "key_findings": [], "tool_calls": 1, "error": None}
 
 
 def _brain(tools_manager: Any):
@@ -925,6 +1173,12 @@ def ingest_report_findings(
         for kf in findings[:6]:
             title = str(kf).strip()[:200]
             if not title or len(title) < 8:
+                continue
+            # Specialist diagnostics are not vulnerability claims. In
+            # particular, a failed lease/probe must never become a candidate.
+            if ("invalid_coverage_lease" in title.lower()
+                    or re.search(r"\b(?:returned|result:)\s+success\s*=\s*false\b", title, re.I)
+                    or re.search(r"\b(?:tool|probe)\s+(?:failed|error|denied)\b", title, re.I)):
                 continue
             cand = submit_candidate(
                 brain,

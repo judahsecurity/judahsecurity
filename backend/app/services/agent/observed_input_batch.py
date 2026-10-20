@@ -30,6 +30,20 @@ logger = logging.getLogger(__name__)
 _STALE_LEASE_REASONS = frozenset({
     "not_leased", "lease_mismatch", "lease_expired", "lease_changed",
 })
+_RETRYABLE_HANDOFF_ERRORS = frozenset({
+    "invalid_coverage_lease", "lease_changed", "missing_probe_evidence",
+    "First-pass probe timed out without a proof receipt",
+})
+
+
+def _retryable_first_pass(cell: dict[str, Any], now: float) -> bool:
+    reason = str(cell.get("first_pass_handoff_error") or "")
+    return bool(
+        cell.get("first_pass_outcome") == "unattempted"
+        and reason.split(":", 1)[0] in _RETRYABLE_HANDOFF_ERRORS
+        and int(cell.get("first_pass_attempts") or 0) < 2
+        and float(cell.get("first_pass_retry_at") or 0) <= now
+    )
 
 
 async def _invoke(manager: Any, name: str, kwargs: dict[str, Any]) -> Any:
@@ -73,6 +87,7 @@ def pending_first_pass_cells(brain: Any, *, target: str = "") -> list[dict[str, 
     scheme = urlsplit(active_origin).scheme if active_origin else ""
     cells = brain.get("coverage_cells", []) if isinstance(brain, dict) else getattr(brain, "coverage_cells", [])
     focus_paths = verified_input_paths(brain)
+    now = time.time()
     return sorted(
         (
             cell for cell in cells
@@ -89,7 +104,7 @@ def pending_first_pass_cells(brain: Any, *, target: str = "") -> list[dict[str, 
                 or (cell.get("status") == "leased"
                     and float(cell.get("lease_deadline") or 0) <= time.time())
             )
-            and not cell.get("first_pass_outcome")
+            and (not cell.get("first_pass_outcome") or _retryable_first_pass(cell, now))
             and not cell.get("candidate_id")
             and not cell.get("probe_artifact_ids")
             and not cell.get("service_probe_artifact_ids")
@@ -154,6 +169,11 @@ async def run_observed_input_batch(
             key=lambda name: (completed[name], 0 if name == "sqli" else 1),
         )
         selected = next(row for row in pending if row["specialist"] == specialist)
+        if _retryable_first_pass(selected, time.time()):
+            # Preserve the attempt count but allow the lease selector to take
+            # this exact cell for one more execution after the cooldown.
+            selected.pop("first_pass_outcome", None)
+            selected.pop("first_pass_handoff_error", None)
         leases = claim_coverage_cell_leases(
             brain, [specialist],
             allowed_observation_sources=OBSERVED_INPUT_SOURCES,
@@ -361,13 +381,20 @@ async def run_observed_input_batch(
                                and current.get("status") == "tested_clean"
                                and not current.get("lease_id"))
         if owns_lease or closed_with_receipt:
+            current["first_pass_attempts"] = int(current.get("first_pass_attempts") or 0) + 1
             current["first_pass_outcome"] = outcome
             current["first_pass_reason"] = reason[:300]
             current["first_pass_at"] = time.time()
             if outcome == "unattempted" and operation_name:
                 current["first_pass_handoff_error"] = reason[:300]
+                if (reason.split(":", 1)[0] in _RETRYABLE_HANDOFF_ERRORS
+                        and current["first_pass_attempts"] < 2):
+                    current["first_pass_retry_at"] = time.time() + 60
+                else:
+                    current.pop("first_pass_retry_at", None)
             else:
                 current.pop("first_pass_handoff_error", None)
+                current.pop("first_pass_retry_at", None)
             if evidence_id:
                 current["first_pass_evidence_id"] = evidence_id
             if candidate_id:

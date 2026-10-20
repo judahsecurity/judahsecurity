@@ -288,6 +288,18 @@ def test_ingest_lifts_hunter_key_findings():
     assert brain.candidates[0]["status"] == "pending"
 
 
+def test_ingest_does_not_promote_failed_probe_to_vulnerability_candidate():
+    brain = EngagementBrain(target="https://app.example.com")
+    report = SimpleNamespace(
+        specialist="xss", mission="Test https://app.example.com/catalog",
+        summary="Probe handoff failed", key_findings=[
+            "scoped_input_probe_assigned returned success=false, error=invalid_coverage_lease",
+        ],
+    )
+    assert ingest_report_findings(brain, [report]) == []
+    assert brain.candidates == []
+
+
 def test_untested_denom_blocks_complete():
     brain = EngagementBrain(target="https://app.example.com")
     brain.hypotheses = [_killed_card()]

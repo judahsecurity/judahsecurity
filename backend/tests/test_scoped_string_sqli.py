@@ -634,7 +634,10 @@ def test_malformed_verifier_proof_is_inconclusive_not_a_crash(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_independent_verifier_replays_exact_observed_string_sqli_before_model(monkeypatch):
+@pytest.mark.parametrize("linked_at_submission", [False, True])
+async def test_independent_verifier_replays_exact_observed_string_sqli_before_model(
+    monkeypatch, linked_at_submission,
+):
     manager = ASMToolsManager()
     manager._fallback_target = "https://app.example.test"
     register_scope(manager, "app.example.test")
@@ -652,7 +655,8 @@ async def test_independent_verifier_replays_exact_observed_string_sqli_before_mo
     cell = next(row for row in brain.coverage_cells if row.get("test_type") == "sqli")
     candidate = submit_candidate(
         brain, title="SQL injection in catalog category", target=TARGET,
-        vulnerability_class="sql_injection", coverage_cell_id=cell["id"],
+        vulnerability_class="sql_injection",
+        coverage_cell_id=cell["id"] if linked_at_submission else "",
         identity="anonymous", parameter="query:category", evidence_ids=[hunter],
     )
     manager._engagement_brain = brain.to_dict()
@@ -672,6 +676,7 @@ async def test_independent_verifier_replays_exact_observed_string_sqli_before_mo
         [candidate], llm=None, tools_manager=manager, targets=[TARGET],
     )
     assert reports[0]["status"] == "confirmed"
+    assert manager._engagement_brain["candidates"][0]["coverage_cell_id"] == cell["id"]
     assert calls == [("scoped_string_sqli", {
         "url": TARGET, "parameter": "category", "identity": "anonymous",
     })]
@@ -679,3 +684,123 @@ async def test_independent_verifier_replays_exact_observed_string_sqli_before_mo
         manager._verify_receipts, title=candidate.title, target=TARGET,
         tools_manager=manager,
     )[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("candidate_target", [TARGET, "https://app.example.test:443/catalog"])
+async def test_candidate_handoff_links_real_sql_proof_to_observed_cell(monkeypatch, candidate_target):
+    manager = ASMToolsManager()
+    brain = EngagementBrain(target="https://app.example.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "host": "app.example.test", "path": "/catalog",
+        "name": "category", "location": "query", "identity": "anonymous",
+        "source": "browser_link", "testable": True,
+    }])
+    manager._engagement_brain = brain.to_dict()
+    proof = _proof(monkeypatch, "12345")
+    proof["target"] = candidate_target
+    proof_id = evidence_store(manager).record(
+        "scoped_string_sqli", proof,
+        target=candidate_target, identity="anonymous",
+    )
+    await manager.submit_finding_candidate(
+        title="SQL injection in catalog category", target=candidate_target,
+        evidence_ids=[proof_id], vulnerability_class="sql_injection",
+    )
+    cell = next(row for row in brain.coverage_cells if row.get("test_type") == "sqli")
+    assert manager._engagement_brain["candidates"][0]["coverage_cell_id"] == cell["id"]
+    assert manager._engagement_brain["candidates"][0]["parameter"] == "query:category"
+
+
+@pytest.mark.asyncio
+async def test_sql_verifier_inconclusive_replay_does_not_fall_into_model_loop(monkeypatch):
+    manager = ASMToolsManager()
+    store = evidence_store(manager)
+    hunter = store.record(
+        "scoped_string_sqli", _proof(monkeypatch, "12345"),
+        target=TARGET, identity="anonymous",
+    )
+    brain = EngagementBrain(target="https://app.example.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "host": "app.example.test", "path": "/catalog",
+        "name": "category", "location": "query", "identity": "anonymous",
+        "source": "browser_link", "testable": True,
+    }])
+    cell = next(row for row in brain.coverage_cells if row.get("test_type") == "sqli")
+    candidate = submit_candidate(
+        brain, title="SQL injection in catalog category", target=TARGET,
+        vulnerability_class="sql_injection", coverage_cell_id=cell["id"],
+        evidence_ids=[hunter],
+    )
+    manager._engagement_brain = brain.to_dict()
+    calls = []
+
+    async def execute(name, args):
+        calls.append(name)
+        return {"success": True, "output": json.dumps({"proof_confirmed": False})}
+
+    manager.execute = execute
+    reports = await run_independent_verifiers(
+        [candidate], llm=None, tools_manager=manager, targets=[TARGET],
+    )
+    assert calls == ["scoped_string_sqli"]
+    assert reports[0]["status"] == "inconclusive"
+    assert "did not confirm" in reports[0]["verifier_summary"]
+
+
+def _numeric_receipt(nonce):
+    names = ("baseline_first", "true_first", "false_first",
+             "true_second", "false_second", "baseline_last")
+    hashes = ("a" * 64, "a" * 64, "b" * 64,
+              "a" * 64, "b" * 64, "a" * 64)
+    return {
+        "operation": "sqli_boolean_numeric", "proof_recipe": "numeric_and_boolean_v1",
+        "proof_confirmed": True, "method": "GET", "location": "query",
+        "target": TARGET, "parameter": "category", "nonce": nonce,
+        "checks": {name: {"status": 200, "content_type": "text/html",
+                          "truncated": False, "redirected": False,
+                          "body_sha256": digest}
+                   for name, digest in zip(names, hashes)},
+    }
+
+
+@pytest.mark.asyncio
+async def test_numeric_sql_proof_handoff_and_independent_replay():
+    manager = ASMToolsManager()
+    store = evidence_store(manager)
+    hunter = store.record(
+        "scoped_numeric_sqli", _numeric_receipt("12345"),
+        target=TARGET, identity="anonymous",
+    )
+    brain = EngagementBrain(target="https://app.example.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "host": "app.example.test", "path": "/catalog",
+        "name": "category", "location": "query", "identity": "anonymous",
+        "source": "browser_link", "testable": True,
+    }])
+    manager._engagement_brain = brain.to_dict()
+    await manager.submit_finding_candidate(
+        title="Numeric SQL injection in category", target=TARGET,
+        evidence_ids=[hunter], vulnerability_class="sql_injection",
+    )
+    candidate = manager._engagement_brain["candidates"][0]
+    assert candidate["coverage_cell_id"]
+    calls = []
+
+    async def execute(name, args):
+        calls.append(name)
+        assert args == {"url": TARGET, "parameter": "category", "identity": "anonymous"}
+        proof = _numeric_receipt("67890")
+        artifact_id = store.record(
+            "scoped_numeric_sqli", proof, target=TARGET, identity="anonymous",
+        )
+        return {"success": True, "output": json.dumps({**proof, "evidence_id": artifact_id})}
+
+    manager.execute = execute
+    from app.services.agent.independent_verify import candidate_from_dict
+    reports = await run_independent_verifiers(
+        [candidate_from_dict(candidate)], llm=None, tools_manager=manager,
+        targets=[TARGET],
+    )
+    assert calls == ["scoped_numeric_sqli"]
+    assert reports[0]["status"] == "confirmed"

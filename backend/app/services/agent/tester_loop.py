@@ -287,9 +287,10 @@ def _observed_input_batch_step(
     # The queue count can stay flat or grow when crawling discovers new inputs
     # while a batch is running. Compare the actual pending work instead.
     pending_signature = hashlib.sha256(json.dumps(sorted(
-        str(cell.get("id") or "|".join(str(cell.get(key) or "") for key in (
+        (str(cell.get("id") or "|".join(str(cell.get(key) or "") for key in (
             "host", "method", "path", "parameter", "test_type",
-        ))) for cell in pending_cells
+        ))) + ":" + str(cell.get("first_pass_attempts") or 0))
+        for cell in pending_cells
     ), separators=(",", ":")).encode()).hexdigest()[:16]
     prior = next((
         step for step in reversed(trace)

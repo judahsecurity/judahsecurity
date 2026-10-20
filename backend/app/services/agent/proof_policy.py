@@ -215,6 +215,7 @@ def validate_proof(
         if (first.get("operation") != second.get("operation")
                 or first.get("operation") != "check_xss"
                 or first.get("executed") is not True or second.get("executed") is not True
+                or hunter["identity"] != verifier["identity"]
                 or not first.get("nonce") or first.get("nonce") == second.get("nonce")
                 or first.get("target_template") != second.get("target_template")):
             return False, "Two fresh browser execution nonces are required"

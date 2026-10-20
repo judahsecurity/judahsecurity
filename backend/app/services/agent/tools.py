@@ -8549,7 +8549,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         matching proof validator exists. Hunters must not create_finding.
         """
         from app.services.agent.engagement_brain import engagement_brain_from_dict
-        from app.services.agent.independent_verify import submit_candidate
+        from app.services.agent.independent_verify import (
+            observed_sql_cell_for_proof, observed_xss_cell_for_proof,
+            submit_candidate,
+        )
 
         self._require_independent_verify = True
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
@@ -8557,7 +8560,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if evidence_ids:
             from app.services.agent.evidence_store import evidence_store
 
-            evidence_rows = [evidence_store(self).records.get(item) for item in evidence_ids]
+            store = evidence_store(self)
+            evidence_rows = [store.records.get(item) for item in evidence_ids]
             inferred_cells = {
                 str(row.get("coverage_cell_id") or "")
                 for row in evidence_rows
@@ -8570,6 +8574,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 )
             if not coverage_cell_id and len(inferred_cells) == 1:
                 coverage_cell_id = inferred_cells.pop()
+            if not coverage_cell_id:
+                sql_cell = observed_sql_cell_for_proof(
+                    brain, store, target=target, evidence_ids=evidence_ids,
+                )
+                xss_cell = observed_xss_cell_for_proof(
+                    brain, store, target=target, evidence_ids=evidence_ids,
+                )
+                linked = [row for row in (sql_cell, xss_cell) if row]
+                if len(linked) == 1:
+                    coverage_cell_id = str(linked[0]["id"])
         if coverage_cell_id:
             from app.services.agent.coverage_cells import (
                 migrate_coverage_cells,

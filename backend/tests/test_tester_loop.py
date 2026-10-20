@@ -468,6 +468,27 @@ def test_new_inputs_keep_first_pass_running_when_pending_count_is_unchanged(prio
     assert second["tool_args"]["pending_batch_signature"] != first["tool_args"]["pending_batch_signature"]
 
 
+def test_retryable_handoff_gets_new_batch_signature_after_cooldown():
+    cell = {
+        "id": "xss-search", "host": "app.example.com", "method": "GET",
+        "path": "/catalog", "parameter": "query:searchTerm",
+        "source": "parameter_inventory", "observation_source": "browser_link",
+        "specialist": "xss", "test_type": "xss", "status": "untested",
+    }
+    state = {
+        "target_info": {"primary_target": "https://app.example.com"},
+        "engagement_brain": {"coverage_cells": [cell]},
+    }
+    first = _observed_input_batch_step(state, [], "surface-a")
+    trace = [{"tool_name": "probe_observed_input_batch", "success": True,
+              "tool_args": first["tool_args"]}]
+    cell.update(first_pass_outcome="unattempted", first_pass_attempts=1,
+                first_pass_handoff_error="invalid_coverage_lease: lease_changed",
+                first_pass_retry_at=0)
+    second = _observed_input_batch_step(state, trace, "surface-a")
+    assert second["tool_args"]["pending_batch_signature"] != first["tool_args"]["pending_batch_signature"]
+
+
 def test_link_discovered_input_enters_observed_first_pass():
     target = "https://app.example.com"
     state = {
