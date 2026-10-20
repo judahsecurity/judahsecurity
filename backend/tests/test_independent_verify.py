@@ -440,6 +440,153 @@ def test_methodology_progress_surfaces_inconclusive_verdict_reason():
     assert "Candidates inconclusive: 1" in progress["summary"]
 
 
+def test_refutation_without_counterevidence_keeps_proof_gap_open():
+    from app.services.agent.evidence_store import VerificationRun, verification_run
+    from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+    brain = EngagementBrain(target="https://app.example.com")
+    brain.coverage_cells = [{"id": "cell-1", "status": "in_focus"}]
+    candidate = submit_candidate(
+        brain, title="Possible IDOR", target="https://app.example.com/api/orders/1",
+        coverage_cell_id="cell-1",
+    )
+    manager = SimpleNamespace(_engagement_brain=brain.to_dict(), _verify_receipts={})
+    token = verification_run.set(VerificationRun("verifier-1", candidate.id, candidate.revision, candidate.nonce))
+    try:
+        result = apply_verdict(
+            manager, candidate_id=candidate.id, verdict="refuted",
+            summary="Could not reproduce the claimed read",
+        )
+    finally:
+        verification_run.reset(token)
+
+    assert result.status == "inconclusive"
+    assert result.counterevidence == {}
+    assert "structured counterevidence" in result.proof_gap["reason"]
+    assert manager._engagement_brain["coverage_cells"][0]["status"] == "inconclusive"
+    progress = methodology_progress(engagement_brain_from_dict(manager._engagement_brain))
+    assert progress["open_proof_gaps"][0]["next_step"]
+
+
+@pytest.mark.parametrize(
+    "response_path,expected",
+    [("/api/orders/1", "refuted"), ("/login", "inconclusive")],
+)
+def test_fresh_counterevidence_can_refute_exact_candidate_path(response_path, expected):
+    from app.services.agent.evidence_store import EvidenceStore, VerificationRun, verification_run
+
+    target = "https://app.example.com/api/orders/1"
+    brain = EngagementBrain(target="https://app.example.com")
+    brain.coverage_cells = [{"id": "cell-1", "status": "in_focus"}]
+    candidate = submit_candidate(
+        brain, title="Possible IDOR", target=target, coverage_cell_id="cell-1",
+    )
+    store = EvidenceStore()
+    manager = SimpleNamespace(
+        _engagement_brain=brain.to_dict(), _verify_receipts={}, _evidence_store=store,
+    )
+    token = verification_run.set(VerificationRun("verifier-1", candidate.id, candidate.revision, candidate.nonce))
+    try:
+        artifact_id = store.record(
+            "http_exchange",
+            {"request": {"url": target}, "response": {
+                "status": 403, "url": "https://app.example.com" + response_path,
+            }},
+            target=target, success=False,
+        )
+        result = apply_verdict(
+            manager, candidate_id=candidate.id, verdict="refuted",
+            summary="Attacker request was denied by the object owner check",
+            evidence_ids=[artifact_id],
+            proof={
+                "kind": "counterevidence", "artifact_id": artifact_id,
+                "control": "object owner authorization", "attacker_path": target,
+                "response_status": 403, "observation": "403 on cross-owner read",
+            },
+        )
+    finally:
+        verification_run.reset(token)
+
+    assert result.status == expected
+    if expected == "refuted":
+        assert result.counterevidence["artifact_id"] == artifact_id
+        assert result.proof_gap == {}
+    else:
+        assert result.counterevidence == {}
+        assert result.proof_gap["reason"]
+    assert manager._engagement_brain["coverage_cells"][0]["status"] == (
+        "tested_clean" if expected == "refuted" else "inconclusive"
+    )
+
+
+def test_refutation_cannot_cite_another_verifier_run():
+    from app.services.agent.evidence_store import EvidenceStore, VerificationRun, verification_run
+
+    target = "https://app.example.com/api/orders/1"
+    brain = EngagementBrain(target="https://app.example.com")
+    candidate = submit_candidate(brain, title="Possible IDOR", target=target)
+    store = EvidenceStore()
+    manager = SimpleNamespace(
+        _engagement_brain=brain.to_dict(), _verify_receipts={}, _evidence_store=store,
+    )
+    old_token = verification_run.set(VerificationRun("old-run", candidate.id, candidate.revision, candidate.nonce))
+    try:
+        artifact_id = store.record(
+            "http_exchange",
+            {"request": {"url": target}, "response": {"status": 403}},
+            target=target, success=False,
+        )
+    finally:
+        verification_run.reset(old_token)
+    token = verification_run.set(VerificationRun("new-run", candidate.id, candidate.revision, candidate.nonce))
+    try:
+        result = apply_verdict(
+            manager, candidate_id=candidate.id, verdict="refuted",
+            evidence_ids=[artifact_id],
+            proof={
+                "kind": "counterevidence", "artifact_id": artifact_id,
+                "control": "object owner authorization", "attacker_path": target,
+                "response_status": 403, "observation": "403 on cross-owner read",
+            },
+        )
+    finally:
+        verification_run.reset(token)
+    assert result.status == "inconclusive"
+    assert "fresh, complete HTTP exchange" in result.proof_gap["reason"]
+
+
+def test_trusted_refuted_workflow_receipt_closes_candidate():
+    from app.services.agent.evidence_store import VerificationRun, verification_run
+
+    target = "https://app.example.com/api/orders/1"
+    brain = EngagementBrain(target="https://app.example.com")
+    candidate = submit_candidate(
+        brain, title="Unauthorized order mutation", target=target, hypothesis_id="authz-1",
+    )
+    receipt = SimpleNamespace(
+        run_id="proof-1", verdict="refuted", candidate_id=candidate.id,
+        candidate_revision=candidate.revision, verifier_run_id="verifier-1",
+        target=target, hypothesis_id="authz-1", evidence_ids=("setup", "attack", "verify"),
+        strategy="authorization_mutation", attack_url=target,
+        reason="Owner readback shows the controlled value unchanged",
+    )
+    manager = SimpleNamespace(
+        _engagement_brain=brain.to_dict(), _verify_receipts={},
+        _proof_engine=SimpleNamespace(receipts={"proof-1": receipt}),
+    )
+    token = verification_run.set(VerificationRun("verifier-1", candidate.id, candidate.revision, candidate.nonce))
+    try:
+        result = apply_verdict(
+            manager, candidate_id=candidate.id, verdict="refuted",
+            evidence_ids=list(receipt.evidence_ids),
+            proof={"kind": "workflow", "run_id": "proof-1"},
+        )
+    finally:
+        verification_run.reset(token)
+    assert result.status == "refuted"
+    assert result.counterevidence["observation"] == receipt.reason
+
+
 def test_candidate_class_survives_serialization_and_revision():
     brain = EngagementBrain(target="https://app.example.com")
     candidate = submit_candidate(
