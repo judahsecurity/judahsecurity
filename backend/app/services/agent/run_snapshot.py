@@ -94,6 +94,8 @@ def _recover_brain_after_restart(brain: Any) -> Any:
             verifier_run_id="",
             verified_at="",
             verifier_evidence="",
+            counterevidence={},
+            proof_gap={},
             verifier_summary=(
                 "Restart recovery: durable verifier receipt was incomplete; reverify"
             ),

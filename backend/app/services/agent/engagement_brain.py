@@ -3529,10 +3529,15 @@ def methodology_progress(
         if status in candidate_status:
             candidate_status[status] += 1
         if status == "inconclusive":
+            gap = row.get("proof_gap") or {}
+            if not isinstance(gap, dict):
+                gap = {}
             inconclusive_candidates.append({
                 "id": row.get("id", ""),
                 "title": row.get("title", ""),
-                "reason": str(row.get("verifier_summary") or "No supported proof recorded")[:200],
+                "reason": str(gap.get("reason") or row.get("verifier_summary") or
+                              "No supported proof recorded")[:200],
+                "next_step": str(gap.get("next_step") or "Collect a fresh supported proof")[:200],
             })
     unpublished_candidates = [
         c for c in (brain.candidates or [])
@@ -3619,6 +3624,7 @@ def methodology_progress(
         "pending_candidates": len(pending_candidates),
         "candidate_verdicts": candidate_status,
         "inconclusive_candidates": inconclusive_candidates[:12],
+        "open_proof_gaps": inconclusive_candidates[:12],
         "unpublished_candidates": len(unpublished_candidates),
         "pending_risk_assessments": len(pending_ras),
         "blockers": blockers,
@@ -3656,6 +3662,11 @@ def format_methodology_progress_for_prompt(progress: Dict[str, Any]) -> str:
         lines.append(
             f"Pending independent_verify: {progress.get('pending_candidates')} candidate(s). "
             "Do not create_finding until confirmed."
+        )
+    for gap in (progress.get("open_proof_gaps") or [])[:6]:
+        lines.append(
+            f"Open proof gap [{gap.get('id')}]: {gap.get('reason')}. "
+            f"Next: {gap.get('next_step')}. Do not report as a verified finding or a clean test."
         )
     if progress.get("unpublished_candidates"):
         lines.append(

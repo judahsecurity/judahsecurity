@@ -54,6 +54,8 @@ class FindingCandidate:
     status: str = "pending"  # pending | confirmed | refuted | inconclusive
     verifier_evidence: str = ""
     verifier_summary: str = ""
+    counterevidence: Dict[str, str] = field(default_factory=dict)
+    proof_gap: Dict[str, str] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     verified_at: str = ""
 
@@ -598,8 +600,15 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         "A product version within a CVE's published range is an applicability lead, "
         "not proof of the vulnerability. Mark inconclusive until a class-specific "
         "validator demonstrates the claimed behavior. "
-        "refuted = control holds or the finder hallucinated. "
-        "inconclusive = you could not re-derive and must not rubber-stamp."
+        "Close every candidate as confirmed, refuted, or inconclusive with an explicit proof gap. "
+        "Refuted requires a fresh exchange on the claimed attacker path and proof "
+        "{kind: counterevidence, artifact_id, control, attacker_path, "
+        "response_status, observation}; "
+        "name the control that held and what the response showed. A fresh trusted "
+        "workflow receipt with verdict refuted may instead use proof {kind: workflow, run_id}. "
+        "A failed replay, timeout, or absence of a callback alone is inconclusive. "
+        "For inconclusive include summary explaining the missing proof and "
+        "proof {next_step: specific follow-up test}. Never call an untested path clean."
     )
 
 
@@ -634,7 +643,9 @@ async def run_independent_verifiers(
                 mission += (f"\nA controlled workflow is registered for hypothesis {cand.hypothesis_id}. "
                             "Call run_authorization_proof with this hypothesis_id and no plan to reproduce it. "
                             "Use the returned receipt's evidence_ids and proof={kind: workflow, run_id: receipt.run_id} "
-                            "in record_verify_verdict. A prior hunter receipt is not valid in this verifier run.")
+                            "in record_verify_verdict for a confirmed or refuted workflow verdict. "
+                            "An inconclusive workflow receipt must stay inconclusive with a specific next_step. "
+                            "A prior hunter receipt is not valid in this verifier run.")
             from app.services.agent.evidence_store import VerificationRun, verification_run
             run = VerificationRun(uuid.uuid4().hex, cand.id, cand.revision, cand.nonce)
             token = verification_run.set(run)
@@ -925,6 +936,96 @@ def _candidate(brain: Any, cid: str) -> Optional[FindingCandidate]:
     return None
 
 
+def _validate_counterevidence(
+    tools_manager: Any,
+    candidate: FindingCandidate,
+    run: Any,
+    proof: Dict[str, Any],
+    evidence_ids: List[str],
+) -> tuple[Dict[str, str], str]:
+    """A clean verdict needs an execution-owned check of the claimed path."""
+    from app.services.agent.evidence_store import evidence_store, origin
+
+    if proof.get("kind") == "workflow":
+        run_id = proof.get("run_id")
+        if not isinstance(run_id, str):
+            return {}, "A fresh refuted workflow receipt for this candidate is required"
+        receipt = (getattr(getattr(tools_manager, "_proof_engine", None), "receipts", {})
+                   or {}).get(run_id)
+        if (receipt and receipt.verdict == "refuted"
+                and receipt.candidate_id == candidate.id
+                and receipt.candidate_revision == candidate.revision
+                and receipt.verifier_run_id == run.id
+                and receipt.target == candidate.target
+                and receipt.hypothesis_id == candidate.hypothesis_id
+                and tuple(evidence_ids) == receipt.evidence_ids):
+            return {
+                "kind": "workflow",
+                "control": receipt.strategy,
+                "attacker_path": receipt.attack_url,
+                "observation": receipt.reason,
+                "artifact_id": receipt.run_id,
+            }, ""
+        return {}, "A fresh refuted workflow receipt for this candidate is required"
+
+    if proof.get("kind") != "counterevidence":
+        return {}, "Refutation requires structured counterevidence on the claimed attacker path"
+    details = {
+        key: str(proof.get(key) or "").strip()
+        for key in ("control", "attacker_path", "observation", "artifact_id")
+    }
+    if not all(details.values()):
+        return {}, "Refutation must name the control, attacker path, observation, and artifact ID"
+    artifact_id = details["artifact_id"]
+    if artifact_id not in evidence_ids:
+        return {}, "Counterevidence artifact must be cited in evidence_ids"
+    store = evidence_store(tools_manager)
+    if artifact_id in store._historical_ids:
+        return {}, "Counterevidence must come from this fresh verifier run"
+    row = store.records.get(artifact_id)
+    if (not row or row.get("kind") != "http_exchange"
+            or row.get("candidate_id") != candidate.id
+            or row.get("revision") != candidate.revision
+            or row.get("run_id") != run.id
+            or row.get("truncated")
+            or time.time() - row.get("created_at", 0) > 3600):
+        return {}, "Refutation requires a fresh, complete HTTP exchange from this verifier"
+    for cited_id in evidence_ids:
+        cited = store.records.get(cited_id)
+        if (cited_id in store._historical_ids or not cited
+                or cited.get("candidate_id") != candidate.id
+                or cited.get("revision") != candidate.revision
+                or cited.get("run_id") != run.id
+                or cited.get("truncated")):
+            return {}, "All counterevidence IDs must come from this fresh verifier run"
+    payload = row.get("payload") or {}
+    response = payload.get("response") if isinstance(payload, dict) else None
+    response = response if isinstance(response, dict) else {}
+    request = payload.get("request") if isinstance(payload, dict) else None
+    request = request if isinstance(request, dict) else {}
+    if not isinstance(response.get("status"), int):
+        return {}, "Counterevidence HTTP exchange has no recorded response status"
+    if proof.get("response_status") != response["status"]:
+        return {}, "Counterevidence must state the recorded HTTP response status"
+    try:
+        claimed = urlsplit(candidate.target)
+        checked = urlsplit(row["target"])
+        described = urlsplit(details["attacker_path"])
+        if (origin(row["target"]) != origin(candidate.target)
+                or origin(details["attacker_path"]) != origin(candidate.target)
+                or details["attacker_path"] != row["target"]
+                or request.get("url") != row["target"]
+                or origin(response.get("url") or "") != origin(candidate.target)
+                or urlsplit(response.get("url") or "").path != claimed.path
+                or checked.path != claimed.path
+                or described.path != checked.path):
+            return {}, "Counterevidence did not check the candidate endpoint"
+    except (TypeError, ValueError):
+        return {}, "Counterevidence needs an absolute in-scope attacker path"
+    return {"kind": "counterevidence", **details,
+            "response_status": str(response["status"])}, ""
+
+
 def apply_verdict(
     tools_manager: Any,
     *,
@@ -991,13 +1092,33 @@ def apply_verdict(
                 if not ok or not evidence.strip():
                     verdict = "inconclusive"
                     summary = why or "A supported impact explanation is required"
+            elif verdict == "refuted":
+                counterevidence, why = _validate_counterevidence(
+                    tools_manager, c, run, proof, evidence_ids or [],
+                )
+                if why:
+                    verdict = "inconclusive"
+                    summary = why + (f"; verifier note: {summary}" if summary else "")
+                else:
+                    c.counterevidence = counterevidence
             c.status = verdict
+            if verdict != "refuted":
+                c.counterevidence = {}
+            c.proof_gap = (
+                {
+                    "reason": (summary or evidence or "Verifier did not establish impact")[:2000],
+                    "next_step": str(proof.get("next_step") or
+                                     "Run a fresh, targeted impact or control check on the claimed path")[:500],
+                }
+                if verdict == "inconclusive" else {}
+            )
             c.verifier_run_id = run.id
             c.evidence_ids = list(dict.fromkeys([*c.evidence_ids, *(evidence_ids or [])]))
             if (proof or {}).get("kind") == "workflow":
                 c.proof_run_id = str((proof or {}).get("run_id") or "")
             c.verifier_evidence = (evidence or "")[:2000]
-            c.verifier_summary = (summary or evidence or "")[:2000]
+            c.verifier_summary = (summary or evidence or
+                                  c.counterevidence.get("observation", ""))[:2000]
             c.verified_at = datetime.now(timezone.utc).isoformat()
             cand = c
         updated.append(c.to_dict())
@@ -1031,11 +1152,13 @@ def apply_verdict(
             if cand.proof_run_id:
                 cell["proof_run_id"] = cand.proof_run_id
             if verdict == "refuted":
-                cell.update(status="tested_clean", reason="Independent verification refuted the candidate")
+                cell.update(status="tested_clean", reason=cand.verifier_summary or
+                            cand.counterevidence.get("observation", "Independent control held"))
             elif verdict == "confirmed":
                 cell.update(status="in_focus", reason="Confirmed candidate awaits publication")
             else:
-                cell.update(status="inconclusive", reason="Independent verification was inconclusive")
+                cell.update(status="inconclusive", reason=cand.proof_gap.get("reason") or
+                            "Independent verification was inconclusive")
     if cand.proof_escalation_id:
         from app.services.agent.signal_escalation import apply_verifier_result
 
@@ -1140,6 +1263,7 @@ def submit_candidate(
                     c.status = "pending"
                     c.nonce = new_nonce()
                     c.verifier_evidence = c.verifier_summary = c.verified_at = ""
+                    c.counterevidence = c.proof_gap = {}
                     c.verifier_run_id = ""
                     brain.verification_receipts.pop(
                         verify_receipt_key(c.title, c.target), None

@@ -76,6 +76,18 @@ Differentials remain leads. A service proof signal remains subject to the
 fresh verifier and publication gate above. Unsupported input shapes remain
 open rather than being marked tested.
 
+## Candidate verification closure
+
+The built-in independent verifier closes each candidate as confirmed, refuted,
+or inconclusive. Confirmation requires a supported class-specific impact proof
+from the fresh verifier run. Refutation requires a fresh HTTP exchange on the
+candidate endpoint with a named control, exact attacker path, recorded response
+status, and observed result; a trusted refuted authorization workflow receipt
+also qualifies. A failed replay or missing callback is inconclusive, not a
+clean test. The candidate records the missing proof and next test, and the
+methodology progress prompt surfaces these open proof gaps. Only an evidenced
+refutation can mark its coverage cell `tested_clean`.
+
 ## JavaScript and API handoff
 
 Browser requests and `browser_inspect_js` supply first-party script URLs. Aegis
