@@ -1,21 +1,26 @@
 """Discovered inputs must become exact, durable specialist work items."""
 
+import base64
 import json
 from types import SimpleNamespace
 
 import pytest
-
 from app.services.agent.capability_map import build_capability_map_from_dict
 from app.services.agent.coverage_cells import (
     claim_coverage_cell_leases,
     parameter_test_funnel,
     release_coverage_cell_lease,
+    scoped_replay_eligible,
     seed_parameter_coverage_cells,
 )
-from app.services.agent.engagement_brain import EngagementBrain, engagement_brain_from_dict
+from app.services.agent.engagement_brain import (
+    EngagementBrain,
+    engagement_brain_from_dict,
+)
+from app.services.agent.observed_input_batch import pending_first_pass_cells
 from app.services.agent.operation_directive import directives_from_hypotheses
 from app.services.agent.parameter_inventory import collect_parameter_inventory
-from app.services.agent.observed_input_batch import pending_first_pass_cells
+from app.services.agent.scoped_assessment.body_probe import plan_observed_body
 from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES, forced_next_step
 from app.services.agent.tools import ASMToolsManager
 
@@ -48,13 +53,79 @@ def test_inventory_keeps_endpoint_location_and_drops_values_and_offscope_inputs(
     assert ("GET", "/search", "query", "q") in keys
     assert ("POST", "/comment", "body_form", "message") in keys
     assert ("GET", "/api/items", "query", "id") in keys
-    assert ("POST", "/api/profile", "body_json", "user.display_name") in keys
+    assert ("POST", "/api/profile", "body_json", "/user/display_name") in keys
     assert ("POST", "/api/order", "body_json", "/items/*/sku") in keys
     assert not any(r["name"] == "offscope" for r in rows)
     assert not next(r for r in rows if r["name"] == "csrf_token")["testable"]
-    assert next(r for r in rows if r["name"] == "author_id")["testable"]
+    assert next(r for r in rows if r["name"] == "/author_id")["testable"]
     assert "private-value" not in str(rows)
     assert "sensitive-value" not in str(rows)
+
+
+def test_observed_link_query_without_query_keys_becomes_numeric_test_work():
+    cmap = {"target": "https://app.test", "discovered_links": [
+        {"url": "https://app.test/items?productId=17&csrf_token=secret"},
+        {"url": "https://outside.test/items?offscope=1"},
+    ]}
+    rows = collect_parameter_inventory(cmap)
+    product = next(row for row in rows if row["name"] == "productId")
+    assert product["value_type"] == "positive_integer"
+    assert product["source"] == "browser_link"
+    assert next(row for row in rows if row["name"] == "csrf_token")["testable"] is False
+    assert not any(row["name"] == "offscope" for row in rows)
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, rows)
+    assert any(cell["parameter"] == "query:productId" and cell["value_type"] == "positive_integer"
+               for cell in pending_first_pass_cells(brain, target="https://app.test"))
+    assert "secret" not in str(rows)
+
+
+def test_captured_json_fields_use_replayable_pointers_including_arrays():
+    body = {"filter": {"items": [{"sku": "ABC"}, {"sku": "DEF"}]},
+            "user/name": "canary"}
+    cmap = {"target": "https://app.test", "api_samples": [{
+        "method": "POST", "url": "https://app.test/api/search",
+        "body": body, "artifact_id": "capture-1", "identity": "user_a",
+    }]}
+    rows = collect_parameter_inventory(cmap)
+    names = {row["name"] for row in rows}
+    assert {"/filter/items/0/sku", "/filter/items/1/sku", "/user~1name"} <= names
+    assert all(row["artifact_id"] == "capture-1" and row["identity"] == "user_a"
+               for row in rows)
+    captured = json.dumps({
+        "method": "POST", "resource_type": "fetch", "url": "https://app.test/api/search",
+        "request_content_type": "application/json",
+        "request_body_base64": base64.b64encode(json.dumps(body).encode()).decode(),
+    }).encode()
+    for name in names:
+        _, _, original, mutated = plan_observed_body(
+            captured, parameter=name, allowed_origins=["https://app.test"],
+        )
+        assert original != mutated
+    assert "ABC" not in str(rows) and "DEF" not in str(rows)
+
+
+def test_captured_json_pointer_joins_private_browser_replay():
+    cmap = {"target": "https://app.test", "api_samples": [{
+        "method": "POST", "url": "https://app.test/api/profile",
+        "body": {"user": {"display_name": "private-value"}},
+        "artifact_id": "public-sample",
+    }], "parameter_inventory": [{
+        "method": "POST", "path": "/api/profile", "name": "/user/display_name",
+        "location": "body_json", "source": "browser_traffic",
+        "artifact_id": "private-capture",
+    }]}
+    rows = [row for row in collect_parameter_inventory(cmap)
+            if row["name"] == "/user/display_name"]
+    assert len(rows) == 1
+    assert rows[0]["source"] == "browser_traffic"
+    assert rows[0]["artifact_id"] == "private-capture"
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, rows)
+    checks = [cell for cell in pending_first_pass_cells(brain, target="https://app.test")
+              if cell["parameter"] == "body_json:/user/display_name"]
+    assert len(checks) == 2
+    assert all(scoped_replay_eligible(cell) for cell in checks)
 
 
 @pytest.mark.asyncio
