@@ -282,8 +282,13 @@ def _observed_input_batch_step(
     pending_cells = pending_first_pass_cells(
         state.get("engagement_brain") or {}, target=primary_web_target(state),
     )
-    if not signature or not pending_cells:
+    if not pending_cells:
         return None
+    # A saved coverage queue can outlive the capability-map inventory used to
+    # create its surface signature. Resume its exact cells instead of silently
+    # handing them back to the model when that inventory is absent.
+    if not signature:
+        signature = "saved-coverage"
     # The queue count can stay flat or grow when crawling discovers new inputs
     # while a batch is running. Compare the actual pending work instead.
     pending_signature = hashlib.sha256(json.dumps(sorted(
@@ -539,6 +544,35 @@ def _observed_input_wave(
     }
 
 
+def _unprobed_class_cells(
+    state: Dict[str, Any], target: str,
+) -> List[Dict[str, Any]]:
+    """Applicable non-SQLi/XSS work without a live probe receipt."""
+    from urllib.parse import urlsplit
+
+    from app.services.agent.coverage_cells import CELL_OPEN
+    from app.services.agent.parameter_inventory import _origin
+
+    active_origin = _origin(target)
+    if not active_origin:
+        return []
+    scheme = urlsplit(active_origin).scheme
+    return [
+        row
+        for row in ((state.get("engagement_brain") or {}).get("coverage_cells") or [])
+        if isinstance(row, dict)
+        and row.get("source") in {"parameter_inventory", "surface_applicability", "js_inventory"}
+        and row.get("test_type") not in {"xss", "sqli", "js_secret_review"}
+        and row.get("status") in {*CELL_OPEN, "leased", "blocked"}
+        and row.get("specialist") not in {"", None, "sqli", "js_secrets"}
+        and (not row.get("host") or _origin(f"{scheme}://{row['host']}") == active_origin)
+        and not (row.get("first_pass_outcome") or row.get("candidate_id")
+                 or row.get("probe_artifact_ids") or row.get("service_probe_artifact_ids")
+                 or row.get("first_pass_evidence_id") or row.get("evidence_ids")
+                 or row.get("finding_id"))
+    ]
+
+
 def _coverage_followup_wave(
     state: Dict[str, Any], trace: List[Dict[str, Any]], target: str,
 ) -> Optional[Dict[str, Any]]:
@@ -551,13 +585,8 @@ def _coverage_followup_wave(
         and row.get("source") in {"parameter_inventory", "surface_applicability", "js_inventory"}
         and row.get("test_type") not in {"xss", "sqli", "js_secret_review"}
     ]
-    unattempted = [
-        row for row in all_cells
-        if row.get("status") in {*CELL_OPEN, "leased"}
-        and not int(row.get("attempts") or 0)
-        and not (row.get("first_pass_outcome") or row.get("candidate_id")
-                 or row.get("probe_artifact_ids") or row.get("service_probe_artifact_ids"))
-    ]
+    unattempted = [row for row in _unprobed_class_cells(state, target)
+                   if not int(row.get("attempts") or 0)]
     cells = [row for row in unattempted if row.get("status") in CELL_OPEN]
     if not cells:
         return None
@@ -566,12 +595,8 @@ def _coverage_followup_wave(
         if step.get("tool_name") == "fireteam_dispatch"
         and (step.get("tool_args") or {}).get("mode") == "coverage_followup"
     ]
-    if len(prior_waves) >= 64:
+    if len(prior_waves) >= min(512, max(64, len(all_cells) * 2)):
         return None
-    if prior_waves:
-        previous = (prior_waves[-1].get("tool_args") or {}).get("pending_coverage_count")
-        if not isinstance(previous, int) or len(unattempted) >= previous:
-            return None
     classes_by_specialist: Dict[str, set[str]] = {}
     for row in cells:
         specialist = str(row.get("specialist") or "")
@@ -579,7 +604,22 @@ def _coverage_followup_wave(
             classes_by_specialist.setdefault(specialist, set()).add(
                 str(row.get("test_type") or "")
             )
-    specialists = sorted(classes_by_specialist)[:6]
+    specialists = sorted(classes_by_specialist)
+    if prior_waves:
+        previous = (prior_waves[-1].get("tool_args") or {}).get("pending_coverage_count")
+        if not isinstance(previous, int):
+            return None
+        if len(unattempted) >= previous:
+            # A stalled specialist must not consume the whole follow-up lane.
+            # Try different classes once, then stop until a receipt is repaired.
+            attempted = {
+                name
+                for wave in reversed(prior_waves)
+                if (wave.get("tool_args") or {}).get("pending_coverage_count") == previous
+                for name in (wave.get("tool_args") or {}).get("specialists", [])
+            }
+            specialists = [name for name in specialists if name not in attempted]
+    specialists = specialists[:6]
     if not specialists:
         return None
     classes = sorted({kind for name in specialists for kind in classes_by_specialist[name]})
@@ -794,13 +834,22 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
     except Exception:
         pass
     if state.get("assessment_resume") and pipeline:
-        pending = (_pending_first_pass_count(state)
-                   if observed_input_signature(state) else 0)
+        pending = _pending_first_pass_count(state)
         missing = ([{
             "id": "observed_input_first_pass",
             "title": f"{pending} observed SQLi/XSS checks need a first pass",
             "next": "probe_observed_input_batch on the current assessment target",
         }] if pending else [])
+        broad_pending = _unprobed_class_cells(state, primary_web_target(state))
+        if broad_pending:
+            missing.append({
+                "id": "class_coverage_first_pass",
+                "title": f"{len(broad_pending)} other class checks lack probe evidence",
+                "next": (
+                    "dispatch coverage_followup for untried classes; reconcile "
+                    "specialist receipts for checks already claimed"
+                ),
+            })
         missing.extend(_first_pass_candidate_gaps(state, primary_web_target(state)))
         if handoff_failures:
             missing.append({
@@ -880,6 +929,23 @@ def tester_loop_progress(state: Optional[Dict[str, Any]] = None) -> Dict[str, An
             "next": "sync_engagement_brain (or build_threat_model) — aim before fireteam",
         })
     if pipeline:
+        pending = _pending_first_pass_count(state)
+        if pending:
+            missing.append({
+                "id": "observed_input_first_pass",
+                "title": f"{pending} observed SQLi/XSS checks need a first pass",
+                "next": "probe_observed_input_batch on the current assessment target",
+            })
+        broad_pending = _unprobed_class_cells(state, primary_web_target(state))
+        if broad_pending:
+            missing.append({
+                "id": "class_coverage_first_pass",
+                "title": f"{len(broad_pending)} other class checks lack probe evidence",
+                "next": (
+                    "dispatch coverage_followup for untried classes; reconcile "
+                    "specialist receipts for checks already claimed"
+                ),
+            })
         missing.extend(_first_pass_candidate_gaps(state, primary_web_target(state)))
         if handoff_failures:
             missing.append({
@@ -1127,6 +1193,9 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         batch = _observed_input_batch_step(state, trace, signature)
         if batch:
             return batch
+        followup = _coverage_followup_wave(state, trace, target)
+        if followup:
+            return followup
         return None
     ran = normalized_tools_run(trace)
     crawled = bool(ran & _CRAWL_TOOLS)

@@ -429,7 +429,11 @@ def test_positive_probe_survives_failed_candidate_submission_for_scheduler_retry
         {"tool_name": "submit_finding_candidate", "tool_args": next_step["tool_args"],
          "success": False},
     ]
-    assert forced_next_step(state) is None
+    # Candidate handoff retries are exhausted; other unprobed classes on the
+    # same observed input must still get their own first pass.
+    followup = forced_next_step(state)
+    assert followup["tool_name"] == "fireteam_dispatch"
+    assert followup["tool_args"]["mode"] == "coverage_followup"
     progress = loop_progress(state)
     assert any(item["id"] == "candidate_handoff_exhausted" for item in progress["missing"])
 

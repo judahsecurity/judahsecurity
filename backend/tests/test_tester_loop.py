@@ -5,6 +5,7 @@ import pytest
 
 from app.services.agent.assessment_kickoff import root_needs_dir_brute
 from app.services.agent.tester_loop import (
+    _coverage_followup_wave,
     _observed_input_batch_step,
     cms_followup_product,
     complete_blocked_reason,
@@ -659,6 +660,97 @@ def test_resumed_assessment_tests_observed_inputs_on_its_current_target():
 
     state["target_info"]["primary_target"] = "https://old.example.com"
     assert forced_next_step(state) is None
+
+
+def test_resumed_assessment_drains_saved_inputs_without_inventory_signature():
+    target = "https://app.test"
+    state = {
+        "mode": "agent", "assessment_resume": True,
+        "target_info": {"primary_target": target},
+        "capability_map": {"target": target, "scope": target},
+        "engagement_brain": {"coverage_cells": [{
+            "id": "saved-xss", "host": "app.test", "path": "/search",
+            "method": "GET", "parameter": "query:q", "status": "untested",
+            "source": "parameter_inventory", "observation_source": "browser_link",
+            "specialist": "xss", "test_type": "xss",
+        }]},
+        "execution_trace": [],
+    }
+    assert observed_input_signature(state) == ""
+    step = forced_next_step(state)
+    assert step["tool_name"] == "probe_observed_input_batch"
+    assert step["tool_args"]["surface_signature"] == "saved-coverage"
+    assert "observed_input_first_pass" in complete_blocked_reason(state)
+
+
+def test_resumed_assessment_dispatches_other_classes_and_keeps_stalls_open():
+    target = "https://app.test"
+    state = {
+        "mode": "agent", "assessment_resume": True,
+        "target_info": {"primary_target": target},
+        "capability_map": {"target": target, "scope": target},
+        "engagement_brain": {"coverage_cells": [{
+            "id": "saved-ssrf", "host": "app.test", "path": "/preview",
+            "method": "GET", "parameter": "query:url", "status": "untested",
+            "source": "parameter_inventory", "observation_source": "browser_link",
+            "specialist": "ssrf", "test_type": "ssrf",
+        }]},
+        "execution_trace": [],
+    }
+    step = forced_next_step(state)
+    assert step["tool_name"] == "fireteam_dispatch"
+    assert step["tool_args"]["mode"] == "coverage_followup"
+    assert "class_coverage_first_pass" in complete_blocked_reason(state)
+
+    state["execution_trace"] = [{
+        "tool_name": "fireteam_dispatch", "tool_args": step["tool_args"],
+        "success": True,
+    }]
+    assert forced_next_step(state) is None  # No identical retry without a receipt.
+    assert "class_coverage_first_pass" in complete_blocked_reason(state)
+
+
+def test_finished_surface_loop_still_requires_class_probe_receipt():
+    target = "https://app.test"
+    trace = [{"tool_name": name, "success": True} for name in (
+        "execute_deep_crawl", "execute_feroxbuster", "fingerprint_api",
+        "fetch_lazy_chunks", "extract_js_endpoints", "sync_engagement_brain",
+        "fireteam_dispatch",
+    )]
+    state = {
+        "mode": "agent", "target_info": {"primary_target": target},
+        "capability_map": {"target": target}, "execution_trace": trace,
+        "engagement_brain": {"coverage_cells": [{
+            "id": "ssrf", "host": "app.test", "path": "/preview",
+            "status": "untested", "source": "parameter_inventory",
+            "specialist": "ssrf", "test_type": "ssrf",
+        }]},
+    }
+    progress = loop_progress(state)
+    assert [row["id"] for row in progress["missing"]] == [
+        "class_coverage_first_pass",
+    ]
+    assert progress["ready_to_complete"] is False
+    assert "class_coverage_first_pass" in complete_blocked_reason(state)
+
+    state["engagement_brain"]["coverage_cells"][0]["probe_artifact_ids"] = ["receipt-1"]
+    assert loop_progress(state)["ready_to_complete"] is True
+
+
+def test_stalled_coverage_wave_does_not_starve_other_specialists():
+    target = "https://app.test"
+    state = {"engagement_brain": {"coverage_cells": [{
+        "id": f"cell-{index}", "host": "app.test", "path": f"/item/{index}",
+        "status": "untested", "source": "parameter_inventory",
+        "specialist": f"specialist_{index}", "test_type": f"class_{index}",
+    } for index in range(7)]}}
+    first = _coverage_followup_wave(state, [], target)
+    assert len(first["tool_args"]["specialists"]) == 6
+    trace = [{"tool_name": "fireteam_dispatch", "tool_args": first["tool_args"]}]
+    second = _coverage_followup_wave(state, trace, target)
+    assert second["tool_args"]["specialists"] == ["specialist_6"]
+    trace.append({"tool_name": "fireteam_dispatch", "tool_args": second["tool_args"]})
+    assert _coverage_followup_wave(state, trace, target) is None
 
 
 def test_interceptor_job_forces_attach_not_second_crawl():
