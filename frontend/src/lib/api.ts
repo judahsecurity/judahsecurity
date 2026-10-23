@@ -429,6 +429,19 @@ export interface WizSyncResult {
   findings_filtered: number;
 }
 
+export interface ZpaIntegration {
+  id: number;
+  organization_id: number;
+  name: string;
+  is_active: boolean;
+  created_at: string;
+  last_ingest_at?: string | null;
+}
+
+export interface ZpaIntegrationSecret extends ZpaIntegration {
+  ingest_token: string;
+}
+
 // ── HackerOne shared types ─────────────────────────────────────────────────
 
 export interface HackerOneIntegration {
@@ -3428,6 +3441,33 @@ class ApiClient {
 
   async syncF5Integration(id: number): Promise<F5SyncResult> {
     const response = await this.client.post(`/integrations/f5/${id}/sync`);
+    return response.data;
+  }
+
+  // ── ZPA LSS flow evidence ──────────────────────────────────────────────────
+
+  async getZpaIntegrations(): Promise<ZpaIntegration[]> {
+    const response = await this.client.get('/integrations/zpa');
+    return response.data;
+  }
+
+  async createZpaIntegration(name: string): Promise<ZpaIntegrationSecret> {
+    const response = await this.client.post('/integrations/zpa', { name });
+    return response.data;
+  }
+
+  async updateZpaIntegration(id: number, is_active: boolean): Promise<ZpaIntegration> {
+    const response = await this.client.put(`/integrations/zpa/${id}`, { is_active });
+    return response.data;
+  }
+
+  async rotateZpaToken(id: number): Promise<ZpaIntegrationSecret> {
+    const response = await this.client.post(`/integrations/zpa/${id}/rotate-token`);
+    return response.data;
+  }
+
+  async projectZpaIntegration(id: number): Promise<{ ok: boolean; assets?: number; edges?: number; error?: string }> {
+    const response = await this.client.post(`/integrations/zpa/${id}/project`);
     return response.data;
   }
 

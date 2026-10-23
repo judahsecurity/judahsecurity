@@ -3,6 +3,7 @@
 import sys
 import types
 import unittest
+import re
 
 try:
     import neo4j  # noqa: F401
@@ -18,8 +19,9 @@ try:
 except ModuleNotFoundError:
     GraphService = None
 else:
-    from app.services.graph_service import GraphService
-    from app.models.asset import AssetType
+    from app.services.graph_service import GraphService, graph_node_properties
+    from app.services.graph_ip_identity import graph_ip_identity
+    from app.models.asset import AssetStatus, AssetType
 
 
 class FakeResult:
@@ -149,6 +151,143 @@ class GraphKnowledgeTests(unittest.TestCase):
             GraphService()._sync_asset(session, asset, 7)
         self.assertIn("REMOVE a:Domain:Subdomain:IP:URL:Certificate", session.statement)
         self.assertNotIn("SET a:Domain", session.statement)
+
+    @unittest.skipIf(GraphService is None, "backend dependencies not installed")
+    def test_shared_reference_properties_hide_tenant_observations(self):
+        class Node(dict):
+            labels = {"IP"}
+
+        node = Node(address="203.0.113.10", organization_id=8, is_live=True)
+        self.assertEqual(graph_node_properties(node), {"address": "203.0.113.10"})
+
+    @unittest.skipIf(GraphService is None, "backend dependencies not installed")
+    def test_overlapping_private_ips_need_the_same_explicit_network_scope(self):
+        a = types.SimpleNamespace(id=1, metadata_={})
+        b = types.SimpleNamespace(id=2, metadata_={})
+        self.assertNotEqual(
+            graph_ip_identity("10.0.0.5", 7, a).key,
+            graph_ip_identity("10.0.0.5", 8, a).key,
+        )
+        self.assertNotEqual(
+            graph_ip_identity("10.0.0.5", 7, a).key,
+            graph_ip_identity("10.0.0.5", 7, b).key,
+        )
+        a.metadata_["network_scope_id"] = "vpc-123"
+        b.metadata_["network_scope_id"] = "vpc-123"
+        self.assertEqual(
+            graph_ip_identity("10.0.0.5", 7, a).key,
+            graph_ip_identity("10.0.0.5", 7, b).key,
+        )
+        self.assertNotEqual(
+            graph_ip_identity("8.8.8.8", 7, a).key,
+            graph_ip_identity("8.8.8.8", 8, b).key,
+        )
+        a.metadata_ = {}
+        b.metadata_ = {}
+        self.assertEqual(
+            graph_ip_identity("8.8.8.8", 7, a).key,
+            graph_ip_identity("8.8.8.8", 8, b).key,
+        )
+        self.assertNotEqual(
+            graph_ip_identity("fd00::1", 7, a).key,
+            graph_ip_identity("fd00::1", 8, b).key,
+        )
+
+    @unittest.skipIf(GraphService is None, "backend dependencies not installed")
+    def test_wiz_cloud_context_is_not_a_route(self):
+        asset = types.SimpleNamespace(id=42, metadata_={"wiz": {
+            "id": "wiz-vm-42", "provider_unique_id": "vm-42",
+            "cloud_platform": "AWS", "subscription_external_id": "123456789012",
+            "subscription_name": "production", "region": "us-east-1",
+            "has_wide_internet_exposure": True,
+        }})
+        session = FakeSession()
+        GraphService()._sync_wiz_cloud_context(session, asset, 7)
+        statements = "\n".join(statement for statement, _ in session.calls)
+        self.assertIn("IN_CLOUD_SUBSCRIPTION", statements)
+        self.assertIn("IN_CLOUD_REGION", statements)
+        self.assertNotIn("ROUTES_TO", statements)
+        self.assertNotIn("FORWARDS_TO", statements)
+        self.assertEqual(session.calls[3][1]["key"], "7|aws|123456789012")
+
+    @unittest.skipIf(GraphService is None, "backend dependencies not installed")
+    def test_attack_paths_require_source_backed_reachability(self):
+        graph = GraphService()
+        graph._connected = True
+        graph.query = lambda statement, params: [(statement, params)]
+        statement, _ = graph.get_attack_paths(7)[0]
+        self.assertIn("forward.vip_asset_id = start.asset_id", statement)
+        self.assertIn("forward.member_asset_id = target.asset_id", statement)
+        self.assertNotIn("[*1..", statement)
+
+    @unittest.skipIf(GraphService is None, "backend dependencies not installed")
+    def test_inactive_f5_asset_retires_forwarding_evidence(self):
+        asset = types.SimpleNamespace(
+            id=42, status=AssetStatus.INACTIVE,
+            metadata_={"f5_integration_id": 9, "f5_pool_members": [
+                {"asset_id": 43, "ip": "10.0.0.43"},
+            ]}, value="10.0.0.42",
+        )
+        session = FakeSession()
+        GraphService()._sync_f5_forwards_to(session, asset, 7, ["10.0.0.42"])
+        self.assertEqual(len(session.calls), 1)
+        self.assertIn("DELETE r", session.calls[0][0])
+
+    @unittest.skipIf(GraphService is None, "backend dependencies not installed")
+    def test_asset_projection_scopes_shared_observations(self):
+        class AssetStub(types.SimpleNamespace):
+            def __getattr__(self, _name):
+                return None
+
+        asset = AssetStub(
+            id=42, name="203.0.113.10", value="203.0.113.10",
+            asset_type=AssetType.IP_ADDRESS, status=None, parent_id=None,
+            first_seen=None, root_domain=None, ip_addresses=["203.0.113.10"],
+            hosting_provider="Example Cloud", hosting_type="cloud", asn="64500",
+            technologies=[types.SimpleNamespace(
+                name="Example Server", slug="example-server", categories=["server"],
+                cpe="cpe:2.3:a:example:server:1", website=None, version="1",
+            )],
+        )
+        session = FakeSession()
+        GraphService()._sync_asset(session, asset, 7)
+        for statement, params in session.calls:
+            missing = set(re.findall(r"\$([a-zA-Z_]\w*)", statement)) - set(params)
+            self.assertFalse(missing, (statement, missing))
+        ip_write = next(s for s, _ in session.calls if "MERGE (ip:IP {ip_key: $ip_key})" in s and "resolution:RESOLVES_TO" in s)
+        self.assertIn("REMOVE ip.organization_id", ip_write)
+        self.assertIn("resolution.organization_id = $org_id", ip_write)
+        self.assertIn("ip.scope_id = $scope_id", ip_write)
+        tech_write = next(s for s, _ in session.calls if "MERGE (t:Technology {name: $name})" in s)
+        self.assertIn("observed.version = $version", tech_write)
+        self.assertIn("REMOVE t.version, t.cpe", tech_write)
+
+    @unittest.skipIf(GraphService is None, "backend dependencies not installed")
+    def test_f5_reachability_uses_asset_evidence_for_overlapping_ip(self):
+        asset = types.SimpleNamespace(
+            id=10, value="10.0.0.5", asset_type=AssetType.IP_ADDRESS,
+            metadata_={"f5_pool_members": [{"ip": "10.0.0.6", "asset_id": 11, "port": 443}]},
+        )
+        session = FakeSession()
+        GraphService()._sync_f5_forwards_to(session, asset, 7, [asset.value])
+        statement, params = session.calls[0]
+        self.assertIn("vip_asset:Asset {asset_id: $vip_asset_id", statement)
+        self.assertIn("member_asset:Asset {asset_id: $member_asset_id", statement)
+        self.assertNotIn("MERGE (member:IP", statement)
+        self.assertEqual(params["member_asset_id"], 11)
+
+    @unittest.skipIf(GraphService is None, "backend dependencies not installed")
+    def test_shared_infrastructure_requires_context_for_ambiguous_private_ip(self):
+        graph = GraphService()
+        graph._connected = True
+        graph.query = lambda _statement, _params: [
+            {"asset_id": 10, "scope_id": "org:7:asset:10", "ip_key": "a"},
+            {"asset_id": 11, "scope_id": "org:7:asset:11", "ip_key": "b"},
+        ]
+        result = graph.get_shared_infrastructure("10.0.0.5", 7)
+        self.assertTrue(result["ambiguous"])
+        self.assertEqual({option["asset_id"] for option in result["scope_options"]}, {10, 11})
+        self.assertEqual(result["nodes"], [])
 
 
 if __name__ == "__main__":

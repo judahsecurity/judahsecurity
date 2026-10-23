@@ -373,6 +373,11 @@ async def sync_integration(db: Session, integration: NetBrainIntegration) -> dic
         integration.last_sync_stats = stats
         integration.last_error = None
         db.commit()
+        from app.services.integration_graph_sync import sync_integration_assets_to_graph
+        await sync_integration_assets_to_graph(
+            integration.organization_id,
+            {finding.asset.value for finding in findings if finding.asset},
+        )
         return {"ok": True, "message": f"Assessed {stats['findings_assessed']} supported finding(s).", **stats}
     except Exception as exc:  # noqa: BLE001
         db.rollback()
