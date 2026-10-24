@@ -3,7 +3,9 @@
 import json
 import os
 import threading
+from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs
 
 import pytest
 from app.services.agent.assessment_scope import register_scope
@@ -110,6 +112,59 @@ async def test_real_browser_identity_capture_and_origin_block(monkeypatch):
         assert any(cookie == "sid=a" for path, cookie in requests if path == "/graphql")
         assert any(cookie == "sid=b" for path, cookie in requests if path == "/graphql")
         assert all(path != "/out-of-origin" for path, cookie in requests)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_scoped_post_form_xss_needs_response_and_browser_execution():
+    from app.services.agent.scoped_assessment.browser import check_browser
+
+    posted = []
+
+    class Handler(BaseHTTPRequestHandler):
+        encode = False
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(b'<form method="POST" action="/submit">'
+                             b'<input type="email" name="email">'
+                             b'<button type="submit">Subscribe</button></form>')
+
+        def do_POST(self):
+            value = parse_qs(self.rfile.read(int(self.headers["Content-Length"])).decode()).get(
+                "email", [""])[0]
+            posted.append(self.path)
+            rendered = escape(value) if self.encode else value
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.end_headers()
+            self.wfile.write(("<html><body>" + rendered + "</body></html>").encode())
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        for encoded in (False, True):
+            Handler.encode = encoded
+            result, _ = await check_browser(
+                operation="check_form_xss", url=base + "/page",
+                allowed_origins=[base], form_action=base + "/submit",
+                form_field="email",
+                form_payload_template='<img src=x onerror=alert("__PROWL_NONCE__")>',
+            )
+            assert result["post_submitted"] is True
+            assert result["post_response_seen"] is True
+            assert result["executed"] is not encoded
+        assert posted == ["/submit", "/submit"]
     finally:
         server.shutdown()
         server.server_close()
