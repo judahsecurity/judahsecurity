@@ -1488,6 +1488,7 @@ async def _safe_invoke(tools_manager: Any, tool_name: str, args: dict) -> ToolIn
                              if row.get("id") == args["coverage_cell_id"]), None)
                 if (record and record.get("kind") in {
                         "scoped_numeric_sqli", "scoped_string_sqli", "scoped_browser_check_xss",
+                        "scoped_browser_check_form_xss",
                     } and cell and cell.get("lease_id") == args["coverage_lease_id"]
                         and receipt_id in (cell.get("probe_artifact_ids") or [])):
                     ids = list(dict.fromkeys([*ids, receipt_id]))

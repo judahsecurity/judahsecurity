@@ -12,7 +12,7 @@ from urllib.parse import parse_qsl, urlsplit
 from .browser import origin
 
 
-MAX_EXCHANGES = 40
+MAX_EXCHANGES = 120
 MAX_BODY_BYTES = 256_000
 MAX_URL_LENGTH = 2_048
 MAX_BODY_FIELDS = 40

@@ -2140,7 +2140,7 @@ function AgentPageContent() {
                         <div className="mt-2 space-y-2 w-80">
                           <Textarea
                             aria-label="Approved POST replay paths"
-                            placeholder="Approved POST replay paths, one per line (for example /api/search)"
+                            placeholder="Approved POST test paths, one per line (enables form XSS and captured body checks)"
                             value={bodyReplayPathsText}
                             onChange={(event) => setBodyReplayPathsText(event.target.value)}
                             disabled={loading}

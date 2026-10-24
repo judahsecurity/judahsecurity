@@ -445,6 +445,7 @@ class EvidenceStore:
             if row["kind"] in {
                 "scoped_numeric_sqli", "scoped_string_sqli", "scoped_owner_only",
                 "scoped_http_get", "scoped_browser_check_xss",
+                "scoped_browser_check_form_xss",
             }:
                 try:
                     if origin(row["target"]) != origin(target):
@@ -455,8 +456,11 @@ class EvidenceStore:
                 payload = row["payload"] if isinstance(row["payload"], dict) else {}
                 if row["kind"] == "scoped_http_get":
                     proven = payload.get("status") == 200 and payload.get("directory_index") is True
-                elif row["kind"] == "scoped_browser_check_xss":
-                    proven = payload.get("executed") is True
+                elif row["kind"] in {"scoped_browser_check_xss", "scoped_browser_check_form_xss"}:
+                    proven = payload.get("executed") is True and (
+                        row["kind"] != "scoped_browser_check_form_xss"
+                        or (payload.get("post_submitted") is True
+                            and payload.get("post_response_seen") is True))
                 else:
                     proven = payload.get("proof_confirmed") is True
                 has_response |= bool(row["success"] and proven)

@@ -906,7 +906,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         self, coverage_cell_id: str, coverage_lease_id: str,
         technique: str = "html_body",
     ) -> Dict[str, Any]:
-        """Probe one leased, observed GET input with a local proof receipt.
+        """Probe one leased, observed GET input or approved POST form.
 
         Browser links and forms do not always yield a private XHR capture. The
         scoped browser/SQLi tools can still test those exact observed inputs;
@@ -925,6 +925,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         cell = next((row for row in brain.coverage_cells
                      if row.get("id") == coverage_cell_id), None)
         location, separator, parameter = str((cell or {}).get("parameter") or "").partition(":")
+        method = str((cell or {}).get("method") or "").upper()
+        form_xss = bool(cell and cell.get("test_type") == "xss"
+                        and method == "POST" and location == "body_form")
         reason = (
             "missing_cell" if not cell else
             "not_leased" if cell.get("status") != "leased" else
@@ -933,8 +936,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "not_observed_input" if cell.get("source") != "parameter_inventory" or
                 cell.get("observation_source") not in OBSERVED_INPUT_SOURCES else
             "unsupported_input" if cell.get("test_type") not in {"xss", "sqli"} or
-                str(cell.get("method") or "").upper() != "GET" or
-                location != "query" or not separator or not parameter else
+                not ((method == "GET" and location == "query") or form_xss)
+                or not separator or not parameter else
             "unsafe_path" if not allowed_discovery_path(str(cell.get("path") or "/")) else ""
         )
         if reason:
@@ -994,14 +997,36 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             }
             if technique not in payloads:
                 return {"success": False, "error": "unsupported_technique"}
-            template, request_context = self._observed_get_query_template(
-                url, parameter, payloads[technique], identity,
-                capture_id=str(cell.get("capture_id") or ""),
-            )
-            proof = json.loads(await self.scoped_browser_assessment(
-                "check_xss", template, identity=identity,
-            ))
-            operation = "scoped_browser_check_xss"
+            if form_xss:
+                matching_forms = [form for form in (cmap.get("forms") or [])[:80]
+                                  if isinstance(form, dict)
+                                  and str(form.get("method") or "").upper() == "POST"
+                                  and str(form.get("action") or "") == url
+                                  and parameter in (form.get("inputs") or [])
+                                  and isinstance(form.get("page"), str)
+                                  and _origin(form["page"]) == scoped_origin
+                                  and not urlsplit(form["page"]).query
+                                  and not urlsplit(form["page"]).fragment]
+                pages = sorted({str(form["page"]) for form in matching_forms})
+                if not pages:
+                    return {"success": False, "error": "observed_form_page_missing",
+                            "output": "POST form needs its observed source page for browser proof"}
+                proof = json.loads(await self.scoped_browser_assessment(
+                    "check_form_xss", pages[0], identity=identity,
+                    form_action=url, form_field=parameter,
+                    form_payload_template=payloads[technique],
+                ))
+                request_context = "observed_post_form"
+                operation = "scoped_browser_check_form_xss"
+            else:
+                template, request_context = self._observed_get_query_template(
+                    url, parameter, payloads[technique], identity,
+                    capture_id=str(cell.get("capture_id") or ""),
+                )
+                proof = json.loads(await self.scoped_browser_assessment(
+                    "check_xss", template, identity=identity,
+                ))
+                operation = "scoped_browser_check_xss"
             confirmed = proof.get("executed") is True
 
         artifact_id = str(proof.get("evidence_id") or "")
@@ -1088,12 +1113,45 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "xss_browser_js_single": "';alert(\"__PROWL_NONCE__\");//",
             "xss_browser_js_double": '\";alert(\'__PROWL_NONCE__\');//',
         }
-        if not separator or not parameter or technique not in {"captured", *xss_payloads}:
+        if not separator or not parameter or technique not in {"captured", "xss_reflection", *xss_payloads}:
             return {"success": False, "error": "invalid_parameter_probe",
                     "output": "Unsupported parameter or technique"}
         identity = str(cell.get("identity") or "anonymous")
         body = {"artifact_id": cell["capture_id"], "parameter": parameter, "identity": identity}
         method = str(cell.get("method") or "GET")
+        if cell.get("specialist") == "xss" and method == "POST" and location in {"body_json", "body_form"}:
+            if technique not in {"captured", "xss_reflection"}:
+                return {"success": False, "error": "unsupported_xss_browser",
+                        "output": "POST XSS first pass requires an approved captured body"}
+            try:
+                proof = json.loads(await self.scoped_body_xss_reflection(
+                    cell["capture_id"], parameter, identity,
+                ))
+            except ValueError as exc:
+                return {"success": False, "error": "operator_approval_required",
+                        "reason": str(exc)[:200], "output": "POST replay needs an approved path and capture"}
+            artifact_id = str(proof.get("evidence_id") or "")
+            if not artifact_id:
+                return {"success": False, "error": "missing_probe_evidence"}
+            live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            current = next((row for row in live.coverage_cells
+                            if row.get("id") == coverage_cell_id and row.get("lease_id") == coverage_lease_id), None)
+            if current is None:
+                return {"success": False, "error": "lease_changed"}
+            current["probe_artifact_ids"] = list(dict.fromkeys([
+                *(current.get("probe_artifact_ids") or []), artifact_id,
+            ]))[:20]
+            current["evidence_ids"] = list(dict.fromkeys([
+                *(current.get("evidence_ids") or []), artifact_id,
+            ]))[:30]
+            current["last_probe"] = "scoped_body_xss_reflection"
+            self._engagement_brain = live.to_dict()
+            return {"success": True, "coverage_cell_id": coverage_cell_id,
+                    "coverage_lease_id": coverage_lease_id,
+                    "operation": "scoped_body_xss_reflection", "evidence_id": artifact_id,
+                    "proof_confirmed": False,
+                    "probe_result": {"reflection_detected": proof["reflection_detected"],
+                                     "raw_html_reflection": proof["raw_html_reflection"]}}
         if technique in xss_payloads:
             if cell.get("specialist") != "xss" or method != "GET" or location != "query":
                 return {"success": False, "error": "unsupported_xss_browser",

@@ -6,7 +6,7 @@ import pytest
 
 from app.services.agent.assessment_scope import register_scope
 from app.services.agent.assessment_sessions import identity_registry
-from app.services.agent.evidence_store import VerificationRun, verification_run
+from app.services.agent.evidence_store import VerificationRun, evidence_store, verification_run
 from app.services.agent.scoped_assessment.browser_traffic import package_exchange
 from app.services.agent.tools import ASMToolsManager
 from app.services.agent.prompts import is_tool_allowed_in_phase
@@ -88,6 +88,84 @@ async def test_agent_browser_inventory_keeps_private_exchange_values_out_of_tool
     assert manager._scoped_assessment_partial_reason == partial["reason"]
     assert is_tool_allowed_in_phase("scoped_numeric_sqli", "exploitation")
     assert not is_tool_allowed_in_phase("scoped_numeric_sqli", "informational")
+
+
+@pytest.mark.asyncio
+async def test_post_form_xss_requires_operator_path_and_keeps_fresh_proof(monkeypatch):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    calls = []
+
+    async def fake_browser(**kwargs):
+        calls.append(kwargs)
+        return ({"operation": "check_form_xss", "target_template": kwargs["url"],
+                 "final_origin": "https://app.example.test", "final_path": "/catalog",
+                 "form_action": kwargs["form_action"], "form_field": kwargs["form_field"],
+                 "form_payload_template": kwargs["form_payload_template"],
+                 "post_submitted": True, "post_response_seen": True,
+                 "executed": True, "nonce": "fresh-nonce",
+                 "dialog_count": 1, "requests": []}, None)
+
+    monkeypatch.setattr("app.services.agent.scoped_assessment_tools.browser.check_browser", fake_browser)
+    kwargs = {"operation": "check_form_xss", "url": "https://app.example.test/catalog",
+              "form_action": "https://app.example.test/catalog/subscribe",
+              "form_field": "email",
+              "form_payload_template": '<img src=x onerror=alert("__PROWL_NONCE__")>'}
+    with pytest.raises(ValueError, match="approved"):
+        await manager.scoped_browser_assessment(**kwargs)
+    assert not calls
+    manager.set_scoped_assessment_policy({"body_replay_paths": ["/catalog/subscribe"]})
+    result = json.loads(await manager.scoped_browser_assessment(**kwargs))
+    assert result["executed"] is True
+    assert calls[0]["form_action"] == kwargs["form_action"]
+    receipt = evidence_store(manager).records[result["evidence_id"]]
+    assert receipt["target"] == kwargs["form_action"]
+    assert receipt["kind"] == "scoped_browser_check_form_xss"
+
+
+@pytest.mark.asyncio
+async def test_assigned_post_form_xss_binds_browser_receipt_to_exact_cell(monkeypatch):
+    from app.services.agent.coverage_cells import (
+        claim_coverage_cell_leases, seed_parameter_coverage_cells,
+    )
+    from app.services.agent.engagement_brain import EngagementBrain
+
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    action = "https://app.example.test/newsletter"
+    page = "https://app.example.test/catalog"
+    manager._capability_map = {"target": "https://app.example.test",
+        "scope": "https://app.example.test", "forms": [{
+            "method": "POST", "action": action, "page": page,
+            "inputs": ["email"], "fields": [{"name": "email", "control_type": "email"}],
+        }]}
+    brain = EngagementBrain(target="https://app.example.test")
+    seed_parameter_coverage_cells(brain, [{"method": "POST", "host": "app.example.test",
+        "path": "/newsletter", "name": "email", "location": "body_form",
+        "identity": "anonymous", "source": "observed_form", "testable": True}])
+    lease = claim_coverage_cell_leases(brain, ["xss"], first_pass_only=True)["xss"]
+    manager._engagement_brain = brain.to_dict()
+    store = evidence_store(manager)
+
+    async def fake_assessment(operation, url, **kwargs):
+        assert operation == "check_form_xss" and url == page
+        assert kwargs["form_action"] == action and kwargs["form_field"] == "email"
+        artifact_id = store.record("scoped_browser_check_form_xss", {
+            "operation": operation, "executed": True, "nonce": "first",
+            "target_template": page, "form_action": action, "form_field": "email",
+            "form_payload_template": kwargs["form_payload_template"],
+            "post_submitted": True, "post_response_seen": True,
+        }, target=action, identity="anonymous")
+        return json.dumps({"evidence_id": artifact_id, "executed": True})
+
+    monkeypatch.setattr(manager, "scoped_browser_assessment", fake_assessment)
+    result = await manager.scoped_input_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert result["success"] and result["proof_confirmed"] is True
+    cell = next(row for row in manager._engagement_brain["coverage_cells"]
+                if row["id"] == lease.coverage_cell_id)
+    assert result["evidence_id"] in cell["probe_artifact_ids"]
 
 
 @pytest.mark.asyncio
@@ -225,6 +303,43 @@ async def test_post_and_owner_proofs_require_operator_policy(monkeypatch):
     owner = json.loads(await manager.scoped_owner_only("owner", "owner"))
     assert body["finding"] is False
     assert owner["proof_confirmed"] and owner["finding"] is False
+
+
+@pytest.mark.asyncio
+async def test_post_xss_reflection_uses_capture_and_keeps_execution_unproven(monkeypatch):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    public, private = package_exchange(
+        url="https://app.example.test/feedback",
+        expected_origin="https://app.example.test", action_ref="form-1",
+        method="POST", resource_type="fetch", status=200,
+        content_type="text/html", request_content_type="application/x-www-form-urlencoded",
+        request_body=b"message=hello", response_body=b"hello",
+    )
+    manager._scoped_browser_exchanges = {
+        "capture-1": {"identity": "anonymous", "private": private, "public": public},
+    }
+    with pytest.raises(ValueError, match="not approved"):
+        await manager.scoped_body_xss_reflection("capture-1", "message")
+    manager.set_scoped_assessment_policy({"body_replay_paths": ["/feedback"]})
+
+    def fake_probe(url, mime, baseline, changed, **kwargs):
+        assert url == "https://app.example.test/feedback"
+        assert baseline == b"message=hello"
+        assert b"%3Cimg" in changed and b"onerror" in changed
+        assert kwargs["payload"].startswith("<img")
+        return {"target": url, "inconclusive": False, "reflection_detected": True,
+                "raw_html_reflection": True, "proof_confirmed": False, "finding": False}
+
+    monkeypatch.setattr(
+        "app.services.agent.scoped_assessment_tools.body_probe.probe_observed_body_reflection",
+        fake_probe,
+    )
+    result = json.loads(await manager.scoped_body_xss_reflection("capture-1", "message"))
+    assert result["reflection_detected"] is True
+    assert result["proof_confirmed"] is False
+    assert result["evidence_id"]
 
 
 @pytest.mark.asyncio

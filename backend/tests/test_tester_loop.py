@@ -710,6 +710,31 @@ def test_resumed_assessment_dispatches_other_classes_and_keeps_stalls_open():
     assert "class_coverage_first_pass" in complete_blocked_reason(state)
 
 
+def test_normal_assessment_runs_mapped_class_checks_before_general_fireteam():
+    target = "https://app.test"
+    trace = [{"tool_name": name, "success": True} for name in (
+        "execute_deep_crawl", "execute_feroxbuster", "fingerprint_api",
+        "fetch_lazy_chunks", "extract_js_endpoints", "sync_engagement_brain",
+    )]
+    trace.append({"tool_name": "scoped_browser_assessment", "success": True,
+                  "tool_args": {"operation": "inspect_js", "url": target}})
+    state = {
+        "mode": "agent", "target_info": {"primary_target": target},
+        "capability_map": {"target": target, "scope": target},
+        "execution_trace": trace,
+        "engagement_brain": {"coverage_cells": [{
+            "id": "header-check", "host": "app.test", "path": "/search",
+            "method": "GET", "parameter": "query:q", "status": "untested",
+            "source": "parameter_inventory", "observation_source": "browser_link",
+            "specialist": "injection", "test_type": "crlf",
+        }]},
+    }
+    step = forced_next_step(state)
+    assert step["tool_name"] == "fireteam_dispatch"
+    assert step["tool_args"]["mode"] == "coverage_followup"
+    assert step["tool_args"]["specialists"] == ["injection"]
+
+
 def test_finished_surface_loop_still_requires_class_probe_receipt():
     target = "https://app.test"
     trace = [{"tool_name": name, "success": True} for name in (

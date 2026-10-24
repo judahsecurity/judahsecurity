@@ -840,12 +840,14 @@ async def _verify_scoped_browser_xss_candidate(
             tools_manager._engagement_brain = brain.to_dict()
     if not cell or (cell.get("source") != "parameter_inventory"
                     or cell.get("observation_source") not in OBSERVED_INPUT_SOURCES
-                    or cell.get("test_type") != "xss" or cell.get("method") != "GET"):
+                    or cell.get("test_type") != "xss" or cell.get("method") not in {"GET", "POST"}):
         return None
     location, separator, parameter = str(cell.get("parameter") or "").partition(":")
+    form_xss = cell.get("method") == "POST" and location == "body_form"
     target = urlsplit(cand.target)
     identity = str(cell.get("identity") or "anonymous")
-    if (location != "query" or not separator or not parameter
+    if (not ((location == "query" and not form_xss) or form_xss)
+            or not separator or not parameter
             or target.scheme not in {"http", "https"}
             or not _same_observed_origin(target.scheme, str(cell.get("host") or ""), cand.target)
             or (target.path or "/") != cell.get("path")
@@ -857,7 +859,8 @@ async def _verify_scoped_browser_xss_candidate(
     hunter = []
     for evidence_id in cand.evidence_ids:
         receipt = store.records.get(evidence_id)
-        if (not receipt or receipt.get("kind") != "scoped_browser_check_xss"
+        expected_receipt = "scoped_browser_check_form_xss" if form_xss else "scoped_browser_check_xss"
+        if (not receipt or receipt.get("kind") != expected_receipt
                 or receipt.get("target") != cand.target
                 or receipt.get("identity") != identity):
             continue
@@ -866,11 +869,21 @@ async def _verify_scoped_browser_xss_candidate(
             continue
         template = str(proof.get("target_template") or "")
         parsed = urlsplit(template)
-        if (not _same_observed_origin(parsed.scheme, parsed.netloc, cand.target)
-                or (parsed.path or "/") != (target.path or "/")
-                or parsed.fragment or "__PROWL_NONCE__" not in template
-                or not any("__PROWL_NONCE__" in value
-                           for value in parse_qs(parsed.query).get(parameter, []))):
+        if form_xss:
+            if (proof.get("operation") != "check_form_xss"
+                    or proof.get("form_action") != cand.target
+                    or proof.get("form_field") != parameter
+                    or proof.get("post_submitted") is not True
+                    or proof.get("post_response_seen") is not True
+                    or "__PROWL_NONCE__" not in str(proof.get("form_payload_template") or "")
+                    or parsed.query or parsed.fragment
+                    or not _same_observed_origin(parsed.scheme, parsed.netloc, cand.target)):
+                continue
+        elif (not _same_observed_origin(parsed.scheme, parsed.netloc, cand.target)
+              or (parsed.path or "/") != (target.path or "/")
+              or parsed.fragment or "__PROWL_NONCE__" not in template
+              or not any("__PROWL_NONCE__" in value
+                         for value in parse_qs(parsed.query).get(parameter, []))):
             continue
         hunter.append((evidence_id, template))
     if not hunter:
@@ -878,9 +891,13 @@ async def _verify_scoped_browser_xss_candidate(
     failure = "Fresh browser replay did not execute the XSS canary"
     try:
         for hunter_id, template in hunter[:3]:
-            wrapped = await tools_manager.execute("scoped_browser_assessment", {
-                "operation": "check_xss", "url": template, "identity": identity,
-            })
+            replay_args = {"operation": "check_xss", "url": template, "identity": identity}
+            if form_xss:
+                hunter_proof = store.records[hunter_id]["payload"]
+                replay_args.update({"operation": "check_form_xss", "form_action": cand.target,
+                                    "form_field": parameter,
+                                    "form_payload_template": hunter_proof["form_payload_template"]})
+            wrapped = await tools_manager.execute("scoped_browser_assessment", replay_args)
             output = wrapped.get("output") if isinstance(wrapped, dict) else None
             result = json.loads(output) if isinstance(output, str) else output
             if not isinstance(result, dict):
@@ -895,7 +912,8 @@ async def _verify_scoped_browser_xss_candidate(
                     or verifier.get("identity") != identity):
                 failure = "XSS replay had no fresh verifier evidence"
                 continue
-            proof = {"kind": "scoped_browser_xss", "hunter_artifact_id": hunter_id,
+            proof = {"kind": "scoped_browser_form_xss" if form_xss else "scoped_browser_xss",
+                     "hunter_artifact_id": hunter_id,
                      "artifact_id": artifact_id}
             valid, why = validate_proof(store, cand, proof, [artifact_id])
             fresh, fresh_why = store.validate(

@@ -84,12 +84,15 @@ def capability_map_from_observation(observation: dict) -> dict | None:
     elif isinstance(result.get("status"), int) and 200 <= result["status"] < 400:
         pages = [scope + str(result.get("final_path") or "/")]
 
-    raw_forms = list(result.get("forms") or [])
+    raw_forms = [dict(row, page=scope + str(result.get("final_path") or "/"))
+                 for row in (result.get("forms") or []) if isinstance(row, dict)]
     for page in (result.get("pages") or [])[:80]:
         if isinstance(page, dict):
-            raw_forms.extend(page.get("forms") or [])
+            raw_forms.extend(dict(row, page=page.get("url"))
+                             for row in (page.get("forms") or []) if isinstance(row, dict))
     forms = [
         {"method": row.get("method"), "action": row.get("action"),
+         "page": row.get("page"),
          "inputs": [field["name"] for field in (row.get("fields") or [])[:40]
                     if isinstance(field, dict) and isinstance(field.get("name"), str)],
          "fields": [
@@ -100,7 +103,7 @@ def capability_map_from_observation(observation: dict) -> dict | None:
         for row in raw_forms[:60] if isinstance(row, dict)
     ]
     api_endpoints = []
-    for row in [*(result.get("requests") or [])[:200], *(result.get("traffic") or [])[:40]]:
+    for row in [*(result.get("requests") or [])[:300], *(result.get("traffic") or [])[:120]]:
         if not isinstance(row, dict) or row.get("resource_type") not in ("xhr", "fetch"):
             continue
         path = in_origin_path(row.get("path"))
@@ -129,7 +132,7 @@ def capability_map_from_observation(observation: dict) -> dict | None:
                     api_endpoints.append({"host": origin_parts.netloc, "method": method,
                                           "path": path, "source": "javascript_static"})
     js_files = []
-    for row in [*(result.get("requests") or [])[:200], *(result.get("scripts") or [])[:20]]:
+    for row in [*(result.get("requests") or [])[:300], *(result.get("scripts") or [])[:20]]:
         if not isinstance(row, dict):
             continue
         if row.get("resource_type") != "script" and row.get("kind") != "external":
@@ -187,7 +190,7 @@ def capability_map_from_observation(observation: dict) -> dict | None:
             if isinstance(name, str):
                 parameters.append({"method": "GET", "path": path, "name": name,
                                    "location": "query", "source": "browser_link"})
-    for row in (result.get("requests") or [])[:100]:
+    for row in (result.get("requests") or [])[:300]:
         if not isinstance(row, dict) or not isinstance(row.get("path"), str):
             continue
         for name in (row.get("query_keys") or [])[:20]:
@@ -196,7 +199,7 @@ def capability_map_from_observation(observation: dict) -> dict | None:
                 "name": name, "location": "query", "source": "browser_request",
                 "identity": result.get("identity", "anonymous"),
             })
-    for row in (result.get("traffic") or [])[:40]:
+    for row in (result.get("traffic") or [])[:120]:
         if not isinstance(row, dict) or not isinstance(row.get("path"), str):
             continue
         common = {"method": row.get("method", "GET"), "path": row["path"],

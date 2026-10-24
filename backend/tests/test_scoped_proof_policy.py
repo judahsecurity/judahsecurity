@@ -146,3 +146,29 @@ def test_real_evidence_receipts_preserve_the_numeric_proof_boundary():
         "kind": "numeric_boolean_sqli", "hunter_artifact_id": hunter_id,
         "artifact_id": verifier_id,
     }, [verifier_id])[0]
+
+
+def test_post_form_xss_requires_completed_post_before_nonce_dialog():
+    target = "https://app.example.test/newsletter"
+    payload = {"operation": "check_form_xss", "target_template": "https://app.example.test/",
+               "form_action": target, "form_field": "email",
+               "form_payload_template": '<img src=x onerror=alert("__PROWL_NONCE__")>',
+               "post_submitted": True, "post_response_seen": True, "executed": True}
+    hunter = {"id": "hunter", "kind": "scoped_browser_check_form_xss",
+              "target": target, "identity": "anonymous", "created_at": 1,
+              "payload": dict(payload, nonce="first")}
+    verifier = {"id": "verifier", "kind": "scoped_browser_check_form_xss",
+                "target": target, "identity": "anonymous", "created_at": 2,
+                "payload": dict(payload, nonce="second")}
+    candidate = SimpleNamespace(target=target, evidence_ids=["hunter"],
+                                title="Reflected XSS in form", description="",
+                                vulnerability_class="xss")
+    store = Store(hunter, verifier)
+    proof = {"kind": "scoped_browser_form_xss", "hunter_artifact_id": "hunter",
+             "artifact_id": "verifier"}
+    assert validate_proof(store, candidate, proof, ["verifier"])[0]
+    verifier["payload"]["post_response_seen"] = False
+    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
+    verifier["payload"]["post_response_seen"] = True
+    verifier["payload"]["nonce"] = "first"
+    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
