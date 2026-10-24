@@ -477,7 +477,7 @@ async def test_string_tool_prefers_private_observed_get_over_invented_baseline(m
 
 
 @pytest.mark.asyncio
-async def test_string_tool_uses_late_document_capture_with_original_query_context(monkeypatch):
+async def test_string_tool_uses_late_fetch_capture_with_original_query_context(monkeypatch):
     manager = ASMToolsManager()
     manager._fallback_target = "https://app.example.test"
     register_scope(manager, "app.example.test")
