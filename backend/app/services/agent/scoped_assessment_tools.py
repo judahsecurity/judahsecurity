@@ -693,13 +693,22 @@ class ScopedAssessmentTools:
             # The public inventory is value-free. Keep ordinary link values in
             # session-local browser state, then recover only this exact input.
             captured_urls = []
-            for artifact_id in list((getattr(self, "_scoped_browser_exchanges", None) or {}))[:40]:
+            # A busy browser session can record hundreds of requests before the
+            # input under test. Search all private captures, placing this
+            # inventory row's exact capture first when one is available.
+            exchanges = getattr(self, "_scoped_browser_exchanges", None) or {}
+            capture_ids = list(exchanges)
+            preferred_id = str(observed.get("artifact_id") or "")
+            if preferred_id in exchanges:
+                capture_ids.remove(preferred_id)
+                capture_ids.insert(0, preferred_id)
+            for artifact_id in capture_ids:
                 try:
                     captured = json.loads(self._scoped_exchange(artifact_id, identity))
                 except (TypeError, ValueError):
                     continue
                 if (isinstance(captured, dict) and captured.get("method") == "GET"
-                        and captured.get("resource_type") in {"xhr", "fetch"}):
+                        and captured.get("resource_type") in {"xhr", "fetch", "document"}):
                     captured_urls.append(captured.get("url"))
             candidates = [
                 *captured_urls,
