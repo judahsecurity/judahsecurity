@@ -739,6 +739,7 @@ def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, A
             )
             dom["script_url"] = script_url
             dom["script_kind"] = "inline" if inline else "external"
+            dom["page_path"] = str(source.get("page_path") or (parts.path if inline else ""))[:512]
             dom["source_leads"] = source_leads
             dom["sink_leads"] = sink_leads
             dom["priority_rank"] = 2

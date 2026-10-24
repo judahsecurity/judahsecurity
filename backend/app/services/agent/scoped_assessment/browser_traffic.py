@@ -89,7 +89,8 @@ def _body_fields(data: bytes, content_type: str) -> tuple[str, str, list[dict]]:
 def package_exchange(*, url: str, expected_origin: str, action_ref: str,
                      method: str, resource_type: str, status: int,
                      content_type: str, request_body: bytes,
-                     response_body: bytes, request_content_type: str = "") -> tuple[dict, bytes]:
+                     response_body: bytes, request_content_type: str = "",
+                     page_url: str = "") -> tuple[dict, bytes]:
     if origin(url) != expected_origin:
         raise ValueError("Exchange is outside the browser origin")
     if len(url) > MAX_URL_LENGTH:
@@ -99,9 +100,19 @@ def package_exchange(*, url: str, expected_origin: str, action_ref: str,
     if len(request_body) > MAX_BODY_BYTES or len(response_body) > MAX_BODY_BYTES:
         raise ValueError("Exchange body exceeds capture limit")
     parts = urlsplit(url)
+    # The rendering page is needed to test XHR responses consumed by a SPA.
+    # Keep its query private, just as we do for the captured API URL.
+    try:
+        valid_page = bool(page_url and len(page_url) <= MAX_URL_LENGTH
+                          and origin(page_url) == expected_origin)
+    except ValueError:
+        valid_page = False
+    if not valid_page:
+        page_url = ""
     request_mime, body_fields_status, body_fields = _body_fields(request_body, request_content_type)
     public = {
         "action_ref": action_ref,
+        "page_path": (urlsplit(page_url).path or "/")[:512] if page_url else "",
         "method": method.upper()[:12],
         "path": (parts.path or "/")[:512],
         "query_keys": sorted({key[:80] for key, _ in parse_qsl(parts.query)})[:20],
@@ -126,6 +137,7 @@ def package_exchange(*, url: str, expected_origin: str, action_ref: str,
         "status": status,
         "content_type": content_type,
         "action_ref": action_ref,
+        "page_url": page_url,
         "request_body_base64": base64.b64encode(request_body).decode("ascii"),
         "request_content_type": request_mime,
         "response_body_base64": base64.b64encode(response_body).decode("ascii"),

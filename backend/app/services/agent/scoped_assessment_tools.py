@@ -97,13 +97,16 @@ class ScopedAssessmentTools:
         """Install operator supplied rules for this agent session, never model supplied rules."""
         policy = policy or {}
         paths = policy.get("body_replay_paths") or []
+        cleanup_paths = policy.get("stored_xss_cleanup_paths") or []
         expectations = policy.get("owner_only_resources") or []
-        if not isinstance(paths, list) or len(paths) > 8 or not isinstance(expectations, list) or len(expectations) > 8:
+        if (not isinstance(paths, list) or len(paths) > 8
+                or not isinstance(cleanup_paths, list) or len(cleanup_paths) > 8
+                or not isinstance(expectations, list) or len(expectations) > 8):
             raise ValueError("Invalid bounded assessment policy")
-        for path in paths:
+        for path in [*paths, *cleanup_paths]:
             if (not isinstance(path, str) or not path.startswith("/") or path.startswith("//")
                     or path == "/" or len(path) > 256 or any(char in path for char in "?#\\\r\n\t ")):
-                raise ValueError("Invalid body replay path")
+                raise ValueError("Invalid approved write or cleanup path")
         approved = {}
         for row in expectations:
             if not isinstance(row, dict):
@@ -120,8 +123,9 @@ class ScopedAssessmentTools:
                 raise ValueError("Owner-only resource needs an exact safe path")
             approved[target] = (owner, other)
         self._scoped_body_replay_paths = set(paths)
+        self._scoped_stored_xss_cleanup_paths = set(cleanup_paths)
         self._scoped_owner_expectations = approved
-        if paths or approved:
+        if paths or cleanup_paths or approved:
             self._scoped_assessment_started = True
 
     def _scoped_origin(self, url: str) -> str:
@@ -252,17 +256,29 @@ class ScopedAssessmentTools:
         max_pages: int = 1, max_actions: int = 3,
         form_action: str = "", form_field: str = "",
         form_payload_template: str = "",
+        xhr_path: str = "", xhr_parameter: str = "",
+        xhr_payload_template: str = "",
+        xhr_query_keys: list[str] | None = None,
+        readback_url: str = "", cleanup_url_template: str = "",
     ) -> str:
         """Run scoped map, crawl, JS inspection, or nonce XSS execution in Chromium."""
-        if operation not in ("map", "crawl", "inspect_js", "check_xss", "check_form_xss"):
+        if operation not in ("map", "crawl", "inspect_js", "check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss"):
             raise ValueError("Unsupported scoped browser operation")
         allowed = self._scoped_origin(url)
-        if operation == "check_form_xss":
+        if operation in {"check_form_xss", "check_stored_xss"}:
             if self._scoped_origin(form_action) != allowed:
                 raise ValueError("Form action is outside the assessment origin")
             action_path = urlsplit(form_action).path or "/"
             if action_path not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
                 raise ValueError("POST form path was not approved by the assessment operator")
+            if operation == "check_stored_xss":
+                if (self._scoped_origin(readback_url) != allowed
+                        or urlsplit(readback_url).query or urlsplit(readback_url).fragment):
+                    raise ValueError("Stored XSS needs an exact same-origin readback page")
+                if (self._scoped_origin(cleanup_url_template) != allowed
+                        or (urlsplit(cleanup_url_template).path or "/") not in
+                        (getattr(self, "_scoped_stored_xss_cleanup_paths", None) or set())):
+                    raise ValueError("Stored XSS cleanup path was not approved by the assessment operator")
             used = int(getattr(self, "_scoped_post_count", 0) or 0)
             if used >= 10:
                 raise ValueError("Scoped POST budget exhausted for this assessment session")
@@ -275,11 +291,15 @@ class ScopedAssessmentTools:
             operation=operation, url=url, allowed_origins=[allowed],
             storage_state=state, max_pages=max_pages,
             javascript_sources=sources if operation == "inspect_js" else None,
-            traffic_exchanges=exchanges if operation == "inspect_js" else None,
-            link_baselines=link_baselines if operation != "check_xss" else None,
+            traffic_exchanges=exchanges if operation in {"map", "crawl", "inspect_js"} else None,
+            link_baselines=link_baselines if operation in {"map", "crawl", "inspect_js"} else None,
             max_actions=max_actions,
             form_action=form_action, form_field=form_field,
             form_payload_template=form_payload_template,
+            xhr_path=xhr_path, xhr_parameter=xhr_parameter,
+            xhr_payload_template=xhr_payload_template,
+            xhr_query_keys=xhr_query_keys,
+            readback_url=readback_url, cleanup_url_template=cleanup_url_template,
         )
         if link_baselines:
             private = dict(getattr(self, "_scoped_link_baselines", None) or {})
@@ -288,7 +308,8 @@ class ScopedAssessmentTools:
             ]))[-120:]
             self._scoped_link_baselines = private
         self._scoped_assessment_started = True
-        target = allowed + (urlsplit(form_action if operation == "check_form_xss" else url).path or "/")
+        target = allowed + (xhr_path if operation == "check_xhr_xss" else
+                            (urlsplit(form_action if operation in {"check_form_xss", "check_stored_xss"} else url).path or "/"))
         result["screenshot_sha256"] = hashlib.sha256(screenshot).hexdigest() if screenshot else None
         if operation in ("map", "crawl", "inspect_js"):
             result["directory_candidates"] = http_observe.observed_parent_directories(
@@ -302,7 +323,6 @@ class ScopedAssessmentTools:
             result["suggested_coverage"] = planning.coverage_from_observation(result)
         if operation == "inspect_js":
             from app.services.agent.scoped_assessment.javascript import analyze_javascript
-            from app.services.agent.scoped_assessment.surface_inventory import build_surface_inventory
 
             scripts = []
             for source in sources[:20]:
@@ -316,11 +336,27 @@ class ScopedAssessmentTools:
                     target=source_url, identity=identity,
                 )
                 scripts.append({"url": source_url, "kind": source["kind"],
+                                "page_path": source.get("page_path", ""),
                                 "action_ref": source.get("action_ref"), "artifact_id": source_id,
                                 "sha256": hashlib.sha256(data).hexdigest(), "analysis": analysis})
+            result["scripts"] = scripts
+        if operation in ("map", "crawl", "inspect_js"):
+            from app.services.agent.scoped_assessment.surface_inventory import build_surface_inventory
             traffic = []
             private_store = dict(getattr(self, "_scoped_browser_exchanges", None) or {})
+            from app.services.agent.engagement_brain import engagement_brain_from_dict
+            active_brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            pinned = {str(cell.get("capture_id")) for cell in active_brain.coverage_cells
+                      if isinstance(cell, dict) and cell.get("capture_id")
+                      and cell.get("status") not in {"finding", "tested_clean", "skipped"}}
+            dropped = 0
             for row in exchanges[:120]:
+                if len(private_store) >= 120:
+                    oldest = next((key for key in private_store if key not in pinned), None)
+                    if oldest is None:
+                        dropped += 1
+                        continue
+                    del private_store[oldest]
                 public = row["public"]
                 artifact_id = evidence_store(self).record(
                     "scoped_browser_exchange", public, target=allowed + public["path"],
@@ -331,13 +367,12 @@ class ScopedAssessmentTools:
                     "identity": identity, "private": row["private"], "public": public,
                     "verifier_run_id": current.id if current else None,
                 }
+                pinned.add(artifact_id)
                 public["artifact_id"] = artifact_id
                 traffic.append(public)
-            while len(private_store) > 120:
-                private_store.pop(next(iter(private_store)))
             self._scoped_browser_exchanges = private_store
-            result["scripts"] = scripts
             result["traffic"] = traffic
+            result["traffic_store_dropped"] = dropped
             result["surface_inventory"] = build_surface_inventory(
                 result, body_replay_paths=getattr(self, "_scoped_body_replay_paths", None),
             )
@@ -425,7 +460,7 @@ class ScopedAssessmentTools:
                 self._engagement_brain = brain.to_dict()
         receipt_id = evidence_store(self).record(
             "scoped_browser_" + operation, result, target=target, identity=identity,
-            success=bool(result.get("executed")) if operation in {"check_xss", "check_form_xss"} else True,
+            success=bool(result.get("executed")) if operation in {"check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss"} else True,
         )
         result["evidence_id"] = receipt_id
         output = json.dumps(result)

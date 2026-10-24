@@ -169,3 +169,202 @@ async def test_scoped_post_form_xss_needs_response_and_browser_execution():
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_scoped_xhr_xss_replays_rendering_page_and_requires_execution(monkeypatch):
+    from app.services.agent.scoped_assessment.browser import check_browser
+    from playwright.async_api import BrowserType
+
+    executable = os.environ.get("ASSESSMENT_TEST_CHROMIUM")
+    if executable:
+        original = BrowserType.launch
+
+        async def launch(self, **kwargs):
+            return await original(self, **dict(kwargs, executable_path=executable))
+
+        monkeypatch.setattr(BrowserType, "launch", launch)
+
+    seen_queries = []
+
+    class Handler(BaseHTTPRequestHandler):
+        encode = False
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            if self.path.startswith("/api/search"):
+                value = parse_qs(self.path.split("?", 1)[1]).get("term", [""])[0]
+                seen_queries.append(value)
+                rendered = escape(value) if self.encode else value
+                body = rendered.encode()
+                content_type = "text/html"
+            else:
+                body = (b'<div id="result"></div><script>'
+                        b'fetch("/api/search?term=seed").then(r => r.text())'
+                        b'.then(v => document.getElementById("result").innerHTML = v)'
+                        b'</script>')
+                content_type = "text/html"
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        traffic = []
+        mapped, _ = await check_browser(operation="map", url=base + "/catalog",
+                                        allowed_origins=[base], traffic_exchanges=traffic)
+        assert mapped["operation"] == "map"
+        assert len(traffic) == 1
+        assert json.loads(traffic[0]["private"])["page_url"] == base + "/catalog"
+        payload = '<img src=x onerror=alert("__PROWL_NONCE__")>'
+        for encoded in (False, True):
+            Handler.encode = encoded
+            result, _ = await check_browser(
+                operation="check_xhr_xss", url=base + "/catalog",
+                allowed_origins=[base], xhr_path="/api/search",
+                xhr_parameter="term", xhr_query_keys=["term"],
+                xhr_payload_template=payload,
+            )
+            assert result["xhr_mutated"] is True
+            assert result["xhr_response_seen"] is True
+            assert result["executed"] is not encoded
+        assert seen_queries[0] == "seed"
+        assert all("onerror" in value for value in seen_queries[1:])
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_scoped_dom_fragment_executes_only_in_unsafe_sink(monkeypatch):
+    from app.services.agent.scoped_assessment.browser import check_browser
+    from playwright.async_api import BrowserType
+
+    executable = os.environ.get("ASSESSMENT_TEST_CHROMIUM")
+    if executable:
+        original = BrowserType.launch
+
+        async def launch(self, **kwargs):
+            return await original(self, **dict(kwargs, executable_path=executable))
+
+        monkeypatch.setattr(BrowserType, "launch", launch)
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            sink = "innerHTML" if self.path == "/unsafe" else "textContent"
+            body = (f'<div id="result"></div><script>'
+                    f'document.getElementById("result").{sink} = '
+                    f'decodeURIComponent(location.hash.slice(1));</script>').encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    payload = "%3Cimg%20src%3Dx%20onerror%3Dalert(%22__PROWL_NONCE__%22)%3E"
+    try:
+        for path, expected in (("/unsafe", True), ("/safe", False)):
+            result, _ = await check_browser(
+                operation="check_xss", url=base + path + "#" + payload,
+                allowed_origins=[base],
+            )
+            assert result["executed"] is expected
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_scoped_stored_xss_reads_then_cleans_up(monkeypatch):
+    from playwright.async_api import BrowserType
+    from app.services.agent.scoped_assessment.browser import check_browser
+
+    executable = os.environ.get("ASSESSMENT_TEST_CHROMIUM")
+    if executable:
+        original = BrowserType.launch
+
+        async def launch(self, **kwargs):
+            return await original(self, **dict(kwargs, executable_path=executable))
+
+        monkeypatch.setattr(BrowserType, "launch", launch)
+
+    values = []
+
+    class Handler(BaseHTTPRequestHandler):
+        encode = False
+
+        def log_message(self, *args):
+            pass
+
+        def respond(self, status, body=b""):
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            if self.path == "/new":
+                self.respond(200, b'<form method="POST" action="/comments">'
+                             b'<textarea name="message"></textarea>'
+                             b'<button type="submit">Save</button></form>')
+            elif self.path == "/comments/view":
+                body = "".join(escape(value) if self.encode else value for value in values)
+                self.respond(200, ("<html><body>" + body + "</body></html>").encode())
+            else:
+                self.respond(404)
+
+        def do_POST(self):
+            if self.path != "/comments":
+                self.respond(404)
+                return
+            body = self.rfile.read(int(self.headers["Content-Length"])).decode()
+            values.append(parse_qs(body).get("message", [""])[0])
+            self.respond(200, b"Saved")
+
+        def do_DELETE(self):
+            marker = parse_qs(self.path.split("?", 1)[1]).get("marker", [""])[0]
+            values[:] = [value for value in values if marker not in value]
+            self.respond(200)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        for encoded in (False, True):
+            Handler.encode = encoded
+            result, _ = await check_browser(
+                operation="check_stored_xss", url=base + "/new",
+                allowed_origins=[base], form_action=base + "/comments",
+                form_field="message",
+                form_payload_template='<img src=x onerror=alert("__PROWL_NONCE__")>',
+                readback_url=base + "/comments/view",
+                cleanup_url_template=base + "/comments/purge?marker=__PROWL_NONCE__",
+            )
+            assert result["post_submitted"] is True
+            assert result["readback_status"] == 200
+            assert result["readback_final_exact"] is True
+            assert result["cleanup_success"] is True
+            assert result["executed"] is not encoded
+            assert values == []
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)

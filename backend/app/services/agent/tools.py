@@ -495,6 +495,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _scoped_verify_get_count = SessionValue(lambda: 0)
     _scoped_post_count = SessionValue(lambda: 0)
     _scoped_body_replay_paths = SessionValue(set)
+    _scoped_stored_xss_cleanup_paths = SessionValue(set)
     _scoped_owner_expectations = SessionValue(dict)
     _scoped_assessment_started = SessionValue(lambda: False)
     _scoped_assessment_partial_reason = SessionValue(lambda: "")
@@ -721,6 +722,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "scoped_assessment_probe": self.scoped_assessment_probe,
             "scoped_assessment_probe_assigned": self.scoped_assessment_probe_assigned,
             "scoped_input_probe_assigned": self.scoped_input_probe_assigned,
+            "scoped_dom_xss_assigned": self.scoped_dom_xss_assigned,
+            "scoped_stored_xss_assigned": self.scoped_stored_xss_assigned,
             "probe_observed_input_batch": self.probe_observed_input_batch,
             "scoped_assessment_candidate": self.scoped_assessment_candidate,
             "scoped_assessment_publish": self.scoped_assessment_publish,
@@ -913,7 +916,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         this adapter binds their evidence to the assigned coverage cell.
         """
         import time
-        from urllib.parse import urlsplit
+        from urllib.parse import parse_qsl, urlsplit
 
         from app.services.agent.coverage_cells import parameter_test_funnel
         from app.services.agent.engagement_brain import engagement_brain_from_dict
@@ -1019,14 +1022,51 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 request_context = "observed_post_form"
                 operation = "scoped_browser_check_form_xss"
             else:
-                template, request_context = self._observed_get_query_template(
-                    url, parameter, payloads[technique], identity,
-                    capture_id=str(cell.get("capture_id") or ""),
-                )
-                proof = json.loads(await self.scoped_browser_assessment(
-                    "check_xss", template, identity=identity,
-                ))
-                operation = "scoped_browser_check_xss"
+                captured = {}
+                capture_id = str(cell.get("capture_id") or "")
+                if capture_id:
+                    try:
+                        captured = json.loads(self._scoped_exchange(capture_id, identity))
+                    except (TypeError, ValueError):
+                        captured = {}
+                page_url = str(captured.get("page_url") or "")
+                captured_url = str(captured.get("url") or "")
+                try:
+                    captured_pairs = parse_qsl(
+                        urlsplit(captured_url).query, keep_blank_values=True,
+                        max_num_fields=40,
+                    )
+                except ValueError:
+                    captured_pairs = []
+                query_keys = sorted({name for name, _ in captured_pairs})
+                if (captured.get("method") == "GET"
+                        and captured.get("resource_type") in {"xhr", "fetch"}
+                        and _origin(page_url) == scoped_origin
+                        and not urlsplit(page_url).query
+                        and not urlsplit(page_url).fragment
+                        and urlsplit(page_url).path != cell["path"]
+                        and urlsplit(captured_url).path == cell["path"]
+                        and sum(name == parameter for name, _ in captured_pairs) == 1
+                        and 1 <= len(query_keys) <= 20
+                        and all(_re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,79}", name)
+                                for name in query_keys)):
+                    proof = json.loads(await self.scoped_browser_assessment(
+                        "check_xhr_xss", page_url, identity=identity,
+                        xhr_path=cell["path"], xhr_parameter=parameter,
+                        xhr_payload_template=payloads[technique],
+                        xhr_query_keys=query_keys,
+                    ))
+                    request_context = "observed_xhr_render_page"
+                    operation = "scoped_browser_check_xhr_xss"
+                else:
+                    template, request_context = self._observed_get_query_template(
+                        url, parameter, payloads[technique], identity,
+                        capture_id=capture_id,
+                    )
+                    proof = json.loads(await self.scoped_browser_assessment(
+                        "check_xss", template, identity=identity,
+                    ))
+                    operation = "scoped_browser_check_xss"
             confirmed = proof.get("executed") is True
 
         artifact_id = str(proof.get("evidence_id") or "")
@@ -1079,6 +1119,155 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         result["surface_signature"] = surface_signature
         result["pending_batch_signature"] = pending_batch_signature
         return result
+
+    async def scoped_dom_xss_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+    ) -> Dict[str, Any]:
+        """Probe a mapped fragment-to-sink lead on its observed rendering page."""
+        import time
+        from urllib.parse import quote, urlsplit
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "js_inventory"
+                or cell.get("test_type") != "dom_xss"
+                or cell.get("specialist") != "xss"
+                or not any(isinstance(lead, dict) and lead.get("kind") == "fragment"
+                           for lead in cell.get("source_leads") or [])
+                or not any(isinstance(lead, dict) and lead.get("kind") in
+                           {"html_assignment", "dynamic_code"}
+                           for lead in cell.get("sink_leads") or [])):
+            return {"success": False, "error": "invalid_dom_xss_lease"}
+        page_path = str(cell.get("page_path") or "")
+        if (not page_path or not page_path.startswith("/") or page_path.startswith("//")
+                or any(char in page_path for char in "?#\\\r\n\t ")
+                or not allowed_discovery_path(page_path)):
+            return {"success": False, "error": "observed_rendering_page_missing"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        payload = '<img src=x onerror=alert("__PROWL_NONCE__")>'
+        template = scoped_origin + page_path + "#" + quote(payload, safe="")
+        proof = json.loads(await self.scoped_browser_assessment(
+            "check_xss", template, identity=str(cell.get("identity") or "anonymous"),
+        ))
+        artifact_id = str(proof.get("evidence_id") or "")
+        if not artifact_id:
+            return {"success": False, "error": str(proof.get("error") or "missing_probe_evidence")[:100]}
+        live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        current = next((row for row in live.coverage_cells
+                        if row.get("id") == coverage_cell_id
+                        and row.get("lease_id") == coverage_lease_id), None)
+        if current is None:
+            return {"success": False, "error": "lease_changed"}
+        current["probe_artifact_ids"] = list(dict.fromkeys([
+            *(current.get("probe_artifact_ids") or []), artifact_id,
+        ]))[:20]
+        current["evidence_ids"] = list(dict.fromkeys([
+            *(current.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        current["last_probe"] = "scoped_browser_check_xss_fragment"
+        if proof.get("executed") is True:
+            current["status"] = "in_focus"
+            current["reason"] = "Fragment execution signal; independent verification required"
+        self._engagement_brain = live.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
+                "operation": "scoped_browser_check_xss_fragment",
+                "proof_confirmed": proof.get("executed") is True,
+                "probe_result": {"executed": proof.get("executed") is True,
+                                 "request_context": "observed_fragment_render_page"}}
+
+    async def scoped_stored_xss_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+        readback_url: str, cleanup_url_template: str,
+    ) -> Dict[str, Any]:
+        """Submit, independently read, and clean up one approved stored XSS canary."""
+        import time
+        from urllib.parse import urlsplit
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.parameter_inventory import _origin
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        location, separator, field = str((cell or {}).get("parameter") or "").partition(":")
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "parameter_inventory"
+                or cell.get("test_type") != "stored_xss"
+                or cell.get("method") != "POST"
+                or location != "body_form" or not separator or not field):
+            return {"success": False, "error": "invalid_stored_xss_lease"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        action = scoped_origin + str(cell.get("path") or "/")
+        pages = sorted({str(form.get("page")) for form in (cmap.get("forms") or [])[:80]
+                        if isinstance(form, dict)
+                        and str(form.get("method") or "").upper() == "POST"
+                        and form.get("action") == action
+                        and field in (form.get("inputs") or [])
+                        and _origin(str(form.get("page") or "")) == scoped_origin
+                        and not urlsplit(str(form.get("page") or "")).query
+                        and not urlsplit(str(form.get("page") or "")).fragment})
+        if len(pages) != 1:
+            return {"success": False, "error": "observed_form_page_missing"}
+        if (readback_url not in (cmap.get("pages_visited") or [])
+                and readback_url not in [row.get("url") for row in
+                                         (cmap.get("discovered_links") or []) if isinstance(row, dict)]):
+            return {"success": False, "error": "observed_readback_page_missing"}
+        payload = '<img src=x onerror=alert("__PROWL_NONCE__")>'
+        try:
+            proof = json.loads(await self.scoped_browser_assessment(
+                "check_stored_xss", pages[0], identity=str(cell.get("identity") or "anonymous"),
+                form_action=action, form_field=field, form_payload_template=payload,
+                readback_url=readback_url, cleanup_url_template=cleanup_url_template,
+            ))
+        except ValueError as exc:
+            return {"success": False, "error": "operator_approval_required",
+                    "reason": str(exc)[:200]}
+        artifact_id = str(proof.get("evidence_id") or "")
+        if not artifact_id:
+            return {"success": False, "error": str(proof.get("error") or "missing_probe_evidence")[:100]}
+        live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        current = next((row for row in live.coverage_cells
+                        if row.get("id") == coverage_cell_id
+                        and row.get("lease_id") == coverage_lease_id), None)
+        if current is None:
+            return {"success": False, "error": "lease_changed"}
+        current["probe_artifact_ids"] = list(dict.fromkeys([
+            *(current.get("probe_artifact_ids") or []), artifact_id,
+        ]))[:20]
+        current["evidence_ids"] = list(dict.fromkeys([
+            *(current.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        current["last_probe"] = "scoped_browser_check_stored_xss"
+        if proof.get("executed") is True:
+            current["status"] = "in_focus"
+            current["reason"] = "Stored readback execution signal; independent verification required"
+        self._engagement_brain = live.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
+                "operation": "scoped_browser_check_stored_xss",
+                "proof_confirmed": proof.get("executed") is True,
+                "probe_result": {"executed": proof.get("executed") is True,
+                                 "readback_executed": proof.get("readback_executed") is True,
+                                 "cleanup_success": proof.get("cleanup_success") is True}}
 
     async def scoped_assessment_probe_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
@@ -1156,6 +1345,19 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             if cell.get("specialist") != "xss" or method != "GET" or location != "query":
                 return {"success": False, "error": "unsupported_xss_browser",
                         "output": "Browser XSS check requires a captured GET query parameter"}
+            local_capture = (getattr(self, "_scoped_browser_exchanges", None) or {}).get(
+                str(cell.get("capture_id") or ""))
+            if local_capture and local_capture.get("identity") == identity:
+                result = await self.scoped_input_probe_assigned(
+                    coverage_cell_id, coverage_lease_id, technique={
+                        "xss_browser": "html_body",
+                        "xss_browser_attribute": "html_attribute",
+                        "xss_browser_js_single": "js_single",
+                        "xss_browser_js_double": "js_double",
+                    }[technique],
+                )
+                result["assigned_operation"] = result.get("operation", "")
+                return result
             cmap = getattr(self, "_capability_map", None) or {}
             origin = urlsplit(str(cmap.get("scope") or cmap.get("target") or ""))
             if (origin.scheme not in {"http", "https"} or

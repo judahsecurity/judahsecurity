@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import parse_qsl, quote, unquote_plus, urlsplit, urlunsplit
 
 from .browser_runtime import launch_options
 
@@ -45,6 +45,33 @@ def assert_in_scope(url: str, allowed_origins: list[str]) -> None:
     sensitive = ("token", "secret", "password", "api_key", "apikey", "authorization", "session", "jwt")
     if any(any(word in key.lower() for word in sensitive) for key, _ in parse_qsl(urlsplit(url).query)):
         raise ValueError("Credential-bearing URL query is not accepted")
+
+
+def replace_observed_query_value(url: str, parameter: str, value: str) -> str:
+    """Change exactly one observed query field without rebuilding its neighbors."""
+    parts = urlsplit(url)
+    fields = parts.query.split("&")
+    if len(fields) > 40 or len(parts.query) > 2048:
+        raise ValueError("Observed query exceeds XSS replay limit")
+    matches = [index for index, field in enumerate(fields)
+               if field and unquote_plus(field.split("=", 1)[0]) == parameter]
+    if len(matches) != 1:
+        raise ValueError("XSS replay requires one observed query field")
+    index = matches[0]
+    name = fields[index].split("=", 1)[0]
+    fields[index] = name + "=" + quote(value, safe="")
+    return urlunsplit(parts._replace(query="&".join(fields)))
+
+
+def observed_query_keys(url: str) -> list[str]:
+    query = urlsplit(url).query
+    if len(query) > 2048:
+        return []
+    try:
+        return sorted({key for key, _ in parse_qsl(
+            query, keep_blank_values=True, max_num_fields=40)})
+    except ValueError:
+        return []
 
 
 def _storage_for_origin(state: dict | None, target: str) -> dict | None:
@@ -179,11 +206,15 @@ async def check_browser(
     max_actions: int = 3,
     form_action: str = "", form_field: str = "",
     form_payload_template: str = "",
+    xhr_path: str = "", xhr_parameter: str = "",
+    xhr_payload_template: str = "",
+    xhr_query_keys: list[str] | None = None,
+    readback_url: str = "", cleanup_url_template: str = "",
 ) -> tuple[dict, bytes | None]:
     """Execute one bounded browser check with HTTP and WebSocket origin routing."""
     from playwright.async_api import async_playwright
 
-    if operation not in ("map", "check_xss", "check_form_xss", "crawl", "inspect_js"):
+    if operation not in ("map", "check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss", "crawl", "inspect_js"):
         raise ValueError("Unsupported browser operation")
     if operation == "inspect_js":
         from .browser_actions import MAX_DISCOVERY_ACTIONS
@@ -196,10 +227,10 @@ async def check_browser(
     if operation == "crawl" and not 1 <= max_pages <= 10:
         raise ValueError("Crawl page limit must be between 1 and 10")
     assert_in_scope(url, allowed_origins)
-    nonce = secrets.token_hex(8) if operation in {"check_xss", "check_form_xss"} else ""
+    nonce = secrets.token_hex(8) if operation in {"check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss"} else ""
     if operation == "check_xss" and NONCE_MARKER not in url:
         raise ValueError(f"XSS URL must contain {NONCE_MARKER}")
-    if operation == "check_form_xss":
+    if operation in {"check_form_xss", "check_stored_xss"}:
         import re
         if (not form_action or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,79}", form_field)
                 or NONCE_MARKER not in form_payload_template
@@ -208,6 +239,32 @@ async def check_browser(
         assert_in_scope(form_action, allowed_origins)
         if urlsplit(form_action).query or urlsplit(form_action).fragment:
             raise ValueError("Form XSS action must be an exact path")
+    if operation == "check_stored_xss":
+        cleanup_fields = parse_qsl(urlsplit(cleanup_url_template).query, keep_blank_values=True)
+        if (not readback_url or not cleanup_url_template
+                or len(cleanup_fields) != 1 or cleanup_fields[0][1] != NONCE_MARKER
+                or urlsplit(readback_url).query or urlsplit(readback_url).fragment
+                or urlsplit(cleanup_url_template).fragment
+                or len(cleanup_url_template) > 2048):
+            raise ValueError("Stored XSS needs an exact read page and nonce-addressed cleanup")
+        assert_in_scope(readback_url, allowed_origins)
+        assert_in_scope(cleanup_url_template.replace(NONCE_MARKER, nonce), allowed_origins)
+    if operation == "check_xhr_xss":
+        from .browser_actions import allowed_discovery_path
+        import re
+        if (urlsplit(url).query or urlsplit(url).fragment
+                or not xhr_path.startswith("/") or xhr_path.startswith("//")
+                or len(xhr_path) > 512 or not allowed_discovery_path(xhr_path)
+                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,79}", xhr_parameter)
+                or not isinstance(xhr_query_keys, list)
+                or not 1 <= len(xhr_query_keys) <= 20
+                or xhr_parameter not in xhr_query_keys
+                or xhr_query_keys != sorted(set(xhr_query_keys))
+                or any(not isinstance(key, str) or not re.fullmatch(
+                    r"[A-Za-z_][A-Za-z0-9_.-]{0,79}", key) for key in xhr_query_keys)
+                or NONCE_MARKER not in xhr_payload_template
+                or len(xhr_payload_template) > 300):
+            raise ValueError("An exact rendering page, safe XHR path, field, and nonce payload are required")
     final_target = url.replace(NONCE_MARKER, nonce)
     assert_in_scope(final_target, allowed_origins)
     expected_origin = origin(final_target)
@@ -220,18 +277,32 @@ async def check_browser(
     seen_scripts: set[str] = set()
     seen_inline: set[tuple[str, int]] = set()
     request_actions: dict[object, str] = {}
+    request_pages: dict[object, str] = {}
     request_rows: dict[object, dict] = {}
     seen_request_templates: set[tuple] = set()
     seen_exchange_shapes: set[tuple] = set()
     current_action_ref = "navigate"
     actions: list[dict] = []
-    read_only_interaction = False
+    read_only_interaction = operation in {"check_xhr_xss", "check_form_xss", "check_stored_xss"}
     get_form_actions = 0
     approved_post_path = urlsplit(form_action).path or "/"
     post_action_active = False
     approved_post_requests = 0
     post_response_seen = False
     post_response_dialogs: list[str] = []
+    xhr_mutated = False
+    xhr_response_seen = False
+    xhr_response_dialogs: list[str] = []
+    xhr_request = None
+    readback_active = False
+    readback_response_seen = False
+    readback_status = None
+    readback_final_exact = False
+    readback_error = ""
+    readback_dialogs: list[str] = []
+    cleanup_sent = False
+    cleanup_success = False
+    cleanup_status = None
 
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(**launch_options())
@@ -243,24 +314,42 @@ async def check_browser(
             context = await browser.new_context(**context_args)
 
             async def route_request(route):
-                nonlocal blocked_requests, approved_post_requests
+                nonlocal blocked_requests, approved_post_requests, xhr_mutated, xhr_request
                 try:
                     allowed = origin(route.request.url) == expected_origin
-                    if allowed and read_only_interaction:
-                        from .browser_actions import allowed_discovery_path
-
-                        allowed = (route.request.method.upper() in {"GET", "HEAD", "OPTIONS"}
-                                   and allowed_discovery_path(urlsplit(route.request.url).path or "/"))
                     if allowed and post_action_active:
                         from .browser_actions import allowed_discovery_path
                         method = route.request.method.upper()
                         path = urlsplit(route.request.url).path or "/"
-                        allowed = ((method == "POST" and path == approved_post_path)
+                        allowed = ((method == "POST" and path == approved_post_path
+                                    and approved_post_requests == 0)
                                    or (method in {"GET", "HEAD", "OPTIONS"}
                                        and allowed_discovery_path(path)))
+                    elif allowed and read_only_interaction:
+                        from .browser_actions import allowed_discovery_path
+
+                        allowed = (route.request.method.upper() in {"GET", "HEAD", "OPTIONS"}
+                                   and allowed_discovery_path(urlsplit(route.request.url).path or "/"))
                 except ValueError:
                     allowed = False
                 if allowed:
+                    if (operation == "check_xhr_xss" and not xhr_mutated
+                            and route.request.method.upper() == "GET"
+                            and route.request.resource_type in {"xhr", "fetch"}
+                            and (urlsplit(route.request.url).path or "/") == xhr_path
+                            and observed_query_keys(route.request.url) == xhr_query_keys):
+                        try:
+                            changed = replace_observed_query_value(
+                                route.request.url, xhr_parameter,
+                                xhr_payload_template.replace(NONCE_MARKER, nonce),
+                            )
+                            assert_in_scope(changed, allowed_origins)
+                            xhr_request = route.request
+                            xhr_mutated = True
+                            await route.continue_(url=changed)
+                        except ValueError:
+                            await route.continue_()
+                        return
                     if post_action_active and route.request.method.upper() == "POST":
                         approved_post_requests += 1
                     await route.continue_()
@@ -297,6 +386,11 @@ async def check_browser(
                     return
                 if request.resource_type in ("xhr", "fetch", "script") and len(request_actions) < 200:
                     request_actions[request] = current_action_ref
+                    if request.resource_type in {"xhr", "fetch", "script"}:
+                        try:
+                            request_pages[request] = request.frame.url
+                        except Exception:
+                            request_pages[request] = page.url
                 if request.resource_type not in {"document", "xhr", "fetch", "script"}:
                     return
                 parts = urlsplit(request.url)
@@ -317,7 +411,7 @@ async def check_browser(
             page.on("request", record_request)
 
             def record_response(response):
-                nonlocal post_response_seen
+                nonlocal post_response_seen, xhr_response_seen, readback_response_seen, readback_status
                 try:
                     if origin(response.url) != expected_origin:
                         return
@@ -325,6 +419,12 @@ async def check_browser(
                     if (post_action_active and response.request.method.upper() == "POST"
                             and (urlsplit(response.url).path or "/") == approved_post_path):
                         post_response_seen = True
+                    if response.request is xhr_request:
+                        xhr_response_seen = True
+                    if (readback_active and response.request.resource_type == "document"
+                            and response.url == readback_url):
+                        readback_response_seen = True
+                        readback_status = response.status
                     if row is not None:
                         row["status"] = response.status
                         row["content_type"] = response.headers.get("content-type", "").split(";", 1)[0][:80]
@@ -333,9 +433,57 @@ async def check_browser(
 
             page.on("response", record_response)
 
+            if traffic_exchanges is not None and operation in {"map", "crawl", "inspect_js"}:
+                from .browser_traffic import MAX_BODY_BYTES, MAX_EXCHANGES, package_exchange
+
+                async def capture_exchange(response):
+                    try:
+                        request = response.request
+                        if origin(response.url) != expected_origin or request.resource_type not in {"xhr", "fetch"}:
+                            return
+                        if len(traffic_exchanges) >= MAX_EXCHANGES:
+                            return
+                        declared = response.headers.get("content-length", "")
+                        if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
+                            return
+                        request_body = request.post_data_buffer or b""
+                        if len(request_body) > MAX_BODY_BYTES:
+                            return
+                        async with body_slots:
+                            response_body = await response.body()
+                        initiator_page = request_pages.get(request, "")
+                        public, private = package_exchange(
+                            url=response.url, expected_origin=expected_origin,
+                            action_ref=request_actions.get(request, "unattributed"),
+                            method=request.method, resource_type=request.resource_type,
+                            status=response.status,
+                            content_type=response.headers.get("content-type", ""),
+                            request_body=request_body, response_body=response_body,
+                            request_content_type=request.headers.get("content-type", ""),
+                            page_url=initiator_page,
+                        )
+                        shape = (public["method"], public["path"],
+                                 tuple(public["query_keys"]), public["request_content_type"],
+                                 tuple((field.get("location"), field.get("path"))
+                                       for field in public["body_fields"]))
+                        if shape not in seen_exchange_shapes and len(traffic_exchanges) < MAX_EXCHANGES:
+                            seen_exchange_shapes.add(shape)
+                            traffic_exchanges.append({"public": public, "private": private})
+                    except Exception:
+                        return
+
+                def queue_exchange(response):
+                    try:
+                        relevant = response.request.resource_type in {"xhr", "fetch"} and origin(response.url) == expected_origin
+                    except ValueError:
+                        relevant = False
+                    if relevant and len(traffic_tasks) < MAX_EXCHANGES * 3:
+                        traffic_tasks.append(asyncio.create_task(capture_exchange(response)))
+
+                page.on("response", queue_exchange)
+
             if operation == "inspect_js":
                 from .javascript import MAX_SOURCE_BYTES, MAX_SOURCES
-                from .browser_traffic import MAX_BODY_BYTES, MAX_EXCHANGES, package_exchange
 
                 async def capture_script(response):
                     try:
@@ -359,6 +507,7 @@ async def check_browser(
                             data = await response.body()
                         if 0 < len(data) <= MAX_SOURCE_BYTES:
                             javascript_sources.append({"url": source_key, "kind": "external",
+                                                       "page_path": urlsplit(request_pages.get(response.request, "")).path or "",
                                                        "action_ref": request_actions.get(response.request, "unattributed"),
                                                        "data": data})
                     except Exception:
@@ -374,54 +523,14 @@ async def check_browser(
 
                 page.on("response", queue_script)
 
-                async def capture_exchange(response):
-                    try:
-                        request = response.request
-                        if origin(response.url) != expected_origin or request.resource_type not in ("xhr", "fetch"):
-                            return
-                        if len(traffic_exchanges) >= MAX_EXCHANGES:
-                            return
-                        declared = response.headers.get("content-length", "")
-                        if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
-                            return
-                        request_body = request.post_data_buffer or b""
-                        if len(request_body) > MAX_BODY_BYTES:
-                            return
-                        async with body_slots:
-                            response_body = await response.body()
-                        public, private = package_exchange(
-                            url=response.url, expected_origin=expected_origin,
-                            action_ref=request_actions.get(request, "unattributed"),
-                            method=request.method, resource_type=request.resource_type,
-                            status=response.status,
-                            content_type=response.headers.get("content-type", ""),
-                            request_body=request_body, response_body=response_body,
-                            request_content_type=request.headers.get("content-type", ""),
-                        )
-                        shape = (public["method"], public["path"],
-                                 tuple(public["query_keys"]), public["request_content_type"],
-                                 tuple((field.get("location"), field.get("path"))
-                                       for field in public["body_fields"]))
-                        if shape not in seen_exchange_shapes and len(traffic_exchanges) < MAX_EXCHANGES:
-                            seen_exchange_shapes.add(shape)
-                            traffic_exchanges.append({"public": public, "private": private})
-                    except Exception:
-                        return
-
-                def queue_exchange(response):
-                    try:
-                        relevant = response.request.resource_type in ("xhr", "fetch") and origin(response.url) == expected_origin
-                    except ValueError:
-                        relevant = False
-                    if relevant and len(traffic_tasks) < MAX_EXCHANGES * 3:
-                        traffic_tasks.append(asyncio.create_task(capture_exchange(response)))
-
-                page.on("response", queue_exchange)
-
             async def accept_dialog(dialog):
                 dialogs.append(dialog.message[:200])
                 if post_response_seen:
                     post_response_dialogs.append(dialog.message[:200])
+                if xhr_response_seen:
+                    xhr_response_dialogs.append(dialog.message[:200])
+                if readback_active and readback_response_seen:
+                    readback_dialogs.append(dialog.message[:200])
                 await dialog.dismiss()
 
             page.on("dialog", lambda dialog: asyncio.create_task(accept_dialog(dialog)))
@@ -455,6 +564,7 @@ async def check_browser(
                         seen_inline.add(key)
                         javascript_sources.append({"url": expected_origin + page_path,
                                                    "kind": "inline", "index": row["index"],
+                                                   "page_path": page_path,
                                                    "action_ref": current_action_ref, "data": data})
 
             if operation == "crawl":
@@ -496,13 +606,14 @@ async def check_browser(
                     "pages_visited": len(pages), "requests": requests,
                     "blocked_requests": blocked_requests,
                 }
+                await settle_capture()
                 await context.unroute_all(behavior="ignoreErrors")
                 await context.close()
                 return result, None
             response = await page.goto(final_target, wait_until="domcontentloaded", timeout=20_000)
-            await page.wait_for_timeout(1200 if operation in {"check_xss", "check_form_xss"} else 650)
+            await page.wait_for_timeout(1200 if operation in {"check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss"} else 650)
             form_submitted = False
-            if operation == "check_form_xss":
+            if operation in {"check_form_xss", "check_stored_xss"}:
                 # Use the observed page's native submit path, including its JS
                 # handler. Route policy permits POST only to the approved path.
                 forms = await _forms(page, expected_origin)
@@ -542,6 +653,28 @@ async def check_browser(
                     form_submitted = approved_post_requests > 0
                 finally:
                     post_action_active = False
+            if operation == "check_stored_xss" and form_submitted:
+                # A new navigation separates persistence from the POST response.
+                # Cleanup is attempted even if the readback page errors.
+                try:
+                    readback_active = True
+                    await page.goto(readback_url, wait_until="domcontentloaded", timeout=20_000)
+                    await page.wait_for_timeout(1200)
+                    readback_final_exact = page.url == readback_url
+                except Exception as exc:
+                    readback_error = type(exc).__name__
+                finally:
+                    readback_active = False
+                    cleanup_sent = True
+                    try:
+                        cleanup = await context.request.delete(
+                            cleanup_url_template.replace(NONCE_MARKER, nonce),
+                            max_redirects=0, timeout=10_000,
+                        )
+                        cleanup_status = cleanup.status
+                        cleanup_success = 200 <= cleanup.status < 300
+                    except Exception:
+                        cleanup_success = False
             if operation == "inspect_js":
                 from .browser_actions import (
                     MAX_GET_FORM_ACTIONS, allowed_discovery_control,
@@ -737,23 +870,50 @@ async def check_browser(
                 result["links"] = _crawl_links(hrefs, [expected_origin])
                 result["link_query_inputs"] = _link_query_inputs(hrefs, [expected_origin])
                 result["forms"] = await _forms(page, expected_origin)
-            elif operation in {"check_xss", "check_form_xss"}:
+            elif operation in {"check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss"}:
                 # A dialog containing a fresh server nonce is execution evidence.
                 # Reflection or an unrelated dialog alone is not proof.
                 result["executed"] = (
                     any(nonce in message for message in post_response_dialogs)
                     and form_submitted and post_response_seen
                     if operation == "check_form_xss" else
+                    any(nonce in message for message in xhr_response_dialogs)
+                    and xhr_mutated and xhr_response_seen
+                    if operation == "check_xhr_xss" else
+                    any(nonce in message for message in readback_dialogs)
+                    and form_submitted and post_response_seen and readback_response_seen
+                    and readback_final_exact and readback_status is not None
+                    and 200 <= readback_status < 300
+                    and cleanup_success
+                    if operation == "check_stored_xss" else
                     any(nonce in message for message in dialogs)
                 )
                 result["dialog_count"] = len(dialogs)
                 result["nonce"] = nonce
-                if operation == "check_form_xss":
+                if operation in {"check_form_xss", "check_stored_xss"}:
                     result["form_action"] = form_action
                     result["form_field"] = form_field
                     result["form_payload_template"] = form_payload_template
                     result["post_submitted"] = form_submitted
                     result["post_response_seen"] = post_response_seen
+                if operation == "check_stored_xss":
+                    result["readback_url"] = readback_url
+                    result["readback_response_seen"] = readback_response_seen
+                    result["readback_status"] = readback_status
+                    result["readback_final_exact"] = readback_final_exact
+                    result["readback_error"] = readback_error
+                    result["readback_executed"] = any(nonce in message for message in readback_dialogs)
+                    result["cleanup_url_template"] = cleanup_url_template
+                    result["cleanup_sent"] = cleanup_sent
+                    result["cleanup_success"] = cleanup_success
+                    result["cleanup_status"] = cleanup_status
+                if operation == "check_xhr_xss":
+                    result["xhr_path"] = xhr_path
+                    result["xhr_parameter"] = xhr_parameter
+                    result["xhr_payload_template"] = xhr_payload_template
+                    result["xhr_query_keys"] = xhr_query_keys
+                    result["xhr_mutated"] = xhr_mutated
+                    result["xhr_response_seen"] = xhr_response_seen
                 # Give the specialist context without exposing page source or
                 # mistaking reflection for execution. Scan a bounded DOM slice.
                 try:
@@ -789,6 +949,7 @@ async def check_browser(
                 result["pages_inspected"] = len(page_paths)
                 result["pages"] = page_observations
                 result["get_form_actions"] = get_form_actions
+            await settle_capture()
             screenshot = await page.screenshot(full_page=True)
             await context.unroute_all(behavior="ignoreErrors")
             await context.close()

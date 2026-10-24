@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from urllib.parse import urlsplit
 
 
 PROOF_GUIDANCE = """Evidence policy (applies to every product and specialist):
@@ -23,7 +24,7 @@ Keep observations, candidates, confirmed findings, refutations, and inconclusive
 PROOFS_BY_CLASS = {
     "exposure": frozenset({"response_match", "public_directory_index"}),
     "sql_injection": frozenset({"numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli"}),
-    "xss": frozenset({"browser_xss", "scoped_browser_xss", "scoped_browser_form_xss", "upload_xss"}),
+    "xss": frozenset({"browser_xss", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "upload_xss"}),
     "authorization": frozenset({"authorization", "owner_only", "state_change", "workflow"}),
     "ssrf": frozenset({"oob_callback"}),
     "xxe": frozenset(),
@@ -115,7 +116,7 @@ def validate_proof(
     allowed, reason = proof_kind_allowed(candidate, kind)
     if not allowed:
         return False, reason
-    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss"):
+    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss"):
         hunter_id = proof.get("hunter_artifact_id")
         verifier = row("artifact_id")
         hunter = (store.records.get(hunter_id)
@@ -128,6 +129,8 @@ def validate_proof(
             "public_directory_index": "scoped_http_get",
             "scoped_browser_xss": "scoped_browser_check_xss",
             "scoped_browser_form_xss": "scoped_browser_check_form_xss",
+            "scoped_browser_xhr_xss": "scoped_browser_check_xhr_xss",
+            "scoped_browser_stored_xss": "scoped_browser_check_stored_xss",
         }[kind]
         if (not hunter or not verifier or hunter["id"] == verifier["id"]
                 or hunter["kind"] != expected_kind or verifier["kind"] != expected_kind
@@ -217,7 +220,9 @@ def validate_proof(
                            or row.get("redirected") is not False for row in (first, second))):
                 return False, "Two complete anonymous directory index observations are required"
             return True, ""
-        expected_operation = "check_form_xss" if kind == "scoped_browser_form_xss" else "check_xss"
+        expected_operation = {"scoped_browser_form_xss": "check_form_xss",
+                              "scoped_browser_xhr_xss": "check_xhr_xss",
+                              "scoped_browser_stored_xss": "check_stored_xss"}.get(kind, "check_xss")
         if (first.get("operation") != second.get("operation")
                 or first.get("operation") != expected_operation
                 or first.get("executed") is not True or second.get("executed") is not True
@@ -236,6 +241,42 @@ def validate_proof(
             or second.get("post_response_seen") is not True
         ):
             return False, "Two matching approved POST form executions are required"
+        if kind == "scoped_browser_xhr_xss" and (
+            first.get("xhr_path") != urlsplit(candidate.target).path
+            or second.get("xhr_path") != urlsplit(candidate.target).path
+            or first.get("xhr_parameter") != second.get("xhr_parameter")
+            or not first.get("xhr_parameter")
+            or first.get("xhr_query_keys") != second.get("xhr_query_keys")
+            or not isinstance(first.get("xhr_query_keys"), list)
+            or first.get("xhr_parameter") not in first["xhr_query_keys"]
+            or first.get("xhr_payload_template") != second.get("xhr_payload_template")
+            or "__PROWL_NONCE__" not in str(first.get("xhr_payload_template") or "")
+            or first.get("xhr_mutated") is not True
+            or second.get("xhr_mutated") is not True
+            or first.get("xhr_response_seen") is not True
+            or second.get("xhr_response_seen") is not True
+        ):
+            return False, "Two matching rendered XHR executions are required"
+        if kind == "scoped_browser_stored_xss" and (
+            first.get("form_action") != candidate.target
+            or second.get("form_action") != candidate.target
+            or first.get("form_field") != second.get("form_field")
+            or first.get("form_payload_template") != second.get("form_payload_template")
+            or "__PROWL_NONCE__" not in str(first.get("form_payload_template") or "")
+            or first.get("readback_url") != second.get("readback_url")
+            or first.get("cleanup_url_template") != second.get("cleanup_url_template")
+            or not first.get("readback_url") or not first.get("cleanup_url_template")
+            or any(row.get("post_submitted") is not True
+                   or row.get("post_response_seen") is not True
+                   or row.get("readback_response_seen") is not True
+                   or row.get("readback_final_exact") is not True
+                   or not isinstance(row.get("readback_status"), int)
+                   or not 200 <= row["readback_status"] < 300
+                   or row.get("readback_executed") is not True
+                   or row.get("cleanup_success") is not True
+                   for row in (first, second))
+        ):
+            return False, "Two matching readback executions and successful cleanups are required"
         return True, ""
     if kind == "browser_xss":
         item = row("artifact_id")
@@ -302,7 +343,6 @@ def validate_proof(
         if r.get("reused") or not domain or r.get("session_id") != p.get("session_id"):
             return False, "Use a newly registered collaborator session"
         from app.services.agent.evidence_store import origin
-        from urllib.parse import urlsplit
 
         planted_url = plant["payload"].get("request", {}).get("url", "")
         try:

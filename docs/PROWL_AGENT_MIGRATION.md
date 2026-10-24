@@ -76,6 +76,42 @@ Differentials remain leads. A service proof signal remains subject to the
 fresh verifier and publication gate above. Unsupported input shapes remain
 open rather than being marked tested.
 
+## Built-in XSS execution handoff
+
+The built-in browser captures bounded private fetch/XHR exchanges during map,
+crawl, and JavaScript inspection. Each capture retains its initiating page
+inside the session while the agent sees only method, path, parameter names,
+page path, and an artifact ID. Open coverage cells keep their referenced
+captures when the session's 120-exchange store fills; additional captures are
+reported as dropped rather than given unusable IDs.
+
+For an observed GET fetch/XHR input, `scoped_input_probe_assigned` revisits the
+initiating page and changes one matching request parameter in the browser. A
+nonce dialog counts only after that mutated response arrives and the page
+renders it. The specialist's captured-GET adapter uses the same local path.
+An independent verifier repeats the exact page, endpoint, field, and payload
+template with a different nonce. A reflected response or a dialog from a
+different browser event is inconclusive. Pages with query values are not
+automatically used as rendering pages, so private URL values do not enter the
+receipt.
+
+JavaScript analysis keeps the page that loaded an external script. An XSS
+specialist can use `scoped_dom_xss_assigned` on a leased DOM cell when the
+script has a fragment source lead, an executable sink lead, and an observed
+rendering page. It navigates that page with a nonce fragment and requires
+browser execution. Static source/sink patterns are only leads; the verifier
+replays the same fragment on a fresh browser run.
+
+For a leased stored-XSS POST form cell, the operator approves the form action
+under `body_replay_paths` and a DELETE cleanup path under
+`stored_xss_cleanup_paths` in Assessment policy. The specialist supplies an
+observed readback page and a cleanup URL whose sole query value is
+`__PROWL_NONCE__`. `scoped_stored_xss_assigned` submits through the observed
+form, opens the separate readback page, requires nonce execution there, and
+attempts cleanup. Confirmation requires successful cleanup and a second fresh
+write, read, and cleanup by the independent verifier. No approval or failed
+cleanup leaves the candidate inconclusive.
+
 ## Candidate verification closure
 
 The built-in independent verifier closes each candidate as confirmed, refuted,
