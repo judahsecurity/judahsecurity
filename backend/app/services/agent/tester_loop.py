@@ -1263,7 +1263,7 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         return {
             "tool_name": "scoped_browser_assessment",
             "tool_args": {"operation": "inspect_js", "url": target,
-                          "max_pages": 4, "max_actions": 3},
+                          "max_pages": 10, "max_actions": 3},
             "thought": "Prowl: capture browser actions, inputs, and first-party API traffic for specialist work.",
         }
 
@@ -1360,6 +1360,13 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             ),
         }
 
+    # Do not gate concrete class work behind the broad fireteam wave. A slow
+    # general hunt otherwise consumes the assessment window while mapped
+    # injection and client-side cells remain unattempted.
+    followup = _coverage_followup_wave(state, trace, target)
+    if followup:
+        return followup
+
     if not full_fireteam:
         return {
             "tool_name": "fireteam_dispatch",
@@ -1377,10 +1384,6 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
                 "xss, sqli, ssrf, …). Fingerprints are not an assessment."
             ),
         }
-
-    followup = _coverage_followup_wave(state, trace, target)
-    if followup:
-        return followup
 
     try:
         from app.services.agent.wordpress_surface import wordpress_forced_step

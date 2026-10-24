@@ -23,7 +23,7 @@ Keep observations, candidates, confirmed findings, refutations, and inconclusive
 PROOFS_BY_CLASS = {
     "exposure": frozenset({"response_match", "public_directory_index"}),
     "sql_injection": frozenset({"numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli"}),
-    "xss": frozenset({"browser_xss", "scoped_browser_xss", "upload_xss"}),
+    "xss": frozenset({"browser_xss", "scoped_browser_xss", "scoped_browser_form_xss", "upload_xss"}),
     "authorization": frozenset({"authorization", "owner_only", "state_change", "workflow"}),
     "ssrf": frozenset({"oob_callback"}),
     "xxe": frozenset(),
@@ -115,7 +115,7 @@ def validate_proof(
     allowed, reason = proof_kind_allowed(candidate, kind)
     if not allowed:
         return False, reason
-    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "owner_only", "public_directory_index", "scoped_browser_xss"):
+    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss"):
         hunter_id = proof.get("hunter_artifact_id")
         verifier = row("artifact_id")
         hunter = (store.records.get(hunter_id)
@@ -127,6 +127,7 @@ def validate_proof(
             "owner_only": "scoped_owner_only",
             "public_directory_index": "scoped_http_get",
             "scoped_browser_xss": "scoped_browser_check_xss",
+            "scoped_browser_form_xss": "scoped_browser_check_form_xss",
         }[kind]
         if (not hunter or not verifier or hunter["id"] == verifier["id"]
                 or hunter["kind"] != expected_kind or verifier["kind"] != expected_kind
@@ -216,13 +217,25 @@ def validate_proof(
                            or row.get("redirected") is not False for row in (first, second))):
                 return False, "Two complete anonymous directory index observations are required"
             return True, ""
+        expected_operation = "check_form_xss" if kind == "scoped_browser_form_xss" else "check_xss"
         if (first.get("operation") != second.get("operation")
-                or first.get("operation") != "check_xss"
+                or first.get("operation") != expected_operation
                 or first.get("executed") is not True or second.get("executed") is not True
                 or hunter["identity"] != verifier["identity"]
                 or not first.get("nonce") or first.get("nonce") == second.get("nonce")
                 or first.get("target_template") != second.get("target_template")):
             return False, "Two fresh browser execution nonces are required"
+        if kind == "scoped_browser_form_xss" and (
+            first.get("form_action") != candidate.target
+            or second.get("form_action") != candidate.target
+            or first.get("form_field") != second.get("form_field")
+            or first.get("form_payload_template") != second.get("form_payload_template")
+            or first.get("post_submitted") is not True
+            or second.get("post_submitted") is not True
+            or first.get("post_response_seen") is not True
+            or second.get("post_response_seen") is not True
+        ):
+            return False, "Two matching approved POST form executions are required"
         return True, ""
     if kind == "browser_xss":
         item = row("artifact_id")

@@ -101,3 +101,48 @@ async def test_xss_candidate_handoff_links_real_browser_receipt():
     cell = next(row for row in brain.coverage_cells if row.get("test_type") == "xss")
     assert manager._engagement_brain["candidates"][0]["coverage_cell_id"] == cell["id"]
     assert manager._engagement_brain["candidates"][0]["parameter"] == "query:searchTerm"
+
+
+@pytest.mark.asyncio
+async def test_post_form_xss_verifier_replays_approved_form_with_fresh_nonce():
+    manager = ASMToolsManager()
+    store = evidence_store(manager)
+    action = "https://app.example.test/catalog/subscribe"
+    source = "https://app.example.test/catalog"
+    payload = '<img src=x onerror=alert("__PROWL_NONCE__")>'
+    hunter_proof = {"operation": "check_form_xss", "target_template": source,
+                    "form_action": action, "form_field": "email",
+                    "form_payload_template": payload, "post_submitted": True,
+                    "post_response_seen": True,
+                    "executed": True, "nonce": "hunter-nonce"}
+    hunter = store.record("scoped_browser_check_form_xss", hunter_proof,
+                          target=action, identity="anonymous")
+    brain = EngagementBrain(target="https://app.example.test")
+    seed_parameter_coverage_cells(brain, [{"method": "POST", "host": "app.example.test",
+        "path": "/catalog/subscribe", "name": "email", "location": "body_form",
+        "identity": "anonymous", "source": "observed_form", "testable": True}])
+    cell = next(row for row in brain.coverage_cells if row.get("test_type") == "xss")
+    candidate = submit_candidate(brain, title="Reflected XSS in subscription form",
+                                 target=action, vulnerability_class="xss",
+                                 coverage_cell_id=cell["id"], identity="anonymous",
+                                 parameter="body_form:email", evidence_ids=[hunter])
+    manager._engagement_brain = brain.to_dict()
+    calls = []
+
+    async def execute(name, args):
+        calls.append((name, args))
+        assert name == "scoped_browser_assessment"
+        assert args == {"operation": "check_form_xss", "url": source,
+                        "identity": "anonymous", "form_action": action,
+                        "form_field": "email", "form_payload_template": payload}
+        verifier_proof = dict(hunter_proof, nonce="verifier-nonce")
+        artifact_id = store.record("scoped_browser_check_form_xss", verifier_proof,
+                                   target=action, identity="anonymous", success=True)
+        return {"success": True, "output": json.dumps({**verifier_proof,
+                                                         "evidence_id": artifact_id})}
+
+    manager.execute = execute
+    reports = await run_independent_verifiers([candidate], llm=None,
+                                               tools_manager=manager, targets=[action])
+    assert len(calls) == 1
+    assert reports[0]["status"] == "confirmed", reports

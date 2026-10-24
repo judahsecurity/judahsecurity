@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import html
 import json
 import re
 from urllib.error import HTTPError
@@ -22,7 +23,7 @@ from .http_observe import MAX_BODY, _NoRedirect, _cookie_header
 MAX_REPLAY_BODY = min(MAX_BODY_BYTES, 64 * 1024)
 
 
-def _mutate_json(data: bytes, pointer: str) -> bytes:
+def _mutate_json(data: bytes, pointer: str, payload: str = "'") -> bytes:
     if not pointer.startswith("/") or len(pointer) > 300:
         raise ValueError("A bounded JSON pointer is required")
     try:
@@ -56,14 +57,14 @@ def _mutate_json(data: bytes, pointer: str) -> bytes:
         raise ValueError("JSON pointer does not identify an observed field")
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         raise ValueError("Body probe requires a string or numeric field")
-    setter(str(value) + "'")
+    setter(str(value) + payload)
     changed = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode()
     if len(changed) > MAX_REPLAY_BODY:
         raise ValueError("Mutated body exceeds replay limit")
     return changed
 
 
-def _mutate_form(data: bytes, parameter: str) -> bytes:
+def _mutate_form(data: bytes, parameter: str, payload: str = "'") -> bytes:
     try:
         raw = data.decode("ascii")
     except UnicodeDecodeError as exc:
@@ -79,7 +80,9 @@ def _mutate_form(data: bytes, parameter: str) -> bytes:
         raise ValueError("Form field must occur exactly once")
     index = matches[0]
     name, separator, value = fields[index].partition("=")
-    fields[index] = name + "=" + value + "%27" if separator else name + "=%27"
+    from urllib.parse import quote
+
+    fields[index] = name + "=" + value + quote(payload, safe="") if separator else name + "=" + quote(payload, safe="")
     changed = "&".join(fields).encode("ascii")
     if len(changed) > MAX_REPLAY_BODY:
         raise ValueError("Mutated body exceeds replay limit")
@@ -87,7 +90,7 @@ def _mutate_form(data: bytes, parameter: str) -> bytes:
 
 
 def plan_observed_body(private_exchange: bytes, *, parameter: str,
-                       allowed_origins: list[str]) -> tuple[str, str, bytes, bytes]:
+                       allowed_origins: list[str], payload: str = "'") -> tuple[str, str, bytes, bytes]:
     """Validate a captured POST and change one JSON or form field."""
     try:
         captured = json.loads(private_exchange)
@@ -111,12 +114,16 @@ def plan_observed_body(private_exchange: bytes, *, parameter: str,
         raise ValueError("Invalid captured request body") from exc
     if not body or len(body) > MAX_REPLAY_BODY:
         raise ValueError("Captured body is empty or exceeds replay limit")
-    changed = _mutate_json(body, parameter) if mime == "application/json" else _mutate_form(body, parameter)
+    if not isinstance(payload, str) or not 0 < len(payload) <= 300:
+        raise ValueError("A bounded body probe payload is required")
+    changed = (_mutate_json(body, parameter, payload)
+               if mime == "application/json" else _mutate_form(body, parameter, payload))
     return url, mime, body, changed
 
 
 def _observe_post(url: str, mime: str, body: bytes,
-                  allowed_origins: list[str], storage_state: dict | None) -> dict:
+                  allowed_origins: list[str], storage_state: dict | None,
+                  reflection_text: str = "") -> dict:
     assert_in_scope(url, allowed_origins)
     headers = {"Accept": "application/json, text/html;q=0.9, */*;q=0.8", "Content-Type": mime}
     cookies = _cookie_header(storage_state, url)
@@ -132,13 +139,18 @@ def _observe_post(url: str, mime: str, body: bytes,
         data = response.read(MAX_BODY + 1)
         truncated = len(data) > MAX_BODY
         data = data[:MAX_BODY]
-        return {
+        result = {
             "status": response.status,
             "content_type": response.headers.get("Content-Type", "").split(";", 1)[0].lower()[:100],
             "bytes_captured": len(data), "truncated": truncated,
             "body_sha256": hashlib.sha256(data).hexdigest(),
             "redirected": bool(response.headers.get("Location", "")),
         }
+        if reflection_text:
+            page = data.decode("utf-8", errors="replace")
+            result["raw_reflection"] = reflection_text in page
+            result["html_encoded_reflection"] = html.escape(reflection_text) in page
+        return result
 
 
 def probe_observed_body(url: str, mime: str, body: bytes, changed_body: bytes, *,
@@ -157,4 +169,29 @@ def probe_observed_body(url: str, mime: str, body: bytes, changed_body: bytes, *
         "inconclusive": any(row["truncated"] or row["redirected"] or row["status"] in (401, 403)
                             for row in (baseline, probe)),
         "finding": False,
+    }
+
+
+def probe_observed_body_reflection(
+    url: str, mime: str, body: bytes, changed_body: bytes, *,
+    parameter: str, payload: str, allowed_origins: list[str],
+    storage_state: dict | None,
+) -> dict:
+    """Check a captured POST for reflection; browser execution is still required."""
+    baseline = _observe_post(url, mime, body, allowed_origins, storage_state)
+    probe = _observe_post(url, mime, changed_body, allowed_origins, storage_state,
+                          reflection_text=payload)
+    parts = urlsplit(url)
+    inconclusive = any(row["truncated"] or row["redirected"] or row["status"] in (401, 403)
+                       for row in (baseline, probe))
+    return {
+        "operation": "body_xss_reflection", "target": origin(url) + (parts.path or "/"),
+        "method": "POST", "parameter": parameter,
+        "location": "json" if mime == "application/json" else "form",
+        "requests_sent": 2, "baseline": baseline, "probe": probe,
+        "reflection_detected": bool(probe.get("raw_reflection") or probe.get("html_encoded_reflection")),
+        "raw_html_reflection": bool(probe.get("raw_reflection") and probe["content_type"] == "text/html"),
+        "inconclusive": inconclusive,
+        "proof_confirmed": False, "finding": False,
+        "next_test": "Reproduce execution in the target browser context",
     }

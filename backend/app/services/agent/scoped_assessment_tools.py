@@ -250,11 +250,23 @@ class ScopedAssessmentTools:
     async def scoped_browser_assessment(
         self, operation: str, url: str, identity: str = "anonymous",
         max_pages: int = 1, max_actions: int = 3,
+        form_action: str = "", form_field: str = "",
+        form_payload_template: str = "",
     ) -> str:
         """Run scoped map, crawl, JS inspection, or nonce XSS execution in Chromium."""
-        if operation not in ("map", "crawl", "inspect_js", "check_xss"):
+        if operation not in ("map", "crawl", "inspect_js", "check_xss", "check_form_xss"):
             raise ValueError("Unsupported scoped browser operation")
         allowed = self._scoped_origin(url)
+        if operation == "check_form_xss":
+            if self._scoped_origin(form_action) != allowed:
+                raise ValueError("Form action is outside the assessment origin")
+            action_path = urlsplit(form_action).path or "/"
+            if action_path not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
+                raise ValueError("POST form path was not approved by the assessment operator")
+            used = int(getattr(self, "_scoped_post_count", 0) or 0)
+            if used >= 10:
+                raise ValueError("Scoped POST budget exhausted for this assessment session")
+            self._scoped_post_count = used + 1
         state = self._scoped_state(identity, url)
         sources: list[dict] = []
         exchanges: list[dict] = []
@@ -266,6 +278,8 @@ class ScopedAssessmentTools:
             traffic_exchanges=exchanges if operation == "inspect_js" else None,
             link_baselines=link_baselines if operation != "check_xss" else None,
             max_actions=max_actions,
+            form_action=form_action, form_field=form_field,
+            form_payload_template=form_payload_template,
         )
         if link_baselines:
             private = dict(getattr(self, "_scoped_link_baselines", None) or {})
@@ -274,7 +288,7 @@ class ScopedAssessmentTools:
             ]))[-120:]
             self._scoped_link_baselines = private
         self._scoped_assessment_started = True
-        target = allowed + (urlsplit(url).path or "/")
+        target = allowed + (urlsplit(form_action if operation == "check_form_xss" else url).path or "/")
         result["screenshot_sha256"] = hashlib.sha256(screenshot).hexdigest() if screenshot else None
         if operation in ("map", "crawl", "inspect_js"):
             result["directory_candidates"] = http_observe.observed_parent_directories(
@@ -306,7 +320,7 @@ class ScopedAssessmentTools:
                                 "sha256": hashlib.sha256(data).hexdigest(), "analysis": analysis})
             traffic = []
             private_store = dict(getattr(self, "_scoped_browser_exchanges", None) or {})
-            for row in exchanges[:40]:
+            for row in exchanges[:120]:
                 public = row["public"]
                 artifact_id = evidence_store(self).record(
                     "scoped_browser_exchange", public, target=allowed + public["path"],
@@ -319,15 +333,17 @@ class ScopedAssessmentTools:
                 }
                 public["artifact_id"] = artifact_id
                 traffic.append(public)
-            while len(private_store) > 40:
+            while len(private_store) > 120:
                 private_store.pop(next(iter(private_store)))
             self._scoped_browser_exchanges = private_store
             result["scripts"] = scripts
             result["traffic"] = traffic
-            result["surface_inventory"] = build_surface_inventory(result)
+            result["surface_inventory"] = build_surface_inventory(
+                result, body_replay_paths=getattr(self, "_scoped_body_replay_paths", None),
+            )
         observed = [
             {"method": row.get("method", "GET"), "url": allowed + row["path"]}
-            for row in (result.get("requests") or [])[:100]
+            for row in (result.get("requests") or [])[:300]
             if isinstance(row, dict) and isinstance(row.get("path"), str)
             and row["path"].startswith("/") and not row["path"].startswith("//")
         ]
@@ -357,7 +373,7 @@ class ScopedAssessmentTools:
                                        "takes_input": False, "assessment_check": True,
                                        "check_kind": check["kind"], "source": "scoped_browser"})
                 known.add(key)
-        for request in (result.get("requests") or [])[:100]:
+        for request in (result.get("requests") or [])[:300]:
             if not isinstance(request, dict) or request.get("resource_type") not in ("xhr", "fetch"):
                 continue
             path, method = request.get("path"), request.get("method", "GET")
@@ -409,7 +425,7 @@ class ScopedAssessmentTools:
                 self._engagement_brain = brain.to_dict()
         receipt_id = evidence_store(self).record(
             "scoped_browser_" + operation, result, target=target, identity=identity,
-            success=bool(result.get("executed")) if operation == "check_xss" else True,
+            success=bool(result.get("executed")) if operation in {"check_xss", "check_form_xss"} else True,
         )
         result["evidence_id"] = receipt_id
         output = json.dumps(result)
@@ -505,6 +521,37 @@ class ScopedAssessmentTools:
         result["source_artifact_id"] = artifact_id
         result["evidence_id"] = evidence_store(self).record(
             "scoped_body_probe", result, target=result["target"], identity=identity,
+            success=not result["inconclusive"],
+        )
+        return json.dumps(result)
+
+    async def scoped_body_xss_reflection(
+        self, artifact_id: str, parameter: str, identity: str = "anonymous",
+    ) -> str:
+        """Probe one approved captured POST with an XSS canary; never claim execution."""
+        private = self._scoped_exchange(artifact_id, identity)
+        observed = json.loads(private)
+        allowed = self._scoped_origin(observed["url"])
+        marker = "prowl-xss-" + secrets.token_hex(8)
+        payload = f'<img src=x onerror=alert("{marker}")>'
+        url, mime, baseline, changed = body_probe.plan_observed_body(
+            private, parameter=parameter, allowed_origins=[allowed], payload=payload,
+        )
+        if (urlsplit(url).path or "/") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
+            raise ValueError("POST path was not approved by the assessment operator")
+        used = int(getattr(self, "_scoped_post_count", 0) or 0)
+        if used >= 10:
+            raise ValueError("Scoped POST budget exhausted for this assessment session")
+        self._scoped_post_count = used + 1
+        result = await asyncio.to_thread(
+            body_probe.probe_observed_body_reflection, url, mime, baseline, changed,
+            parameter=parameter, payload=payload, allowed_origins=[allowed],
+            storage_state=self._scoped_state(identity, url),
+        )
+        result["source_artifact_id"] = artifact_id
+        result["probe_marker"] = marker
+        result["evidence_id"] = evidence_store(self).record(
+            "scoped_body_xss_reflection", result, target=result["target"], identity=identity,
             success=not result["inconclusive"],
         )
         return json.dumps(result)

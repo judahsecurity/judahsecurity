@@ -9,6 +9,8 @@ from app.services.agent import prowl_service_bridge as bridge
 from app.services.agent.scoped_assessment.browser import (
     _crawl_links, _link_query_inputs, _private_link_baselines,
 )
+from app.services.agent.scoped_assessment.browser_actions import safe_get_form_field
+from app.services.agent.scoped_assessment.surface_inventory import build_surface_inventory
 
 
 def _asset(value="app.example", kind=AssetType.DOMAIN, in_scope=True):
@@ -73,6 +75,57 @@ def test_browser_observation_feeds_aegis_capability_map():
     }
     assert next(row for row in cmap["parameter_inventory"]
                 if row["name"] == "/comment/text")["artifact_id"] == "capture-9"
+
+
+def test_inspected_page_forms_and_links_reach_input_inventory():
+    observation = {"signal": "browser_inspect_js", "result": {
+        "target_template": "https://app.example/", "final_origin": "https://app.example",
+        "final_path": "/", "status": 200,
+        "pages": [
+            {"url": "https://app.example/", "status": 200, "forms": [], "links": []},
+            {"url": "https://app.example/catalog", "status": 200,
+             "forms": [{"method": "GET", "action": "https://app.example/catalog",
+                        "fields": [{"name": "search", "control_type": "search"}]}],
+             "link_query_inputs": [{"path": "/catalog", "query_keys": ["category"]}],
+             "links": ["https://app.example/catalog"]},
+        ],
+    }}
+    cmap = bridge.capability_map_from_observation(observation)
+    assert {row["name"] for row in cmap["parameter_inventory"]
+            if row["path"] == "/catalog"} >= {"search", "category"}
+    assert next(form for form in cmap["forms"] if form["action"].endswith("/catalog"))["page"] == (
+        "https://app.example/catalog")
+
+
+def test_surface_inventory_keeps_page_form_and_link_inputs():
+    result = {"final_origin": "https://app.example", "pages": [{
+        "url": "https://app.example/catalog", "status": 200,
+        "forms": [{"method": "POST", "action": "https://app.example/newsletter",
+                   "fields": [{"name": "email", "control_type": "email"}]}],
+        "link_query_inputs": [{"path": "/catalog", "query_keys": ["category"]}],
+    }]}
+    inventory = build_surface_inventory(result)
+    assert {row["path"] for row in inventory["endpoints"]} == {"/catalog", "/newsletter"}
+    assert {(row["path"], row["method"], row["location"], row["name"])
+            for row in inventory["parameters"]} == {
+        ("/catalog", "GET", "query", "category"),
+        ("/newsletter", "POST", "form", "email"),
+    }
+
+
+@pytest.mark.parametrize(("form", "expected"), [
+    ({"method": "GET", "action": "https://app.example/search",
+      "fields": [{"name": "q", "control_type": "search"}]}, "q"),
+    ({"method": "POST", "action": "https://app.example/search",
+      "fields": [{"name": "q", "control_type": "search"}]}, ""),
+    ({"method": "GET", "action": "https://app.example/subscribe",
+      "fields": [{"name": "q", "control_type": "search"}]}, ""),
+    ({"method": "GET", "action": "https://app.example/search",
+      "fields": [{"name": "q", "control_type": "search"},
+                 {"name": "password", "control_type": "password"}]}, ""),
+])
+def test_only_read_only_single_field_forms_are_exercised(form, expected):
+    assert safe_get_form_field(form) == expected
 
 
 def test_inspected_script_urls_and_inline_sources_reach_capability_map():

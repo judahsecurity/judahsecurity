@@ -15,7 +15,7 @@ from .browser_runtime import launch_options
 
 NONCE_MARKER = "__PROWL_NONCE__"
 MAX_LINKS_PER_PAGE = 300
-FORM_INVENTORY_JS = """els => els.slice(0, 30).map(form => {
+FORM_INVENTORY_JS = """els => els.slice(0, 30).map((form, dom_index) => {
   const action = new URL(form.action);
   const fields = Array.from(form.querySelectorAll('input[name], textarea[name], select[name]'))
     .slice(0, 40).map(el => ({
@@ -23,7 +23,7 @@ FORM_INVENTORY_JS = """els => els.slice(0, 30).map(form => {
       control_type: (el.type || el.tagName.toLowerCase()).toLowerCase().slice(0, 30),
       hidden: el.type === 'hidden'
     })).filter(field => field.name);
-  return {method: form.method.toUpperCase(), action: (action.origin + action.pathname).slice(0, 512), fields};
+  return {dom_index, method: form.method.toUpperCase(), action: (action.origin + action.pathname).slice(0, 512), fields};
 })"""
 
 
@@ -177,11 +177,13 @@ async def check_browser(
     traffic_exchanges: list[dict] | None = None,
     link_baselines: list[str] | None = None,
     max_actions: int = 3,
+    form_action: str = "", form_field: str = "",
+    form_payload_template: str = "",
 ) -> tuple[dict, bytes | None]:
     """Execute one bounded browser check with HTTP and WebSocket origin routing."""
     from playwright.async_api import async_playwright
 
-    if operation not in ("map", "check_xss", "crawl", "inspect_js"):
+    if operation not in ("map", "check_xss", "check_form_xss", "crawl", "inspect_js"):
         raise ValueError("Unsupported browser operation")
     if operation == "inspect_js":
         from .browser_actions import MAX_DISCOVERY_ACTIONS
@@ -189,14 +191,23 @@ async def check_browser(
             raise ValueError("JavaScript inspection requires private source and traffic collectors")
         if not 0 <= max_actions <= MAX_DISCOVERY_ACTIONS:
             raise ValueError("Discovery action limit must be between 0 and 6")
-        if not 1 <= max_pages <= 4:
-            raise ValueError("JavaScript inspection page limit must be between 1 and 4")
+        if not 1 <= max_pages <= 10:
+            raise ValueError("JavaScript inspection page limit must be between 1 and 10")
     if operation == "crawl" and not 1 <= max_pages <= 10:
         raise ValueError("Crawl page limit must be between 1 and 10")
     assert_in_scope(url, allowed_origins)
-    nonce = secrets.token_hex(8) if operation == "check_xss" else ""
+    nonce = secrets.token_hex(8) if operation in {"check_xss", "check_form_xss"} else ""
     if operation == "check_xss" and NONCE_MARKER not in url:
         raise ValueError(f"XSS URL must contain {NONCE_MARKER}")
+    if operation == "check_form_xss":
+        import re
+        if (not form_action or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,79}", form_field)
+                or NONCE_MARKER not in form_payload_template
+                or len(form_payload_template) > 300):
+            raise ValueError("An observed form action, field, and bounded nonce payload are required")
+        assert_in_scope(form_action, allowed_origins)
+        if urlsplit(form_action).query or urlsplit(form_action).fragment:
+            raise ValueError("Form XSS action must be an exact path")
     final_target = url.replace(NONCE_MARKER, nonce)
     assert_in_scope(final_target, allowed_origins)
     expected_origin = origin(final_target)
@@ -210,8 +221,17 @@ async def check_browser(
     seen_inline: set[tuple[str, int]] = set()
     request_actions: dict[object, str] = {}
     request_rows: dict[object, dict] = {}
+    seen_request_templates: set[tuple] = set()
+    seen_exchange_shapes: set[tuple] = set()
     current_action_ref = "navigate"
     actions: list[dict] = []
+    read_only_interaction = False
+    get_form_actions = 0
+    approved_post_path = urlsplit(form_action).path or "/"
+    post_action_active = False
+    approved_post_requests = 0
+    post_response_seen = False
+    post_response_dialogs: list[str] = []
 
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(**launch_options())
@@ -223,12 +243,26 @@ async def check_browser(
             context = await browser.new_context(**context_args)
 
             async def route_request(route):
-                nonlocal blocked_requests
+                nonlocal blocked_requests, approved_post_requests
                 try:
                     allowed = origin(route.request.url) == expected_origin
+                    if allowed and read_only_interaction:
+                        from .browser_actions import allowed_discovery_path
+
+                        allowed = (route.request.method.upper() in {"GET", "HEAD", "OPTIONS"}
+                                   and allowed_discovery_path(urlsplit(route.request.url).path or "/"))
+                    if allowed and post_action_active:
+                        from .browser_actions import allowed_discovery_path
+                        method = route.request.method.upper()
+                        path = urlsplit(route.request.url).path or "/"
+                        allowed = ((method == "POST" and path == approved_post_path)
+                                   or (method in {"GET", "HEAD", "OPTIONS"}
+                                       and allowed_discovery_path(path)))
                 except ValueError:
                     allowed = False
                 if allowed:
+                    if post_action_active and route.request.method.upper() == "POST":
+                        approved_post_requests += 1
                     await route.continue_()
                 else:
                     blocked_requests += 1
@@ -263,13 +297,18 @@ async def check_browser(
                     return
                 if request.resource_type in ("xhr", "fetch", "script") and len(request_actions) < 200:
                     request_actions[request] = current_action_ref
-                if len(requests) >= 100:
+                if request.resource_type not in {"document", "xhr", "fetch", "script"}:
                     return
                 parts = urlsplit(request.url)
+                query_keys = tuple(sorted({key[:80] for key, _ in parse_qsl(parts.query[:2048])})[:20])
+                template = (request.method, parts.path or "/", request.resource_type, query_keys)
+                if template in seen_request_templates or len(requests) >= 300:
+                    return
+                seen_request_templates.add(template)
                 row = {
                     "method": request.method, "path": (parts.path or "/")[:512],
                     "resource_type": request.resource_type,
-                    "query_keys": sorted({key[:80] for key, _ in parse_qsl(parts.query[:2048])})[:20],
+                    "query_keys": list(query_keys),
                     "action_ref": current_action_ref,
                 }
                 requests.append(row)
@@ -278,10 +317,14 @@ async def check_browser(
             page.on("request", record_request)
 
             def record_response(response):
+                nonlocal post_response_seen
                 try:
                     if origin(response.url) != expected_origin:
                         return
                     row = request_rows.get(response.request)
+                    if (post_action_active and response.request.method.upper() == "POST"
+                            and (urlsplit(response.url).path or "/") == approved_post_path):
+                        post_response_seen = True
                     if row is not None:
                         row["status"] = response.status
                         row["content_type"] = response.headers.get("content-type", "").split(";", 1)[0][:80]
@@ -355,7 +398,12 @@ async def check_browser(
                             request_body=request_body, response_body=response_body,
                             request_content_type=request.headers.get("content-type", ""),
                         )
-                        if len(traffic_exchanges) < MAX_EXCHANGES:
+                        shape = (public["method"], public["path"],
+                                 tuple(public["query_keys"]), public["request_content_type"],
+                                 tuple((field.get("location"), field.get("path"))
+                                       for field in public["body_fields"]))
+                        if shape not in seen_exchange_shapes and len(traffic_exchanges) < MAX_EXCHANGES:
+                            seen_exchange_shapes.add(shape)
                             traffic_exchanges.append({"public": public, "private": private})
                     except Exception:
                         return
@@ -372,6 +420,8 @@ async def check_browser(
 
             async def accept_dialog(dialog):
                 dialogs.append(dialog.message[:200])
+                if post_response_seen:
+                    post_response_dialogs.append(dialog.message[:200])
                 await dialog.dismiss()
 
             page.on("dialog", lambda dialog: asyncio.create_task(accept_dialog(dialog)))
@@ -446,12 +496,128 @@ async def check_browser(
                     "pages_visited": len(pages), "requests": requests,
                     "blocked_requests": blocked_requests,
                 }
+                await context.unroute_all(behavior="ignoreErrors")
                 await context.close()
                 return result, None
             response = await page.goto(final_target, wait_until="domcontentloaded", timeout=20_000)
-            await page.wait_for_timeout(650)
+            await page.wait_for_timeout(1200 if operation in {"check_xss", "check_form_xss"} else 650)
+            form_submitted = False
+            if operation == "check_form_xss":
+                # Use the observed page's native submit path, including its JS
+                # handler. Route policy permits POST only to the approved path.
+                forms = await _forms(page, expected_origin)
+                matching = [row for row in forms if row.get("method") == "POST"
+                            and row.get("action") == form_action
+                            and any(field.get("name") == form_field and
+                                    field.get("control_type") in {"text", "search", "email", "textarea"}
+                                    for field in row.get("fields") or [])]
+                if len(matching) != 1:
+                    raise ValueError("The observed POST form is missing or ambiguous on its source page")
+                current_action_ref = "approved-post-form"
+                try:
+                    post_action_active = True
+                    form = page.locator("form").nth(int(matching[0]["dom_index"]))
+                    payload = form_payload_template.replace(NONCE_MARKER, nonce)
+                    try:
+                        await form.evaluate("""(form, data) => {
+                        const field = [...form.elements].find(el => el.name === data.name);
+                        if (!field) throw Error('Observed POST field disappeared');
+                        form.noValidate = true;
+                        field.value = data.value;
+                        field.dispatchEvent(new Event('input', {bubbles: true}));
+                        field.dispatchEvent(new Event('change', {bubbles: true}));
+                        }""", {"name": form_field, "value": payload})
+                        submitters = form.locator("button, input[type=submit]")
+                        if await submitters.count() == 1:
+                            await submitters.first.click(timeout=3_000, no_wait_after=True)
+                        else:
+                            await form.evaluate("form => form.requestSubmit()")
+                    except Exception:
+                        # A native form navigation can destroy the evaluation
+                        # context after the POST was already sent.
+                        await page.wait_for_timeout(400)
+                        if not approved_post_requests:
+                            raise
+                    await page.wait_for_timeout(1500)
+                    form_submitted = approved_post_requests > 0
+                finally:
+                    post_action_active = False
             if operation == "inspect_js":
-                from .browser_actions import allowed_discovery_control
+                from .browser_actions import (
+                    MAX_GET_FORM_ACTIONS, allowed_discovery_control,
+                    safe_get_form_field,
+                )
+
+                page_observations: list[dict] = []
+
+                async def observe_page(status: int | None = None) -> list[str]:
+                    """Preserve inputs on every inspected page, not only the seed."""
+                    hrefs = await page.locator("a[href]").evaluate_all(
+                        f"els => els.slice(0, {MAX_LINKS_PER_PAGE}).map(e => e.href)"
+                    )
+                    if link_baselines is not None:
+                        link_baselines.extend(_private_link_baselines(hrefs, [expected_origin]))
+                    page_observations.append({
+                        "url": expected_origin + (urlsplit(page.url).path or "/"),
+                        "status": status,
+                        "final_path": urlsplit(page.url).path or "/",
+                        "links": _crawl_links(hrefs, [expected_origin]),
+                        "link_query_inputs": _link_query_inputs(hrefs, [expected_origin]),
+                        "forms": await _forms(page, expected_origin),
+                    })
+                    return hrefs
+
+                async def submit_safe_get_forms() -> None:
+                    """Exercise bounded search forms with inert values and GET-only routing."""
+                    nonlocal current_action_ref, read_only_interaction, get_form_actions
+                    if get_form_actions >= MAX_GET_FORM_ACTIONS:
+                        return
+                    page_url = page.url
+                    forms = await _forms(page, expected_origin)
+                    for form_row in forms:
+                        field = safe_get_form_field(form_row)
+                        if not field or get_form_actions >= MAX_GET_FORM_ACTIONS:
+                            continue
+                        form = page.locator("form").nth(int(form_row["dom_index"]))
+                        try:
+                            if not await form.is_visible():
+                                continue
+                            current_action_ref = f"get-form-{get_form_actions + 1}"
+                            start = (len(requests), len(javascript_sources), len(traffic_exchanges))
+                            marker = "prowl-observe-" + secrets.token_hex(6)
+                            read_only_interaction = True
+                            await form.evaluate("""(form, data) => {
+                                const field = [...form.elements].find(el => el.name === data.name);
+                                if (!field) throw Error('Observed form field disappeared');
+                                field.value = data.value;
+                                field.dispatchEvent(new Event('input', {bubbles: true}));
+                                field.dispatchEvent(new Event('change', {bubbles: true}));
+                                form.requestSubmit();
+                            }""", {"name": field, "value": marker})
+                            await page.wait_for_timeout(500)
+                            assert_in_scope(page.url, allowed_origins)
+                            if link_baselines is not None and urlsplit(page.url).query:
+                                link_baselines.append(page.url)
+                            get_form_actions += 1
+                            actions.append(await checkpoint(
+                                current_action_ref, "get_form", start,
+                                path=urlsplit(form_row["action"]).path or "/",
+                                field=field, status="completed",
+                            ))
+                        except ValueError:
+                            raise
+                        except Exception as exc:
+                            actions.append({"ref": current_action_ref, "kind": "get_form",
+                                            "path": urlsplit(form_row["action"]).path or "/",
+                                            "field": field, "status": type(exc).__name__})
+                        finally:
+                            current_action_ref = "restore"
+                            try:
+                                if page.url != page_url:
+                                    await page.goto(page_url, wait_until="domcontentloaded", timeout=20_000)
+                                    assert_in_scope(page.url, allowed_origins)
+                            finally:
+                                read_only_interaction = False
 
                 await collect_inline()
                 actions.append(await checkpoint("navigate", "navigate", (0, 0, 0),
@@ -514,11 +680,8 @@ async def check_browser(
                 await page.wait_for_timeout(300)
                 await settle_capture()
                 page_paths = [urlsplit(page.url).path or "/"]
-                hrefs = await page.locator("a[href]").evaluate_all(
-                    f"els => els.slice(0, {MAX_LINKS_PER_PAGE}).map(e => e.href)"
-                )
-                if link_baselines is not None:
-                    link_baselines.extend(_private_link_baselines(hrefs, [expected_origin]))
+                hrefs = await observe_page(response.status if response else None)
+                await submit_safe_get_forms()
                 queue = _crawl_links(hrefs, [expected_origin])
                 visited = {expected_origin + page_paths[0]}
                 while queue and len(page_paths) < max_pages:
@@ -545,11 +708,8 @@ async def check_browser(
                         page_paths.append(page_path)
                         actions.append(await checkpoint(ref, "navigate_link", start, path=page_path,
                                                         navigation_mode=navigation_mode, status="completed"))
-                        hrefs = await page.locator("a[href]").evaluate_all(
-                            f"els => els.slice(0, {MAX_LINKS_PER_PAGE}).map(e => e.href)"
-                        )
-                        if link_baselines is not None:
-                            link_baselines.extend(_private_link_baselines(hrefs, [expected_origin]))
+                        hrefs = await observe_page(response.status if navigation_mode == "direct" and response else 200)
+                        await submit_safe_get_forms()
                         queue.extend(link for link in _crawl_links(hrefs, [expected_origin])
                                      if link not in visited and link not in queue)
                     except ValueError:
@@ -577,12 +737,23 @@ async def check_browser(
                 result["links"] = _crawl_links(hrefs, [expected_origin])
                 result["link_query_inputs"] = _link_query_inputs(hrefs, [expected_origin])
                 result["forms"] = await _forms(page, expected_origin)
-            elif operation == "check_xss":
+            elif operation in {"check_xss", "check_form_xss"}:
                 # A dialog containing a fresh server nonce is execution evidence.
                 # Reflection or an unrelated dialog alone is not proof.
-                result["executed"] = any(nonce in message for message in dialogs)
+                result["executed"] = (
+                    any(nonce in message for message in post_response_dialogs)
+                    and form_submitted and post_response_seen
+                    if operation == "check_form_xss" else
+                    any(nonce in message for message in dialogs)
+                )
                 result["dialog_count"] = len(dialogs)
                 result["nonce"] = nonce
+                if operation == "check_form_xss":
+                    result["form_action"] = form_action
+                    result["form_field"] = form_field
+                    result["form_payload_template"] = form_payload_template
+                    result["post_submitted"] = form_submitted
+                    result["post_response_seen"] = post_response_seen
                 # Give the specialist context without exposing page source or
                 # mistaking reflection for execution. Scan a bounded DOM slice.
                 try:
@@ -616,7 +787,10 @@ async def check_browser(
                 result["max_pages"] = max_pages
                 result["page_paths"] = page_paths
                 result["pages_inspected"] = len(page_paths)
+                result["pages"] = page_observations
+                result["get_form_actions"] = get_form_actions
             screenshot = await page.screenshot(full_page=True)
+            await context.unroute_all(behavior="ignoreErrors")
             await context.close()
             return result, screenshot
         finally:

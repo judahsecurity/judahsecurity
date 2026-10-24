@@ -12,8 +12,8 @@ from .browser_actions import allowed_discovery_path
 
 
 _CREDENTIAL_FIELD = re.compile(r"(?:token|secret|password|api[_-]?key|authorization|session|jwt)", re.I)
-MAX_ENDPOINTS = 100
-MAX_PARAMETERS = 120
+MAX_ENDPOINTS = 200
+MAX_PARAMETERS = 400
 MAX_TEST_SUGGESTIONS = 20
 
 
@@ -54,7 +54,36 @@ def build_surface_inventory(result: dict, *, body_replay_paths: set[str] | None 
         if artifact_id:
             row["artifact_ids"].add(artifact_id)
 
-    for request in (result.get("requests") or [])[:100]:
+    observed_pages = [result, *((row for row in (result.get("pages") or [])[:80]
+                                if isinstance(row, dict)))]
+    for page in observed_pages:
+        for form in (page.get("forms") or [])[:30]:
+            if not isinstance(form, dict):
+                continue
+            action = form.get("action")
+            method = str(form.get("method") or "GET").upper()
+            if not isinstance(action, str) or method not in {"GET", "POST"}:
+                continue
+            path = action.removeprefix(origin)
+            if not path.startswith("/") or not allowed_discovery_path(path):
+                continue
+            endpoint(path, method, "observed_form")
+            for field in (form.get("fields") or [])[:40]:
+                if isinstance(field, dict) and isinstance(field.get("name"), str):
+                    parameter(path, method, "query" if method == "GET" else "form",
+                              field["name"], "observed_form",
+                              field.get("control_type", "unknown"))
+        for link in (page.get("link_query_inputs") or [])[:100]:
+            if not isinstance(link, dict):
+                continue
+            path = link.get("path")
+            if not isinstance(path, str) or not allowed_discovery_path(path):
+                continue
+            endpoint(path, "GET", "observed_link")
+            for name in (link.get("query_keys") or [])[:20]:
+                parameter(path, "GET", "query", name, "observed_link")
+
+    for request in (result.get("requests") or [])[:300]:
         if not isinstance(request, dict) or request.get("resource_type") not in ("xhr", "fetch"):
             continue
         path, method = request.get("path"), request.get("method")
@@ -84,7 +113,7 @@ def build_surface_inventory(result: dict, *, body_replay_paths: set[str] | None 
                 parameter(path, method, "query", name, "javascript_static",
                           action_ref=action_ref, artifact_id=artifact_id)
 
-    for traffic in (result.get("traffic") or [])[:40]:
+    for traffic in (result.get("traffic") or [])[:120]:
         if not isinstance(traffic, dict):
             continue
         path, method = traffic.get("path"), traffic.get("method")

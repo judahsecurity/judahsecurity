@@ -96,6 +96,22 @@ def pending_first_pass_cells(brain: Any, *, target: str = "") -> list[dict[str, 
             and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
             and cell.get("test_type") in {"sqli", "xss"}
             and cell.get("specialist") in {"sqli", "xss"}
+            and (
+                # Keep legacy cells with incomplete shape in the queue so the
+                # existing scheduler can surface their missing metadata.
+                not cell.get("method") or not cell.get("parameter")
+                or (str(cell.get("method") or "").upper() == "GET"
+                 and str(cell.get("parameter") or "").startswith("query:"))
+                or (str(cell.get("method") or "").upper() == "POST"
+                    and (str(cell.get("parameter") or "").startswith("body_form:")
+                         or str(cell.get("parameter") or "").startswith("body_json:"))
+                    and cell.get("observation_source") == "browser_traffic"
+                    and bool(cell.get("capture_id")))
+                or (str(cell.get("method") or "").upper() == "POST"
+                    and str(cell.get("parameter") or "").startswith("body_form:")
+                    and cell.get("specialist") == "xss"
+                    and cell.get("observation_source") == "observed_form")
+            )
             and (not active_origin or _origin(
                 f"{scheme}://{cell.get('host') or ''}"
             ) == active_origin)
@@ -212,10 +228,21 @@ async def run_observed_input_batch(
                 else:
                     operation_name = "scoped_input_probe_assigned"
                     probe_args["technique"] = "html_body"
+            elif method == "POST" and location == "body_form" and specialist == "xss" and any(
+                isinstance(form, dict) and str(form.get("method") or "").upper() == "POST"
+                and _origin(str(form.get("action") or "")) == active_origin
+                and urlsplit(str(form.get("action") or "")).path == cell.get("path")
+                and parameter in (form.get("inputs") or []) and form.get("page")
+                for form in (cmap.get("forms") or [])[:80]
+            ):
+                operation_name = "scoped_input_probe_assigned"
+                probe_args["technique"] = "html_body"
             elif (cell.get("observation_source") == "browser_traffic"
                   and cell.get("capture_id") and method == "POST"
                   and location in {"body_json", "body_form"}):
                 operation_name = "scoped_assessment_probe_assigned"
+                if specialist == "xss":
+                    probe_args["technique"] = "xss_reflection"
             elif method == "POST" and location in {"body_json", "body_form"}:
                 reason = "POST input needs a private browser capture and approved replay"
             if operation_name:
@@ -371,6 +398,8 @@ async def run_observed_input_batch(
                     else:
                         outcome = "inconclusive"
                         reason = (
+                            "POST reflection observed; browser execution is still required"
+                            if specialist == "xss" and (result.get("probe_result") or {}).get("reflection_detected") else
                             "XSS browser execution not observed in bounded reflected contexts"
                             if specialist == "xss" else
                             "Captured request changed without an independent SQLi proof"
