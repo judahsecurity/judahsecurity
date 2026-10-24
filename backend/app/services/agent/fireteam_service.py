@@ -588,6 +588,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
         allowed_tools=[
             "get_parameter_inventory",
             "scoped_input_probe_assigned",
+            "scoped_dom_xss_assigned",
+            "scoped_stored_xss_assigned",
             "scoped_assessment_probe_assigned",
             "scoped_assessment_candidate",
             "execute_xsstrike",
@@ -630,12 +632,16 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "'xss_browser_attribute' for a double-quoted HTML attribute, or "
             "'xss_browser_js_single'/'xss_browser_js_double' for the corresponding "
             "JavaScript string. Each runs a fresh nonce-backed browser proof. "
-            "Submit a scoped candidate only on executed=true with its service artifact ID. "
+            "Submit a local candidate with the execution receipt and exact cell; the independent "
+            "verifier repeats it. "
             "A quote differential alone is not XSS. Status 200 is not XSS."
-            " For DOM XSS, inspect the assigned first-party script and show a real data path "
-            "from location.search or location.hash into an executable sink before browser proof. "
-            "For stored XSS, request approval for a reversible canary write and verify a "
-            "separate read; leave the cell blocked if no write is authorized."
+            " For a leased dom_xss cell with a location.hash lead and observed rendering page, "
+            "call scoped_dom_xss_assigned with the cell and lease IDs. Submit a candidate only "
+            "when its fresh nonce executes; static source and sink patterns remain leads. "
+            "For a leased stored_xss form cell, call scoped_stored_xss_assigned only with "
+            "an observed readback page and an operator-approved nonce-addressed cleanup URL. "
+            "It submits through the observed form, checks execution on a separate read, and "
+            "requires successful cleanup. Cite its receipt for independent verification."
         ),
     ),
     SpecialistProfile(

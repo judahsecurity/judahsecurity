@@ -91,6 +91,43 @@ async def test_agent_browser_inventory_keeps_private_exchange_values_out_of_tool
 
 
 @pytest.mark.asyncio
+async def test_browser_capture_store_preserves_open_cell_references(monkeypatch):
+    from app.services.agent.engagement_brain import EngagementBrain
+
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    brain = EngagementBrain(target="https://app.example.test")
+    brain.coverage_cells = [{"id": "open-cell", "status": "untested",
+                             "capture_id": "pinned-capture"}]
+    manager._engagement_brain = brain.to_dict()
+    manager._scoped_browser_exchanges = {
+        **{"pinned-capture": {"identity": "anonymous", "private": b"{}", "public": {}}},
+        **{f"old-{index}": {"identity": "anonymous", "private": b"{}", "public": {}}
+           for index in range(119)},
+    }
+    public, private = package_exchange(
+        url="https://app.example.test/api/search?term=seed",
+        page_url="https://app.example.test/catalog", action_ref="navigate",
+        expected_origin="https://app.example.test", method="GET", resource_type="fetch",
+        status=200, content_type="text/html", request_body=b"", response_body=b"seed",
+    )
+
+    async def fake_browser(**kwargs):
+        kwargs["traffic_exchanges"].append({"public": public, "private": private})
+        return ({"operation": "map", "final_origin": "https://app.example.test",
+                 "final_path": "/catalog", "status": 200, "requests": []}, None)
+
+    monkeypatch.setattr("app.services.agent.scoped_assessment_tools.browser.check_browser", fake_browser)
+    result = json.loads(await manager.scoped_browser_assessment(
+        "map", "https://app.example.test/catalog"))
+    assert result["traffic_store_dropped"] == 0
+    assert "pinned-capture" in manager._scoped_browser_exchanges
+    assert result["traffic"][0]["artifact_id"] in manager._scoped_browser_exchanges
+    assert len(manager._scoped_browser_exchanges) == 120
+
+
+@pytest.mark.asyncio
 async def test_post_form_xss_requires_operator_path_and_keeps_fresh_proof(monkeypatch):
     manager = ASMToolsManager()
     manager._fallback_target = "https://app.example.test"
@@ -122,6 +159,45 @@ async def test_post_form_xss_requires_operator_path_and_keeps_fresh_proof(monkey
     receipt = evidence_store(manager).records[result["evidence_id"]]
     assert receipt["target"] == kwargs["form_action"]
     assert receipt["kind"] == "scoped_browser_check_form_xss"
+
+
+@pytest.mark.asyncio
+async def test_stored_xss_requires_separate_cleanup_approval(monkeypatch):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    calls = []
+
+    async def fake_browser(**kwargs):
+        calls.append(kwargs)
+        return ({"operation": "check_stored_xss", "target_template": kwargs["url"],
+                 "form_action": kwargs["form_action"], "form_field": kwargs["form_field"],
+                 "form_payload_template": kwargs["form_payload_template"],
+                 "readback_url": kwargs["readback_url"],
+                 "cleanup_url_template": kwargs["cleanup_url_template"],
+                 "post_submitted": True, "post_response_seen": True,
+                 "readback_response_seen": True, "readback_status": 200,
+                 "readback_final_exact": True, "readback_executed": True,
+                 "cleanup_success": True, "executed": True, "nonce": "fresh-nonce",
+                 "final_origin": "https://app.example.test", "requests": []}, None)
+
+    monkeypatch.setattr("app.services.agent.scoped_assessment_tools.browser.check_browser", fake_browser)
+    kwargs = {"operation": "check_stored_xss", "url": "https://app.example.test/new",
+              "form_action": "https://app.example.test/comments", "form_field": "message",
+              "form_payload_template": '<img src=x onerror=alert("__PROWL_NONCE__")>',
+              "readback_url": "https://app.example.test/comments/view",
+              "cleanup_url_template": "https://app.example.test/comments/purge?marker=__PROWL_NONCE__"}
+    manager.set_scoped_assessment_policy({"body_replay_paths": ["/comments"]})
+    with pytest.raises(ValueError, match="cleanup path was not approved"):
+        await manager.scoped_browser_assessment(**kwargs)
+    assert not calls
+    manager.set_scoped_assessment_policy({"body_replay_paths": ["/comments"],
+                                          "stored_xss_cleanup_paths": ["/comments/purge"]})
+    result = json.loads(await manager.scoped_browser_assessment(**kwargs))
+    assert result["executed"] is True
+    receipt = evidence_store(manager).records[result["evidence_id"]]
+    assert receipt["target"] == kwargs["form_action"]
+    assert receipt["kind"] == "scoped_browser_check_stored_xss"
 
 
 @pytest.mark.asyncio
@@ -166,6 +242,94 @@ async def test_assigned_post_form_xss_binds_browser_receipt_to_exact_cell(monkey
     cell = next(row for row in manager._engagement_brain["coverage_cells"]
                 if row["id"] == lease.coverage_cell_id)
     assert result["evidence_id"] in cell["probe_artifact_ids"]
+
+
+@pytest.mark.asyncio
+async def test_captured_get_xss_replays_the_rendering_page(monkeypatch):
+    from app.services.agent.coverage_cells import (
+        claim_coverage_cell_leases, seed_parameter_coverage_cells,
+    )
+    from app.services.agent.engagement_brain import EngagementBrain
+
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    manager._capability_map = {"target": "https://app.example.test",
+                               "scope": "https://app.example.test"}
+    public, private = package_exchange(
+        url="https://app.example.test/api/search?term=seed&category=all",
+        page_url="https://app.example.test/catalog", action_ref="navigate",
+        expected_origin="https://app.example.test", method="GET",
+        resource_type="fetch", status=200, content_type="text/html",
+        request_body=b"", response_body=b"seed",
+    )
+    manager._scoped_browser_exchanges = {
+        "capture-1": {"identity": "anonymous", "private": private, "public": public},
+    }
+    brain = EngagementBrain(target="https://app.example.test")
+    seed_parameter_coverage_cells(brain, [{"method": "GET", "host": "app.example.test",
+        "path": "/api/search", "name": "term", "location": "query",
+        "identity": "anonymous", "source": "browser_traffic", "testable": True,
+        "artifact_id": "capture-1"}])
+    lease = claim_coverage_cell_leases(brain, ["xss"], first_pass_only=True)["xss"]
+    manager._engagement_brain = brain.to_dict()
+    calls = []
+
+    async def fake_assessment(operation, url, **kwargs):
+        calls.append((operation, url, kwargs))
+        return json.dumps({"evidence_id": "proof-1", "executed": True})
+
+    monkeypatch.setattr(manager, "scoped_browser_assessment", fake_assessment)
+    result = await manager.scoped_input_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert calls == [("check_xhr_xss", "https://app.example.test/catalog", {
+        "identity": "anonymous", "xhr_path": "/api/search", "xhr_parameter": "term",
+        "xhr_query_keys": ["category", "term"],
+        "xhr_payload_template": '<img src=x onerror=alert("__PROWL_NONCE__")>',
+    })]
+    assert result["operation"] == "scoped_browser_check_xhr_xss"
+    assert result["probe_result"]["request_context"] == "observed_xhr_render_page"
+
+
+@pytest.mark.asyncio
+async def test_assigned_stored_xss_uses_observed_form_and_readback(monkeypatch):
+    from app.services.agent.coverage_cells import (
+        claim_coverage_cell_leases, seed_parameter_coverage_cells,
+    )
+    from app.services.agent.engagement_brain import EngagementBrain
+
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    page = "https://app.example.test/new"
+    action = "https://app.example.test/comments"
+    readback = "https://app.example.test/comments/view"
+    cleanup = "https://app.example.test/comments/purge?marker=__PROWL_NONCE__"
+    manager._capability_map = {"target": "https://app.example.test",
+        "scope": "https://app.example.test", "pages_visited": [readback],
+        "forms": [{"method": "POST", "action": action, "page": page,
+                   "inputs": ["message"]}]}
+    brain = EngagementBrain(target="https://app.example.test")
+    seed_parameter_coverage_cells(brain, [{"method": "POST", "host": "app.example.test",
+        "path": "/comments", "name": "message", "location": "body_form",
+        "identity": "anonymous", "source": "observed_form", "testable": True}])
+    lease = claim_coverage_cell_leases(brain, ["xss"],
+        allowed_test_types=frozenset({"stored_xss"}))["xss"]
+    manager._engagement_brain = brain.to_dict()
+    calls = []
+
+    async def fake_assessment(operation, url, **kwargs):
+        calls.append((operation, url, kwargs))
+        return json.dumps({"evidence_id": "stored-proof", "executed": True,
+                           "readback_executed": True, "cleanup_success": True})
+
+    monkeypatch.setattr(manager, "scoped_browser_assessment", fake_assessment)
+    result = await manager.scoped_stored_xss_assigned(
+        lease.coverage_cell_id, lease.id, readback, cleanup)
+    assert result["proof_confirmed"] is True
+    assert calls[0][0:2] == ("check_stored_xss", page)
+    assert calls[0][2]["form_action"] == action
+    assert calls[0][2]["readback_url"] == readback
+    assert calls[0][2]["cleanup_url_template"] == cleanup
 
 
 @pytest.mark.asyncio

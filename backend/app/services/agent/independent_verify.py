@@ -184,23 +184,49 @@ def observed_xss_cell_for_proof(
     matches: Dict[str, Dict[str, Any]] = {}
     for evidence_id in evidence_ids:
         receipt = store.records.get(str(evidence_id))
-        if (not receipt or receipt.get("kind") != "scoped_browser_check_xss"
+        if (not receipt or receipt.get("kind") not in {"scoped_browser_check_xss", "scoped_browser_check_xhr_xss"}
                 or receipt.get("target") != target):
             continue
         proof = receipt.get("payload")
-        if (not isinstance(proof, dict) or proof.get("operation") != "check_xss"
+        xhr_xss = receipt.get("kind") == "scoped_browser_check_xhr_xss"
+        if (not isinstance(proof, dict)
+                or proof.get("operation") != ("check_xhr_xss" if xhr_xss else "check_xss")
                 or proof.get("executed") is not True):
             continue
         template = str(proof.get("target_template") or "")
         parsed = urlsplit(template)
-        if (not _same_observed_origin(parsed.scheme, parsed.netloc, target)
-                or (parsed.path or "/") != (parsed_target.path or "/")
-                or parsed.fragment):
+        if not _same_observed_origin(parsed.scheme, parsed.netloc, target):
             continue
-        parameters = {
-            name for name, values in parse_qs(parsed.query).items()
-            if any("__PROWL_NONCE__" in value for value in values)
-        }
+        if parsed.fragment:
+            if (xhr_xss or parsed.query or (parsed.path or "/") != (parsed_target.path or "/")
+                    or "__PROWL_NONCE__" not in parsed.fragment):
+                continue
+            for cell in getattr(brain, "coverage_cells", None) or []:
+                if (cell.get("source") == "js_inventory"
+                        and cell.get("test_type") == "dom_xss"
+                        and cell.get("page_path") == (parsed_target.path or "/")
+                        and _same_observed_origin(parsed_target.scheme, str(cell.get("host") or ""), target)
+                        and any(isinstance(lead, dict) and lead.get("kind") == "fragment"
+                                for lead in cell.get("source_leads") or [])
+                        and (cell.get("identity") or "anonymous") == receipt.get("identity")):
+                    matches[str(cell["id"])] = cell
+            continue
+        if xhr_xss:
+            if (proof.get("xhr_path") != (parsed_target.path or "/")
+                    or "__PROWL_NONCE__" not in str(proof.get("xhr_payload_template") or "")
+                    or not isinstance(proof.get("xhr_query_keys"), list)
+                    or proof.get("xhr_parameter") not in proof["xhr_query_keys"]
+                    or proof.get("xhr_mutated") is not True
+                    or proof.get("xhr_response_seen") is not True):
+                continue
+            parameters = {str(proof.get("xhr_parameter") or "")}
+        else:
+            if (parsed.path or "/") != (parsed_target.path or "/"):
+                continue
+            parameters = {
+                name for name, values in parse_qs(parsed.query).items()
+                if any("__PROWL_NONCE__" in value for value in values)
+            }
         for cell in getattr(brain, "coverage_cells", None) or []:
             if (cell.get("source") == "parameter_inventory"
                     and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
@@ -838,19 +864,28 @@ async def _verify_scoped_browser_xss_candidate(
                     raw["coverage_cell_id"] = cand.coverage_cell_id
             cell["candidate_id"] = cand.id
             tools_manager._engagement_brain = brain.to_dict()
-    if not cell or (cell.get("source") != "parameter_inventory"
-                    or cell.get("observation_source") not in OBSERVED_INPUT_SOURCES
-                    or cell.get("test_type") != "xss" or cell.get("method") not in {"GET", "POST"}):
+    dom_xss = bool(cell and cell.get("source") == "js_inventory"
+                   and cell.get("test_type") == "dom_xss"
+                   and cell.get("method") == "GET"
+                   and any(isinstance(lead, dict) and lead.get("kind") == "fragment"
+                           for lead in cell.get("source_leads") or []))
+    stored_xss = bool(cell and cell.get("source") == "parameter_inventory"
+                      and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
+                      and cell.get("test_type") == "stored_xss"
+                      and cell.get("method") == "POST")
+    if not cell or not (dom_xss or stored_xss or (cell.get("source") == "parameter_inventory"
+                    and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
+                    and cell.get("test_type") == "xss" and cell.get("method") in {"GET", "POST"})):
         return None
     location, separator, parameter = str(cell.get("parameter") or "").partition(":")
     form_xss = cell.get("method") == "POST" and location == "body_form"
     target = urlsplit(cand.target)
     identity = str(cell.get("identity") or "anonymous")
-    if (not ((location == "query" and not form_xss) or form_xss)
-            or not separator or not parameter
+    if (not (dom_xss or (location == "query" and not form_xss) or form_xss)
+            or (not dom_xss and (not separator or not parameter))
             or target.scheme not in {"http", "https"}
             or not _same_observed_origin(target.scheme, str(cell.get("host") or ""), cand.target)
-            or (target.path or "/") != cell.get("path")
+            or (target.path or "/") != (cell.get("page_path") if dom_xss else cell.get("path"))
             or target.query or target.fragment
             or (cand.identity and cand.identity != identity)
             or (cand.parameter and cand.parameter != cell.get("parameter"))):
@@ -859,8 +894,10 @@ async def _verify_scoped_browser_xss_candidate(
     hunter = []
     for evidence_id in cand.evidence_ids:
         receipt = store.records.get(evidence_id)
-        expected_receipt = "scoped_browser_check_form_xss" if form_xss else "scoped_browser_check_xss"
-        if (not receipt or receipt.get("kind") != expected_receipt
+        expected_receipts = ({"scoped_browser_check_stored_xss"} if stored_xss else
+                             {"scoped_browser_check_form_xss"} if form_xss else
+                             {"scoped_browser_check_xss", "scoped_browser_check_xhr_xss"})
+        if (not receipt or receipt.get("kind") not in expected_receipts
                 or receipt.get("target") != cand.target
                 or receipt.get("identity") != identity):
             continue
@@ -869,7 +906,30 @@ async def _verify_scoped_browser_xss_candidate(
             continue
         template = str(proof.get("target_template") or "")
         parsed = urlsplit(template)
-        if form_xss:
+        xhr_xss = receipt.get("kind") == "scoped_browser_check_xhr_xss"
+        if stored_xss:
+            if (proof.get("operation") != "check_stored_xss"
+                    or proof.get("form_action") != cand.target
+                    or proof.get("form_field") != parameter
+                    or proof.get("post_submitted") is not True
+                    or proof.get("post_response_seen") is not True
+                    or proof.get("readback_response_seen") is not True
+                    or proof.get("readback_final_exact") is not True
+                    or not isinstance(proof.get("readback_status"), int)
+                    or not 200 <= proof["readback_status"] < 300
+                    or proof.get("readback_executed") is not True
+                    or proof.get("cleanup_success") is not True
+                    or "__PROWL_NONCE__" not in str(proof.get("form_payload_template") or "")
+                    or not _same_observed_origin(parsed.scheme, parsed.netloc, cand.target)
+                    or parsed.query or parsed.fragment
+                    or not _same_observed_origin(
+                        urlsplit(str(proof.get("readback_url") or "")).scheme,
+                        urlsplit(str(proof.get("readback_url") or "")).netloc, cand.target)
+                    or not _same_observed_origin(
+                        urlsplit(str(proof.get("cleanup_url_template") or "")).scheme,
+                        urlsplit(str(proof.get("cleanup_url_template") or "")).netloc, cand.target)):
+                continue
+        elif form_xss:
             if (proof.get("operation") != "check_form_xss"
                     or proof.get("form_action") != cand.target
                     or proof.get("form_field") != parameter
@@ -878,6 +938,23 @@ async def _verify_scoped_browser_xss_candidate(
                     or "__PROWL_NONCE__" not in str(proof.get("form_payload_template") or "")
                     or parsed.query or parsed.fragment
                     or not _same_observed_origin(parsed.scheme, parsed.netloc, cand.target)):
+                continue
+        elif dom_xss:
+            if (proof.get("operation") != "check_xss" or xhr_xss
+                    or not _same_observed_origin(parsed.scheme, parsed.netloc, cand.target)
+                    or (parsed.path or "/") != (target.path or "/")
+                    or parsed.query or "__PROWL_NONCE__" not in parsed.fragment):
+                continue
+        elif xhr_xss:
+            if (proof.get("operation") != "check_xhr_xss"
+                    or not _same_observed_origin(parsed.scheme, parsed.netloc, cand.target)
+                    or parsed.fragment or proof.get("xhr_path") != (target.path or "/")
+                    or proof.get("xhr_parameter") != parameter
+                    or not isinstance(proof.get("xhr_query_keys"), list)
+                    or parameter not in proof["xhr_query_keys"]
+                    or "__PROWL_NONCE__" not in str(proof.get("xhr_payload_template") or "")
+                    or proof.get("xhr_mutated") is not True
+                    or proof.get("xhr_response_seen") is not True):
                 continue
         elif (not _same_observed_origin(parsed.scheme, parsed.netloc, cand.target)
               or (parsed.path or "/") != (target.path or "/")
@@ -892,11 +969,22 @@ async def _verify_scoped_browser_xss_candidate(
     try:
         for hunter_id, template in hunter[:3]:
             replay_args = {"operation": "check_xss", "url": template, "identity": identity}
-            if form_xss:
-                hunter_proof = store.records[hunter_id]["payload"]
+            hunter_proof = store.records[hunter_id]["payload"]
+            if stored_xss:
+                replay_args.update({"operation": "check_stored_xss", "form_action": cand.target,
+                                    "form_field": parameter,
+                                    "form_payload_template": hunter_proof["form_payload_template"],
+                                    "readback_url": hunter_proof["readback_url"],
+                                    "cleanup_url_template": hunter_proof["cleanup_url_template"]})
+            elif form_xss:
                 replay_args.update({"operation": "check_form_xss", "form_action": cand.target,
                                     "form_field": parameter,
                                     "form_payload_template": hunter_proof["form_payload_template"]})
+            elif hunter_proof.get("operation") == "check_xhr_xss":
+                replay_args.update({"operation": "check_xhr_xss", "xhr_path": target.path or "/",
+                                    "xhr_parameter": parameter,
+                                    "xhr_query_keys": hunter_proof["xhr_query_keys"],
+                                    "xhr_payload_template": hunter_proof["xhr_payload_template"]})
             wrapped = await tools_manager.execute("scoped_browser_assessment", replay_args)
             output = wrapped.get("output") if isinstance(wrapped, dict) else None
             result = json.loads(output) if isinstance(output, str) else output
@@ -912,7 +1000,10 @@ async def _verify_scoped_browser_xss_candidate(
                     or verifier.get("identity") != identity):
                 failure = "XSS replay had no fresh verifier evidence"
                 continue
-            proof = {"kind": "scoped_browser_form_xss" if form_xss else "scoped_browser_xss",
+            proof = {"kind": ("scoped_browser_stored_xss" if stored_xss else
+                              "scoped_browser_form_xss" if form_xss else
+                              "scoped_browser_xhr_xss" if hunter_proof.get("operation") == "check_xhr_xss"
+                              else "scoped_browser_xss"),
                      "hunter_artifact_id": hunter_id,
                      "artifact_id": artifact_id}
             valid, why = validate_proof(store, cand, proof, [artifact_id])
