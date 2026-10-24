@@ -504,7 +504,7 @@ async def test_string_tool_uses_late_document_capture_with_original_query_contex
     observed_url = URL + "&sort=asc"
     public, private = package_exchange(
         url=observed_url, expected_origin="https://app.example.test",
-        action_ref="catalog-filter", method="GET", resource_type="document",
+        action_ref="catalog-filter", method="GET", resource_type="fetch",
         status=200, content_type="text/html", request_body=b"",
         response_body=b"catalog",
     )
