@@ -708,7 +708,7 @@ class ScopedAssessmentTools:
                 except (TypeError, ValueError):
                     continue
                 if (isinstance(captured, dict) and captured.get("method") == "GET"
-                        and captured.get("resource_type") in {"xhr", "fetch", "document"}):
+                        and captured.get("resource_type") in {"xhr", "fetch"}):
                     captured_urls.append(captured.get("url"))
             candidates = [
                 *captured_urls,
