@@ -116,6 +116,13 @@ def capability_map_from_observation(observation: dict) -> dict | None:
                 "source": "browser_traffic" if row.get("artifact_id") else "browser_request",
                 "artifact_id": row.get("artifact_id", ""),
                 "status": row.get("status"), "content_type": row.get("content_type", ""),
+                "protocol": row.get("protocol", ""),
+                "graphql_operation_type": row.get("graphql_operation_type", ""),
+                "graphql_operation_name": row.get("graphql_operation_name", ""),
+                "graphql_document_sha256": row.get("graphql_document_sha256", ""),
+                "action_ref": row.get("action_ref", ""),
+                "page_path": row.get("page_path", ""),
+                "replay_header_names": row.get("replay_header_names", []),
             })
     inventory = result.get("surface_inventory") or {}
     if not isinstance(inventory, dict):

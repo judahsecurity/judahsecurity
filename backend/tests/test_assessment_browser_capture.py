@@ -244,6 +244,79 @@ async def test_scoped_xhr_xss_replays_rendering_page_and_requires_execution(monk
 
 
 @pytest.mark.asyncio
+async def test_scoped_xhr_xss_replays_observed_tab_before_mutating_request(monkeypatch):
+    from app.services.agent.scoped_assessment.browser import check_browser
+    from playwright.async_api import BrowserType
+
+    executable = os.environ.get("ASSESSMENT_TEST_CHROMIUM")
+    if executable:
+        original = BrowserType.launch
+
+        async def launch(self, **kwargs):
+            return await original(self, **dict(kwargs, executable_path=executable))
+
+        monkeypatch.setattr(BrowserType, "launch", launch)
+
+    class Handler(BaseHTTPRequestHandler):
+        encode = False
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            if self.path.startswith("/api/search"):
+                value = parse_qs(self.path.split("?", 1)[1]).get("term", [""])[0]
+                body = (escape(value) if self.encode else value).encode()
+            else:
+                body = (b'<button role="tab" aria-controls="results">Results</button>'
+                        b'<div id="results"></div><script>'
+                        b'document.querySelector("[role=tab]").addEventListener("click", () => {'
+                        b'fetch("/api/search?term=seed").then(r => r.text())'
+                        b'.then(v => document.getElementById("results").innerHTML = v)'
+                        b'});</script>')
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        sources, traffic = [], []
+        observed, _ = await check_browser(
+            operation="inspect_js", url=base + "/catalog", allowed_origins=[base],
+            javascript_sources=sources, traffic_exchanges=traffic,
+            max_pages=1, max_actions=1,
+        )
+        ui_action = next(row for row in observed["actions"] if row["kind"] == "tab")
+        assert ui_action["status"] == "completed"
+        assert traffic[0]["public"]["action_ref"] == ui_action["ref"]
+        actions = [{key: ui_action[key] for key in (
+            "kind", "label", "aria_controls", "before_path",
+        )}]
+        payload = '<img src=x onerror=alert("__PROWL_NONCE__")>'
+        for encoded in (False, True):
+            Handler.encode = encoded
+            result, _ = await check_browser(
+                operation="check_xhr_xss", url=base + "/catalog",
+                allowed_origins=[base], xhr_path="/api/search",
+                xhr_parameter="term", xhr_query_keys=["term"],
+                xhr_payload_template=payload, xhr_actions=actions,
+            )
+            assert result["xhr_actions_replayed"] == 1
+            assert result["xhr_mutated"] is True
+            assert result["xhr_response_seen"] is True
+            assert result["executed"] is not encoded
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
 async def test_scoped_dom_fragment_executes_only_in_unsafe_sink(monkeypatch):
     from app.services.agent.scoped_assessment.browser import check_browser
     from playwright.async_api import BrowserType

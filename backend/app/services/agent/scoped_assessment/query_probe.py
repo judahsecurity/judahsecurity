@@ -25,8 +25,8 @@ def plan_observed_query(private_exchange: bytes, *, parameter: str,
     if not isinstance(captured, dict):
         raise ValueError("Invalid captured exchange")
     url = captured.get("url")
-    if captured.get("method") != "GET" or captured.get("resource_type") not in ("xhr", "fetch"):
-        raise ValueError("Query probe requires an observed GET XHR/fetch exchange")
+    if captured.get("method") != "GET" or captured.get("resource_type") not in ("document", "xhr", "fetch"):
+        raise ValueError("Query probe requires an observed GET browser exchange")
     if not isinstance(url, str) or not isinstance(parameter, str) or not 0 < len(parameter) <= 80:
         raise ValueError("Observed URL and parameter name are required")
     try:

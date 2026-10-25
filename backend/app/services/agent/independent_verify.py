@@ -985,6 +985,8 @@ async def _verify_scoped_browser_xss_candidate(
                                     "xhr_parameter": parameter,
                                     "xhr_query_keys": hunter_proof["xhr_query_keys"],
                                     "xhr_payload_template": hunter_proof["xhr_payload_template"]})
+                if hunter_proof.get("xhr_actions"):
+                    replay_args["xhr_actions"] = hunter_proof["xhr_actions"]
             wrapped = await tools_manager.execute("scoped_browser_assessment", replay_args)
             output = wrapped.get("output") if isinstance(wrapped, dict) else None
             result = json.loads(output) if isinstance(output, str) else output

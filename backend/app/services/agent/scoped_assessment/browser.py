@@ -209,6 +209,7 @@ async def check_browser(
     xhr_path: str = "", xhr_parameter: str = "",
     xhr_payload_template: str = "",
     xhr_query_keys: list[str] | None = None,
+    xhr_actions: list[dict] | None = None,
     readback_url: str = "", cleanup_url_template: str = "",
 ) -> tuple[dict, bytes | None]:
     """Execute one bounded browser check with HTTP and WebSocket origin routing."""
@@ -226,6 +227,8 @@ async def check_browser(
             raise ValueError("JavaScript inspection page limit must be between 1 and 10")
     if operation == "crawl" and not 1 <= max_pages <= 10:
         raise ValueError("Crawl page limit must be between 1 and 10")
+    if xhr_actions is None:
+        xhr_actions = []
     assert_in_scope(url, allowed_origins)
     nonce = secrets.token_hex(8) if operation in {"check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss"} else ""
     if operation == "check_xss" and NONCE_MARKER not in url:
@@ -265,6 +268,17 @@ async def check_browser(
                 or NONCE_MARKER not in xhr_payload_template
                 or len(xhr_payload_template) > 300):
             raise ValueError("An exact rendering page, safe XHR path, field, and nonce payload are required")
+        if not isinstance(xhr_actions, list) or len(xhr_actions) > 6:
+            raise ValueError("XHR replay actions must be a bounded observed sequence")
+        for action in xhr_actions:
+            if (not isinstance(action, dict)
+                    or action.get("kind") not in {"tab", "disclosure", "summary"}
+                    or not isinstance(action.get("label"), str)
+                    or not 0 < len(action["label"]) <= 80
+                    or not isinstance(action.get("aria_controls"), str)
+                    or len(action["aria_controls"]) > 80
+                    or action.get("before_path") != (urlsplit(url).path or "/")):
+                raise ValueError("XHR replay action is not bound to the rendering page")
     final_target = url.replace(NONCE_MARKER, nonce)
     assert_in_scope(final_target, allowed_origins)
     expected_origin = origin(final_target)
@@ -334,6 +348,7 @@ async def check_browser(
                     allowed = False
                 if allowed:
                     if (operation == "check_xhr_xss" and not xhr_mutated
+                            and (not xhr_actions or current_action_ref == f"xhr-replay-{len(xhr_actions)}")
                             and route.request.method.upper() == "GET"
                             and route.request.resource_type in {"xhr", "fetch"}
                             and (urlsplit(route.request.url).path or "/") == xhr_path
@@ -384,9 +399,11 @@ async def check_browser(
                         return
                 except ValueError:
                     return
-                if request.resource_type in ("xhr", "fetch", "script") and len(request_actions) < 200:
+                if request.resource_type in ("document", "xhr", "fetch", "script") and len(request_actions) < 200:
                     request_actions[request] = current_action_ref
-                    if request.resource_type in {"xhr", "fetch", "script"}:
+                    if request.resource_type == "document":
+                        request_pages[request] = request.url
+                    else:
                         try:
                             request_pages[request] = request.frame.url
                         except Exception:
@@ -439,8 +456,14 @@ async def check_browser(
                 async def capture_exchange(response):
                     try:
                         request = response.request
-                        if origin(response.url) != expected_origin or request.resource_type not in {"xhr", "fetch"}:
+                        if origin(response.url) != expected_origin or request.resource_type not in {"document", "xhr", "fetch"}:
                             return
+                        if request.resource_type == "document":
+                            from .browser_actions import allowed_discovery_path
+                            parts = urlsplit(response.url)
+                            if (request.method.upper() != "GET" or not parts.query
+                                    or not allowed_discovery_path(parts.path or "/")):
+                                return
                         if len(traffic_exchanges) >= MAX_EXCHANGES:
                             return
                         declared = response.headers.get("content-length", "")
@@ -461,9 +484,11 @@ async def check_browser(
                             request_body=request_body, response_body=response_body,
                             request_content_type=request.headers.get("content-type", ""),
                             page_url=initiator_page,
+                            request_headers=request.headers,
                         )
                         shape = (public["method"], public["path"],
                                  tuple(public["query_keys"]), public["request_content_type"],
+                                 public["graphql_document_sha256"],
                                  tuple((field.get("location"), field.get("path"))
                                        for field in public["body_fields"]))
                         if shape not in seen_exchange_shapes and len(traffic_exchanges) < MAX_EXCHANGES:
@@ -474,7 +499,7 @@ async def check_browser(
 
                 def queue_exchange(response):
                     try:
-                        relevant = response.request.resource_type in {"xhr", "fetch"} and origin(response.url) == expected_origin
+                        relevant = response.request.resource_type in {"document", "xhr", "fetch"} and origin(response.url) == expected_origin
                     except ValueError:
                         relevant = False
                     if relevant and len(traffic_tasks) < MAX_EXCHANGES * 3:
@@ -611,6 +636,37 @@ async def check_browser(
                 await context.close()
                 return result, None
             response = await page.goto(final_target, wait_until="domcontentloaded", timeout=20_000)
+            xhr_actions_replayed = 0
+            if operation == "check_xhr_xss" and xhr_actions:
+                from .browser_actions import allowed_discovery_control
+
+                for index, action in enumerate(xhr_actions, start=1):
+                    if (urlsplit(page.url).path or "/") != action["before_path"]:
+                        raise ValueError("XHR replay page changed before the observed UI action")
+                    matches = []
+                    for control in (await page.query_selector_all(
+                        "[role=tab], button[aria-expanded='false'][aria-controls], summary"
+                    ))[:24]:
+                        if not await control.is_visible():
+                            continue
+                        role = (await control.get_attribute("role") or "").lower()
+                        tag = await control.evaluate("el => el.tagName.toLowerCase()")
+                        kind = "tab" if role == "tab" else "summary" if tag == "summary" else "disclosure"
+                        label = " ".join((await control.inner_text()).split())[:80]
+                        controls_id = (await control.get_attribute("aria-controls") or "")[:80]
+                        in_form = await control.evaluate("el => Boolean(el.closest('form'))")
+                        button_type = await control.get_attribute("type") or ""
+                        if (kind == action["kind"] and label == action["label"]
+                                and controls_id == action["aria_controls"]
+                                and allowed_discovery_control(kind=kind, label=label,
+                                                              in_form=in_form, button_type=button_type)):
+                            matches.append(control)
+                    if len(matches) != 1:
+                        raise ValueError("Observed XHR UI control is missing or ambiguous")
+                    current_action_ref = f"xhr-replay-{index}"
+                    await matches[0].click(timeout=3_000, no_wait_after=True)
+                    xhr_actions_replayed += 1
+                    await page.wait_for_timeout(350)
             await page.wait_for_timeout(1200 if operation in {"check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss"} else 650)
             form_submitted = False
             if operation in {"check_form_xss", "check_stored_xss"}:
@@ -914,6 +970,8 @@ async def check_browser(
                     result["xhr_query_keys"] = xhr_query_keys
                     result["xhr_mutated"] = xhr_mutated
                     result["xhr_response_seen"] = xhr_response_seen
+                    result["xhr_actions"] = xhr_actions
+                    result["xhr_actions_replayed"] = xhr_actions_replayed
                 # Give the specialist context without exposing page source or
                 # mistaking reflection for execution. Scan a bounded DOM slice.
                 try:

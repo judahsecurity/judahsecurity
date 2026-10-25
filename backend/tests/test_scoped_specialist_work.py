@@ -274,6 +274,52 @@ async def test_assigned_sqli_selects_service_proof_shape(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("method,location,name,value_type,operation,proof_result", [
+    ("GET", "query", "id", "positive_integer", "scoped_numeric_sqli",
+     {"proof_confirmed": True, "proof_recipe": "numeric_and_boolean_v1"}),
+    ("GET", "query", "q", "string", "scoped_string_sqli",
+     {"proof_confirmed": True, "proof_recipe": "string_or_boolean_v1"}),
+    ("POST", "body_json", "/variables/term", "string", "scoped_body_probe",
+     {"changed": True, "inconclusive": False}),
+])
+async def test_assigned_sqli_uses_builtin_private_capture(
+    monkeypatch, method, location, name, value_type, operation, proof_result,
+):
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": method, "path": "/graphql" if method == "POST" else "/items",
+        "host": "app.test", "name": name, "location": location,
+        "value_type": value_type, "source": "browser_traffic",
+        "identity": "tester", "artifact_id": "capture-1", "testable": True,
+    }])
+    lease = claim_coverage_cell_leases(brain, ["sqli"])["sqli"]
+    manager = ASMToolsManager()
+    manager._engagement_brain = brain.to_dict()
+    manager._capability_map = {"target": "https://app.test", "scope": "https://app.test"}
+    manager._scoped_browser_exchanges = {
+        "capture-1": {"identity": "tester",
+                      "private": b'{"url":"https://app.test/items?q=seed"}', "public": {}},
+    }
+
+    async def fake_probe(*_args, **_kwargs):
+        return json.dumps({"evidence_id": "local-proof", **proof_result})
+
+    async def remote_forbidden(*_args, **_kwargs):
+        raise AssertionError("Built-in Prowl must not call the optional service")
+
+    monkeypatch.setattr(manager, operation, fake_probe)
+    monkeypatch.setattr(manager, "_scoped_assessment_operation", remote_forbidden)
+    result = await manager.scoped_assessment_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert result["success"] and result["operation"] == operation
+    assert result["evidence_id"] == "local-proof"
+    assert result["proof_confirmed"] is (method == "GET")
+    cell = next(row for row in manager._engagement_brain["coverage_cells"]
+                if row["id"] == lease.coverage_cell_id)
+    assert cell["probe_artifact_ids"] == ["local-proof"]
+    assert cell["status"] == ("in_focus" if method == "GET" else "leased")
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("executed", [False, True])
 async def test_assigned_link_xss_probe_records_exact_cell_receipt(monkeypatch, executed):
     brain = EngagementBrain(target="https://app.test")

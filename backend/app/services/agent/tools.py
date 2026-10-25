@@ -1057,6 +1057,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         xhr_path=cell["path"], xhr_parameter=parameter,
                         xhr_payload_template=payloads[technique],
                         xhr_query_keys=query_keys,
+                        **({"xhr_actions": captured["replay_actions"]}
+                           if captured.get("replay_actions") else {}),
                     ))
                     request_context = "observed_xhr_render_page"
                     operation = "scoped_browser_check_xhr_xss"
@@ -1344,6 +1346,61 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     "proof_confirmed": False,
                     "probe_result": {"reflection_detected": proof["reflection_detected"],
                                      "raw_html_reflection": proof["raw_html_reflection"]}}
+        local_capture = (getattr(self, "_scoped_browser_exchanges", None) or {}).get(
+            str(cell.get("capture_id") or ""))
+        if (cell.get("specialist") == "sqli" and local_capture
+                and local_capture.get("identity") == identity):
+            try:
+                if method == "GET" and location == "query":
+                    if cell.get("value_type") in {"positive_integer", "number"}:
+                        operation = "scoped_numeric_sqli"
+                        proof = json.loads(await self.scoped_numeric_sqli(
+                            artifact_id=cell["capture_id"], parameter=parameter,
+                            identity=identity,
+                        ))
+                    else:
+                        operation = "scoped_string_sqli"
+                        url = json.loads(self._scoped_exchange(cell["capture_id"], identity))["url"]
+                        proof = json.loads(await self.scoped_string_sqli(
+                            url, parameter, identity,
+                        ))
+                elif method == "POST" and location in {"body_json", "body_form"}:
+                    operation = "scoped_body_probe"
+                    proof = json.loads(await self.scoped_body_probe(
+                        cell["capture_id"], parameter, identity,
+                    ))
+                else:
+                    return {"success": False, "error": "unsupported_capture",
+                            "output": "No built-in replay for this captured input shape"}
+            except ValueError as exc:
+                return {"success": False, "error": "local_probe_blocked",
+                        "reason": str(exc)[:200]}
+            artifact_id = str(proof.get("evidence_id") or "")
+            if not artifact_id:
+                return {"success": False, "error": "missing_probe_evidence"}
+            live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            current = next((row for row in live.coverage_cells
+                            if row.get("id") == coverage_cell_id and row.get("lease_id") == coverage_lease_id), None)
+            if current is None:
+                return {"success": False, "error": "lease_changed"}
+            current["probe_artifact_ids"] = list(dict.fromkeys([
+                *(current.get("probe_artifact_ids") or []), artifact_id,
+            ]))[:20]
+            current["evidence_ids"] = list(dict.fromkeys([
+                *(current.get("evidence_ids") or []), artifact_id,
+            ]))[:30]
+            current["last_probe"] = operation
+            if proof.get("proof_confirmed") is True:
+                current["status"] = "in_focus"
+                current["reason"] = "Execution-owned SQLi proof signal; independent verification required"
+            self._engagement_brain = live.to_dict()
+            return {"success": True, "coverage_cell_id": coverage_cell_id,
+                    "coverage_lease_id": coverage_lease_id, "operation": operation,
+                    "evidence_id": artifact_id,
+                    "proof_confirmed": proof.get("proof_confirmed") is True,
+                    "probe_result": {key: proof[key] for key in (
+                        "proof_recipe", "changed", "inconclusive", "requests_sent",
+                    ) if key in proof}}
         if technique in xss_payloads:
             if cell.get("specialist") != "xss" or method != "GET" or location != "query":
                 return {"success": False, "error": "unsupported_xss_browser",

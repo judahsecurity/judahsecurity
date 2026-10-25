@@ -654,7 +654,7 @@ def test_xss_attribute_followup_tries_single_quote_after_double_quote():
     assert result["results"][0]["candidate_id"] == "single-quote-candidate"
 
 
-def test_clean_sqli_requires_coverage_validator_to_close_cell():
+def test_sqli_receipt_without_proof_recipe_cannot_close_cell_clean():
     class Manager:
         def __init__(self):
             brain = _brain()
@@ -668,16 +668,12 @@ def test_clean_sqli_requires_coverage_validator_to_close_cell():
             return {"success": True, "evidence_id": "complete-controls", "proof_confirmed": False}
 
         async def record_surface_coverage(self, **kwargs):
-            row = next(cell for cell in self._engagement_brain["coverage_cells"]
-                       if cell["id"] == kwargs["coverage_cell_id"])
-            row["status"] = "tested_clean"
-            row["lease_id"] = ""
-            return "truncated output is allowed"
+            raise AssertionError("An unproven SQLi first pass cannot close coverage")
 
     manager = Manager()
     result = asyncio.run(run_observed_input_batch(manager, max_checks=1))
-    assert result["results"][0]["outcome"] == "tested_clean"
-    assert result["funnel"]["tested_clean"] == 1
+    assert result["results"][0]["outcome"] == "inconclusive"
+    assert result["funnel"]["tested_clean"] == 0
 
 
 def test_negative_boolean_receipt_keeps_input_inconclusive():

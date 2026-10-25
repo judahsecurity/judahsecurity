@@ -373,28 +373,11 @@ async def run_observed_input_batch(
                         outcome = "inconclusive"
                         reason = "Bounded Boolean controls did not independently prove SQLi"
                     elif specialist == "sqli" and result.get("evidence_id"):
-                        receipt = await _invoke(manager, "record_surface_coverage", {
-                            "path": cell["path"], "method": method, "host": cell.get("host", ""),
-                            "identity": cell.get("identity", ""), "test_type": "sqli",
-                            "parameter": cell["parameter"], "status": "tested_clean",
-                            "evidence_id": evidence_id, "coverage_cell_id": cell["id"],
-                            "coverage_lease_id": lease.id,
-                            "reason": "Complete bounded SQLi controls did not confirm injection",
-                        })
-                        receipt_brain = engagement_brain_from_dict(
-                            getattr(manager, "_engagement_brain", None)
-                        )
-                        closed = next((row for row in receipt_brain.coverage_cells
-                                       if row.get("id") == cell["id"]), {})
-                        if closed.get("status") == "tested_clean":
-                            outcome = "tested_clean"
-                            reason = "Complete bounded SQLi controls did not confirm injection"
-                        else:
-                            outcome = "inconclusive"
-                            try:
-                                reason = str(json.loads(receipt).get("error") or "SQLi controls were inconclusive")[:200]
-                            except (ValueError, TypeError):
-                                reason = "SQLi controls were inconclusive"
+                        # A quote differential on a captured POST body is a
+                        # lead, including when its response did not change.
+                        # It cannot close all SQLi techniques as clean.
+                        outcome = "inconclusive"
+                        reason = "Captured input needs class-specific SQLi controls and independent proof"
                     else:
                         outcome = "inconclusive"
                         reason = (

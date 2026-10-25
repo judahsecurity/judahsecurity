@@ -16,11 +16,21 @@ from urllib.parse import unquote_plus, urlsplit
 from urllib.request import ProxyHandler, Request, build_opener
 
 from .browser import assert_in_scope, origin
-from .browser_traffic import MAX_BODY_BYTES
+from .browser_traffic import MAX_BODY_BYTES, _replay_headers
 from .http_observe import MAX_BODY, _NoRedirect, _cookie_header
 
 
 MAX_REPLAY_BODY = min(MAX_BODY_BYTES, 64 * 1024)
+
+
+def safe_replay_headers(private_exchange: bytes) -> dict[str, str]:
+    """Revalidate the private capture's small non-credential header allowlist."""
+    try:
+        captured = json.loads(private_exchange)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ValueError("Invalid captured exchange") from exc
+    headers = captured.get("replay_headers") if isinstance(captured, dict) else None
+    return _replay_headers(headers if isinstance(headers, dict) else None)
 
 
 def _mutate_json(data: bytes, pointer: str, payload: str = "'") -> bytes:
@@ -98,6 +108,8 @@ def plan_observed_body(private_exchange: bytes, *, parameter: str,
         raise ValueError("Invalid captured exchange") from exc
     if not isinstance(captured, dict) or captured.get("method") != "POST" or captured.get("resource_type") not in ("xhr", "fetch"):
         raise ValueError("Body probe requires a browser-observed POST XHR/fetch exchange")
+    if captured.get("graphql_operation_type") not in (None, "", "query"):
+        raise ValueError("GraphQL mutation or subscription needs a disposable workflow proof")
     url = captured.get("url")
     if not isinstance(url, str) or not isinstance(parameter, str):
         raise ValueError("Observed URL and parameter name are required")
@@ -106,7 +118,8 @@ def plan_observed_body(private_exchange: bytes, *, parameter: str,
     if parts.query or parts.fragment:
         raise ValueError("Body replay does not accept query or fragment values")
     mime = captured.get("request_content_type")
-    if mime not in ("application/json", "application/x-www-form-urlencoded"):
+    json_body = mime == "application/json" or (isinstance(mime, str) and mime.endswith("+json"))
+    if not json_body and mime != "application/x-www-form-urlencoded":
         raise ValueError("Body replay requires captured JSON or form content type")
     try:
         body = base64.b64decode(captured.get("request_body_base64", ""), validate=True)
@@ -117,15 +130,16 @@ def plan_observed_body(private_exchange: bytes, *, parameter: str,
     if not isinstance(payload, str) or not 0 < len(payload) <= 300:
         raise ValueError("A bounded body probe payload is required")
     changed = (_mutate_json(body, parameter, payload)
-               if mime == "application/json" else _mutate_form(body, parameter, payload))
+               if json_body else _mutate_form(body, parameter, payload))
     return url, mime, body, changed
 
 
 def _observe_post(url: str, mime: str, body: bytes,
                   allowed_origins: list[str], storage_state: dict | None,
-                  reflection_text: str = "") -> dict:
+                  reflection_text: str = "", replay_headers: dict[str, str] | None = None) -> dict:
     assert_in_scope(url, allowed_origins)
     headers = {"Accept": "application/json, text/html;q=0.9, */*;q=0.8", "Content-Type": mime}
+    headers.update(_replay_headers(replay_headers))
     cookies = _cookie_header(storage_state, url)
     if cookies:
         headers["Cookie"] = cookies
@@ -154,16 +168,18 @@ def _observe_post(url: str, mime: str, body: bytes,
 
 
 def probe_observed_body(url: str, mime: str, body: bytes, changed_body: bytes, *,
-                        parameter: str, allowed_origins: list[str], storage_state: dict | None) -> dict:
-    baseline = _observe_post(url, mime, body, allowed_origins, storage_state)
-    probe = _observe_post(url, mime, changed_body, allowed_origins, storage_state)
+                        parameter: str, allowed_origins: list[str], storage_state: dict | None,
+                        replay_headers: dict[str, str] | None = None) -> dict:
+    baseline = _observe_post(url, mime, body, allowed_origins, storage_state, replay_headers=replay_headers)
+    probe = _observe_post(url, mime, changed_body, allowed_origins, storage_state, replay_headers=replay_headers)
     parts = urlsplit(url)
     return {
         "operation": "body_probe", "target": origin(url) + (parts.path or "/"),
         "method": "POST", "parameter": parameter,
-        "location": "json" if mime == "application/json" else "form",
+        "location": "json" if mime == "application/json" or mime.endswith("+json") else "form",
         "technique": "append_single_quote", "requests_sent": 2,
         "identity_transport": "named_identity_cookies_only",
+        "replay_header_names": sorted(_replay_headers(replay_headers)),
         "baseline": baseline, "probe": probe,
         "changed": baseline["status"] != probe["status"] or baseline["body_sha256"] != probe["body_sha256"],
         "inconclusive": any(row["truncated"] or row["redirected"] or row["status"] in (401, 403)
@@ -175,20 +191,21 @@ def probe_observed_body(url: str, mime: str, body: bytes, changed_body: bytes, *
 def probe_observed_body_reflection(
     url: str, mime: str, body: bytes, changed_body: bytes, *,
     parameter: str, payload: str, allowed_origins: list[str],
-    storage_state: dict | None,
+    storage_state: dict | None, replay_headers: dict[str, str] | None = None,
 ) -> dict:
     """Check a captured POST for reflection; browser execution is still required."""
-    baseline = _observe_post(url, mime, body, allowed_origins, storage_state)
+    baseline = _observe_post(url, mime, body, allowed_origins, storage_state, replay_headers=replay_headers)
     probe = _observe_post(url, mime, changed_body, allowed_origins, storage_state,
-                          reflection_text=payload)
+                          reflection_text=payload, replay_headers=replay_headers)
     parts = urlsplit(url)
     inconclusive = any(row["truncated"] or row["redirected"] or row["status"] in (401, 403)
                        for row in (baseline, probe))
     return {
         "operation": "body_xss_reflection", "target": origin(url) + (parts.path or "/"),
         "method": "POST", "parameter": parameter,
-        "location": "json" if mime == "application/json" else "form",
+        "location": "json" if mime == "application/json" or mime.endswith("+json") else "form",
         "requests_sent": 2, "baseline": baseline, "probe": probe,
+        "replay_header_names": sorted(_replay_headers(replay_headers)),
         "reflection_detected": bool(probe.get("raw_reflection") or probe.get("html_encoded_reflection")),
         "raw_html_reflection": bool(probe.get("raw_reflection") and probe["content_type"] == "text/html"),
         "inconclusive": inconclusive,
