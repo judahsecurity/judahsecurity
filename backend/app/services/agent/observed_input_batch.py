@@ -274,7 +274,8 @@ async def run_observed_input_batch(
                         and result.get("proof_confirmed") is not True):
                     contexts = set((result.get("probe_result") or {}).get("reflection_contexts") or [])
                     techniques = (
-                        (["html_attribute", "html_attribute_single"] if "html_attribute" in contexts else [])
+                        (["html_body_svg"] if "html_text" in contexts else [])
+                        + (["html_attribute", "html_attribute_single"] if "html_attribute" in contexts else [])
                         + (["js_single", "js_double"] if "javascript" in contexts else [])
                     )[:4]
                     for technique in techniques:

@@ -237,6 +237,34 @@ async def test_assigned_probe_uses_private_capture_and_cannot_change_input(monke
     assert "%27%3Balert" in calls[-1][1]["url_template"]
 
 
+
+@pytest.mark.asyncio
+async def test_captured_xss_single_quote_alias_reaches_builtin_probe(monkeypatch):
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "path": "/catalog", "host": "app.test",
+        "name": "searchTerm", "location": "query", "source": "browser_traffic",
+        "identity": "anonymous", "artifact_id": "capture-q", "testable": True,
+    }])
+    lease = claim_coverage_cell_leases(brain, ["xss"])["xss"]
+    manager = ASMToolsManager()
+    manager._engagement_brain = brain.to_dict()
+    manager._scoped_browser_exchanges = {
+        "capture-q": {"identity": "anonymous", "private": b"{}", "public": {}},
+    }
+
+    async def fake_probe(coverage_cell_id, coverage_lease_id, technique):
+        return {"success": True, "operation": "scoped_browser_check_xss",
+                "technique": technique}
+
+    monkeypatch.setattr(manager, "scoped_input_probe_assigned", fake_probe)
+    result = await manager.scoped_assessment_probe_assigned(
+        lease.coverage_cell_id, lease.id, "xss_browser_attribute_single",
+    )
+    assert result["technique"] == "html_attribute_single"
+    assert result["assigned_operation"] == "scoped_browser_check_xss"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("method,location,name,value_type,expected", [
     ("GET", "query", "id", "positive_integer", "http_sqli_boolean"),
