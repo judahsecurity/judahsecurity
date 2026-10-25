@@ -164,6 +164,23 @@ async def run_observed_input_batch(
             "funnel": parameter_test_funnel(brain),
         }
     results: list[dict[str, Any]] = []
+    # A discovered POST input is still open coverage when this run has no
+    # operator-approved replay path. Record that fact before scheduling so a
+    # rejected write does not consume a probe slot or masquerade as a test.
+    approved_post_paths = set(getattr(manager, "_scoped_body_replay_paths", None) or ())
+    policy_blocked = 0
+    for cell in pending_first_pass_cells(brain, target=active_target):
+        if (str(cell.get("method") or "").upper() == "POST"
+                and str(cell.get("path") or "") not in approved_post_paths):
+            reason = "POST replay path requires operator approval for this run"
+            cell["status"] = "blocked"
+            cell["reason"] = reason
+            cell["first_pass_outcome"] = "unattempted"
+            cell["first_pass_reason"] = reason
+            cell["first_pass_at"] = time.time()
+            policy_blocked += 1
+    if policy_blocked:
+        manager._engagement_brain = brain.to_dict()
 
     while len(results) < max_checks and time.monotonic() < deadline - 5:
         brain = engagement_brain_from_dict(getattr(manager, "_engagement_brain", None))
@@ -461,7 +478,8 @@ async def run_observed_input_batch(
 
     brain = engagement_brain_from_dict(getattr(manager, "_engagement_brain", None))
     return {
-        "processed": len(results), "remaining": len(pending_first_pass_cells(
+        "processed": len(results), "policy_blocked": policy_blocked,
+        "remaining": len(pending_first_pass_cells(
             brain, target=active_target,
         )),
         "handoff_failures": sum(bool(row["handoff_failed"]) for row in results),
