@@ -1349,8 +1349,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     "proof_confirmed": False,
                     "probe_result": {"reflection_detected": proof["reflection_detected"],
                                      "raw_html_reflection": proof["raw_html_reflection"]}}
-        local_capture = (getattr(self, "_scoped_browser_exchanges", None) or {}).get(
-            str(cell.get("capture_id") or ""))
+        local_capture = self._scoped_capture_row(str(cell.get("capture_id") or ""))
         if (cell.get("specialist") == "sqli" and local_capture
                 and local_capture.get("identity") == identity):
             try:
@@ -1408,8 +1407,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             if cell.get("specialist") != "xss" or method != "GET" or location != "query":
                 return {"success": False, "error": "unsupported_xss_browser",
                         "output": "Browser XSS check requires a captured GET query parameter"}
-            local_capture = (getattr(self, "_scoped_browser_exchanges", None) or {}).get(
-                str(cell.get("capture_id") or ""))
+            local_capture = self._scoped_capture_row(str(cell.get("capture_id") or ""))
             if local_capture and local_capture.get("identity") == identity:
                 result = await self.scoped_input_probe_assigned(
                     coverage_cell_id, coverage_lease_id, technique={
