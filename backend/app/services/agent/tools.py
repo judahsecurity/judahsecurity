@@ -293,7 +293,7 @@ def normalize_execute_tool_args(
                 browser_url = browser_spec.get("url") or browser_spec.get("target")
                 if not browser_url:
                     browser_url = fallback_target
-                if isinstance(browser_url, str) and browser_url.startswith(("https://", "http://")):
+                if isinstance(browser_url, str) and browser_url.strip():
                     actions = [{"action": "navigate", "url": browser_url}]
                     wait_ms = browser_spec.pop("wait_ms", None)
                     if isinstance(wait_ms, (int, float)) and wait_ms > 0:
