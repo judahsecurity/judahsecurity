@@ -12,6 +12,7 @@ from app.services.agent.tools import (
     recover_assessment_target,
     same_assessment_target,
     normalize_execute_tool_args,
+    ASMToolsManager,
 )
 from app.services.agent.assessment_scope import prepare_browser_scope
 
@@ -191,7 +192,39 @@ def test_browser_scope_resolves_relative_and_bare_same_host_urls_without_expandi
         prepare_browser_scope(manager, {"actions": [
             {"action": "navigate", "url": "other.example/catalog"},
         ]}, fallback_target="https://ginandjuice.shop/")
-    with pytest.raises(ValueError, match="Protocol-relative"):
+    same_host = prepare_browser_scope(manager, {"actions": [
+        {"action": "navigate", "url": "//ginandjuice.shop/catalog"},
+    ]}, fallback_target="https://ginandjuice.shop/")
+    assert same_host["actions"][0]["url"] == "https://ginandjuice.shop/catalog"
+    with pytest.raises(ValueError, match="Out-of-scope"):
         prepare_browser_scope(manager, {"actions": [
             {"action": "navigate", "url": "//other.example/catalog"},
         ]}, fallback_target="https://ginandjuice.shop/")
+    bare_seed = prepare_browser_scope(manager, {"actions": [
+        {"action": "navigate", "url": "/catalog"},
+    ]}, fallback_target="ginandjuice.shop")
+    assert bare_seed["actions"][0]["url"] == "https://ginandjuice.shop/catalog"
+
+
+@pytest.mark.asyncio
+async def test_agent_browser_distinguishes_invalid_args_from_scope_denial(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.agent.confirmation_service.autonomous_mode_enabled",
+        lambda: True,
+    )
+    manager = ASMToolsManager()
+    manager._assessment_scope = {"ginandjuice.shop"}
+    manager._fallback_target = "https://ginandjuice.shop/"
+    malformed = await manager._execute_impl(
+        "execute_browser", {"args": "--url https://ginandjuice.shop/ --unknown x"},
+    )
+    assert malformed["error"] == "invalid_browser_args"
+    assert malformed["reason"] == "invalid_json"
+    mixed = await manager._execute_impl(
+        "execute_browser", {"args": json.dumps({"actions": [
+            {"action": "navigate", "url": "https://ginandjuice.shop/"},
+            {"action": "navigate", "url": "http://ginandjuice.shop/"},
+        ]})},
+    )
+    assert mixed["error"] == "assessment_scope_denied"
+    assert mixed["reason"] == "mixed_origin"
