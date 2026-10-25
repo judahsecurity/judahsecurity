@@ -15,6 +15,7 @@ from urllib.parse import parse_qsl, quote, unquote_plus, urlencode, urljoin, url
 from app.services.agent.assessment_scope import assert_url_in_scope
 from app.services.agent.assessment_sessions import browser_storage_state, identity_registry
 from app.services.agent.evidence_store import evidence_store, verification_run
+from app.services.agent.private_capture_store import delete_capture, load_capture, persist_capture
 from app.services.agent.scoped_assessment import (
     authz_proof, body_probe, browser, http_observe, planning, query_probe,
     sqli_boolean, sqli_string, technology,
@@ -177,8 +178,7 @@ class ScopedAssessmentTools:
         target = urlsplit(url)
         cmap = getattr(self, "_capability_map", None) or {}
         private_captures = []
-        available = getattr(self, "_scoped_browser_exchanges", None) or {}
-        capture_ids = [capture_id] if capture_id else list(available)[:40]
+        capture_ids = [capture_id] if capture_id else list(reversed(self._scoped_capture_ids()))[:40]
         for artifact_id in capture_ids:
             try:
                 captured = json.loads(self._scoped_exchange(artifact_id, identity))
@@ -235,8 +235,34 @@ class ScopedAssessmentTools:
             raise ValueError("Scoped HTTP GET budget exhausted for this assessment session")
         setattr(self, counter, used + count)
 
-    def _scoped_exchange(self, artifact_id: str, identity: str) -> bytes:
+    def _scoped_capture_ids(self) -> list[str]:
+        """Find current and recovered capture IDs without exposing private bytes."""
+        live = list((getattr(self, "_scoped_browser_exchanges", None) or {}).keys())
+        historical = [artifact_id for artifact_id, record in evidence_store(self).records.items()
+                      if record.get("kind") == "scoped_browser_exchange"]
+        return list(dict.fromkeys([*(artifact_id for artifact_id in live
+                                   if artifact_id not in historical), *historical]))[-120:]
+
+    def _scoped_capture_row(self, artifact_id: str) -> dict | None:
         row = (getattr(self, "_scoped_browser_exchanges", None) or {}).get(artifact_id)
+        if row is not None:
+            return row
+        store = evidence_store(self)
+        record = store.records.get(artifact_id)
+        if not record or record.get("kind") != "scoped_browser_exchange":
+            return None
+        recovered = load_capture(store.namespace, artifact_id)
+        from app.services.agent.observability import redact_string
+
+        if (not recovered or record["identity"] not in {
+                recovered["identity"], redact_string(recovered["identity"])}
+                or recovered["verifier_run_id"] != (record.get("verifier_run_id") or None)
+                or not isinstance(record.get("payload"), dict)):
+            return None
+        return {**recovered, "public": record["payload"]}
+
+    def _scoped_exchange(self, artifact_id: str, identity: str) -> bytes:
+        row = self._scoped_capture_row(artifact_id)
         if not row or row["identity"] != identity:
             raise ValueError("Unknown browser exchange for this identity")
         current = verification_run.get()
@@ -247,8 +273,10 @@ class ScopedAssessmentTools:
     async def list_scoped_browser_exchanges(self) -> str:
         """List execution-owned browser XHR/fetch samples without request values."""
         rows = []
-        for artifact_id, row in (getattr(self, "_scoped_browser_exchanges", None) or {}).items():
-            rows.append({"artifact_id": artifact_id, "identity": row["identity"], **row["public"]})
+        for artifact_id in self._scoped_capture_ids():
+            row = self._scoped_capture_row(artifact_id)
+            if row:
+                rows.append({**row["public"], "artifact_id": artifact_id, "identity": row["identity"]})
         return json.dumps({"exchanges": rows[-40:]})
 
     async def scoped_browser_assessment(
@@ -347,6 +375,8 @@ class ScopedAssessmentTools:
             from app.services.agent.scoped_assessment.surface_inventory import build_surface_inventory
             traffic = []
             private_store = dict(getattr(self, "_scoped_browser_exchanges", None) or {})
+            retained_ids = [artifact_id for artifact_id in self._scoped_capture_ids()
+                            if self._scoped_capture_row(artifact_id) is not None]
             from app.services.agent.engagement_brain import engagement_brain_from_dict
             active_brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
             pinned = {str(cell.get("capture_id")) for cell in active_brain.coverage_cells
@@ -354,12 +384,14 @@ class ScopedAssessmentTools:
                       and cell.get("status") not in {"finding", "tested_clean", "skipped"}}
             dropped = 0
             for row in exchanges[:120]:
-                if len(private_store) >= 120:
-                    oldest = next((key for key in private_store if key not in pinned), None)
+                if len(retained_ids) >= 120:
+                    oldest = next((key for key in retained_ids if key not in pinned), None)
                     if oldest is None:
                         dropped += 1
                         continue
-                    del private_store[oldest]
+                    retained_ids.remove(oldest)
+                    private_store.pop(oldest, None)
+                    delete_capture(evidence_store(self).namespace, oldest)
                 public = row["public"]
                 private = row["private"]
                 if operation == "inspect_js":
@@ -391,6 +423,8 @@ class ScopedAssessmentTools:
                     "identity": identity, "private": private, "public": public,
                     "verifier_run_id": current.id if current else None,
                 }
+                persist_capture(evidence_store(self).namespace, artifact_id, private_store[artifact_id])
+                retained_ids.append(artifact_id)
                 pinned.add(artifact_id)
                 public["artifact_id"] = artifact_id
                 traffic.append(public)
@@ -755,10 +789,9 @@ class ScopedAssessmentTools:
             # session-local browser state, then recover only this exact input.
             captured_urls = []
             # Search the complete session and prefer this input's exact capture.
-            exchanges = getattr(self, "_scoped_browser_exchanges", None) or {}
-            capture_ids = list(exchanges)
+            capture_ids = list(reversed(self._scoped_capture_ids()))
             preferred_id = str(observed.get("artifact_id") or "")
-            if preferred_id in exchanges:
+            if preferred_id in capture_ids:
                 capture_ids.remove(preferred_id)
                 capture_ids.insert(0, preferred_id)
             for artifact_id in capture_ids:

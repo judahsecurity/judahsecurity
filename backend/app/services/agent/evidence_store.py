@@ -57,7 +57,7 @@ def purge_session_evidence(organization_id: int, session_id: str) -> None:
     namespace = hashlib.sha256(f"{organization_id}:{session_id}".encode()).hexdigest()[:32]
     root = Path(directory) / namespace
     if root.is_dir():
-        for artifact in root.glob("*.json"):
+        for artifact in (*root.glob("*.json"), *root.glob("*.capture")):
             artifact.unlink(missing_ok=True)
         root.rmdir()
 
@@ -76,7 +76,7 @@ def prune_expired_evidence() -> int:
     for namespace in root.iterdir():
         if namespace.is_symlink() or not namespace.is_dir():
             continue
-        for artifact in namespace.glob("*.json"):
+        for artifact in (*namespace.glob("*.json"), *namespace.glob("*.capture")):
             try:
                 if not artifact.is_symlink() and artifact.stat().st_mtime < cutoff:
                     artifact.unlink(missing_ok=True)
@@ -227,7 +227,7 @@ class EvidenceStore:
                 continue
             if record["created_at"] < cutoff:
                 try:
-                    path.unlink(missing_ok=True)
+                    self._delete_persisted(artifact_id)
                 except OSError:
                     pass
                 continue
@@ -246,6 +246,9 @@ class EvidenceStore:
                 path.unlink(missing_ok=True)
             except OSError:
                 pass
+            from app.services.agent.private_capture_store import delete_capture
+
+            delete_capture(self.namespace, artifact_id)
 
     def clear(self, *, memory_only: bool = False) -> None:
         """Erase session evidence from memory and configured private persistence."""
@@ -259,7 +262,8 @@ class EvidenceStore:
             self._historical_ids.clear()
             root = self._root()
             if root and not memory_only:
-                for artifact in (root / self.namespace).glob("*.json"):
+                for artifact in (*(root / self.namespace).glob("*.json"),
+                                 *(root / self.namespace).glob("*.capture")):
                     artifact.unlink(missing_ok=True)
                 try:
                     (root / self.namespace).rmdir()
