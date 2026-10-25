@@ -126,6 +126,25 @@ def test_browser_specialist_url_shapes_become_actions(supplied):
     ]
 
 
+
+@pytest.mark.parametrize("url", ["/catalog", "ginandjuice.shop/catalog"])
+def test_browser_specialist_relative_url_reaches_scope_normalization(url):
+    normalized = normalize_execute_tool_args(
+        "execute_browser", {"url": url},
+        fallback_target="https://ginandjuice.shop/",
+    )
+    spec = json.loads(normalized["args"])
+    assert spec["actions"][0] == {"action": "navigate", "url": url}
+    manager = SimpleNamespace(
+        _assessment_scope={"ginandjuice.shop"},
+        _fallback_target="https://ginandjuice.shop/",
+        _identity_registry=SimpleNamespace(identities={}),
+    )
+    bounded = prepare_browser_scope(
+        manager, spec, fallback_target="https://ginandjuice.shop/",
+    )
+    assert bounded["actions"][0]["url"] == "https://ginandjuice.shop/catalog"
+
 def test_browser_specialist_wait_and_action_aliases():
     result = normalize_execute_tool_args(
         "execute_browser", {"url": "https://ginandjuice.shop/", "wait_ms": 3000}
