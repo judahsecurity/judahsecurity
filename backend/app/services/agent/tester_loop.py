@@ -1199,7 +1199,9 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         return None
     ran = normalized_tools_run(trace)
     crawled = bool(ran & _CRAWL_TOOLS)
-    dir_done = bool(ran & _DIR_BRUTE_TOOLS)
+    # Respect an operator's no-directory constraint without stalling the
+    # observed-input queue behind enrichment that will never be launched.
+    dir_done = bool(ran & _DIR_BRUTE_TOOLS) or bool(state.get("skip_directory_enrichment"))
     dir_started = "dir_brute_started" in ran or dir_done
     full_fireteam = _full_fireteam_completed(trace)
     input_signature = observed_input_signature(state)
