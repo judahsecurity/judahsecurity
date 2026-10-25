@@ -1401,14 +1401,19 @@ class AgentOrchestrator:
         # Do not spend a reasoning turn asking Joshua whether to assess.
         forced = None
         forced_complete = False
-        if not operator_steers:
+        # A fresh steer gets one planning turn so the model can apply it. Saved
+        # operator constraints remain in the prompt, but must not disable the
+        # deterministic input queue for the rest of the assessment.
+        if not steer_notes and (iteration > 1 or not operator_steers):
             try:
                 from app.services.agent.tester_loop import forced_next_step
+                _, no_directories = _operator_recon_limits(operator_steers)
                 forced = forced_next_step({
                     **state,
                     "execution_trace": merged_trace,
                     "capability_map": recon_map_update or state.get("capability_map"),
                     "engagement_brain": recon_brain_update or state.get("engagement_brain"),
+                    "skip_directory_enrichment": no_directories,
                 })
             except Exception:
                 logger.exception("forced assessment step failed")
