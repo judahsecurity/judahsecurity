@@ -35,6 +35,42 @@ async def test_manual_operator_note_blocks_automatic_directory_enrichment(monkey
 
 
 @pytest.mark.asyncio
+async def test_saved_operator_note_does_not_disable_observed_input_scheduler(monkeypatch):
+    from app.services.agent import recon_workers, tester_loop
+
+    note = "Focus on manual SQLi/XSS. Avoid automated scanners and directory brute forcing."
+    seen = []
+    async def no_recon(*_args, **_kwargs):
+        return []
+
+    def next_step(state):
+        seen.append(state)
+        return {
+            "tool_name": "probe_observed_input_batch",
+            "tool_args": {"target": "https://example.test"},
+            "thought": "Test mapped inputs",
+        }
+
+    monkeypatch.setattr(recon_workers, "drain_completed", no_recon)
+    monkeypatch.setattr(tester_loop, "forced_next_step", next_step)
+    orchestrator = AgentOrchestrator()
+    orchestrator._emit_status = AsyncMock()
+    orchestrator._resolve_llm = lambda *_args: pytest.fail("saved steer triggered a model call")
+
+    result = await orchestrator._think_node({
+        "user_id": "1", "session_id": "saved-steer-input-queue",
+        "mode": "agent", "current_iteration": 2,
+        "current_phase": "exploitation", "execution_trace": [],
+        "operator_steers": [note],
+        "target_info": {"primary_target": "https://example.test"},
+    })
+
+    assert result["_current_step"]["tool_name"] == "probe_observed_input_batch"
+    assert seen[0]["skip_directory_enrichment"] is True
+    assert result["operator_steers"] == [note]
+
+
+@pytest.mark.asyncio
 async def test_port_probe_result_reaches_trace_and_status_as_text(monkeypatch):
     observation = {
         "host": "ginandjuice.shop",
