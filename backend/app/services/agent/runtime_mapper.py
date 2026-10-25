@@ -193,11 +193,37 @@ def ingest_capability_map_operations(brain, cmap: dict) -> list[dict]:
         if not normalized:
             continue
         row = normalized[0]
+        captured_graphql = (
+            endpoint.get("protocol") == "graphql"
+            and endpoint.get("graphql_operation_type") in {"query", "mutation", "subscription"}
+            and isinstance(endpoint.get("graphql_document_sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", endpoint["graphql_document_sha256"])
+            and bool(endpoint.get("artifact_id"))
+        )
+        if captured_graphql:
+            operation_name = str(endpoint.get("graphql_operation_name") or "anonymous")
+            if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", operation_name):
+                operation_name = "anonymous"
+            row["protocol"] = "graphql"
+            row["operation"] = (
+                f"{endpoint['graphql_operation_type']}:{operation_name}:"
+                f"{endpoint['graphql_document_sha256'][:16]}"
+            )
+            row["id"] = stable_id(url, method, row["protocol"], row["operation"])
+            row["fidelity"] = "browser_observed_operation"
+            row["graphql_operation_type"] = endpoint["graphql_operation_type"]
+            row["graphql_operation_name"] = operation_name
+        parameter_rows = (
+            (cmap.get("parameter_inventory") or []) if captured_graphql
+            else parameter_inventory
+        )
         row["parameters"] = sorted({
             f"{part.get('location')}:{part.get('name')}"
-            for part in parameter_inventory
+            for part in parameter_rows
             if isinstance(part, dict) and part.get("method") == method
-            and part.get("host") == root.netloc.lower() and part.get("path") == path
+            and (part.get("host") in (None, "", root.netloc.lower()))
+            and part.get("path") == path
+            and (not captured_graphql or part.get("artifact_id") == endpoint.get("artifact_id"))
             and part.get("location") and part.get("name")
         })
         if endpoint.get("artifact_id"):

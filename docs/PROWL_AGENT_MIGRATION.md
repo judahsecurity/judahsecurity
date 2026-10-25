@@ -67,29 +67,42 @@ the ledger cannot claim coverage for inputs that were never observed.
 
 For a leased input backed by a PROWL private browser capture, XSS and SQLi
 specialists can call `scoped_assessment_probe_assigned`. Aegis selects the
-service operation from the cell's method, location, value type, and identity;
-the specialist cannot substitute another capture or parameter. A GET query
-can receive a bounded quote differential; a positive integer GET query can
-receive the service's Boolean SQLi proof; a configured POST JSON/form capture
-can receive a body probe. GET query XSS can receive a nonce browser check.
-Differentials remain leads. A service proof signal remains subject to the
-fresh verifier and publication gate above. Unsupported input shapes remain
-open rather than being marked tested.
+operation from the cell's method, location, value type, and identity; the
+specialist cannot substitute another capture or parameter. The built-in
+adapter replays a captured GET query using its private baseline: positive
+integer inputs receive bounded Boolean controls, while string inputs receive
+bounded OR/AND controls and a controlled error follow-up when eligible. A
+configured POST JSON/form capture can receive
+a baseline-versus-quote body probe using only allowlisted application headers
+and fresh cookies from the named identity. GraphQL query variables follow the
+same POST path; mutation, subscription, mixed, and unknown GraphQL documents
+are excluded from this generic two-request replay. GET query XSS can receive
+a nonce browser check. Differentials remain leads, including unchanged POST
+responses; they do not close an input as clean. A SQLi proof signal remains
+subject to the fresh verifier and publication gate above. Unsupported input
+shapes remain open rather than being marked tested.
 
 ## Built-in XSS execution handoff
 
-The built-in browser captures bounded private fetch/XHR exchanges during map,
-crawl, and JavaScript inspection. Each capture retains its initiating page
-inside the session while the agent sees only method, path, parameter names,
-page path, and an artifact ID. Open coverage cells keep their referenced
-captures when the session's 120-exchange store fills; additional captures are
-reported as dropped rather than given unusable IDs.
+The built-in browser captures bounded private fetch/XHR exchanges and
+input-bearing GET document navigations during map, crawl, and JavaScript
+inspection. Each capture retains the exact URL, body, initiating page, action
+reference, and a small non-credential header allowlist inside the session.
+The agent sees the method, path, parameter names and types, page path, action
+reference, and artifact ID. For GraphQL, it also sees the operation type and
+name, document hash, and variable paths; the query text and variable values
+stay private. Open coverage cells keep their referenced captures when the
+session's 120-exchange store fills; additional captures are reported as
+dropped rather than given unusable IDs.
 
 For an observed GET fetch/XHR input, `scoped_input_probe_assigned` revisits the
-initiating page and changes one matching request parameter in the browser. A
-nonce dialog counts only after that mutated response arrives and the page
-renders it. The specialist's captured-GET adapter uses the same local path.
-An independent verifier repeats the exact page, endpoint, field, and payload
+initiating page and changes one matching request parameter in the browser. If
+JavaScript inspection found that a tab or disclosure produced the request,
+the capture privately carries that bounded control sequence; the hunter and
+fresh verifier repeat it before changing the final XHR. A nonce dialog counts
+only after that mutated response arrives and the page renders it. The
+specialist's captured-GET adapter uses the same local path. An independent
+verifier repeats the exact page, control sequence, endpoint, field, and payload
 template with a different nonce. A reflected response or a dialog from a
 different browser event is inconclusive. Pages with query values are not
 automatically used as rendering pages, so private URL values do not enter the

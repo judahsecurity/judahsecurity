@@ -250,6 +250,11 @@ def validate_proof(
             or not isinstance(first.get("xhr_query_keys"), list)
             or first.get("xhr_parameter") not in first["xhr_query_keys"]
             or first.get("xhr_payload_template") != second.get("xhr_payload_template")
+            or first.get("xhr_actions", []) != second.get("xhr_actions", [])
+            or any(not isinstance(row.get("xhr_actions", []), list)
+                   or len(row.get("xhr_actions", [])) > 6
+                   or row.get("xhr_actions_replayed", 0) != len(row.get("xhr_actions", []))
+                   for row in (first, second))
             or "__PROWL_NONCE__" not in str(first.get("xhr_payload_template") or "")
             or first.get("xhr_mutated") is not True
             or second.get("xhr_mutated") is not True

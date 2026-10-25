@@ -8,16 +8,68 @@ import pytest
 from app.services.agent.coverage_cells import (
     claim_coverage_cell_leases, seed_js_coverage_cells, seed_parameter_coverage_cells,
 )
+from app.services.agent.assessment_scope import register_scope
 from app.services.agent.engagement_brain import EngagementBrain, engagement_brain_from_dict
 from app.services.agent.evidence_store import evidence_store
 from app.services.agent.independent_verify import (
     check_verify_receipt, run_independent_verifiers, submit_candidate,
 )
 from app.services.agent.tools import ASMToolsManager
+from app.services.agent.scoped_assessment.browser_traffic import package_exchange
 
 
 TARGET = "https://app.example.test/catalog"
 TEMPLATE = TARGET + "?searchTerm=" + quote('<img src=x onerror=alert("__PROWL_NONCE__")>')
+
+
+@pytest.mark.asyncio
+async def test_captured_ui_action_is_private_and_replayed_for_xhr_proof(monkeypatch):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    public, private = package_exchange(
+        url="https://app.example.test/api/search?term=seed",
+        page_url=TARGET, action_ref="ui-1",
+        expected_origin="https://app.example.test", method="GET", resource_type="fetch",
+        status=200, content_type="text/html", request_body=b"", response_body=b"seed",
+    )
+    action = {"ref": "ui-1", "kind": "tab", "label": "Results",
+              "aria_controls": "results", "before_path": "/catalog",
+              "after_path": "/catalog", "status": "completed"}
+
+    async def fake_browser(**kwargs):
+        kwargs["traffic_exchanges"].append({"public": public, "private": private})
+        return ({"operation": "inspect_js", "final_origin": "https://app.example.test",
+                 "final_path": "/catalog", "status": 200, "requests": [],
+                 "actions": [action]}, None)
+
+    monkeypatch.setattr("app.services.agent.scoped_assessment_tools.browser.check_browser", fake_browser)
+    observed = json.loads(await manager.scoped_browser_assessment("inspect_js", TARGET))
+    captured = observed["traffic"][0]
+    assert captured["replay_action_count"] == 1
+    assert "Results" not in json.dumps(captured)
+    private_record = json.loads(manager._scoped_browser_exchanges[captured["artifact_id"]]["private"])
+    expected_actions = [{"kind": "tab", "label": "Results", "aria_controls": "results",
+                         "before_path": "/catalog"}]
+    assert private_record["replay_actions"] == expected_actions
+
+    brain = EngagementBrain(target="https://app.example.test")
+    seed_parameter_coverage_cells(brain, [{"method": "GET", "host": "app.example.test",
+        "path": "/api/search", "name": "term", "location": "query",
+        "identity": "anonymous", "source": "browser_traffic", "testable": True,
+        "artifact_id": captured["artifact_id"]}])
+    lease = claim_coverage_cell_leases(brain, ["xss"], first_pass_only=True)["xss"]
+    manager._engagement_brain = brain.to_dict()
+    calls = []
+
+    async def fake_assessment(operation, url, **kwargs):
+        calls.append((operation, url, kwargs))
+        return json.dumps({"evidence_id": "proof-1", "executed": True})
+
+    monkeypatch.setattr(manager, "scoped_browser_assessment", fake_assessment)
+    result = await manager.scoped_input_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert result["proof_confirmed"] is True
+    assert calls[0][2]["xhr_actions"] == expected_actions
 
 
 @pytest.mark.asyncio
@@ -152,7 +204,8 @@ async def test_post_form_xss_verifier_replays_approved_form_with_fresh_nonce():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("replayed_execution", [False, True])
-async def test_rendered_xhr_xss_needs_fresh_browser_execution(replayed_execution):
+@pytest.mark.parametrize("with_action", [False, True])
+async def test_rendered_xhr_xss_needs_fresh_browser_execution(replayed_execution, with_action):
     manager = ASMToolsManager()
     store = evidence_store(manager)
     endpoint = "https://app.example.test/api/search"
@@ -164,6 +217,10 @@ async def test_rendered_xhr_xss_needs_fresh_browser_execution(replayed_execution
                     "xhr_payload_template": payload, "xhr_mutated": True,
                     "xhr_response_seen": True, "executed": True,
                     "nonce": "hunter-nonce"}
+    actions = [{"kind": "tab", "label": "Results", "aria_controls": "results",
+                "before_path": "/catalog"}] if with_action else []
+    if actions:
+        hunter_proof.update(xhr_actions=actions, xhr_actions_replayed=1)
     hunter = store.record("scoped_browser_check_xhr_xss", hunter_proof,
                           target=endpoint, identity="anonymous")
     brain = EngagementBrain(target="https://app.example.test")
@@ -184,7 +241,8 @@ async def test_rendered_xhr_xss_needs_fresh_browser_execution(replayed_execution
         assert args == {"operation": "check_xhr_xss", "url": source,
                         "identity": "anonymous", "xhr_path": "/api/search",
                         "xhr_parameter": "term", "xhr_payload_template": payload,
-                        "xhr_query_keys": ["term"]}
+                        "xhr_query_keys": ["term"],
+                        **({"xhr_actions": actions} if actions else {})}
         fresh_proof = dict(hunter_proof, nonce="verifier-nonce",
                            executed=replayed_execution)
         artifact_id = store.record("scoped_browser_check_xhr_xss", fresh_proof,

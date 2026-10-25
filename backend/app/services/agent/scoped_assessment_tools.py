@@ -185,7 +185,7 @@ class ScopedAssessmentTools:
             except (TypeError, ValueError):
                 continue
             if (isinstance(captured, dict) and captured.get("method") == "GET"
-                    and captured.get("resource_type") in {"xhr", "fetch"}):
+                    and captured.get("resource_type") in {"document", "xhr", "fetch"}):
                 private_captures.append(("browser_traffic", captured.get("url")))
         private_links = (getattr(self, "_scoped_link_baselines", None) or {}).get(identity) or []
         candidates = [*private_captures, *(("browser_link", value) for value in private_links)]
@@ -259,6 +259,7 @@ class ScopedAssessmentTools:
         xhr_path: str = "", xhr_parameter: str = "",
         xhr_payload_template: str = "",
         xhr_query_keys: list[str] | None = None,
+        xhr_actions: list[dict] | None = None,
         readback_url: str = "", cleanup_url_template: str = "",
     ) -> str:
         """Run scoped map, crawl, JS inspection, or nonce XSS execution in Chromium."""
@@ -299,8 +300,10 @@ class ScopedAssessmentTools:
             xhr_path=xhr_path, xhr_parameter=xhr_parameter,
             xhr_payload_template=xhr_payload_template,
             xhr_query_keys=xhr_query_keys,
+            xhr_actions=xhr_actions,
             readback_url=readback_url, cleanup_url_template=cleanup_url_template,
         )
+        result["identity"] = identity
         if link_baselines:
             private = dict(getattr(self, "_scoped_link_baselines", None) or {})
             private[identity] = list(dict.fromkeys([
@@ -358,13 +361,34 @@ class ScopedAssessmentTools:
                         continue
                     del private_store[oldest]
                 public = row["public"]
+                private = row["private"]
+                if operation == "inspect_js":
+                    action_ref = public.get("action_ref")
+                    prior_actions = []
+                    for action in (result.get("actions") or [])[:12]:
+                        if not isinstance(action, dict):
+                            continue
+                        if (action.get("kind") in {"tab", "disclosure", "summary"}
+                                and action.get("status") == "completed"
+                                and action.get("before_path") == public.get("page_path")
+                                and action.get("after_path") == public.get("page_path")):
+                            prior_actions.append({key: action.get(key) for key in (
+                                "kind", "label", "aria_controls", "before_path",
+                            )})
+                        if action.get("ref") == action_ref:
+                            if action.get("kind") in {"tab", "disclosure", "summary"} and prior_actions:
+                                payload = json.loads(private)
+                                payload["replay_actions"] = prior_actions[-6:]
+                                private = json.dumps(payload, sort_keys=True).encode()
+                                public["replay_action_count"] = len(payload["replay_actions"])
+                            break
                 artifact_id = evidence_store(self).record(
                     "scoped_browser_exchange", public, target=allowed + public["path"],
                     identity=identity,
                 )
                 current = verification_run.get()
                 private_store[artifact_id] = {
-                    "identity": identity, "private": row["private"], "public": public,
+                    "identity": identity, "private": private, "public": public,
                     "verifier_run_id": current.id if current else None,
                 }
                 pinned.add(artifact_id)
@@ -552,6 +576,7 @@ class ScopedAssessmentTools:
             body_probe.probe_observed_body, url, mime, baseline, changed,
             parameter=parameter, allowed_origins=[allowed],
             storage_state=self._scoped_state(identity, url),
+            replay_headers=body_probe.safe_replay_headers(private),
         )
         result["source_artifact_id"] = artifact_id
         result["evidence_id"] = evidence_store(self).record(
@@ -582,6 +607,7 @@ class ScopedAssessmentTools:
             body_probe.probe_observed_body_reflection, url, mime, baseline, changed,
             parameter=parameter, payload=payload, allowed_origins=[allowed],
             storage_state=self._scoped_state(identity, url),
+            replay_headers=body_probe.safe_replay_headers(private),
         )
         result["source_artifact_id"] = artifact_id
         result["probe_marker"] = marker
@@ -728,9 +754,7 @@ class ScopedAssessmentTools:
             # The public inventory is value-free. Keep ordinary link values in
             # session-local browser state, then recover only this exact input.
             captured_urls = []
-            # A busy browser session can record hundreds of requests before the
-            # input under test. Search all private captures, placing this
-            # inventory row's exact capture first when one is available.
+            # Search the complete session and prefer this input's exact capture.
             exchanges = getattr(self, "_scoped_browser_exchanges", None) or {}
             capture_ids = list(exchanges)
             preferred_id = str(observed.get("artifact_id") or "")
@@ -743,7 +767,7 @@ class ScopedAssessmentTools:
                 except (TypeError, ValueError):
                     continue
                 if (isinstance(captured, dict) and captured.get("method") == "GET"
-                        and captured.get("resource_type") in {"xhr", "fetch"}):
+                        and captured.get("resource_type") in {"document", "xhr", "fetch"}):
                     captured_urls.append(captured.get("url"))
             candidates = [
                 *captured_urls,
