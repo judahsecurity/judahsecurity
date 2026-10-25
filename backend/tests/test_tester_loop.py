@@ -904,3 +904,30 @@ def test_force_complete_bypass():
         "execution_trace": [],
     }
     assert complete_blocked_reason(state, completion_reason="force complete") is None
+
+
+def test_no_directory_constraint_still_runs_observed_input_first_pass():
+    target = "https://app.test"
+    state = {
+        "mode": "agent",
+        "target_info": {"primary_target": target},
+        "skip_directory_enrichment": True,
+        "capability_map": {
+            "target": target, "scope": target,
+            "forms": [{"method": "GET", "action": "/catalog", "inputs": ["category"]}],
+        },
+        "engagement_brain": {"coverage_cells": [{
+            "id": "catalog-category-sqli", "host": "app.test", "path": "/catalog",
+            "method": "GET", "parameter": "query:category", "status": "untested",
+            "source": "parameter_inventory", "observation_source": "observed_form",
+            "specialist": "sqli", "test_type": "sqli",
+        }]},
+        "execution_trace": [
+            {"tool_name": "execute_deep_crawl", "success": True},
+            {"tool_name": "sync_engagement_brain", "success": True},
+        ],
+    }
+
+    step = forced_next_step(state)
+    assert step["tool_name"] == "probe_observed_input_batch"
+    assert step["tool_args"]["pending_input_count"] == 1
