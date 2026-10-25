@@ -1694,9 +1694,14 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         completed = bool(result.get("success")) and (tool_name != "create_finding" or published)
         referenced = result.get("evidence_ids")
         evidence_ids = referenced if isinstance(referenced, list) else []
+        failure_code = str(result.get("error") or "")
+        if failure_code in {"assessment_scope_denied", "invalid_browser_args"}:
+            # The action ledger excludes raw arguments and output. A stable
+            # reason code distinguishes bad browser args from a true host deny.
+            failure_code += f":{str(result.get('reason') or 'unspecified')[:40]}"
         append_action(run_id, action_id, "completed" if completed else "failed",
                       tool_name, target=target,
-                      detail="finding_published" if published else str(result.get("error") or "")[:300],
+                      detail="finding_published" if published else failure_code[:300],
                       fingerprint=fingerprint,
                       evidence_ids=[*evidence_ids,
                                     *([result["artifact_id"]] if result.get("artifact_id") else [])])
@@ -1816,12 +1821,38 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             from app.services.agent.confirmation_service import autonomous_mode_enabled
             if autonomous_mode_enabled():
                 try:
-                    from app.services.agent.assessment_scope import prepare_browser_scope
                     spec = json.loads(tool_args["args"])
+                except (json.JSONDecodeError, TypeError):
+                    return {
+                        "success": False,
+                        "output": "Browser actions require a JSON object with an actions array",
+                        "error": "invalid_browser_args",
+                        "reason": "invalid_json",
+                    }
+                if not isinstance(spec, dict) or not isinstance(spec.get("actions"), list):
+                    return {
+                        "success": False,
+                        "output": "Browser actions require a JSON object with an actions array",
+                        "error": "invalid_browser_args",
+                        "reason": "missing_actions",
+                    }
+                try:
+                    from app.services.agent.assessment_scope import prepare_browser_scope
                     spec = prepare_browser_scope(self, spec, fallback_target=fallback)
                     tool_args["args"] = json.dumps(spec)
                 except (ValueError, TypeError, KeyError) as exc:
-                    return {"success": False, "output": str(exc), "error": "assessment_scope_denied"}
+                    message = str(exc)
+                    reason = (
+                        "external_host" if message.startswith("Out-of-scope network destination") else
+                        "mixed_origin" if "one origin per call" in message else
+                        "embedded_credentials" if "Embedded URL credentials" in message else
+                        "missing_target" if "assessment target" in message or "assessment URL" in message else
+                        "invalid_url"
+                    )
+                    return {
+                        "success": False, "output": message,
+                        "error": "assessment_scope_denied", "reason": reason,
+                    }
 
         # -- Per-tool confirmation gate ---------------------------------------
         # Consult the org's agent confirmation policy. Dangerous tools
