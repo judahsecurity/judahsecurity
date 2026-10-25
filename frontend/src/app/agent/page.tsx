@@ -2141,6 +2141,7 @@ function AgentPageContent() {
                       {mode !== 'pilot' && <details className="text-xs text-muted-foreground">
                         <summary className="cursor-pointer">Assessment policy</summary>
                         <div className="mt-2 space-y-2 w-80">
+                          <p>Exact-host GET and browser reads need no POST replay path. Analyst tool approvals may still apply. POST replay can change data, so list only paths with a rollback or reset plan; omitted POST checks remain open as blocked coverage.</p>
                           <Textarea
                             aria-label="Approved POST replay paths"
                             placeholder="Approved POST test paths, one per line (enables form XSS and captured body checks)"

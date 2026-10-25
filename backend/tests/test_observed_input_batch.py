@@ -177,6 +177,7 @@ def test_observed_post_form_xss_is_sent_to_browser_execution():
                                                "action": "https://app.test/newsletter",
                                                "page": "https://app.test/catalog",
                                                "inputs": ["email"]}]}
+            self._scoped_body_replay_paths = {"/newsletter"}
             self.calls = []
 
         async def scoped_input_probe_assigned(self, **kwargs):
@@ -192,6 +193,34 @@ def test_observed_post_form_xss_is_sent_to_browser_execution():
     assert manager.calls[0]["technique"] == "html_body"
     assert any(row["outcome"] == "inconclusive" for row in result["results"])
 
+
+
+def test_unapproved_post_form_is_recorded_as_open_blocked_coverage():
+    class Manager:
+        def __init__(self):
+            brain = EngagementBrain(target="https://app.test")
+            seed_parameter_coverage_cells(brain, [{
+                "method": "POST", "host": "app.test", "path": "/newsletter",
+                "name": "email", "location": "body_form", "identity": "anonymous",
+                "source": "observed_form", "testable": True,
+            }])
+            self._engagement_brain = brain.to_dict()
+            self._capability_map = {"target": "https://app.test"}
+            self._scoped_body_replay_paths = set()
+
+        async def scoped_input_probe_assigned(self, **_kwargs):
+            raise AssertionError("Unapproved POST must not reach the executor")
+
+    manager = Manager()
+    result = asyncio.run(run_observed_input_batch(manager, max_checks=2))
+    assert result["processed"] == 0
+    assert result["policy_blocked"] == 1
+    assert result["funnel"]["blocked"] == 1
+    assert result["funnel"]["attempted"] == 0
+    cell = next(row for row in manager._engagement_brain["coverage_cells"]
+                if row["test_type"] == "xss")
+    assert cell["status"] == "blocked"
+    assert cell["first_pass_outcome"] == "unattempted"
 
 def test_transient_first_pass_handoff_gets_one_delayed_retry():
     class Manager:
@@ -483,6 +512,7 @@ def test_scoped_service_proof_does_not_enter_local_verifier_queue():
                     cell["status"] = "skipped"
             self._engagement_brain = brain.to_dict()
             self._capability_map = {"target": "https://app.test"}
+            self._scoped_body_replay_paths = {"/catalog"}
 
         async def scoped_assessment_probe_assigned(self, **_kwargs):
             return {"success": True, "service_artifact_ids": ["service-proof-1"],
@@ -522,6 +552,7 @@ def test_captured_post_xss_uses_reflection_canary_and_stays_inconclusive():
                     cell["status"] = "skipped"
             self._engagement_brain = brain.to_dict()
             self._capability_map = {"target": "https://app.test"}
+            self._scoped_body_replay_paths = {"/feedback"}
             self.techniques = []
 
         async def scoped_assessment_probe_assigned(self, **kwargs):

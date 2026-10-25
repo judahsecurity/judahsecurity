@@ -123,6 +123,7 @@ async def test_captured_post_form_is_dispatched_for_both_input_classes():
             ])
             self._engagement_brain = brain.to_dict()
             self._capability_map = {"target": "https://app.test"}
+            self._scoped_body_replay_paths = {"/feedback"}
             self.calls = []
 
         async def execute(self, name, kwargs):

@@ -79,11 +79,17 @@ def prepare_browser_scope(manager, spec: dict, *, fallback_target: str = "") -> 
     bounded["actions"] = [dict(action) if isinstance(action, dict) else action
                           for action in spec["actions"]]
     base = str(fallback_target or getattr(manager, "_fallback_target", "") or "")
+    if base and not urlsplit(base).scheme:
+        base = f"https://{base}"
 
     def normalize_url(value: str) -> str:
         raw = str(value).strip()
         if raw.startswith("//"):
-            raise ValueError("Protocol-relative browser URLs are not allowed")
+            if not base:
+                raise ValueError("A protocol-relative browser URL requires an assessment target")
+            # Browser-observed //host/path links use the seed scheme. The exact
+            # host and single-origin checks below still reject external links.
+            return f"{urlsplit(base).scheme}:{raw}"
         parsed = urlsplit(raw)
         if parsed.scheme:
             return raw
