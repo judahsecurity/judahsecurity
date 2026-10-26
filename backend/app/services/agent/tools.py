@@ -10000,11 +10000,28 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 elif node and node.status == NODE_PROVEN:
                     node.status = NODE_RETRY
 
-        first_wave_timeout = min(420.0, max(1.0, _remaining_dispatch_time() - reserve))
+        from dataclasses import replace as _dc_replace
+
+        bounded_first_pass = mode in {"observed_inputs", "coverage_followup"}
+        first_wave_profiles = (
+            [
+                _dc_replace(
+                    profiles[name],
+                    max_iterations=min(profiles[name].max_iterations, 4),
+                    max_tools_per_iteration=min(profiles[name].max_tools_per_iteration, 3),
+                )
+                for name in chosen if name in profiles
+            ]
+            if bounded_first_pass else chosen
+        )
+        first_wave_timeout = min(
+            150.0 if bounded_first_pass else 420.0,
+            max(1.0, _remaining_dispatch_time() - reserve),
+        )
         result = await run_fireteam(
             mission=mission,
             targets=target_list,
-            specialists=chosen,
+            specialists=first_wave_profiles,
             llm=llm,
             tools_manager=self,
             max_parallel=max_parallel,
@@ -10022,8 +10039,6 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             record_failure_approach,
             should_rewrite,
         )
-        from dataclasses import replace as _dc_replace
-
         executor_summaries = [parse_executor_summary(r) for r in result.reports]
         spawned: list = []
         rewrites: list = []
@@ -10042,8 +10057,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         retry_names = []
         retry_window = min(180.0, _remaining_dispatch_time() - reserve)
-        retry_deferred = bool(rewrites and retry_window < 90.0)
-        if rewrites and retry_window >= 90.0:
+        retry_deferred = bool(rewrites and (bounded_first_pass or retry_window < 90.0))
+        if rewrites and retry_window >= 90.0 and not bounded_first_pass:
             retry_leases = claim_task_leases(
                 graph, [rewrite.specialist for rewrite in rewrites]
             )
