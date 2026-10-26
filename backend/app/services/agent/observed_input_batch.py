@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import time
+from collections import Counter
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -87,6 +88,33 @@ def pending_first_pass_cells(brain: Any, *, target: str = "") -> list[dict[str, 
     scheme = urlsplit(active_origin).scheme if active_origin else ""
     cells = brain.get("coverage_cells", []) if isinstance(brain, dict) else getattr(brain, "coverage_cells", [])
     focus_paths = verified_input_paths(brain)
+    # Cover distinct inputs and paths before repeating a checked input for
+    # another class. The same parameter can have both SQLi and XSS cells.
+    def input_key(cell: dict[str, Any]) -> tuple[str, str, str, str]:
+        return (
+            str(cell.get("host") or ""),
+            str(cell.get("method") or "GET").upper(),
+            str(cell.get("path") or ""),
+            str(cell.get("parameter") or ""),
+        )
+
+    completed = [
+        cell for cell in cells
+        if isinstance(cell, dict)
+        and cell.get("source") == "parameter_inventory"
+        and cell.get("specialist") in {"sqli", "xss"}
+        and (
+            cell.get("first_pass_outcome") in {"inconclusive", "proof_signal", "tested_clean"}
+            or cell.get("first_pass_evidence_id")
+            or cell.get("probe_artifact_ids")
+            or cell.get("service_probe_artifact_ids")
+            or cell.get("candidate_id")
+            or cell.get("finding_id")
+        )
+    ]
+    touched_inputs = {input_key(cell) for cell in completed}
+    touched_paths = Counter(key[:3] for key in touched_inputs)
+    completed_by_class = Counter(str(cell.get("specialist")) for cell in completed)
     now = time.time()
     return sorted(
         (
@@ -126,9 +154,11 @@ def pending_first_pass_cells(brain: Any, *, target: str = "") -> list[dict[str, 
             and not cell.get("service_probe_artifact_ids")
         ),
         key=lambda cell: (
+            int(cell.get("first_pass_attempts") or 0),
+            int(input_key(cell) in touched_inputs),
+            completed_by_class[str(cell.get("specialist") or "")],
+            touched_paths[input_key(cell)[:3]],
             int(cell.get("attempts") or 0),
-            # A validated input makes other observed inputs on that same
-            # endpoint worth exercising before unrelated endpoints.
             0 if cell.get("path") in focus_paths else 1,
             int(cell.get("priority_rank", 2)),
             cell.get("surface_key", ""),
@@ -187,21 +217,9 @@ async def run_observed_input_batch(
         pending = pending_first_pass_cells(brain, target=active_target)
         if not pending:
             break
-        # Claiming only first-pass cells prevents an inconclusive lead from
-        # starving the remaining discovered inputs. Balance the two classes
-        # so a run that expires midway has exercised both specialists.
-        completed = {
-            name: sum(1 for row in brain.coverage_cells
-                      if row.get("source") == "parameter_inventory"
-                      and row.get("specialist") == name
-                      and row.get("first_pass_outcome"))
-            for name in ("sqli", "xss")
-        }
-        specialist = min(
-            {str(row["specialist"]) for row in pending},
-            key=lambda name: (completed[name], 0 if name == "sqli" else 1),
-        )
-        selected = next(row for row in pending if row["specialist"] == specialist)
+        # The queue orders new inputs first, then balances SQLi and XSS.
+        selected = pending[0]
+        specialist = str(selected["specialist"])
         if _retryable_first_pass(selected, time.time()):
             # Preserve the attempt count but allow the lease selector to take
             # this exact cell for one more execution after the cooldown.
@@ -232,8 +250,10 @@ async def run_observed_input_batch(
         followup_failure = ""
 
         operation_name = ""
+        # Limit one cell's first pass so a slow lead cannot monopolize a batch.
+        cell_deadline = min(deadline - 2, time.monotonic() + 65)
         try:
-            remaining = max(1.0, deadline - time.monotonic() - 2)
+            remaining = max(1.0, cell_deadline - time.monotonic())
             probe_args = {"coverage_cell_id": cell["id"], "coverage_lease_id": lease.id}
             if method == "GET" and location == "query" and parameter:
                 if specialist == "sqli" and cell.get("value_type") in {"positive_integer", "number"}:
@@ -265,7 +285,7 @@ async def run_observed_input_batch(
             if operation_name:
                 result = await asyncio.wait_for(
                     _invoke(manager, operation_name, probe_args),
-                    timeout=min(remaining, 50.0),
+                    timeout=min(remaining, 45.0),
                 )
                 if (isinstance(result, dict)
                         and result.get("error") == "invalid_coverage_lease"
@@ -276,10 +296,10 @@ async def run_observed_input_batch(
                     if renewed is not None:
                         lease = renewed
                         probe_args["coverage_lease_id"] = lease.id
-                        remaining = max(1.0, deadline - time.monotonic() - 2)
+                        remaining = max(1.0, cell_deadline - time.monotonic())
                         result = await asyncio.wait_for(
                             _invoke(manager, operation_name, probe_args),
-                            timeout=min(remaining, 50.0),
+                            timeout=min(remaining, 45.0),
                         )
                 evidence_id = str(result.get("evidence_id") or next(
                     iter(result.get("service_artifact_ids") or []), ""
@@ -294,16 +314,16 @@ async def run_observed_input_batch(
                         (["html_body_svg"] if "html_text" in contexts else [])
                         + (["html_attribute", "html_attribute_single"] if "html_attribute" in contexts else [])
                         + (["js_single", "js_double"] if "javascript" in contexts else [])
-                    )[:4]
+                    )[:2]
                     for technique in techniques:
-                        remaining = deadline - time.monotonic() - 5
+                        remaining = cell_deadline - time.monotonic()
                         if remaining < 5:
                             break
                         followup = await asyncio.wait_for(_invoke(
                             manager, "scoped_input_probe_assigned",
                             {"coverage_cell_id": cell["id"], "coverage_lease_id": lease.id,
                              "technique": technique},
-                        ), timeout=min(remaining, 35.0))
+                        ), timeout=min(remaining, 20.0))
                         if followup.get("success") is not True or not followup.get("evidence_id"):
                             followup_failure = str(followup.get("error") or "missing_followup_receipt")[:100]
                             break
