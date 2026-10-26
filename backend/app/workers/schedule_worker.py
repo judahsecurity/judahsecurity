@@ -762,6 +762,38 @@ class ScheduleWorker:
         finally:
             db.close()
 
+    async def run_crowdstrike_syncs(self):
+        """Run due Falcon Exposure Management imports."""
+        from app.models.crowdstrike_integration import CrowdStrikeIntegration
+        from app.models.crowdstrike_integration import CrowdStrikeAssetLink
+        from app.services import crowdstrike_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(CrowdStrikeIntegration).filter(
+                CrowdStrikeIntegration.is_active == True,
+                CrowdStrikeIntegration.continuous_sync_enabled == True,
+            ).all()
+            for integration in candidates:
+                if integration.is_sync_due(now):
+                    result = await crowdstrike_service.sync_integration(db, integration)
+                    logger.info("CrowdStrike sync for org %s: %s", integration.organization_id, result.get("message"))
+                    if result["ok"]:
+                        from app.services.graph_service import sync_organization_background
+                        values = [value for (value,) in db.query(Asset.value).join(
+                            CrowdStrikeAssetLink, CrowdStrikeAssetLink.asset_id == Asset.id
+                        ).filter(CrowdStrikeAssetLink.integration_id == integration.id).distinct().all()]
+                        if values:
+                            await asyncio.to_thread(sync_organization_background, integration.organization_id, values)
+        except Exception:
+            logger.exception("CrowdStrike scheduled sync failed")
+            db.rollback()
+        finally:
+            db.close()
+
     async def run_akamai_waf_syncs(self):
         """Run continuous Akamai WAF syncs for connections whose interval is due."""
         from app.models.akamai_integration import AkamaiWafIntegration
@@ -979,6 +1011,9 @@ class ScheduleWorker:
 
                 # Continuous Wiz VM and vulnerability syncs
                 await self.run_wiz_syncs()
+
+                # Falcon external assets, managed hosts, and Spotlight findings
+                await self.run_crowdstrike_syncs()
 
                 # Continuous Akamai WAF syncs
                 await self.run_akamai_waf_syncs()

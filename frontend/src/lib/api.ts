@@ -429,6 +429,40 @@ export interface WizSyncResult {
   findings_filtered: number;
 }
 
+export interface CrowdStrikeIntegration {
+  id: number;
+  organization_id: number;
+  connection_name: string;
+  cloud_region: 'us-1' | 'us-2' | 'eu-1' | 'us-gov-1';
+  import_external_assets: boolean;
+  import_hosts: boolean;
+  import_spotlight: boolean;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+}
+
+export interface CrowdStrikeSyncResult {
+  ok: boolean;
+  message: string;
+  assets_created: number;
+  assets_updated: number;
+  ports_created: number;
+  ports_updated: number;
+  vulns_created: number;
+  vulns_updated: number;
+  vulns_resolved: number;
+  external_seen: number;
+  hosts_seen: number;
+  findings_seen: number;
+}
+
 // ── HackerOne shared types ─────────────────────────────────────────────────
 
 export interface HackerOneIntegration {
@@ -3170,6 +3204,58 @@ class ApiClient {
 
   async syncWizIntegration(id: number): Promise<WizSyncResult> {
     const response = await this.client.post(`/integrations/wiz/${id}/sync`);
+    return response.data;
+  }
+
+  // ── CrowdStrike Falcon Exposure Management ───────────────────────────────
+
+  async getCrowdStrikeIntegrations(): Promise<CrowdStrikeIntegration[]> {
+    const response = await this.client.get('/integrations/crowdstrike');
+    return response.data;
+  }
+
+  async createCrowdStrikeIntegration(payload: {
+    connection_name: string;
+    cloud_region: CrowdStrikeIntegration['cloud_region'];
+    client_id: string;
+    client_secret: string;
+    import_external_assets: boolean;
+    import_hosts: boolean;
+    import_spotlight: boolean;
+    continuous_sync_enabled: boolean;
+    sync_interval_minutes: number;
+  }): Promise<CrowdStrikeIntegration> {
+    const response = await this.client.post('/integrations/crowdstrike', payload);
+    return response.data;
+  }
+
+  async updateCrowdStrikeIntegration(id: number, payload: Partial<{
+    connection_name: string;
+    cloud_region: CrowdStrikeIntegration['cloud_region'];
+    client_id: string;
+    client_secret: string;
+    import_external_assets: boolean;
+    import_hosts: boolean;
+    import_spotlight: boolean;
+    is_active: boolean;
+    continuous_sync_enabled: boolean;
+    sync_interval_minutes: number;
+  }>): Promise<CrowdStrikeIntegration> {
+    const response = await this.client.put(`/integrations/crowdstrike/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteCrowdStrikeIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/crowdstrike/${id}`);
+  }
+
+  async testCrowdStrikeIntegration(id: number): Promise<{ ok: boolean; message: string }> {
+    const response = await this.client.post(`/integrations/crowdstrike/${id}/test`);
+    return response.data;
+  }
+
+  async syncCrowdStrikeIntegration(id: number): Promise<CrowdStrikeSyncResult> {
+    const response = await this.client.post(`/integrations/crowdstrike/${id}/sync`);
     return response.data;
   }
 
