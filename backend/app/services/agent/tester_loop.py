@@ -595,7 +595,7 @@ def _coverage_followup_wave(
         if step.get("tool_name") == "fireteam_dispatch"
         and (step.get("tool_args") or {}).get("mode") == "coverage_followup"
     ]
-    if len(prior_waves) >= min(512, max(64, len(all_cells) * 2)):
+    if len(prior_waves) >= min(32, max(8, len(all_cells))):
         return None
     classes_by_specialist: Dict[str, set[str]] = {}
     for row in cells:
@@ -619,7 +619,9 @@ def _coverage_followup_wave(
                 for name in (wave.get("tool_args") or {}).get("specialists", [])
             }
             specialists = [name for name in specialists if name not in attempted]
-    specialists = specialists[:6]
+    # One bounded wave has four execution slots. Dispatch the next classes
+    # on a later wave instead of timing them out behind this batch.
+    specialists = specialists[:4]
     if not specialists:
         return None
     classes = sorted({kind for name in specialists for kind in classes_by_specialist[name]})
