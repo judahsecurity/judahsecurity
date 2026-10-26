@@ -132,6 +132,40 @@ def test_batch_reaches_all_link_inputs_once_with_live_receipts():
     assert len(manager.calls) == 4
 
 
+
+def test_first_pass_covers_distinct_inputs_before_second_class():
+    class Manager:
+        def __init__(self):
+            brain = EngagementBrain(target="https://app.test")
+            seed_parameter_coverage_cells(brain, [
+                {"method": "GET", "host": "app.test", "path": path,
+                 "name": name, "location": "query", "identity": "anonymous",
+                 "source": "browser_link", "testable": True}
+                for path, name in (
+                    ("/catalog", "category"),
+                    ("/catalog", "searchTerm"),
+                    ("/blog", "q"),
+                    ("/login", "next"),
+                )
+            ])
+            self._engagement_brain = brain.to_dict()
+            self._capability_map = {"target": "https://app.test"}
+            self.calls = []
+
+        async def scoped_input_probe_assigned(self, coverage_cell_id, **_kwargs):
+            cell = next(row for row in self._engagement_brain["coverage_cells"]
+                        if row["id"] == coverage_cell_id)
+            self.calls.append((cell["path"], cell["parameter"], cell["test_type"]))
+            return {"success": True, "evidence_id": "receipt-" + coverage_cell_id,
+                    "proof_confirmed": False}
+
+    manager = Manager()
+    result = asyncio.run(run_observed_input_batch(manager, max_checks=4))
+    assert result["processed"] == 4
+    assert len({(path, param) for path, param, _ in manager.calls}) == 4
+    assert {kind for _, _, kind in manager.calls} == {"sqli", "xss"}
+
+
 def test_numeric_link_reaches_bounded_first_pass():
     class Manager:
         def __init__(self):
