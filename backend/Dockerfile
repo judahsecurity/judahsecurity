@@ -138,6 +138,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     chromium-driver \
     xvfb \
     libnss3 \
+    libnss3-tools \
     libxss1 \
     libasound2t64 \
     fonts-liberation \

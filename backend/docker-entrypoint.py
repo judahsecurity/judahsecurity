@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import pwd
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,6 +19,35 @@ def _chown_tree(path: Path, uid: int, gid: int, *, recursive: bool = True) -> No
             os.chown(child, uid, gid)
         except OSError:
             continue
+
+
+def _trust_browser_proxy_ca() -> None:
+    if not os.environ.get("AEGIS_ASSESSMENT_PROXY_URL", "").strip():
+        return
+    from app.services.agent.assessment_proxy import (
+        assessment_ca_bundle,
+        assessment_proxy_url,
+    )
+
+    certificate = assessment_ca_bundle(assessment_proxy_url())
+    database = Path.home() / ".pki" / "nssdb"
+    database.mkdir(parents=True, exist_ok=True, mode=0o700)
+    location = "sql:" + str(database)
+    if not (database / "cert9.db").exists():
+        subprocess.run(
+            ["certutil", "-N", "-d", location, "--empty-password"],
+            check=True, capture_output=True,
+        )
+    nickname = "Prowl Assessment CA"
+    subprocess.run(
+        ["certutil", "-D", "-d", location, "-n", nickname],
+        check=False, capture_output=True,
+    )
+    subprocess.run(
+        ["certutil", "-A", "-d", location, "-n", nickname, "-t", "C,,",
+         "-i", str(certificate)],
+        check=True, capture_output=True,
+    )
 
 
 def main() -> None:
@@ -55,6 +85,7 @@ def main() -> None:
         except Exception as exc:
             sys.stderr.write(f"docker-entrypoint: privilege drop failed ({exc}); continuing\n")
 
+    _trust_browser_proxy_ca()
     os.execvp(sys.argv[1], sys.argv[1:])
 
 

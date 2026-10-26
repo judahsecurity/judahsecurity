@@ -58,6 +58,8 @@ services:
       - AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS=${AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS:-35}
       - AEGIS_EVIDENCE_DIR=${AEGIS_EVIDENCE_DIR:-/app/data/evidence}
       - AEGIS_EVIDENCE_RETENTION_SECONDS=${AEGIS_EVIDENCE_RETENTION_SECONDS:-86400}
+      - AEGIS_ASSESSMENT_PROXY_URL=${AEGIS_ASSESSMENT_PROXY_URL:-}
+      - AEGIS_ASSESSMENT_CA_BUNDLE=${AEGIS_ASSESSMENT_CA_BUNDLE:-}
       # AWS SQS Configuration (optional - for async scan job submission)
       - SQS_QUEUE_URL=${SQS_QUEUE_URL:-}
       - AWS_REGION=${AWS_REGION:-us-east-1}
@@ -177,6 +179,7 @@ services:
       - panorama_data:/app/data/panorama
       - delphi_cache:/app/data/delphi_cache
       - evidence_data:/app/data/evidence
+      - caido_ca_public:/app/certs/caido:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -610,9 +613,25 @@ services:
     profiles:
       - observability
 
-  # Private interception proxy for the host Interceptor browser. The UI and
-  # unauthenticated proxy listener stay on loopback and are reached by SSH
-  # tunnel or by the Brave process running on this host.
+  # Optional Caido proxy for analyst inspection of Prowl assessment traffic.
+  # The UI and host proxy listener remain on loopback; only backend can reach
+  # the Docker-network listener when explicitly configured to use it.
+  caido-cert-init:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: ${BACKEND_IMAGE:-asm-backend:latest}
+    user: "0:0"
+    entrypoint: ["/bin/sh", "/app/scripts/init_caido_ca.sh"]
+    command: []
+    restart: "no"
+    network_mode: "none"
+    volumes:
+      - caido_ca_private:/caido-ca-private
+      - caido_ca_public:/caido-ca-public
+    profiles:
+      - caido
+
   caido-data-init:
     image: caido/caido:0.58.3@sha256:1e5058bebeb9acb6de8f04b4956fa16c68f6fcb3b61d89ab8715860d753e3205
     user: "0:0"
@@ -631,6 +650,8 @@ services:
     depends_on:
       caido-data-init:
         condition: service_completed_successfully
+      caido-cert-init:
+        condition: service_completed_successfully
     command:
       - caido-cli
       - --no-open
@@ -639,11 +660,18 @@ services:
       - 0.0.0.0:8080
       - --proxy-listen
       - 0.0.0.0:8082
+      - --import-ca-cert
+      - /caido-ca-private/ca.p12
+      - --import-ca-cert-pass
+      - ""
     ports:
       - "127.0.0.1:8081:8080"
       - "127.0.0.1:8082:8082"
     volumes:
       - caido_data:/home/caido/.local/share/caido
+      - caido_ca_private:/caido-ca-private:ro
+    networks:
+      - asm_network
     profiles:
       - caido
 
@@ -689,4 +717,8 @@ volumes:
   interactsh_state:
     driver: local
   caido_data:
+    driver: local
+  caido_ca_private:
+    driver: local
+  caido_ca_public:
     driver: local
