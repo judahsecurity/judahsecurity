@@ -494,6 +494,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _scoped_get_count = SessionValue(lambda: 0)
     _scoped_verify_get_count = SessionValue(lambda: 0)
     _scoped_post_count = SessionValue(lambda: 0)
+    _scoped_verifier_post_count = SessionValue(lambda: 0)
     _scoped_body_replay_paths = SessionValue(set)
     _scoped_stored_xss_cleanup_paths = SessionValue(set)
     _scoped_owner_expectations = SessionValue(dict)
@@ -1371,6 +1372,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     proof = json.loads(await self.scoped_body_probe(
                         cell["capture_id"], parameter, identity,
                     ))
+                    if proof.get("proof_recipe") == "post_form_error_v1":
+                        operation = "scoped_body_sqli_error"
                 else:
                     return {"success": False, "error": "unsupported_capture",
                             "output": "No built-in replay for this captured input shape"}
