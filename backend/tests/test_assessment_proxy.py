@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import inspect
+import ssl
+from urllib.request import HTTPSHandler, ProxyHandler
 
 import httpx
 import pytest
@@ -11,6 +13,7 @@ from app.services.agent.assessment_proxy import (
     assessment_browser_proxy,
     assessment_httpx_options,
     assessment_proxy_url,
+    assessment_urllib_handlers,
 )
 from app.services.agent.scoped_assessment.browser_runtime import launch_options
 
@@ -23,6 +26,9 @@ def test_proxy_is_disabled_without_explicit_configuration(monkeypatch):
     assert assessment_httpx_options() == {"verify": True, "trust_env": False}
     assert assessment_browser_proxy() is None
     assert "proxy" not in launch_options()
+    handlers = assessment_urllib_handlers()
+    assert len(handlers) == 1 and isinstance(handlers[0], ProxyHandler)
+    assert handlers[0].proxies == {}
 
 
 @pytest.mark.parametrize("value", [
@@ -61,3 +67,26 @@ def test_proxy_routes_httpx_and_browser_with_trusted_ca(monkeypatch, tmp_path):
     proxy_key = "proxy" if "proxy" in inspect.signature(httpx.AsyncClient).parameters else "proxies"
     assert options[proxy_key] == "http://caido:8082"
     assert launch_options()["proxy"] == {"server": "http://caido:8082"}
+
+
+def test_urllib_scoped_probes_use_caido_and_its_ca(monkeypatch, tmp_path):
+    bundle = tmp_path / "ca.crt"
+    bundle.write_text("placeholder")
+    monkeypatch.setenv("AEGIS_ASSESSMENT_PROXY_URL", "http://caido:8082")
+    monkeypatch.setenv("AEGIS_ASSESSMENT_CA_BUNDLE", str(bundle))
+    monkeypatch.delenv("AEGIS_ALLOW_INSECURE_TLS", raising=False)
+    original_context = ssl.create_default_context
+    seen = {}
+
+    def context(*, cafile):
+        seen["cafile"] = cafile
+        return original_context()
+
+    monkeypatch.setattr(ssl, "create_default_context", context)
+    handlers = assessment_urllib_handlers()
+    assert seen["cafile"] == str(bundle)
+    assert isinstance(handlers[0], ProxyHandler)
+    assert handlers[0].proxies == {
+        "http": "http://caido:8082", "https": "http://caido:8082",
+    }
+    assert isinstance(handlers[1], HTTPSHandler)

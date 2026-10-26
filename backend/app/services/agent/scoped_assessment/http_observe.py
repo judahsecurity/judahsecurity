@@ -8,7 +8,9 @@ import re
 import time
 from urllib.error import HTTPError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+from app.services.agent.assessment_proxy import assessment_urllib_handlers
 
 from .browser import assert_in_scope
 
@@ -103,7 +105,7 @@ def observe_get(url: str, allowed_origins: list[str], storage_state: dict | None
     if cookies:
         headers["Cookie"] = cookies
     request = Request(url, headers=headers, method="GET")
-    opener = build_opener(ProxyHandler({}), _NoRedirect())
+    opener = build_opener(*assessment_urllib_handlers(), _NoRedirect())
     try:
         response = opener.open(request, timeout=15)
     except HTTPError as error:

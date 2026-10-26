@@ -59,6 +59,19 @@ def assessment_httpx_options() -> dict:
     return options
 
 
+def assessment_urllib_handlers() -> list:
+    """Build a target-only urllib opener with Caido's CA when configured."""
+    import ssl
+    from urllib.request import HTTPSHandler, ProxyHandler
+
+    proxy_url = assessment_proxy_url()
+    certificate = assessment_ca_bundle(proxy_url)
+    handlers = [ProxyHandler({"http": proxy_url, "https": proxy_url} if proxy_url else {})]
+    if isinstance(certificate, str):
+        handlers.append(HTTPSHandler(context=ssl.create_default_context(cafile=certificate)))
+    return handlers
+
+
 def assessment_browser_proxy() -> dict | None:
     proxy_url = assessment_proxy_url()
     if proxy_url:

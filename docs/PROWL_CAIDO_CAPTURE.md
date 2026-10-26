@@ -2,12 +2,13 @@
 
 Prowl's own evidence receipts remain the source of truth for verification.
 Caido is an optional analyst view of HTTP requests and responses. With this
-configuration, Prowl's structured `_http_exchange` calls and scoped Playwright
-browser use Caido. Those include the baseline and modified requests made by
-the observed-input probes and their verifier. Prowl still applies its
+configuration, Prowl's structured `_http_exchange` calls, local scoped GET/POST probes,
+and scoped Playwright browser use Caido. This captures baseline and modified
+requests from locally executed observed-input checks and their verifier. Prowl still applies its
 in-scope URL and browser-route checks before sending traffic.
 
-MCP command-line scanners and remote recon workers use separate transports.
+MCP command-line scanners, remote scoped services, and remote recon workers
+use separate transports.
 Their requests are **not** guaranteed to appear in Caido. Do not treat a Caido
 count as total assessment coverage or a Caido request ID as proof by itself.
 The existing run-scoped evidence IDs, controls, and verifier gate remain
