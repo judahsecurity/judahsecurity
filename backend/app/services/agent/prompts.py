@@ -921,6 +921,11 @@ from app.services.agent.proof_policy import PROOF_GUIDANCE
 APPLICATION_ASSESSMENT_GUIDANCE = """
 For a first-party web assessment, use scoped_browser_assessment(operation="map"|
 "crawl"|"inspect_js"|"check_xss", url=...) under the current exact origin.
+For reflected XSS that requires typing, include data-prowl-nonce="__PROWL_NONCE__"
+on the injected contenteditable element in the nonce-backed URL. check_xss
+types one character only into a unique visible marked element and records the
+interaction as a precondition. Preserve an observed unnamed query string after
+? when that is the input; do not invent a key=value parameter.
 The inspect_js result has action-linked traffic artifact IDs and a redacted
 surface_inventory. Use list_scoped_browser_exchanges to locate an observed
 XHR/fetch sample. scoped_http_get and scoped_http_compare return bounded
