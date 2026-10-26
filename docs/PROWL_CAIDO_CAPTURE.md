@@ -28,6 +28,11 @@ sudo docker compose build backend
 sudo docker compose --profile caido up -d caido
 ```
 
+Before enabling proxy routing, open the Caido UI through the loopback SSH tunnel,
+sign in, and create/select a project for this assessment. Caido needs an
+active project to retain traffic. Keep Intercept turned off so probes are
+not paused waiting for a manual forward.
+
 Set these two values in `/opt/asm/.env`:
 
 ```dotenv
@@ -44,7 +49,9 @@ sudo docker compose exec -T backend python -c 'from app.services.agent.assessmen
 ```
 
 The last command confirms the backend selected Caido and a readable CA. It
-does not send target traffic. A failed CA import or missing certificate stops
+does not send target traffic. Before the full assessment, send one authorized
+in-scope read-only request and confirm its request and response appear in
+the selected Caido project. A failed CA import or missing certificate stops
 backend startup rather than turning off TLS verification. To inspect Caido,
 tunnel the loopback UI port (`ssh -L 8081:127.0.0.1:8081 <host>`) and open
 `http://localhost:8081` locally. The proxy listener also remains bound to
