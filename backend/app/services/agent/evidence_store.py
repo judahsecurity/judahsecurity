@@ -447,7 +447,7 @@ class EvidenceStore:
                 )
                 continue
             if row["kind"] in {
-                "scoped_numeric_sqli", "scoped_string_sqli", "scoped_owner_only",
+                "scoped_numeric_sqli", "scoped_string_sqli", "scoped_body_sqli_error", "scoped_owner_only",
                 "scoped_http_get", "scoped_browser_check_xss",
                 "scoped_browser_check_form_xss", "scoped_browser_check_xhr_xss",
                 "scoped_browser_check_stored_xss",

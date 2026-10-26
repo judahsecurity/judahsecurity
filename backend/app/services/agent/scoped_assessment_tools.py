@@ -40,6 +40,8 @@ SCOPED_ASSESSMENT_TOOLS = (
 
 HUNTER_GET_BUDGET = 320
 VERIFIER_GET_BUDGET = 80
+HUNTER_POST_BUDGET = 10
+VERIFIER_POST_BUDGET = 10
 
 
 class ScopedAssessmentTools:
@@ -242,6 +244,16 @@ class ScopedAssessmentTools:
                       if record.get("kind") == "scoped_browser_exchange"]
         return list(dict.fromkeys([*(artifact_id for artifact_id in live
                                    if artifact_id not in historical), *historical]))[-120:]
+
+    def _scoped_claim_posts(self, count: int) -> None:
+        """Charge actual POST probe requests to the hunter or verifier budget."""
+        verifier = verification_run.get() is not None
+        counter = "_scoped_verifier_post_count" if verifier else "_scoped_post_count"
+        limit = VERIFIER_POST_BUDGET if verifier else HUNTER_POST_BUDGET
+        used = int(getattr(self, counter, 0) or 0)
+        if used + count > limit:
+            raise ValueError("Scoped POST request budget exhausted for this assessment session")
+        setattr(self, counter, used + count)
 
     def _scoped_capture_row(self, artifact_id: str) -> dict | None:
         row = (getattr(self, "_scoped_browser_exchanges", None) or {}).get(artifact_id)
@@ -592,7 +604,7 @@ class ScopedAssessmentTools:
         return json.dumps(result)
 
     async def scoped_body_probe(self, artifact_id: str, parameter: str, identity: str = "anonymous") -> str:
-        """Probe one browser observed POST field on an operator approved path; lead only."""
+        """Probe one approved POST field; only repeated SQL errors become a proof signal."""
         private = self._scoped_exchange(artifact_id, identity)
         self._scoped_assessment_started = True
         observed = json.loads(private)
@@ -602,22 +614,68 @@ class ScopedAssessmentTools:
         )
         if (urlsplit(url).path or "/") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
             raise ValueError("POST path was not approved by the assessment operator")
-        used = int(getattr(self, "_scoped_post_count", 0) or 0)
-        if used >= 10:
-            raise ValueError("Scoped POST budget exhausted for this assessment session")
-        self._scoped_post_count = used + 1
+        self._scoped_claim_posts(2)
         result = await asyncio.to_thread(
             body_probe.probe_observed_body, url, mime, baseline, changed,
             parameter=parameter, allowed_origins=[allowed],
             storage_state=self._scoped_state(identity, url),
             replay_headers=body_probe.safe_replay_headers(private),
         )
+        if result.get("sql_error_signal") and result.get("inconclusive") is False:
+            try:
+                _, _, baseline, quote_body, escaped_body = body_probe.plan_sql_error_form(
+                    private, parameter=parameter, allowed_origins=[allowed],
+                )
+                self._scoped_claim_posts(3)
+                result = await asyncio.to_thread(
+                    body_probe.probe_sql_error_form, url, mime, baseline,
+                    quote_body, escaped_body, parameter=parameter,
+                    allowed_origins=[allowed], storage_state=self._scoped_state(identity, url),
+                    replay_headers=body_probe.safe_replay_headers(private), initial=result,
+                )
+            except (ValueError, OSError, TimeoutError) as exc:
+                result["error_followup_blocked"] = type(exc).__name__
         result["source_artifact_id"] = artifact_id
         result["evidence_id"] = evidence_store(self).record(
-            "scoped_body_probe", result, target=result["target"], identity=identity,
-            success=not result["inconclusive"],
+            "scoped_body_sqli_error" if result.get("operation") == "sqli_error_form" else "scoped_body_probe",
+            result, target=result["target"], identity=identity,
+            success=result.get("proof_confirmed") is True if result.get("operation") == "sqli_error_form"
+                    else not result["inconclusive"],
         )
         return json.dumps(result)
+
+    async def _scoped_body_sql_error_verifier(
+        self, artifact_id: str, parameter: str, identity: str,
+    ) -> dict:
+        """Freshly replay an immutable hunter capture inside a verifier run."""
+        run = verification_run.get()
+        record = evidence_store(self).records.get(artifact_id)
+        row = self._scoped_capture_row(artifact_id)
+        if (run is None or not record or record.get("kind") != "scoped_browser_exchange"
+                or record.get("run_id") or not row or row.get("identity") != identity
+                or row.get("verifier_run_id")):
+            raise ValueError("Verifier requires a hunter-owned browser capture for this identity")
+        private = row["private"]
+        observed = json.loads(private)
+        allowed = self._scoped_origin(observed["url"])
+        url, mime, baseline, quote_body, escaped_body = body_probe.plan_sql_error_form(
+            private, parameter=parameter, allowed_origins=[allowed],
+        )
+        if (urlsplit(url).path or "/") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
+            raise ValueError("POST path was not approved by the assessment operator")
+        self._scoped_claim_posts(5)
+        result = await asyncio.to_thread(
+            body_probe.probe_sql_error_form, url, mime, baseline, quote_body, escaped_body,
+            parameter=parameter, allowed_origins=[allowed],
+            storage_state=self._scoped_state(identity, url),
+            replay_headers=body_probe.safe_replay_headers(private),
+        )
+        result["source_artifact_id"] = artifact_id
+        result["evidence_id"] = evidence_store(self).record(
+            "scoped_body_sqli_error", result, target=result["target"], identity=identity,
+            success=result["proof_confirmed"],
+        )
+        return result
 
     async def scoped_body_xss_reflection(
         self, artifact_id: str, parameter: str, identity: str = "anonymous",
@@ -633,10 +691,7 @@ class ScopedAssessmentTools:
         )
         if (urlsplit(url).path or "/") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
             raise ValueError("POST path was not approved by the assessment operator")
-        used = int(getattr(self, "_scoped_post_count", 0) or 0)
-        if used >= 10:
-            raise ValueError("Scoped POST budget exhausted for this assessment session")
-        self._scoped_post_count = used + 1
+        self._scoped_claim_posts(2)
         result = await asyncio.to_thread(
             body_probe.probe_observed_body_reflection, url, mime, baseline, changed,
             parameter=parameter, payload=payload, allowed_origins=[allowed],

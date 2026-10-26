@@ -82,7 +82,7 @@ def _same_observed_origin(scheme: str, host: str, target: str) -> bool:
 def observed_sql_cell_for_proof(
     brain: Any, store: Any, *, target: str, evidence_ids: Iterable[str],
 ) -> Optional[Dict[str, Any]]:
-    """Link a real scoped SQLi receipt to one exact observed GET input.
+    """Link a scoped SQLi receipt to one exact observed GET or POST input.
 
     Narrative claims and parameter-name guesses cannot create this link.
     Ambiguous inventory rows are deliberately left for analyst review.
@@ -90,6 +90,7 @@ def observed_sql_cell_for_proof(
     from urllib.parse import urlsplit
     from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
     from app.services.agent.scoped_assessment.sqli_boolean import numeric_sql_proof_valid
+    from app.services.agent.scoped_assessment.body_probe import post_sql_error_proof_valid
     from app.services.agent.scoped_assessment.sqli_string import (
         string_error_proof_valid, string_sql_proof_valid,
     )
@@ -101,14 +102,15 @@ def observed_sql_cell_for_proof(
     matches: Dict[str, Dict[str, Any]] = {}
     for evidence_id in evidence_ids:
         receipt = store.records.get(str(evidence_id))
-        if (not receipt or receipt.get("kind") not in {"scoped_string_sqli", "scoped_numeric_sqli"}
+        if (not receipt or receipt.get("kind") not in {"scoped_string_sqli", "scoped_numeric_sqli", "scoped_body_sqli_error"}
                 or receipt.get("target") != target):
             continue
         proof = receipt.get("payload")
         if (not isinstance(proof, dict) or proof.get("proof_confirmed") is not True
                 or proof.get("target") != target):
             continue
-        valid = (numeric_sql_proof_valid(proof) if receipt.get("kind") == "scoped_numeric_sqli"
+        valid = (post_sql_error_proof_valid(proof) if receipt.get("kind") == "scoped_body_sqli_error"
+                 else numeric_sql_proof_valid(proof) if receipt.get("kind") == "scoped_numeric_sqli"
                  else string_error_proof_valid(proof) if proof.get("proof_recipe") == "string_error_v1"
                  else string_sql_proof_valid(proof))
         if not valid:
@@ -118,10 +120,16 @@ def observed_sql_cell_for_proof(
             if (cell.get("source") == "parameter_inventory"
                     and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
                     and cell.get("test_type") == "sqli"
-                    and cell.get("method") == "GET"
+                    and cell.get("method") == proof.get("method")
                     and _same_observed_origin(parsed.scheme, str(cell.get("host") or ""), target)
                     and cell.get("path") == (parsed.path or "/")
-                    and cell.get("parameter") == f"query:{parameter}"
+                    and cell.get("parameter") == (
+                        f"body_form:{parameter}" if proof.get("method") == "POST"
+                        else f"query:{parameter}"
+                    )
+                    and (proof.get("method") != "POST"
+                         or (cell.get("capture_id") == proof.get("source_artifact_id")
+                             and cell.get("observation_source") == "browser_traffic"))
                     and (cell.get("identity") or "anonymous") == receipt.get("identity")):
                 matches[str(cell["id"])] = cell
     return next(iter(matches.values())) if len(matches) == 1 else None
@@ -149,7 +157,7 @@ def resolve_observed_sql_candidate_proof(
     matches: list[tuple[str, Dict[str, Any], float]] = []
     for artifact_id in ids:
         receipt = store.records.get(artifact_id)
-        if (not receipt or receipt.get("kind") not in {"scoped_string_sqli", "scoped_numeric_sqli"}
+        if (not receipt or receipt.get("kind") not in {"scoped_string_sqli", "scoped_numeric_sqli", "scoped_body_sqli_error"}
                 or receipt.get("target") != canonical or receipt.get("run_id")):
             continue
         proof = receipt.get("payload") or {}
@@ -745,6 +753,8 @@ async def _verify_scoped_sql_candidate(
                     raw["coverage_cell_id"] = cand.coverage_cell_id
             cell["candidate_id"] = cand.id
             tools_manager._engagement_brain = brain.to_dict()
+    if cell and cell.get("method") == "POST":
+        return await _verify_scoped_post_sql_candidate(tools_manager, cand, run, cell)
     if not cell or cell.get("source") != "parameter_inventory" or (
         cell.get("observation_source") not in OBSERVED_INPUT_SOURCES
         or cell.get("test_type") != "sqli" or cell.get("method") != "GET"
@@ -835,6 +845,85 @@ async def _verify_scoped_sql_candidate(
         "verifier_summary": failure, "key_findings": [], "tool_calls": 1,
         "error": None,
     }
+
+
+async def _verify_scoped_post_sql_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any, cell: dict,
+) -> Optional[Dict[str, Any]]:
+    """Repeat the same captured form with fresh POST controls and identity."""
+    import logging
+
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.proof_policy import validate_proof
+    from app.services.agent.scoped_assessment.body_probe import post_sql_error_proof_valid
+    from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
+
+    target = urlsplit(cand.target)
+    location, separator, parameter = str(cell.get("parameter") or "").partition(":")
+    identity = str(cell.get("identity") or "anonymous")
+    capture_id = str(cell.get("capture_id") or "")
+    if (cell.get("source") != "parameter_inventory"
+            or cell.get("observation_source") not in OBSERVED_INPUT_SOURCES
+            or cell.get("observation_source") != "browser_traffic"
+            or cell.get("test_type") != "sqli" or location != "body_form"
+            or not separator or not parameter or not capture_id
+            or target.scheme not in {"http", "https"}
+            or not _same_observed_origin(target.scheme, str(cell.get("host") or ""), cand.target)
+            or (target.path or "/") != cell.get("path")
+            or target.query or target.fragment
+            or (cand.identity and cand.identity != identity)
+            or (cand.parameter and cand.parameter != cell.get("parameter"))):
+        return None
+    store = evidence_store(tools_manager)
+    hunter_ids = [artifact_id for artifact_id in cand.evidence_ids
+                  if (artifact_id in store.records
+                      and store.records[artifact_id]["kind"] == "scoped_body_sqli_error"
+                      and store.records[artifact_id]["target"] == cand.target
+                      and store.records[artifact_id]["identity"] == identity
+                      and store.records[artifact_id]["payload"].get("parameter") == parameter
+                      and store.records[artifact_id]["payload"].get("source_artifact_id") == capture_id
+                      and store.records[artifact_id]["payload"].get("proof_confirmed") is True
+                      and post_sql_error_proof_valid(store.records[artifact_id]["payload"]))]
+    if not hunter_ids:
+        return None
+    failure = "Fresh POST SQLi controls did not reproduce the hunter proof"
+    try:
+        result = await tools_manager._scoped_body_sql_error_verifier(capture_id, parameter, identity)
+        artifact_id = str(result.get("evidence_id") or "")
+        verifier = store.records.get(artifact_id)
+        if (not post_sql_error_proof_valid(result) or result.get("proof_confirmed") is not True
+                or not verifier or verifier.get("kind") != "scoped_body_sqli_error"
+                or verifier.get("run_id") != run.id):
+            failure = "Fresh POST SQL error controls did not confirm injection"
+        else:
+            for hunter_id in hunter_ids:
+                proof = {"kind": "post_error_sqli", "hunter_artifact_id": hunter_id,
+                         "artifact_id": artifact_id}
+                valid, why = validate_proof(store, cand, proof, [artifact_id])
+                fresh, fresh_why = store.validate(
+                    [artifact_id], candidate_id=cand.id, revision=cand.revision,
+                    run_id=run.id, target=cand.target,
+                )
+                if valid and fresh:
+                    verified = apply_verdict(
+                        tools_manager, candidate_id=cand.id, verdict="confirmed",
+                        evidence="Fresh scoped POST SQL error controls reproduced the candidate on the exact captured form input.",
+                        evidence_ids=[artifact_id], proof=proof,
+                    )
+                    if verified and verified.status == "confirmed":
+                        return {"candidate_id": cand.id, "title": cand.title,
+                                "status": "confirmed", "verifier_summary": "Fresh POST SQL error proof matched the hunter receipt",
+                                "key_findings": [], "tool_calls": 1, "error": None}
+                failure = why or fresh_why or "POST SQL error proof policy rejected the replay"
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Deterministic POST SQLi verifier could not replay candidate %s", cand.id,
+        )
+        failure = "Scoped POST SQLi replay failed before verification completed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title, "status": "inconclusive",
+            "verifier_summary": failure, "key_findings": [], "tool_calls": 1, "error": None}
 
 
 async def _verify_scoped_browser_xss_candidate(

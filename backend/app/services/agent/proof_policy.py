@@ -23,7 +23,7 @@ Keep observations, candidates, confirmed findings, refutations, and inconclusive
 # Keep unsupported classes inconclusive until they have their own validator.
 PROOFS_BY_CLASS = {
     "exposure": frozenset({"response_match", "public_directory_index"}),
-    "sql_injection": frozenset({"numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli"}),
+    "sql_injection": frozenset({"numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "post_error_sqli"}),
     "xss": frozenset({"browser_xss", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "upload_xss"}),
     "authorization": frozenset({"authorization", "owner_only", "state_change", "workflow"}),
     "ssrf": frozenset({"oob_callback"}),
@@ -116,7 +116,7 @@ def validate_proof(
     allowed, reason = proof_kind_allowed(candidate, kind)
     if not allowed:
         return False, reason
-    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss"):
+    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "post_error_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss"):
         hunter_id = proof.get("hunter_artifact_id")
         verifier = row("artifact_id")
         hunter = (store.records.get(hunter_id)
@@ -125,6 +125,7 @@ def validate_proof(
             "numeric_boolean_sqli": "scoped_numeric_sqli",
             "string_boolean_sqli": "scoped_string_sqli",
             "string_error_sqli": "scoped_string_sqli",
+            "post_error_sqli": "scoped_body_sqli_error",
             "owner_only": "scoped_owner_only",
             "public_directory_index": "scoped_http_get",
             "scoped_browser_xss": "scoped_browser_check_xss",
@@ -197,6 +198,19 @@ def validate_proof(
                         != second["checks"]["quote_first"]["sql_error_family"]
                     or hunter["identity"] != verifier["identity"]):
                 return False, "Independent matching SQL error proof is required"
+            return True, ""
+        if kind == "post_error_sqli":
+            from app.services.agent.scoped_assessment.body_probe import post_sql_error_proof_valid
+            if (not post_sql_error_proof_valid(first) or not post_sql_error_proof_valid(second)
+                    or first.get("proof_confirmed") is not True
+                    or second.get("proof_confirmed") is not True
+                    or first.get("parameter") != second.get("parameter")
+                    or first.get("source_artifact_id") != second.get("source_artifact_id")
+                    or first.get("baseline_request_sha256") != second.get("baseline_request_sha256")
+                    or first["checks"]["quote_first"]["sql_error_family"]
+                        != second["checks"]["quote_first"]["sql_error_family"]
+                    or hunter["identity"] != verifier["identity"]):
+                return False, "Independent matching POST SQL error proof is required"
             return True, ""
         if kind == "owner_only":
             from app.services.agent.scoped_assessment.authz_proof import owner_only_proof_valid

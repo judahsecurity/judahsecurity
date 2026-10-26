@@ -20,7 +20,7 @@ _POSITIVE_INTEGER = re.compile(r"[1-9][0-9]{0,8}\Z")
 _GRAPHQL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,79}\Z")
 
 
-def _replay_headers(headers: dict[str, str] | None) -> dict[str, str]:
+def _replay_headers(headers: dict[str, str] | None, *, expected_origin: str = "") -> dict[str, str]:
     """Keep only fixed, non-credential application headers for a future replay."""
     selected: dict[str, str] = {}
     for name, value in (headers or {}).items():
@@ -28,6 +28,18 @@ def _replay_headers(headers: dict[str, str] | None) -> dict[str, str]:
         normalized = str(value).strip()
         if key == "x-requested-with" and normalized.lower() == "xmlhttprequest":
             selected["X-Requested-With"] = "XMLHttpRequest"
+        elif key == "accept" and re.fullmatch(r"[A-Za-z0-9/*+.;=, qQ-]{1,160}", normalized):
+            selected["Accept"] = normalized
+        elif key == "origin" and expected_origin and normalized == expected_origin:
+            selected["Origin"] = normalized
+        elif key == "referer" and expected_origin and len(normalized) <= MAX_URL_LENGTH:
+            try:
+                parts = urlsplit(normalized)
+                if (origin(normalized) == expected_origin and not parts.fragment
+                        and not parts.username and not parts.password):
+                    selected["Referer"] = normalized
+            except ValueError:
+                pass
         elif key in {"apollo-require-preflight", "graphql-require-preflight"} and normalized.lower() == "true":
             selected["Apollo-Require-Preflight" if key.startswith("apollo") else "GraphQL-Require-Preflight"] = "true"
     return selected
@@ -158,7 +170,7 @@ def package_exchange(*, url: str, expected_origin: str, action_ref: str,
     graphql = _graphql_shape(request_body, request_mime)
     if graphql is not None:
         body_fields = graphql[3]
-    replay_headers = _replay_headers(request_headers)
+    replay_headers = _replay_headers(request_headers, expected_origin=expected_origin)
     public = {
         "action_ref": action_ref,
         "page_path": (urlsplit(page_url).path or "/")[:512] if page_url else "",
