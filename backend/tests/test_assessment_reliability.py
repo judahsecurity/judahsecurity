@@ -283,7 +283,7 @@ async def test_http_transport_uses_caido_without_disabling_tls(manager, monkeypa
     seen = {}
     ca_bundle = tmp_path / "ca.crt"
     ca_bundle.write_text("test certificate")
-    monkeypatch.setenv("AEGIS_ASSESSMENT_PROXY_URL", "http://caido:8082")
+    monkeypatch.setenv("AEGIS_ASSESSMENT_PROXY_URL", "http://caido-assessment:8082")
     monkeypatch.setenv("AEGIS_ASSESSMENT_CA_BUNDLE", str(ca_bundle))
     monkeypatch.delenv("AEGIS_ALLOW_INSECURE_TLS", raising=False)
 
@@ -300,7 +300,7 @@ async def test_http_transport_uses_caido_without_disabling_tls(manager, monkeypa
 
     monkeypatch.setattr(httpx, "AsyncClient", client)
     await manager._http_exchange("GET", "https://a.test/")
-    assert seen.get("proxy", seen.get("proxies")) == "http://caido:8082"
+    assert seen.get("proxy", seen.get("proxies")) == "http://caido-assessment:8082"
     assert seen["verify"] == str(ca_bundle)
     assert seen["trust_env"] is False
 
