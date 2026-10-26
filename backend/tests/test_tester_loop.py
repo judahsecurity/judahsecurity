@@ -770,10 +770,14 @@ def test_stalled_coverage_wave_does_not_starve_other_specialists():
         "specialist": f"specialist_{index}", "test_type": f"class_{index}",
     } for index in range(7)]}}
     first = _coverage_followup_wave(state, [], target)
-    assert len(first["tool_args"]["specialists"]) == 6
+    assert first["tool_args"]["specialists"] == [
+        "specialist_0", "specialist_1", "specialist_2", "specialist_3",
+    ]
     trace = [{"tool_name": "fireteam_dispatch", "tool_args": first["tool_args"]}]
     second = _coverage_followup_wave(state, trace, target)
-    assert second["tool_args"]["specialists"] == ["specialist_6"]
+    assert second["tool_args"]["specialists"] == [
+        "specialist_4", "specialist_5", "specialist_6",
+    ]
     trace.append({"tool_name": "fireteam_dispatch", "tool_args": second["tool_args"]})
     assert _coverage_followup_wave(state, trace, target) is None
 

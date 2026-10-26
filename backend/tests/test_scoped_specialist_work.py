@@ -174,7 +174,16 @@ async def test_coverage_followup_leases_observed_client_script(monkeypatch):
     monkeypatch.setattr(manager, "_cheap_llm", lambda: object())
     leased = []
 
-    async def fake_fireteam(*, mission, directives, **_kwargs):
+    async def fake_fireteam(
+        *, mission, directives, specialists, member_timeout_sec,
+        wave_timeout_sec, **_kwargs,
+    ):
+        assert wave_timeout_sec <= 150
+        assert member_timeout_sec <= 140
+        assert len(specialists) == 1
+        assert specialists[0].name == "spa_client"
+        assert specialists[0].max_iterations <= 4
+        assert specialists[0].max_tools_per_iteration <= 3
         if not directives:
             return FireteamResult(mission=mission, specialists_run=[], reports=[])
         directive = directives["spa_client"]

@@ -77,7 +77,7 @@ def test_new_private_capture_requeues_only_unprobed_checks():
     assert sqli["capture_id"] != "private-1"
 
 
-def test_verified_input_prioritizes_other_observed_inputs_on_same_path():
+def test_verified_input_does_not_preempt_unseen_paths_in_first_pass():
     brain = EngagementBrain(target="https://app.test")
     seed_parameter_coverage_cells(brain, [
         _input("/items", "filter", method="GET", location="query", source="browser_link"),
@@ -91,9 +91,9 @@ def test_verified_input_prioritizes_other_observed_inputs_on_same_path():
     brain.candidates = [{"id": "candidate-1", "coverage_cell_id": proven["id"],
                          "status": "confirmed", "finding_id": "finding-1"}]
     pending = pending_first_pass_cells(brain)
-    assert pending[0]["path"] == "/items"
-    assert pending[0]["parameter"] == "query:extra"
-    assert any(row["path"] == "/search" for row in pending)
+    assert pending[0]["path"] == "/search"
+    pending[0]["first_pass_outcome"] = "inconclusive"
+    assert pending_first_pass_cells(brain)[0]["parameter"] == "query:extra"
 
 
 def test_confirmed_xss_prioritizes_other_classes_on_same_path():
