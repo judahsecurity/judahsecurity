@@ -14,7 +14,9 @@ import json
 import re
 from urllib.error import HTTPError
 from urllib.parse import unquote_plus, urlsplit
-from urllib.request import ProxyHandler, Request, build_opener
+from urllib.request import Request, build_opener
+
+from app.services.agent.assessment_proxy import assessment_urllib_handlers
 
 from .browser import assert_in_scope, origin
 from .browser_traffic import MAX_BODY_BYTES, _replay_headers
@@ -173,7 +175,7 @@ def _observe_post(url: str, mime: str, body: bytes,
     if cookies:
         headers["Cookie"] = cookies
     request = Request(url, data=body, headers=headers, method="POST")
-    opener = build_opener(ProxyHandler({}), _NoRedirect())
+    opener = build_opener(*assessment_urllib_handlers(), _NoRedirect())
     try:
         response = opener.open(request, timeout=timeout)
     except HTTPError as error:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 
+from app.services.agent.assessment_proxy import assessment_browser_proxy
+
 
 def launch_options() -> dict:
     options = {
@@ -16,4 +18,7 @@ def launch_options() -> dict:
     executable = os.getenv("AEGIS_CHROMIUM_PATH") or os.getenv("PROWL_CHROMIUM_PATH") or os.getenv("CHROME_BIN")
     if executable:
         options["executable_path"] = executable
+    proxy = assessment_browser_proxy()
+    if proxy:
+        options["proxy"] = proxy
     return options

@@ -7796,10 +7796,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         start = _time.monotonic()
         # Follow redirects manually: retain RFC cookie scope and never forward an
         # explicit Cookie/Authorization header to a different origin.
-        ca_bundle = os.environ.get("AEGIS_ASSESSMENT_CA_BUNDLE")
-        allow_insecure = os.environ.get("AEGIS_ALLOW_INSECURE_TLS", "").lower() in ("1", "true", "yes")
-        tls_verify = False if allow_insecure else (ca_bundle or True)
-        async with httpx.AsyncClient(cookies=jar, follow_redirects=False, verify=tls_verify, timeout=timeout) as client:
+        from app.services.agent.assessment_proxy import assessment_httpx_options
+        async with httpx.AsyncClient(
+            cookies=jar, follow_redirects=False, timeout=timeout,
+            **assessment_httpx_options(),
+        ) as client:
             req = client.build_request(method, url, headers=hdrs, content=raw_body)
             if not any(k.lower() == "cookie" for k in hdrs):
                 req.headers.pop("cookie", None)

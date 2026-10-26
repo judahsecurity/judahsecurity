@@ -278,6 +278,34 @@ async def test_http_transport_verifies_tls_by_default(manager, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_http_transport_uses_caido_without_disabling_tls(manager, monkeypatch, tmp_path):
+    original = httpx.AsyncClient
+    seen = {}
+    ca_bundle = tmp_path / "ca.crt"
+    ca_bundle.write_text("test certificate")
+    monkeypatch.setenv("AEGIS_ASSESSMENT_PROXY_URL", "http://caido-assessment:8082")
+    monkeypatch.setenv("AEGIS_ASSESSMENT_CA_BUNDLE", str(ca_bundle))
+    monkeypatch.delenv("AEGIS_ALLOW_INSECURE_TLS", raising=False)
+
+    def client(**kwargs):
+        seen.update(kwargs)
+        # MockTransport bypasses the proxy and avoids loading a placeholder CA.
+        kwargs.pop("proxy", None)
+        kwargs.pop("proxies", None)
+        kwargs["verify"] = True
+        return original(
+            transport=httpx.MockTransport(lambda req: httpx.Response(200, text="ok")),
+            **kwargs,
+        )
+
+    monkeypatch.setattr(httpx, "AsyncClient", client)
+    await manager._http_exchange("GET", "https://a.test/")
+    assert seen.get("proxy", seen.get("proxies")) == "http://caido-assessment:8082"
+    assert seen["verify"] == str(ca_bundle)
+    assert seen["trust_env"] is False
+
+
+@pytest.mark.asyncio
 async def test_http_transport_blocks_unregistered_scope_before_network(manager, transport):
     called = False
 

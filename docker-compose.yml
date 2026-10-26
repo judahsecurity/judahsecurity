@@ -58,6 +58,8 @@ services:
       - AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS=${AEGIS_INTERACTSH_RPC_TIMEOUT_SECONDS:-35}
       - AEGIS_EVIDENCE_DIR=${AEGIS_EVIDENCE_DIR:-/app/data/evidence}
       - AEGIS_EVIDENCE_RETENTION_SECONDS=${AEGIS_EVIDENCE_RETENTION_SECONDS:-86400}
+      - AEGIS_ASSESSMENT_PROXY_URL=${AEGIS_ASSESSMENT_PROXY_URL:-}
+      - AEGIS_ASSESSMENT_CA_BUNDLE=${AEGIS_ASSESSMENT_CA_BUNDLE:-}
       # AWS SQS Configuration (optional - for async scan job submission)
       - SQS_QUEUE_URL=${SQS_QUEUE_URL:-}
       - AWS_REGION=${AWS_REGION:-us-east-1}
@@ -177,6 +179,7 @@ services:
       - panorama_data:/app/data/panorama
       - delphi_cache:/app/data/delphi_cache
       - evidence_data:/app/data/evidence
+      - caido_assessment_ca_public:/app/certs/caido:ro
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -647,6 +650,66 @@ services:
     profiles:
       - caido
 
+  # Separate Prowl assessment proxy. Existing host Interceptor Caido keeps
+  # its project data and CA unchanged.
+  caido-assessment-cert-init:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: ${BACKEND_IMAGE:-asm-backend:latest}
+    user: "0:0"
+    entrypoint: ["/bin/sh", "/app/scripts/init_caido_ca.sh"]
+    command: []
+    restart: "no"
+    network_mode: "none"
+    volumes:
+      - caido_assessment_ca_private:/caido-ca-private
+      - caido_assessment_ca_public:/caido-ca-public
+    profiles:
+      - caido-assessment
+
+  caido-assessment-data-init:
+    image: caido/caido:0.58.3@sha256:1e5058bebeb9acb6de8f04b4956fa16c68f6fcb3b61d89ab8715860d753e3205
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown -R 996:996 /home/caido/.local/share/caido"]
+    restart: "no"
+    volumes:
+      - caido_assessment_data:/home/caido/.local/share/caido
+    profiles:
+      - caido-assessment
+
+  caido-assessment:
+    image: caido/caido:0.58.3@sha256:1e5058bebeb9acb6de8f04b4956fa16c68f6fcb3b61d89ab8715860d753e3205
+    container_name: asm_caido_assessment
+    restart: unless-stopped
+    depends_on:
+      caido-assessment-data-init:
+        condition: service_completed_successfully
+      caido-assessment-cert-init:
+        condition: service_completed_successfully
+    command:
+      - caido-cli
+      - --no-open
+      - --no-renderer-sandbox
+      - --ui-listen
+      - 0.0.0.0:8080
+      - --proxy-listen
+      - 0.0.0.0:8082
+      - --import-ca-cert
+      - /caido-ca-private/ca.p12
+      - --import-ca-cert-pass
+      - ""
+    ports:
+      - "127.0.0.1:8083:8080"
+    volumes:
+      - caido_assessment_data:/home/caido/.local/share/caido
+      - caido_assessment_ca_private:/caido-ca-private:ro
+    networks:
+      - asm_network
+    profiles:
+      - caido-assessment
+
 networks:
   asm_network:
     driver: bridge
@@ -689,4 +752,10 @@ volumes:
   interactsh_state:
     driver: local
   caido_data:
+    driver: local
+  caido_assessment_data:
+    driver: local
+  caido_assessment_ca_private:
+    driver: local
+  caido_assessment_ca_public:
     driver: local
