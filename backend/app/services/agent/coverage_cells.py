@@ -985,10 +985,15 @@ def claim_coverage_cell_leases(
         ]
         candidates.sort(
             key=lambda cell: (
-                # A first pass should reach every observed input before
-                # revisiting a promising but inconclusive parameter.
+                # A positive proof belongs with candidate verification, not
+                # another manual specialist probing the same input.
+                int(bool(cell.get("candidate_id") or cell.get("finding_id")
+                         or cell.get("first_pass_outcome") == "proof_signal")),
+                # Give untouched SQLi/XSS inputs a turn before deeper probes
+                # on an input that already has a first-pass receipt.
+                int(bool(cell.get("first_pass_outcome")))
+                if specialist in {"sqli", "xss"} else 0,
                 int(cell.get("attempts") or 0) if first_pass_only else 0,
-                0 if cell.get("first_pass_outcome") == "proof_signal" else 1,
                 0 if cell.get("path") in focus_paths else 1,
                 int(cell.get("priority_rank", 2)),
                 0 if specialist in {"xss", "sqli"} and scoped_replay_eligible(cell) else 1,
