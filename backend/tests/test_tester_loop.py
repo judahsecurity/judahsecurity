@@ -459,8 +459,16 @@ def test_new_inputs_keep_first_pass_running_when_pending_count_is_unchanged(prio
     assert first["tool_args"]["pending_input_count"] == 2
     trace = [{"tool_name": "probe_observed_input_batch", "success": prior_success,
               "tool_args": first["tool_args"]}]
-    # A completed batch with the same exact queue must not spin.
-    assert _observed_input_batch_step(state, trace, "surface-a") is None
+    # A completed no-progress batch must not spin. A failed tool call gets
+    # one bounded retry because it did not test any of the pending inputs.
+    retry = _observed_input_batch_step(state, trace, "surface-a")
+    if prior_success:
+        assert retry is None
+    else:
+        assert retry["tool_name"] == "probe_observed_input_batch"
+        trace.append({"tool_name": "probe_observed_input_batch", "success": False,
+                      "tool_args": retry["tool_args"]})
+        assert _observed_input_batch_step(state, trace, "surface-a") is None
 
     state["engagement_brain"]["coverage_cells"][0]["first_pass_outcome"] = "inconclusive"
     state["engagement_brain"]["coverage_cells"].append(cell("c"))
