@@ -172,3 +172,24 @@ async def test_assigned_xss_replays_observed_query_context(monkeypatch):
     query = parse_qs(urlsplit(template).query)
     assert query["sort"] == ["recent"] and query["page"] == ["2"]
     assert "__PROWL_NONCE__" in query["term"][0]
+
+
+def test_manual_specialist_leases_untouched_input_before_positive_receipt():
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, [
+        _input("/catalog", "category", method="GET", location="query",
+               source="browser_link"),
+        _input("/search", "searchTerm", method="GET", location="query",
+               source="browser_link"),
+    ])
+    proven = next(row for row in brain.coverage_cells
+                  if row["test_type"] == "sqli" and row["path"] == "/catalog")
+    untouched = next(row for row in brain.coverage_cells
+                     if row["test_type"] == "sqli" and row["path"] == "/search")
+    proven.update(status="in_focus", first_pass_outcome="proof_signal",
+                  candidate_id="candidate-1", attempts=1)
+    lease = claim_coverage_cell_leases(
+        brain, ["sqli"], allowed_sources=frozenset({"parameter_inventory"}),
+        allowed_test_types=frozenset({"sqli"}),
+    )["sqli"]
+    assert lease.coverage_cell_id == untouched["id"]
