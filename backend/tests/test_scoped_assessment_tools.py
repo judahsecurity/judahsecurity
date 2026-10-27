@@ -630,3 +630,30 @@ async def test_observed_directory_becomes_assessment_coverage(monkeypatch):
     assert result["suggested_coverage"][0]["target"] == "https://app.example.test/static/"
     summary = json.loads(await manager.scoped_assessment_summary())
     assert any(row["path"] == "/static/" for row in summary["coverage"]["untested"])
+
+def test_observed_input_get_budget_survives_exploratory_exhaustion():
+    from app.services.agent.scoped_assessment_tools import (
+        HUNTER_GENERAL_GET_BUDGET,
+        HUNTER_GET_BUDGET,
+        first_pass_get_context,
+    )
+
+    manager = ASMToolsManager()
+    manager._scoped_get_count = HUNTER_GENERAL_GET_BUDGET
+    manager._scoped_general_get_count = HUNTER_GENERAL_GET_BUDGET
+    with pytest.raises(ValueError, match="Exploratory HTTP GET budget"):
+        manager._scoped_claim_gets(1)
+    token = first_pass_get_context.set(True)
+    try:
+        manager._scoped_claim_gets(6)
+    finally:
+        first_pass_get_context.reset(token)
+    assert manager._scoped_get_count == HUNTER_GENERAL_GET_BUDGET + 6
+    assert manager._scoped_general_get_count == HUNTER_GENERAL_GET_BUDGET
+    manager._scoped_get_count = HUNTER_GET_BUDGET
+    token = first_pass_get_context.set(True)
+    try:
+        with pytest.raises(ValueError, match="Scoped HTTP GET budget"):
+            manager._scoped_claim_gets(1)
+    finally:
+        first_pass_get_context.reset(token)

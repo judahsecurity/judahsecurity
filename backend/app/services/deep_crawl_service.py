@@ -68,6 +68,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 from urllib.parse import parse_qsl, urljoin, urlparse, urlsplit
 
+from app.services.crawl_priority import route_family
+
 logger = logging.getLogger(__name__)
 
 
@@ -493,6 +495,35 @@ def _functionality_score(url: str) -> int:
     return score
 
 
+def _api_sample_family(sample: Dict[str, Any]) -> tuple:
+    """Identify a replay shape without retaining request values in the key."""
+    method = str(sample.get("method") or "GET").upper()
+    route = route_family(str(sample.get("url") or ""))
+    headers = sample.get("headers") or {}
+    content_type = str(headers.get("content-type") or "").split(";", 1)[0].lower()
+    body = str(sample.get("body") or "")
+    fields: tuple[str, ...] = ()
+    if content_type == "application/x-www-form-urlencoded":
+        try:
+            fields = tuple(sorted({name for name, _ in parse_qsl(
+                body, keep_blank_values=True, max_num_fields=80,
+            )}))
+        except ValueError:
+            pass
+    elif content_type == "application/json" or content_type.endswith("+json"):
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict):
+                fields = tuple(sorted(str(key) for key in parsed))
+        except (TypeError, ValueError):
+            pass
+    elif "xml" in content_type:
+        root = re.search(r"<([A-Za-z_][A-Za-z0-9_.:-]*)\b", body)
+        if root:
+            fields = (root.group(1),)
+    return method, route, content_type, fields
+
+
 def _enqueue_func(
     queue: List[tuple],
     seen: Set[str],
@@ -811,6 +842,8 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                 from app.services.agent.runtime_mapper import normalize_request, merge_operations
                 from app.services.browser_automation_service import MAX_NETWORK_REQUESTS, _request_metadata
                 request_rows: Dict[int, int] = {}
+                api_sample_rows: Dict[int, int] = {}
+                api_sample_families: Set[tuple] = set()
 
                 def _on_request(req):
                     try:
@@ -871,7 +904,11 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                                     sample["body"] = pd[:4000]
                             except Exception:
                                 pass
-                            result.api_samples.append(sample)
+                            family = _api_sample_family(sample)
+                            if family not in api_sample_families:
+                                api_sample_families.add(family)
+                                api_sample_rows[id(req)] = len(result.api_samples)
+                                result.api_samples.append(sample)
                     except Exception:
                         pass
 
@@ -899,30 +936,28 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                             )
                         if req.resource_type not in ("xhr", "fetch"):
                             return
-                        url = (req.url or "")[:500]
-                        method = req.method
-                        for sample in reversed(result.api_samples):
-                            if sample.get("url") == url and sample.get("method") == method:
-                                sample["status"] = resp.status
-                                try:
-                                    rh = resp.headers or {}
-                                    resp_headers = {}
-                                    for hk in (
-                                        "server", "x-powered-by", "via", "cf-ray",
-                                        "cf-cache-status", "content-type",
-                                        "x-amzn-requestid", "x-amz-apigw-id",
-                                        "x-envoy-upstream-service-time",
-                                    ):
-                                        if hk in rh:
-                                            resp_headers[hk] = str(rh[hk])[:200]
-                                    if resp_headers:
-                                        sample["response_headers"] = resp_headers
-                                    sc = rh.get("set-cookie")
-                                    if sc:
-                                        sample["set_cookie"] = str(sc).split("=", 1)[0][:80]
-                                except Exception:
-                                    pass
-                                break
+                        sample_index = api_sample_rows.pop(id(req), None)
+                        if sample_index is not None:
+                            sample = result.api_samples[sample_index]
+                            sample["status"] = resp.status
+                            try:
+                                rh = resp.headers or {}
+                                resp_headers = {}
+                                for hk in (
+                                    "server", "x-powered-by", "via", "cf-ray",
+                                    "cf-cache-status", "content-type",
+                                    "x-amzn-requestid", "x-amz-apigw-id",
+                                    "x-envoy-upstream-service-time",
+                                ):
+                                    if hk in rh:
+                                        resp_headers[hk] = str(rh[hk])[:200]
+                                if resp_headers:
+                                    sample["response_headers"] = resp_headers
+                                sc = rh.get("set-cookie")
+                                if sc:
+                                    sample["set_cookie"] = str(sc).split("=", 1)[0][:80]
+                            except Exception:
+                                pass
                     except Exception:
                         pass
 
@@ -932,6 +967,9 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                     index = request_rows.get(id(req))
                     if index is not None:
                         result.network_requests[index]["failed"] = True
+                    sample_index = api_sample_rows.pop(id(req), None)
+                    if sample_index is not None:
+                        result.api_samples[sample_index]["failed"] = True
                 page.on("requestfailed", _on_request_failed)
                 page.on("websocket", lambda ws: result.websockets.add(ws.url)
                         if len(result.websockets) < 100 else None)
