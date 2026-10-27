@@ -305,7 +305,17 @@ def _observed_input_batch_step(
     # Avoid a tight retry loop only when the same exact queue failed or made
     # no progress. A newly discovered input deserves its own first pass.
     if prior and (prior.get("tool_args") or {}).get("pending_batch_signature") == pending_signature:
-        return None
+        # A failed tool call has not tested the queue. Retry it once; a second
+        # failure yields to the normal scheduler without claiming clean coverage.
+        failures = sum(
+            step.get("tool_name") == "probe_observed_input_batch"
+            and (step.get("tool_args") or {}).get("surface_signature") == signature
+            and (step.get("tool_args") or {}).get("pending_batch_signature") == pending_signature
+            and step.get("success") is False
+            for step in trace
+        )
+        if prior.get("success") is not False or failures >= 2:
+            return None
     return {
         "tool_name": "probe_observed_input_batch",
         "tool_args": {
