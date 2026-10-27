@@ -25,6 +25,7 @@ from app.services.agent.coverage_cells import (
 )
 from app.services.agent.engagement_brain import engagement_brain_from_dict
 from app.services.agent.parameter_inventory import _origin
+from app.services.agent.scoped_assessment_tools import first_pass_get_context
 from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
 
 logger = logging.getLogger(__name__)
@@ -48,12 +49,16 @@ def _retryable_first_pass(cell: dict[str, Any], now: float) -> bool:
 
 
 async def _invoke(manager: Any, name: str, kwargs: dict[str, Any]) -> Any:
-    """Keep nested active probes inside the normal tool policy and ledger."""
-    if callable(getattr(manager, "execute", None)):
-        wrapped = await manager.execute(name, kwargs)
-        output = wrapped.get("output") if isinstance(wrapped, dict) else None
-        return output if isinstance(output, dict) else wrapped
-    return await getattr(manager, name)(**kwargs)
+    """Keep nested active probes inside policy and reserve their GET budget."""
+    token = first_pass_get_context.set(True)
+    try:
+        if callable(getattr(manager, "execute", None)):
+            wrapped = await manager.execute(name, kwargs)
+            output = wrapped.get("output") if isinstance(wrapped, dict) else None
+            return output if isinstance(output, dict) else wrapped
+        return await getattr(manager, name)(**kwargs)
+    finally:
+        first_pass_get_context.reset(token)
 
 
 def _renew_stale_first_pass_lease(
