@@ -898,3 +898,20 @@ def test_batch_refuses_stale_map_for_current_target():
     assert result["processed"] == 0
     assert result["error"] == "assessment_target_mismatch"
     assert manager.calls == 0
+
+@pytest.mark.asyncio
+async def test_nested_first_pass_probe_reserves_gets_without_context_leak():
+    from app.services.agent.observed_input_batch import _invoke
+    from app.services.agent.scoped_assessment_tools import first_pass_get_context
+
+    class Manager:
+        async def execute(self, name, kwargs):
+            assert name == "scoped_input_probe_assigned"
+            assert first_pass_get_context.get() is True
+            return {"output": {"success": True}}
+
+    assert first_pass_get_context.get() is False
+    assert await _invoke(Manager(), "scoped_input_probe_assigned", {}) == {
+        "success": True,
+    }
+    assert first_pass_get_context.get() is False
