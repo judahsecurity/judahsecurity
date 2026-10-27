@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import secrets
+from contextvars import ContextVar
 from urllib.parse import parse_qsl, quote, unquote_plus, urlencode, urljoin, urlsplit, urlunsplit
 
 from app.services.agent.assessment_scope import assert_url_in_scope
@@ -38,8 +39,14 @@ SCOPED_ASSESSMENT_TOOLS = (
     "get_finding_candidate",
 )
 
-HUNTER_GET_BUDGET = 320
+# Exploratory probes cannot consume the capacity needed to give observed
+# SQLi/XSS inputs a first pass. The total cap still bounds target traffic.
+HUNTER_GET_BUDGET = 1024
+HUNTER_GENERAL_GET_BUDGET = 256
 VERIFIER_GET_BUDGET = 80
+first_pass_get_context: ContextVar[bool] = ContextVar(
+    "prowl_first_pass_get", default=False,
+)
 HUNTER_POST_BUDGET = 10
 VERIFIER_POST_BUDGET = 10
 
@@ -235,6 +242,13 @@ class ScopedAssessmentTools:
         used = int(getattr(self, counter, 0) or 0)
         if used + count > limit:
             raise ValueError("Scoped HTTP GET budget exhausted for this assessment session")
+        if not verifier and not first_pass_get_context.get():
+            general_used = int(getattr(self, "_scoped_general_get_count", 0) or 0)
+            if general_used + count > HUNTER_GENERAL_GET_BUDGET:
+                raise ValueError(
+                    "Exploratory HTTP GET budget exhausted; observed-input first passes remain reserved"
+                )
+            setattr(self, "_scoped_general_get_count", general_used + count)
         setattr(self, counter, used + count)
 
     def _scoped_capture_ids(self) -> list[str]:
