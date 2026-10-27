@@ -6,6 +6,8 @@
     "Inject a unique canary into search/reflect params from the map.",
     "Confirm reflection context (HTML body, quoted attribute, JavaScript string) and encoding via response or browser; reflection alone is not execution.",
     "Choose one context-matched, nonce-backed browser execution proof in-scope; an event handler is suitable for HTML body or DOM insertion, while a quoted JavaScript string needs a matching string-breakout probe.",
+    "For a reflected contenteditable onbeforeinput case, put data-prowl-nonce=\"__PROWL_NONCE__\" on the injected editable element. The scoped browser types one character only when exactly one visible marked element exists, and still requires a fresh nonce dialog. Record that the victim must also type.",
+    "A URL can use an unnamed query string after ? rather than a key=value field. Preserve that exact shape when checking a reflected script-context candidate; do not invent a parameter name.",
     "If filtered, try one context-appropriate encoding — do not spray huge payload lists.",
     "Stored: submit canary, reload as second identity if available.",
     "On PASS: fresh nonce-backed script execution in the scoped browser with a reproducible URL; reflection or raw markup alone is only a lead."

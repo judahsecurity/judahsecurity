@@ -5,7 +5,7 @@ import os
 import threading
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import pytest
 from app.services.agent.assessment_scope import register_scope
@@ -15,6 +15,98 @@ pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_ASSESSMENT_BROWSER_TESTS") != "1",
     reason="Opt-in local Chromium fixture",
 )
+
+
+@pytest.mark.asyncio
+async def test_scoped_reflected_xss_types_only_into_nonce_marked_contenteditable():
+    from app.services.agent.scoped_assessment.browser import check_browser
+
+    posts = []
+
+    class Handler(BaseHTTPRequestHandler):
+        encode = False
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            value = parse_qs(urlsplit(self.path).query).get("q", [""])[0]
+            rendered = escape(value) if self.encode else value
+            body = ("<html><body>" + rendered + "</body></html>").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            posts.append(self.path)
+            self.send_response(204)
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    payload = ('<div contenteditable data-prowl-nonce="__PROWL_NONCE__" '
+               'onbeforeinput="fetch(\'/write\',{method:\'POST\'});'
+               'alert(\'__PROWL_NONCE__\')">type here</div>')
+    try:
+        for encoded in (False, True):
+            Handler.encode = encoded
+            result, _ = await check_browser(
+                operation="check_xss", url=base + "/search?q=" + quote(payload),
+                allowed_origins=[base],
+            )
+            assert result["executed"] is not encoded
+            assert result["interaction_performed"] is not encoded
+            assert result["trigger"] == ("none" if encoded else "contenteditable_input")
+        assert posts == []  # Typing may fire script, but cannot send a POST.
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_scoped_reflected_xss_accepts_unnamed_query_string():
+    from app.services.agent.scoped_assessment.browser import check_browser
+
+    class Handler(BaseHTTPRequestHandler):
+        encode = False
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            value = unquote(urlsplit(self.path).query)
+            rendered = escape(value) if self.encode else value
+            body = (f'<script>window.search="{rendered}";</script>').encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    payload = '</script><script>alert("__PROWL_NONCE__")</script>'
+    try:
+        for encoded in (False, True):
+            Handler.encode = encoded
+            result, _ = await check_browser(
+                operation="check_xss", url=base + "/login?" + quote(payload),
+                allowed_origins=[base],
+            )
+            assert result["executed"] is not encoded
+            assert result["trigger"] == ("none" if encoded else "load")
+            assert result["interaction_performed"] is False
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 @pytest.mark.asyncio

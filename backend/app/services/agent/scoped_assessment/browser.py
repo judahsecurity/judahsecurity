@@ -297,7 +297,12 @@ async def check_browser(
     seen_exchange_shapes: set[tuple] = set()
     current_action_ref = "navigate"
     actions: list[dict] = []
-    read_only_interaction = operation in {"check_xhr_xss", "check_form_xss", "check_stored_xss"}
+    read_only_interaction = operation in {"check_xss", "check_xhr_xss", "check_form_xss", "check_stored_xss"}
+    xss_load_executed = False
+    xss_interaction_attempted = False
+    xss_interaction_performed = False
+    xss_interaction_executed = False
+    xss_interaction_error = ""
     get_form_actions = 0
     approved_post_path = urlsplit(form_action).path or "/"
     post_action_active = False
@@ -668,6 +673,27 @@ async def check_browser(
                     xhr_actions_replayed += 1
                     await page.wait_for_timeout(350)
             await page.wait_for_timeout(1200 if operation in {"check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss"} else 650)
+            if operation == "check_xss":
+                xss_load_executed = any(nonce in message for message in dialogs)
+                # Only interact with a single visible element explicitly marked
+                # by this fresh payload. Never type into an arbitrary page field.
+                editable = page.locator(f'[contenteditable][data-prowl-nonce="{nonce}"]')
+                if await editable.count() == 1 and await editable.is_visible():
+                    if await editable.evaluate("el => el.isContentEditable && !el.closest('form')"):
+                        xss_interaction_attempted = True
+                        current_action_ref = "xss-contenteditable-input"
+                        before = len(dialogs)
+                        try:
+                            await editable.press("x", timeout=3_000)
+                            xss_interaction_performed = True
+                            await page.wait_for_timeout(300)
+                        except Exception as exc:
+                            xss_interaction_error = type(exc).__name__
+                        finally:
+                            xss_interaction_executed = any(
+                                nonce in message for message in dialogs[before:]
+                            )
+                            current_action_ref = "settle"
             form_submitted = False
             if operation in {"check_form_xss", "check_stored_xss"}:
                 # Use the observed page's native submit path, including its JS
@@ -946,6 +972,14 @@ async def check_browser(
                 )
                 result["dialog_count"] = len(dialogs)
                 result["nonce"] = nonce
+                if operation == "check_xss":
+                    result["trigger"] = (
+                        "load" if xss_load_executed else
+                        "contenteditable_input" if xss_interaction_executed else "none"
+                    )
+                    result["interaction_attempted"] = xss_interaction_attempted
+                    result["interaction_performed"] = xss_interaction_performed
+                    result["interaction_error"] = xss_interaction_error
                 if operation in {"check_form_xss", "check_stored_xss"}:
                     result["form_action"] = form_action
                     result["form_field"] = form_field
