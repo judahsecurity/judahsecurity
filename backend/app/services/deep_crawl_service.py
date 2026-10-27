@@ -68,6 +68,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 from urllib.parse import parse_qsl, urljoin, urlparse, urlsplit
 
+from app.services.crawl_priority import route_family
+
 logger = logging.getLogger(__name__)
 
 
@@ -493,6 +495,35 @@ def _functionality_score(url: str) -> int:
     return score
 
 
+def _api_sample_family(sample: Dict[str, Any]) -> tuple:
+    """Identify a replay shape without retaining request values in the key."""
+    method = str(sample.get("method") or "GET").upper()
+    route = route_family(str(sample.get("url") or ""))
+    headers = sample.get("headers") or {}
+    content_type = str(headers.get("content-type") or "").split(";", 1)[0].lower()
+    body = str(sample.get("body") or "")
+    fields: tuple[str, ...] = ()
+    if content_type == "application/x-www-form-urlencoded":
+        try:
+            fields = tuple(sorted({name for name, _ in parse_qsl(
+                body, keep_blank_values=True, max_num_fields=80,
+            )}))
+        except ValueError:
+            pass
+    elif content_type == "application/json" or content_type.endswith("+json"):
+        try:
+            parsed = json.loads(body)
+            if isinstance(parsed, dict):
+                fields = tuple(sorted(str(key) for key in parsed))
+        except (TypeError, ValueError):
+            pass
+    elif "xml" in content_type:
+        root = re.search(r"<([A-Za-z_][A-Za-z0-9_.:-]*)\b", body)
+        if root:
+            fields = (root.group(1),)
+    return method, route, content_type, fields
+
+
 def _enqueue_func(
     queue: List[tuple],
     seen: Set[str],
@@ -811,6 +842,7 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                 from app.services.agent.runtime_mapper import normalize_request, merge_operations
                 from app.services.browser_automation_service import MAX_NETWORK_REQUESTS, _request_metadata
                 request_rows: Dict[int, int] = {}
+                api_sample_families: Set[tuple] = set()
 
                 def _on_request(req):
                     try:
@@ -871,7 +903,10 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                                     sample["body"] = pd[:4000]
                             except Exception:
                                 pass
-                            result.api_samples.append(sample)
+                            family = _api_sample_family(sample)
+                            if family not in api_sample_families:
+                                api_sample_families.add(family)
+                                result.api_samples.append(sample)
                     except Exception:
                         pass
 
