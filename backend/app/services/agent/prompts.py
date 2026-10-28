@@ -395,7 +395,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **mcp_connect**: Attach an external MCP server the operator already runs (Burp/Caido). Args: **url** (e.g. http://127.0.0.1:9876/sse), **name** (default burp). Then mcp_call.
 - **mcp_list** / **mcp_disconnect**: List or detach attached MCP servers.
 - **mcp_call**: Invoke a tool on an attached MCP server. Args: **server**, **tool**, **arguments** (object).
-- **run_custom_probe** / **run_poc_python**: Sandboxed Python HTTP PoC (json/re/httpx only). In-scope hosts plus Interactsh/OAST. Never metadata/localhost. Args: **source** (Python that prints results), allowed_hosts (optional), timeout_sec (default 20). Not a shell.
+- **run_custom_probe** / **run_poc_python**: Bounded Python HTTP PoC for exact assessment hosts only (up to six requests; redirects and OOB callbacks disabled). Args: **source** (Python that prints results), allowed_hosts (optional narrowing only), timeout_sec (default 20). Prefer scoped_adaptive_experiment for an observed GET input because it records repeatable evidence.
 - **list_captured_requests**: Index XHR/API samples from the crawl map. Use before mutate_captured_request.
 - **plan_intruder_mutations**: Build a dry-run, bounded queue of one-field authorization, boundary, injection-canary, and URL-fetch mutations from captured requests. Read-only methods only by default. Review this before active execution.
 - **run_intruder_batch**: Execute up to 12 planned differential mutations at a bounded rate. Always confirmation-gated; state-changing methods remain excluded unless allow_state_change=true is explicitly approved. A difference is a lead, not a confirmed finding.
@@ -882,6 +882,7 @@ TOOL_PHASE_MAP = {
     "complete_scoped_assessment": ["informational", "exploitation", "post_exploitation"],
     "get_finding_candidate": ["informational", "exploitation", "post_exploitation"],
     "scoped_query_probe": ["exploitation", "post_exploitation"],
+    "scoped_adaptive_experiment": ["exploitation", "post_exploitation"],
     "scoped_numeric_sqli": ["exploitation", "post_exploitation"],
     "scoped_string_sqli": ["exploitation", "post_exploitation"],
     "scoped_body_probe": ["exploitation", "post_exploitation"],
@@ -925,7 +926,11 @@ The inspect_js result has action-linked traffic artifact IDs and a redacted
 surface_inventory. Use list_scoped_browser_exchanges to locate an observed
 XHR/fetch sample. scoped_http_get and scoped_http_compare return bounded
 response metadata. scoped_query_probe is exploratory; changed responses are
-leads only. scoped_numeric_sqli runs six bounded requests on one observed
+leads only. scoped_adaptive_experiment takes a private browser exchange ID, one
+observed GET parameter, a hypothesis, and agent-chosen control and probe values.
+It repeats six scoped GET requests and records an evidence receipt. Optional
+coverage cell and lease IDs bind the receipt to the assigned cell. Its
+diagnostic_lead is exploratory and never proves a finding. scoped_numeric_sqli runs six bounded requests on one observed
 positive numeric GET field from a capture or private browser link. Its
 proof_confirmed flag is one actor's evidence;
 scoped_string_sqli(url, parameter) runs bounded OR Boolean controls on one mapped

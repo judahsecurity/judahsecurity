@@ -5043,32 +5043,40 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         timeout_sec: float = 20,
         **kwargs: Any,
     ) -> str:
-        """Run a one-off Python HTTP probe in a sandbox (bounded CodeAgent).
+        """Run the legacy AST-limited Python HTTP probe on assessment hosts.
 
         Allowed imports: json, re, httpx, hashlib, hmac, base64, time, math,
         datetime, collections, urllib.parse. Hosts must be in engagement scope.
-        Print results to stdout. Not a shell — no os/subprocess/sockets.
+        Print results to stdout. Prefer scoped_adaptive_experiment for
+        autonomous testing; this subprocess is not an OS egress boundary.
         """
-        from app.services.agent.custom_probe import run_custom_probe_async
+        from app.services.agent.assessment_scope import allowed_hosts as assessment_allowed_hosts
+        from app.services.agent.assessment_scope import assert_url_in_scope
+        from app.services.agent.custom_probe import _normalize_hosts, run_custom_probe_async
 
-        hosts: List[str] = []
+        registered = assessment_allowed_hosts(self)
+        if not registered:
+            return json.dumps({"ok": False, "error": "No assessment network scope is registered"})
+        requested: List[str] = []
         if allowed_hosts:
-            hosts.extend(
+            requested.extend(
                 p.strip() for p in str(allowed_hosts).replace(",", "\n").splitlines() if p.strip()
             )
-        fallback = (getattr(self, "_fallback_target", "") or "").strip()
-        if fallback:
-            hosts.append(fallback)
-        cmap = getattr(self, "_capability_map", None) or {}
-        if isinstance(cmap, dict) and cmap.get("target"):
-            hosts.append(str(cmap.get("target")))
-
-        result = await run_custom_probe_async(source, allowed_hosts=hosts, timeout_sec=timeout_sec)
-        result["oob_allowed"] = True
-        result["hint"] = (
-            "In-scope hosts plus Interactsh/OAST. Never fetch 169.254.169.254 or "
-            "localhost — Lictor blocks those. Print JSON proof to stdout."
+        hosts = _normalize_hosts(requested) if requested else sorted(
+            host for host in registered if not host.startswith("*.")
         )
+        if not hosts:
+            return json.dumps({"ok": False, "error": "Select an exact registered host for this probe"})
+        for host in hosts:
+            if "*" in host:
+                raise ValueError("Custom probes require an exact assessment host")
+            assert_url_in_scope(self, f"https://{host}/")
+
+        result = await run_custom_probe_async(
+            source, allowed_hosts=hosts, timeout_sec=timeout_sec, oob_allowed=False,
+        )
+        result["oob_allowed"] = False
+        result["hint"] = "Use an exact assessment host. The runner permits at most six HTTP requests."
         return json.dumps(result, default=str)[: int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)]
 
     async def list_captured_requests(self, limit: int = 40, identity: Optional[str] = None, **kwargs: Any) -> str:
