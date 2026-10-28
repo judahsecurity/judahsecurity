@@ -451,7 +451,8 @@ class ScopedAssessmentTools:
                 }
                 persist_capture(evidence_store(self).namespace, artifact_id, private_store[artifact_id])
                 retained_ids.append(artifact_id)
-                pinned.add(artifact_id)
+                # Only captures referenced by an existing open coverage cell are
+                # pinned. A new, unused capture can yield to a later route.
                 public["artifact_id"] = artifact_id
                 traffic.append(public)
             self._scoped_browser_exchanges = private_store
