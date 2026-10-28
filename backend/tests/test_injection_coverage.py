@@ -57,7 +57,7 @@ def test_observed_inputs_create_class_specific_work():
 def test_dom_work_requires_both_browser_source_and_sink():
     target = "https://app.test"
     risky = analyze_javascript(
-        b"const value = location.hash; document.body.innerHTML = value;",
+        b"const value = decodeURIComponent(location.hash); document.body.innerHTML = value;",
         source_url=target + "/risky.js", expected_origin=target,
     )
     inert = analyze_javascript(
@@ -70,6 +70,7 @@ def test_dom_work_requires_both_browser_source_and_sink():
         "js_files": [target + "/risky.js", target + "/inert.js"],
         "js_sources": [
             {"url": target + "/risky.js", "source_leads": risky["source_leads"],
+             "transform_leads": risky["transform_leads"],
              "sink_leads": risky["sink_leads"]},
             {"url": target + "/inert.js", "source_leads": inert["source_leads"],
              "sink_leads": inert["sink_leads"]},
@@ -79,6 +80,7 @@ def test_dom_work_requires_both_browser_source_and_sink():
     assert [cell["path"] for cell in dom] == ["/risky.js"]
     assert dom[0]["status"] == "untested"
     assert dom[0]["specialist"] == "xss"
+    assert dom[0]["transform_leads"][0]["kind"] == "uri_decode"
 
     source = target + "/risky.js"
     assert scan_dom_sources("const x = location.hash", source=source)[0]["source"] == source

@@ -126,6 +126,16 @@ class OperationDirective:
                     "baseline, true-condition, false-condition, and unrelated-invalid controls. "
                     "A lone quote response change is an inconclusive lead, not proof."
                 )
+            elif kind in {"xss", "dom_xss"}:
+                block += (
+                    " Read xss_trace from each scoped browser probe. Use its observed "
+                    "rendered context and representation to choose one bounded next_test "
+                    "on this same cell and lease. Static JavaScript sink leads are not "
+                    "execution proof; require a fresh nonce browser dialog and independent "
+                    "verification before reporting."
+                )
+                if work.get("xss_next_tests"):
+                    block += f" Prior scoped probe suggested: {work['xss_next_tests']}."
             elif kind == "stored_xss":
                 block += (
                     " Stored XSS needs an approved reversible write, a unique harmless canary, "
@@ -162,11 +172,14 @@ class OperationDirective:
                 block += (
                     "\nAssigned DOM XSS lead in observed JavaScript: "
                     f"{self.js_work.get('url', '')}. Source leads: "
-                    f"{self.js_work.get('source_leads', '')}; sink leads: "
+                    f"{self.js_work.get('source_leads', '')}; transform leads: "
+                    f"{self.js_work.get('transform_leads', '')}; sink leads: "
                     f"{self.js_work.get('sink_leads', '')}. Trace actual data flow from "
                     "query or fragment to an executable sink and prove it with a fresh browser "
                     "nonce in the target origin. Co-located regex matches alone are not a finding."
                 )
+                if self.js_work.get("xss_next_tests"):
+                    block += f" Prior scoped probe suggested: {self.js_work['xss_next_tests']}."
             elif self.js_work.get("test_type") not in {"js_secret_review", "js_dependency_review"}:
                 block += (
                     "\nAssigned client-side lead in observed JavaScript: "
@@ -284,6 +297,9 @@ def directives_from_hypotheses(
             {},
         )
         parameter_work: Dict[str, str] = {}
+        prior_xss = coverage_cell.get("xss_trace") or {}
+        prior_xss = prior_xss if isinstance(prior_xss, dict) else {}
+        next_xss = str(prior_xss.get("next_tests") or "")[:200]
         if coverage_cell.get("source") in {"parameter_inventory", "surface_applicability"}:
             location, _, parameter_name = str(coverage_cell.get("parameter") or "").partition(":")
             if parameter_name or coverage_cell.get("source") == "surface_applicability":
@@ -300,6 +316,7 @@ def directives_from_hypotheses(
                     "capture_id": str(coverage_cell.get("capture_id") or ""),
                     "test_type": str(coverage_cell.get("test_type") or ""),
                     "value_type": str(coverage_cell.get("value_type") or ""),
+                    "xss_next_tests": next_xss,
                     "scoped_capture_id": (
                         str(coverage_cell.get("capture_id") or "")
                         if scoped_replay_eligible(coverage_cell)
@@ -314,7 +331,9 @@ def directives_from_hypotheses(
                 "test_type": str(coverage_cell.get("test_type") or ""),
                 "kind": str(coverage_cell.get("script_kind") or "external"),
                 "source_leads": str(coverage_cell.get("source_leads") or "")[:300],
+                "transform_leads": str(coverage_cell.get("transform_leads") or "")[:200],
                 "sink_leads": str(coverage_cell.get("sink_leads") or "")[:300],
+                "xss_next_tests": next_xss,
                 "client_leads": str(coverage_cell.get("client_leads") or "")[:300],
             }
         proof_escalation_id = str(coverage_cell.get("proof_escalation_id") or "")

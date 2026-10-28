@@ -351,6 +351,9 @@ async def test_dom_specialist_adapts_technique_from_browser_feedback(monkeypatch
     )
     assert first["proof_confirmed"] is False
     assert first["probe_result"]["reflection_contexts"] == ["html_attribute"]
+    assert first["xss_trace"]["next_tests"][0] == {
+        "technique": "html_attribute", "variant": "base",
+    }
     duplicate = await manager.scoped_dom_xss_assigned(
         lease.coverage_cell_id, lease.id, technique="html_body",
     )

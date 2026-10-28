@@ -357,6 +357,13 @@ async def test_scoped_dom_fragment_executes_only_in_unsafe_sink(monkeypatch):
                 allowed_origins=[base],
             )
             assert result["executed"] is expected
+            observations = result["reflection_observations"]
+            if expected:
+                assert {"context": "html_attribute",
+                        "representation": "event_handler_attribute"} in observations
+            else:
+                assert {"context": "html_text",
+                        "representation": "literal_markup_text"} in observations
     finally:
         server.shutdown()
         server.server_close()

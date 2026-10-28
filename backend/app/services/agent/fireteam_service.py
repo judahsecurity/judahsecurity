@@ -610,7 +610,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "validate_finding",
             "submit_finding_candidate",
         ],
-        max_iterations=10,
+        max_iterations=14,
         system_prompt_suffix=(
             "Work the assigned observed input first. Use a harmless unique canary to check "
             "reflection or rendering; if it is absent, record an evidence-backed negative for "
@@ -620,7 +620,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "scoped_input_probe_assigned with its coverage cell and lease IDs. "
             "This records an execution-owned browser receipt on the exact cell. "
             "Choose html_body, html_attribute, js_single, or js_double from the observed reflection context. "
-            "After a negative probe, call record_surface_coverage with this cell, its lease, "
+            "After a negative probe, follow an applicable xss_trace.next_tests before closing. "
+            "Then call record_surface_coverage with this cell, its lease, "
             "and the evidence ID only when the browser completed a context-appropriate check; "
             "otherwise record inconclusive so the input remains open. "
             "When it confirms execution, submit_finding_candidate with the receipt and coverage cell; "
@@ -641,6 +642,13 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "html_body_svg, html_attribute, html_attribute_single, js_single, or js_double "
             "from the observed context. A negative result is inconclusive; use the returned "
             "reflection_contexts to select a different technique on the same lease. "
+            "Read xss_trace after each scoped XSS probe: it separates the observed source, "
+            "static sink leads, rendered context, render representation, and next_tests. "
+            "Choose at most one of the suggested next_tests at a time; technique and "
+            "variant are backend allowlisted and the eight-attempt cap is shared across "
+            "the cell. Use mixed_case only for HTML contexts and url_double only when "
+            "a decode lead and rendered encoding make it plausible. Keep unsupported URL/CSS sinks "
+            "inconclusive instead of calling reflection an XSS proof. "
             "Submit a candidate only "
             "when its fresh nonce executes; static source and sink patterns remain leads. "
             "For a leased stored_xss form cell, call scoped_stored_xss_assigned only with "

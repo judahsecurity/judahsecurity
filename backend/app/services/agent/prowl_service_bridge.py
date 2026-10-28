@@ -157,6 +157,7 @@ def capability_map_from_observation(observation: dict) -> dict | None:
          "sha256": row.get("sha256", ""), "bytes": row.get("bytes", 0),
          "sink_leads": row["analysis"].get("sink_leads", []) if isinstance(row.get("analysis"), dict) else [],
          "source_leads": row["analysis"].get("source_leads", []) if isinstance(row.get("analysis"), dict) else [],
+         "transform_leads": row["analysis"].get("transform_leads", []) if isinstance(row.get("analysis"), dict) else [],
          "client_leads": row["analysis"].get("client_leads", []) if isinstance(row.get("analysis"), dict) else []}
         for row in (result.get("scripts") or [])[:20]
         if isinstance(row, dict) and row.get("kind") in {"external", "inline"}

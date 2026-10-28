@@ -909,7 +909,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
     async def scoped_input_probe_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
-        technique: str = "html_body",
+        technique: str = "html_body", variant: str = "base",
     ) -> Dict[str, Any]:
         """Probe one leased, observed GET input or approved POST form.
 
@@ -924,6 +924,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.engagement_brain import engagement_brain_from_dict
         from app.services.agent.parameter_inventory import _origin
         from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.scoped_assessment.xss_feedback import (
+            MAX_ATTEMPTS, payload_for, xss_trace,
+        )
         from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
 
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
@@ -967,7 +970,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         identity = str(cell.get("identity") or "anonymous")
 
         if cell["test_type"] == "sqli":
-            if technique != "html_body":
+            if technique != "html_body" or variant != "base":
                 return {"success": False, "error": "unsupported_technique"}
             numeric = cell.get("value_type") in {"positive_integer", "number"}
             if not numeric:
@@ -996,16 +999,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "xss_browser_js_single": "js_single",
                 "xss_browser_js_double": "js_double",
             }.get(technique, technique)
-            payloads = {
-                "html_body": '<img src=x onerror=alert("__PROWL_NONCE__")>',
-                "html_body_svg": '<svg onload=alert("__PROWL_NONCE__")>',
-                "html_attribute": '"><img src=x onerror=alert("__PROWL_NONCE__")>',
-                "html_attribute_single": "'><img src=x onerror=alert(\"__PROWL_NONCE__\")>",
-                "js_single": "';alert(\"__PROWL_NONCE__\");//",
-                "js_double": '\";alert(\'__PROWL_NONCE__\');//',
-            }
-            if technique not in payloads:
-                return {"success": False, "error": "unsupported_technique"}
+            attempts = list(cell.get("xss_probe_attempts") or [])
+            if len(attempts) >= MAX_ATTEMPTS:
+                return {"success": False, "error": "xss_probe_budget_exhausted"}
+            if any(row.get("technique") == technique
+                   and row.get("variant", "base") == variant for row in attempts):
+                return {"success": False, "error": "technique_already_attempted"}
+            try:
+                payload = payload_for(technique, variant, allow_double_url=not form_xss)
+            except ValueError as exc:
+                return {"success": False, "error": str(exc)}
             if form_xss:
                 matching_forms = [form for form in (cmap.get("forms") or [])[:80]
                                   if isinstance(form, dict)
@@ -1023,7 +1026,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 proof = json.loads(await self.scoped_browser_assessment(
                     "check_form_xss", pages[0], identity=identity,
                     form_action=url, form_field=parameter,
-                    form_payload_template=payloads[technique],
+                    form_payload_template=payload,
                 ))
                 request_context = "observed_post_form"
                 operation = "scoped_browser_check_form_xss"
@@ -1059,7 +1062,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     proof = json.loads(await self.scoped_browser_assessment(
                         "check_xhr_xss", page_url, identity=identity,
                         xhr_path=cell["path"], xhr_parameter=parameter,
-                        xhr_payload_template=payloads[technique],
+                        xhr_payload_template=payload,
                         xhr_query_keys=query_keys,
                         **({"xhr_actions": captured["replay_actions"]}
                            if captured.get("replay_actions") else {}),
@@ -1068,7 +1071,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     operation = "scoped_browser_check_xhr_xss"
                 else:
                     template, request_context = self._observed_get_query_template(
-                        url, parameter, payloads[technique], identity,
+                        url, parameter, payload, identity,
                         capture_id=capture_id,
                     )
                     proof = json.loads(await self.scoped_browser_assessment(
@@ -1097,6 +1100,15 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             *(current.get("evidence_ids") or []), artifact_id,
         ]))[:30]
         current["last_probe"] = operation
+        if cell["test_type"] == "xss":
+            current["xss_probe_attempts"] = [
+                *(current.get("xss_probe_attempts") or []),
+                {"technique": technique, "variant": variant,
+                 "evidence_id": artifact_id, "executed": confirmed},
+            ][:MAX_ATTEMPTS]
+            trace = xss_trace(current, proof, technique=technique,
+                              variant=variant, attempts=current["xss_probe_attempts"])
+            current["xss_trace"] = trace
         if confirmed:
             current["status"] = "in_focus"
             current["reason"] = "Execution-owned proof signal; independent verification required"
@@ -1106,11 +1118,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "evidence_id": artifact_id, "proof_confirmed": confirmed,
                 "probe_result": {key: proof[key] for key in (
                     "executed", "proof_confirmed", "requests_sent", "baseline_source",
-                    "reflection_contexts", "proof_recipe", "total_requests_sent",
+                    "proof_recipe", "total_requests_sent",
                     "and_followup_error", "error_followup_error",
                 ) if key in proof} | ({"request_context": request_context}
-                                   if cell["test_type"] == "xss" else {}),
-                "funnel": parameter_test_funnel(live)}
+                                   if cell["test_type"] == "xss" else {})
+                | ({"reflection_contexts": trace["rendered_contexts"],
+                    "reflection_observations": trace["render_observations"]}
+                   if cell["test_type"] == "xss" else {}),
+                "funnel": parameter_test_funnel(live),
+                **({"xss_trace": trace, "technique": technique, "variant": variant}
+                   if cell["test_type"] == "xss" else {})}
 
     async def probe_observed_input_batch(
         self, max_checks: int = 8, max_seconds: int = 180,
@@ -1130,7 +1147,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
     async def scoped_dom_xss_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
-        technique: str = "html_body",
+        technique: str = "html_body", variant: str = "base",
     ) -> Dict[str, Any]:
         """Try one bounded browser technique on a leased DOM source."""
         import time
@@ -1138,6 +1155,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.engagement_brain import engagement_brain_from_dict
         from app.services.agent.parameter_inventory import _origin
         from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.scoped_assessment.xss_feedback import (
+            MAX_ATTEMPTS, payload_for, xss_trace,
+        )
 
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         cell = next((row for row in brain.coverage_cells
@@ -1154,21 +1174,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                            {"html_assignment", "dynamic_code"}
                            for lead in cell.get("sink_leads") or [])):
             return {"success": False, "error": "invalid_dom_xss_lease"}
-        payloads = {
-            "html_body": '<img src=x onerror=alert("__PROWL_NONCE__")>',
-            "html_body_svg": '<svg onload=alert("__PROWL_NONCE__")>',
-            "html_attribute": '"><img src=x onerror=alert("__PROWL_NONCE__")>',
-            "html_attribute_single": "'><img src=x onerror=alert(\"__PROWL_NONCE__\")>",
-            "js_single": "';alert(\"__PROWL_NONCE__\");//",
-            "js_double": '\";alert(\'__PROWL_NONCE__\');//',
-        }
-        if technique not in payloads:
-            return {"success": False, "error": "unsupported_technique",
-                    "allowed_techniques": list(payloads)}
-        if len(cell.get("dom_probe_attempts") or []) >= len(payloads):
+        attempts = list(cell.get("dom_probe_attempts") or [])
+        if len(attempts) >= MAX_ATTEMPTS:
             return {"success": False, "error": "dom_probe_budget_exhausted"}
-        if technique in {row.get("technique") for row in cell.get("dom_probe_attempts") or []}:
+        if any(row.get("technique") == technique
+               and row.get("variant", "base") == variant for row in attempts):
             return {"success": False, "error": "technique_already_attempted"}
+        try:
+            payload = payload_for(technique, variant)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
         location, separator, field = str(cell.get("parameter") or "").partition(":")
         source_kind = "query" if location == "query" and separator else "fragment"
         if (source_kind == "query"
@@ -1192,7 +1207,6 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
                 != scoped_origin):
             return {"success": False, "error": "scope_mismatch"}
-        payload = payloads[technique]
         identity = str(cell.get("identity") or "anonymous")
         page_url = scoped_origin + page_path
         if source_kind == "query":
@@ -1226,9 +1240,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         current["last_probe"] = operation
         current["dom_probe_attempts"] = [
             *(current.get("dom_probe_attempts") or []),
-            {"technique": technique, "evidence_id": artifact_id,
+            {"technique": technique, "variant": variant,
+             "evidence_id": artifact_id,
              "executed": proof.get("executed") is True},
-        ][:len(payloads)]
+        ][:MAX_ATTEMPTS]
+        trace = xss_trace(current, proof, technique=technique,
+                          variant=variant, attempts=current["dom_probe_attempts"])
+        current["xss_trace"] = trace
         if proof.get("executed") is True:
             current["status"] = "in_focus"
             current["reason"] = "Browser execution signal; independent verification required"
@@ -1236,11 +1254,13 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         return {"success": True, "coverage_cell_id": coverage_cell_id,
                 "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
                 "operation": operation,
-                "technique": technique,
+                "technique": technique, "variant": variant,
                 "proof_confirmed": proof.get("executed") is True,
+                "xss_trace": trace,
                 "probe_result": {"executed": proof.get("executed") is True,
                                  "request_context": request_context,
-                                 "reflection_contexts": proof.get("reflection_contexts") or []}}
+                                 "reflection_contexts": trace["rendered_contexts"],
+                                 "reflection_observations": trace["render_observations"]}}
 
     async def scoped_xml_entity_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,

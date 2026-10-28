@@ -737,6 +737,7 @@ def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, A
         parameter = f"inline_script:{source.get('index', 0)}" if inline else "script"
         source_leads = list(source.get("source_leads") or [])[:10]
         sink_leads = list(source.get("sink_leads") or [])[:30]
+        transform_leads = list(source.get("transform_leads") or [])[:12]
         if source_leads and any(
             isinstance(lead, dict) and lead.get("kind") in {"html_assignment", "dynamic_code"}
             for lead in sink_leads
@@ -771,6 +772,7 @@ def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, A
                         dom["script_kind"] = "inline" if inline else "external"
                         dom["page_path"] = page_path
                         dom["source_leads"] = matching_leads
+                        dom["transform_leads"] = transform_leads
                         dom["sink_leads"] = sink_leads
                         dom["priority_rank"] = 2
                         if dom["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
@@ -788,6 +790,7 @@ def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, A
                 review["script_kind"] = "inline" if inline else "external"
                 review["page_path"] = str(source.get("page_path") or "")
                 review["source_leads"] = source_leads
+                review["transform_leads"] = transform_leads
                 review["sink_leads"] = sink_leads
                 if review["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
                     brain.coverage_cells.append(review)
