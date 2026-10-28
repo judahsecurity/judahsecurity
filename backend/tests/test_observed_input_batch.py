@@ -127,9 +127,10 @@ def test_batch_reaches_all_link_inputs_once_with_live_receipts():
     assert {row["first_pass_outcome"] for row in manager._engagement_brain["coverage_cells"]
             if row["source"] == "parameter_inventory"
             and row["test_type"] in {"sqli", "xss"}} == {"inconclusive"}
+    calls_after_first = list(manager.calls)
     second = asyncio.run(run_observed_input_batch(manager, max_checks=4))
     assert second["processed"] == 0 and second["remaining"] == 0
-    assert len(manager.calls) == 4
+    assert manager.calls == calls_after_first
 
 
 
@@ -286,7 +287,7 @@ def test_transient_first_pass_handoff_gets_one_delayed_retry():
     assert len(pending_first_pass_cells(manager._engagement_brain)) == 1
     second = asyncio.run(run_observed_input_batch(manager, max_checks=1))
     assert second["results"][0]["outcome"] == "inconclusive"
-    assert manager.calls == 3
+    assert manager.calls == 8  # two stale attempts, then six XSS variants
     cell = next(row for row in manager._engagement_brain["coverage_cells"]
                 if row["test_type"] == "xss" and row["parameter"] == "query:searchTerm")
     assert cell["first_pass_attempts"] == 2
@@ -838,7 +839,8 @@ def test_eighteen_inputs_receive_both_class_first_pass_outcomes():
     for _ in range(9):
         asyncio.run(run_observed_input_batch(manager, max_checks=4))
     funnel = parameter_test_funnel(manager._engagement_brain)
-    assert len(set(manager.calls)) == len(manager.calls) == 36
+    assert len(set(manager.calls)) == 36
+    assert len(manager.calls) == 18 + 18 * 6  # SQLi once and six XSS variants per input
     assert funnel["inputs"] == 18 and funnel["checks"] == 54
     assert funnel["attempted"] == funnel["probed"] == 36
     assert not pending_first_pass_cells(manager._engagement_brain)
@@ -876,7 +878,7 @@ def test_batch_probes_only_the_active_assessment_target():
         manager, target="https://ginandjuice.shop", max_checks=8,
     ))
     assert result["processed"] == 2 and result["remaining"] == 0
-    assert manager.calls == ["ginandjuice.shop", "ginandjuice.shop"]
+    assert manager.calls == ["ginandjuice.shop"] * 7  # SQLi once and six XSS variants
     assert len(pending_first_pass_cells(manager._engagement_brain)) == 2
 
 
