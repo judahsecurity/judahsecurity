@@ -36,6 +36,10 @@ _RETRYABLE_HANDOFF_ERRORS = frozenset({
     "invalid_coverage_lease", "lease_changed", "missing_probe_evidence",
     "First-pass probe timed out without a proof receipt",
 })
+XSS_GET_TECHNIQUES = (
+    "html_body", "html_body_svg", "html_attribute", "html_attribute_single",
+    "js_single", "js_double",
+)
 
 
 def _retryable_first_pass(cell: dict[str, Any], now: float) -> bool:
@@ -153,10 +157,11 @@ def pending_first_pass_cells(brain: Any, *, target: str = "") -> list[dict[str, 
                 or (cell.get("status") == "leased"
                     and float(cell.get("lease_deadline") or 0) <= time.time())
             )
-            and (not cell.get("first_pass_outcome") or _retryable_first_pass(cell, now))
+            and (not cell.get("first_pass_outcome") or _retryable_first_pass(cell, now)
+                 or (cell.get("test_type") == "xss" and cell.get("xss_pending_techniques")))
             and not cell.get("candidate_id")
-            and not cell.get("probe_artifact_ids")
-            and not cell.get("service_probe_artifact_ids")
+            and (not cell.get("probe_artifact_ids") or cell.get("xss_pending_techniques"))
+            and (not cell.get("service_probe_artifact_ids") or cell.get("xss_pending_techniques"))
         ),
         key=lambda cell: (
             int(cell.get("first_pass_attempts") or 0),
@@ -253,6 +258,10 @@ async def run_observed_input_batch(
         candidate_handoff_error = ""
         result: dict[str, Any] = {}
         followup_failure = ""
+        followup_deferred = False
+        xss_attempted = list(cell.get("xss_techniques_attempted") or [])
+        xss_pending = list(cell.get("xss_pending_techniques") or [])
+        first_technique = ""
 
         operation_name = ""
         # Limit one cell's first pass so a slow lead cannot monopolize a batch.
@@ -269,7 +278,9 @@ async def run_observed_input_batch(
                         probe_args["technique"] = "html_body"
                 else:
                     operation_name = "scoped_input_probe_assigned"
-                    probe_args["technique"] = "html_body"
+                    first_technique = (xss_pending[0] if specialist == "xss" and xss_pending
+                                       else "html_body")
+                    probe_args["technique"] = first_technique
             elif method == "POST" and location == "body_form" and specialist == "xss" and any(
                 isinstance(form, dict) and str(form.get("method") or "").upper() == "POST"
                 and _origin(str(form.get("action") or "")) == active_origin
@@ -278,7 +289,8 @@ async def run_observed_input_batch(
                 for form in (cmap.get("forms") or [])[:80]
             ):
                 operation_name = "scoped_input_probe_assigned"
-                probe_args["technique"] = "html_body"
+                first_technique = "html_body"
+                probe_args["technique"] = first_technique
             elif (cell.get("observation_source") == "browser_traffic"
                   and cell.get("capture_id") and method == "POST"
                   and location in {"body_json", "body_form"}):
@@ -311,30 +323,51 @@ async def run_observed_input_batch(
                 ))
                 if evidence_id:
                     evidence_source = "local" if result.get("evidence_id") else "service"
-                if (specialist == "xss" and result.get("success") is True
-                        and result.get("evidence_id")
-                        and result.get("proof_confirmed") is not True):
-                    contexts = set((result.get("probe_result") or {}).get("reflection_contexts") or [])
-                    techniques = (
-                        (["html_body_svg"] if "html_text" in contexts else [])
-                        + (["html_attribute", "html_attribute_single"] if "html_attribute" in contexts else [])
-                        + (["js_single", "js_double"] if "javascript" in contexts else [])
-                    )[:2]
-                    for technique in techniques:
-                        remaining = cell_deadline - time.monotonic()
-                        if remaining < 5:
-                            break
-                        followup = await asyncio.wait_for(_invoke(
-                            manager, "scoped_input_probe_assigned",
-                            {"coverage_cell_id": cell["id"], "coverage_lease_id": lease.id,
-                             "technique": technique},
-                        ), timeout=min(remaining, 20.0))
-                        if followup.get("success") is not True or not followup.get("evidence_id"):
-                            followup_failure = str(followup.get("error") or "missing_followup_receipt")[:100]
-                            break
-                        result = followup
-                        if result.get("proof_confirmed") is True:
-                            break
+                if (specialist == "xss" and first_technique
+                        and result.get("success") is True
+                        and result.get("evidence_id")):
+                    if first_technique and first_technique not in xss_attempted:
+                        xss_attempted.append(first_technique)
+                    if result.get("proof_confirmed") is not True:
+                        contexts = set((result.get("probe_result") or {}).get("reflection_contexts") or [])
+                        contextual = (
+                            (["html_body_svg"] if "html_text" in contexts else [])
+                            + (["html_attribute", "html_attribute_single"] if "html_attribute" in contexts else [])
+                            + (["js_single", "js_double"] if "javascript" in contexts else [])
+                        )
+                        # GET is read-only: try every supported reflected context,
+                        # even when the first payload produces no visible reflection.
+                        # POST stays limited to context-led probes under its write policy.
+                        full_get = list(XSS_GET_TECHNIQUES[1:]) if method == "GET" else []
+                        techniques = [
+                            technique for technique in dict.fromkeys([*contextual, *full_get])
+                            if technique not in xss_attempted
+                        ]
+                        for technique in techniques:
+                            remaining = cell_deadline - time.monotonic()
+                            if remaining < 5:
+                                break
+                            try:
+                                followup = await asyncio.wait_for(_invoke(
+                                    manager, "scoped_input_probe_assigned",
+                                    {"coverage_cell_id": cell["id"], "coverage_lease_id": lease.id,
+                                     "technique": technique},
+                                ), timeout=min(remaining, 20.0))
+                            except asyncio.TimeoutError:
+                                followup_deferred = True
+                                break
+                            if followup.get("success") is not True or not followup.get("evidence_id"):
+                                followup_failure = str(followup.get("error") or "missing_followup_receipt")[:100]
+                                break
+                            xss_attempted.append(technique)
+                            result = followup
+                            if result.get("proof_confirmed") is True:
+                                break
+                        xss_pending = ([] if result.get("proof_confirmed") is True or followup_failure
+                                       else [technique for technique in techniques
+                                             if technique not in xss_attempted])
+                    else:
+                        xss_pending = []
                 evidence_id = str(result.get("evidence_id") or next(
                     iter(result.get("service_artifact_ids") or []), ""
                 ))
@@ -433,6 +466,8 @@ async def run_observed_input_batch(
                         )
                         if followup_failure:
                             reason += f"; follow-up blocked: {followup_failure}"
+                        elif followup_deferred:
+                            reason += "; follow-up deferred after timeout"
         except asyncio.TimeoutError:
             outcome = "inconclusive" if evidence_id else "unattempted"
             reason = "First-pass probe timed out" + (" after a partial receipt" if evidence_id else " without a proof receipt")
@@ -474,6 +509,23 @@ async def run_observed_input_batch(
             if evidence_id:
                 current["first_pass_evidence_id"] = evidence_id
                 current["first_pass_evidence_source"] = evidence_source
+            if specialist == "xss" and method == "GET" and location == "query":
+                if outcome == "unattempted" and current["first_pass_attempts"] >= 2:
+                    xss_pending = []
+                current["xss_techniques_attempted"] = xss_attempted
+                current["xss_pending_techniques"] = xss_pending
+                variant_error = followup_failure or (
+                    reason if outcome == "unattempted" and not xss_pending else ""
+                )
+                if variant_error:
+                    current["xss_variant_error"] = variant_error
+                    current["xss_unattempted_techniques"] = [
+                        technique for technique in XSS_GET_TECHNIQUES
+                        if technique not in xss_attempted
+                    ]
+                else:
+                    current.pop("xss_variant_error", None)
+                    current.pop("xss_unattempted_techniques", None)
             if candidate_id:
                 current["candidate_id"] = candidate_id
             if candidate_handoff_error:
@@ -500,6 +552,8 @@ async def run_observed_input_batch(
             "candidate_handoff_error": candidate_handoff_error,
             "handoff_failed": outcome == "unattempted" and bool(operation_name),
             "candidate_handoff_pending": outcome == "proof_signal" and bool(evidence_id) and not candidate_id,
+            "xss_techniques_attempted": xss_attempted if specialist == "xss" else [],
+            "xss_pending_techniques": xss_pending if specialist == "xss" else [],
         })
 
     brain = engagement_brain_from_dict(getattr(manager, "_engagement_brain", None))
