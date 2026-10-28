@@ -146,8 +146,8 @@ services:
       # deep_crawl's self-service login can reference these as
       # {"login": {"username": "env:TARGET_USER", "password": "env:TARGET_PASS"}}
       # so secrets never appear inline in the agent's tool args / trace.
-      # - TARGET_USER=${TARGET_USER:-}
-      # - TARGET_PASS=${TARGET_PASS:-}
+      - TARGET_USER=${TARGET_USER:-}
+      - TARGET_PASS=${TARGET_PASS:-}
       # Directory for "secret:NAME" references (defaults to /run/secrets).
       # - SECRETS_DIR=/run/secrets
       # Dual Interceptor workers (Mac desktop + Ubuntu browser host)
