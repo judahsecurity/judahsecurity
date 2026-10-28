@@ -27,7 +27,7 @@ PROOFS_BY_CLASS = {
     "xss": frozenset({"browser_xss", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "upload_xss"}),
     "authorization": frozenset({"authorization", "owner_only", "state_change", "workflow"}),
     "ssrf": frozenset({"oob_callback"}),
-    "xxe": frozenset(),
+    "xxe": frozenset({"oob_callback"}),
     "command_injection": frozenset(),
     "path_traversal": frozenset(),
     "csrf": frozenset(),
@@ -388,6 +388,33 @@ def validate_proof(
             for e in events
         ):
             return False, "No matching callback for this canary"
+        if (getattr(candidate, "vulnerability_class", "") or inferred_vulnerability_class(candidate)) == "xxe":
+            hunter_id = proof.get("hunter_artifact_id")
+            hunter = (store.records.get(hunter_id)
+                      if isinstance(hunter_id, str)
+                      and hunter_id in (candidate.evidence_ids or []) else None)
+            request = plant["payload"].get("request") or {}
+            headers = {str(k).lower(): str(v).lower()
+                       for k, v in (request.get("headers") or {}).items()}
+            body = str(request.get("body") or "")
+            xml_mime = headers.get("content-type", "").split(";", 1)[0]
+            xml_request = (
+                request.get("method") == "POST"
+                and request.get("url") == candidate.target
+                and (xml_mime in {"application/xml", "text/xml"}
+                     or xml_mime.endswith("+xml"))
+                and re.search(r"<!DOCTYPE\s+[A-Za-z_][\w:.-]*\s+\[", body)
+                and re.search(r"<!ENTITY\s+prowl\s+SYSTEM\s+[\"'][^\"']*"
+                              + re.escape(domain) + r"[^\"']*[\"']", body)
+                and "&prowl;" in body
+            )
+            if (not hunter or hunter.get("kind") != "scoped_xml_xxe"
+                    or hunter.get("target") != candidate.target
+                    or hunter.get("identity") != plant.get("identity")
+                    or hunter.get("created_at", 0) >= register.get("created_at", 0)
+                    or hunter.get("payload", {}).get("callback_observed") is not True
+                    or not xml_request):
+                return False, "XXE requires an observed XML capture and a fresh external-entity callback"
         return True, ""
     if kind == "response_match":
         item, marker = row("artifact_id"), proof.get("contains")

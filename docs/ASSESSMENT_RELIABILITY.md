@@ -33,8 +33,11 @@ Candidates now carry `vulnerability_class`. Hunters can set it on `submit_findin
 | `xss` | `browser_xss`, `scoped_browser_xss`, `upload_xss` |
 | `authorization` | `authorization`, `owner_only`, `state_change`, `workflow` |
 | `ssrf` | `oob_callback` |
+| `xxe` | `oob_callback` only for an approved, browser-captured XML POST with an external entity and a fresh matching callback |
 
-`xxe`, `command_injection`, `path_traversal`, `csrf`, `known_cve`, and `account_enumeration` have no confirmation recipe yet. Keep these candidates inconclusive until a dedicated validator demonstrates the claimed behavior. Version-in-range is a CVE applicability lead; the separate named-CVE applicability workflow reports that classification and must not be read as exploit verification. Assessment progress includes counts of pending, confirmed, refuted, and inconclusive candidates, plus concise inconclusive reasons.
+`command_injection`, `path_traversal`, `csrf`, `known_cve`, and `account_enumeration` have no confirmation recipe yet. Keep these candidates inconclusive until a dedicated validator demonstrates the claimed behavior. Version-in-range is a CVE applicability lead; the separate named-CVE applicability workflow reports that classification and must not be read as exploit verification. Assessment progress includes counts of pending, confirmed, refuted, and inconclusive candidates, plus concise inconclusive reasons.
+
+For a leased `body_xml:document` input, `scoped_xml_entity_assigned` derives a parser control or external-entity callback from the private browser capture. It requires an exact operator-approved POST path; the callback technique also requires the run's out-of-band authorization. The model supplies neither request bytes nor a callback destination. A callback is a candidate signal. The verifier generates a new callback from the same observed request and requires the XML external-entity syntax, a matching interaction, and fresh evidence before confirmation. Other XML shapes remain inconclusive.
 
 These are minimum proof requirements, not a universal vulnerability oracle. The verifier still has to establish intended access policy, context, and impact. A public object accessible to two users is not an IDOR. A legitimate authorized write is not an authorization flaw. Unsupported proof types stay inconclusive rather than falling back to a prose confirmation.
 

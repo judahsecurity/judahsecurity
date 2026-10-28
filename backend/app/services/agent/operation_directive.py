@@ -141,11 +141,14 @@ class OperationDirective:
             elif kind == "xxe":
                 block += (
                     " XML parser testing requires an observed XML request and approved replay of "
-                    "this exact endpoint. If a captured XML sample is available, use "
-                    "mutate_captured_request location=body_xml, field=document and compare a "
-                    "harmless local entity canary with an inert XML control. The structured "
-                    "mutation blocks network callbacks; leave the proof inconclusive if no "
-                    "approved replay path exists."
+                    "this exact endpoint. For a private browser capture, call "
+                    "scoped_xml_entity_assigned with this cell and lease using "
+                    "technique=parser_control first. If the run separately authorizes "
+                    "out-of-band callbacks, choose technique=external_callback next; "
+                    "it constructs the XML from the private capture and uses a fresh callback. "
+                    "Only callback_observed=true is a candidate signal. Without a captured "
+                    "XML request, approved replay path, and callback authorization, leave "
+                    "the proof inconclusive."
                 )
             elif kind == "crlf":
                 block += (

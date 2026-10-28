@@ -18,7 +18,7 @@ def test_proof_kind_must_match_the_claimed_vulnerability():
         ("CVE-2025-12345 affects server", "response_match", False),
         ("CVE-2025-12345 stored XSS", "browser_xss", True),
         ("Command injection in export", "oob_callback", False),
-        ("XXE in XML upload", "oob_callback", False),
+        ("XXE in XML upload", "oob_callback", True),
         ("Sensitive configuration exposure", "response_match", True),
         ("Sensitive configuration exposure", "workflow", False),
         ("Blind SSRF in image fetch", "oob_callback", True),

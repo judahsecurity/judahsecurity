@@ -555,6 +555,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "execute_browser",
             "execute_interactsh",
             "generate_injection_payloads",
+            "scoped_xml_entity_assigned",
             "compare_requests",
             "mutate_list",
             "list_captured_requests",
@@ -635,8 +636,12 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "Submit a local candidate with the execution receipt and exact cell; the independent "
             "verifier repeats it. "
             "A quote differential alone is not XSS. Status 200 is not XSS."
-            " For a leased dom_xss cell with a location.hash lead and observed rendering page, "
-            "call scoped_dom_xss_assigned with the cell and lease IDs. Submit a candidate only "
+            " For a leased dom_xss cell with an observed rendering page, call "
+            "scoped_dom_xss_assigned with the cell and lease IDs. Choose html_body, "
+            "html_body_svg, html_attribute, html_attribute_single, js_single, or js_double "
+            "from the observed context. A negative result is inconclusive; use the returned "
+            "reflection_contexts to select a different technique on the same lease. "
+            "Submit a candidate only "
             "when its fresh nonce executes; static source and sink patterns remain leads. "
             "For a leased stored_xss form cell, call scoped_stored_xss_assigned only with "
             "an observed readback page and an operator-approved nonce-addressed cleanup URL. "

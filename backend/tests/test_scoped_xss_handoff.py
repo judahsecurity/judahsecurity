@@ -316,6 +316,83 @@ async def test_assigned_dom_fragment_replays_observed_page_and_fresh_nonce(monke
 
 
 @pytest.mark.asyncio
+async def test_dom_specialist_adapts_technique_from_browser_feedback(monkeypatch):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    manager._capability_map = {"target": "https://app.example.test",
+                               "scope": "https://app.example.test"}
+    brain = EngagementBrain(target="https://app.example.test")
+    seed_js_coverage_cells(brain, {"target": "https://app.example.test",
+        "js_sources": [{"url": "https://app.example.test/static/blog.js",
+            "kind": "external", "page_path": "/blog", "artifact_id": "script-1",
+            "source_leads": [{"kind": "fragment", "line": 1}],
+            "sink_leads": [{"kind": "html_assignment", "line": 2}]}]})
+    lease = claim_coverage_cell_leases(
+        brain, ["xss"], allowed_test_types=frozenset({"dom_xss"}),
+    )["xss"]
+    manager._engagement_brain = brain.to_dict()
+    store = evidence_store(manager)
+    calls = []
+
+    async def fake_assessment(operation, url, **kwargs):
+        calls.append(url)
+        executed = len(calls) == 2
+        proof = {"operation": "check_xss", "target_template": url,
+                 "executed": executed, "nonce": "hunter-nonce",
+                 "reflection_contexts": ["html_attribute"] if not executed else []}
+        artifact_id = store.record("scoped_browser_check_xss", proof,
+                                   target="https://app.example.test/blog",
+                                   identity="anonymous", success=executed)
+        return json.dumps({**proof, "evidence_id": artifact_id})
+
+    monkeypatch.setattr(manager, "scoped_browser_assessment", fake_assessment)
+    first = await manager.scoped_dom_xss_assigned(
+        lease.coverage_cell_id, lease.id, technique="html_body",
+    )
+    assert first["proof_confirmed"] is False
+    assert first["probe_result"]["reflection_contexts"] == ["html_attribute"]
+    duplicate = await manager.scoped_dom_xss_assigned(
+        lease.coverage_cell_id, lease.id, technique="html_body",
+    )
+    assert duplicate["error"] == "technique_already_attempted"
+    second = await manager.scoped_dom_xss_assigned(
+        lease.coverage_cell_id, lease.id, technique="html_attribute",
+    )
+    assert second["proof_confirmed"] is True
+    assert len(calls) == 2 and "%22%3E" in calls[1]
+    cell = next(row for row in engagement_brain_from_dict(manager._engagement_brain).coverage_cells
+                if row["id"] == lease.coverage_cell_id)
+    assert [row["technique"] for row in cell["dom_probe_attempts"]] == [
+        "html_body", "html_attribute",
+    ]
+    brain = engagement_brain_from_dict(manager._engagement_brain)
+    candidate = submit_candidate(
+        brain, title="DOM XSS in blog fragment",
+        target="https://app.example.test/blog", vulnerability_class="xss",
+        evidence_ids=[second["evidence_id"]], coverage_cell_id=lease.coverage_cell_id,
+    )
+    manager._engagement_brain = brain.to_dict()
+
+    async def execute(name, args):
+        assert name == "scoped_browser_assessment"
+        assert args == {"operation": "check_xss", "url": calls[1],
+                        "identity": "anonymous"}
+        proof = {"operation": "check_xss", "target_template": calls[1],
+                 "executed": True, "nonce": "verifier-nonce"}
+        artifact_id = store.record("scoped_browser_check_xss", proof,
+                                   target="https://app.example.test/blog",
+                                   identity="anonymous", success=True)
+        return {"success": True, "output": json.dumps({**proof, "evidence_id": artifact_id})}
+
+    manager.execute = execute
+    reports = await run_independent_verifiers(
+        [candidate], llm=None, tools_manager=manager,
+        targets=["https://app.example.test/blog"],
+    )
+    assert reports[0]["status"] == "confirmed", reports
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("cleanup_success", [False, True])
 async def test_stored_xss_requires_readback_and_cleanup_on_both_runs(cleanup_success):
     manager = ASMToolsManager()

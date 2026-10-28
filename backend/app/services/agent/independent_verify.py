@@ -690,6 +690,9 @@ async def run_independent_verifiers(
                 replayed = await _verify_scoped_browser_xss_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
+                replayed = await _verify_scoped_xml_xxe_candidate(tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
                 report = await _run_specialist(
                     profile, mission, [cand.target], llm, tools_manager,
                 )
@@ -712,6 +715,98 @@ async def run_independent_verifiers(
             }
 
     return list(await asyncio.gather(*(_one(c) for c in pending)))
+
+
+async def _verify_scoped_xml_xxe_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Repeat a captured XML entity with a new callback in the verifier run."""
+    import logging
+
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.parameter_inventory import _origin
+    from app.services.agent.proof_policy import inferred_vulnerability_class, validate_proof
+    from app.services.agent.scoped_assessment.xml_entity import (
+        plan_xml_entity_probe, send_xml_callback,
+    )
+
+    if (cand.vulnerability_class or inferred_vulnerability_class(cand)) != "xxe":
+        return None
+    brain = _brain(tools_manager)
+    cell = next((row for row in brain.coverage_cells
+                 if row.get("id") == cand.coverage_cell_id), None)
+    if (not cell or cell.get("source") != "parameter_inventory"
+            or cell.get("observation_source") != "browser_traffic"
+            or cell.get("test_type") != "xxe" or cell.get("method") != "POST"
+            or cell.get("parameter") != "body_xml:document"
+            or not cell.get("capture_id") or not cell.get("path")):
+        return None
+    target = urlsplit(cand.target)
+    identity = str(cell.get("identity") or "anonymous")
+    if (target.scheme not in {"http", "https"} or target.query or target.fragment
+            or not _same_observed_origin(target.scheme, str(cell.get("host") or ""), cand.target)
+            or (target.path or "/") != cell["path"]
+            or (cand.identity and cand.identity != identity)
+            or (cand.parameter and cand.parameter != cell["parameter"])):
+        return None
+    store = evidence_store(tools_manager)
+    hunter_ids = [artifact_id for artifact_id in cand.evidence_ids
+                  if (artifact_id in store.records
+                      and store.records[artifact_id].get("kind") == "scoped_xml_xxe"
+                      and store.records[artifact_id].get("target") == cand.target
+                      and store.records[artifact_id].get("identity") == identity
+                      and store.records[artifact_id].get("payload", {}).get("source_artifact_id")
+                      == cell["capture_id"]
+                      and store.records[artifact_id].get("payload", {}).get("callback_observed") is True)]
+    if not hunter_ids:
+        return None
+    failure = "Fresh XML callback did not reproduce the hunter signal"
+    try:
+        if cell["path"] not in (getattr(tools_manager, "_scoped_body_replay_paths", None) or set()):
+            raise ValueError("The exact XML POST path was not approved for replay")
+        capture = tools_manager._scoped_capture_row(str(cell["capture_id"]))
+        if (not capture or capture.get("identity") != identity
+                or capture.get("verifier_run_id") is not None):
+            raise ValueError("The original browser XML capture is unavailable")
+        plan = plan_xml_entity_probe(
+            capture["private"], allowed_origin=_origin(cand.target),
+            expected_path=cell["path"],
+        )
+        if plan["url"] != cand.target:
+            raise ValueError("XML capture does not match the candidate target")
+        result = await send_xml_callback(tools_manager, plan, identity=identity)
+        if result.get("callback_observed") is True and isinstance(result.get("proof"), dict):
+            evidence_ids = [str(item) for item in result.get("evidence_ids") or []]
+            for hunter_id in hunter_ids:
+                proof = {**result["proof"], "hunter_artifact_id": hunter_id}
+                valid, why = validate_proof(store, cand, proof, evidence_ids)
+                fresh, fresh_why = store.validate(
+                    evidence_ids, candidate_id=cand.id, revision=cand.revision,
+                    run_id=run.id, target=cand.target,
+                )
+                if valid and fresh:
+                    verified = apply_verdict(
+                        tools_manager, candidate_id=cand.id, verdict="confirmed",
+                        evidence="A fresh external XML entity produced a matching callback on the observed endpoint.",
+                        evidence_ids=evidence_ids, proof=proof,
+                    )
+                    if verified and verified.status == "confirmed":
+                        return {"candidate_id": cand.id, "title": cand.title,
+                                "status": "confirmed", "verifier_summary": "Fresh XML callback matched the hunter signal",
+                                "key_findings": [], "tool_calls": 1, "error": None}
+                failure = why or fresh_why or "XML callback proof policy rejected the replay"
+        else:
+            failure = "No matching callback arrived during the fresh XML replay"
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Deterministic XXE verifier could not replay candidate %s", cand.id,
+        )
+        failure = "Scoped XML replay failed before verification completed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title, "status": "inconclusive",
+            "verifier_summary": failure, "key_findings": [], "tool_calls": 1,
+            "error": None}
 
 
 async def _verify_scoped_sql_candidate(

