@@ -915,3 +915,79 @@ async def test_nested_first_pass_probe_reserves_gets_without_context_leak():
         "success": True,
     }
     assert first_pass_get_context.get() is False
+
+
+def test_get_xss_first_pass_sweeps_all_supported_contexts_without_reflection():
+    """An inert first marker cannot suppress other reflected XSS contexts."""
+    class Manager:
+        def __init__(self):
+            brain = EngagementBrain(target="https://app.test")
+            seed_parameter_coverage_cells(brain, [{
+                "method": "GET", "host": "app.test", "path": "/search",
+                "name": "term", "location": "query", "identity": "anonymous",
+                "source": "browser_link", "testable": True,
+            }])
+            for cell in brain.coverage_cells:
+                if cell["test_type"] == "sqli":
+                    cell["status"] = "skipped"
+            self._engagement_brain = brain.to_dict()
+            self._capability_map = {"target": "https://app.test"}
+            self.techniques = []
+
+        async def scoped_input_probe_assigned(self, coverage_cell_id, coverage_lease_id, technique):
+            self.techniques.append(technique)
+            return {"success": True, "evidence_id": "receipt-" + technique,
+                    "proof_confirmed": False,
+                    "probe_result": {"reflection_contexts": []}}
+
+    manager = Manager()
+    result = asyncio.run(run_observed_input_batch(manager, max_checks=1))
+    expected = ["html_body", "html_body_svg", "html_attribute",
+                "html_attribute_single", "js_single", "js_double"]
+    assert manager.techniques == expected
+    assert result["results"][0]["outcome"] == "inconclusive"
+    xss = next(cell for cell in manager._engagement_brain["coverage_cells"]
+               if cell["test_type"] == "xss")
+    assert xss["xss_techniques_attempted"] == expected
+    assert xss["xss_pending_techniques"] == []
+
+
+def test_get_xss_variant_sweep_resumes_saved_cell_without_repeating_probes():
+    class Manager:
+        def __init__(self):
+            brain = EngagementBrain(target="https://app.test")
+            seed_parameter_coverage_cells(brain, [{
+                "method": "GET", "host": "app.test", "path": "/search",
+                "name": "term", "location": "query", "identity": "anonymous",
+                "source": "browser_link", "testable": True,
+            }])
+            for cell in brain.coverage_cells:
+                if cell["test_type"] == "sqli":
+                    cell["status"] = "skipped"
+                else:
+                    cell["status"] = "inconclusive"
+                    cell["first_pass_outcome"] = "inconclusive"
+                    cell["probe_artifact_ids"] = ["prior-receipt"]
+                    cell["xss_techniques_attempted"] = ["html_body", "html_body_svg"]
+                    cell["xss_pending_techniques"] = [
+                        "html_attribute", "html_attribute_single", "js_single", "js_double",
+                    ]
+            self._engagement_brain = brain.to_dict()
+            self._capability_map = {"target": "https://app.test"}
+            self.techniques = []
+
+        async def scoped_input_probe_assigned(self, coverage_cell_id, coverage_lease_id, technique):
+            self.techniques.append(technique)
+            return {"success": True, "evidence_id": "receipt-" + technique,
+                    "proof_confirmed": False,
+                    "probe_result": {"reflection_contexts": []}}
+
+    manager = Manager()
+    result = asyncio.run(run_observed_input_batch(manager, max_checks=1))
+    assert result["processed"] == 1
+    assert manager.techniques == [
+        "html_attribute", "html_attribute_single", "js_single", "js_double",
+    ]
+    xss = next(cell for cell in manager._engagement_brain["coverage_cells"]
+               if cell["test_type"] == "xss")
+    assert xss["xss_pending_techniques"] == []
