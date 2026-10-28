@@ -675,6 +675,15 @@ def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, A
         and isinstance(row.get("url"), str)
     }
     existing = {row.get("id") for row in getattr(brain, "coverage_cells", []) if isinstance(row, dict)}
+    observed_query_fields: dict[str, set[str]] = {}
+    for row in (cmap.get("parameter_inventory") or [])[:4000]:
+        if (isinstance(row, dict) and str(row.get("method") or "").upper() == "GET"
+                and row.get("location") == "query"
+                and row.get("source") in {"browser_link", "browser_request", "browser_traffic"}):
+            page = str(row.get("path") or "")
+            field = str(row.get("name") or "")
+            if page.startswith("/") and not page.startswith("//") and 0 < len(field) <= 80:
+                observed_query_fields.setdefault(page, set()).add(field)
     hypothesis = next((
         h for h in getattr(brain, "hypotheses", []) or []
         if getattr(h, "specialist", "") == "js_secrets"
@@ -732,20 +741,37 @@ def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, A
             isinstance(lead, dict) and lead.get("kind") in {"html_assignment", "dynamic_code"}
             for lead in sink_leads
         ):
-            dom = _new_cell(
-                brain, method="GET", path=parts.path, host=parts.netloc,
-                identity="anonymous", parameter=parameter, test_type="dom_xss",
-                source="js_inventory", capture_id=source.get("artifact_id", ""),
-            )
-            dom["script_url"] = script_url
-            dom["script_kind"] = "inline" if inline else "external"
-            dom["page_path"] = str(source.get("page_path") or (parts.path if inline else ""))[:512]
-            dom["source_leads"] = source_leads
-            dom["sink_leads"] = sink_leads
-            dom["priority_rank"] = 2
-            if dom["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
-                brain.coverage_cells.append(dom)
-                existing.add(dom["id"])
+            observed_pages = [
+                page for page in (source.get("page_paths") or [source.get("page_path")])[:20]
+                if isinstance(page, str) and page.startswith("/") and not page.startswith("//")
+                and "?" not in page and "#" not in page
+            ]
+            for page_path in dict.fromkeys(observed_pages):
+                for source_kind in ("fragment", "query"):
+                    matching_leads = [
+                        lead for lead in source_leads
+                        if isinstance(lead, dict) and lead.get("kind") == source_kind
+                    ]
+                    if not matching_leads:
+                        continue
+                    fields = (["fragment"] if source_kind == "fragment"
+                              else ["query:" + name for name in
+                                    sorted(observed_query_fields.get(page_path, set()))[:20]])
+                    for field in fields:
+                        dom = _new_cell(
+                            brain, method="GET", path=page_path, host=parts.netloc,
+                            identity="anonymous", parameter=field, test_type="dom_xss",
+                            source="js_inventory", capture_id=source.get("artifact_id", ""),
+                        )
+                        dom["script_url"] = script_url
+                        dom["script_kind"] = "inline" if inline else "external"
+                        dom["page_path"] = page_path
+                        dom["source_leads"] = matching_leads
+                        dom["sink_leads"] = sink_leads
+                        dom["priority_rank"] = 2
+                        if dom["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
+                            brain.coverage_cells.append(dom)
+                            existing.add(dom["id"])
         for lead in (source.get("client_leads") or [])[:18]:
             kind = client_classes.get(lead.get("kind")) if isinstance(lead, dict) else None
             if not kind or not source_leads:
