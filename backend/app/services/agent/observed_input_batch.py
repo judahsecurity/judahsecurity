@@ -261,6 +261,7 @@ async def run_observed_input_batch(
         followup_deferred = False
         xss_attempted = list(cell.get("xss_techniques_attempted") or [])
         xss_pending = list(cell.get("xss_pending_techniques") or [])
+        xss_variant_failures = dict(cell.get("xss_variant_failures") or {})
         first_technique = ""
 
         operation_name = ""
@@ -328,6 +329,7 @@ async def run_observed_input_batch(
                         and result.get("evidence_id")):
                     if first_technique and first_technique not in xss_attempted:
                         xss_attempted.append(first_technique)
+                    xss_variant_failures.pop(first_technique, None)
                     if result.get("proof_confirmed") is not True:
                         contexts = set((result.get("probe_result") or {}).get("reflection_contexts") or [])
                         contextual = (
@@ -342,6 +344,7 @@ async def run_observed_input_batch(
                         techniques = [
                             technique for technique in dict.fromkeys([*contextual, *full_get])
                             if technique not in xss_attempted
+                            and int(xss_variant_failures.get(technique) or 0) < 2
                         ]
                         for technique in techniques:
                             remaining = cell_deadline - time.monotonic()
@@ -354,20 +357,34 @@ async def run_observed_input_batch(
                                      "technique": technique},
                                 ), timeout=min(remaining, 20.0))
                             except asyncio.TimeoutError:
+                                xss_variant_failures[technique] = int(
+                                    xss_variant_failures.get(technique) or 0
+                                ) + 1
                                 followup_deferred = True
                                 break
                             if followup.get("success") is not True or not followup.get("evidence_id"):
+                                xss_variant_failures[technique] = int(
+                                    xss_variant_failures.get(technique) or 0
+                                ) + 1
                                 followup_failure = str(followup.get("error") or "missing_followup_receipt")[:100]
                                 break
+                            xss_variant_failures.pop(technique, None)
                             xss_attempted.append(technique)
                             result = followup
                             if result.get("proof_confirmed") is True:
                                 break
-                        xss_pending = ([] if result.get("proof_confirmed") is True or followup_failure
+                        xss_pending = ([] if result.get("proof_confirmed") is True
                                        else [technique for technique in techniques
-                                             if technique not in xss_attempted])
+                                             if technique not in xss_attempted
+                                             and int(xss_variant_failures.get(technique) or 0) < 2])
                     else:
                         xss_pending = []
+                if (specialist == "xss" and method == "GET" and location == "query"
+                        and first_technique and (result.get("success") is not True
+                                                 or not result.get("evidence_id"))):
+                    xss_variant_failures[first_technique] = int(
+                        xss_variant_failures.get(first_technique) or 0
+                    ) + 1
                 evidence_id = str(result.get("evidence_id") or next(
                     iter(result.get("service_artifact_ids") or []), ""
                 ))
@@ -469,6 +486,10 @@ async def run_observed_input_batch(
                         elif followup_deferred:
                             reason += "; follow-up deferred after timeout"
         except asyncio.TimeoutError:
+            if specialist == "xss" and method == "GET" and first_technique and not evidence_id:
+                xss_variant_failures[first_technique] = int(
+                    xss_variant_failures.get(first_technique) or 0
+                ) + 1
             outcome = "inconclusive" if evidence_id else "unattempted"
             reason = "First-pass probe timed out" + (" after a partial receipt" if evidence_id else " without a proof receipt")
             logger.warning("Observed input first pass timed out for %s", cell["id"])
@@ -481,6 +502,10 @@ async def run_observed_input_batch(
             manager._engagement_brain = interrupted.to_dict()
             raise
         except Exception as exc:
+            if specialist == "xss" and method == "GET" and first_technique and not evidence_id:
+                xss_variant_failures[first_technique] = int(
+                    xss_variant_failures.get(first_technique) or 0
+                ) + 1
             outcome = "inconclusive" if evidence_id else "unattempted"
             reason = f"First-pass probe failed: {type(exc).__name__}"
             logger.exception("Observed input first pass failed for %s", cell["id"])
@@ -510,12 +535,24 @@ async def run_observed_input_batch(
                 current["first_pass_evidence_id"] = evidence_id
                 current["first_pass_evidence_source"] = evidence_source
             if specialist == "xss" and method == "GET" and location == "query":
-                if outcome == "unattempted" and current["first_pass_attempts"] >= 2:
-                    xss_pending = []
+                xss_pending = ([] if outcome == "proof_signal" else [
+                    technique for technique in XSS_GET_TECHNIQUES
+                    if technique not in xss_attempted
+                    and int(xss_variant_failures.get(technique) or 0) < 2
+                ])
                 current["xss_techniques_attempted"] = xss_attempted
                 current["xss_pending_techniques"] = xss_pending
-                variant_error = followup_failure or (
-                    reason if outcome == "unattempted" and not xss_pending else ""
+                current["xss_variant_failures"] = xss_variant_failures
+                exhausted = [
+                    technique for technique in XSS_GET_TECHNIQUES
+                    if technique not in xss_attempted
+                    and int(xss_variant_failures.get(technique) or 0) >= 2
+                ]
+                variant_error = (
+                    "XSS variants exhausted after two failed attempts: " + ", ".join(exhausted)
+                    if exhausted else followup_failure or (
+                        reason if outcome == "unattempted" and not xss_pending else ""
+                    )
                 )
                 if variant_error:
                     current["xss_variant_error"] = variant_error
@@ -554,6 +591,7 @@ async def run_observed_input_batch(
             "candidate_handoff_pending": outcome == "proof_signal" and bool(evidence_id) and not candidate_id,
             "xss_techniques_attempted": xss_attempted if specialist == "xss" else [],
             "xss_pending_techniques": xss_pending if specialist == "xss" else [],
+            "xss_variant_failures": xss_variant_failures if specialist == "xss" else {},
         })
 
     brain = engagement_brain_from_dict(getattr(manager, "_engagement_brain", None))
