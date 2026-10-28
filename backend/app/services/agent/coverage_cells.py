@@ -780,7 +780,7 @@ def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, A
                 review = _new_cell(
                     brain, method="GET", path=parts.path, host=parts.netloc,
                     identity="anonymous", parameter=parameter, test_type="dom_xss",
-                    status="blocked", source="js_inventory",
+                    source="js_inventory",
                     reason="A rendering page and observed input are required for browser replay",
                     capture_id=source.get("artifact_id", ""),
                 )
