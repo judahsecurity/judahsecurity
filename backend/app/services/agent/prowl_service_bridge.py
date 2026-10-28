@@ -152,6 +152,8 @@ def capability_map_from_observation(observation: dict) -> dict | None:
         {"url": scope + path, "kind": row.get("kind"), "index": row.get("index", 0),
          "action_ref": row.get("action_ref", ""), "artifact_id": row.get("artifact_id", ""),
          "page_path": in_origin_path(row.get("page_path")),
+         "page_paths": [path for value in (row.get("page_paths") or [])[:20]
+                        if (path := in_origin_path(value))],
          "sha256": row.get("sha256", ""), "bytes": row.get("bytes", 0),
          "sink_leads": row["analysis"].get("sink_leads", []) if isinstance(row.get("analysis"), dict) else [],
          "source_leads": row["analysis"].get("source_leads", []) if isinstance(row.get("analysis"), dict) else [],
