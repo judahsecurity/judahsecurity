@@ -258,6 +258,7 @@ async def run_observed_input_batch(
         candidate_handoff_error = ""
         result: dict[str, Any] = {}
         followup_failure = ""
+        followup_deferred = False
         xss_attempted = list(cell.get("xss_techniques_attempted") or [])
         xss_pending = list(cell.get("xss_pending_techniques") or [])
         first_technique = ""
@@ -322,7 +323,8 @@ async def run_observed_input_batch(
                 ))
                 if evidence_id:
                     evidence_source = "local" if result.get("evidence_id") else "service"
-                if (specialist == "xss" and result.get("success") is True
+                if (specialist == "xss" and first_technique
+                        and result.get("success") is True
                         and result.get("evidence_id")):
                     if first_technique and first_technique not in xss_attempted:
                         xss_attempted.append(first_technique)
@@ -345,11 +347,15 @@ async def run_observed_input_batch(
                             remaining = cell_deadline - time.monotonic()
                             if remaining < 5:
                                 break
-                            followup = await asyncio.wait_for(_invoke(
-                                manager, "scoped_input_probe_assigned",
-                                {"coverage_cell_id": cell["id"], "coverage_lease_id": lease.id,
-                                 "technique": technique},
-                            ), timeout=min(remaining, 20.0))
+                            try:
+                                followup = await asyncio.wait_for(_invoke(
+                                    manager, "scoped_input_probe_assigned",
+                                    {"coverage_cell_id": cell["id"], "coverage_lease_id": lease.id,
+                                     "technique": technique},
+                                ), timeout=min(remaining, 20.0))
+                            except asyncio.TimeoutError:
+                                followup_deferred = True
+                                break
                             if followup.get("success") is not True or not followup.get("evidence_id"):
                                 followup_failure = str(followup.get("error") or "missing_followup_receipt")[:100]
                                 break
@@ -460,6 +466,8 @@ async def run_observed_input_batch(
                         )
                         if followup_failure:
                             reason += f"; follow-up blocked: {followup_failure}"
+                        elif followup_deferred:
+                            reason += "; follow-up deferred after timeout"
         except asyncio.TimeoutError:
             outcome = "inconclusive" if evidence_id else "unattempted"
             reason = "First-pass probe timed out" + (" after a partial receipt" if evidence_id else " without a proof receipt")
