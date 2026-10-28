@@ -182,7 +182,7 @@ def observed_xss_cell_for_proof(
     brain: Any, store: Any, *, target: str, evidence_ids: Iterable[str],
 ) -> Optional[Dict[str, Any]]:
     """Link browser execution to one mapped GET parameter, never to a guess."""
-    from urllib.parse import parse_qs, urlsplit
+    from urllib.parse import parse_qs, parse_qsl, urlsplit
     from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
 
     parsed_target = urlsplit(target)
@@ -956,7 +956,7 @@ async def _verify_scoped_browser_xss_candidate(
     dom_xss = bool(cell and cell.get("source") == "js_inventory"
                    and cell.get("test_type") == "dom_xss"
                    and cell.get("method") == "GET"
-                   and any(isinstance(lead, dict) and lead.get("kind") == "fragment"
+                   and any(isinstance(lead, dict) and lead.get("kind") in {"fragment", "query"}
                            for lead in cell.get("source_leads") or []))
     stored_xss = bool(cell and cell.get("source") == "parameter_inventory"
                       and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
@@ -967,6 +967,7 @@ async def _verify_scoped_browser_xss_candidate(
                     and cell.get("test_type") == "xss" and cell.get("method") in {"GET", "POST"})):
         return None
     location, separator, parameter = str(cell.get("parameter") or "").partition(":")
+    dom_query = dom_xss and location == "query" and bool(separator and parameter)
     form_xss = cell.get("method") == "POST" and location == "body_form"
     target = urlsplit(cand.target)
     identity = str(cell.get("identity") or "anonymous")
@@ -1031,8 +1032,19 @@ async def _verify_scoped_browser_xss_candidate(
         elif dom_xss:
             if (proof.get("operation") != "check_xss" or xhr_xss
                     or not _same_observed_origin(parsed.scheme, parsed.netloc, cand.target)
-                    or (parsed.path or "/") != (target.path or "/")
-                    or parsed.query or "__PROWL_NONCE__" not in parsed.fragment):
+                    or (parsed.path or "/") != (target.path or "/")):
+                continue
+            if dom_query:
+                try:
+                    fields = parse_qsl(parsed.query, keep_blank_values=True, max_num_fields=40)
+                except ValueError:
+                    continue
+                if (parsed.fragment or len([value for name, value in fields
+                                             if name == parameter]) != 1
+                        or not any("__PROWL_NONCE__" in value
+                                   for name, value in fields if name == parameter)):
+                    continue
+            elif parsed.query or "__PROWL_NONCE__" not in parsed.fragment:
                 continue
         elif xhr_xss:
             if (proof.get("operation") != "check_xhr_xss"
