@@ -1,7 +1,7 @@
-"""Bounded CodeAgent: run a one-off HTTP/Python probe in a sandbox.
+"""Legacy AST-limited Python probe for an assessment host.
 
-Not a Kali shell. The source is AST-checked, then executed in a subprocess
-with a tiny allowlist (json/re/httpx/...) and DNS/host scope enforcement.
+This process isolation is not a security boundary. Autonomous experiments
+should use the typed scoped assessment executor, which enforces policy at I/O.
 """
 
 from __future__ import annotations
@@ -74,6 +74,8 @@ FORBIDDEN_NAMES = {
 MAX_SOURCE_CHARS = 12_000
 DEFAULT_TIMEOUT_SEC = 20
 MAX_OUTPUT_CHARS = 20_000
+SAFE_HTTPX_ATTRIBUTES = {"Client", "get", "post", "request", "put", "patch",
+                         "delete", "head", "options"}
 
 _RUNNER = r'''
 import json, re, time, math, base64, hashlib, hmac, datetime, collections, typing, decimal, uuid, sys
@@ -82,6 +84,8 @@ import httpx
 
 _ALLOWED = json.loads(__ALLOWED_JSON__)
 _TIMEOUT = float(__TIMEOUT__)
+_MAX_REQUESTS = 6
+_REQUESTS_SENT = 0
 
 _OOB = json.loads(__OOB_JSON__)
 
@@ -93,17 +97,31 @@ def _host_ok(host: str) -> bool:
         allowed = (raw or "").lower().lstrip(".").rstrip(".")
         if not allowed:
             continue
-        if host == allowed or host.endswith("." + allowed):
+        if host == allowed or (raw in _OOB and host.endswith("." + allowed)):
             return True
     return False
 
 class _ScopedClient(httpx.Client):
-    def request(self, method, url, **kwargs):
-        host = (urlparse(str(url)).hostname or "").lower()
+    def __init__(self, *args, **kwargs):
+        if any(key in kwargs for key in ("proxy", "mounts", "transport")):
+            raise PermissionError("custom HTTP transports are not allowed")
+        kwargs["trust_env"] = False
+        super().__init__(*args, **kwargs)
+
+    def send(self, request, **kwargs):
+        global _REQUESTS_SENT
+        host = (urlparse(str(request.url)).hostname or "").lower()
         if not _host_ok(host):
             raise PermissionError(f"host not in engagement scope: {host}")
+        if _REQUESTS_SENT >= _MAX_REQUESTS:
+            raise PermissionError("custom probe request limit exceeded")
+        _REQUESTS_SENT += 1
+        kwargs["follow_redirects"] = False
+        return super().send(request, **kwargs)
+
+    def request(self, method, url, **kwargs):
         kwargs.setdefault("timeout", _TIMEOUT)
-        kwargs.setdefault("follow_redirects", True)
+        kwargs["follow_redirects"] = False
         return super().request(method, url, **kwargs)
 
 def get(url, **kw):
@@ -134,7 +152,7 @@ class http:
     request = staticmethod(request)
 
 # User probe follows. Print JSON/text to stdout. Use httpx/http against in-scope
-# hosts or Interactsh/OAST (never 169.254.169.254 / localhost — Lictor blocks those).
+# hosts. Out-of-band callbacks require an explicit operator-enabled runner.
 '''
 
 
@@ -179,19 +197,28 @@ def validate_probe_source(source: str) -> List[str]:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 root = (alias.name or "").split(".")[0]
-                if root not in ALLOWED_MODULES:
+                if (root not in ALLOWED_MODULES or
+                        (root == "urllib" and alias.name != "urllib.parse") or
+                        (root == "httpx" and alias.name != "httpx")):
                     errors.append(f"import not allowed: {alias.name}")
         elif isinstance(node, ast.ImportFrom):
             mod = node.module or ""
             root = mod.split(".")[0]
-            if root not in ALLOWED_MODULES:
+            if (root not in ALLOWED_MODULES or
+                    (root == "urllib" and mod != "urllib.parse") or
+                    (root == "httpx" and
+                     (mod != "httpx" or any(alias.name not in SAFE_HTTPX_ATTRIBUTES
+                                            for alias in node.names)))):
                 errors.append(f"from-import not allowed: {mod or '*'}")
         elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
             if node.id in FORBIDDEN_NAMES:
                 errors.append(f"builtin not allowed: {node.id}")
         elif isinstance(node, ast.Attribute):
-            if node.attr.startswith("__"):
-                errors.append(f"dunder access not allowed: {node.attr}")
+            if node.attr.startswith("_"):
+                errors.append(f"private attribute access not allowed: {node.attr}")
+            if (isinstance(node.value, ast.Name) and node.value.id == "httpx" and
+                    node.attr not in SAFE_HTTPX_ATTRIBUTES):
+                errors.append(f"httpx attribute not allowed: {node.attr}")
     # de-dupe, keep order
     seen = set()
     uniq = []
@@ -207,6 +234,7 @@ def _prepare_probe(
     *,
     allowed_hosts: Sequence[str],
     timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+    oob_allowed: bool = False,
 ) -> tuple[list[str], float, str, dict[str, str]] | dict[str, Any]:
     """Validate scope and source before either probe runner starts a process."""
     hosts = _normalize_hosts(allowed_hosts)
@@ -222,7 +250,7 @@ def _prepare_probe(
     timeout_sec = max(3.0, min(float(timeout_sec or DEFAULT_TIMEOUT_SEC), 45.0))
     prelude = (
         _RUNNER.replace("__ALLOWED_JSON__", repr(json.dumps(hosts)))
-        .replace("__OOB_JSON__", repr(json.dumps(list(OOB_HOST_SUFFIXES))))
+        .replace("__OOB_JSON__", repr(json.dumps(list(OOB_HOST_SUFFIXES) if oob_allowed else [])))
         .replace("__TIMEOUT__", repr(timeout_sec))
     )
     body = textwrap.dedent(source).strip() + "\n"
@@ -244,9 +272,11 @@ def run_custom_probe(
     *,
     allowed_hosts: Sequence[str],
     timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+    oob_allowed: bool = False,
 ) -> dict[str, Any]:
     """Synchronous runner for direct callers; the agent uses the async runner."""
-    prepared = _prepare_probe(source, allowed_hosts=allowed_hosts, timeout_sec=timeout_sec)
+    prepared = _prepare_probe(source, allowed_hosts=allowed_hosts, timeout_sec=timeout_sec,
+                              oob_allowed=oob_allowed)
     if isinstance(prepared, dict):
         return prepared
     hosts, timeout_sec, script, env = prepared
@@ -309,9 +339,11 @@ async def run_custom_probe_async(
     *,
     allowed_hosts: Sequence[str],
     timeout_sec: float = DEFAULT_TIMEOUT_SEC,
+    oob_allowed: bool = False,
 ) -> dict[str, Any]:
     """Run the agent's probe without blocking cancellation of its turn."""
-    prepared = _prepare_probe(source, allowed_hosts=allowed_hosts, timeout_sec=timeout_sec)
+    prepared = _prepare_probe(source, allowed_hosts=allowed_hosts, timeout_sec=timeout_sec,
+                              oob_allowed=oob_allowed)
     if isinstance(prepared, dict):
         return prepared
     hosts, timeout_sec, script, env = prepared

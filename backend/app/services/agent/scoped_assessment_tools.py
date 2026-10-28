@@ -10,6 +10,7 @@ import asyncio
 import hashlib
 import json
 import secrets
+import time
 from contextvars import ContextVar
 from urllib.parse import parse_qsl, quote, unquote_plus, urlencode, urljoin, urlsplit, urlunsplit
 
@@ -29,6 +30,7 @@ SCOPED_ASSESSMENT_TOOLS = (
     "scoped_http_get",
     "scoped_http_compare",
     "scoped_query_probe",
+    "scoped_adaptive_experiment",
     "scoped_numeric_sqli",
     "scoped_string_sqli",
     "scoped_body_probe",
@@ -617,6 +619,77 @@ class ScopedAssessmentTools:
             "scoped_query_probe", result, target=result["target"], identity=identity,
             success=not result["inconclusive"],
         )
+        return json.dumps(result)
+
+    async def scoped_adaptive_experiment(
+        self, artifact_id: str, parameter: str, hypothesis: str,
+        control: str, probe: str, identity: str = "anonymous",
+        coverage_cell_id: str = "", coverage_lease_id: str = "",
+    ) -> str:
+        """Try one agent-chosen GET mutation against a repeated negative control."""
+        hypothesis = str(hypothesis or "").strip()
+        if not 0 < len(hypothesis) <= 300:
+            raise ValueError("A 1-300 character hypothesis is required")
+        private = self._scoped_exchange(artifact_id, identity)
+        observed = json.loads(private)
+        allowed = self._scoped_origin(observed["url"])
+        baseline, control_url, probe_url = query_probe.plan_adaptive_query(
+            private, parameter=parameter, control=control, probe=probe,
+            allowed_origins=[allowed],
+        )
+        if bool(coverage_cell_id) != bool(coverage_lease_id):
+            raise ValueError("Coverage cell and lease IDs must be supplied together")
+        if coverage_cell_id:
+            from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+            brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            cell = next((row for row in brain.coverage_cells
+                         if row.get("id") == coverage_cell_id), None)
+            parts = urlsplit(baseline)
+            if (not cell or cell.get("status") != "leased" or
+                    cell.get("lease_id") != coverage_lease_id or
+                    float(cell.get("lease_deadline") or 0) <= time.time() or
+                    cell.get("capture_id") != artifact_id or
+                    cell.get("parameter") != f"query:{parameter}" or
+                    cell.get("method") != "GET" or
+                    cell.get("path") != (parts.path or "/") or
+                    cell.get("host") != parts.hostname or
+                    (cell.get("identity") or "anonymous") != identity or
+                    cell.get("test_type") not in {"xss", "sqli"}):
+                raise ValueError("Invalid leased coverage cell for this captured input")
+        state = self._scoped_state(identity, baseline)
+        self._scoped_claim_gets(6)
+        self._scoped_assessment_started = True
+        result = await asyncio.to_thread(
+            query_probe.probe_adaptive_query, baseline, control_url, probe_url,
+            parameter=parameter, hypothesis=hypothesis,
+            allowed_origins=[allowed], storage_state=state,
+        )
+        result["source_artifact_id"] = artifact_id
+        result["control"] = control
+        result["probe"] = probe
+        result["coverage_cell_id"] = coverage_cell_id
+        result["coverage_lease_id"] = coverage_lease_id
+        result["evidence_id"] = evidence_store(self).record(
+            "scoped_adaptive_experiment", result, target=result["target"],
+            identity=identity, success=not result["inconclusive"],
+            coverage_cell_id=coverage_cell_id, parameter=parameter,
+            capture_id=artifact_id,
+        )
+        if coverage_cell_id:
+            from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+            live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            current = next((row for row in live.coverage_cells
+                            if row.get("id") == coverage_cell_id and
+                            row.get("lease_id") == coverage_lease_id), None)
+            if current is not None:
+                for key, limit in (("probe_artifact_ids", 20), ("evidence_ids", 30)):
+                    current[key] = list(dict.fromkeys([
+                        *(current.get(key) or []), result["evidence_id"],
+                    ]))[:limit]
+                current["last_probe"] = "scoped_adaptive_experiment"
+                self._engagement_brain = live.to_dict()
         return json.dumps(result)
 
     async def scoped_body_probe(self, artifact_id: str, parameter: str, identity: str = "anonymous") -> str:

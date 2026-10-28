@@ -1,12 +1,14 @@
 """PROWL execution primitives are available through the existing Aegis agent."""
 
 import json
+import time
 
 import pytest
 
 from app.services.agent.assessment_scope import register_scope
 from app.services.agent.assessment_sessions import identity_registry
 from app.services.agent.evidence_store import VerificationRun, evidence_store, verification_run
+from app.services.agent.engagement_brain import EngagementBrain
 from app.services.agent.scoped_assessment.browser_traffic import package_exchange
 from app.services.agent.tools import ASMToolsManager
 from app.services.agent.prompts import is_tool_allowed_in_phase
@@ -27,6 +29,88 @@ def test_legacy_scoped_identity_requires_proven_auth_on_exact_origin():
         manager._scoped_state("legacy", "https://elsewhere.test/catalog")
     state = manager._scoped_state("legacy", "https://app.example.test/catalog")
     assert state["cookies"][0]["name"] == "session"
+
+
+@pytest.mark.asyncio
+async def test_adaptive_query_experiment_is_scoped_repeated_and_evidenced(monkeypatch):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    assert manager.get_tool("scoped_adaptive_experiment") is not None
+    assert is_tool_allowed_in_phase("scoped_adaptive_experiment", "exploitation")
+    assert not is_tool_allowed_in_phase("scoped_adaptive_experiment", "informational")
+    _, private = package_exchange(
+        url="https://app.example.test/search?other=keep%2Bthis&q=seed&tail=ok",
+        expected_origin="https://app.example.test", action_ref="search",
+        method="GET", resource_type="fetch", status=200,
+        content_type="text/html", request_body=b"", response_body=b"seed",
+    )
+    manager._scoped_browser_exchanges = {
+        "capture-1": {"identity": "anonymous", "private": private,
+                      "public": {}, "verifier_run_id": None},
+    }
+    brain = EngagementBrain(target="https://app.example.test")
+    brain.coverage_cells = [{
+        "id": "cell-1", "status": "leased", "lease_id": "lease-1",
+        "lease_deadline": time.time() + 60, "capture_id": "capture-1",
+        "parameter": "query:q", "method": "GET", "path": "/search",
+        "host": "app.example.test", "identity": "anonymous", "test_type": "sqli",
+    }]
+    manager._engagement_brain = brain.to_dict()
+    seen = []
+
+    def fake_get(url, allowed_origins, state):
+        seen.append(url)
+        assert allowed_origins == ["https://app.example.test"]
+        assert state is None
+        label = "probe" if "q=%27" in url else "control" if "q=plain" in url else "baseline"
+        return {"status": 500 if label == "probe" else 200,
+                "content_type": "text/html", "bytes_captured": 10,
+                "truncated": False, "body_sha256": label, "redirected": False,
+                "sql_error_family": "sqlite" if label == "probe" else ""}
+
+    monkeypatch.setattr(
+        "app.services.agent.scoped_assessment.query_probe.observe_get", fake_get,
+    )
+    result = json.loads(await manager.scoped_adaptive_experiment(
+        "capture-1", "q", "A quote may trigger a parser error", "plain", "'",
+        coverage_cell_id="cell-1", coverage_lease_id="lease-1",
+    ))
+    assert result["requests_sent"] == 6
+    assert result["sequence"] == ["baseline", "control", "probe", "probe", "control", "baseline"]
+    assert result["stable"] is True
+    assert result["diagnostic_lead"] is True
+    assert result["finding"] is False
+    assert all("other=keep%2Bthis" in url and "tail=ok" in url for url in seen)
+    assert seen[2] == seen[3]
+    assert "seed" not in json.dumps(result)
+    assert result["evidence_id"] in evidence_store(manager).records
+    record = evidence_store(manager).records[result["evidence_id"]]
+    assert record["coverage_cell_id"] == "cell-1"
+    assert result["evidence_id"] in manager._engagement_brain["coverage_cells"][0]["evidence_ids"]
+    assert manager._scoped_get_count == 6
+
+
+@pytest.mark.asyncio
+async def test_adaptive_query_rejects_unsafe_mutations_before_budget(monkeypatch):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    _, private = package_exchange(
+        url="https://app.example.test/search?q=seed",
+        expected_origin="https://app.example.test", action_ref="search",
+        method="GET", resource_type="fetch", status=200,
+        content_type="text/html", request_body=b"", response_body=b"seed",
+    )
+    manager._scoped_browser_exchanges = {
+        "capture-1": {"identity": "anonymous", "private": private,
+                      "public": {}, "verifier_run_id": None},
+    }
+    with pytest.raises(ValueError, match="ineligible URL"):
+        await manager.scoped_adaptive_experiment(
+            "capture-1", "q", "Check URL dereference", "plain", "https://other.test/",
+        )
+    assert manager._scoped_get_count == 0
 
 
 @pytest.mark.asyncio
