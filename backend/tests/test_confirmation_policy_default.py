@@ -112,9 +112,10 @@ async def test_authenticated_crawl_requires_analyst_approval(monkeypatch):
             "url": "https://app.test/login",
             "username_env": "TARGET_USER", "password_env": "TARGET_PASS",
         }})}
-        decision = await confirmation.gate("execute_interceptor", args, 7, "run")
-        assert decision["decision"] == "confirm"
-        assert "TARGET_PASS" in str(decision["tool_args"])
+        for tool_name in ("execute_interceptor", "execute_deep_crawl"):
+            decision = await confirmation.gate(tool_name, args, 7, "run")
+            assert decision["decision"] == "confirm"
+            assert "TARGET_PASS" in str(decision["tool_args"])
         anonymous = await confirmation.gate(
             "execute_interceptor", {"args": "https://app.test"}, 7, "run"
         )
