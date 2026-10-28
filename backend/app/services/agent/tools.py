@@ -9948,6 +9948,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         capability_map: Optional[Dict[str, Any]] = None,
         mode: str = "attack",
         surface_signature: str = "",
+        hypothesis_signature: str = "",
         pending_input_count: int = 0,
         pending_coverage_count: int = 0,
         completed_coverage_count: int = 0,
@@ -9967,6 +9968,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             mode: ``attack`` (default), ``observed_inputs`` (leased browser inputs),
                 ``cms_followup`` (fingerprinted CMS), or ``recon`` (legacy triad).
             surface_signature: Value-free observed-input inventory revision for scheduling.
+            hypothesis_signature: Value-free ready-hypothesis revision for scheduling.
             pending_input_count: Number of untested observed input cells when queued.
             pending_coverage_count: Number of unattempted non-SQLi/XSS checks when queued.
             completed_coverage_count: Number of completed coverage checks when queued.
@@ -10206,6 +10208,14 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         profiles = {n: get_specialist(n) for n in chosen if get_specialist(n)}
         default_target = target_list[0] if target_list else (cmap.target if cmap else "")
+        if hypothesis_signature:
+            if hypothesis_signature in brain.hypothesis_wave_history:
+                return json.dumps({"selection_source": "already_dispatched_hypothesis_revision",
+                                   "hypothesis_signature": hypothesis_signature})
+            brain.hypothesis_wave_history = [
+                *brain.hypothesis_wave_history[-99:], hypothesis_signature,
+            ]
+            self._engagement_brain = brain.to_dict()
         # A class-coverage follow-up owns a coverage cell, not an arbitrary
         # methodology card of the same specialist. Claiming that card would
         # let a class probe close unrelated hypothesis work.

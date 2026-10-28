@@ -1102,6 +1102,64 @@ def complete_blocked_reason(
     return None
 
 
+def _ready_hypothesis_wave(
+    state: Dict[str, Any], trace: List[Dict[str, Any]], target: str,
+) -> Optional[Dict[str, Any]]:
+    """Dispatch a new task-graph revision once, including on resumed turns."""
+    if state.get("mode") != "agent":
+        return None
+    from app.services.agent.parameter_inventory import _origin
+
+    cmap = state.get("capability_map") or {}
+    target_origin = _origin(target)
+    if not target_origin or _origin(str(cmap.get("target") or "")) != target_origin:
+        return None
+    from app.services.agent.engagement_brain import engagement_brain_from_dict
+    from app.services.agent.penetration_task_graph import (
+        NODE_READY, ready_wave, sync_graph_from_brain,
+    )
+
+    brain = engagement_brain_from_dict(state.get("engagement_brain"))
+    if not brain.hypotheses:
+        return None
+    graph = sync_graph_from_brain(brain)
+    selected = ready_wave(graph, max_specialists=4)
+    if not selected:
+        return None
+    # A specialist lease picks its highest-priority ready node. Do not force a
+    # wave when that specialist has a node aimed at a different origin.
+    by_id = {h.id: h for h in brain.hypotheses}
+    selected = [name for name in selected if all(
+        not by_id[node.id].target or _origin(by_id[node.id].target) == target_origin
+        for node in graph.nodes.values()
+        if node.status == NODE_READY and node.specialist == name and node.id in by_id
+    )]
+    if not selected:
+        return None
+    ready = sorted(
+        (node.id, node.attempts, node.specialist)
+        for node in graph.nodes.values()
+        if node.status == NODE_READY and node.specialist in selected
+    )
+    signature = hashlib.sha256(
+        json.dumps(ready, separators=(",", ":")).encode()
+    ).hexdigest()[:16]
+    if signature in brain.hypothesis_wave_history or any(
+        step.get("tool_name") == "fireteam_dispatch"
+        and (step.get("tool_args") or {}).get("hypothesis_signature") == signature
+        for step in trace
+    ):
+        return None
+    return {
+        "tool_name": "fireteam_dispatch",
+        "tool_args": {
+            "specialists": selected, "targets": [target], "mode": "attack",
+            "hypothesis_signature": signature,
+        },
+        "thought": "New ready hypotheses need a bounded specialist wave.",
+    }
+
+
 def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """
     Deterministic next tool for a web assessment.
@@ -1206,7 +1264,7 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         followup = _coverage_followup_wave(state, trace, target)
         if followup:
             return followup
-        return None
+        return _ready_hypothesis_wave(state, trace, target)
     ran = normalized_tools_run(trace)
     crawled = bool(ran & _CRAWL_TOOLS)
     # Respect an operator's no-directory constraint without stalling the
@@ -1408,6 +1466,10 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
                 "xss, sqli, ssrf, …). Fingerprints are not an assessment."
             ),
         }
+
+    hypothesis_wave = _ready_hypothesis_wave(state, trace, target)
+    if hypothesis_wave:
+        return hypothesis_wave
 
     try:
         from app.services.agent.wordpress_surface import wordpress_forced_step

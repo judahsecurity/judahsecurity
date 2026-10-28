@@ -116,6 +116,7 @@ class EngagementBrain:
     proof_escalations: List[Dict[str, Any]] = field(default_factory=list)
     verification_receipts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     task_graph: Dict[str, Any] = field(default_factory=dict)
+    hypothesis_wave_history: List[str] = field(default_factory=list)
     pending_risk_assessments: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -142,6 +143,7 @@ class EngagementBrain:
             "proof_escalations": list(self.proof_escalations or []),
             "verification_receipts": dict(self.verification_receipts or {}),
             "task_graph": dict(self.task_graph or {}),
+            "hypothesis_wave_history": list(self.hypothesis_wave_history[-100:]),
             "pending_risk_assessments": list(self.pending_risk_assessments or []),
         }
 

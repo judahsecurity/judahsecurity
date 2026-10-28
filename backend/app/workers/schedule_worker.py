@@ -533,6 +533,9 @@ class ScheduleWorker:
             targets=urls,
             price_limit_usd=price,
             schedule_name=schedule.name,
+            run_key=f"{schedule.id}:{schedule.next_run_at.isoformat()}",
+            max_turns=max(1, min(int(cfg.get("max_turns") or 3), 4)),
+            max_total_seconds=max(300, min(int(cfg.get("max_total_seconds") or 3600), 7200)),
         )
         digest = result.get("digest") or ""
         failed = any(r.get("error") for r in (result.get("results") or []))
