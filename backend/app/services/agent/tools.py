@@ -1130,7 +1130,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     async def scoped_dom_xss_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
     ) -> Dict[str, Any]:
-        """Probe a mapped fragment-to-sink lead on its observed rendering page."""
+        """Probe an observed browser URL source on its rendering page."""
         import time
         from urllib.parse import quote, urlsplit
         from app.services.agent.engagement_brain import engagement_brain_from_dict
@@ -1146,12 +1146,24 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 or cell.get("source") != "js_inventory"
                 or cell.get("test_type") != "dom_xss"
                 or cell.get("specialist") != "xss"
-                or not any(isinstance(lead, dict) and lead.get("kind") == "fragment"
+                or not any(isinstance(lead, dict) and lead.get("kind") in {"fragment", "query"}
                            for lead in cell.get("source_leads") or [])
                 or not any(isinstance(lead, dict) and lead.get("kind") in
                            {"html_assignment", "dynamic_code"}
                            for lead in cell.get("sink_leads") or [])):
             return {"success": False, "error": "invalid_dom_xss_lease"}
+        location, separator, field = str(cell.get("parameter") or "").partition(":")
+        source_kind = "query" if location == "query" and separator else "fragment"
+        if (source_kind == "query"
+                and (not field or len(field) > 80 or not any(
+                    isinstance(lead, dict) and lead.get("kind") == "query"
+                    for lead in cell.get("source_leads") or []))):
+            return {"success": False, "error": "invalid_dom_xss_source"}
+        if source_kind == "fragment" and not any(
+            isinstance(lead, dict) and lead.get("kind") == "fragment"
+            for lead in cell.get("source_leads") or []
+        ):
+            return {"success": False, "error": "invalid_dom_xss_source"}
         page_path = str(cell.get("page_path") or "")
         if (not page_path or not page_path.startswith("/") or page_path.startswith("//")
                 or any(char in page_path for char in "?#\\\r\n\t ")
@@ -1164,9 +1176,19 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 != scoped_origin):
             return {"success": False, "error": "scope_mismatch"}
         payload = '<img src=x onerror=alert("__PROWL_NONCE__")>'
-        template = scoped_origin + page_path + "#" + quote(payload, safe="")
+        identity = str(cell.get("identity") or "anonymous")
+        page_url = scoped_origin + page_path
+        if source_kind == "query":
+            template, request_context = self._observed_get_query_template(
+                page_url, field, payload, identity,
+            )
+            if request_context == "single_parameter":
+                return {"success": False, "error": "observed_query_baseline_missing"}
+        else:
+            template = page_url + "#" + quote(payload, safe="")
+            request_context = "observed_fragment_render_page"
         proof = json.loads(await self.scoped_browser_assessment(
-            "check_xss", template, identity=str(cell.get("identity") or "anonymous"),
+            "check_xss", template, identity=identity,
         ))
         artifact_id = str(proof.get("evidence_id") or "")
         if not artifact_id:
@@ -1183,17 +1205,18 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         current["evidence_ids"] = list(dict.fromkeys([
             *(current.get("evidence_ids") or []), artifact_id,
         ]))[:30]
-        current["last_probe"] = "scoped_browser_check_xss_fragment"
+        operation = "scoped_browser_check_xss_" + source_kind
+        current["last_probe"] = operation
         if proof.get("executed") is True:
             current["status"] = "in_focus"
-            current["reason"] = "Fragment execution signal; independent verification required"
+            current["reason"] = "Browser execution signal; independent verification required"
         self._engagement_brain = live.to_dict()
         return {"success": True, "coverage_cell_id": coverage_cell_id,
                 "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
-                "operation": "scoped_browser_check_xss_fragment",
+                "operation": operation,
                 "proof_confirmed": proof.get("executed") is True,
                 "probe_result": {"executed": proof.get("executed") is True,
-                                 "request_context": "observed_fragment_render_page"}}
+                                 "request_context": request_context}}
 
     async def scoped_stored_xss_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
