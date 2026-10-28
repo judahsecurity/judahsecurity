@@ -1012,7 +1012,10 @@ def claim_coverage_cell_leases(
             and (not allowed_sources or cell.get("source") in allowed_sources)
             and (not excluded_test_types or cell.get("test_type") not in excluded_test_types)
             and (allowed_cell_ids is None or cell.get("id") in allowed_cell_ids)
-            and (not first_pass_only or not (
+            and (not first_pass_only or (
+                cell.get("test_type") == "xss" and cell.get("xss_pending_techniques")
+                and not cell.get("candidate_id")
+            ) or not (
                 cell.get("first_pass_outcome") or cell.get("candidate_id")
                 or cell.get("probe_artifact_ids") or cell.get("service_probe_artifact_ids")
             ))
