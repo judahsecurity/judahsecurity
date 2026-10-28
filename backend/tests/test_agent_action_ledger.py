@@ -335,3 +335,27 @@ def test_active_run_cannot_be_deleted_from_another_api_request(monkeypatch, tmp_
     action_ledger.finish_run(run_id, "completed")
     assert client.delete("/agent/conversations/active-session").status_code == 200
     assert not artifact_path.exists()
+
+
+def test_ledger_groups_failed_actions_by_tool_and_reason(monkeypatch):
+    factory = _isolated_ledger(monkeypatch)
+    run_id = action_ledger.start_run(
+        session_id="failure-summary", organization_id=12, user_id=7,
+        objective="https://demo.example", mode="agent", budget_seconds=60,
+    )
+    for index in range(2):
+        action_ledger.append_action(run_id, f"failed-{index}", "failed",
+                                    "scoped_input_probe_assigned", detail="invalid_coverage_lease")
+    action_ledger.append_action(run_id, "interrupted-1", "interrupted",
+                                "specialist:xss", detail="timeout")
+    with factory() as db:
+        report = action_ledger.latest_run(
+            db, session_id="failure-summary", organization_id=12, user_id=7,
+            run_id=run_id,
+        )
+    assert report["coverage"]["failure_groups"] == [
+        {"tool_name": "scoped_input_probe_assigned", "status": "failed",
+         "count": 2, "reason": "invalid_coverage_lease"},
+        {"tool_name": "specialist:xss", "status": "interrupted",
+         "count": 1, "reason": "timeout"},
+    ]
