@@ -973,3 +973,21 @@ def test_no_directory_constraint_still_runs_observed_input_first_pass():
     step = forced_next_step(state)
     assert step["tool_name"] == "probe_observed_input_batch"
     assert step["tool_args"]["pending_input_count"] == 1
+
+
+def test_operator_login_path_reaches_first_crawl_without_inline_credentials():
+    from app.api.routes.agent import AgentAssessmentPolicy
+
+    assert AgentAssessmentPolicy(auth_login_path="/login").auth_login_path == "/login"
+    for bad in ("https://other.test/login", "//other.test/login", "/login?next=other", "/../login"):
+        with pytest.raises(ValueError):
+            AgentAssessmentPolicy(auth_login_path=bad)
+
+    login = {"url": "https://app.test/login", "username_env": "TARGET_USER",
+             "password_env": "TARGET_PASS"}
+    state = {"mode": "agent", "target_info": {"primary_target": "https://app.test"},
+             "auth_login": login, "execution_trace": []}
+    first = forced_next_step(state)
+    assert first["tool_name"] == "execute_deep_crawl"
+    assert json.loads(first["tool_args"]["args"])["login"] == login
+    assert "hunter2" not in first["tool_args"]["args"]
