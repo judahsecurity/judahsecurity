@@ -367,3 +367,84 @@ async def test_stored_xss_requires_readback_and_cleanup_on_both_runs(cleanup_suc
                                                tools_manager=manager, targets=[action])
     assert len(calls) == 1
     assert reports[0]["status"] == ("confirmed" if cleanup_success else "inconclusive")
+
+
+@pytest.mark.asyncio
+async def test_observed_query_dom_probe_replays_original_fields_and_fresh_nonce(monkeypatch):
+    """A passive JS lead becomes work only for a query field seen in browser traffic."""
+    origin = "https://app.example.test"
+    page = origin + "/articles"
+    manager = ASMToolsManager()
+    manager._fallback_target = origin
+    manager._capability_map = {"target": origin, "scope": origin}
+    manager._scoped_link_baselines = {
+        "anonymous": [page + "?sort=new&q=seed"],
+    }
+    brain = EngagementBrain(target=origin)
+    seed_js_coverage_cells(brain, {
+        "target": origin,
+        "parameter_inventory": [
+            {"method": "GET", "path": "/articles", "name": "q",
+             "location": "query", "source": "browser_link"},
+        ],
+        "js_sources": [{
+            "url": origin + "/static/site.js", "kind": "external",
+            "page_path": "/articles", "page_paths": ["/articles", "/help"],
+            "artifact_id": "script-1",
+            "source_leads": [{"kind": "query", "line": 1}],
+            "sink_leads": [{"kind": "html_assignment", "line": 2}],
+        }],
+    })
+    dom_cells = [cell for cell in brain.coverage_cells
+                 if cell.get("test_type") == "dom_xss"]
+    assert [(cell["path"], cell["parameter"]) for cell in dom_cells] == [
+        ("/articles", "query:q")
+    ]
+    lease = claim_coverage_cell_leases(
+        brain, ["xss"], allowed_test_types=frozenset({"dom_xss"})
+    )["xss"]
+    manager._engagement_brain = brain.to_dict()
+    store = evidence_store(manager)
+    calls = []
+
+    async def fake_assessment(operation, url, **kwargs):
+        calls.append((operation, url))
+        assert kwargs["identity"] == "anonymous"
+        proof = {"operation": "check_xss", "target_template": url,
+                 "executed": True, "nonce": "hunter-nonce"}
+        artifact_id = store.record("scoped_browser_check_xss", proof,
+                                   target=page, identity="anonymous")
+        return json.dumps({**proof, "evidence_id": artifact_id})
+
+    monkeypatch.setattr(manager, "scoped_browser_assessment", fake_assessment)
+    probed = await manager.scoped_dom_xss_assigned(lease.coverage_cell_id, lease.id)
+    assert probed["proof_confirmed"] is True
+    assert probed["operation"] == "scoped_browser_check_xss_query"
+    assert calls[0][0] == "check_xss"
+    assert calls[0][1].startswith(page + "?sort=new&q=")
+    assert "__PROWL_NONCE__" in calls[0][1]
+    brain = engagement_brain_from_dict(manager._engagement_brain)
+    candidate = submit_candidate(
+        brain, title="Query-driven DOM execution", target=page,
+        vulnerability_class="xss", evidence_ids=[probed["evidence_id"]],
+        coverage_cell_id=lease.coverage_cell_id, parameter="query:q",
+    )
+    manager._engagement_brain = brain.to_dict()
+
+    async def execute(name, args):
+        assert name == "scoped_browser_assessment"
+        assert args == {"operation": "check_xss", "url": calls[0][1],
+                        "identity": "anonymous"}
+        fresh = {"operation": "check_xss", "target_template": calls[0][1],
+                 "executed": True, "nonce": "verifier-nonce"}
+        artifact_id = store.record("scoped_browser_check_xss", fresh,
+                                   target=page, identity="anonymous", success=True)
+        return {"success": True, "output": json.dumps(
+            {**fresh, "evidence_id": artifact_id}
+        )}
+
+    manager.execute = execute
+    reports = await run_independent_verifiers(
+        [candidate], llm=None, tools_manager=manager, targets=[page]
+    )
+    assert reports[0]["status"] == "confirmed", reports
