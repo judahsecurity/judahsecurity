@@ -2568,6 +2568,7 @@ class ApiClient {
       assessmentPolicy?: {
         body_replay_paths: string[];
         stored_xss_cleanup_paths: string[];
+        auth_login_path?: string;
         owner_only_resources: { target: string; owner_identity: string; other_identity: string }[];
       };
     }
