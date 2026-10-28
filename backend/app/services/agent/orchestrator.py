@@ -885,7 +885,6 @@ class AgentOrchestrator:
                             tool_args={
                                 "url": seed,
                                 "interceptor_job_id": interceptor_job_id,
-            "auth_login": auth_login,
                                 "streams": streams if isinstance(streams, list) else [],
                                 "root_status": (kickoff or {}).get("root_status"),
                                 "needs_dir_brute": needs_dirs,
@@ -952,6 +951,7 @@ class AgentOrchestrator:
             "assessment_resume": resume_ready,
             "kickoff_brief": kickoff_brief or None,
             "interceptor_job_id": interceptor_job_id,
+            "auth_login": auth_login,
             "recon_worker_briefs": recon_worker_briefs,
             "needs_dir_brute": (bool((kickoff or {}).get("needs_dir_brute"))
                                 if isinstance(kickoff, dict) and not no_directories else False),
