@@ -29,3 +29,19 @@ def next_crawl_index(
             index,
         ),
     )
+
+
+def next_crawl_url_index(
+    queue: Sequence[str],
+    visited_families: Mapping[tuple[str, tuple[str, ...]], int],
+) -> int:
+    """Prefer an unseen route shape in a browser link queue."""
+    if not queue:
+        raise ValueError("Crawl queue is empty")
+    return min(
+        range(len(queue)),
+        key=lambda index: (
+            visited_families.get(route_family(queue[index]), 0) > 0,
+            index,
+        ),
+    )

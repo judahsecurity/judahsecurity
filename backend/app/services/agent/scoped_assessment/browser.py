@@ -871,10 +871,13 @@ async def check_browser(
                 page_paths = [urlsplit(page.url).path or "/"]
                 hrefs = await observe_page(response.status if response else None)
                 await submit_safe_get_forms()
+                from app.services.crawl_priority import next_crawl_url_index, route_family
+
                 queue = _crawl_links(hrefs, [expected_origin])
                 visited = {expected_origin + page_paths[0]}
+                visited_families = {route_family(expected_origin + page_paths[0]): 1}
                 while queue and len(page_paths) < max_pages:
-                    next_url = queue.pop(0)
+                    next_url = queue.pop(next_crawl_url_index(queue, visited_families))
                     if next_url in visited:
                         continue
                     visited.add(next_url)
@@ -895,6 +898,8 @@ async def check_browser(
                         await collect_inline()
                         page_path = urlsplit(page.url).path or "/"
                         page_paths.append(page_path)
+                        family = route_family(page.url)
+                        visited_families[family] = visited_families.get(family, 0) + 1
                         actions.append(await checkpoint(ref, "navigate_link", start, path=page_path,
                                                         navigation_mode=navigation_mode, status="completed"))
                         hrefs = await observe_page(response.status if navigation_mode == "direct" and response else 200)

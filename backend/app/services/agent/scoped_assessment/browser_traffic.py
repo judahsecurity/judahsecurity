@@ -117,8 +117,8 @@ def _body_fields(data: bytes, content_type: str) -> tuple[str, str, list[dict]]:
                     segment = key.replace("~", "~0").replace("/", "~1")
                     collect(child, path + "/" + segment, depth + 1)
             elif isinstance(value, list):
-                for child in value[:3]:
-                    collect(child, path + "/*", depth + 1)
+                for index, child in enumerate(value[:3]):
+                    collect(child, path + "/" + str(index), depth + 1)
             elif path and path not in seen and len(path) <= 300:
                 seen.add(path)
                 kind = "null" if value is None else "boolean" if isinstance(value, bool) else "number" if isinstance(value, (int, float)) else "string"

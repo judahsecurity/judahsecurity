@@ -1,4 +1,4 @@
-from app.services.crawl_priority import next_crawl_index, route_family
+from app.services.crawl_priority import next_crawl_index, next_crawl_url_index, route_family
 
 
 def test_crawl_visits_blog_before_eighteen_more_product_ids():
@@ -40,3 +40,13 @@ def test_crawl_reserves_remaining_slots_for_distinct_route_families():
         route_family("https://example.test/catalog?category=Gifts"),
         route_family("https://example.test/catalog?searchTerm=gin"),
     }
+
+
+def test_browser_link_queue_visits_new_route_before_sibling_queries():
+    queue = [
+        "https://example.test/items?id=2",
+        "https://example.test/items?id=3",
+        "https://example.test/articles",
+    ]
+    visited = {route_family("https://example.test/items?id=1"): 1}
+    assert next_crawl_url_index(queue, visited) == 2

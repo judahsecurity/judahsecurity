@@ -384,6 +384,36 @@ def test_static_js_endpoint_without_observed_input_does_not_start_early_hunt():
     assert forced_next_step(state)["tool_name"] == "wait_recon_workers"
 
 
+def test_agent_inspects_javascript_after_observed_input_first_pass():
+    target = "https://app.example.test"
+    cell = {
+        "id": "cell-1", "host": "app.example.test", "method": "GET",
+        "path": "/search", "parameter": "query:q", "test_type": "xss",
+        "specialist": "xss", "source": "parameter_inventory",
+        "observation_source": "browser_link", "status": "untested",
+    }
+    state = {
+        "mode": "agent", "target_info": {"primary_target": target},
+        "capability_map": {
+            "target": target, "scope": target,
+            "forms": [{"method": "GET", "action": "/search", "inputs": ["q"]}],
+            "js_files": [target + "/static/app.js"],
+        },
+        "engagement_brain": {"coverage_cells": [cell]},
+        "execution_trace": [
+            {"tool_name": name, "success": True} for name in (
+                "execute_deep_crawl", "recon_worker:ferox_dirs",
+                "sync_engagement_brain",
+            )
+        ],
+    }
+    assert forced_next_step(state)["tool_name"] == "probe_observed_input_batch"
+    cell.update(status="inconclusive", first_pass_outcome="inconclusive")
+    step = forced_next_step(state)
+    assert step["tool_name"] == "scoped_browser_assessment"
+    assert step["tool_args"]["operation"] == "inspect_js"
+
+
 def test_observed_input_queue_batches_first_pass_before_specialist_wave():
     target = "https://app.example.com"
     state = {

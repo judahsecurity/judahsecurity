@@ -1268,7 +1268,14 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
             ),
         }
 
-    if state.get("mode") == "agent" and not input_signature and not any(
+    if state.get("mode") == "agent" and (
+        not input_signature or (
+            bool((state.get("capability_map") or {}).get("js_files")
+                 or (state.get("capability_map") or {}).get("js_sources"))
+            and ("sync_engagement_brain" in ran or "build_threat_model" in ran)
+            and not _pending_first_pass_count(state)
+        )
+    ) and not any(
         step.get("tool_name") == "scoped_browser_assessment"
         and isinstance(step.get("tool_args"), dict)
         and step["tool_args"].get("operation") == "inspect_js"
