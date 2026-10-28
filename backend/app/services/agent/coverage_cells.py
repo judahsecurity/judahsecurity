@@ -742,10 +742,13 @@ def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, A
             for lead in sink_leads
         ):
             observed_pages = [
-                page for page in (source.get("page_paths") or [source.get("page_path")])[:20]
+                page for page in (source.get("page_paths") or [
+                    source.get("page_path") or (parts.path if inline else "")
+                ])[:20]
                 if isinstance(page, str) and page.startswith("/") and not page.startswith("//")
                 and "?" not in page and "#" not in page
             ]
+            runnable = False
             for page_path in dict.fromkeys(observed_pages):
                 for source_kind in ("fragment", "query"):
                     matching_leads = [
@@ -758,6 +761,7 @@ def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, A
                               else ["query:" + name for name in
                                     sorted(observed_query_fields.get(page_path, set()))[:20]])
                     for field in fields:
+                        runnable = True
                         dom = _new_cell(
                             brain, method="GET", path=page_path, host=parts.netloc,
                             identity="anonymous", parameter=field, test_type="dom_xss",
@@ -772,6 +776,22 @@ def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, A
                         if dom["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
                             brain.coverage_cells.append(dom)
                             existing.add(dom["id"])
+            if not runnable:
+                review = _new_cell(
+                    brain, method="GET", path=parts.path, host=parts.netloc,
+                    identity="anonymous", parameter=parameter, test_type="dom_xss",
+                    status="blocked", source="js_inventory",
+                    reason="A rendering page and observed input are required for browser replay",
+                    capture_id=source.get("artifact_id", ""),
+                )
+                review["script_url"] = script_url
+                review["script_kind"] = "inline" if inline else "external"
+                review["page_path"] = str(source.get("page_path") or "")
+                review["source_leads"] = source_leads
+                review["sink_leads"] = sink_leads
+                if review["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
+                    brain.coverage_cells.append(review)
+                    existing.add(review["id"])
         for lead in (source.get("client_leads") or [])[:18]:
             kind = client_classes.get(lead.get("kind")) if isinstance(lead, dict) else None
             if not kind or not source_leads:
