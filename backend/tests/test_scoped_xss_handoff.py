@@ -427,6 +427,7 @@ async def test_observed_query_dom_probe_replays_original_fields_and_fresh_nonce(
     candidate = submit_candidate(
         brain, title="Query-driven DOM execution", target=page,
         vulnerability_class="xss", evidence_ids=[probed["evidence_id"]],
+        coverage_cell_id=lease.coverage_cell_id, parameter="query:q",
     )
     manager._engagement_brain = brain.to_dict()
 
