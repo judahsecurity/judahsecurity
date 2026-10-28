@@ -21,6 +21,7 @@ from app.services.agent.observed_input_batch import pending_first_pass_cells
 from app.services.agent.operation_directive import directives_from_hypotheses
 from app.services.agent.parameter_inventory import collect_parameter_inventory
 from app.services.agent.scoped_assessment.body_probe import plan_observed_body
+from app.services.agent.scoped_assessment.browser_traffic import package_exchange
 from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES, forced_next_step
 from app.services.agent.tools import ASMToolsManager
 
@@ -103,6 +104,24 @@ def test_captured_json_fields_use_replayable_pointers_including_arrays():
         )
         assert original != mutated
     assert "ABC" not in str(rows) and "DEF" not in str(rows)
+
+
+def test_browser_json_array_fields_keep_exact_replayable_indexes():
+    body = json.dumps({"items": [{"name": "one"}, {"name": "two"}]}).encode()
+    public, private = package_exchange(
+        url="https://app.test/api/items", expected_origin="https://app.test",
+        action_ref="items", method="POST", resource_type="fetch", status=200,
+        content_type="application/json", request_content_type="application/json",
+        request_body=body, response_body=b"{}",
+    )
+    paths = {field["path"] for field in public["body_fields"]}
+    assert paths == {"/items/0/name", "/items/1/name"}
+    assert all("*" not in path for path in paths)
+    for path in paths:
+        _, _, original, mutated = plan_observed_body(
+            private, parameter=path, allowed_origins=["https://app.test"],
+        )
+        assert original != mutated
 
 
 def test_captured_json_pointer_joins_private_browser_replay():
