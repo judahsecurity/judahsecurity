@@ -672,7 +672,7 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
     Args (bare URL string, or JSON object):
         url        (str, required) — seed URL/host to crawl
         max_pages  (int)  — in-scope pages to visit (default 12, cap 24)
-        max_pages_per_route (int) — sibling URL samples per route shape (default 2, cap 4)
+        max_pages_per_route (int) — sibling URL samples per route shape (default 3, cap 4)
         depth      (int)  — max link hops from seed (default 3, cap 6)
         interact   (bool) — click safe tabs/menus/buttons (default True)
         scope      (str)  — apex to constrain crawl (default: derived from url)
@@ -742,9 +742,9 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
 
     max_pages = min(int(opts.get("max_pages", DEFAULT_MAX_PAGES) or DEFAULT_MAX_PAGES), HARD_MAX_PAGES)
     try:
-        max_pages_per_route = int(opts.get("max_pages_per_route") or 2)
+        max_pages_per_route = int(opts.get("max_pages_per_route") or 3)
     except (TypeError, ValueError):
-        max_pages_per_route = 2
+        max_pages_per_route = 3
     max_pages_per_route = max(1, min(max_pages_per_route, 4))
     try:
         max_depth = int(opts.get("depth", DEFAULT_DEPTH) or DEFAULT_DEPTH)
