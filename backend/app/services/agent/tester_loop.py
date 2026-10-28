@@ -1115,8 +1115,6 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         target = primary_web_target(state)
         ran = normalized_tools_run(_steps(state.get("execution_trace")))
         if target and "execute_browser" not in ran:
-            import json
-
             return {
                 "tool_name": "execute_browser",
                 "tool_args": {"args": json.dumps({"actions": [
