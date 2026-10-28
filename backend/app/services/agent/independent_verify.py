@@ -182,7 +182,7 @@ def observed_xss_cell_for_proof(
     brain: Any, store: Any, *, target: str, evidence_ids: Iterable[str],
 ) -> Optional[Dict[str, Any]]:
     """Link browser execution to one mapped GET parameter, never to a guess."""
-    from urllib.parse import parse_qs, parse_qsl, urlsplit
+    from urllib.parse import parse_qs, urlsplit
     from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
 
     parsed_target = urlsplit(target)
@@ -931,7 +931,7 @@ async def _verify_scoped_browser_xss_candidate(
 ) -> Optional[Dict[str, Any]]:
     """Replay a browser-executed XSS receipt against its exact observed input."""
     import logging
-    from urllib.parse import parse_qs, urlsplit
+    from urllib.parse import parse_qs, parse_qsl, urlsplit
     from app.services.agent.evidence_store import evidence_store
     from app.services.agent.proof_policy import inferred_vulnerability_class, validate_proof
     from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
