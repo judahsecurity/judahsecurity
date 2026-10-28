@@ -694,6 +694,7 @@ function AgentPageContent() {
   const [bodyReplayPathsText, setBodyReplayPathsText] = useState('');
   const [storedXssCleanupPathsText, setStoredXssCleanupPathsText] = useState('');
   const [ownerOnlyText, setOwnerOnlyText] = useState('');
+  const [authLoginPath, setAuthLoginPath] = useState('');
   const [mode, setMode] = useState<'assist' | 'agent' | 'pilot'>('agent');
   const [pilotStatus, setPilotStatus] = useState<{ ready: boolean; egress_ready: boolean; redis_ready: boolean } | null>(null);
   const [urlPrefilled, setUrlPrefilled] = useState(false);
@@ -1282,9 +1283,10 @@ function AgentPageContent() {
         description: 'Use at most eight POST paths, eight stored XSS cleanup paths, and eight owner-only lines in URL | owner | other format.' });
       return;
     }
-    const assessmentPolicy = bodyReplayPaths.length || storedXssCleanupPaths.length || ownerOnlyResources.length
+    const assessmentPolicy = bodyReplayPaths.length || storedXssCleanupPaths.length || ownerOnlyResources.length || authLoginPath.trim()
       ? { body_replay_paths: bodyReplayPaths,
           stored_xss_cleanup_paths: storedXssCleanupPaths,
+          auth_login_path: authLoginPath.trim() || undefined,
           owner_only_resources: ownerOnlyResources.map((row) => ({
             target: row.target, owner_identity: row.owner_identity, other_identity: row.other_identity,
           })) }
@@ -2142,6 +2144,15 @@ function AgentPageContent() {
                         <summary className="cursor-pointer">Assessment policy</summary>
                         <div className="mt-2 space-y-2 w-80">
                           <p>Exact-host GET and browser reads need no POST replay path. Analyst tool approvals may still apply. POST replay can change data, so list only paths with a rollback or reset plan; omitted POST checks remain open as blocked coverage.</p>
+                          <p>For an authenticated crawl, enter its login path. The backend must have TARGET_USER and TARGET_PASS configured. Login is approval-gated; those values stay out of the agent prompt.</p>
+                          <Input
+                            aria-label="Authenticated login path"
+                            placeholder="/login (leave blank for anonymous crawl)"
+                            value={authLoginPath}
+                            onChange={(event) => setAuthLoginPath(event.target.value)}
+                            disabled={loading}
+                            className="h-7 text-xs"
+                          />
                           <Textarea
                             aria-label="Approved POST replay paths"
                             placeholder="Approved POST test paths, one per line (enables form XSS and captured body checks)"
