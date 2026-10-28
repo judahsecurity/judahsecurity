@@ -660,7 +660,7 @@ class AgentOrchestrator:
         if seed and auth_path:
             from app.services.agent.scoped_assessment.browser import origin as browser_origin
             auth_login = {
-                "url": browser_origin(seed) + auth_path,
+                "url": browser_origin(seed if "://" in seed else f"https://{seed}") + auth_path,
                 "username_env": "TARGET_USER", "password_env": "TARGET_PASS",
             }
 
