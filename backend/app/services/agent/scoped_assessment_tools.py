@@ -394,6 +394,7 @@ class ScopedAssessmentTools:
                 )
                 scripts.append({"url": source_url, "kind": source["kind"],
                                 "page_path": source.get("page_path", ""),
+                                "page_paths": source.get("page_paths", []),
                                 "action_ref": source.get("action_ref"), "artifact_id": source_id,
                                 "sha256": hashlib.sha256(data).hexdigest(), "analysis": analysis})
             result["scripts"] = scripts
