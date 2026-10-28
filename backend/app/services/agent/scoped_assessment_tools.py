@@ -109,6 +109,13 @@ class ScopedAssessmentTools:
         paths = policy.get("body_replay_paths") or []
         cleanup_paths = policy.get("stored_xss_cleanup_paths") or []
         expectations = policy.get("owner_only_resources") or []
+        auth_login_path = policy.get("auth_login_path") or ""
+        if (auth_login_path and (not isinstance(auth_login_path, str)
+                or not auth_login_path.startswith("/") or auth_login_path.startswith("//")
+                or auth_login_path == "/" or len(auth_login_path) > 256
+                or ".." in auth_login_path
+                or any(not (char.isascii() and (char.isalnum() or char in "/_.-")) for char in auth_login_path))):
+            raise ValueError("Invalid authenticated login path")
         if (not isinstance(paths, list) or len(paths) > 8
                 or not isinstance(cleanup_paths, list) or len(cleanup_paths) > 8
                 or not isinstance(expectations, list) or len(expectations) > 8):
@@ -135,6 +142,7 @@ class ScopedAssessmentTools:
         self._scoped_body_replay_paths = set(paths)
         self._scoped_stored_xss_cleanup_paths = set(cleanup_paths)
         self._scoped_owner_expectations = approved
+        self._scoped_auth_login_path = auth_login_path
         if paths or cleanup_paths or approved:
             self._scoped_assessment_started = True
 
