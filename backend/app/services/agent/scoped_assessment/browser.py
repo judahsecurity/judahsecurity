@@ -533,6 +533,7 @@ async def check_browser(
                         if 0 < len(data) <= MAX_SOURCE_BYTES:
                             javascript_sources.append({"url": source_key, "kind": "external",
                                                        "page_path": urlsplit(request_pages.get(response.request, "")).path or "",
+                                                       "page_paths": [urlsplit(request_pages.get(response.request, "")).path or ""],
                                                        "action_ref": request_actions.get(response.request, "unattributed"),
                                                        "data": data})
                     except Exception:
@@ -746,6 +747,23 @@ async def check_browser(
                     )
                     if link_baselines is not None:
                         link_baselines.extend(_private_link_baselines(hrefs, [expected_origin]))
+                    render_path = urlsplit(page.url).path or "/"
+                    loaded_scripts = await page.locator("script[src]").evaluate_all(
+                        "els => els.slice(0, 80).map(e => e.src)"
+                    )
+                    loaded_keys = set()
+                    for value in loaded_scripts:
+                        try:
+                            if isinstance(value, str) and origin(value) == expected_origin:
+                                loaded_keys.add(expected_origin + (urlsplit(value).path or "/"))
+                        except ValueError:
+                            continue
+                    for source in javascript_sources or []:
+                        if source.get("kind") != "external" or source.get("url") not in loaded_keys:
+                            continue
+                        paths = source.setdefault("page_paths", [])
+                        if render_path not in paths and len(paths) < max_pages:
+                            paths.append(render_path)
                     page_observations.append({
                         "url": expected_origin + (urlsplit(page.url).path or "/"),
                         "status": status,
