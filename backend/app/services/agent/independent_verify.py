@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -690,6 +691,12 @@ async def run_independent_verifiers(
                 replayed = await _verify_scoped_browser_xss_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
+                replayed = await _verify_scoped_client_candidate(tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
+                replayed = await _verify_scoped_response_candidate(tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
                 replayed = await _verify_scoped_xml_xxe_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
@@ -715,6 +722,190 @@ async def run_independent_verifiers(
             }
 
     return list(await asyncio.gather(*(_one(c) for c in pending)))
+
+
+async def _verify_scoped_client_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Revisit the same observed page and require a fresh browser nonce."""
+    from urllib.parse import urlsplit
+
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.proof_policy import validate_proof
+
+    claim = cand.vulnerability_class
+    if claim not in {"dom_open_redirect", "client_template_injection",
+                     "client_prototype_pollution"}:
+        return None
+    store = evidence_store(tools_manager)
+    cell = next((row for row in _brain(tools_manager).coverage_cells
+                 if row.get("id") == cand.coverage_cell_id
+                 and row.get("test_type") == claim
+                 and row.get("source") == "js_inventory"
+                 and row.get("page_path") == (urlsplit(cand.target).path or "/")), None)
+    identity = str(cand.identity or "anonymous")
+    hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
+                   if eid in store.records
+                   and store.records[eid].get("kind") == "scoped_browser_check_client"
+                   and store.records[eid].get("target") == cand.target
+                   and store.records[eid].get("identity") == identity
+                   and store.records[eid].get("payload", {}).get("client_test_type") == claim
+                   and store.records[eid].get("payload", {}).get("behavior_observed") is True), None)
+    failure = "A scoped browser receipt on the observed client source is required"
+    if cell and hunter:
+        hunter_id, receipt = hunter
+        template = str(receipt["payload"].get("target_template") or "")
+        parsed = urlsplit(template)
+        if ("__PROWL_NONCE__" in template
+                and (parsed.scheme, parsed.netloc, parsed.path or "/") ==
+                (urlsplit(cand.target).scheme, urlsplit(cand.target).netloc,
+                 urlsplit(cand.target).path or "/")):
+            try:
+                wrapped = await tools_manager.execute("scoped_browser_assessment", {
+                    "operation": "check_client", "url": template,
+                    "identity": identity, "client_test_type": claim,
+                })
+                output = wrapped.get("output") if isinstance(wrapped, dict) else None
+                replay = json.loads(output) if isinstance(output, str) else output
+                artifact_id = str((replay or {}).get("evidence_id") or "")
+                verifier = store.records.get(artifact_id)
+                if (isinstance(replay, dict) and replay.get("behavior_observed") is True
+                        and verifier and verifier.get("run_id") == run.id):
+                    proof = {"kind": "scoped_browser_client",
+                             "hunter_artifact_id": hunter_id, "artifact_id": artifact_id}
+                    valid, why = validate_proof(store, cand, proof, [artifact_id])
+                    fresh, fresh_why = store.validate(
+                        [artifact_id], candidate_id=cand.id, revision=cand.revision,
+                        run_id=run.id, target=cand.target,
+                    )
+                    if valid and fresh:
+                        verified = apply_verdict(
+                            tools_manager, candidate_id=cand.id, verdict="confirmed",
+                            evidence="Fresh browser replay reproduced the client-side behavior.",
+                            evidence_ids=[artifact_id], proof=proof,
+                        )
+                        if verified and verified.status == "confirmed":
+                            return {"candidate_id": cand.id, "title": cand.title,
+                                    "status": "confirmed", "verifier_summary":
+                                    "Fresh browser replay matched the client-side receipt",
+                                    "key_findings": [], "tool_calls": 1, "error": None}
+                    failure = why or fresh_why or "Client proof policy rejected the replay"
+                else:
+                    failure = "Fresh browser replay did not reproduce the client-side behavior"
+            except Exception:
+                logging.getLogger(__name__).exception("Client-side verifier replay failed")
+                failure = "Client-side browser replay failed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title,
+            "status": "inconclusive", "verifier_summary": failure,
+            "key_findings": [], "tool_calls": 1, "error": None}
+
+
+async def _verify_scoped_response_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Repeat the fixed response-header or Location canary on the same input."""
+    import asyncio
+    import secrets
+    from urllib.parse import urlsplit
+
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.proof_policy import validate_proof
+    from app.services.agent.scoped_assessment.response_probe import probe_response
+
+    claim = cand.vulnerability_class
+    if claim not in {"crlf", "open_redirect"}:
+        return None
+    store = evidence_store(tools_manager)
+    cell = next((row for row in _brain(tools_manager).coverage_cells
+                 if row.get("id") == cand.coverage_cell_id
+                 and row.get("test_type") == claim
+                 and row.get("source") == "parameter_inventory"
+                 and row.get("method") == "GET"
+                 and row.get("path") == (urlsplit(cand.target).path or "/")), None)
+    identity = str(cand.identity or "anonymous")
+    hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
+                   if eid in store.records
+                   and store.records[eid].get("kind") == "scoped_response_probe"
+                   and store.records[eid].get("target") == cand.target
+                   and store.records[eid].get("identity") == identity
+                   and store.records[eid].get("payload", {}).get("test_type") == claim
+                   and store.records[eid].get("payload", {}).get("proof_confirmed") is True), None)
+    failure = "An observed-input response probe receipt is required"
+    if cell and hunter:
+        hunter_id, receipt = hunter
+        location, separator, parameter = str(cell.get("parameter") or "").partition(":")
+        if location == "query" and separator and parameter:
+            nonce = secrets.token_hex(8)
+            target = urlsplit(cand.target)
+            scoped_origin = f"{target.scheme}://{target.netloc}"
+            if claim == "crlf":
+                control_value = "%0D%0AX-Prowl-Probe: " + nonce
+                probe_value = "\r\nX-Prowl-Probe: " + nonce
+            else:
+                control_value = scoped_origin + "/__prowl_control_" + nonce
+                probe_value = "https://prowl.invalid/" + nonce
+            try:
+                control_url, context = tools_manager._observed_get_query_template(
+                    cand.target, parameter, control_value, identity,
+                    capture_id=cell.get("capture_id") or "",
+                )
+                probe_url, probe_context = tools_manager._observed_get_query_template(
+                    cand.target, parameter, probe_value, identity,
+                    capture_id=cell.get("capture_id") or "",
+                )
+                if (context == "single_parameter" or probe_context != context
+                        or context != receipt["payload"].get("request_context")):
+                    raise ValueError("Observed response baseline changed")
+                tools_manager._scoped_origin(control_url)
+                tools_manager._scoped_origin(probe_url)
+                tools_manager._scoped_claim_gets(2)
+                replay = await asyncio.to_thread(
+                    probe_response, control_url, probe_url, test_type=claim,
+                    allowed_origin=scoped_origin,
+                    state=tools_manager._scoped_state(identity, cand.target),
+                    nonce=nonce,
+                )
+                summary = {"test_type": claim, "parameter": parameter,
+                           "path": cell["path"], "request_context": context,
+                           "nonce": nonce, **replay}
+                artifact_id = store.record(
+                    "scoped_response_probe", summary, target=cand.target,
+                    identity=identity, coverage_cell_id=cand.coverage_cell_id,
+                    test_type=claim, success=replay["proof_confirmed"],
+                )
+                if replay.get("proof_confirmed") is True:
+                    proof = {"kind": "scoped_response_crlf" if claim == "crlf"
+                             else "scoped_response_redirect",
+                             "hunter_artifact_id": hunter_id, "artifact_id": artifact_id}
+                    valid, why = validate_proof(store, cand, proof, [artifact_id])
+                    fresh, fresh_why = store.validate(
+                        [artifact_id], candidate_id=cand.id, revision=cand.revision,
+                        run_id=run.id, target=cand.target,
+                    )
+                    if valid and fresh:
+                        verified = apply_verdict(
+                            tools_manager, candidate_id=cand.id, verdict="confirmed",
+                            evidence="Fresh response canary reproduced the behavior.",
+                            evidence_ids=[artifact_id], proof=proof,
+                        )
+                        if verified and verified.status == "confirmed":
+                            return {"candidate_id": cand.id, "title": cand.title,
+                                    "status": "confirmed", "verifier_summary":
+                                    "Fresh response probe matched the hunter receipt",
+                                    "key_findings": [], "tool_calls": 1, "error": None}
+                    failure = why or fresh_why or "Response proof policy rejected the replay"
+                else:
+                    failure = "Fresh response probe did not reproduce the canary"
+            except Exception:
+                logging.getLogger(__name__).exception("Response verifier replay failed")
+                failure = "Response verifier replay failed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title,
+            "status": "inconclusive", "verifier_summary": failure,
+            "key_findings": [], "tool_calls": 1, "error": None}
 
 
 async def _verify_scoped_xml_xxe_candidate(

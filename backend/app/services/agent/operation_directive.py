@@ -162,10 +162,18 @@ class OperationDirective:
                 )
             elif kind == "crlf":
                 block += (
-                    " Test this exact query input with a benign, unique X-Aegis-Probe "
-                    "response-header marker and an inert control. Inspect the raw response "
-                    "headers; body reflection or a status change is not header injection. "
-                    "Do not set cookies or alter application state for this first pass."
+                    " Call scoped_response_probe_assigned on this exact cell and lease. "
+                    "It compares a fixed X-Prowl-Probe response-header marker with an "
+                    "inert control without following redirects. A body change is not proof. "
+                    "For a positive receipt, submit a candidate with vulnerability_class=crlf "
+                    "and the exact evidence_id for independent replay."
+                )
+            elif kind == "open_redirect":
+                block += (
+                    " Call scoped_response_probe_assigned on this exact observed query "
+                    "input. Its fixed invalid-domain canary checks Location without "
+                    "following the redirect. Submit a positive candidate with "
+                    "vulnerability_class=open_redirect and its evidence_id for independent replay."
                 )
         if self.js_work:
             if self.js_work.get("test_type") == "dom_xss":
@@ -188,16 +196,20 @@ class OperationDirective:
                     f"kind={self.js_work.get('kind', '')}. Source leads: "
                     f"{self.js_work.get('source_leads', '')}; candidate sinks: "
                     f"{self.js_work.get('client_leads', '')}. Reproduce on an observed page "
-                    "in the allowed origin using a benign marker and an inert control. "
-                    "Show the resulting navigation, request change, DOM change, template "
-                    "execution, or prototype change and its security impact. Static pattern "
-                    "co-location alone cannot close this cell or support a finding."
+                    "in the allowed origin using scoped_client_probe_assigned with this "
+                    "cell and lease. Show the resulting navigation, request change, DOM "
+                    "change, template execution, or prototype change and its security "
+                    "impact. Static pattern co-location alone cannot support a finding. "
+                    "For a reproducible DOM redirect, client template execution, or "
+                    "prototype change, submit a candidate with the exact test_type as "
+                    "vulnerability_class, this cell ID, and the browser evidence ID. "
+                    "Link, text, and request changes remain leads until impact is demonstrated."
                 )
             elif self.js_work.get("test_type") == "js_dependency_review":
                 block += (
                     "\nAssigned observed JavaScript dependency: "
-                    f"{self.js_work.get('url', '')}. Run execute_retirejs on this exact "
-                    "first-party URL, then verify its library/version identity and whether "
+                    f"{self.js_work.get('url', '')}. Call scan_assigned_js_dependency "
+                    "with this cell and lease, then verify its library/version identity and whether "
                     "the reported vulnerable behavior is reachable. A filename or version "
                     "match alone is a lead, not a finding."
                 )

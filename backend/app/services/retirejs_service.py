@@ -60,7 +60,9 @@ def _fetch_url(
     client: httpx.Client, url: str, max_bytes: int, timeout: float
 ) -> Tuple[Optional[bytes], Optional[str]]:
     try:
-        with client.stream("GET", url, follow_redirects=True, timeout=timeout) as resp:
+        # A captured first-party script must not redirect this scanner to an
+        # unobserved host (or to a private network address).
+        with client.stream("GET", url, follow_redirects=False, timeout=timeout) as resp:
             if resp.status_code != 200:
                 return None, f"HTTP {resp.status_code}"
             buf = bytearray()
@@ -153,6 +155,7 @@ def scan_js_urls_for_vulns(
     max_urls: int = 30,
     max_bytes: int = DEFAULT_MAX_BYTES,
     timeout: float = DEFAULT_TIMEOUT,
+    same_origin_only: bool = False,
 ) -> Dict[str, Any]:
     """
     Download each JS URL, write to a temp dir, run retire.js, map findings to URLs.
@@ -176,6 +179,14 @@ def scan_js_urls_for_vulns(
             "vulnerable_components": [],
             "downloads": [],
         }
+    if same_origin_only:
+        from urllib.parse import urlsplit
+
+        first = urlsplit(parsed[0])
+        if any((urlsplit(url).scheme, urlsplit(url).netloc) !=
+               (first.scheme, first.netloc) for url in parsed):
+            return {"success": False, "error": "mixed_origin_urls",
+                    "urls_scanned": 0, "vulnerable_components": [], "downloads": []}
 
     downloads: List[Dict[str, Any]] = []
 
@@ -196,7 +207,9 @@ def scan_js_urls_for_vulns(
                 except OSError as e:
                     downloads.append({"url": url, "ok": False, "error": str(e)})
                     continue
-                downloads.append({"url": url, "ok": True, "bytes": len(body), "file": fname})
+                downloads.append({"url": url, "ok": True, "bytes": len(body),
+                                  "sha256": hashlib.sha256(body).hexdigest(),
+                                  "file": fname})
 
         name_to_url: Dict[str, str] = {
             d["file"]: d["url"] for d in downloads if d.get("ok") and d.get("file")

@@ -315,9 +315,10 @@ class ScopedAssessmentTools:
         xhr_query_keys: list[str] | None = None,
         xhr_actions: list[dict] | None = None,
         readback_url: str = "", cleanup_url_template: str = "",
+        client_test_type: str = "",
     ) -> str:
         """Run scoped map, crawl, JS inspection, or nonce XSS execution in Chromium."""
-        if operation not in ("map", "crawl", "inspect_js", "check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss"):
+        if operation not in ("map", "crawl", "inspect_js", "check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss", "check_client"):
             raise ValueError("Unsupported scoped browser operation")
         allowed = self._scoped_origin(url)
         if operation in {"check_form_xss", "check_stored_xss"}:
@@ -356,6 +357,7 @@ class ScopedAssessmentTools:
             xhr_query_keys=xhr_query_keys,
             xhr_actions=xhr_actions,
             readback_url=readback_url, cleanup_url_template=cleanup_url_template,
+            client_test_type=client_test_type,
         )
         result["identity"] = identity
         if link_baselines:
@@ -546,7 +548,10 @@ class ScopedAssessmentTools:
                 self._engagement_brain = brain.to_dict()
         receipt_id = evidence_store(self).record(
             "scoped_browser_" + operation, result, target=target, identity=identity,
-            success=bool(result.get("executed")) if operation in {"check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss"} else True,
+            success=(bool(result.get("executed")) if operation in
+                     {"check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss"}
+                     else bool(result.get("behavior_observed")) if operation == "check_client"
+                     else True),
         )
         result["evidence_id"] = receipt_id
         output = json.dumps(result)

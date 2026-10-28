@@ -707,17 +707,19 @@ def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, A
         if cell["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
             brain.coverage_cells.append(cell)
             existing.add(cell["id"])
-        if re.search(r"(?:^|[/_.-])\d+[._-]\d+(?:[._-]\d+)?(?:[._-]|\.js$)", parts.path, re.I):
-            dependency = _new_cell(
-                brain, method="GET", path=parts.path, host=parts.netloc,
-                identity="anonymous", parameter="script", test_type="js_dependency_review",
-                source="js_inventory", capture_id=source.get("artifact_id", ""),
-            )
-            dependency["script_url"] = script_url
-            dependency["priority_rank"] = 2
-            if dependency["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
-                brain.coverage_cells.append(dependency)
-                existing.add(dependency["id"])
+        dependency = _new_cell(
+            brain, method="GET", path=parts.path, host=parts.netloc,
+            identity="anonymous", parameter="script", test_type="js_dependency_review",
+            source="js_inventory", capture_id=source.get("artifact_id", ""),
+        )
+        dependency["script_url"] = script_url
+        dependency["expected_sha256"] = str(source.get("sha256") or "")[:64]
+        dependency["priority_rank"] = (1 if re.search(
+            r"(?:^|[/_.-])\d+[._-]\d+(?:[._-]\d+)?(?:[._-]|\.js$)",
+            parts.path, re.I) else 3)
+        if dependency["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
+            brain.coverage_cells.append(dependency)
+            existing.add(dependency["id"])
     client_classes = {
         "dom_open_redirect": "dom_open_redirect",
         "dom_link_manipulation": "dom_link_manipulation",
@@ -799,19 +801,56 @@ def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, A
             kind = client_classes.get(lead.get("kind")) if isinstance(lead, dict) else None
             if not kind or not source_leads:
                 continue
-            cell = _new_cell(
-                brain, method="GET", path=parts.path, host=parts.netloc,
-                identity="anonymous", parameter=parameter, test_type=kind,
-                source="js_inventory", capture_id=source.get("artifact_id", ""),
-            )
-            cell["script_url"] = script_url
-            cell["script_kind"] = "inline" if inline else "external"
-            cell["source_leads"] = source_leads
-            cell["client_leads"] = [lead]
-            cell["priority_rank"] = 2
-            if cell["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
-                brain.coverage_cells.append(cell)
-                existing.add(cell["id"])
+            observed_pages = [
+                page for page in (source.get("page_paths") or [
+                    source.get("page_path") or (parts.path if inline else "")
+                ])[:20]
+                if isinstance(page, str) and page.startswith("/") and not page.startswith("//")
+                and "?" not in page and "#" not in page
+            ]
+            runnable = False
+            for page_path in dict.fromkeys(observed_pages):
+                for source_kind in ("fragment", "query"):
+                    matching = [row for row in source_leads
+                                if isinstance(row, dict) and row.get("kind") == source_kind]
+                    if not matching:
+                        continue
+                    fields = (["fragment"] if source_kind == "fragment" else
+                              ["query:" + name for name in
+                               sorted(observed_query_fields.get(page_path, set()))[:20]])
+                    if kind == "client_prototype_pollution" and source_kind == "query":
+                        fields.append("query:__proto__")
+                    for field in dict.fromkeys(fields):
+                        runnable = True
+                        cell = _new_cell(
+                            brain, method="GET", path=page_path, host=parts.netloc,
+                            identity="anonymous", parameter=field, test_type=kind,
+                            source="js_inventory", capture_id=source.get("artifact_id", ""),
+                        )
+                        cell["script_url"] = script_url
+                        cell["script_kind"] = "inline" if inline else "external"
+                        cell["page_path"] = page_path
+                        cell["source_leads"] = matching
+                        cell["client_leads"] = [lead]
+                        cell["priority_rank"] = 2
+                        if cell["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
+                            brain.coverage_cells.append(cell)
+                            existing.add(cell["id"])
+            if not runnable:
+                review = _new_cell(
+                    brain, method="GET", path=parts.path, host=parts.netloc,
+                    identity="anonymous", parameter=parameter, test_type=kind,
+                    source="js_inventory", capture_id=source.get("artifact_id", ""),
+                    reason="An observed rendering page and input are required for browser replay",
+                )
+                review["script_url"] = script_url
+                review["script_kind"] = "inline" if inline else "external"
+                review["source_leads"] = source_leads
+                review["client_leads"] = [lead]
+                review["priority_rank"] = 4
+                if review["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
+                    brain.coverage_cells.append(review)
+                    existing.add(review["id"])
     return migrate_coverage_cells(brain)
 
 

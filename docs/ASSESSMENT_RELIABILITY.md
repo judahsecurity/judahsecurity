@@ -128,6 +128,10 @@ For string GET SQLi returning a small JSON result array, the scoped proof checks
 
 The first-pass batch receives the active assessment target from the scheduler. It runs only when the saved capability map names that origin and leases only cells on that origin; a stale map returns `assessment_target_mismatch` without network probes. Resumed assessments continue pending first passes on their current target before completion, without restarting the broad crawl.
 
+Client-side JavaScript leads now receive one source-bound browser probe when an observed rendering page and query field or fragment are available. The scoped probe uses fixed markers to observe DOM navigation, link or text changes, request URL changes, client template evaluation, and prototype pollution. A behavior observation stays a candidate lead until its security impact is independently verified. A script with no observed rendering page remains inconclusive.
+
+Observed GET query inputs assigned to `crlf` or `open_redirect` receive an inert control and one fixed canary request. The response probe does not follow redirects and returns only header-marker and Location-canary booleans, never raw headers or body content. JavaScript dependency cells cover all observed first-party scripts. Their assigned Retire.js scan rejects redirects, compares the fetched bytes with the captured script hash when available, and treats a component/CVE match as a reachability lead rather than exploit proof. Scanner failures and changed script hashes remain inconclusive.
+
 Chromium runs with its sandbox enabled by default. Containers that cannot support it must opt in with `AEGIS_BROWSER_DISABLE_SANDBOX=true`; prefer fixing the container runtime and seccomp/user-namespace configuration instead.
 
 ## Evaluate the in-product execution path

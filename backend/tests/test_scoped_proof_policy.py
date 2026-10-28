@@ -34,6 +34,50 @@ def test_proof_kind_must_match_the_claimed_vulnerability():
     assert not proof_kind_allowed(mislabeled, "response_match")[0]
 
 
+def test_response_header_proof_needs_two_fresh_controlled_canaries():
+    payload = lambda nonce: {
+        "operation": "scoped_response_probe", "test_type": "crlf",
+        "parameter": "searchTerm", "request_context": "browser_link",
+        "nonce": nonce, "requests_sent": 2, "proof_confirmed": True,
+        "control": {"header_marker": False}, "probe": {"header_marker": True},
+    }
+    hunter = record("hunter", "scoped_response_probe", payload("first"), 1)
+    verifier = record("verifier", "scoped_response_probe", payload("second"), 2)
+    store = Store(hunter, verifier)
+    candidate = SimpleNamespace(
+        target=hunter["target"], evidence_ids=["hunter"],
+        title="CRLF response header injection", description="", vulnerability_class="crlf",
+    )
+    proof = {"kind": "scoped_response_crlf", "hunter_artifact_id": "hunter",
+             "artifact_id": "verifier"}
+    assert validate_proof(store, candidate, proof, ["verifier"])[0]
+    verifier["payload"]["nonce"] = "first"
+    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
+
+
+def test_client_template_proof_requires_fresh_rendered_execution():
+    payload = lambda nonce: {
+        "operation": "check_client", "client_test_type": "client_template_injection",
+        "target_template": "https://app.example.test/api/items#{{7*7}}__PROWL_NONCE__",
+        "nonce": nonce, "behavior_observed": True,
+        "observations": {"initial_document_ok": True, "template_evaluated": True,
+                         "server_body_checked": True, "server_template_evaluated": False},
+    }
+    hunter = record("hunter", "scoped_browser_check_client", payload("first"), 1)
+    verifier = record("verifier", "scoped_browser_check_client", payload("second"), 2)
+    store = Store(hunter, verifier)
+    candidate = SimpleNamespace(
+        target=hunter["target"], evidence_ids=["hunter"],
+        title="Client-side template injection", description="",
+        vulnerability_class="client_template_injection",
+    )
+    proof = {"kind": "scoped_browser_client", "hunter_artifact_id": "hunter",
+             "artifact_id": "verifier"}
+    assert validate_proof(store, candidate, proof, ["verifier"])[0]
+    verifier["payload"]["observations"]["template_evaluated"] = False
+    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
+
+
 def test_response_match_requires_direct_anonymous_get():
     target = "https://app.example.test/config"
     row = {

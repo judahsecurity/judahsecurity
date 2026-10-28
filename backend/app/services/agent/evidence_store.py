@@ -451,6 +451,7 @@ class EvidenceStore:
                 "scoped_http_get", "scoped_browser_check_xss",
                 "scoped_browser_check_form_xss", "scoped_browser_check_xhr_xss",
                 "scoped_browser_check_stored_xss",
+                "scoped_browser_check_client", "scoped_response_probe",
             }:
                 try:
                     if origin(row["target"]) != origin(target):
@@ -475,6 +476,10 @@ class EvidenceStore:
                                  and isinstance(payload.get("readback_status"), int)
                                  and 200 <= payload["readback_status"] < 300
                                  and payload.get("cleanup_success") is True)))
+                elif row["kind"] == "scoped_browser_check_client":
+                    proven = (payload.get("behavior_observed") is True
+                              and (payload.get("observations") or {}).get(
+                                  "initial_document_ok") is True)
                 else:
                     proven = payload.get("proof_confirmed") is True
                 has_response |= bool(row["success"] and proven)

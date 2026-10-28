@@ -371,6 +371,54 @@ async def test_scoped_dom_fragment_executes_only_in_unsafe_sink(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_scoped_client_parser_probe_observes_rendered_template_and_prototype():
+    from app.services.agent.scoped_assessment.browser import check_browser
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            if self.path.startswith("/template"):
+                body = (b'<div id="result"></div><script>'
+                        b'const value=decodeURIComponent(location.hash.slice(1));'
+                        b'document.getElementById("result").innerText='
+                        b'value.replace("{{7*7}}","49");</script>')
+            else:
+                body = (b'<script>for(const [k,v] of new URLSearchParams(location.search))'
+                        b'{const m=k.match(/^__proto__\\[(prowl_[a-f0-9]+)\\]$/);'
+                        b'if(m)Object.prototype[m[1]]=v;}</script>')
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        template, _ = await check_browser(
+            operation="check_client", url=base + "/template#{{7*7}}__PROWL_NONCE__",
+            client_test_type="client_template_injection", allowed_origins=[base],
+        )
+        assert template["behavior_observed"] is True
+        assert template["observations"]["server_template_evaluated"] is False
+        polluted, _ = await check_browser(
+            operation="check_client",
+            url=base + "/prototype?__proto__%5Bprowl___PROWL_NONCE__%5D=1",
+            client_test_type="client_prototype_pollution", allowed_origins=[base],
+        )
+        assert polluted["behavior_observed"] is True
+        assert polluted["observations"]["prototype_polluted"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
 async def test_scoped_stored_xss_reads_then_cleans_up(monkeypatch):
     from playwright.async_api import BrowserType
     from app.services.agent.scoped_assessment.browser import check_browser

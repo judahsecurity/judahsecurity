@@ -133,7 +133,7 @@ def test_inert_script_and_navigation_sink_do_not_create_dom_xss_work():
     })
     assert not any(cell["test_type"] == "dom_xss" for cell in cells)
     assert not any(cell["path"] == "/inert.js" and cell["specialist"] == "spa_client"
-                   for cell in cells)
+                   and cell["test_type"] != "js_dependency_review" for cell in cells)
 
 
 def test_xml_replay_preserves_observed_request_and_rejects_network_callbacks():

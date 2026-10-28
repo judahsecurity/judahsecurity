@@ -724,6 +724,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "scoped_assessment_probe_assigned": self.scoped_assessment_probe_assigned,
             "scoped_input_probe_assigned": self.scoped_input_probe_assigned,
             "scoped_dom_xss_assigned": self.scoped_dom_xss_assigned,
+            "scoped_response_probe_assigned": self.scoped_response_probe_assigned,
+            "scoped_client_probe_assigned": self.scoped_client_probe_assigned,
+            "scan_assigned_js_dependency": self.scan_assigned_js_dependency,
             "scoped_xml_entity_assigned": self.scoped_xml_entity_assigned,
             "scoped_stored_xss_assigned": self.scoped_stored_xss_assigned,
             "probe_observed_input_batch": self.probe_observed_input_batch,
@@ -1261,6 +1264,194 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                                  "request_context": request_context,
                                  "reflection_contexts": trace["rendered_contexts"],
                                  "reflection_observations": trace["render_observations"]}}
+
+    async def scoped_client_probe_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+    ) -> Dict[str, Any]:
+        """Replay one observed client source with a fixed, harmless marker."""
+        import time
+        from urllib.parse import quote, urlsplit
+
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+
+        classes = {"dom_open_redirect", "dom_link_manipulation",
+                   "dom_data_manipulation", "request_url_override",
+                   "client_template_injection", "client_prototype_pollution"}
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        test_type = str((cell or {}).get("test_type") or "")
+        source_kind, separator, field = str((cell or {}).get("parameter") or "").partition(":")
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "js_inventory"
+                or cell.get("specialist") != "spa_client"
+                or test_type not in classes
+                or cell.get("method") != "GET"
+                or source_kind not in {"fragment", "query"}
+                or (source_kind == "query" and (not separator or not field or len(field) > 80))
+                or not any(isinstance(row, dict) and row.get("kind") == source_kind
+                           for row in cell.get("source_leads") or [])
+                or not any(isinstance(row, dict) and row.get("kind") ==
+                           ("prototype_pollution" if test_type == "client_prototype_pollution"
+                            else test_type) for row in cell.get("client_leads") or [])):
+            return {"success": False, "error": "invalid_client_lease"}
+        page_path = str(cell.get("page_path") or "")
+        if (not page_path or page_path != cell.get("path")
+                or not page_path.startswith("/") or page_path.startswith("//")
+                or any(char in page_path for char in "?#\\\r\n\t ")
+                or not allowed_discovery_path(page_path)):
+            return {"success": False, "error": "observed_rendering_page_missing"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        page_url = scoped_origin + page_path
+        payload = {
+            "dom_open_redirect": "https://prowl.invalid/__PROWL_NONCE__",
+            "dom_link_manipulation": "https://prowl.invalid/__PROWL_NONCE__",
+            "dom_data_manipulation": "__PROWL_NONCE__",
+            "request_url_override": "https://prowl.invalid/__PROWL_NONCE__",
+            "client_template_injection": "{{7*7}}__PROWL_NONCE__",
+            "client_prototype_pollution": "__proto__[prowl___PROWL_NONCE__]=1",
+        }[test_type]
+        identity = str(cell.get("identity") or "anonymous")
+        if source_kind == "fragment":
+            template = page_url + "#" + payload
+            request_context = "observed_fragment_render_page"
+        elif test_type == "client_prototype_pollution" and field == "__proto__":
+            template = page_url + "?" + quote("__proto__[prowl___PROWL_NONCE__]", safe="") + "=1"
+            request_context = "static_parser_lead_on_observed_page"
+        else:
+            template, request_context = self._observed_get_query_template(
+                page_url, field, payload, identity,
+            )
+            if request_context == "single_parameter":
+                return {"success": False, "error": "observed_query_baseline_missing"}
+        try:
+            proof = json.loads(await self.scoped_browser_assessment(
+                "check_client", template, identity=identity,
+                client_test_type=test_type,
+            ))
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__}
+        artifact_id = str(proof.get("evidence_id") or "")
+        if not artifact_id:
+            return {"success": False, "error": str(proof.get("error") or "missing_probe_evidence")[:100]}
+        live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        current = next((row for row in live.coverage_cells
+                        if row.get("id") == coverage_cell_id
+                        and row.get("lease_id") == coverage_lease_id), None)
+        if current is None:
+            return {"success": False, "error": "lease_changed"}
+        observed = proof.get("behavior_observed") is True
+        current["evidence_ids"] = list(dict.fromkeys([
+            *(current.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        current["last_probe"] = "scoped_browser_check_client"
+        if observed:
+            current["status"] = "in_focus"
+            current["reason"] = "Observed browser behavior requires impact and independent verification"
+        self._engagement_brain = live.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
+                "test_type": test_type, "request_context": request_context,
+                "behavior_observed": observed, "proof_confirmed": False,
+                "observations": proof.get("observations") or {}}
+
+    async def scoped_response_probe_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+    ) -> Dict[str, Any]:
+        """Test one observed GET input for response-header or redirect control."""
+        import asyncio
+        import secrets
+        import time
+        from urllib.parse import urlsplit
+
+        from app.services.agent.coverage_cells import parameter_test_funnel
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.scoped_assessment.response_probe import probe_response
+        from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        location, separator, parameter = str((cell or {}).get("parameter") or "").partition(":")
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "parameter_inventory"
+                or cell.get("observation_source") not in OBSERVED_INPUT_SOURCES
+                or cell.get("test_type") not in {"crlf", "open_redirect"}
+                or cell.get("method") != "GET" or location != "query"
+                or not separator or not parameter
+                or not allowed_discovery_path(str(cell.get("path") or "/"))):
+            return {"success": False, "error": "invalid_coverage_lease"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        url = scoped_origin + cell["path"]
+        identity = str(cell.get("identity") or "anonymous")
+        nonce = secrets.token_hex(8)
+        test_type = cell["test_type"]
+        if test_type == "crlf":
+            control_value = "%0D%0AX-Prowl-Probe: " + nonce
+            probe_value = "\r\nX-Prowl-Probe: " + nonce
+        else:
+            control_value = scoped_origin + "/__prowl_control_" + nonce
+            probe_value = "https://prowl.invalid/" + nonce
+        control_url, control_source = self._observed_get_query_template(
+            url, parameter, control_value, identity, capture_id=cell.get("capture_id") or "",
+        )
+        probe_url, probe_source = self._observed_get_query_template(
+            url, parameter, probe_value, identity, capture_id=cell.get("capture_id") or "",
+        )
+        if control_source == "single_parameter" or probe_source != control_source:
+            return {"success": False, "error": "observed_query_baseline_missing"}
+        try:
+            self._scoped_origin(control_url)
+            self._scoped_origin(probe_url)
+            self._scoped_claim_gets(2)
+            proof = await asyncio.to_thread(
+                probe_response, control_url, probe_url, test_type=test_type,
+                allowed_origin=scoped_origin, state=self._scoped_state(identity, url),
+                nonce=nonce,
+            )
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__}
+        summary = {"test_type": test_type, "parameter": parameter,
+                   "path": cell["path"], "request_context": control_source,
+                   "nonce": nonce,
+                   **proof}
+        artifact_id = evidence_store(self).record(
+            "scoped_response_probe", summary, target=url, identity=identity,
+            coverage_cell_id=coverage_cell_id, test_type=test_type,
+            capture_id=str(cell.get("capture_id") or ""),
+            success=proof["proof_confirmed"],
+        )
+        cell["evidence_ids"] = list(dict.fromkeys([
+            *(cell.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        cell["last_probe"] = "scoped_response_probe"
+        if proof["proof_confirmed"]:
+            cell["status"] = "in_focus"
+            cell["reason"] = "Response-header signal requires independent verification"
+        self._engagement_brain = brain.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
+                "proof_confirmed": proof["proof_confirmed"],
+                "probe_result": proof, "funnel": parameter_test_funnel(brain)}
 
     async def scoped_xml_entity_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
@@ -4432,6 +4623,81 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "client_signing_findings": result.get("client_signing_findings") or [],
             },
         }, default=str)[:_tool_output_max_chars()]
+
+    async def scan_assigned_js_dependency(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+    ) -> str:
+        """Run Retire.js on one leased first-party script and retain its provenance."""
+        import asyncio
+        import time
+        from urllib.parse import urlsplit
+
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.retirejs_service import scan_js_urls_for_vulns
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "js_inventory"
+                or cell.get("specialist") != "spa_client"
+                or cell.get("test_type") != "js_dependency_review"):
+            return json.dumps({"success": False, "error": "invalid_coverage_lease"})
+        url = str(cell.get("script_url") or "")
+        cmap = getattr(self, "_capability_map", None) or {}
+        target = urlsplit(str(cmap.get("scope") or cmap.get("target") or ""))
+        script = urlsplit(url)
+        if ((script.scheme, script.netloc) != (target.scheme, target.netloc)
+                or script.scheme not in {"http", "https"} or not script.path
+                or script.path != cell.get("path") or script.query or script.fragment):
+            return json.dumps({"success": False, "error": "scope_mismatch"})
+        try:
+            result = await asyncio.to_thread(
+                scan_js_urls_for_vulns, url, 1, same_origin_only=True,
+            )
+        except Exception:
+            logger.exception("Assigned dependency review failed")
+            result = {"success": False, "downloads": [], "retire_error": "scanner_failed"}
+        downloads = result.get("downloads") or []
+        fetched = (len(downloads) == 1 and downloads[0].get("url") == url
+                   and downloads[0].get("ok") is True)
+        expected = str(cell.get("expected_sha256") or "")
+        source_matched = bool(fetched and (not expected or
+                              downloads[0].get("sha256") == expected))
+        complete = bool(source_matched and not result.get("retire_error")
+                        and result.get("success") is True)
+        candidates = [
+            {key: item.get(key) for key in ("component", "version", "severity", "cve")}
+            for item in (result.get("vulnerable_components") or [])[:20]
+            if isinstance(item, dict) and item.get("source_url") == url
+        ] if source_matched else []
+        status = "in_focus" if complete and candidates else "tested_clean" if complete else "inconclusive"
+        summary = {"url": url, "fetched": fetched, "source_matched": source_matched,
+                   "complete": complete, "candidate_count": len(candidates),
+                   "scanner_error": bool(result.get("retire_error")),
+                   "status": status, "candidates": candidates,
+                   "proof_confirmed": False}
+        artifact_id = evidence_store(self).record(
+            "js_dependency_review", summary, target=url,
+            coverage_cell_id=coverage_cell_id, test_type="js_dependency_review",
+            capture_id=str(cell.get("capture_id") or ""), success=complete,
+        )
+        cell["evidence_ids"] = list(dict.fromkeys([
+            *(cell.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        cell["status"] = status
+        cell["reason"] = (
+            "Known-vulnerability component match needs reachability validation" if candidates else
+            "Complete dependency scan found no known match" if complete else
+            "Script fetch, content hash, or Retire.js scan incomplete"
+        )
+        self._engagement_brain = brain.to_dict()
+        return json.dumps({"success": True, "coverage_cell_id": coverage_cell_id,
+                           "coverage_lease_id": coverage_lease_id,
+                           "evidence_id": artifact_id, "summary": summary})
 
     async def scan_js_urls_for_vulns(
         self,

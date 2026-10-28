@@ -211,11 +211,12 @@ async def check_browser(
     xhr_query_keys: list[str] | None = None,
     xhr_actions: list[dict] | None = None,
     readback_url: str = "", cleanup_url_template: str = "",
+    client_test_type: str = "",
 ) -> tuple[dict, bytes | None]:
     """Execute one bounded browser check with HTTP and WebSocket origin routing."""
     from playwright.async_api import async_playwright
 
-    if operation not in ("map", "check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss", "crawl", "inspect_js"):
+    if operation not in ("map", "check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss", "check_client", "crawl", "inspect_js"):
         raise ValueError("Unsupported browser operation")
     if operation == "inspect_js":
         from .browser_actions import MAX_DISCOVERY_ACTIONS
@@ -230,9 +231,23 @@ async def check_browser(
     if xhr_actions is None:
         xhr_actions = []
     assert_in_scope(url, allowed_origins)
-    nonce = secrets.token_hex(8) if operation in {"check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss"} else ""
+    nonce = secrets.token_hex(8) if operation in {"check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss", "check_client"} else ""
     if operation == "check_xss" and NONCE_MARKER not in url:
         raise ValueError(f"XSS URL must contain {NONCE_MARKER}")
+    client_classes = {"dom_open_redirect", "dom_link_manipulation",
+                      "dom_data_manipulation", "request_url_override",
+                      "client_template_injection", "client_prototype_pollution"}
+    if operation == "check_client" and (client_test_type not in client_classes
+                                         or NONCE_MARKER not in url):
+        raise ValueError("Client check needs a known class and nonce URL template")
+    if operation == "check_client":
+        from .browser_actions import allowed_discovery_path
+
+        parts = urlsplit(url)
+        if (not allowed_discovery_path(parts.path or "/")
+                or len(parts.query) > 2048 or len(parts.fragment) > 300
+                or NONCE_MARKER not in (parts.query + parts.fragment)):
+            raise ValueError("Client check requires a bounded read-only URL source")
     if operation in {"check_form_xss", "check_stored_xss"}:
         import re
         if (not form_action or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,79}", form_field)
@@ -297,7 +312,11 @@ async def check_browser(
     seen_exchange_shapes: set[tuple] = set()
     current_action_ref = "navigate"
     actions: list[dict] = []
-    read_only_interaction = operation in {"check_xhr_xss", "check_form_xss", "check_stored_xss"}
+    read_only_interaction = operation in {"check_xhr_xss", "check_form_xss", "check_stored_xss", "check_client"}
+    blocked_marker_navigation = False
+    blocked_marker_fetch = False
+    marker_request = False
+    client_initial_response_ok = False
     get_form_actions = 0
     approved_post_path = urlsplit(form_action).path or "/"
     post_action_active = False
@@ -329,6 +348,7 @@ async def check_browser(
 
             async def route_request(route):
                 nonlocal blocked_requests, approved_post_requests, xhr_mutated, xhr_request
+                nonlocal blocked_marker_navigation, blocked_marker_fetch
                 try:
                     allowed = origin(route.request.url) == expected_origin
                     if allowed and post_action_active:
@@ -370,6 +390,12 @@ async def check_browser(
                     await route.continue_()
                 else:
                     blocked_requests += 1
+                    if (operation == "check_client" and nonce in route.request.url
+                            and urlsplit(route.request.url).hostname == "prowl.invalid"):
+                        if route.request.resource_type == "document":
+                            blocked_marker_navigation = True
+                        elif route.request.resource_type in {"xhr", "fetch"}:
+                            blocked_marker_fetch = True
                     await route.abort()
 
             await context.route("**/*", route_request)
@@ -394,6 +420,7 @@ async def check_browser(
             page = await context.new_page()
 
             def record_request(request):
+                nonlocal marker_request
                 try:
                     if origin(request.url) != expected_origin:
                         return
@@ -410,6 +437,9 @@ async def check_browser(
                             request_pages[request] = page.url
                 if request.resource_type not in {"document", "xhr", "fetch", "script"}:
                     return
+                if (operation == "check_client" and nonce in request.url
+                        and request.resource_type in {"xhr", "fetch"}):
+                    marker_request = True
                 parts = urlsplit(request.url)
                 query_keys = tuple(sorted({key[:80] for key, _ in parse_qsl(parts.query[:2048])})[:20])
                 template = (request.method, parts.path or "/", request.resource_type, query_keys)
@@ -429,9 +459,15 @@ async def check_browser(
 
             def record_response(response):
                 nonlocal post_response_seen, xhr_response_seen, readback_response_seen, readback_status
+                nonlocal client_initial_response_ok
                 try:
                     if origin(response.url) != expected_origin:
                         return
+                    if (operation == "check_client"
+                            and response.request.resource_type == "document"
+                            and response.url == final_target.split("#", 1)[0]
+                            and 200 <= response.status < 300):
+                        client_initial_response_ok = True
                     row = request_rows.get(response.request)
                     if (post_action_active and response.request.method.upper() == "POST"
                             and (urlsplit(response.url).path or "/") == approved_post_path):
@@ -636,7 +672,13 @@ async def check_browser(
                 await context.unroute_all(behavior="ignoreErrors")
                 await context.close()
                 return result, None
-            response = await page.goto(final_target, wait_until="domcontentloaded", timeout=20_000)
+            try:
+                response = await page.goto(final_target, wait_until="domcontentloaded", timeout=20_000)
+            except Exception:
+                if (operation != "check_client" or not client_initial_response_ok
+                        or not blocked_marker_navigation):
+                    raise
+                response = None
             xhr_actions_replayed = 0
             if operation == "check_xhr_xss" and xhr_actions:
                 from .browser_actions import allowed_discovery_control
@@ -668,7 +710,7 @@ async def check_browser(
                     await matches[0].click(timeout=3_000, no_wait_after=True)
                     xhr_actions_replayed += 1
                     await page.wait_for_timeout(350)
-            await page.wait_for_timeout(1200 if operation in {"check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss"} else 650)
+            await page.wait_for_timeout(1200 if operation in {"check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss", "check_client"} else 650)
             form_submitted = False
             if operation in {"check_form_xss", "check_stored_xss"}:
                 # Use the observed page's native submit path, including its JS
@@ -949,6 +991,57 @@ async def check_browser(
                 result["links"] = _crawl_links(hrefs, [expected_origin])
                 result["link_query_inputs"] = _link_query_inputs(hrefs, [expected_origin])
                 result["forms"] = await _forms(page, expected_origin)
+            elif operation == "check_client":
+                server_body_checked = False
+                server_marker = False
+                server_template_evaluated = False
+                if response is not None and 200 <= response.status < 300:
+                    declared = response.headers.get("content-length", "")
+                    if not declared.isdigit() or int(declared) <= 1_000_000:
+                        try:
+                            raw = await response.body()
+                            if len(raw) <= 1_000_000:
+                                server_body_checked = True
+                                server_marker = nonce.encode() in raw
+                                server_template_evaluated = ("49" + nonce).encode() in raw
+                        except Exception:
+                            pass
+                observed = await page.evaluate("""token => {
+                    const canary = 'https://prowl.invalid/' + token;
+                    const links = [...document.querySelectorAll('a[href]')].slice(0, 300);
+                    const text = (document.body?.innerText || '').slice(0, 200000);
+                    const key = 'prowl_' + token;
+                    return {
+                        link_canary: links.some(a => a.href === canary),
+                        text_marker: text.includes(token),
+                        template_evaluated: text.includes('49' + token),
+                        prototype_polluted: Object.prototype[key] === '1' ||
+                            Object.prototype[key] === 1,
+                    };
+                }""", nonce)
+                signal = {
+                    "dom_open_redirect": blocked_marker_navigation,
+                    "dom_link_manipulation": observed["link_canary"],
+                    "dom_data_manipulation": observed["text_marker"]
+                    and server_body_checked and not server_marker,
+                    "request_url_override": blocked_marker_fetch or marker_request,
+                    "client_template_injection": observed["template_evaluated"]
+                    and server_body_checked and not server_template_evaluated,
+                    "client_prototype_pollution": observed["prototype_polluted"],
+                }[client_test_type] and client_initial_response_ok
+                result.update({"client_test_type": client_test_type,
+                               "nonce": nonce, "behavior_observed": bool(signal),
+                               "security_impact_confirmed": False,
+                               "observations": {
+                                   **observed,
+                                   "initial_document_ok": client_initial_response_ok,
+                                   "server_body_checked": server_body_checked,
+                                   "server_marker": server_marker,
+                                   "server_template_evaluated": server_template_evaluated,
+                                   "blocked_marker_navigation": blocked_marker_navigation,
+                                   "blocked_marker_fetch": blocked_marker_fetch,
+                                   "marker_request": marker_request,
+                               }})
             elif operation in {"check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss"}:
                 # A dialog containing a fresh server nonce is execution evidence.
                 # Reflection or an unrelated dialog alone is not proof.
