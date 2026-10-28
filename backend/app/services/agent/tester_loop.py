@@ -1261,10 +1261,11 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         return {
             "tool_name": "execute_deep_crawl",
             "tool_args": {
-                "args": json.dumps({
+                "args": (json.dumps({
                     "url": target, "depth": 3, "interact": True,
-                    **({"login": auth_login} if auth_login else {}),
-                }),
+                    "login": auth_login,
+                }) if auth_login else
+                         f'{{"url":"{target}","depth":3,"interact":true}}'),
             },
             "thought": (
                 "Assessment pipeline: crawl the primary URL before any "
