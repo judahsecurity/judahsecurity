@@ -68,7 +68,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 from urllib.parse import parse_qsl, urljoin, urlparse, urlsplit
 
-from app.services.crawl_priority import route_family
+from app.services.crawl_priority import route_family, route_visit_allowed
 
 logger = logging.getLogger(__name__)
 
@@ -373,6 +373,7 @@ class CrawlResult:
     scope: str = ""
     authenticated: Optional[bool] = None
     pages_visited: List[str] = field(default_factory=list)
+    route_variants_skipped: int = 0
     # Value-free, same-origin links observed in page markup, including pages
     # that the crawl budget did not permit us to visit.
     discovered_links: List[Dict[str, Any]] = field(default_factory=list)
@@ -671,6 +672,7 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
     Args (bare URL string, or JSON object):
         url        (str, required) — seed URL/host to crawl
         max_pages  (int)  — in-scope pages to visit (default 12, cap 24)
+        max_pages_per_route (int) — sibling URL samples per route shape (default 3, cap 4)
         depth      (int)  — max link hops from seed (default 3, cap 6)
         interact   (bool) — click safe tabs/menus/buttons (default True)
         scope      (str)  — apex to constrain crawl (default: derived from url)
@@ -739,6 +741,11 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
         seed = f"https://{seed}"
 
     max_pages = min(int(opts.get("max_pages", DEFAULT_MAX_PAGES) or DEFAULT_MAX_PAGES), HARD_MAX_PAGES)
+    try:
+        max_pages_per_route = int(opts.get("max_pages_per_route") or 3)
+    except (TypeError, ValueError):
+        max_pages_per_route = 3
+    max_pages_per_route = max(1, min(max_pages_per_route, 4))
     try:
         max_depth = int(opts.get("depth", DEFAULT_DEPTH) or DEFAULT_DEPTH)
     except (TypeError, ValueError):
@@ -987,7 +994,7 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                 queue: List[tuple] = [(-_functionality_score(seed), 0, seed)]
                 seen: Set[str] = set()
                 link_rows: Dict[str, Dict[str, Any]] = {}
-                from app.services.crawl_priority import next_crawl_index, route_family
+                from app.services.crawl_priority import next_crawl_index
                 visited_families: Dict[tuple[str, tuple[str, ...]], int] = {}
 
                 async def record_surface(child_depth: int) -> None:
@@ -1036,6 +1043,9 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                     if norm in seen:
                         continue
                     seen.add(norm)
+                    if not route_visit_allowed(norm, visited_families, max_pages_per_route):
+                        result.route_variants_skipped += 1
+                        continue
 
                     nav_ref = _start_action("navigate", url)
                     before_path = urlparse(page.url).path or "/"
@@ -1054,8 +1064,11 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                                    before_path, urlparse(page.url).path or "/")
 
                     result.pages_visited.append(page.url)
+                    requested_family = route_family(norm)
+                    visited_families[requested_family] = visited_families.get(requested_family, 0) + 1
                     family = route_family(page.url)
-                    visited_families[family] = visited_families.get(family, 0) + 1
+                    if family != requested_family:
+                        visited_families[family] = visited_families.get(family, 0) + 1
                     page_score = _functionality_score(page.url)
 
                     try:
@@ -1180,6 +1193,7 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
         "network_requests": result.network_requests,
         "network_requests_total": result.network_requests_total,
         "network_requests_dropped": result.network_requests_dropped,
+        "route_variants_skipped": result.route_variants_skipped,
         "application_operations": result.application_operations,
     }
 
@@ -1638,6 +1652,7 @@ def _format_output(r: CrawlResult) -> str:
     if r.authenticated is not None:
         lines.append(f"Authenticated session: {'yes' if r.authenticated else 'FAILED (crawled unauthenticated)'}")
     lines.append(f"Pages visited: {len(r.pages_visited)}")
+    lines.append(f"Sibling URLs skipped after route sampling: {r.route_variants_skipped}")
     lines.append(
         f"Browser requests observed: {r.network_requests_total} "
         f"({len(r.network_requests)} metadata rows saved; "

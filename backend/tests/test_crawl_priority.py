@@ -1,4 +1,6 @@
-from app.services.crawl_priority import next_crawl_index, next_crawl_url_index, route_family
+from app.services.crawl_priority import (
+    next_crawl_index, next_crawl_url_index, route_family, route_visit_allowed,
+)
 
 
 def test_crawl_visits_blog_before_eighteen_more_product_ids():
@@ -50,3 +52,10 @@ def test_browser_link_queue_visits_new_route_before_sibling_queries():
     ]
     visited = {route_family("https://example.test/items?id=1"): 1}
     assert next_crawl_url_index(queue, visited) == 2
+
+
+def test_route_sample_limit_keeps_other_query_features_eligible():
+    visited = {route_family("https://example.test/items?id=1"): 2}
+    assert not route_visit_allowed("https://example.test/items?id=3", visited, 2)
+    assert route_visit_allowed("https://example.test/items?search=book", visited, 2)
+    assert route_visit_allowed("https://example.test/articles", visited, 2)
