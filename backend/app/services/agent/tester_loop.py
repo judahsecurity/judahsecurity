@@ -1115,8 +1115,6 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         target = primary_web_target(state)
         ran = normalized_tools_run(_steps(state.get("execution_trace")))
         if target and "execute_browser" not in ran:
-            import json
-
             return {
                 "tool_name": "execute_browser",
                 "tool_args": {"args": json.dumps({"actions": [
@@ -1223,6 +1221,7 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
     waits = sum(1 for s in trace if s.get("tool_name") == "wait_recon_workers")
 
     if not crawled:
+        auth_login = state.get("auth_login")
         interceptor_failed = any(
             step.get("tool_name") == "execute_interceptor"
             and step.get("success") is False
@@ -1260,7 +1259,11 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         return {
             "tool_name": "execute_deep_crawl",
             "tool_args": {
-                "args": f'{{"url":"{target}","depth":3,"interact":true}}',
+                "args": (json.dumps({
+                    "url": target, "depth": 3, "interact": True,
+                    "login": auth_login,
+                }) if auth_login else
+                         f'{{"url":"{target}","depth":3,"interact":true}}'),
             },
             "thought": (
                 "Assessment pipeline: crawl the primary URL before any "

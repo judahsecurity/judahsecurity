@@ -655,6 +655,15 @@ class AgentOrchestrator:
         except Exception:
             pass
 
+        auth_login = None
+        auth_path = str(getattr(self.tool_manager, "_scoped_auth_login_path", "") or "")
+        if seed and auth_path:
+            from app.services.agent.scoped_assessment.browser import origin as browser_origin
+            auth_login = {
+                "url": browser_origin(seed if "://" in seed else f"https://{seed}") + auth_path,
+                "username_env": "TARGET_USER", "password_env": "TARGET_PASS",
+            }
+
         # Fast parallel probes + early Interceptor queue so crawl starts while
         # the LLM plans. execute_interceptor later attaches to the same job_id.
         # Also spawn Copilot-style recon streams (httpx/waf/whatweb) in background.
@@ -700,7 +709,9 @@ class AgentOrchestrator:
                     })
                 except Exception:
                     cve_only = False
-                if acr_seed or cve_only:
+                # Sign-in submits a form. Wait for the normal tool approval gate
+                # instead of starting it in the unattended early crawl queue.
+                if acr_seed or cve_only or auth_login:
                     kickoff = await asyncio.wait_for(kickoff_coro, timeout=28.0)
                     queued, streams = {}, []
                 else:
@@ -940,6 +951,7 @@ class AgentOrchestrator:
             "assessment_resume": resume_ready,
             "kickoff_brief": kickoff_brief or None,
             "interceptor_job_id": interceptor_job_id,
+            "auth_login": auth_login,
             "recon_worker_briefs": recon_worker_briefs,
             "needs_dir_brute": (bool((kickoff or {}).get("needs_dir_brute"))
                                 if isinstance(kickoff, dict) and not no_directories else False),
@@ -3424,6 +3436,9 @@ class AgentOrchestrator:
             set_tenant_context(int(user_id), organization_id, session_id)
             if assessment_policy is not None:
                 self.tool_manager.set_scoped_assessment_policy(assessment_policy)
+            else:
+                # A prior turn's login opt-in must not authorize this turn.
+                self.tool_manager._scoped_auth_login_path = ""
             from app.services.agent.run_permissions import (
                 credential_testing_allowed, oob_callbacks_allowed,
             )

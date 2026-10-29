@@ -24,6 +24,7 @@ store can be swapped for Redis without touching callers.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import threading
 import time
@@ -340,6 +341,18 @@ def _is_bounded_nuclei_recon(tool_name: str, tool_args: Optional[dict]) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _is_login_crawl(tool_name: str, tool_args: dict) -> bool:
+    """A crawl with a login action must reach the analyst gate."""
+    if tool_name not in {"execute_interceptor", "execute_deep_crawl"}:
+        return False
+    raw = (tool_args or {}).get("args")
+    try:
+        options = json.loads(raw) if isinstance(raw, str) else raw
+    except (TypeError, ValueError):
+        return False
+    return isinstance(options, dict) and bool(options.get("login"))
+
+
 async def gate(
     tool_name: str,
     tool_args: dict,
@@ -366,7 +379,8 @@ async def gate(
     policy_cfg = _load_policy(organization_id)
     from app.services.agent.pilot_policy import PILOT_NETWORK_TOOLS, current_pilot
     pilot_network_action = current_pilot() is not None and tool_name in PILOT_NETWORK_TOOLS
-    if not policy_cfg.get("tool_confirmation_enabled", True) and not pilot_network_action:
+    login_crawl = _is_login_crawl(tool_name, tool_args)
+    if not policy_cfg.get("tool_confirmation_enabled", True) and not pilot_network_action and not login_crawl:
         if existing_token:
             tool_args.pop("_confirm_token", None)
         return {"decision": "auto"}
@@ -385,7 +399,7 @@ async def gate(
     # Light recon must not block assessment kickoff behind approve dialogs.
     # Explicit "deny" still wins; everything else becomes auto for SAFE_RECON_TOOLS.
     # Bounded informational Nuclei (tech/exposure/panel) is the same class as httpx.
-    if (tool_name in SAFE_RECON_TOOLS or nuclei_recon) and decision != "deny":
+    if (tool_name in SAFE_RECON_TOOLS or nuclei_recon) and decision != "deny" and not login_crawl:
         decision = "auto"
 
     # RoE escalates "auto" -> "confirm" for non-readonly tools when enabled,
@@ -404,6 +418,10 @@ async def gate(
     # Every network-capable action in a bounded pilot goes to the analyst,
     # including tools normally covered by an organization auto policy. The
     # request-level budget still applies after approval.
+    if login_crawl and decision != "deny":
+        decision = "confirm"
+        roe_escalated = True
+
     if pilot_network_action and decision != "deny":
         decision = "confirm"
         roe_escalated = True

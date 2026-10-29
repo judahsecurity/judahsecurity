@@ -97,3 +97,31 @@ async def test_pilot_network_tool_requires_analyst_even_with_auto_policy(monkeyp
     finally:
         reset_pilot(pilot_token)
         confirmation._autonomous_mode.reset(mode_token)
+
+
+@pytest.mark.asyncio
+async def test_authenticated_crawl_requires_analyst_approval(monkeypatch):
+    policy = default_agent_config()
+    policy["agent_autonomous_auto_approve"] = True
+    monkeypatch.setattr(confirmation, "_load_policy", lambda _org_id: policy)
+    monkeypatch.setattr(confirmation, "_roe_requires_confirmation", lambda _org_id: False)
+    monkeypatch.setattr(confirmation, "get_store", lambda: confirmation.ConfirmationStore())
+    mode_token = confirmation.set_autonomous_mode(True)
+    try:
+        args = {"args": json.dumps({"url": "https://app.test", "login": {
+            "url": "https://app.test/login",
+            "username_env": "TARGET_USER", "password_env": "TARGET_PASS",
+        }})}
+        for tool_name in ("execute_interceptor", "execute_deep_crawl"):
+            decision = await confirmation.gate(tool_name, args, 7, "run")
+            assert decision["decision"] == "confirm"
+            assert "TARGET_PASS" in str(decision["tool_args"])
+        policy["tool_confirmation_enabled"] = False
+        disabled_policy = await confirmation.gate("execute_deep_crawl", args, 7, "run")
+        assert disabled_policy["decision"] == "confirm"
+        anonymous = await confirmation.gate(
+            "execute_interceptor", {"args": "https://app.test"}, 7, "run"
+        )
+        assert anonymous["decision"] == "auto"
+    finally:
+        confirmation._autonomous_mode.reset(mode_token)

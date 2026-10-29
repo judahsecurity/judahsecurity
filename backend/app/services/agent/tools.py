@@ -498,6 +498,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _scoped_body_replay_paths = SessionValue(set)
     _scoped_stored_xss_cleanup_paths = SessionValue(set)
     _scoped_owner_expectations = SessionValue(dict)
+    _scoped_auth_login_path = SessionValue(lambda: "")
     _scoped_assessment_started = SessionValue(lambda: False)
     _scoped_assessment_partial_reason = SessionValue(lambda: "")
     _proof_engine = SessionValue(lambda: None)

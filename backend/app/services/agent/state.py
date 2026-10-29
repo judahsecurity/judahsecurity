@@ -317,6 +317,8 @@ class AgentState(TypedDict, total=False):
     kickoff_brief: Optional[str]
     # Early-queued Interceptor job id (agent attaches instead of double-crawl)
     interceptor_job_id: Optional[str]
+    # Operator-selected login path with secret references only, never raw credentials.
+    auth_login: Optional[Dict[str, str]]
     # Parallel recon stream briefs drained into the prompt (Copilot-style)
     recon_worker_briefs: Optional[List[str]]
     # Kickoff saw 404/empty root — directory brute-force is mandatory
