@@ -620,10 +620,11 @@ class ScopedAssessmentTools:
         baseline, mutated = query_probe.plan_observed_query(
             private, parameter=parameter, allowed_origins=[allowed],
         )
+        state = self._scoped_state(identity, baseline)
         self._scoped_claim_gets(2)
         result = await asyncio.to_thread(
             query_probe.probe_observed_query, baseline, mutated, parameter=parameter,
-            allowed_origins=[allowed], storage_state=self._scoped_state(identity, baseline),
+            allowed_origins=[allowed], storage_state=state,
         )
         result["source_artifact_id"] = artifact_id
         result["evidence_id"] = evidence_store(self).record(
@@ -643,11 +644,12 @@ class ScopedAssessmentTools:
         )
         if (urlsplit(url).path or "/") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
             raise ValueError("POST path was not approved by the assessment operator")
+        state = self._scoped_state(identity, url)
         self._scoped_claim_posts(2)
         result = await asyncio.to_thread(
             body_probe.probe_observed_body, url, mime, baseline, changed,
             parameter=parameter, allowed_origins=[allowed],
-            storage_state=self._scoped_state(identity, url),
+            storage_state=state,
             replay_headers=body_probe.safe_replay_headers(private),
         )
         if result.get("sql_error_signal") and result.get("inconclusive") is False:
@@ -659,7 +661,7 @@ class ScopedAssessmentTools:
                 result = await asyncio.to_thread(
                     body_probe.probe_sql_error_body, url, mime, baseline,
                     quote_body, escaped_body, parameter=parameter,
-                    allowed_origins=[allowed], storage_state=self._scoped_state(identity, url),
+                    allowed_origins=[allowed], storage_state=state,
                     replay_headers=body_probe.safe_replay_headers(private), initial=result,
                 )
             except (ValueError, OSError, TimeoutError) as exc:
@@ -692,11 +694,12 @@ class ScopedAssessmentTools:
         )
         if (urlsplit(url).path or "/") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
             raise ValueError("POST path was not approved by the assessment operator")
+        state = self._scoped_state(identity, url)
         self._scoped_claim_posts(5)
         result = await asyncio.to_thread(
             body_probe.probe_sql_error_body, url, mime, baseline, quote_body, escaped_body,
             parameter=parameter, allowed_origins=[allowed],
-            storage_state=self._scoped_state(identity, url),
+            storage_state=state,
             replay_headers=body_probe.safe_replay_headers(private),
         )
         result["source_artifact_id"] = artifact_id
@@ -720,11 +723,12 @@ class ScopedAssessmentTools:
         )
         if (urlsplit(url).path or "/") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
             raise ValueError("POST path was not approved by the assessment operator")
+        state = self._scoped_state(identity, url)
         self._scoped_claim_posts(2)
         result = await asyncio.to_thread(
             body_probe.probe_observed_body_reflection, url, mime, baseline, changed,
             parameter=parameter, payload=payload, allowed_origins=[allowed],
-            storage_state=self._scoped_state(identity, url),
+            storage_state=state,
             replay_headers=body_probe.safe_replay_headers(private),
         )
         result["source_artifact_id"] = artifact_id
@@ -745,12 +749,14 @@ class ScopedAssessmentTools:
         if not policy or policy[0] != owner_identity:
             raise ValueError("Owner-only policy was not declared for this exact resource")
         other_identity = policy[1]
+        owner_state = self._scoped_state(owner_identity, target)
+        other_state = self._scoped_state(other_identity, target)
         self._scoped_claim_gets(6)
         result = await asyncio.to_thread(
             authz_proof.probe_owner_only, target,
             owner_identity=owner_identity, other_identity=other_identity,
-            owner_state=self._scoped_state(owner_identity, target),
-            other_state=self._scoped_state(other_identity, target),
+            owner_state=owner_state,
+            other_state=other_state,
             allowed_origins=[allowed], before_request=lambda: None,
         )
         result["captured_artifact_id"] = artifact_id
@@ -828,12 +834,13 @@ class ScopedAssessmentTools:
             )
             baseline_source = "observed_url"
         self._scoped_assessment_started = True
+        state = self._scoped_state(identity, baseline)
         self._scoped_claim_gets(6)
         result = await asyncio.to_thread(
             sqli_boolean.probe_numeric_boolean,
             baseline, true_url, false_url, nonce,
             parameter=parameter, allowed_origins=[allowed],
-            storage_state=self._scoped_state(identity, baseline),
+            storage_state=state,
             before_request=lambda: None,
         )
         if artifact_id:
@@ -964,8 +971,8 @@ class ScopedAssessmentTools:
                 url, parameter=parameter, allowed_origins=[allowed],
             )
         self._scoped_assessment_started = True
-        self._scoped_claim_gets(9 if needs_preflight else 8)
         state = self._scoped_state(identity, baseline)
+        self._scoped_claim_gets(9 if needs_preflight else 8)
         if needs_preflight:
             preflight = await asyncio.to_thread(http_observe.observe_get, baseline, [allowed], state)
             if (preflight.get("status") != 200 or preflight.get("redirected")

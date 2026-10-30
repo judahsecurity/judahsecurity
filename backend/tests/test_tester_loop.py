@@ -53,6 +53,38 @@ def test_ready_hypotheses_dispatch_on_resume_and_new_revision_only():
     assert _ready_hypothesis_wave(state, [], target) is None
 
 
+def test_authentication_requeues_identity_blocked_input_after_prior_batch():
+    target = "https://app.test"
+    cell = {
+        "id": "legacy-sqli", "source": "parameter_inventory",
+        "observation_source": "browser_link", "test_type": "sqli",
+        "specialist": "sqli", "status": "untested", "identity": "legacy",
+        "host": "app.test", "method": "GET", "path": "/catalog",
+        "parameter": "query:category",
+    }
+    state = {
+        "mode": "agent", "assessment_resume": True,
+        "target_info": {"primary_target": target},
+        "capability_map": {"target": target},
+        "engagement_brain": {"coverage_cells": [cell]},
+        "execution_trace": [],
+    }
+    first = forced_next_step(state)
+    assert first["tool_name"] == "probe_observed_input_batch"
+    state["execution_trace"].append({
+        "tool_name": first["tool_name"], "tool_args": first["tool_args"],
+        "success": True,
+    })
+    cell.update(status="blocked", first_pass_outcome="unattempted",
+                first_pass_blocked_reason="identity_unavailable")
+    state["auth_session"] = {"target": target, "authenticated": True}
+
+    retry = forced_next_step(state)
+    assert retry["tool_name"] == "probe_observed_input_batch"
+    assert retry["tool_args"]["pending_input_count"] == 1
+    assert retry["tool_args"]["pending_batch_signature"] != first["tool_args"]["pending_batch_signature"]
+
+
 def test_ready_hypothesis_wave_retries_one_failed_dispatch():
     target = "https://app.test"
     state = {

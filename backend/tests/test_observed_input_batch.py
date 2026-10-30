@@ -133,6 +133,71 @@ def test_batch_reaches_all_link_inputs_once_with_live_receipts():
     assert manager.calls == calls_after_first
 
 
+def test_unavailable_identity_is_blocked_without_probe_and_reopens_after_login():
+    class Manager:
+        def __init__(self):
+            brain = EngagementBrain(target="https://app.test")
+            seed_parameter_coverage_cells(brain, [{
+                "method": "GET", "host": "app.test", "path": "/catalog",
+                "name": "category", "location": "query", "identity": "legacy",
+                "source": "browser_traffic", "artifact_id": "capture-1",
+                "testable": True,
+            }])
+            self._engagement_brain = brain.to_dict()
+            self._capability_map = {"target": "https://app.test"}
+            self.logged_in = False
+            self.calls = []
+
+        def _scoped_state(self, identity, url):
+            assert identity == "legacy" and url == "https://app.test/catalog"
+            if not self.logged_in:
+                raise ValueError("no authenticated session")
+            return {"cookies": []}
+
+        async def scoped_input_probe_assigned(self, coverage_cell_id, **_kwargs):
+            self.calls.append(coverage_cell_id)
+            return {"success": True, "evidence_id": "receipt-" + coverage_cell_id,
+                    "proof_confirmed": False}
+
+        async def scoped_assessment_probe_assigned(self, coverage_cell_id, **_kwargs):
+            return await self.scoped_input_probe_assigned(coverage_cell_id)
+
+    manager = Manager()
+    blocked = asyncio.run(run_observed_input_batch(manager, max_checks=2))
+    assert blocked["processed"] == 0 and blocked["identity_blocked"] == 2
+    assert blocked["remaining"] == 0 and manager.calls == []
+    assert all(cell["status"] == "blocked" and cell["first_pass_outcome"] == "unattempted"
+               for cell in manager._engagement_brain["coverage_cells"]
+               if cell["test_type"] in {"sqli", "xss"})
+
+    manager.logged_in = True
+    reopened = asyncio.run(run_observed_input_batch(manager, max_checks=2))
+    assert reopened["identity_reopened"] == 2
+    assert reopened["processed"] == 2 and reopened["remaining"] == 0
+    assert len(set(manager.calls)) == 2
+
+
+def test_assigned_probe_reports_missing_identity_before_using_budget():
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.test"
+    manager._assessment_scope = {"app.test"}
+    manager._capability_map = {"target": "https://app.test"}
+    brain = EngagementBrain(target="https://app.test")
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "host": "app.test", "path": "/catalog",
+        "name": "category", "location": "query", "identity": "legacy",
+        "source": "browser_link", "testable": True,
+    }])
+    lease = claim_coverage_cell_leases(brain, ["sqli"])["sqli"]
+    manager._engagement_brain = brain.to_dict()
+
+    result = asyncio.run(manager.scoped_input_probe_assigned(
+        lease.coverage_cell_id, lease.id,
+    ))
+    assert result["error"] == "identity_unavailable"
+    assert getattr(manager, "_scoped_get_count", 0) == 0
+
+
 
 def test_first_pass_covers_distinct_inputs_before_second_class():
     class Manager:
