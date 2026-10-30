@@ -4113,6 +4113,75 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
     }
 
 
+def coverage_confidence_statement(
+    assessment: Dict[str, Any],
+    *,
+    partial_reason: str = "",
+) -> str:
+    """Render a human-readable coverage/confidence block for a run's final answer.
+
+    A clean result is never silent: it states what was exercised and what was not
+    reached, so "no findings" cannot be mistaken for "secure". The input is the
+    scoped_assessment_summary payload (``complete`` flag, ``coverage``
+    progress dict, ``pending_candidates`` / ``unpublished_candidates`` ids,
+    ``threat_model_present``). ``partial_reason`` is the operator/agent-recorded
+    reason an incomplete assessment was closed anyway.
+    """
+    coverage = assessment.get("coverage") or {}
+
+    def _int(key: str) -> int:
+        try:
+            return int(coverage.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    denom = _int("denominator")
+    finding = _int("finding")
+    clean = _int("tested_clean")
+    skipped = _int("skipped")
+    inconclusive = _int("inconclusive")
+    untested = _int("untested_count")
+    cell_denom = _int("cell_denominator")
+    open_cells = _int("open_cell_count")
+    verified = _int("verified_checks")
+    pending_proofs = _int("pending_proof_escalation_count")
+    accounted = finding + clean + skipped
+    pending_candidates = len(assessment.get("pending_candidates") or [])
+    unpublished = len(assessment.get("unpublished_candidates") or [])
+
+    tested_line = (
+        f"Tested {accounted}/{denom} mapped surfaces "
+        f"(findings={finding}, clean={clean}, skipped={skipped}); "
+        f"{cell_denom - open_cells}/{cell_denom} test cells complete, "
+        f"{verified} with recorded evidence."
+    )
+    not_reached = (
+        f"Not reached: {untested} untested surfaces, {inconclusive} inconclusive, "
+        f"{open_cells} open cells, {pending_proofs} pending verification, "
+        f"{pending_candidates} pending candidates, {unpublished} confirmed-but-unpublished."
+    )
+    if not assessment.get("threat_model_present"):
+        not_reached += " No threat model recorded."
+
+    if assessment.get("complete"):
+        confidence = (
+            "Confidence: complete — every mapped surface and test cell was exercised. "
+            "A clean result reflects the coverage above, not a guarantee of security."
+        )
+    elif partial_reason:
+        confidence = (
+            "Confidence: partial — the result does not cover the open items above. "
+            f"Reason: {partial_reason}"
+        )
+    else:
+        confidence = (
+            "Confidence: incomplete — coverage is still open. "
+            "Review the threat model and scoped_assessment_summary before closing."
+        )
+
+    return "## Assessment coverage\n" + tested_line + "\n" + not_reached + "\n" + confidence
+
+
 # ---------------------------------------------------------------------------
 # internals
 # ---------------------------------------------------------------------------

@@ -3500,25 +3500,21 @@ class AgentOrchestrator:
             if mode == "agent" and response.task_complete and self.tool_manager._scoped_assessment_started:
                 import json as _json
 
+                from app.services.agent.engagement_brain import coverage_confidence_statement
+
                 assessment = _json.loads(await self.tool_manager.scoped_assessment_summary())
+                partial_reason = self.tool_manager._scoped_assessment_partial_reason
                 if not assessment["complete"]:
-                    coverage = assessment["coverage"]
-                    partial_reason = self.tool_manager._scoped_assessment_partial_reason
                     partial_closure = bool(partial_reason)
-                    coverage_gap = (
-                        f"{coverage['untested_count']} open surfaces, "
-                        f"{coverage['open_cell_count']} open cells, "
-                        f"{len(assessment['pending_candidates'])} pending candidates. "
-                    )
-                    if partial_closure:
-                        suffix = f"\n\nAssessment ended partial: {coverage_gap}Reason: {partial_reason}."
-                    else:
+                    if not partial_closure:
                         response.task_complete = False
-                        suffix = (
-                            "\n\nAssessment coverage is still open: " + coverage_gap
-                            + "Review the threat model and scoped_assessment_summary before closing."
-                        )
-                    response.answer = (response.answer or "") + suffix
+                # Always state coverage — a complete, clean run must not be silent
+                # about what it exercised (and did not reach), not only an open one.
+                statement = coverage_confidence_statement(
+                    assessment,
+                    partial_reason=partial_reason if not assessment["complete"] else "",
+                )
+                response.answer = (response.answer or "") + "\n\n" + statement
 
             # EvoGraph: record chain end
             evograph.record_chain_end(
