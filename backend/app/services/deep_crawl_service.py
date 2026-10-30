@@ -31,10 +31,13 @@ The result is a structured map of the *real* attack surface:
     - third-party / out-of-scope calls
     - WebSocket + SSE channels
     - JS files and source maps
-    - forms and their inputs
+    - forms and their inputs, including form-less / JS-submitted inputs
+      (search boxes, React controlled inputs) that have no ``<form>`` ancestor
 
 This is read-only reconnaissance: it never submits forms or clicks
-state-mutating controls (logout/delete/pay/submit are filtered out).
+state-mutating controls (logout/delete/pay/submit are filtered out). Because it
+never submits, a form-less input's request is never observed, so the input
+element itself (captured above) is the only record that the sink exists.
 
 Runs on headless Linux/Ubuntu servers (Playwright + Chromium are baked into the
 Docker images). To look like a *normal user* rather than a bot, the crawl:
@@ -1583,20 +1586,44 @@ async def _drain_calls(page, result: CrawlResult) -> None:
 
 
 async def _harvest(page):
-    """Return (links, forms) from the current DOM."""
+    """Return (links, forms) from the current DOM.
+
+    ``forms`` also carries one synthetic ``loose`` entry for interactive inputs
+    that are NOT wrapped in a ``<form>`` (JS-submitted search boxes, React
+    controlled inputs). The crawl is read-only and never submits them, so the
+    input element is the only trace of the sink — without this, the catalog
+    "search" class of SQLi/XSS input is invisible to the parameter inventory on
+    SPA targets. The loose entry has no action, so collect_parameter_inventory
+    binds it to the page URL (set by record_surface) as a GET query input.
+    """
     data = await page.evaluate(
         """
         () => {
           const links = Array.from(document.querySelectorAll('a[href]'))
             .map(a => a.getAttribute('href')).filter(Boolean).slice(0, 300);
+          const slug = (s) => String(s || '').trim().toLowerCase()
+            .replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40);
+          const inputName = (i) => i.getAttribute('name') || i.getAttribute('id')
+            || i.getAttribute('data-testid') || slug(i.getAttribute('aria-label'))
+            || slug(i.getAttribute('placeholder'));
           const forms = Array.from(document.querySelectorAll('form')).slice(0, 30).map(f => ({
             action: f.getAttribute('action') || '',
             method: (f.getAttribute('method') || 'GET').toUpperCase(),
             inputs: Array.from(f.querySelectorAll('input,select,textarea'))
-              .map(i => i.getAttribute('name') || i.getAttribute('id') || '')
-              .filter(Boolean).slice(0, 40)
+              .map(inputName).filter(Boolean).slice(0, 40)
           }));
-          return { links, forms };
+          const SKIP = new Set(
+            ['hidden', 'submit', 'button', 'reset', 'checkbox', 'radio', 'file', 'image']);
+          const looseNames = Array.from(document.querySelectorAll(
+            'input,select,textarea,[contenteditable=""],[contenteditable="true"]'))
+            .filter(i => !i.closest('form'))
+            .filter(i => !SKIP.has((i.getAttribute('type') || '').toLowerCase()))
+            .map(inputName).filter(Boolean);
+          const looseForms = looseNames.length
+            ? [{ action: '', method: 'GET', loose: true,
+                 inputs: Array.from(new Set(looseNames)).slice(0, 40) }]
+            : [];
+          return { links, forms: forms.concat(looseForms) };
         }
         """
     )

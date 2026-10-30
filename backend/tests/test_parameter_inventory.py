@@ -445,3 +445,32 @@ def test_early_wave_leases_only_browser_observed_inputs():
         cell = next(row for row in brain.coverage_cells if row["id"] == lease.coverage_cell_id)
         assert cell["path"] == "/catalog/subscribe"
         assert cell["observation_source"] == "observed_form"
+
+
+def test_formless_input_becomes_testable_query_input_on_its_page():
+    """A JS-submitted search box with no <form> ancestor must still be tested.
+
+    deep_crawl's _harvest emits form-less inputs as a loose synthetic form with
+    an empty action; record_surface binds it to the page URL it was seen on.
+    The crawl is read-only and never submits, so the sink's request is never
+    observed and this input element is the only trace of it. The inventory must
+    turn it into a GET query input on the page path so the xss/sqli specialists
+    get a coverage cell (otherwise the catalog-search class of sink is invisible
+    on SPA targets).
+    """
+    rows = collect_parameter_inventory({
+        "target": "https://app.test/",
+        "scope": "https://app.test",
+        "forms": [{
+            "method": "GET", "action": "", "loose": True,
+            "page": "https://app.test/catalog",
+            "inputs": ["searchTerm"],
+        }],
+    })
+    hit = [row for row in rows if row["name"] == "searchTerm"]
+    assert hit, rows
+    assert hit[0]["path"] == "/catalog"
+    assert hit[0]["location"] == "query"
+    assert hit[0]["method"] == "GET"
+    assert hit[0]["source"] == "observed_form"
+    assert hit[0]["testable"] is True
