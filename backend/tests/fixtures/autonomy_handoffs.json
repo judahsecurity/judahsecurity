@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "note": "Synthetic, non-routable examples derived from the NanoClaw takeover and JS/API discovery patterns. No target traffic is sent.",
+  "cases": [
+    {
+      "id": "nanoclaw_takeover_pattern",
+      "target": "https://docs.example.test",
+      "scope_hosts": ["docs.example.test"],
+      "dnsx_output": "{\"host\":\"docs.example.test\",\"cname\":\"unused.github.io\"}",
+      "js_endpoints": [],
+      "expected_leads": [{"specialist": "takeover", "target": "https://docs.example.test"}],
+      "expected_verified": 1
+    },
+    {
+      "id": "nanoclaw_js_api_pattern",
+      "target": "https://login.example.test",
+      "scope_hosts": ["login.example.test"],
+      "dnsx_output": "",
+      "js_endpoints": ["/api/v1/profile", "https://outside.test/api/admin", "/static/app.js"],
+      "expected_leads": [{"specialist": "api_authz", "target": "https://login.example.test/api/v1/profile"}],
+      "expected_verified": 0
+    },
+    {
+      "id": "benign_cname_control",
+      "target": "https://normal.example.test",
+      "scope_hosts": ["normal.example.test"],
+      "dnsx_output": "{\"host\":\"normal.example.test\",\"cname\":\"ordinary.example.net\"}",
+      "js_endpoints": [],
+      "expected_leads": [],
+      "expected_verified": 0
+    }
+  ]
+}

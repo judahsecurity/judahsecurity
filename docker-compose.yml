@@ -434,6 +434,42 @@ services:
     networks:
       - asm_network
 
+  # Opted-in tester-process turns are claimed from Postgres and resumed between
+  # turns. Each worker owns one target at a time; replicas use row locks.
+  autonomy-worker:
+    image: ${SCANNER_IMAGE:-asm-scanner:latest}
+    container_name: asm_autonomy_worker
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-asm_user}:${POSTGRES_PASSWORD:-asm_password}@db:5432/${POSTGRES_DB:-asm_db}
+      - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-change-in-production}
+      - REDIS_URL=redis://redis:6379/0
+      - AI_PROVIDER=${AI_PROVIDER:-anthropic}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - ANTHROPIC_MODEL=${ANTHROPIC_MODEL:-claude-sonnet-4-6}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-chat}
+      - MOONSHOT_API_KEY=${MOONSHOT_API_KEY:-}
+      - KIMI_MODEL=${KIMI_MODEL:-kimi-k3}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
+      - AEGIS_AGENT_EGRESS_IP=${AEGIS_AGENT_EGRESS_IP:-}
+      - AEGIS_ASSESSMENT_PROXY_URL=${AEGIS_ASSESSMENT_PROXY_URL:-}
+      - AEGIS_ASSESSMENT_CA_BUNDLE=${AEGIS_ASSESSMENT_CA_BUNDLE:-}
+      - AUTONOMY_POLL_SECONDS=${AUTONOMY_POLL_SECONDS:-10}
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    command: ["python", "-m", "app.workers.autonomy_worker"]
+    networks:
+      - asm_network
+
   # Incremental vulnerability intelligence updates. Runs once on startup and
   # then on the configured cadence, sharing the backend's persistent cache.
   intel-refresher:

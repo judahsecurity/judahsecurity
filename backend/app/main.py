@@ -62,6 +62,7 @@ from app.models.agent_palace import AgentPalaceDrawer  # noqa: F401 — palace m
 from app.models.recon_job import ReconJob, ReconWorkerHeartbeat  # noqa: F401 — interceptor workers
 from app.models.sitemap_entry import SitemapEntry  # noqa: F401 — Praetorian-style app sitemap
 from app.models.agent_run_ledger import AgentRunLedger, AgentActionReceipt, AgentHypothesisCoverage  # noqa: F401 — durable agent work receipts
+from app.models.agent_autonomy_work import AgentAutonomyWork, AgentRunSnapshot  # noqa: F401 — scheduled continuation queue
 from app.models.scoped_assessment_run import ScopedAssessmentRun  # noqa: F401 — private service capabilities
 from app.models.prowl_publication import ProwlPublication  # noqa: F401 — finding idempotency
 from app.models.workflow import (  # noqa: F401 — ensure workflow tables are created

@@ -6,6 +6,7 @@ Completed briefs are drained into the next think prompt / execution trace
 so results "come in" without serializing the whole turn on one tool.
 
 Worker kinds (bounded — not DirBuster-scale):
+  dns_cname    — bounded CNAME lookup for scoped takeover leads
   httpx_tech   — ProjectDiscovery-style HTTP + tech probe
   waf_probe    — wafw00f
   ferox_dirs   — depth-1 common dirs (app-dirs-common.txt)
@@ -16,6 +17,7 @@ Worker kinds (bounded — not DirBuster-scale):
 
 Packs:
   early        — httpx_tech + waf_probe + whatweb + archive_params
+  autonomy_early — early + dns_cname (opted-in scheduled assessments)
                  (auto on URL paste; interceptor queued separately)
   enrich       — ferox_dirs + katana_urls
   nuclei_recon — informational Nuclei only (explicit spawn)
@@ -38,6 +40,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 logger = logging.getLogger(__name__)
 
 WORKER_KINDS = (
+    "dns_cname",
     "httpx_tech",
     "waf_probe",
     "ferox_dirs",
@@ -49,9 +52,11 @@ WORKER_KINDS = (
 
 PACKS: Dict[str, List[str]] = {
     "early": ["httpx_tech", "waf_probe", "whatweb", "archive_params"],
+    "autonomy_early": ["dns_cname", "httpx_tech", "waf_probe", "whatweb", "archive_params"],
     "enrich": ["ferox_dirs", "katana_urls"],
     "nuclei_recon": ["nuclei_recon"],
     "full": [
+        "dns_cname",
         "httpx_tech",
         "waf_probe",
         "whatweb",
@@ -64,6 +69,7 @@ PACKS: Dict[str, List[str]] = {
 
 # Soft ceilings so background streams cannot eat the whole turn budget.
 _KIND_TIMEOUT_SEC: Dict[str, float] = {
+    "dns_cname": 30.0,
     "httpx_tech": 90.0,
     "waf_probe": 60.0,
     "whatweb": 60.0,
@@ -335,6 +341,19 @@ async def _worker_body(
 ) -> str:
     host = _host_from_url(url)
     wl = _wordlist_path()
+
+    if kind == "dns_cname":
+        from app.services.agent.recon_observation_adapter import _dns_rows
+
+        res = await _run_mcp(
+            tools_manager, "execute_dnsx", f"-d {host} -cname -json -silent",
+            user_id=user_id, org_id=org_id, session_id=session_id,
+        )
+        rows = [row for row in _dns_rows(str(res.get("output") or "")) if row.get("cname") or row.get("cname_chain")][:100]
+        capture = _capture_context.get()
+        if capture and res.get("success"):
+            capture[1].extend({"type": "DNSX_ROW", "row": row} for row in rows)
+        return f"[recon_worker:dns_cname] success={bool(res.get('success'))} cname_rows={len(rows)}"
 
     if kind == "httpx_tech":
         args = f"-u {url} -silent -tech-detect -status-code -title -web-server -json"
@@ -647,7 +666,8 @@ async def drain_completed(
                         "status": rec.status,
                         "brief": rec.brief,
                         "observations": rec.observations if rec.status == "completed" else [],
-                        "urls": ([item["target"] for item in rec.observations]
+                        "urls": ([item["target"] for item in rec.observations
+                                  if item.get("type") == "HTTP_ENDPOINT" and item.get("target")]
                                  if rec.observations else extract_recon_urls(rec.kind, rec.brief, rec.url))
                         if rec.status == "completed" else [],
                         "url": rec.url,

@@ -19,10 +19,12 @@ import asyncio
 import inspect
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
+from urllib.parse import urlsplit
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
@@ -1376,7 +1378,19 @@ async def _run_specialist(
     messages.append(HumanMessage(content="Begin."))
 
     iteration = 0
+    max_tool_calls = directive.max_tool_calls if isinstance(directive, OperationDirective) else 0
+    from app.services.agent.autonomy_limits import current_autonomy_limits
+    strict_scope = bool(current_autonomy_limits.get())
+    scope_target = (
+        directive.target if isinstance(directive, OperationDirective) else
+        target_list[0] if target_list else ""
+    ) if strict_scope else ""
     while iteration < max_iter:
+        if max_tool_calls and len(report.tool_calls) >= max_tool_calls:
+            report.verdict = "inconclusive"
+            report.rewrite_hint = "specialist tool budget exhausted"
+            report.summary = f"Stopped after {max_tool_calls} tool calls; remaining checks are open."
+            break
         iteration += 1
         try:
             from app.services.agent.orchestrator import _ledger_llm_call
@@ -1414,6 +1428,8 @@ async def _run_specialist(
 
         # Enforce allowlist + max parallelism per turn.
         tool_calls = [tc for tc in tool_calls if tc.get("tool") in allowed_tools][: profile.max_tools_per_iteration]
+        if max_tool_calls:
+            tool_calls = tool_calls[:max_tool_calls - len(report.tool_calls)]
 
         if not tool_calls:
             messages.append(HumanMessage(
@@ -1427,7 +1443,10 @@ async def _run_specialist(
             # effect. Completed batches are safe to resume from the ledger.
             execution_progress["tool_inflight"] = True
         tool_results = await asyncio.gather(*(
-            _safe_invoke(tools_manager, tc.get("tool", ""), tc.get("args") or {})
+            _safe_invoke(
+                tools_manager, tc.get("tool", ""), tc.get("args") or {},
+                scope_target=scope_target,
+            )
             for tc in tool_calls
         ))
         if execution_progress is not None:
@@ -1476,7 +1495,31 @@ async def _run_specialist(
     return report
 
 
-async def _safe_invoke(tools_manager: Any, tool_name: str, args: dict) -> ToolInvocation:
+def _out_of_scope_url(args: dict, target: str) -> str:
+    """Reject an explicit cross-host URL before a scheduled specialist tool call."""
+    allowed = urlsplit(target if "://" in target else f"https://{target}").hostname
+    if not allowed:
+        return "invalid specialist target"
+    # The existing assessment scope checks resolved destinations; this catches
+    # a specialist's explicit URL argument before any tool is invoked.
+    for candidate in re.findall(r'https?://[^\s"\'<>},]+', json.dumps(args or {})):
+        host = urlsplit(candidate.rstrip(".)")).hostname
+        if host and host.lower().rstrip(".") != allowed.lower().rstrip("."):
+            return host
+    return ""
+
+
+async def _safe_invoke(
+    tools_manager: Any, tool_name: str, args: dict, *, scope_target: str = "",
+) -> ToolInvocation:
+    if scope_target:
+        denied = _out_of_scope_url(args, scope_target)
+        if denied:
+            return ToolInvocation(
+                tool=tool_name, args=args or {}, success=False,
+                summary=f"Specialist target scope denied: {denied}",
+                error="specialist_scope_denied",
+            )
     try:
         result = await tools_manager.execute(tool_name, args or {})
         success = bool(result.get("success"))
@@ -1666,8 +1709,13 @@ async def run_fireteam(
                 execution_progress=execution_progress,
             ))
             try:
+                directive = directives.get(p.name)
+                member_cap = min(
+                    member_timeout_sec,
+                    float(getattr(directive, "max_seconds", 0) or member_timeout_sec),
+                )
                 done, _ = await asyncio.wait(
-                    {member_task}, timeout=max(0.01, member_timeout_sec)
+                    {member_task}, timeout=max(0.01, member_cap)
                 )
                 if done:
                     rep = member_task.result()
@@ -1675,7 +1723,7 @@ async def run_fireteam(
                     member_task.cancel()
                     member_task.add_done_callback(_log_late_failure)
                     rep = _interrupted_report(
-                        p, f"specialist timed out after {member_timeout_sec:g}s",
+                        p, f"specialist timed out after {member_cap:g}s",
                         execution_progress=execution_progress,
                     )
             except asyncio.CancelledError:

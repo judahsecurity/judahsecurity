@@ -109,6 +109,7 @@ class EngagementBrain:
     notes: List[str] = field(default_factory=list)
     threat_model: Dict[str, Any] = field(default_factory=dict)
     surfaces: List[Dict[str, Any]] = field(default_factory=list)
+    recon_observations: List[Dict[str, Any]] = field(default_factory=list)
     focus_areas: List[Dict[str, Any]] = field(default_factory=list)
     candidates: List[Dict[str, Any]] = field(default_factory=list)
     coverage: List[Dict[str, Any]] = field(default_factory=list)
@@ -136,6 +137,7 @@ class EngagementBrain:
             "notes": list(self.notes),
             "threat_model": dict(self.threat_model or {}),
             "surfaces": list(self.surfaces or []),
+            "recon_observations": list(self.recon_observations[-200:]),
             "focus_areas": list(self.focus_areas or []),
             "candidates": list(self.candidates or []),
             "coverage": list(self.coverage or []),

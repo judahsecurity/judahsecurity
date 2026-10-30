@@ -1,6 +1,7 @@
 """Tests for parallel recon worker helpers."""
 
 import asyncio
+import json
 
 from app.services.agent.recon_workers import (
     PACKS,
@@ -28,6 +29,7 @@ def test_early_pack_defers_nuclei_recon():
         "whatweb",
         "archive_params",
     ]
+    assert PACKS["autonomy_early"] == ["dns_cname", *PACKS["early"]]
     assert PACKS["nuclei_recon"] == ["nuclei_recon"]
     assert "nuclei_recon" in PACKS["full"]
     assert "nuclei_recon" not in PACKS["enrich"]
@@ -186,6 +188,31 @@ def test_ferox_worker_uses_compatible_output_flags():
     assert tool_name == "execute_feroxbuster"
     assert "--silent" in tool_args["args"].split()
     assert "-q" not in tool_args["args"].split()
+
+
+def test_dns_cname_worker_captures_structured_rows_without_leaking_urls():
+    from app.services.agent import recon_workers
+
+    observations = []
+    token = recon_workers._capture_context.set(("https://example.com", observations))
+    tm = _FakeTools({
+        "success": True,
+        "output": json.dumps({"host": "example.com", "cname": ["site.github.io"]}),
+    })
+    try:
+        brief = asyncio.run(_worker_body(
+            "dns_cname", "https://example.com", tm,
+            user_id=None, org_id=None, session_id="t",
+        ))
+    finally:
+        recon_workers._capture_context.reset(token)
+    assert tm.calls[0] == (
+        "execute_dnsx", {"args": "-d example.com -cname -json -silent"},
+    )
+    assert observations == [{
+        "type": "DNSX_ROW", "row": {"host": "example.com", "cname": ["site.github.io"]},
+    }]
+    assert "cname_rows=1" in brief
 
 
 def test_nuclei_recon_worker_runs_bounded_nuclei_and_filters():

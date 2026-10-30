@@ -688,3 +688,65 @@ def get_schedule_history(
             for s in scans
         ]
     }
+
+
+@router.get("/{schedule_id}/autonomy-work")
+def get_schedule_autonomy_work(
+    schedule_id: int,
+    limit: int = Query(20, ge=1, le=100),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Show bounded progress and outcome counts without prompts or raw evidence."""
+    from app.models.agent_autonomy_work import AgentAutonomyWork, AgentRunSnapshot
+
+    schedule = db.get(ScanSchedule, schedule_id)
+    if not schedule:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    if not check_org_access(current_user, schedule.organization_id):
+        raise HTTPException(status_code=403, detail="Access denied")
+    rows = db.query(AgentAutonomyWork).filter(
+        AgentAutonomyWork.schedule_id == schedule_id,
+        AgentAutonomyWork.organization_id == schedule.organization_id,
+    ).order_by(AgentAutonomyWork.created_at.desc()).limit(limit).all()
+    items = []
+    for row in rows:
+        snapshot = db.get(AgentRunSnapshot, row.session_id)
+        brain = ((snapshot.payload or {}).get("engagement_brain") or {}) if snapshot else {}
+        hypotheses = brain.get("hypotheses") or []
+        receipts = {
+            str(receipt.get("candidate_id") or ""): receipt
+            for receipt in (brain.get("verification_receipts") or {}).values()
+            if isinstance(receipt, dict)
+        }
+        verified = sum(
+            1 for candidate in (brain.get("candidates") or [])
+            if isinstance(candidate, dict) and candidate.get("status") == "confirmed"
+            and (receipt := receipts.get(str(candidate.get("id") or "")))
+            and receipt.get("verdict") == "confirmed"
+            and receipt.get("run_id") == candidate.get("verifier_run_id")
+            and receipt.get("revision") == candidate.get("revision")
+            and receipt.get("nonce") == candidate.get("nonce")
+            and receipt.get("nonce_observed") is True
+            and bool(receipt.get("evidence_ids"))
+        )
+        items.append({
+            "id": row.id,
+            "target": row.target,
+            "session_id": row.session_id,
+            "status": row.status,
+            "turns": row.turns,
+            "max_turns": row.max_turns,
+            "spent_usd": row.spent_usd,
+            "price_limit_usd": row.price_limit_usd,
+            "recon_leads": len(brain.get("recon_observations") or []),
+            "open_hypotheses": sum(
+                1 for hyp in hypotheses if isinstance(hyp, dict)
+                and hyp.get("status") in {"open", "in_progress"}
+            ),
+            "verified_candidates": verified,
+            "stop_reason": row.stop_reason,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "updated_at": row.updated_at.isoformat() if row.updated_at else None,
+        })
+    return {"schedule_id": schedule_id, "work": items}

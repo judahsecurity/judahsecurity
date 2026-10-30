@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 
 from app.services.agent.aegis_pantheon import epithet_for, pantheon_line
+from app.services.agent.autonomy_limits import current_autonomy_limits
 from app.services.agent.coverage_cells import lead_packet_for_cell, scoped_replay_eligible
 
 
@@ -34,6 +35,8 @@ class OperationDirective:
     capec_ids: List[str] = field(default_factory=list)
     owasp: List[str] = field(default_factory=list)
     max_iterations: int = 6
+    max_tool_calls: int = 0  # Zero keeps existing interactive behavior.
+    max_seconds: int = 0
     priority: str = "medium"
     rewrite_note: str = ""
     brain_slice: str = ""
@@ -76,6 +79,8 @@ class OperationDirective:
             f"- Coverage cell: {self.coverage_cell_id or 'unassigned'}\n"
             f"- Coverage lease: {self.coverage_lease_id or 'unleased'}\n"
             f"- Max iterations: {self.max_iterations}\n"
+            f"- Max tool calls: {self.max_tool_calls or 'profile default'}\n"
+            f"- Time limit: {self.max_seconds or 'wave default'} seconds\n"
             f"- Priority: {self.priority}\n"
             f"- Allowed tools: {tools}\n"
             "Rules: stay in lane; do not call fireteam_dispatch; "
@@ -289,6 +294,7 @@ def directives_from_hypotheses(
         h for h in getattr(brain, "hypotheses", []) or []
         if getattr(h, "status", "") in ("open", "in_progress")
     ]
+    limits = current_autonomy_limits.get()
     out: Dict[str, OperationDirective] = {}
     for name in specialists:
         profile = profiles_by_name.get(name)
@@ -429,7 +435,7 @@ def directives_from_hypotheses(
                 if ow and ow not in owasps:
                     owasps.append(ow)
             priority = h0.priority
-            target = default_target or ""
+            target = h0.target or default_target or ""
         else:
             goal = profile.role.split(".")[0][:200]
             assumption = ""
@@ -465,6 +471,8 @@ def directives_from_hypotheses(
             capec_ids=capecs,
             owasp=owasps,
             max_iterations=int(getattr(profile, "max_iterations", 6) or 6),
+            max_tool_calls=limits.max_specialist_tool_calls if limits else 0,
+            max_seconds=limits.max_specialist_seconds if limits else 0,
             priority=priority,
             lease_id=lease_id,
             coverage_cell_id=coverage_cell_id,

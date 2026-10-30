@@ -120,6 +120,28 @@ def test_ready_hypothesis_wave_refuses_stale_map_and_assist_mode():
     assert _ready_hypothesis_wave(state, [], target) is None
 
 
+def test_scoped_cname_hypothesis_dispatches_on_its_own_origin():
+    target = "https://app.example.test"
+    child = "https://docs.example.test"
+    state = {
+        "mode": "agent", "capability_map": {"target": target},
+        "engagement_brain": {
+            "recon_observations": [{
+                "id": "dns-1", "kind": "dns_cname", "host": "docs.example.test",
+                "value": "unused.github.io", "source": "execute_dnsx",
+            }],
+            "hypotheses": [{
+                "id": "h1", "title": "Check provider CNAME", "assumption": "A",
+                "test": "T", "pass_criteria": "P", "kill_criteria": "K",
+                "specialist": "takeover", "target": child, "source": "recon",
+            }],
+        },
+    }
+    wave = _ready_hypothesis_wave(state, [], target)
+    assert wave and wave["tool_args"]["specialists"] == ["takeover"]
+    assert wave["tool_args"]["targets"] == [child]
+
+
 def test_404_root_needs_dir_brute():
     assert root_needs_dir_brute([
         {"kind": "root", "status": 404, "title": "Not Found", "bytes": 80, "snippet": "404"},
