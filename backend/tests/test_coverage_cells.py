@@ -76,6 +76,46 @@ def test_static_assets_do_not_consume_http_assessment_cells():
     ]
 
 
+def test_coverage_includes_surfaces_after_the_old_sixty_row_limit():
+    brain = EngagementBrain(surfaces=[
+        {"method": "GET", "path": f"/search/{n}", "host": "app.test",
+         "takes_input": True, "source": "api"}
+        for n in range(61)
+    ])
+    progress = coverage_progress(brain)
+    assert progress["denominator"] == 61
+    assert progress["untested_count"] == 61
+    assert progress["untested"][-1]["discovery_source"] == "api"
+    assert any(row["path"] == "/search/60" for row in brain.coverage)
+
+
+def test_omitted_known_inputs_prevent_complete_coverage():
+    brain = EngagementBrain(
+        surfaces=[{"method": "GET", "path": "/search", "host": "app.test",
+                   "takes_input": True}],
+        threat_model={"provenance": {"surface_inventory_omitted_input_count": 2,
+                                      "surface_inventory_omitted_count": 3}},
+    )
+    seed_coverage_from_surfaces(brain)
+    record_surface_coverage(
+        brain, method="GET", path="/search", host="app.test",
+        status="skipped", reason="Operator excluded this route",
+    )
+    progress = coverage_progress(brain)
+    assert progress["open_cell_count"] == 0
+    assert progress["inventory_omitted_input_count"] == 2
+    assert progress["ready_to_complete_coverage"] is False
+
+    oversized = EngagementBrain(surfaces=[
+        {"method": "GET", "path": f"/search/{n}", "takes_input": True}
+        for n in range(251)
+    ])
+    oversized_progress = coverage_progress(oversized)
+    assert oversized_progress["eligible_surface_count"] == 251
+    assert oversized_progress["denominator_omitted_count"] == 1
+    assert oversized_progress["ready_to_complete_coverage"] is False
+
+
 def test_legacy_surface_status_does_not_hide_new_identity_parameter_cells():
     brain = _operation_brain()
     brain.coverage = [

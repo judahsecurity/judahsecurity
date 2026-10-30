@@ -3575,6 +3575,19 @@ def methodology_progress(
             "priority": "high",
             "status": "untested",
         })
+    omitted_inputs = (
+        cov.get("denominator_omitted_count", 0)
+        + cov.get("inventory_omitted_input_count", 0)
+    )
+    if omitted_inputs:
+        blockers.append({
+            "id": "inventory-truncated",
+            "methodology_id": "coverage",
+            "title": f"{omitted_inputs} known input surfaces omitted from coverage",
+            "specialist": "app_mapper",
+            "priority": "high",
+            "status": "blocked",
+        })
     for c in pending_candidates[:6]:
         if isinstance(c, dict):
             blockers.append({
@@ -3761,6 +3774,7 @@ def boost_methodologies_for_cwes(
 _COVERAGE_STATUSES = (
     "untested", "in_focus", "inconclusive", "finding", "tested_clean", "skipped",
 )
+MAX_DENOMINATOR_SURFACES = 250
 
 
 def surface_key(method: str = "GET", path: str = "", host: str = "") -> str:
@@ -3791,7 +3805,9 @@ def _focus_surface_set(brain: EngagementBrain) -> set[str]:
     return keys
 
 
-def denominator_surfaces(brain: EngagementBrain) -> List[Dict[str, Any]]:
+def denominator_surfaces(
+    brain: EngagementBrain, *, limit: Optional[int] = MAX_DENOMINATOR_SURFACES,
+) -> List[Dict[str, Any]]:
     """Inventory rows that must be accounted before complete.
 
     Focus-area surfaces plus takes_input rows (capped) — not every static asset.
@@ -3828,8 +3844,9 @@ def denominator_surfaces(brain: EngagementBrain) -> List[Dict[str, Any]]:
             "takes_input": takes,
             "assessment_check": assessment_check,
             "in_focus": in_focus,
+            "discovery_source": str(s.get("source") or "unknown"),
         })
-        if len(out) >= 60:
+        if limit is not None and len(out) >= limit:
             break
     return out
 
@@ -4045,6 +4062,16 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
         brain = engagement_brain_from_dict(brain)
     seed_coverage_from_surfaces(brain)
     denom = denominator_surfaces(brain)
+    eligible_total = len(denominator_surfaces(brain, limit=None))
+    provenance = (brain.threat_model or {}).get("provenance") or {}
+    if not isinstance(provenance, dict):
+        provenance = {}
+    try:
+        omitted_input_count = max(0, int(provenance.get("surface_inventory_omitted_input_count") or 0))
+        omitted_surface_count = max(0, int(provenance.get("surface_inventory_omitted_count") or 0))
+    except (TypeError, ValueError):
+        omitted_input_count = omitted_surface_count = 0
+    denominator_omitted_count = max(0, eligible_total - len(denom))
     from app.services.agent.coverage_cells import CELL_TERMINAL, migrate_coverage_cells
 
     cells = migrate_coverage_cells(brain, denominator=denom)
@@ -4081,9 +4108,14 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
         for row in (brain.proof_escalations or [])
         if isinstance(row, dict) and row.get("status") in ("pending", "verifying")
     ]
-    ready = len(open_cells) == 0 and len(pending_proofs) == 0
+    ready = (len(open_cells) == 0 and len(pending_proofs) == 0
+             and denominator_omitted_count == 0 and omitted_input_count == 0)
     return {
         "denominator": denom_n,
+        "eligible_surface_count": eligible_total,
+        "denominator_omitted_count": denominator_omitted_count,
+        "inventory_omitted_count": omitted_surface_count,
+        "inventory_omitted_input_count": omitted_input_count,
         "finding": len(buckets["finding"]),
         "tested_clean": len(buckets["tested_clean"]),
         "skipped": len(buckets["skipped"]),
@@ -4106,7 +4138,8 @@ def coverage_progress(brain: EngagementBrain | Dict[str, Any] | None) -> Dict[st
             f"coverage {accounted}/{denom_n or 0} accounted "
             f"(finding={len(buckets['finding'])} clean={len(buckets['tested_clean'])} "
             f"skipped={len(buckets['skipped'])} untested={len(untested)}); "
-            f"cells {len(cells) - len(open_cells)}/{len(cells)} complete"
+            f"cells {len(cells) - len(open_cells)}/{len(cells)} complete; "
+            f"known input surfaces omitted={denominator_omitted_count + omitted_input_count}"
         ),
     }
 

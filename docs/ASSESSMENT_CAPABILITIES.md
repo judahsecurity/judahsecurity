@@ -42,6 +42,14 @@ owner-only access, public directory index, or browser XSS candidate requires a
 fresh independent verifier record before Aegis permits publication. Coverage
 cannot be marked clean with an unrelated scoped receipt.
 
+Coverage reports the discovery source for each eligible surface and accounts
+for up to 250 input-bearing or focused surfaces from the threat model. If a
+larger observed inventory is truncated, the summary reports the omitted input
+count and requires a partial assessment closure. An accounted denominator only
+describes surfaces the current map observed; it does not establish that the
+whole application was discovered. Review the inventory and its gaps before
+claiming full coverage.
+
 This phase extends Judah's in-product tool manager, engagement brain, task graph,
 identity registry and execution evidence store. It does not launch Hadrian,
 Vespasian or Titus as external scanners. Their design concepts informed the
