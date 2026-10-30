@@ -424,6 +424,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **record_verify_verdict**: Verifier-only. Args: candidate_id, verdict, evidence, evidence_ids, proof. Requires fresh execution records from this verifier and a supported proof rule.
 - **run_assessment_workflow**: Run captured request steps with explicit identities, JSON field extraction, {{variable}} references, expected statuses, cleanup steps, and resumable workflow_id. Does not itself confirm findings.
 - **read_evidence**: Read full redacted artifacts by evidence_id, offset, limit.
+- **search_evidence**: Search already-recorded artifacts for a literal string across this session (no new requests). Use to find where an injected marker/canary was reflected or which stored responses mention a value, then read_evidence the hit. Args: value (3-256 chars, case-insensitive), kind (optional exact artifact kind), identity (optional), max_matches (default 20). A reflected marker is a lead, never proof.
 - **register_test_identity**: Register a named operator-provided test session (name, target, cookies/headers/storage_state, role, tenant).
 - **list_test_identities**: List configured identities without secrets.
 - **check_test_identity**: Check identity against its known endpoint (identity, url, field, expected).
@@ -877,6 +878,7 @@ TOOL_PHASE_MAP = {
     "generate_authorization_matrix": ["informational", "exploitation", "post_exploitation"],
     "run_authorization_proof": ["exploitation", "post_exploitation"],
     "list_proof_captures": ["informational", "exploitation", "post_exploitation"],
+    "search_evidence": ["informational", "exploitation", "post_exploitation"],
     "prepare_captured_authorization_proof": ["informational", "exploitation", "post_exploitation"],
     "get_assessment_coverage": ["informational", "exploitation", "post_exploitation"],
     "collect_js_intelligence": ["informational", "exploitation", "post_exploitation"],

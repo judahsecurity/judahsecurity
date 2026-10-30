@@ -38,6 +38,7 @@ CAPABILITY_TOOLS = (
     "validate_js_secret_candidate",
     "browse_as_identity",
     "list_proof_captures",
+    "search_evidence",
     "prepare_captured_authorization_proof",
 )
 
@@ -71,6 +72,85 @@ class AssessmentCapabilities:
     async def list_proof_captures(self, operation_id: str | None = None) -> str:
         """List execution-owned REST replay templates, without body values or credentials."""
         return json.dumps(dict(captures=self._capture_requests().list(operation_id)))
+
+    async def search_evidence(
+        self,
+        value: str,
+        kind: str | None = None,
+        identity: str | None = None,
+        max_matches: int = 20,
+    ) -> str:
+        """Find which already-recorded evidence artifacts contain a literal string.
+
+        Read-only search across this session's captured exchanges; it sends no
+        requests. Use it to locate where an injected marker/canary was reflected,
+        or which stored responses mention a value, then read_evidence the hit for
+        full context. Payloads are stored already-redacted. A reflected marker is
+        a lead for a specialist, never execution proof.
+
+        Args: value (literal substring, 3-256 chars, case-insensitive); kind
+        (optional exact artifact kind, e.g. "scoped_http_get"); identity
+        (optional exact test identity); max_matches (default 20, hard cap 50).
+        """
+        needle = (value or "").strip()
+        if len(needle) < 3:
+            raise ValueError("Provide at least 3 characters to search for")
+        if len(needle) > 256:
+            raise ValueError("Search value is too long (max 256 characters)")
+        limit = max(1, min(int(max_matches or 20), 50))
+        lowered = needle.lower()
+        store = evidence_store(self)
+        matches: list[dict] = []
+        scanned = 0
+        more_results = False
+        for artifact_id in list(store.records):
+            record = store.records.get(artifact_id)
+            if record is None:
+                continue
+            if kind and record.get("kind") != kind:
+                continue
+            if identity and record.get("identity") != identity:
+                continue
+            scanned += 1
+            text = json.dumps(record.get("payload"), default=str)
+            hay = text.lower()
+            position = hay.find(lowered)
+            if position < 0:
+                continue
+            if len(matches) >= limit:
+                more_results = True
+                continue
+            start = max(0, position - 60)
+            end = min(len(text), position + len(needle) + 60)
+            snippet = text[start:end]
+            matches.append(
+                {
+                    "evidence_id": artifact_id,
+                    "kind": record.get("kind", ""),
+                    "target": record.get("target", ""),
+                    "identity": record.get("identity", ""),
+                    "parameter": record.get("parameter", ""),
+                    "test_type": record.get("test_type", ""),
+                    "success": record.get("success"),
+                    "created_at": record.get("created_at"),
+                    "occurrences": hay.count(lowered),
+                    "snippet": ("…" if start else "") + snippet + ("…" if end < len(text) else ""),
+                }
+            )
+        return json.dumps(
+            {
+                "query": needle,
+                "filters": {"kind": kind or None, "identity": identity or None},
+                "scanned": scanned,
+                "match_count": len(matches),
+                "more_results": more_results,
+                "matches": matches,
+                "note": (
+                    "A reflected marker or matched value is a lead, never execution proof. "
+                    "read_evidence a hit for full context."
+                ),
+            }
+        )
 
     async def prepare_captured_authorization_proof(
         self,
