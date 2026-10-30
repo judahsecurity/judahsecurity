@@ -469,7 +469,7 @@ export default function SchedulesPage() {
                       <Label>Continue partial hunts automatically</Label>
                     </div>
                     <p className="text-xs text-muted-foreground">
-                      Up to 3 turns per target, sharing that target&apos;s spend limit across turns.
+                      Up to 3 turns per target, with time and reported model spend limits.
                     </p>
                   </div>
                 )}
@@ -818,7 +818,7 @@ export default function SchedulesPage() {
                     <Label>Continue partial hunts automatically</Label>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    Up to 3 turns per target, sharing that target&apos;s spend limit across turns.
+                    Up to 3 turns per target, with time and reported model spend limits.
                   </p>
                 </div>
               )}
