@@ -30,6 +30,31 @@ def test_legacy_scoped_identity_requires_proven_auth_on_exact_origin():
 
 
 @pytest.mark.asyncio
+async def test_unusable_identity_does_not_consume_numeric_sqli_get_budget(monkeypatch):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    manager._capability_map = {
+        "scope": "https://app.example.test",
+        "api_samples": [{"method": "GET",
+                         "url": "https://app.example.test/catalog?item=7",
+                         "identity": "legacy"}],
+    }
+    manager._auth_session = {"target": "https://app.example.test", "authenticated": False}
+    monkeypatch.setattr(
+        "app.services.agent.scoped_assessment_tools.sqli_boolean.probe_numeric_boolean",
+        lambda *_args, **_kwargs: pytest.fail("probe ran without a usable identity"),
+    )
+
+    with pytest.raises(ValueError, match="requires an authenticated session"):
+        await manager.scoped_numeric_sqli(
+            url="https://app.example.test/catalog?item=7",
+            parameter="item", identity="legacy",
+        )
+    assert getattr(manager, "_scoped_get_count", 0) == 0
+
+
+@pytest.mark.asyncio
 async def test_agent_browser_inventory_keeps_private_exchange_values_out_of_tool_output(monkeypatch):
     manager = ASMToolsManager()
     manager._fallback_target = "https://app.example.test"

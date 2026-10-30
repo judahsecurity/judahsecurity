@@ -972,6 +972,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             return {"success": False, "error": "assessment_scope_denied",
                     "output": str(exc)[:300]}
         identity = str(cell.get("identity") or "anonymous")
+        try:
+            self._scoped_state(identity, url)
+        except (KeyError, ValueError):
+            return {"success": False, "error": "identity_unavailable",
+                    "output": "Assigned input needs a usable session on this origin"}
 
         if cell["test_type"] == "sqli":
             if technique != "html_body" or variant != "base":

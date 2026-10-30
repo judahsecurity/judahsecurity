@@ -42,6 +42,21 @@ XSS_GET_TECHNIQUES = (
 )
 
 
+def _identity_unavailable(manager: Any, cell: dict[str, Any], active_origin: str) -> bool:
+    """Check local session state before a probe can reserve requests or a lease."""
+    identity = str(cell.get("identity") or "anonymous")
+    if identity == "anonymous":
+        return False
+    resolve = getattr(manager, "_scoped_state", None)
+    if not callable(resolve):
+        return True
+    try:
+        resolve(identity, f"{active_origin}{cell.get('path') or '/'}")
+    except (KeyError, ValueError):
+        return True
+    return False
+
+
 def _retryable_first_pass(cell: dict[str, Any], now: float) -> bool:
     reason = str(cell.get("first_pass_handoff_error") or "")
     return bool(
@@ -205,11 +220,29 @@ async def run_observed_input_batch(
             "funnel": parameter_test_funnel(brain),
         }
     results: list[dict[str, Any]] = []
+    # Authentication may be established after mapping. Reopen only cells that
+    # this preflight blocked, and leave other policy decisions intact.
+    identity_reopened = 0
+    for cell in brain.coverage_cells:
+        if (cell.get("status") == "blocked"
+                and cell.get("first_pass_blocked_reason") == "identity_unavailable"
+                and _origin(f"{urlsplit(active_origin).scheme}://{cell.get('host') or ''}") == active_origin
+                and not _identity_unavailable(manager, cell, active_origin)):
+            cell["status"] = "untested"
+            identity_reopened += 1
+            cell.pop("reason", None)
+            for key in (
+                "first_pass_blocked_reason", "first_pass_outcome", "first_pass_reason",
+                "first_pass_at", "first_pass_handoff_error", "first_pass_retry_at",
+                "first_pass_attempts",
+            ):
+                cell.pop(key, None)
     # A discovered POST input is still open coverage when this run has no
     # operator-approved replay path. Record that fact before scheduling so a
     # rejected write does not consume a probe slot or masquerade as a test.
     approved_post_paths = set(getattr(manager, "_scoped_body_replay_paths", None) or ())
     policy_blocked = 0
+    identity_blocked = 0
     for cell in pending_first_pass_cells(brain, target=active_target):
         if (str(cell.get("method") or "").upper() == "POST"
                 and str(cell.get("path") or "") not in approved_post_paths):
@@ -220,7 +253,17 @@ async def run_observed_input_batch(
             cell["first_pass_reason"] = reason
             cell["first_pass_at"] = time.time()
             policy_blocked += 1
-    if policy_blocked:
+        elif _identity_unavailable(manager, cell, active_origin):
+            reason = "Captured identity has no usable session on this origin"
+            cell["status"] = "blocked"
+            cell["reason"] = reason
+            cell["first_pass_outcome"] = "unattempted"
+            cell["first_pass_reason"] = reason
+            cell["first_pass_blocked_reason"] = "identity_unavailable"
+            cell["first_pass_at"] = time.time()
+            cell.pop("first_pass_handoff_error", None)
+            identity_blocked += 1
+    if policy_blocked or identity_blocked or identity_reopened:
         manager._engagement_brain = brain.to_dict()
 
     while len(results) < max_checks and time.monotonic() < deadline - 5:
@@ -598,6 +641,8 @@ async def run_observed_input_batch(
     brain = engagement_brain_from_dict(getattr(manager, "_engagement_brain", None))
     return {
         "processed": len(results), "policy_blocked": policy_blocked,
+        "identity_blocked": identity_blocked,
+        "identity_reopened": identity_reopened,
         "remaining": len(pending_first_pass_cells(
             brain, target=active_target,
         )),
