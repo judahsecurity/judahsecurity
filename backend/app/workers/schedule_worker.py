@@ -31,6 +31,7 @@ from app.models.scan import Scan, ScanType, ScanStatus
 from app.models.asset import Asset, AssetType
 from app.models.label import Label
 from app.models.netblock import Netblock
+from app.models.user import User, UserRole
 from app.api.routes.scans import send_scan_to_sqs
 from app.services.scan_guardrails import validate_rules_of_engagement
 from app.services.scan_registry import resolve_scan_type
@@ -526,14 +527,26 @@ class ScheduleWorker:
             db.commit()
             return
         price = float(cfg.get("price_limit_usd") or 8.0)
-        user_id = schedule.created_by or "scheduler"
+        operator = (
+            db.query(User).filter(User.username == schedule.created_by).first()
+            if schedule.created_by else None
+        )
+        if (operator is None or not operator.is_active
+                or operator.role not in {UserRole.ADMIN, UserRole.ANALYST}
+                or not (operator.is_superuser or operator.organization_id == schedule.organization_id)):
+            schedule.last_error = "Schedule creator no longer has analyst access to this organization"
+            schedule.next_run_at = schedule.calculate_next_run()
+            schedule.consecutive_failures = (schedule.consecutive_failures or 0) + 1
+            db.commit()
+            return
         result = await run_tester_process_targets(
             organization_id=schedule.organization_id,
-            user_id=str(user_id),
+            user_id=str(operator.id),
             targets=urls,
             price_limit_usd=price,
             schedule_name=schedule.name,
             run_key=f"{schedule.id}:{schedule.next_run_at.isoformat()}",
+            autonomous_followup=cfg.get("autonomous_followup") is True,
             max_turns=max(1, min(int(cfg.get("max_turns") or 3), 4)),
             max_total_seconds=max(300, min(int(cfg.get("max_total_seconds") or 3600), 7200)),
         )

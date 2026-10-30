@@ -1,6 +1,7 @@
 """Scheduled hunts continue only while saved, scoped work makes progress."""
 
 from types import SimpleNamespace
+from datetime import datetime, timezone
 
 import pytest
 
@@ -75,7 +76,8 @@ async def test_scheduled_hunt_resumes_partial_run_with_remaining_spend(monkeypat
     monkeypatch.setattr(snapshot_module, "load_run_snapshot", lambda *args: _snapshot("h1"))
     result = await run_tester_process_targets(
         organization_id=7, user_id="11", targets=[TARGET],
-        price_limit_usd=5.0, run_key="schedule:2026-10-28", max_turns=3,
+        price_limit_usd=5.0, run_key="schedule:2026-10-28",
+        autonomous_followup=True, max_turns=3,
     )
     row = result["results"][0]
     assert row["complete"] is True
@@ -117,7 +119,126 @@ async def test_scheduled_hunt_stops_when_hypotheses_do_not_change(monkeypatch):
     monkeypatch.setattr(ledger, "latest_run", lambda db, **kwargs: {"status": "partial"})
     monkeypatch.setattr(snapshot_module, "load_run_snapshot", lambda *args: _snapshot("h1"))
     result = await run_tester_process_targets(
-        organization_id=7, user_id="11", targets=[TARGET], max_turns=4,
+        organization_id=7, user_id="11", targets=[TARGET],
+        autonomous_followup=True, max_turns=4,
     )
     assert len(calls) == 2
     assert result["results"][0]["stop_reason"] == "no new hypothesis or coverage progress"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_hunt_needs_opt_in_for_followup(monkeypatch):
+    import app.services.agent.action_ledger as ledger
+    import app.services.agent.orchestrator as orchestrator_module
+    import app.services.agent.run_snapshot as snapshot_module
+    import app.db.database as database_module
+
+    calls = []
+
+    class FakeOrchestrator:
+        async def invoke(self, **kwargs):
+            calls.append(kwargs)
+            return SimpleNamespace(task_complete=True, cost_usd=0.5, error=None,
+                                   answer="partial", awaiting_question=False,
+                                   awaiting_approval=False)
+
+    class FakeDB:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    async def get_orchestrator():
+        return FakeOrchestrator()
+
+    monkeypatch.setattr(orchestrator_module, "get_agent_orchestrator", get_orchestrator)
+    monkeypatch.setattr(database_module, "SessionLocal", FakeDB)
+    monkeypatch.setattr(ledger, "latest_run", lambda db, **kwargs: {"status": "partial"})
+    monkeypatch.setattr(snapshot_module, "load_run_snapshot", lambda *args: _snapshot("h1"))
+    result = await run_tester_process_targets(
+        organization_id=7, user_id="11", targets=[TARGET], max_turns=4,
+    )
+    assert len(calls) == 1
+    assert calls[0]["max_iterations"] is None
+    assert result["results"][0]["complete"] is False
+
+
+@pytest.mark.asyncio
+async def test_schedule_worker_uses_creator_id_and_explicit_followup_opt_in(monkeypatch):
+    import app.services.agent.scheduled_hunt as hunt_module
+    from app.models.user import UserRole
+    from app.workers.schedule_worker import ScheduleWorker
+
+    calls = []
+    creator = SimpleNamespace(id=11, is_active=True, role=UserRole.ANALYST,
+                              is_superuser=False, organization_id=7)
+
+    class FakeDB:
+        def query(self, _model):
+            return self
+
+        def filter(self, _condition):
+            return self
+
+        def first(self):
+            return creator
+
+        def commit(self):
+            pass
+
+    async def fake_run(**kwargs):
+        calls.append(kwargs)
+        return {"results": [{"target": TARGET, "complete": True}], "digest": "done"}
+
+    monkeypatch.setattr(hunt_module, "run_tester_process_targets", fake_run)
+    schedule = SimpleNamespace(
+        id=9, organization_id=7, created_by="analyst", name="Autonomy pilot",
+        config={"autonomous_followup": True},
+        next_run_at=datetime(2026, 10, 30, tzinfo=timezone.utc),
+        last_error=None, consecutive_failures=0, run_count=0,
+        notify_on_completion=False, notify_on_findings=False,
+        calculate_next_run=lambda: datetime(2026, 10, 31, tzinfo=timezone.utc),
+    )
+    worker = object.__new__(ScheduleWorker)
+    await worker._run_tester_process_schedule(FakeDB(), schedule, [TARGET])
+    assert calls[0]["user_id"] == "11"
+    assert calls[0]["autonomous_followup"] is True
+    assert schedule.run_count == 1
+
+
+@pytest.mark.asyncio
+async def test_schedule_worker_stops_when_creator_loses_org_access(monkeypatch):
+    import app.services.agent.scheduled_hunt as hunt_module
+    from app.models.user import UserRole
+    from app.workers.schedule_worker import ScheduleWorker
+
+    class FakeDB:
+        def query(self, _model):
+            return self
+
+        def filter(self, _condition):
+            return self
+
+        def first(self):
+            return SimpleNamespace(id=11, is_active=True, role=UserRole.ANALYST,
+                                   is_superuser=False, organization_id=8)
+
+        def commit(self):
+            pass
+
+    async def forbidden_run(**_kwargs):
+        pytest.fail("The agent must not run after organization access is revoked")
+
+    monkeypatch.setattr(hunt_module, "run_tester_process_targets", forbidden_run)
+    schedule = SimpleNamespace(
+        id=9, organization_id=7, created_by="analyst", name="Autonomy pilot",
+        config={"autonomous_followup": True},
+        next_run_at=datetime(2026, 10, 30, tzinfo=timezone.utc),
+        last_error=None, consecutive_failures=0,
+        calculate_next_run=lambda: datetime(2026, 10, 31, tzinfo=timezone.utc),
+    )
+    worker = object.__new__(ScheduleWorker)
+    await worker._run_tester_process_schedule(FakeDB(), schedule, [TARGET])
+    assert "no longer has analyst access" in schedule.last_error
+    assert schedule.consecutive_failures == 1

@@ -53,6 +53,26 @@ def test_ready_hypotheses_dispatch_on_resume_and_new_revision_only():
     assert _ready_hypothesis_wave(state, [], target) is None
 
 
+def test_ready_hypothesis_wave_retries_one_failed_dispatch():
+    target = "https://app.test"
+    state = {
+        "mode": "agent", "capability_map": {"target": target},
+        "engagement_brain": {"hypotheses": [{
+            "id": "h1", "title": "Check", "assumption": "A", "test": "T",
+            "pass_criteria": "P", "kill_criteria": "K", "specialist": "api_authz",
+            "target": target,
+        }]},
+    }
+    wave = _ready_hypothesis_wave(state, [], target)
+    assert wave and wave["tool_name"] == "fireteam_dispatch"
+    failed = {"tool_name": "fireteam_dispatch", "tool_args": wave["tool_args"],
+              "success": False}
+    assert _ready_hypothesis_wave(state, [failed], target) == wave
+    assert _ready_hypothesis_wave(state, [failed, failed], target) is None
+    succeeded = {**failed, "success": True}
+    assert _ready_hypothesis_wave(state, [failed, succeeded], target) is None
+
+
 def test_ready_hypothesis_wave_refuses_stale_map_and_assist_mode():
     target = "https://app.test"
     state = {

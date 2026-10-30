@@ -10212,10 +10212,6 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             if hypothesis_signature in brain.hypothesis_wave_history:
                 return json.dumps({"selection_source": "already_dispatched_hypothesis_revision",
                                    "hypothesis_signature": hypothesis_signature})
-            brain.hypothesis_wave_history = [
-                *brain.hypothesis_wave_history[-99:], hypothesis_signature,
-            ]
-            self._engagement_brain = brain.to_dict()
         # A class-coverage follow-up owns a coverage cell, not an arbitrary
         # methodology card of the same specialist. Claiming that card would
         # let a class probe close unrelated hypothesis work.
@@ -10592,6 +10588,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         # Specialist and verifier tools write to the manager-owned brain while
         # the wave runs. Preserve those receipts before persisting graph results.
         _preserve_live_execution_state()
+        if hypothesis_signature and result.specialists_run:
+            # Record only an executed wave. An exception before run_fireteam
+            # returns leaves this revision available for a bounded retry.
+            brain.hypothesis_wave_history = [
+                *brain.hypothesis_wave_history[-99:], hypothesis_signature,
+            ]
         persist_graph(brain, graph)
         self._engagement_brain = brain.to_dict()
         _checkpoint_task_graph()

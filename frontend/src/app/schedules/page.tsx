@@ -123,6 +123,7 @@ export default function SchedulesPage() {
     run_on_day: '0',
     targets: '',
     is_enabled: true,
+    autonomous_followup: false,
   });
   const [editFormData, setEditFormData] = useState({
     name: '',
@@ -133,6 +134,7 @@ export default function SchedulesPage() {
     run_on_day: '0',
     targets: '',
     is_enabled: true,
+    autonomous_followup: false,
   });
   const { toast } = useToast();
 
@@ -197,6 +199,10 @@ export default function SchedulesPage() {
           run_on_day: formData.frequency === 'weekly' ? parseInt(formData.run_on_day) : undefined,
           targets: targets.length > 0 ? targets : undefined,
           is_enabled: formData.is_enabled,
+          config: formData.scan_type === 'tester_process' ? {
+            ...(scanTypes.tester_process?.default_config || {}),
+            autonomous_followup: formData.autonomous_followup,
+          } : undefined,
         }),
       });
 
@@ -216,6 +222,7 @@ export default function SchedulesPage() {
         run_on_day: '0',
         targets: '',
         is_enabled: true,
+        autonomous_followup: false,
       });
       fetchData();
     } catch (error: any) {
@@ -296,6 +303,7 @@ export default function SchedulesPage() {
       run_on_day: schedule.run_on_day?.toString() || '0',
       targets: schedule.targets?.join('\n') || '',
       is_enabled: schedule.is_enabled,
+      autonomous_followup: schedule.config?.autonomous_followup === true,
     });
     setEditDialogOpen(true);
   };
@@ -321,6 +329,10 @@ export default function SchedulesPage() {
           run_on_day: editFormData.frequency === 'weekly' ? parseInt(editFormData.run_on_day) : undefined,
           targets: targets.length > 0 ? targets : [],
           is_enabled: editFormData.is_enabled,
+          config: editFormData.scan_type === 'tester_process' ? {
+            ...(editingSchedule.config || scanTypes.tester_process?.default_config || {}),
+            autonomous_followup: editFormData.autonomous_followup,
+          } : undefined,
         }),
       });
 
@@ -446,6 +458,21 @@ export default function SchedulesPage() {
                     </p>
                   )}
                 </div>
+
+                {formData.scan_type === 'tester_process' && (
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <Switch
+                        checked={formData.autonomous_followup}
+                        onCheckedChange={(checked) => setFormData({ ...formData, autonomous_followup: checked })}
+                      />
+                      <Label>Continue partial hunts automatically</Label>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Up to 3 turns per target, sharing that target&apos;s spend limit across turns.
+                    </p>
+                  </div>
+                )}
 
                 <div className="grid grid-cols-2 gap-4">
                   <div className="space-y-2">
@@ -780,6 +807,21 @@ export default function SchedulesPage() {
                   </SelectContent>
                 </Select>
               </div>
+
+              {editFormData.scan_type === 'tester_process' && (
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2">
+                    <Switch
+                      checked={editFormData.autonomous_followup}
+                      onCheckedChange={(checked) => setEditFormData({ ...editFormData, autonomous_followup: checked })}
+                    />
+                    <Label>Continue partial hunts automatically</Label>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    Up to 3 turns per target, sharing that target&apos;s spend limit across turns.
+                  </p>
+                </div>
+              )}
 
               <div className="grid grid-cols-2 gap-4">
                 <div className="space-y-2">

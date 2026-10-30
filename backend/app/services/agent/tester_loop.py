@@ -1144,11 +1144,16 @@ def _ready_hypothesis_wave(
     signature = hashlib.sha256(
         json.dumps(ready, separators=(",", ":")).encode()
     ).hexdigest()[:16]
-    if signature in brain.hypothesis_wave_history or any(
-        step.get("tool_name") == "fireteam_dispatch"
+    wave_steps = [
+        step for step in trace
+        if step.get("tool_name") == "fireteam_dispatch"
         and (step.get("tool_args") or {}).get("hypothesis_signature") == signature
-        for step in trace
-    ):
+    ]
+    # A tool error before the specialists run must not consume this revision.
+    # Retry it once, then stop a persistent dispatch failure from looping.
+    if (signature in brain.hypothesis_wave_history
+            or any(step.get("success") is True for step in wave_steps)
+            or sum(step.get("success") is False for step in wave_steps) >= 2):
         return None
     return {
         "tool_name": "fireteam_dispatch",

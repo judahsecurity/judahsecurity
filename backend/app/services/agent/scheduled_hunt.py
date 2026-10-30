@@ -144,6 +144,7 @@ async def run_tester_process_targets(
     price_limit_usd: float = 8.0,
     schedule_name: str = "",
     run_key: str = "",
+    autonomous_followup: bool = False,
     max_turns: int = 3,
     max_total_seconds: int = 3600,
 ) -> dict[str, Any]:
@@ -169,7 +170,8 @@ async def run_tester_process_targets(
         last_run_status = ""
         stop_reason = ""
         try:
-            for turn in range(max(1, min(int(max_turns), 4))):
+            turn_limit = max(1, min(int(max_turns), 4)) if autonomous_followup else 1
+            for turn in range(turn_limit):
                 remaining_seconds = max_total_seconds - (time.monotonic() - started)
                 remaining_usd = price_limit_usd - spent
                 if remaining_seconds <= 0 or remaining_usd <= 0:
@@ -182,7 +184,7 @@ async def run_tester_process_targets(
                     session_id=session_id,
                     initial_todos=todos if turn == 0 else None,
                     mode="agent",
-                    max_iterations=30,
+                    max_iterations=30 if autonomous_followup else None,
                     price_limit_usd=remaining_usd,
                 ), timeout=remaining_seconds)
                 turns += 1
@@ -200,6 +202,8 @@ async def run_tester_process_targets(
                         organization_id=int(organization_id), user_id=int(user_id),
                     )
                 last_run_status = str((run or {}).get("status") or "")
+                if not autonomous_followup:
+                    break
                 plan = continuation_plan(
                     load_run_snapshot(organization_id, session_id), run, target,
                 )

@@ -9,14 +9,18 @@ so the same wave is not launched again on a later turn. The existing specialist
 leases, scope checks, and independent finding verification still apply.
 
 Scheduled `tester_process` hunts continue partial runs in the same assessment
-session while saved hypotheses, coverage cells, or candidates remain actionable.
-The schedule config accepts `max_turns` (default 3, maximum 4),
+session while saved hypotheses, coverage cells, or candidates remain actionable
+when the schedule config sets `autonomous_followup: true`. Without that opt-in,
+the schedule runs one turn as before. The schedule config also accepts
+`max_turns` (default 3, maximum 4),
 `max_total_seconds` (default 3600, maximum 7200), and `price_limit_usd`
-(default 8, shared across turns). Continuation stops on required operator input,
+(default 8 per target, shared across its turns). Continuation stops on required operator input,
 missing spend data, an unchanged work revision, or a budget limit. Each result
 includes its session ID, turn count, spend, and stop reason. A worker restart
 does not yet resume the remaining turns of an interrupted schedule occurrence;
 its saved assessment can still be continued by the operator.
+The schedule executes under its active creator's analyst account; if that
+account loses organization access, the worker records a schedule error.
 
 The product agent now requires execution-owned evidence before publishing medium-or-higher findings. These checks apply to both direct orchestration and fireteam discovery. `skip_judge_gate` and the old verification-disable environment flag do not bypass publication.
 
