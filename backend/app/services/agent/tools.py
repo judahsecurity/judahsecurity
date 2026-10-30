@@ -1104,6 +1104,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             *(current.get("evidence_ids") or []), artifact_id,
         ]))[:30]
         current["last_probe"] = operation
+        if cell["test_type"] == "sqli":
+            from app.services.agent.coverage_cells import record_sqli_trace
+
+            record_sqli_trace(current, proof)
         if cell["test_type"] == "xss":
             current["xss_probe_attempts"] = [
                 *(current.get("xss_probe_attempts") or []),
@@ -1745,7 +1749,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     proof = json.loads(await self.scoped_body_probe(
                         cell["capture_id"], parameter, identity,
                     ))
-                    if proof.get("proof_recipe") == "post_form_error_v1":
+                    if proof.get("proof_recipe") in {"post_form_error_v1", "post_json_error_v1"}:
                         operation = "scoped_body_sqli_error"
                 else:
                     return {"success": False, "error": "unsupported_capture",
@@ -1768,6 +1772,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 *(current.get("evidence_ids") or []), artifact_id,
             ]))[:30]
             current["last_probe"] = operation
+            from app.services.agent.coverage_cells import record_sqli_trace
+
+            record_sqli_trace(current, proof)
             if proof.get("proof_confirmed") is True:
                 current["status"] = "in_focus"
                 current["reason"] = "Execution-owned SQLi proof signal; independent verification required"
@@ -5514,7 +5521,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "identity": identity,
             "samples": rows,
             "next": (
-                "mutate_captured_request(sample_index=N, location='query|header|body_json|body_form|path|method', "
+                "mutate_captured_request(sample_ref='req-...', location='query|header|body_json|body_form|path|method', "
                 "field='url', value='https://<interactsh>') — one field only."
             ),
         }, indent=2)[:_tool_output_max_chars()]
@@ -5626,12 +5633,14 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         timeout: int = 25,
         identity: Optional[str] = None,
         hypothesis_id: str = "",
+        sample_ref: str = "",
         **kwargs: Any,
     ) -> str:
         """Change one field on a captured request and send it (Repeater + one mutation)."""
         from app.services.agent.request_mutate import (
             apply_one_mutation,
             normalize_sample,
+            sample_reference,
             samples_from_map,
         )
 
@@ -5641,15 +5650,29 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             origin = str(cmap.get("target") or "")
         origin = origin or (getattr(self, "_fallback_target", None) or "") or (current_seed_target.get() or "")
         samples = samples_from_map(cmap if isinstance(cmap, dict) else {})
-        try:
-            idx = int(sample_index)
-            sample = samples[idx]
-        except Exception:
-            return json.dumps({
-                "ok": False,
-                "error": "sample_index out of range — call list_captured_requests first",
-                "count": len(samples),
-            })
+        if sample_ref:
+            matches = [(i, row) for i, row in enumerate(samples)
+                       if isinstance(row, dict)
+                       and sample_reference(row, fallback_origin=origin) == sample_ref]
+            if len(matches) != 1:
+                return json.dumps({
+                    "ok": False,
+                    "error": "sample_ref missing or ambiguous — refresh list_captured_requests",
+                    "matches": len(matches),
+                })
+            idx, sample = matches[0]
+        else:
+            try:
+                idx = int(sample_index)
+                sample = samples[idx]
+            except Exception:
+                return json.dumps({
+                    "ok": False,
+                    "error": "sample_index out of range — call list_captured_requests first",
+                    "count": len(samples),
+                })
+        if not isinstance(sample, dict):
+            return json.dumps({"ok": False, "error": "Captured sample is invalid"})
         try:
             baseline, mutant = apply_one_mutation(
                 sample,
@@ -5668,14 +5691,26 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 request["identity"] = identity
                 request["headers"] = {k: v for k, v in (request.get("headers") or {}).items()
                                       if k.lower() not in ("cookie", "authorization")}
+        source_ref = sample_reference(sample, fallback_origin=origin)
+        source_capture_id = str(sample.get("artifact_id") or sample.get("capture_id") or "")[:80]
         if compare:
-            return await self.compare_requests(
+            compared = await self.compare_requests(
                 baseline=baseline,
                 mutant=mutant,
                 use_auth_session=use_auth_session,
                 timeout=timeout,
                 hypothesis_id=hypothesis_id,
             )
+            try:
+                result = json.loads(compared)
+                if isinstance(result, dict):
+                    result["source_sample_ref"] = source_ref
+                    if source_capture_id:
+                        result["source_capture_id"] = source_capture_id
+                    return json.dumps(result, default=str)[:_tool_output_max_chars()]
+            except (TypeError, ValueError):
+                pass
+            return compared
         try:
             exchange = await self._http_exchange(
                 method=mutant["method"],
@@ -5691,6 +5726,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             exchange.pop("_body_text", None)
             return json.dumps({
                 "ok": True,
+                "source_sample_ref": source_ref,
+                "source_capture_id": source_capture_id,
                 "mutation": {"location": location, "field": field, "value": value},
                 "baseline": normalize_sample(baseline, fallback_origin=origin),
                 "sent": mutant,

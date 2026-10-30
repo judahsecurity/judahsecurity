@@ -396,7 +396,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **mcp_list** / **mcp_disconnect**: List or detach attached MCP servers.
 - **mcp_call**: Invoke a tool on an attached MCP server. Args: **server**, **tool**, **arguments** (object).
 - **run_custom_probe** / **run_poc_python**: Sandboxed Python HTTP PoC (json/re/httpx only). In-scope hosts plus Interactsh/OAST. Never metadata/localhost. Args: **source** (Python that prints results), allowed_hosts (optional), timeout_sec (default 20). Not a shell.
-- **list_captured_requests**: Index XHR/API samples from the crawl map. Use before mutate_captured_request.
+- **list_captured_requests**: Index XHR/API samples from the crawl map. Use its sample_ref with mutate_captured_request so later map changes cannot switch the request being tested.
 - **plan_intruder_mutations**: Build a dry-run, bounded queue of one-field authorization, boundary, injection-canary, and URL-fetch mutations from captured requests. Read-only methods only by default. Review this before active execution.
 - **run_intruder_batch**: Execute up to 12 planned differential mutations at a bounded rate. Always confirmation-gated; state-changing methods remain excluded unless allow_state_change=true is explicitly approved. A difference is a lead, not a confirmed finding.
 - **mutate_captured_request**: Change ONE field on a captured request and send (baseline vs mutant). Args: sample_index, location (query|header|body_json|body_form|path|method), field, value, compare (default true). Plant Interactsh URLs for SSRF — not 169.254.169.254.

@@ -633,7 +633,7 @@ class ScopedAssessmentTools:
         return json.dumps(result)
 
     async def scoped_body_probe(self, artifact_id: str, parameter: str, identity: str = "anonymous") -> str:
-        """Probe one approved POST field; only repeated SQL errors become a proof signal."""
+        """Probe one approved POST form or JSON field with bounded SQL controls."""
         private = self._scoped_exchange(artifact_id, identity)
         self._scoped_assessment_started = True
         observed = json.loads(private)
@@ -652,12 +652,12 @@ class ScopedAssessmentTools:
         )
         if result.get("sql_error_signal") and result.get("inconclusive") is False:
             try:
-                _, _, baseline, quote_body, escaped_body = body_probe.plan_sql_error_form(
+                _, _, baseline, quote_body, escaped_body = body_probe.plan_sql_error_body(
                     private, parameter=parameter, allowed_origins=[allowed],
                 )
                 self._scoped_claim_posts(3)
                 result = await asyncio.to_thread(
-                    body_probe.probe_sql_error_form, url, mime, baseline,
+                    body_probe.probe_sql_error_body, url, mime, baseline,
                     quote_body, escaped_body, parameter=parameter,
                     allowed_origins=[allowed], storage_state=self._scoped_state(identity, url),
                     replay_headers=body_probe.safe_replay_headers(private), initial=result,
@@ -666,9 +666,9 @@ class ScopedAssessmentTools:
                 result["error_followup_blocked"] = type(exc).__name__
         result["source_artifact_id"] = artifact_id
         result["evidence_id"] = evidence_store(self).record(
-            "scoped_body_sqli_error" if result.get("operation") == "sqli_error_form" else "scoped_body_probe",
+            "scoped_body_sqli_error" if result.get("operation") in {"sqli_error_form", "sqli_error_json"} else "scoped_body_probe",
             result, target=result["target"], identity=identity,
-            success=result.get("proof_confirmed") is True if result.get("operation") == "sqli_error_form"
+            success=result.get("proof_confirmed") is True if result.get("operation") in {"sqli_error_form", "sqli_error_json"}
                     else not result["inconclusive"],
         )
         return json.dumps(result)
@@ -687,14 +687,14 @@ class ScopedAssessmentTools:
         private = row["private"]
         observed = json.loads(private)
         allowed = self._scoped_origin(observed["url"])
-        url, mime, baseline, quote_body, escaped_body = body_probe.plan_sql_error_form(
+        url, mime, baseline, quote_body, escaped_body = body_probe.plan_sql_error_body(
             private, parameter=parameter, allowed_origins=[allowed],
         )
         if (urlsplit(url).path or "/") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
             raise ValueError("POST path was not approved by the assessment operator")
         self._scoped_claim_posts(5)
         result = await asyncio.to_thread(
-            body_probe.probe_sql_error_form, url, mime, baseline, quote_body, escaped_body,
+            body_probe.probe_sql_error_body, url, mime, baseline, quote_body, escaped_body,
             parameter=parameter, allowed_origins=[allowed],
             storage_state=self._scoped_state(identity, url),
             replay_headers=body_probe.safe_replay_headers(private),

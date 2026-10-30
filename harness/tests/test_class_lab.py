@@ -1,4 +1,5 @@
 import json
+import base64
 import urllib.parse
 from io import BytesIO
 from types import SimpleNamespace
@@ -42,6 +43,12 @@ def test_positive_and_negative_sql_and_graphql_boundaries():
         status, body = request(sql, "/search?q=" + urllib.parse.quote("' OR 1=1--"))
         assert status == 200
         assert ("aegis-lab-private-record" in body) is vulnerable
+
+        encoded = handler_for("sqli_encoded", vulnerable, "")
+        category = urllib.parse.quote(base64.b64encode(b"public' OR 1=1-- ").decode())
+        status, body = request(encoded, "/catalog?category=" + category)
+        assert status == 200
+        assert ("aegis-lab-private-record" in body) is vulnerable
         graphql = handler_for("graphql_authz", vulnerable, "")
         status, body = request(graphql, "/graphql", method="POST", identity="B", body={
             "query": "query($id: ID!) { node(id: $id) { ownerId secret } }",
@@ -71,8 +78,17 @@ def test_upload_and_csrf_negatives_reject_active_or_forged_content():
 
 def test_manifest_has_positive_and_negative_cases_for_each_class():
     cases = build_manifest("http://127.0.0.1:8765")["cases"]
-    assert len(cases) == 14
+    assert len(cases) == 18
     for bug_class in {case["bug_class"] for case in cases}:
         assert {case["polarity"] for case in cases if case["bug_class"] == bug_class} == {
             "positive", "negative"
         }
+
+
+def test_dom_xss_fixture_has_executable_sink_only_in_positive_case():
+    for vulnerable in (True, False):
+        handler = handler_for("xss_dom", vulnerable, "")
+        status, body = request(handler, "/blog?search=hello")
+        assert status == 200
+        assert ('getElementById("results").innerHTML=value' in body) is vulnerable
+        assert ('getElementById("results").textContent=value' in body) is not vulnerable

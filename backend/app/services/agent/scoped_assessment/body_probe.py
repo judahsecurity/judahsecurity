@@ -144,24 +144,49 @@ def plan_observed_body(private_exchange: bytes, *, parameter: str,
     return url, mime, body, changed
 
 
-def plan_sql_error_form(private_exchange: bytes, *, parameter: str,
+def plan_sql_error_body(private_exchange: bytes, *, parameter: str,
                         allowed_origins: list[str]) -> tuple[str, str, bytes, bytes, bytes]:
-    """Plan a bounded error proof from one ordinary, captured form value."""
+    """Plan a bounded error proof from one ordinary captured form or JSON value."""
     url, mime, body, quote_body = plan_observed_body(
         private_exchange, parameter=parameter, allowed_origins=allowed_origins,
     )
-    if mime != "application/x-www-form-urlencoded":
-        raise ValueError("POST SQL error proof currently requires a captured form")
-    raw = body.decode("ascii")
-    matches = [field.partition("=")[2] for field in raw.split("&")
-               if unquote_plus(field.partition("=")[0]) == parameter]
-    if len(matches) != 1 or not _SAFE_SQL_VALUE.fullmatch(unquote_plus(matches[0])):
-        raise ValueError("POST SQL error proof requires an ordinary observed form value")
+    if mime == "application/x-www-form-urlencoded":
+        raw = body.decode("ascii")
+        matches = [field.partition("=")[2] for field in raw.split("&")
+                   if unquote_plus(field.partition("=")[0]) == parameter]
+        value = unquote_plus(matches[0]) if len(matches) == 1 else None
+    else:
+        if not parameter.startswith("/"):
+            raise ValueError("JSON SQL error proof requires an observed JSON pointer")
+        value = json.loads(body)
+        for token in parameter.split("/")[1:]:
+            key = token.replace("~1", "/").replace("~0", "~")
+            if isinstance(value, dict) and key in value:
+                value = value[key]
+            elif isinstance(value, list) and (
+                key == "*" and len(value) == 1 or key.isdecimal() and int(key) < len(value)
+            ):
+                value = value[0 if key == "*" else int(key)]
+            else:
+                raise ValueError("JSON pointer does not identify an observed field")
+    if not isinstance(value, str) or not _SAFE_SQL_VALUE.fullmatch(value):
+        raise ValueError("POST SQL error proof requires an ordinary observed string value")
     _, _, _, escaped_body = plan_observed_body(
         private_exchange, parameter=parameter, allowed_origins=allowed_origins,
         payload="''",
     )
     return url, mime, body, quote_body, escaped_body
+
+
+def plan_sql_error_form(private_exchange: bytes, *, parameter: str,
+                        allowed_origins: list[str]) -> tuple[str, str, bytes, bytes, bytes]:
+    """Compatibility entry point for form-only callers."""
+    planned = plan_sql_error_body(
+        private_exchange, parameter=parameter, allowed_origins=allowed_origins,
+    )
+    if planned[1] != "application/x-www-form-urlencoded":
+        raise ValueError("POST form SQL error proof requires a captured form")
+    return planned
 
 
 def _observe_post(url: str, mime: str, body: bytes,
@@ -224,9 +249,10 @@ def probe_observed_body(url: str, mime: str, body: bytes, changed_body: bytes, *
 
 def post_sql_error_proof_valid(result: dict) -> bool:
     """Require repeated DB-specific errors with stable clean and escape controls."""
-    if (result.get("operation") != "sqli_error_form"
-            or result.get("proof_recipe") != "post_form_error_v1"
-            or result.get("method") != "POST" or result.get("location") != "form"
+    shape = (result.get("operation"), result.get("proof_recipe"), result.get("location"))
+    if (shape not in {("sqli_error_form", "post_form_error_v1", "form"),
+                      ("sqli_error_json", "post_json_error_v1", "json")}
+            or result.get("method") != "POST"
             or not result.get("target") or not result.get("parameter")
             or not _DIGEST.fullmatch(str(result.get("baseline_request_sha256", "")))
             or result.get("requests_sent") != len(SQL_ERROR_CHECK_ORDER)):
@@ -270,12 +296,12 @@ def post_sql_error_proof_valid(result: dict) -> bool:
             and stable(errors[0]["bytes_captured"], errors[1]["bytes_captured"]))
 
 
-def probe_sql_error_form(url: str, mime: str, body: bytes, quote_body: bytes,
+def probe_sql_error_body(url: str, mime: str, body: bytes, quote_body: bytes,
                          escaped_body: bytes, *, parameter: str,
                          allowed_origins: list[str], storage_state: dict | None,
                          replay_headers: dict[str, str] | None = None,
                          initial: dict | None = None) -> dict:
-    """Replay a captured form with five bounded requests; return metadata only."""
+    """Replay a captured form or JSON body with five bounded requests."""
     checks = {}
     if initial is not None:
         checks["baseline_first"] = initial["baseline"]
@@ -296,10 +322,12 @@ def probe_sql_error_form(url: str, mime: str, body: bytes, quote_body: bytes,
             replay_headers=replay_headers, timeout=8,
         )
     parts = urlsplit(url)
+    is_form = mime == "application/x-www-form-urlencoded"
     result = {
-        "operation": "sqli_error_form", "proof_recipe": "post_form_error_v1",
+        "operation": "sqli_error_form" if is_form else "sqli_error_json",
+        "proof_recipe": "post_form_error_v1" if is_form else "post_json_error_v1",
         "target": origin(url) + (parts.path or "/"), "method": "POST",
-        "location": "form", "parameter": parameter,
+        "location": "form" if is_form else "json", "parameter": parameter,
         "baseline_request_sha256": hashlib.sha256(body).hexdigest(),
         "requests_sent": len(SQL_ERROR_CHECK_ORDER),
         "identity_transport": "named_identity_cookies_only",
@@ -309,6 +337,21 @@ def probe_sql_error_form(url: str, mime: str, body: bytes, quote_body: bytes,
     }
     result["proof_confirmed"] = post_sql_error_proof_valid(result)
     return result
+
+
+def probe_sql_error_form(url: str, mime: str, body: bytes, quote_body: bytes,
+                         escaped_body: bytes, *, parameter: str,
+                         allowed_origins: list[str], storage_state: dict | None,
+                         replay_headers: dict[str, str] | None = None,
+                         initial: dict | None = None) -> dict:
+    """Compatibility entry point for form-only callers."""
+    if mime != "application/x-www-form-urlencoded":
+        raise ValueError("POST form SQL error proof requires a captured form")
+    return probe_sql_error_body(
+        url, mime, body, quote_body, escaped_body, parameter=parameter,
+        allowed_origins=allowed_origins, storage_state=storage_state,
+        replay_headers=replay_headers, initial=initial,
+    )
 
 
 def probe_observed_body_reflection(

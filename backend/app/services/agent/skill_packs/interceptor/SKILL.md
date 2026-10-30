@@ -24,7 +24,8 @@ Compound analog of open / read / act / inspect:
 ## Network — three layers (least invasive first)
 
 1. **Passive XHR/fetch** — `api_samples` from the crawl (Judah's `net log`).
-   `list_captured_requests` → `mutate_captured_request` (one field) or
+   `list_captured_requests` → `mutate_captured_request` using the returned
+   `sample_ref` (one field) or
    `fingerprint_api`.
 2. **Passive param mutate** — `mutate_captured_request` / `mutate_list`. Do not
    attach a debugger to rewrite bodies unless you must.

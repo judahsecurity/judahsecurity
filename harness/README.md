@@ -35,8 +35,9 @@ observation, test attempts, evidence, cost, and incomplete runs. A class passes
 only when its positive finding is verified, its negative has an evidenced
 rejection, neither run has an extra finding, and both runs used equal budgets.
 
-The included local lab exposes seven classes in positive and negative modes:
-SQLi, XSS, SSRF, IDOR, GraphQL authorization, unsafe upload, and CSRF. It binds
+The included local lab exposes nine classes in positive and negative modes:
+SQLi, base64 encoded SQLi, reflected XSS, DOM XSS, SSRF, IDOR, GraphQL authorization,
+unsafe upload, and CSRF. It binds
 only to `127.0.0.1`. The SSRF positive fixture makes a DNS lookup only for a
 host beneath an explicitly supplied controlled OAST suffix. Start one case at
 a time, using a dedicated assessment database and the **same model, budget,

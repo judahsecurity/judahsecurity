@@ -1166,7 +1166,7 @@ PALACE / HUNT NOTES (compact — URL, param, hypothesis, next mutation):
 
 INSTRUCTIONS:
 1. Obey the operation directive (goal, PASS/KILL, hypothesis ids).
-2. Code-first: list_captured_requests → mutate_captured_request (one field) or run_custom_probe.
+2. Code-first: list_captured_requests → mutate_captured_request using sample_ref (one field) or run_custom_probe.
    JS: fetch_lazy_chunks → extract_js_endpoints → ingest_urls_into_map. API profile: fingerprint_api.
    For lists (paths/params/xss) call mutate_list once — do not ReAct them.
 3. Blind SSRF/XXE: execute_interactsh register, plant payload_url. Never 169.254.169.254 or localhost.

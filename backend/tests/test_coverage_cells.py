@@ -5,7 +5,9 @@ import pytest
 from app.services.agent.coverage_cells import (
     claim_coverage_cell_leases,
     coverage_cell_id,
+    lead_packet_for_cell,
     migrate_coverage_cells,
+    record_sqli_trace,
     recover_expired_coverage_leases,
     release_coverage_cell_lease,
 )
@@ -291,6 +293,33 @@ def test_directive_carries_task_and_coverage_leases():
     assert directive.coverage_cell_id == leases["auth_logic"].coverage_cell_id
     assert directive.coverage_lease_id == leases["auth_logic"].id
     assert "coverage_cell_id=" in directive.to_prompt_block()
+
+
+def test_lead_packet_preserves_prior_receipt_and_control_result_across_waves():
+    brain = _operation_brain()
+    leases = claim_coverage_cell_leases(brain, ["auth_logic"],
+                                        denominator=denominator_surfaces(brain), now=100)
+    cell = next(row for row in brain.coverage_cells
+                if row["id"] == leases["auth_logic"].coverage_cell_id)
+    cell["capture_id"] = "browser-capture-1"
+    cell["first_pass_outcome"] = "inconclusive"
+    cell["first_pass_evidence_id"] = "evidence-1"
+    record_sqli_trace(cell, {"proof_recipe": "string_or_json_rows_v1",
+                             "input_encoding": "base64", "proof_confirmed": False,
+                             "checks": {"baseline_first": {"status": 200},
+                                        "quote_error": {"status": 400}}})
+    packet = lead_packet_for_cell(cell)
+    assert packet["capture_id"] == "browser-capture-1"
+    assert packet["evidence_ids"] == ["evidence-1"]
+    assert packet["sqli_trace"]["input_encoding"] == "base64"
+    profile = SimpleNamespace(role="Specialist", allowed_tools=["compare_requests"],
+                              max_iterations=4, epithet="Daniel")
+    directive = directives_from_hypotheses(
+        brain=brain, profiles_by_name={"auth_logic": profile},
+        specialists=["auth_logic"], coverage_leases=leases,
+    )["auth_logic"]
+    assert directive.lead_packet == packet
+    assert "evidence-1" in directive.to_prompt_block()
 
 
 def test_trace_fields_survive_request_evidence_and_candidate_ledgers():

@@ -125,7 +125,7 @@ def observed_sql_cell_for_proof(
                     and _same_observed_origin(parsed.scheme, str(cell.get("host") or ""), target)
                     and cell.get("path") == (parsed.path or "/")
                     and cell.get("parameter") == (
-                        f"body_form:{parameter}" if proof.get("method") == "POST"
+                        f"body_{proof.get('location')}:{parameter}" if proof.get("method") == "POST"
                         else f"query:{parameter}"
                     )
                     and (proof.get("method") != "POST"
@@ -596,7 +596,9 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         "bounded Boolean controls. Use its new evidence_id with the hunter's earlier "
         "scoped_numeric_sqli evidence_id. "
         "For a mapped string-valued GET query input, scoped_string_sqli(url, parameter) "
-        "builds a fresh bounded SQLi proof without an XHR capture. It tries "
+        "builds a fresh bounded SQLi proof without an XHR capture. Preserve the "
+        "observed query value when it is base64 encoded; the proof tool mutates "
+        "the decoded value and re-encodes every control. It tries "
         "OR controls first, including small JSON result arrays; when unproven, "
         "it repeats a recognized database error "
         "or compares AND true/false responses against a stable baseline. "
@@ -1136,7 +1138,7 @@ async def _verify_scoped_sql_candidate(
 async def _verify_scoped_post_sql_candidate(
     tools_manager: Any, cand: FindingCandidate, run: Any, cell: dict,
 ) -> Optional[Dict[str, Any]]:
-    """Repeat the same captured form with fresh POST controls and identity."""
+    """Repeat the same captured form or JSON body with fresh POST controls."""
     import logging
 
     from app.services.agent.evidence_store import evidence_store
@@ -1151,7 +1153,7 @@ async def _verify_scoped_post_sql_candidate(
     if (cell.get("source") != "parameter_inventory"
             or cell.get("observation_source") not in OBSERVED_INPUT_SOURCES
             or cell.get("observation_source") != "browser_traffic"
-            or cell.get("test_type") != "sqli" or location != "body_form"
+            or cell.get("test_type") != "sqli" or location not in {"body_form", "body_json"}
             or not separator or not parameter or not capture_id
             or target.scheme not in {"http", "https"}
             or not _same_observed_origin(target.scheme, str(cell.get("host") or ""), cand.target)
@@ -1193,7 +1195,7 @@ async def _verify_scoped_post_sql_candidate(
                 if valid and fresh:
                     verified = apply_verdict(
                         tools_manager, candidate_id=cand.id, verdict="confirmed",
-                        evidence="Fresh scoped POST SQL error controls reproduced the candidate on the exact captured form input.",
+                        evidence="Fresh scoped POST SQL error controls reproduced the candidate on the exact captured input.",
                         evidence_ids=[artifact_id], proof=proof,
                     )
                     if verified and verified.status == "confirmed":

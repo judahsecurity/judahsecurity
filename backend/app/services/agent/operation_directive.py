@@ -7,11 +7,12 @@ allowed tools, hypothesis ids) instead of only a shared mission dump.
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 
 from app.services.agent.aegis_pantheon import epithet_for, pantheon_line
-from app.services.agent.coverage_cells import scoped_replay_eligible
+from app.services.agent.coverage_cells import lead_packet_for_cell, scoped_replay_eligible
 
 
 @dataclass
@@ -41,6 +42,7 @@ class OperationDirective:
     coverage_lease_id: str = ""
     parameter_work: Dict[str, str] = field(default_factory=dict)
     js_work: Dict[str, str] = field(default_factory=dict)
+    lead_packet: Dict[str, Any] = field(default_factory=dict)
     proof_escalation_id: str = ""
     proof_strategy: str = ""
     proof_requirements: List[str] = field(default_factory=list)
@@ -87,6 +89,12 @@ class OperationDirective:
                 f"{self.coverage_cell_id}. When closing it, also pass coverage_lease_id="
                 f"{self.coverage_lease_id}."
             )
+        if self.lead_packet:
+            block += (
+                "\nPrior evidence and follow-up context for this exact cell: "
+                + json.dumps(self.lead_packet, separators=(",", ":"))[:1200]
+                + ". Use only applicable next tests; do not repeat a failed probe without a new hypothesis."
+            )
         if self.parameter_work and self.parameter_work.get("location") == "endpoint":
             work = self.parameter_work
             block += (
@@ -124,8 +132,16 @@ class OperationDirective:
                 block += (
                     " For text SQLi, preserve the observed request shape and compare repeated "
                     "baseline, true-condition, false-condition, and unrelated-invalid controls. "
+                    " If the observed query value is base64, mutate its decoded value and "
+                    "re-encode every control before replay. "
                     "A lone quote response change is an inconclusive lead, not proof."
                 )
+                if work.get("method") == "POST" and work.get("location") in {"body_form", "body_json"}:
+                    block += (
+                        " For an approved captured POST, use the assigned scoped probe. "
+                        "A repeated database-specific error with an escaped-quote control "
+                        "can establish a candidate; hand its receipt to independent verification."
+                    )
             elif kind in {"xss", "dom_xss"}:
                 block += (
                     " Read xss_trace from each scoped browser probe. Use its observed "
@@ -455,6 +471,7 @@ def directives_from_hypotheses(
             coverage_lease_id=coverage_lease_id,
             parameter_work=parameter_work,
             js_work=js_work,
+            lead_packet=lead_packet_for_cell(coverage_cell) if coverage_cell else {},
             proof_escalation_id=proof_escalation_id,
             proof_strategy=str(proof_escalation.get("strategy") or ""),
             proof_requirements=list(proof_escalation.get("requirements") or []),

@@ -25,6 +25,51 @@ CELL_STATUSES = frozenset({*CELL_TERMINAL, *CELL_OPEN, "leased", "blocked"})
 MAX_COVERAGE_CELLS = 10_000
 
 
+def lead_packet_for_cell(cell: dict[str, Any]) -> dict[str, Any]:
+    """Carry bounded, value-free observations into the next specialist wave."""
+    xss = cell.get("xss_trace") if isinstance(cell.get("xss_trace"), dict) else {}
+    sqli = cell.get("sqli_trace") if isinstance(cell.get("sqli_trace"), dict) else {}
+    evidence = list(dict.fromkeys(str(value) for value in [
+        cell.get("first_pass_evidence_id"),
+        *(cell.get("probe_artifact_ids") or []),
+        *(cell.get("service_probe_artifact_ids") or []),
+        *(cell.get("evidence_ids") or []),
+    ] if value))[-6:]
+    return {
+        "capture_id": str(cell.get("capture_id") or ""),
+        "observation_source": str(cell.get("observation_source") or ""),
+        "attempts": int(cell.get("attempts") or 0),
+        "first_pass_outcome": str(cell.get("first_pass_outcome") or ""),
+        "first_pass_reason": str(cell.get("first_pass_reason") or "")[:240],
+        "last_probe": str(cell.get("last_probe") or ""),
+        "evidence_ids": evidence,
+        "xss_rendered_contexts": list(xss.get("rendered_contexts") or [])[:4],
+        "xss_next_tests": list(xss.get("next_tests") or [])[:2],
+        "xss_remaining_attempts": int(xss.get("remaining_attempts") or 0),
+        "sqli_trace": sqli,
+    }
+
+
+def record_sqli_trace(cell: dict[str, Any], proof: dict[str, Any]) -> None:
+    """Persist the last bounded SQLi result without storing query or body values."""
+    checks = proof.get("checks") if isinstance(proof.get("checks"), dict) else {}
+    cell["sqli_trace"] = {
+        "recipe": str(proof.get("proof_recipe") or "")[:60],
+        "input_encoding": str(proof.get("input_encoding") or "plain")[:30],
+        "proof_confirmed": proof.get("proof_confirmed") is True,
+        "statuses": {key: row.get("status") for key, row in checks.items()
+                     if isinstance(row, dict) and key in {
+                         "baseline_first", "baseline_last", "quote_error",
+                         "quote_first", "quote_second", "true_first",
+                         "false_first", "escaped_quote",
+                     }},
+        "next_test": (
+            "Submit the proof for independent verification" if proof.get("proof_confirmed") is True
+            else "Inspect the observed decode or request transform and choose a different controlled proof"
+        ),
+    }
+
+
 def scoped_replay_eligible(cell: dict[str, Any]) -> bool:
     """Whether the scoped service can replay this private browser capture."""
     location, separator, parameter = str(cell.get("parameter") or "").partition(":")

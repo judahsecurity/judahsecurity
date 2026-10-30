@@ -231,6 +231,8 @@ def validate_proof(
                 return False, "Independent matching string Boolean SQLi proof is required"
             if not same_recipe:
                 return False, "Hunter and verifier used different SQLi proof recipes"
+            if first.get("input_encoding", "plain") != second.get("input_encoding", "plain"):
+                return False, "Hunter and verifier tested different query encodings"
             if not json_rows_match:
                 return False, "Independent SQLi JSON result counts changed"
             if first.get("parameter") != second.get("parameter"):
@@ -261,6 +263,8 @@ def validate_proof(
                     or first.get("proof_confirmed") is not True
                     or second.get("proof_confirmed") is not True
                     or first.get("parameter") != second.get("parameter")
+                    or first.get("proof_recipe") != second.get("proof_recipe")
+                    or first.get("location") != second.get("location")
                     or first.get("source_artifact_id") != second.get("source_artifact_id")
                     or first.get("baseline_request_sha256") != second.get("baseline_request_sha256")
                     or first["checks"]["quote_first"]["sql_error_family"]

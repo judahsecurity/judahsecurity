@@ -7,10 +7,12 @@ successful recipe with a fresh nonce before a candidate can be published.
 
 from __future__ import annotations
 
+import base64
+import binascii
 import re
 import secrets
 from collections.abc import Callable
-from urllib.parse import unquote_plus, urlsplit, urlunsplit
+from urllib.parse import quote, unquote_plus, urlsplit, urlunsplit
 
 from .browser import assert_in_scope, origin
 from .browser_actions import allowed_discovery_path
@@ -32,6 +34,28 @@ _SAFE_VALUE = re.compile(r"[A-Za-z][A-Za-z0-9 _-]{0,39}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 
 
+def _observed_value(raw_value: str) -> tuple[str, str]:
+    """Decode a canonical base64 string only when it contains an ordinary value."""
+    value = unquote_plus(raw_value)
+    if len(value) >= 8 and re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", value):
+        try:
+            decoded = base64.b64decode(value, validate=True).decode("utf-8")
+            if (base64.b64encode(decoded.encode()).decode() == value
+                    and _SAFE_VALUE.fullmatch(decoded)):
+                return decoded, "base64"
+        except (ValueError, UnicodeDecodeError, binascii.Error):
+            pass
+    return value, "plain"
+
+
+def observed_query_encoding(url: str, parameter: str) -> str:
+    """Describe the one observed query value without exposing its contents."""
+    fields = urlsplit(url).query.split("&")
+    matches = [field.partition("=")[2] for field in fields
+               if field and unquote_plus(field.partition("=")[0]) == parameter]
+    return _observed_value(matches[0])[1] if len(matches) == 1 else "plain"
+
+
 def plan_string_boolean(
     url: str, *, parameter: str, allowed_origins: list[str],
 ) -> tuple[str, dict[str, str], str]:
@@ -51,7 +75,7 @@ def plan_string_boolean(
         raise ValueError("String parameter must occur exactly once")
     index = matches[0]
     name, sep, raw_value = fields[index].partition("=")
-    value = unquote_plus(raw_value) if sep else ""
+    value, encoding = _observed_value(raw_value) if sep else ("", "plain")
     if not _SAFE_VALUE.fullmatch(value):
         raise ValueError("Boolean SQLi proof requires an ordinary observed string value")
     nonce = str(secrets.randbelow(90000) + 10000)
@@ -59,7 +83,12 @@ def plan_string_boolean(
 
     def variant(suffix: str) -> str:
         changed = fields.copy()
-        changed[index] = name + "=" + raw_value + suffix
+        if encoding == "base64":
+            decoded_suffix = unquote_plus(suffix)
+            encoded = base64.b64encode((value + decoded_suffix).encode()).decode()
+            changed[index] = name + "=" + quote(encoded, safe="")
+        else:
+            changed[index] = name + "=" + raw_value + suffix
         target = urlunsplit(parts._replace(query="&".join(changed)))
         assert_in_scope(target, allowed_origins)
         return target
@@ -89,14 +118,15 @@ def plan_string_and_boolean(
     index = next(i for i, field in enumerate(fields)
                  if field and unquote_plus(field.split("=", 1)[0]) == parameter)
     name, _, raw_value = fields[index].partition("=")
+    value, encoding = _observed_value(raw_value)
     false_nonce = nonce[:-1] + str((int(nonce[-1]) + 1) % 10)
 
     def variant(other: str) -> str:
         changed = fields.copy()
-        changed[index] = (
-            name + "=" + raw_value
-            + f"%27%20AND%20%27{nonce}%27%3D%27{other}%27--%20"
-        )
+        suffix = f"%27%20AND%20%27{nonce}%27%3D%27{other}%27--%20"
+        changed[index] = (name + "=" + quote(
+            base64.b64encode((value + unquote_plus(suffix)).encode()).decode(), safe="",
+        ) if encoding == "base64" else name + "=" + raw_value + suffix)
         target = urlunsplit(parts._replace(query="&".join(changed)))
         assert_in_scope(target, allowed_origins)
         return target
@@ -271,6 +301,7 @@ def string_sql_proof_valid(result: dict) -> bool:
         return False
     if (result.get("method") != "GET" or result.get("location") != "query"
             or not result.get("target") or not result.get("parameter")
+            or result.get("input_encoding", "plain") not in {"plain", "base64"}
             or not re.fullmatch(r"[1-9][0-9]{4}", str(result.get("nonce", "")))):
         return False
     if result["proof_recipe"] == "string_and_boolean_v1":
@@ -331,6 +362,7 @@ def probe_string_boolean(
         "method": "GET", "location": "query", "parameter": parameter,
         "nonce": nonce, "requests_sent": len(CHECK_ORDER),
         "identity_transport": "named_identity_cookies_only", "checks": checks,
+        "input_encoding": observed_query_encoding(baseline, parameter),
     }
     result["proof_confirmed"] = string_sql_proof_valid(result)
     if not result["proof_confirmed"]:
@@ -360,6 +392,7 @@ def probe_string_and_boolean(
         "method": "GET", "location": "query", "parameter": parameter,
         "nonce": nonce, "requests_sent": len(AND_CHECK_ORDER),
         "identity_transport": "named_identity_cookies_only", "checks": checks,
+        "input_encoding": observed_query_encoding(baseline, parameter),
     }
     result["proof_confirmed"] = string_sql_proof_valid(result)
     return result
@@ -388,6 +421,7 @@ def probe_string_error(
         "method": "GET", "location": "query", "parameter": parameter,
         "requests_sent": len(ERROR_CHECK_ORDER),
         "identity_transport": "named_identity_cookies_only", "checks": checks,
+        "input_encoding": observed_query_encoding(baseline, parameter),
     }
     result["proof_confirmed"] = string_error_proof_valid(result)
     return result

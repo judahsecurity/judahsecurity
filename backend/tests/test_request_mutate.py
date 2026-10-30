@@ -1,6 +1,13 @@
 """Captured-request one-field mutate."""
 
-from app.services.agent.request_mutate import apply_one_mutation, coerce_request_body, summarize_samples
+import json
+
+import pytest
+
+from app.services.agent.request_mutate import (
+    apply_one_mutation, coerce_request_body, sample_reference, summarize_samples,
+)
+from app.services.agent.tools import ASMToolsManager
 
 
 def test_mutate_query_one_field():
@@ -40,6 +47,45 @@ def test_summarize_indexes():
     assert rows[0]["index"] == 0
     assert "id" in rows[0]["fields"]
     assert rows[1]["has_body"] is True
+    assert rows[0]["sample_ref"].startswith("req-")
+
+
+def test_request_reference_survives_list_reordering_and_changes_with_body():
+    first = {"method": "POST", "url": "https://app.example.com/api/search",
+             "body": '{"q":"public"}'}
+    second = {"method": "POST", "url": "https://app.example.com/api/search",
+              "body": '{"q":"private"}'}
+    forward = summarize_samples([first, second])
+    reverse = summarize_samples([second, first])
+    assert forward[0]["sample_ref"] == reverse[1]["sample_ref"]
+    assert forward[0]["sample_ref"] == sample_reference(first)
+    assert forward[0]["sample_ref"] != forward[1]["sample_ref"]
+
+
+@pytest.mark.asyncio
+async def test_mutate_uses_exact_reference_after_capture_list_reorders(monkeypatch):
+    manager = ASMToolsManager()
+    first = {"method": "GET", "url": "https://app.example.com/search?q=first"}
+    second = {"method": "GET", "url": "https://app.example.com/search?q=second"}
+    manager._capability_map = {"target": "https://app.example.com",
+                               "api_samples": [first, second]}
+    listed = json.loads(await manager.list_captured_requests())
+    reference = listed["samples"][0]["sample_ref"]
+    manager._capability_map["api_samples"] = [second, first]
+
+    async def compare_requests(**kwargs):
+        return json.dumps({"baseline": kwargs["baseline"]["url"],
+                           "mutant": kwargs["mutant"]["url"]})
+
+    monkeypatch.setattr(manager, "compare_requests", compare_requests)
+    result = json.loads(await manager.mutate_captured_request(
+        sample_ref=reference, location="query", field="q", value="test",
+    ))
+    assert result["baseline"].endswith("q=first")
+    assert result["mutant"].endswith("q=test")
+    assert result["source_sample_ref"] == reference
+    stale = json.loads(await manager.mutate_captured_request(sample_ref="req-missing"))
+    assert stale["ok"] is False
 
 
 def test_coerce_json_alias_sets_content_type():

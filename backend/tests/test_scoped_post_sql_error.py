@@ -1,4 +1,4 @@
-"""Offline POST form SQLi regression based on captured template requests."""
+"""Offline POST form and JSON SQLi regressions from captured requests."""
 
 from __future__ import annotations
 
@@ -110,6 +110,40 @@ def test_post_error_controls_reject_a_preexisting_or_escaped_quote_error(monkeyp
     assert proof["proof_confirmed"] is False
 
 
+def test_post_json_error_controls_preserve_other_observed_fields(monkeypatch):
+    private = json.dumps({
+        "url": TARGET, "method": "POST", "resource_type": "xhr",
+        "request_content_type": "application/json",
+        "request_body_base64": base64.b64encode(
+            b'{"filter":{"template":"botox"},"page":2}',
+        ).decode(),
+    }).encode()
+    url, mime, baseline, quote_body, escaped_body = body_probe.plan_sql_error_body(
+        private, parameter="/filter/template", allowed_origins=["https://app.example.test"],
+    )
+    assert all(json.loads(body)["page"] == 2 for body in (baseline, quote_body, escaped_body))
+    assert json.loads(quote_body)["filter"]["template"] == "botox'"
+    assert json.loads(escaped_body)["filter"]["template"] == "botox''"
+
+    def observe(_url, _mime, request_body, *_args, **_kwargs):
+        value = json.loads(request_body)["filter"]["template"]
+        return _row(MYSQL_ERROR if value.endswith("'") and not value.endswith("''")
+                    else b"ordinary response", request_body)
+
+    monkeypatch.setattr(body_probe, "_observe_post", observe)
+    lead = body_probe.probe_observed_body(
+        url, mime, baseline, quote_body, parameter="/filter/template",
+        allowed_origins=["https://app.example.test"], storage_state=None,
+    )
+    proof = body_probe.probe_sql_error_body(
+        url, mime, baseline, quote_body, escaped_body, parameter="/filter/template",
+        allowed_origins=["https://app.example.test"], storage_state=None, initial=lead,
+    )
+    assert proof["proof_recipe"] == "post_json_error_v1"
+    assert proof["proof_confirmed"] is True
+    assert body_probe.post_sql_error_proof_valid(proof)
+
+
 def test_post_error_proof_binds_same_capture_field_and_independent_receipt():
     request_bodies = {"baseline_first": b"template=botox", "quote_first": b"template=botox%27",
                       "escaped_quote": b"template=botox%27%27", "quote_second": b"template=botox%27",
@@ -153,8 +187,14 @@ def test_post_error_proof_binds_same_capture_field_and_independent_receipt():
     assert not validate_proof(store, candidate, proof, ["verifier"])[0]
 
 
+@pytest.mark.parametrize("request_body, content_type, parameter, cell_location", [
+    (b"template=botox", "application/x-www-form-urlencoded; charset=UTF-8", "template", "body_form"),
+    (b'{"template":"botox","page":2}', "application/json", "/template", "body_json"),
+])
 @pytest.mark.asyncio
-async def test_approved_capture_reaches_fresh_post_verifier(monkeypatch):
+async def test_approved_capture_reaches_fresh_post_verifier(
+    monkeypatch, request_body, content_type, parameter, cell_location,
+):
     manager = ASMToolsManager()
     manager._fallback_target = "https://app.example.test"
     manager._assessment_scope.add("app.example.test")
@@ -164,9 +204,9 @@ async def test_approved_capture_reaches_fresh_post_verifier(monkeypatch):
     public, private = package_exchange(
         url=TARGET, expected_origin="https://app.example.test",
         action_ref="navigate", method="POST", resource_type="xhr", status=200,
-        content_type="text/html", request_body=b"template=botox",
+        content_type="text/html", request_body=request_body,
         response_body=b"ordinary response",
-        request_content_type="application/x-www-form-urlencoded; charset=UTF-8",
+        request_content_type=content_type,
         request_headers={
             "X-Requested-With": "XMLHttpRequest",
             "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -190,12 +230,13 @@ async def test_approved_capture_reaches_fresh_post_verifier(monkeypatch):
     }
 
     def observe(_url, _mime, request_body, *_args, **_kwargs):
-        value = parse_qs(request_body.decode())["template"][0]
+        value = (parse_qs(request_body.decode())["template"][0]
+                 if cell_location == "body_form" else json.loads(request_body)["template"])
         return _row(MYSQL_ERROR if value.endswith("'") and not value.endswith("''")
                     else b"ordinary response", request_body)
 
     monkeypatch.setattr(body_probe, "_observe_post", observe)
-    hunter = json.loads(await manager.scoped_body_probe(capture_id, "template"))
+    hunter = json.loads(await manager.scoped_body_probe(capture_id, parameter))
     assert hunter["proof_confirmed"] is True
     assert store.records[hunter["evidence_id"]]["kind"] == "scoped_body_sqli_error"
     assert manager._scoped_post_count == 5
@@ -206,13 +247,13 @@ async def test_approved_capture_reaches_fresh_post_verifier(monkeypatch):
         "observation_source": "browser_traffic", "test_type": "sqli",
         "method": "POST", "host": "app.example.test",
         "path": "/controllers/extraeDataContenido",
-        "parameter": "body_form:template", "identity": "anonymous",
+        "parameter": f"{cell_location}:{parameter}", "identity": "anonymous",
         "capture_id": capture_id,
     }]
     candidate = FindingCandidate(
         id="candidate-1", title="SQL injection in template", target=TARGET,
         vulnerability_class="sql_injection", coverage_cell_id="cell-1",
-        parameter="body_form:template", evidence_ids=[hunter["evidence_id"]],
+        parameter=f"{cell_location}:{parameter}", evidence_ids=[hunter["evidence_id"]],
     )
     brain.candidates = [candidate.to_dict()]
     manager._engagement_brain = brain.to_dict()

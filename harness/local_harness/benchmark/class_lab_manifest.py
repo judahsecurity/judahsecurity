@@ -1,4 +1,4 @@
-"""Write the seven-class positive/negative product-agent lab manifest."""
+"""Write the positive/negative product-agent lab manifest."""
 
 from __future__ import annotations
 
@@ -9,7 +9,9 @@ from pathlib import Path
 
 CASES = {
     "sqli": ("sqli", "/search", "sqli"),
+    "sqli_encoded": ("sqli", "/catalog", "sqli"),
     "xss": ("xss", "/search", "xss"),
+    "xss_dom": ("xss", "/blog", "xss"),
     "ssrf": ("ssrf", "/api/fetch", "ssrf"),
     "idor": ("idor", "/api/objects/1", "api_authz"),
     "graphql_authz": ("idor", "/graphql", "graphql_api"),
