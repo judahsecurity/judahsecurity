@@ -10,6 +10,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.models.agent_autonomy_work import AgentAutonomyWork, AgentRunSnapshot
+from app.models.agent_run_ledger import AgentActionReceipt, AgentRunLedger
 from app.services.agent import durable_hunt
 
 TARGET = "https://app.example.test"
@@ -22,6 +23,8 @@ def sessions(monkeypatch):
     )
     AgentAutonomyWork.__table__.create(engine)
     AgentRunSnapshot.__table__.create(engine)
+    AgentRunLedger.__table__.create(engine)
+    AgentActionReceipt.__table__.create(engine)
     factory = sessionmaker(bind=engine)
     monkeypatch.setattr(durable_hunt, "SessionLocal", factory)
     yield factory
@@ -69,7 +72,110 @@ def test_interrupted_turn_is_quarantined_not_replayed(sessions):
         assert durable_hunt.claim_next(db, owner="new") is None
         row = db.get(AgentAutonomyWork, "work-1")
         assert row.status == "blocked"
-        assert "reconcile" in row.stop_reason
+        assert "without a fresh costed database snapshot" in row.stop_reason
+
+
+@pytest.mark.parametrize("run_status", ["running", "completed"])
+def test_expired_read_only_turn_resumes_once_from_costed_snapshot(sessions, run_status):
+    started = datetime.utcnow() - timedelta(seconds=10)
+    with sessions() as db:
+        db.add(_work(
+            status="running", lease_owner="dead", turn_started_at=started,
+            created_at=started - timedelta(seconds=10),
+            lease_until=datetime.utcnow() - timedelta(seconds=1),
+        ))
+        db.add(AgentRunLedger(
+            id="run-1", session_id="sched-7-work-1", organization_id=7, user_id=11,
+            objective=TARGET, mode="agent", status=run_status,
+            started_at=started + timedelta(seconds=1),
+        ))
+        db.add(AgentActionReceipt(
+            run_id="run-1", action_id="action-1", event="started",
+            tool_name="execute_dnsx", target=TARGET,
+            created_at=started + timedelta(seconds=2),
+        ))
+        db.add(AgentActionReceipt(
+            run_id="run-1", action_id="action-1", event="completed",
+            tool_name="execute_dnsx", target=TARGET,
+            created_at=started + timedelta(seconds=3),
+        ))
+        db.add(AgentRunSnapshot(
+            session_id="sched-7-work-1", organization_id=7,
+            payload={
+                "schema_version": 3, "saved_at": time.time(),
+                "reported_cost_usd": 0.2,
+                "capability_map": {"target": TARGET},
+                "engagement_brain": {"hypotheses": [{
+                    "id": "h1", "title": "Check API", "assumption": "A",
+                    "test": "T", "pass_criteria": "P", "kill_criteria": "K",
+                    "specialist": "api_authz", "target": TARGET,
+                }]},
+            },
+        ))
+        db.commit()
+        assert durable_hunt.recover_expired(db) == 1
+        row = db.get(AgentAutonomyWork, "work-1")
+        assert row.status == "queued" and row.turns == 1 and row.spent_usd == 0.2
+        assert durable_hunt.recover_expired(db) == 0
+        assert db.query(AgentAutonomyWork).count() == 1
+        assert durable_hunt.claim_next(db, owner="next") == "work-1"
+
+
+def test_expired_actionful_turn_stays_blocked(sessions):
+    started = datetime.utcnow() - timedelta(seconds=10)
+    with sessions() as db:
+        db.add(_work(
+            status="running", lease_owner="dead", turn_started_at=started,
+            lease_until=datetime.utcnow() - timedelta(seconds=1),
+        ))
+        db.add(AgentRunLedger(
+            id="run-1", session_id="sched-7-work-1", organization_id=7, user_id=11,
+            objective=TARGET, mode="agent", status="running",
+            started_at=started + timedelta(seconds=1),
+        ))
+        db.add(AgentActionReceipt(
+            run_id="run-1", action_id="action-1", event="completed",
+            tool_name="mutate_captured_request", target=TARGET,
+            created_at=started + timedelta(seconds=3),
+        ))
+        db.add(AgentRunSnapshot(
+            session_id="sched-7-work-1", organization_id=7,
+            payload={"schema_version": 3, "saved_at": time.time(),
+                     "reported_cost_usd": 0.2, "capability_map": {"target": TARGET}},
+        ))
+        db.commit()
+        assert durable_hunt.recover_expired(db) == 1
+        assert db.get(AgentAutonomyWork, "work-1").status == "blocked"
+        assert durable_hunt.claim_next(db, owner="next") is None
+
+
+def test_expired_turn_with_unresolved_action_is_blocked_even_with_snapshot(sessions):
+    started = datetime.utcnow() - timedelta(seconds=10)
+    with sessions() as db:
+        db.add(_work(
+            status="running", lease_owner="dead", turn_started_at=started,
+            lease_until=datetime.utcnow() - timedelta(seconds=1),
+        ))
+        db.add(AgentRunLedger(
+            id="run-1", session_id="sched-7-work-1", organization_id=7, user_id=11,
+            objective=TARGET, mode="agent", status="running",
+            started_at=started + timedelta(seconds=1),
+        ))
+        db.add(AgentActionReceipt(
+            run_id="run-1", action_id="action-1", event="started",
+            tool_name="execute_dnsx", target=TARGET,
+            created_at=started + timedelta(seconds=2),
+        ))
+        db.add(AgentRunSnapshot(
+            session_id="sched-7-work-1", organization_id=7,
+            payload={"schema_version": 3, "saved_at": time.time(),
+                     "reported_cost_usd": 0.2, "capability_map": {"target": TARGET}},
+        ))
+        db.commit()
+        assert durable_hunt.recover_expired(db) == 1
+        row = db.get(AgentAutonomyWork, "work-1")
+        assert row.status == "blocked" and "in-flight action" in row.stop_reason
+        assert durable_hunt.claim_next(db, owner="next") is None
 
 
 @pytest.mark.asyncio

@@ -165,6 +165,7 @@ def save_run_snapshot(
         "todo_list": state.get("todo_list"),
         "current_phase": state.get("current_phase"),
         "original_objective": state.get("original_objective"),
+        "reported_cost_usd": (state.get("token_usage") or {}).get("cost_usd"),
         "reauthentication_required": reauthentication_required,
     })
     if not payload["engagement_brain"] and not payload["capability_map"]:

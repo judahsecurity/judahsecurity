@@ -27,6 +27,7 @@ class AgentAutonomyWork(Base):
     limits = Column(JSON, nullable=False, default=dict)
     lease_owner = Column(String(64), nullable=False, default="")
     lease_until = Column(DateTime, nullable=True)
+    turn_started_at = Column(DateTime, nullable=True)
     stop_reason = Column(Text, nullable=False, default="")
     answer = Column(Text, nullable=False, default="")
     created_at = Column(DateTime, nullable=False, default=datetime.utcnow)

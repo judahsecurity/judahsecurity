@@ -211,8 +211,24 @@ def test_dns_cname_worker_captures_structured_rows_without_leaking_urls():
     )
     assert observations == [{
         "type": "DNSX_ROW", "row": {"host": "example.com", "cname": ["site.github.io"]},
+        "evidence_ref": "",
     }]
     assert "cname_rows=1" in brief
+
+
+def test_autonomy_dns_worker_passes_cli_request_rate():
+    from app.services.agent.autonomy_limits import AutonomyLimits, current_autonomy_limits
+
+    tm = _FakeTools({"success": True, "output": ""})
+    token = current_autonomy_limits.set(AutonomyLimits(request_rate_per_second=2))
+    try:
+        asyncio.run(_worker_body(
+            "dns_cname", "https://example.com", tm,
+            user_id=None, org_id=None, session_id="t",
+        ))
+    finally:
+        current_autonomy_limits.reset(token)
+    assert tm.calls[0][1]["args"].endswith("-rl 2")
 
 
 def test_nuclei_recon_worker_runs_bounded_nuclei_and_filters():

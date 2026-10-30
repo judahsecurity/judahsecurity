@@ -37,6 +37,7 @@ class Hypothesis:
     priority: str = "high"  # high | medium | low
     target: str = ""
     evidence: str = ""
+    observation_id: str = ""
     source: str = "map"  # map | chain | manual | finding | methodology | threat_model
     parent_finding: str = ""
     methodology_id: str = ""

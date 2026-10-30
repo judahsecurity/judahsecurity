@@ -81,6 +81,37 @@ interface ScanType {
   default_config: Record<string, any>;
 }
 
+interface AutonomyWork {
+  id: string;
+  target: string;
+  status: string;
+  turns: number;
+  spent_usd: number;
+  recon_leads: number;
+  verified_candidates: number;
+  stop_reason: string;
+}
+
+interface TimelineEvent {
+  kind: string;
+  at: string;
+  id?: string;
+  observation_id?: string;
+  observation_kind?: string;
+  title?: string;
+  target?: string;
+  value?: string;
+  source?: string;
+  specialist?: string;
+  tool?: string;
+  status?: string;
+  verdict?: string;
+  evidence_ref?: string;
+  evidence_ids?: string[];
+  stop_reason?: string;
+  cost_usd?: number;
+}
+
 const FREQUENCY_OPTIONS = [
   { value: 'every_15_minutes', label: 'Every 15 Minutes' },
   { value: 'every_30_minutes', label: 'Every 30 Minutes' },
@@ -113,6 +144,45 @@ export default function SchedulesPage() {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editingSchedule, setEditingSchedule] = useState<ScanSchedule | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [autonomyDialogOpen, setAutonomyDialogOpen] = useState(false);
+  const [autonomySchedule, setAutonomySchedule] = useState<ScanSchedule | null>(null);
+  const [autonomyRuns, setAutonomyRuns] = useState<AutonomyWork[]>([]);
+  const [timelineEvents, setTimelineEvents] = useState<TimelineEvent[]>([]);
+  const [selectedWorkId, setSelectedWorkId] = useState('');
+  const [autonomyLoading, setAutonomyLoading] = useState(false);
+
+  const loadTimeline = async (scheduleId: number, workId: string) => {
+    setSelectedWorkId(workId);
+    setAutonomyLoading(true);
+    try {
+      const data = await api.request(`/scan-schedules/${scheduleId}/autonomy-work/${workId}/timeline`);
+      setTimelineEvents(data.events || []);
+    } catch (error) {
+      setTimelineEvents([]);
+      toast({ title: 'Timeline unavailable', description: 'Could not load this assessment timeline.', variant: 'destructive' });
+    } finally {
+      setAutonomyLoading(false);
+    }
+  };
+
+  const showAutonomyRuns = async (schedule: ScanSchedule) => {
+    setAutonomySchedule(schedule);
+    setAutonomyRuns([]);
+    setTimelineEvents([]);
+    setSelectedWorkId('');
+    setAutonomyDialogOpen(true);
+    setAutonomyLoading(true);
+    try {
+      const data = await api.request(`/scan-schedules/${schedule.id}/autonomy-work`);
+      const runs: AutonomyWork[] = data.work || [];
+      setAutonomyRuns(runs);
+      if (runs[0]) await loadTimeline(schedule.id, runs[0].id);
+    } catch (error) {
+      toast({ title: 'Autonomy runs unavailable', description: 'Could not load scheduled assessment runs.', variant: 'destructive' });
+    } finally {
+      setAutonomyLoading(false);
+    }
+  };
   const [formData, setFormData] = useState({
     name: '',
     description: '',
@@ -710,6 +780,11 @@ export default function SchedulesPage() {
                       </TableCell>
                       <TableCell className="text-right">
                         <div className="flex items-center justify-end gap-1">
+                          {schedule.scan_type === 'tester_process' && schedule.config?.autonomous_followup === true && (
+                            <Button variant="ghost" size="sm" onClick={() => showAutonomyRuns(schedule)} title="Autonomy run timeline">
+                              <History className="h-4 w-4" />
+                            </Button>
+                          )}
                           <Button
                             variant="ghost"
                             size="sm"
@@ -756,6 +831,53 @@ export default function SchedulesPage() {
             </Table>
           </CardContent>
         </Card>
+
+        <Dialog open={autonomyDialogOpen} onOpenChange={setAutonomyDialogOpen}>
+          <DialogContent className="max-w-4xl max-h-[85vh] overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle>Autonomy run timeline</DialogTitle>
+              <DialogDescription>{autonomySchedule?.name}: observations and leads are separate from verified findings.</DialogDescription>
+            </DialogHeader>
+            {autonomyLoading && <Loader2 className="h-5 w-5 animate-spin" />}
+            {!autonomyLoading && autonomyRuns.length === 0 && <p className="text-sm text-muted-foreground">No autonomy runs yet.</p>}
+            {autonomyRuns.length > 0 && (
+              <div className="flex flex-wrap gap-2">
+                {autonomyRuns.map((run) => (
+                  <Button key={run.id} size="sm" variant={selectedWorkId === run.id ? 'default' : 'outline'}
+                    onClick={() => autonomySchedule && loadTimeline(autonomySchedule.id, run.id)}>
+                    {run.target} · {run.status}
+                  </Button>
+                ))}
+              </div>
+            )}
+            {autonomyRuns.filter((run) => run.id === selectedWorkId).map((run) => (
+              <div key={run.id} className="text-sm space-y-1">
+                <p>{run.turns} turns · {run.recon_leads} leads · {run.verified_candidates} verified · ${run.spent_usd.toFixed(2)} reported spend</p>
+                {run.stop_reason && <p className="text-muted-foreground">Stopped: {run.stop_reason}</p>}
+              </div>
+            ))}
+            <div className="space-y-2">
+              {timelineEvents.map((event, index) => (
+                <div key={`${event.kind}-${event.id || index}`} className="rounded border p-3 text-sm">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant={event.verdict === 'verified' ? 'default' : 'secondary'}>{event.kind}</Badge>
+                    <span className="text-muted-foreground">{event.at ? formatDate(event.at) : 'Time unavailable'}</span>
+                    {event.status && <span>{event.status}</span>}
+                    {event.verdict && <strong>{event.verdict}</strong>}
+                  </div>
+                  <p className="mt-1">{event.title || event.tool || event.observation_kind || event.target || event.kind}</p>
+                  {event.specialist && <p>Specialist: {event.specialist}</p>}
+                  {event.target && <p className="text-muted-foreground break-all">{event.target}</p>}
+                  {event.value && <p>Observed: {event.value}</p>}
+                  {event.observation_id && <p>Observation: {event.observation_id}</p>}
+                  {(event.evidence_ref || event.evidence_ids?.length) && <p>Evidence: {[event.evidence_ref, ...(event.evidence_ids || [])].filter(Boolean).join(', ')}</p>}
+                  {event.stop_reason && <p>Reason: {event.stop_reason}</p>}
+                  {typeof event.cost_usd === 'number' && <p>Reported cost: ${event.cost_usd.toFixed(2)}</p>}
+                </div>
+              ))}
+            </div>
+          </DialogContent>
+        </Dialog>
 
         {/* Edit Schedule Dialog */}
         <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>

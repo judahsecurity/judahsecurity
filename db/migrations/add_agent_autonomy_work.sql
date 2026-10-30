@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS agent_autonomy_work (
     limits JSONB NOT NULL DEFAULT '{}'::jsonb,
     lease_owner VARCHAR(64) NOT NULL DEFAULT '',
     lease_until TIMESTAMP,
+    turn_started_at TIMESTAMP,
     stop_reason TEXT NOT NULL DEFAULT '',
     answer TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -26,6 +27,7 @@ CREATE TABLE IF NOT EXISTS agent_autonomy_work (
 );
 CREATE INDEX IF NOT EXISTS ix_agent_autonomy_work_schedule_id ON agent_autonomy_work(schedule_id);
 CREATE INDEX IF NOT EXISTS ix_agent_autonomy_work_status ON agent_autonomy_work(status);
+ALTER TABLE agent_autonomy_work ADD COLUMN IF NOT EXISTS turn_started_at TIMESTAMP;
 
 CREATE TABLE IF NOT EXISTS agent_run_snapshots (
     session_id VARCHAR(64) PRIMARY KEY,

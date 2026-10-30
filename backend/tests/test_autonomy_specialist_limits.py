@@ -4,10 +4,10 @@ from types import SimpleNamespace
 import pytest
 
 from app.services.agent.autonomy_limits import (
-    AutonomyLimits, current_autonomy_limits, limits_from_config,
+    AutonomyLimits, AutonomyRequestGate, current_autonomy_limits, limits_from_config,
 )
 from app.services.agent.fireteam_service import (
-    SpecialistProfile, _out_of_scope_url, _run_specialist, _safe_invoke,
+    SpecialistProfile, _SpecialistBudget, _out_of_scope_url, _run_specialist, _safe_invoke,
 )
 from app.services.agent.operation_directive import OperationDirective
 
@@ -19,6 +19,13 @@ def test_scheduled_limits_are_bounded():
         "max_parallel_specialists": 99,
     })
     assert limits == AutonomyLimits(40, 600, 6)
+
+
+@pytest.mark.asyncio
+async def test_recon_gate_rejects_start_after_budget():
+    gate = AutonomyRequestGate(max_starts=1, interval_ms=0)
+    assert await gate.acquire() is True
+    assert await gate.acquire() is False
 
 
 @pytest.mark.asyncio
@@ -38,6 +45,38 @@ async def test_specialist_explicit_cross_host_url_is_rejected_before_tool_execut
     )
     assert receipt.error == "specialist_scope_denied"
     assert manager.called is False
+
+
+@pytest.mark.asyncio
+async def test_specialist_contract_denies_identity_action_and_request_overrun():
+    class Manager:
+        calls = 0
+
+        async def execute(self, *_args):
+            self.calls += 1
+            return {"success": True, "output": "ok"}
+
+    directive = OperationDirective(
+        specialist="api_authz", epithet="API", target="https://app.example.test",
+        goal="Check", allowed_hosts=["app.example.test"],
+        allowed_identities=["anonymous"], allowed_actions=["read"],
+        max_requests=1, interval_ms=0,
+    )
+    budget = _SpecialistBudget(directive)
+    manager = Manager()
+    denied_identity = await _safe_invoke(
+        manager, "get_coverage", {"identity": "owner"}, budget=budget,
+    )
+    assert denied_identity.error == "specialist_identity_denied"
+    denied_action = await _safe_invoke(
+        manager, "mutate_captured_request", {}, budget=budget,
+    )
+    assert denied_action.error == "specialist_action_denied"
+    allowed = await _safe_invoke(manager, "get_coverage", {}, budget=budget)
+    assert allowed.success is True
+    exhausted = await _safe_invoke(manager, "get_coverage", {}, budget=budget)
+    assert exhausted.error == "specialist_request_budget_exhausted"
+    assert manager.calls == 1
 
 
 @pytest.mark.asyncio
