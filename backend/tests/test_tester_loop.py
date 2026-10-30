@@ -5,6 +5,7 @@ import pytest
 
 from app.services.agent.assessment_kickoff import root_needs_dir_brute
 from app.services.agent.tester_loop import (
+    _ready_hypothesis_wave,
     _coverage_followup_wave,
     _observed_input_batch_step,
     cms_followup_product,
@@ -16,6 +17,75 @@ from app.services.agent.tester_loop import (
     surface_looks_empty,
     tester_loop_progress as loop_progress,
 )
+
+
+def test_ready_hypotheses_dispatch_on_resume_and_new_revision_only():
+    target = "https://app.test"
+
+    def hypothesis(identifier):
+        return {
+            "id": identifier, "title": f"Check {identifier}",
+            "assumption": "An observed object may cross an access boundary",
+            "test": "Compare named test identities", "pass_criteria": "Peer access",
+            "kill_criteria": "Peer denied", "specialist": "api_authz",
+            "target": target,
+        }
+
+    state = {
+        "mode": "agent", "assessment_resume": True,
+        "target_info": {"primary_target": target},
+        "capability_map": {"target": target, "scope": target},
+        "engagement_brain": {"hypotheses": [hypothesis("h1")]},
+        "execution_trace": [],
+    }
+    first = forced_next_step(state)
+    assert first["tool_name"] == "fireteam_dispatch"
+    assert first["tool_args"]["specialists"] == ["api_authz"]
+    state["execution_trace"].append({
+        "tool_name": "fireteam_dispatch", "tool_args": first["tool_args"],
+        "success": True,
+    })
+    assert forced_next_step(state) is None
+    state["engagement_brain"]["hypotheses"].append(hypothesis("h2"))
+    second = forced_next_step(state)
+    assert second["tool_args"]["hypothesis_signature"] != first["tool_args"]["hypothesis_signature"]
+    state["engagement_brain"]["hypothesis_wave_history"] = [second["tool_args"]["hypothesis_signature"]]
+    assert _ready_hypothesis_wave(state, [], target) is None
+
+
+def test_ready_hypothesis_wave_retries_one_failed_dispatch():
+    target = "https://app.test"
+    state = {
+        "mode": "agent", "capability_map": {"target": target},
+        "engagement_brain": {"hypotheses": [{
+            "id": "h1", "title": "Check", "assumption": "A", "test": "T",
+            "pass_criteria": "P", "kill_criteria": "K", "specialist": "api_authz",
+            "target": target,
+        }]},
+    }
+    wave = _ready_hypothesis_wave(state, [], target)
+    assert wave and wave["tool_name"] == "fireteam_dispatch"
+    failed = {"tool_name": "fireteam_dispatch", "tool_args": wave["tool_args"],
+              "success": False}
+    assert _ready_hypothesis_wave(state, [failed], target) == wave
+    assert _ready_hypothesis_wave(state, [failed, failed], target) is None
+    succeeded = {**failed, "success": True}
+    assert _ready_hypothesis_wave(state, [failed, succeeded], target) is None
+
+
+def test_ready_hypothesis_wave_refuses_stale_map_and_assist_mode():
+    target = "https://app.test"
+    state = {
+        "mode": "agent", "capability_map": {"target": "https://other.test"},
+        "engagement_brain": {"hypotheses": [{
+            "id": "h1", "title": "Check", "assumption": "A", "test": "T",
+            "pass_criteria": "P", "kill_criteria": "K", "specialist": "api_authz",
+        }]},
+    }
+    assert _ready_hypothesis_wave(state, [], target) is None
+    state["capability_map"]["target"] = target
+    state["mode"] = "assist"
+    assert _ready_hypothesis_wave(state, [], target) is None
 
 
 def test_404_root_needs_dir_brute():

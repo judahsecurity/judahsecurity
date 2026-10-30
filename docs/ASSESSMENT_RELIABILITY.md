@@ -1,5 +1,30 @@
 # Evidence-backed assessments
 
+## Autonomous hypothesis follow-up
+
+In Prowl Agent mode, the tester loop dispatches a bounded specialist wave when
+the saved task graph contains a new ready hypothesis revision, including after
+an assessment is resumed. The revision is recorded in the engagement snapshot
+so the same wave is not launched again on a later turn. The existing specialist
+leases, scope checks, and independent finding verification still apply.
+
+Scheduled `tester_process` hunts continue partial runs in the same assessment
+session while saved hypotheses, coverage cells, or candidates remain actionable
+when the schedule config sets `autonomous_followup: true`. Without that opt-in,
+the schedule runs one turn as before. The schedule config also accepts
+`max_turns` (default 3, maximum 4),
+`max_total_seconds` (default 3600, maximum 7200), and `price_limit_usd`
+(default 8 per target, shared across its turns). Continuation stops on required operator input,
+missing spend data, an unchanged work revision, or a budget limit. Each result
+includes its session ID, turn count, spend, and stop reason. A worker restart
+does not yet resume the remaining turns of an interrupted schedule occurrence;
+its saved assessment can still be continued by the operator.
+The spend figure comes from the orchestrator's reported usage; nested specialist
+model calls may not be included. The turn and elapsed-time caps still bound the
+scheduled loop, but the reported spend limit is not an all-provider hard cap.
+The schedule executes under its active creator's analyst account; if that
+account loses organization access, the worker records a schedule error.
+
 The product agent now requires execution-owned evidence before publishing medium-or-higher findings. These checks apply to both direct orchestration and fireteam discovery. `skip_judge_gate` and the old verification-disable environment flag do not bypass publication.
 
 ## Execution and verification

@@ -678,6 +678,7 @@ async def test_fireteam_dispatch_executes_only_its_leased_hypothesis(
             mission="Test authorization cards",
             targets=["https://app.test"],
             specialists=["api_authz"],
+            hypothesis_signature="wave-test",
         )
     )
 
@@ -687,11 +688,42 @@ async def test_fireteam_dispatch_executes_only_its_leased_hypothesis(
     assert rows[leased_id]["status"] == "killed"
     assert rows[leased_id]["evidence_ids"] == ["http-denied"]
     assert rows[sibling_id]["status"] == "ready"
+    assert manager._engagement_brain["hypothesis_wave_history"] == ["wave-test"]
     assert any(
         checkpoint["engagement_brain"]["task_graph"]["nodes"][leased_id]["lease_id"]
         for checkpoint in checkpoints
     )
     assert checkpoints[-1]["engagement_brain"]["task_graph"]["nodes"][leased_id]["lease_id"] == ""
+
+
+@pytest.mark.asyncio
+async def test_fireteam_dispatch_failure_does_not_consume_hypothesis_revision(
+    manager, monkeypatch
+):
+    brain = EngagementBrain(
+        target="https://app.test",
+        hypotheses=[Hypothesis(
+            id="authz-failure", title="Authorization check",
+            assumption="Object access may cross users", test="Compare access",
+            pass_criteria="Peer access", kill_criteria="Peer denied",
+            specialist="api_authz",
+        )],
+    )
+    manager._engagement_brain = brain.to_dict()
+    monkeypatch.setattr(manager, "_cheap_llm", lambda: object())
+
+    async def failed_fireteam(**_kwargs):
+        raise RuntimeError("specialist unavailable")
+
+    monkeypatch.setattr(
+        "app.services.agent.fireteam_service.run_fireteam", failed_fireteam,
+    )
+    with pytest.raises(RuntimeError, match="specialist unavailable"):
+        await manager.fireteam_dispatch(
+            mission="Test authorization card", targets=["https://app.test"],
+            specialists=["api_authz"], hypothesis_signature="wave-failed",
+        )
+    assert "wave-failed" not in manager._engagement_brain["hypothesis_wave_history"]
 
 
 @pytest.mark.asyncio
