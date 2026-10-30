@@ -108,6 +108,8 @@ def test_methodologies_from_rich_crawl():
     assert "unsafe_file_upload" in ids
     assert "ssrf_url_fetch" in ids
     assert "path_directory_context" in ids
+
+
     assert "path_parameter_mining" in ids
     assert "realtime_channel_auth" in ids
     assert "js_client_hmac_signing" in ids
@@ -132,6 +134,20 @@ def test_methodologies_from_rich_crawl():
     assert cmap.methodologies
     assert any(h.get("methodology_id") for h in cmap.ranked_hunt_queue)
     assert any(h.get("hunt") == "unauth_account_lookup" for h in cmap.ranked_hunt_queue)
+
+
+def test_search_only_surface_keeps_sqli_methodology():
+    crawl = _fake_crawl(
+        pages_visited=["https://tenant-a.app.example.com/catalog?search=tea"],
+        forms=[{"method": "GET", "action": "/catalog", "inputs": ["search"],
+                "page": "https://tenant-a.app.example.com/catalog"}],
+        api_calls={}, api_samples=[], endpoints_from_js=set(), js_files=set(),
+    )
+    cmap = build_capability_map_from_crawl(crawl)
+    methods = {item.id: item for item in methodologies_from_capability_map(cmap)}
+    assert "reflected_xss" in methods
+    assert "param_injection" in methods
+    assert "search" in methods["param_injection"].test.lower()
 
 
 def test_action_execute_path_seeds_ssrf_card():

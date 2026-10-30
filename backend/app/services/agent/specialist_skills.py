@@ -340,34 +340,6 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "- Report with payload + response evidence; no status-only findings. "
         "Homepage plugin/core versions in a published CVE range ARE findings."
     ),
-    "xss": (
-        "SKILL PACK — XSS on what the page showed:\n"
-        "- Prioritize search/reflect params (q, search, searchTerm, name, message, comment, redirect, next).\n"
-        "- Archive parameters are leads: first verify the path responds, then send one "
-        "unique canary in one observed GET parameter. Record whether it appears in "
-        "HTML text, an attribute, a script, or only a DOM update. Do not POST to an "
-        "unobserved form or declare XSS from reflection alone.\n"
-        "- Confirm execution in the browser or show unambiguous active HTML context. CSP block ≠ kill.\n"
-        "- mutate_list(kind='xss') then mutate_captured_request / xsstrike / dalfox.\n"
-        "- Stored: comments/profiles/filenames if those forms exist. Status 200 is not XSS."
-    ),
-    "sqli": (
-        "SKILL PACK — SQLi / SSTI / cmd on mapped params:\n"
-        "- Skip pure reflect/search params (those belong to xss).\n"
-        "- Login/auth is always in rank-1 even with no query-string params. "
-        "POST username/password or JSON /login|/signin|/api/auth/login: "
-        "compare_requests baseline vs one mutation (error, then boolean pair, then "
-        "timing pair). generate_injection_payloads techniques time_based and "
-        "auth_bypass. Timing delta that scales with SLEEP is SUBMIT with the table. "
-        "Session issued from a canary is Critical. Not Appsmith /user/login email.\n"
-        "- Canary (error/boolean/time) then sqlmap --batch on hits only.\n"
-        "- WordPress: compare_requests POST /wp-admin/admin-ajax.php nested tax_query "
-        "SLEEP(0) vs SLEEP(2) even when no query params are mapped. Timing table is SUBMIT.\n"
-        "- If blocked (WAF/403/timeout): rewrite via run_custom_probe / encoding; then prove or kill. "
-        "Do not kill after a single scanner miss.\n"
-        "- commix only on high-signal command-looking fields. No os-shell.\n"
-        "- PASS needs a differential, not a Nuclei template."
-    ),
     "ssrf": (
         "SKILL PACK — SSRF / URL-fetch:\n"
         "- Fields: url, uri, webhook, callback, proxy, import, preview, datasource, requestUrl, execute.\n"
@@ -640,7 +612,8 @@ def skill_pack_for(specialist: str) -> str:
         "content_api": ("js_analysis", "interceptor", "api_fingerprint", "jshero"),
         "app_mapper": ("interceptor", "api_fingerprint"),
         "injection": ("wordpress",),
-        "sqli": ("wordpress",),
+        "xss": ("xss",),
+        "sqli": ("sqli", "wordpress"),
         "ssrf": ("ssrf",),
         "risk_assessor": ("risk_assessment",),
     }.get(specialist) or ()

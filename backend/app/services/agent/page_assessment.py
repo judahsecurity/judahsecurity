@@ -525,20 +525,12 @@ def start_here_from_observations(
             evidence=ssrf_ev[:240],
         )
 
-    if param_paths and not reflect_ev:
+    if param_paths:
         _add(
             start,
             hunt="sqli",
             specialist="sqli",
-            why="Non-reflect params exist — disciplined SQLi/SSTI canaries on mapped fields only",
-            evidence=str(param_paths[0]),
-        )
-    elif param_paths:
-        _add(
-            start,
-            hunt="sqli",
-            specialist="sqli",
-            why="Parameter-rich paths besides search — SQLi/cmd after XSS canaries, not instead of them",
+            why="Observed params, including search/reflect inputs, warrant independent SQLi checks",
             evidence=str(param_paths[0]),
         )
 

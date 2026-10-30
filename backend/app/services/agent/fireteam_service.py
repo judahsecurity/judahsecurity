@@ -584,8 +584,8 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
     SpecialistProfile(
         name="xss",
         role=(
-            "XSS specialist. Hunt reflected/stored/DOM XSS on search and reflect "
-            "params the map actually showed — not a generic injection dump."
+            "XSS specialist. Hunt reflected/stored/DOM XSS on observed inputs, "
+            "prioritizing search and reflect params — not a generic injection dump."
         ),
         allowed_tools=[
             "get_parameter_inventory",
@@ -661,8 +661,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
     SpecialistProfile(
         name="sqli",
         role=(
-            "SQL / template / command injection specialist. Probe mapped non-reflect "
-            "params with canaries; escalate to sqlmap/commix only on hits."
+            "SQL / template / command injection specialist. Probe assigned observed "
+            "params, including search and filter inputs, with controlled canaries; "
+            "escalate to sqlmap/commix only on hits."
         ),
         allowed_tools=[
             "get_parameter_inventory",
