@@ -363,6 +363,12 @@ async def test_scoped_assessment_cannot_complete_with_confirmed_unpublished_cand
     assert closed["status"] == "completed"
     assert closed["complete"] is True
 
+    brain.threat_model["provenance"] = {"surface_inventory_omitted_input_count": 1}
+    manager._engagement_brain = brain.to_dict()
+    truncated = json.loads(await manager.scoped_assessment_summary())
+    assert truncated["complete"] is False
+    assert truncated["coverage"]["inventory_omitted_input_count"] == 1
+
 
 @pytest.mark.asyncio
 async def test_coverage_tool_cannot_turn_empty_or_unknown_status_into_clean():
