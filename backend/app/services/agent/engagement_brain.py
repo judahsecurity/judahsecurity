@@ -2317,6 +2317,19 @@ def seed_hypotheses_from_capability_map(
         except Exception:
             methodologies = []
 
+    # Cross-session learning: demote methodology cards that prior runs on a
+    # similar surface repeatedly killed and never confirmed (EvoGraph priors).
+    methodology_priors: Dict[str, Dict[str, int]] = {}
+    try:
+        from app.services.agent import evograph
+        from app.services.agent.tools import current_organization_id
+
+        _org = current_organization_id.get()
+        if _org:
+            methodology_priors = evograph.get_methodology_priors(_org, brain.target)
+    except Exception:
+        methodology_priors = {}
+
     for m in methodologies:
         if not isinstance(m, dict) or not m.get("id"):
             continue
@@ -2325,6 +2338,19 @@ def seed_hypotheses_from_capability_map(
         if hid in existing:
             covered_hunts.add(str(m.get("hunt") or ""))
             continue
+        seed_priority = str(m.get("priority") or "high")
+        seed_evidence = str(m.get("evidence") or "")[:500]
+        if methodology_priors:
+            try:
+                from app.services.agent.evograph import demote_for_priors
+
+                seed_priority, demote_reason = demote_for_priors(
+                    seed_priority, methodology_priors.get(mid)
+                )
+                if demote_reason:
+                    seed_evidence = (f"[demoted: {demote_reason}] " + seed_evidence).strip()[:500]
+            except Exception:
+                pass
         brain.hypotheses.append(
             Hypothesis(
                 id=hid,
@@ -2334,9 +2360,9 @@ def seed_hypotheses_from_capability_map(
                 pass_criteria=str(m.get("pass_criteria") or ""),
                 kill_criteria=str(m.get("kill_criteria") or ""),
                 specialist=str(m.get("specialist") or "injection"),
-                priority=str(m.get("priority") or "high"),
+                priority=seed_priority,
                 target=brain.target,
-                evidence=str(m.get("evidence") or "")[:500],
+                evidence=seed_evidence,
                 source="methodology",
                 methodology_id=mid,
                 cwe_ids=list(m.get("cwe_ids") or []),

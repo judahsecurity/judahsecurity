@@ -3524,6 +3524,24 @@ class AgentOrchestrator:
                 final_phase=response.current_phase,
                 iteration_count=response.iteration_count,
             )
+            # EvoGraph: record proven/killed methodology outcomes so a later
+            # session can demote cards a similar surface keeps killing.
+            try:
+                from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+                _brain = engagement_brain_from_dict(self.tool_manager._engagement_brain)
+                for h in _brain.hypotheses:
+                    if h.methodology_id and h.status in ("proven", "killed"):
+                        evograph.record_methodology_outcome(
+                            session_id=session_id,
+                            organization_id=organization_id,
+                            methodology_id=h.methodology_id,
+                            outcome="confirmed" if h.status == "proven" else "killed",
+                            target=h.target or _brain.target,
+                            cwe_ids=h.cwe_ids,
+                        )
+            except Exception:
+                logger.debug("EvoGraph methodology outcome recording skipped", exc_info=True)
             completion_reason = str(final_state.get("completion_reason") or "")
             if partial_closure:
                 completion_reason = self.tool_manager._scoped_assessment_partial_reason

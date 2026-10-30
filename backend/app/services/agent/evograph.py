@@ -219,6 +219,84 @@ def record_failure(
         logger.debug(f"EvoGraph record_failure error: {e}")
 
 
+def methodology_signature(target: str) -> str:
+    """Stable cross-run key for a target: its host, lowercased, dots trimmed."""
+    value = str(target or "").strip().lower()
+    if not value:
+        return ""
+    if "://" not in value:
+        value = "https://" + value
+    return (urlparse(value).hostname or "").strip(".")
+
+
+def demote_for_priors(priority: str, prior: Optional[Dict[str, int]]) -> tuple:
+    """Lower a methodology card's seed priority when prior runs show it never pays.
+
+    Returns ``(priority, reason)``. Never raises priority and floors at ``low``.
+    A card ever confirmed (on this target or org-wide) is left untouched — a
+    previously exploitable class is worth re-testing — so only consistently
+    killed, never-confirmed cards are demoted.
+    """
+    order = ["critical", "high", "medium", "low"]
+    current = priority if priority in order else "high"
+    if not prior:
+        return current, ""
+    confirmed = int(prior.get("confirmed", 0)) + int(prior.get("same_target_confirmed", 0))
+    if confirmed > 0:
+        return current, ""
+    same_killed = int(prior.get("same_target_killed", 0))
+    org_killed = int(prior.get("killed", 0))
+    if same_killed >= 2:
+        reason = f"killed {same_killed}x on this target before, never confirmed"
+    elif org_killed >= 3:
+        reason = f"killed {org_killed}x org-wide, never confirmed"
+    else:
+        return current, ""
+    idx = min(order.index(current) + 1, len(order) - 1)
+    return order[idx], reason
+
+
+def record_methodology_outcome(
+    session_id: str,
+    organization_id: int,
+    methodology_id: str,
+    outcome: str,
+    target: str = "",
+    cwe_ids: Optional[List[str]] = None,
+) -> None:
+    """Persist that a methodology card was proven/killed/inconclusive this run.
+
+    A later session can then demote a card that a similar surface has
+    repeatedly killed — turning cross-session storage into cross-session
+    planning. Fire-and-forget; a no-op when Neo4j is unavailable.
+    """
+    driver = _get_driver()
+    if not driver or not methodology_id or outcome not in ("confirmed", "killed", "inconclusive"):
+        return
+    try:
+        with driver.session() as s:
+            s.run(
+                """
+                MATCH (c:AgentChain {session_id: $sid})
+                CREATE (o:MethodologyOutcome {
+                    organization_id: $org,
+                    session_id:      $sid,
+                    methodology_id:  $mid,
+                    signature:       $sig,
+                    cwe:             $cwe,
+                    outcome:         $outcome,
+                    created_at:      $ts
+                })
+                MERGE (c)-[:LEARNED]->(o)
+                """,
+                sid=session_id, org=organization_id, mid=methodology_id,
+                sig=methodology_signature(target), cwe=",".join(cwe_ids or [])[:200],
+                outcome=outcome, ts=_now_iso(),
+            )
+    except Exception as e:
+        logger.debug(f"EvoGraph record_methodology_outcome error: {e}")
+
+
 def record_chain_end(
     session_id: str,
     status: str = "completed",
@@ -349,6 +427,56 @@ def get_prior_chain_context(
     except Exception as e:
         logger.debug(f"EvoGraph get_prior_chain_context error: {e}")
         return ""
+
+
+def get_methodology_priors(
+    organization_id: int,
+    target: str = "",
+    max_rows: int = 200,
+) -> Dict[str, Dict[str, int]]:
+    """Per-methodology outcome counts for an org, split by same-target vs org-wide.
+
+    Returns ``{methodology_id: {killed, confirmed, inconclusive,
+    same_target_killed, same_target_confirmed}}``. Empty when Neo4j is down, so
+    callers degrade to the card's default priority.
+    """
+    driver = _get_driver()
+    if not driver:
+        return {}
+    signature = methodology_signature(target)
+    priors: Dict[str, Dict[str, int]] = {}
+    try:
+        with driver.session() as s:
+            rows = s.run(
+                """
+                MATCH (o:MethodologyOutcome {organization_id: $org})
+                RETURN o.methodology_id AS mid,
+                       o.outcome AS outcome,
+                       o.signature AS signature
+                ORDER BY o.created_at DESC
+                LIMIT $limit
+                """,
+                org=organization_id, limit=max_rows,
+            ).data()
+        for row in rows:
+            mid = str(row.get("mid") or "")
+            outcome = str(row.get("outcome") or "")
+            if not mid or outcome not in ("killed", "confirmed", "inconclusive"):
+                continue
+            bucket = priors.setdefault(mid, {
+                "killed": 0, "confirmed": 0, "inconclusive": 0,
+                "same_target_killed": 0, "same_target_confirmed": 0,
+            })
+            bucket[outcome] += 1
+            if signature and row.get("signature") == signature:
+                if outcome == "killed":
+                    bucket["same_target_killed"] += 1
+                elif outcome == "confirmed":
+                    bucket["same_target_confirmed"] += 1
+    except Exception as e:
+        logger.debug(f"EvoGraph get_methodology_priors error: {e}")
+        return {}
+    return priors
 
 
 def get_session_chain(session_id: str) -> Dict[str, Any]:
