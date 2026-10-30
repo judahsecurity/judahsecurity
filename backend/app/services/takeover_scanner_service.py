@@ -733,8 +733,13 @@ def persist_takeover_findings(
         Vulnerability,
         VulnerabilityStatus,
     )
+    from app.services.reactivation_service import (
+        reactivate_if_closed,
+        trigger_jira_reopen_background,
+    )
 
-    summary = {"created": 0, "updated": 0, "skipped": 0}
+    summary = {"created": 0, "updated": 0, "reactivated": 0, "skipped": 0}
+    reactivations: list[tuple[int, str]] = []
 
     for finding in result.findings:
         asset = (
@@ -784,6 +789,10 @@ def persist_takeover_findings(
             "nuclei_template": finding.nuclei_template,
             "auto_exploit": finding.auto_exploit,
         }
+        # A confirmed verdict means the CNAME is dangling and the provider's
+        # unclaimed-resource signature matched; the DNS misconfiguration IS the
+        # vulnerability, so no exploit payload is needed.
+        dc = "endpoint_confirmed" if finding.verdict == "confirmed" else "version_only"
 
         description = (
             f"Hostname `{finding.hostname}` points to {finding.provider} but the "
@@ -798,15 +807,14 @@ def persist_takeover_findings(
             existing.metadata_ = meta
             existing.evidence = finding.evidence or existing.evidence
             existing.description = description
-            existing.status = VulnerabilityStatus.OPEN
+            existing.detection_confidence = dc
+            # Redetection reopens closed findings; analyst work in progress stays.
+            old_status = existing.status.value
+            if reactivate_if_closed(existing):
+                reactivations.append((existing.id, old_status))
+                summary["reactivated"] += 1
             summary["updated"] += 1
         else:
-            # High-confidence takeover = endpoint_confirmed: the scanner
-            # verified the CNAME is dangling and the resource is unclaimed.
-            # A subdomain takeover doesn't need an exploit payload — the DNS
-            # misconfiguration IS the vulnerability, and it's confirmed reachable.
-            dc = "endpoint_confirmed" if finding.confidence in ("high", "confirmed") else "version_only"
-
             vuln = Vulnerability(
                 title=title,
                 description=description,
@@ -834,6 +842,8 @@ def persist_takeover_findings(
             summary["created"] += 1
 
     db.commit()
+    for vuln_id, old_status in reactivations:
+        trigger_jira_reopen_background(vuln_id, old_status)
     return summary
 
 
