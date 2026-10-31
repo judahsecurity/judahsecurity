@@ -624,6 +624,8 @@ def apply_oracle_migrations():
         # Promoted from metadata_["oracle"] JSON for efficient querying/sorting.
         # Each statement uses ADD COLUMN IF NOT EXISTS so it's safe to re-run.
         "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS detection_confidence   VARCHAR(50) DEFAULT 'unknown'",
+        "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS verification_level     VARCHAR(30)",
+        "CREATE INDEX IF NOT EXISTS ix_vuln_verification_level ON vulnerabilities (verification_level)",
         "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS oracle_opes_score      FLOAT",
         "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS oracle_opes_category   VARCHAR(50)",
         "ALTER TABLE vulnerabilities ADD COLUMN IF NOT EXISTS oracle_opes_label      VARCHAR(100)",

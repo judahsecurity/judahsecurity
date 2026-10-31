@@ -307,6 +307,7 @@ def publish_finding(
         detected_by="PROWL", proof_of_concept=_memory_target(packet.target),
         steps_to_reproduce=_reproduction_steps(packet, proof_kind),
         detection_confidence="endpoint_confirmed" if proof_kind == "public_directory_index" else "exploit_confirmed",
+        verification_level="exploit_verified",
         evidence=json.dumps([row.model_dump() for row in packet.observations], sort_keys=True),
         metadata_=metadata, status=VulnerabilityStatus.OPEN,
     )

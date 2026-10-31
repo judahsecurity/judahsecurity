@@ -107,6 +107,54 @@ def severity_requires_gate(severity: Optional[str]) -> bool:
     return (severity or "info").strip().lower() in _GATE_SEVERITIES
 
 
+_VERIFICATION_LEVELS = frozenset({"source_verified", "exploit_verified"})
+_SOURCE_SCANNERS = ("semgrep", "gitleaks", "trivy", "retire.js", "retirejs", "sast")
+
+
+def classify_verification_level(
+    *,
+    runtime_confirmed: bool,
+    explicit: Optional[str] = None,
+    detected_by: Optional[str] = None,
+    specialist: Optional[str] = None,
+    evidence: Optional[str] = None,
+) -> Optional[str]:
+    """Label how a finding was verified.
+
+    ``exploit_verified`` means the independent verifier reproduced it against
+    the running target. ``source_verified`` means a static / source-only
+    finding (SAST) with a reachable-exploit argument but no runtime
+    reproduction. A finding not reproduced at runtime can never claim
+    ``exploit_verified``, whatever the caller passes. Returns ``None`` when the
+    finding is neither runtime-confirmed nor recognizably source-derived.
+    """
+    if runtime_confirmed:
+        return "exploit_verified"
+    if (explicit or "").strip().lower() == "source_verified":
+        return "source_verified"
+    blob = " ".join(x for x in (detected_by, specialist, evidence) if x).lower()
+    if (specialist or "").strip().lower() == "code_sast" or any(
+        scanner in blob for scanner in _SOURCE_SCANNERS
+    ):
+        return "source_verified"
+    return None
+
+
+def cap_source_verified_severity(
+    severity: Optional[str], verification_level: Optional[str]
+) -> Tuple[str, bool]:
+    """Bound an un-exploited source finding's agent-published severity.
+
+    A ``source_verified`` finding has no runtime reproduction, so it is not
+    filed as high/critical; it is capped at ``medium`` until an exploit proof
+    upgrades it. Returns ``(effective_severity, was_capped)``.
+    """
+    normalized = (severity or "info").strip().lower()
+    if verification_level == "source_verified" and normalized in {"critical", "high"}:
+        return "medium", True
+    return normalized, False
+
+
 def record_submit_receipt(
     store: Dict[str, Dict[str, Any]],
     *,

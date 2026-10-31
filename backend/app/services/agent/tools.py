@@ -4080,6 +4080,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
           Complete is blocked while RA is pending.
         Default/weak login alone is not a finding until privileged impact is proven.
         If demonstrated_chain is omitted, the last live execute_* calls against this target are attached.
+        - verification_level: pass "source_verified" for a static/source-only (SAST) finding
+          with a reachable-exploit argument but no runtime reproduction. Such findings are
+          capped at medium severity until a runtime proof upgrades them. A finding confirmed
+          by the independent verifier is recorded as "exploit_verified" automatically; you
+          cannot claim exploit_verified without that runtime proof.
         """
         from app.services.agent.independent_verify import finding_publish_allowed
 
@@ -4110,6 +4115,26 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             )
             if not valid_claim:
                 return mismatch
+
+        # Label how the finding was verified, and bound an un-exploited source
+        # finding so a SAST lead cannot be filed as high/critical without a
+        # runtime proof.
+        from app.services.agent.finding_gate import (
+            cap_source_verified_severity,
+            classify_verification_level,
+        )
+
+        verification_level = classify_verification_level(
+            runtime_confirmed=verified is not None,
+            explicit=kwargs.get("verification_level"),
+            detected_by="agent",
+            specialist=kwargs.get("specialist"),
+            evidence=evidence,
+        )
+        requested_severity = (severity or "info").strip().lower()
+        severity, severity_capped = cap_source_verified_severity(
+            severity, verification_level
+        )
 
         # Normalize target for asset lookup: strip scheme and path
         target_clean = (target or "").strip()
@@ -4188,8 +4213,15 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 affected_component=(str(component)[:1000] if component else None),
                 impact=(str(impact_text)[:5000] if impact_text else None),
                 references=parsed_refs or None,
+                verification_level=verification_level,
                 metadata_={"agent_detection": agent_detection,
                            "verification": self._verify_receipts.get(verify_receipt_key(title, target)) if str(gate_msg).startswith("verify_ok") else None,
+                           "verification_level": verification_level,
+                           "severity_cap": {"requested": requested_severity,
+                                            "published": severity,
+                                            "reason": "source_verified findings are "
+                                            "capped at medium without a runtime proof"}
+                           if severity_capped else None,
                            "trace": trace_metadata},
             )
             db.add(vuln)

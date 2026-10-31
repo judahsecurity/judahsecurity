@@ -27,6 +27,8 @@ account loses organization access, the worker records a schedule error.
 
 The product agent now requires execution-owned evidence before publishing medium-or-higher findings. These checks apply to both direct orchestration and fireteam discovery. `skip_judge_gate` and the old verification-disable environment flag do not bypass publication.
 
+Each published finding records a `verification_level`. A finding the independent verifier reproduced against the running target is `exploit_verified`; a static/source-only finding (SAST: Semgrep, Gitleaks, Trivy) with a reachable-exploit argument but no runtime reproduction is `source_verified`. A finding that was not reproduced at runtime cannot claim `exploit_verified`, whatever the caller passes. Agent-published `source_verified` findings are capped at `medium` severity (the requested severity and the cap reason are kept in finding metadata) until a runtime proof upgrades them, so a source lead cannot be filed as high or critical on static evidence alone.
+
 ## Execution and verification
 
 `replay_http_request` and `compare_requests` return an `evidence_id` for each HTTP exchange. Browser XSS checks and Interactsh registration/polling return `evidence_ids`. `read_evidence(evidence_id, offset, limit)` retrieves observations beyond the specialist's preview.
@@ -59,6 +61,7 @@ Candidates now carry `vulnerability_class`. Hunters can set it on `submit_findin
 | `authorization` | `authorization`, `owner_only`, `state_change`, `workflow` |
 | `ssrf` | `oob_callback` |
 | `xxe` | `oob_callback` only for an approved, browser-captured XML POST with an external entity and a fresh matching callback |
+| `cors` | `scoped_cors_credentialed` — two distinct-nonce control/probe pairs where a never-seen canary origin is echoed with `Access-Control-Allow-Credentials: true` |
 
 `command_injection`, `path_traversal`, `csrf`, `known_cve`, and `account_enumeration` have no confirmation recipe yet. Keep these candidates inconclusive until a dedicated validator demonstrates the claimed behavior. Version-in-range is a CVE applicability lead; the separate named-CVE applicability workflow reports that classification and must not be read as exploit verification. Assessment progress includes counts of pending, confirmed, refuted, and inconclusive candidates, plus concise inconclusive reasons.
 
@@ -154,6 +157,8 @@ For string GET SQLi returning a small JSON result array, the scoped proof checks
 The first-pass batch receives the active assessment target from the scheduler. It runs only when the saved capability map names that origin and leases only cells on that origin; a stale map returns `assessment_target_mismatch` without network probes. Resumed assessments continue pending first passes on their current target before completion, without restarting the broad crawl.
 
 Client-side JavaScript leads now receive one source-bound browser probe when an observed rendering page and query field or fragment are available. The scoped probe uses fixed markers to observe DOM navigation, link or text changes, request URL changes, client template evaluation, and prototype pollution. A behavior observation stays a candidate lead until its security impact is independently verified. A script with no observed rendering page remains inconclusive.
+
+An endpoint assigned to `cors` receives a no-`Origin` control and a probe carrying a never-seen, nonce-bound canary origin. `scoped_cors_probe_assigned` confirms a signal only when the response echoes that exact origin with `Access-Control-Allow-Credentials: true`; a wildcard `Access-Control-Allow-Origin` or a reflected known origin is not this bug. The independent verifier repeats the credentialed reflection with a fresh canary before publication.
 
 Observed GET query inputs assigned to `crlf` or `open_redirect` receive an inert control and one fixed canary request. The response probe does not follow redirects and returns only header-marker and Location-canary booleans, never raw headers or body content. JavaScript dependency cells cover all observed first-party scripts. Their assigned Retire.js scan rejects redirects, compares the fetched bytes with the captured script hash when available, and treats a component/CVE match as a reachability lead rather than exploit proof. Scanner failures and changed script hashes remain inconclusive.
 

@@ -957,6 +957,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "get_threat_model first; hunt shapes from ranked threats. "
             "A Semgrep hit is a lead — require a reachable exploit scenario that "
             "instantiates a threat row before submit_finding_candidate. "
+            "Source-only findings are not runtime-exploited: set "
+            "verification_level='source_verified' (capped at medium until a runtime "
+            "proof upgrades them). "
             "Mitigated one layer up → kill. Never execute target binaries."
         ),
     ),
