@@ -20,7 +20,34 @@ def test_schema_migration_is_repeatable(monkeypatch):
     apply_agent_ledger_migration.apply()
     assert all(inspect(engine).has_table(name) for name in (
         "agent_run_ledger", "agent_action_receipts", "agent_hypothesis_coverage",
+        "agent_autonomy_work", "agent_run_snapshots",
     ))
+    assert "turn_started_at" in {
+        column["name"] for column in inspect(engine).get_columns("agent_autonomy_work")
+    }
+
+
+def test_migration_upgrades_legacy_autonomy_table(monkeypatch):
+    from sqlalchemy import create_engine, inspect, text
+    from sqlalchemy.pool import StaticPool
+
+    from app.models.organization import Organization
+    from app.models.user import User
+    from scripts import apply_agent_ledger_migration
+
+    engine = create_engine("sqlite://", poolclass=StaticPool)
+    Organization.metadata.create_all(bind=engine, tables=[Organization.__table__, User.__table__])
+    monkeypatch.setattr(apply_agent_ledger_migration, "engine", engine)
+    apply_agent_ledger_migration.apply()
+    with engine.begin() as connection:
+        connection.execute(text("ALTER TABLE agent_autonomy_work DROP COLUMN turn_started_at"))
+    assert "turn_started_at" not in {
+        column["name"] for column in inspect(engine).get_columns("agent_autonomy_work")
+    }
+    apply_agent_ledger_migration.apply()
+    assert "turn_started_at" in {
+        column["name"] for column in inspect(engine).get_columns("agent_autonomy_work")
+    }
 
 
 def test_terminal_partial_run_with_interrupted_action_is_reviewable():

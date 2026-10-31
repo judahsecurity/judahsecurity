@@ -729,10 +729,11 @@ class AgentOrchestrator:
                         )
                         streams = []
                     else:
+                        from app.services.agent.autonomy_limits import current_autonomy_limits
                         streams_coro = recon_workers.spawn_workers(
                             url=seed,
                             session_id=str(session_id or ""),
-                            pack="early",
+                            pack="autonomy_early" if current_autonomy_limits.get() else "early",
                             tools_manager=self.tool_manager,
                             user_id=uid_int,
                             organization_id=org_id if isinstance(org_id, int) else None,
@@ -1028,6 +1029,39 @@ class AgentOrchestrator:
                 out["current_phase"] = snap["current_phase"]
         except Exception:
             logger.debug("run snapshot resume skipped", exc_info=True)
+        # Hand off recent first-party takeover scanner observations to opted-in
+        # scheduled hunts. They remain leads until the normal proof gate runs.
+        try:
+            from app.services.agent.autonomy_limits import current_autonomy_limits
+            if current_autonomy_limits.get() and seed and org_id:
+                from datetime import datetime, timedelta
+                from app.db.database import SessionLocal
+                from app.models.scan import Scan, ScanStatus, ScanType
+                from app.services.agent.assessment_scope import allowed_hosts
+                from app.services.agent.engagement_brain import engagement_brain_from_dict
+                from app.services.agent.penetration_task_graph import sync_graph_from_brain
+                from app.services.agent.recon_observation_adapter import _allowed, ingest_event
+
+                brain = engagement_brain_from_dict(out.get("engagement_brain"))
+                scope_hosts = allowed_hosts(self.tool_manager)
+                with SessionLocal() as db:
+                    scans = db.query(Scan).filter(
+                        Scan.organization_id == org_id,
+                        Scan.scan_type == ScanType.SUBDOMAIN_TAKEOVER,
+                        Scan.status == ScanStatus.COMPLETED,
+                        Scan.completed_at >= datetime.utcnow() - timedelta(days=30),
+                    ).order_by(Scan.completed_at.desc()).limit(10).all()
+                    for scan in scans:
+                        for event in ((scan.results or {}).get("recon_observations") or [])[:100]:
+                            if isinstance(event, dict) and _allowed(
+                                str(event.get("host") or ""), scope_hosts,
+                            ):
+                                ingest_event(brain, event)
+                if brain.recon_observations:
+                    sync_graph_from_brain(brain)
+                    out["engagement_brain"] = brain.to_dict()
+        except Exception:
+            logger.debug("takeover scanner observation handoff skipped", exc_info=True)
         return out
     
     def _wordpress_hunt_note(self, state: AgentState) -> str:
@@ -1281,12 +1315,40 @@ class AgentOrchestrator:
                 wait_sec=soft_wait,
             )
             discovered_urls: list[str] = []
+            dns_rows: list[dict] = []
+            httpx_rows: list[dict] = []
+            dns_evidence_ref = ""
+            httpx_evidence_ref = ""
             for item in newly:
                 brief = (item.get("brief") or "").strip()
                 if not brief:
                     continue
                 if item.get("status") == "completed":
                     discovered_urls.extend(item.get("urls") or [])
+                    dns_rows.extend(
+                        observation["row"] for observation in (item.get("observations") or [])
+                        if isinstance(observation, dict)
+                        and observation.get("type") == "DNSX_ROW"
+                        and isinstance(observation.get("row"), dict)
+                    )
+                    httpx_rows.extend(
+                        observation["row"] for observation in (item.get("observations") or [])
+                        if isinstance(observation, dict)
+                        and observation.get("type") == "HTTPX_ROW"
+                        and isinstance(observation.get("row"), dict)
+                    )
+                    dns_evidence_ref = dns_evidence_ref or next((
+                        str(observation.get("evidence_ref") or "")
+                        for observation in (item.get("observations") or [])
+                        if isinstance(observation, dict) and observation.get("type") == "DNSX_ROW"
+                        and observation.get("evidence_ref")
+                    ), "")
+                    httpx_evidence_ref = httpx_evidence_ref or next((
+                        str(observation.get("evidence_ref") or "")
+                        for observation in (item.get("observations") or [])
+                        if isinstance(observation, dict) and observation.get("type") == "HTTPX_ROW"
+                        and observation.get("evidence_ref")
+                    ), "")
                 drained_briefs.append(brief)
                 drain_trace_extra.append(
                     ExecutionStep(
@@ -1307,7 +1369,7 @@ class AgentOrchestrator:
                     "phase": phase,
                     "thought": f"Recon stream [{item.get('kind')}] results ready",
                 })
-            if discovered_urls:
+            if discovered_urls or dns_rows or httpx_rows:
                 from app.services.agent.capability_map import ingest_passive_urls
                 from app.services.agent.engagement_brain import (
                     engagement_brain_from_dict,
@@ -1321,15 +1383,32 @@ class AgentOrchestrator:
                     if isinstance(existing_map, dict) else ""
                 ) or (state.get("target_info") or {}).get("primary_target") or ""
                 new_map = ingest_passive_urls(
-                    existing_map,
-                    discovered_urls,
-                    target=target,
+                    existing_map, discovered_urls, target=target,
                     source="parallel_recon",
-                )
+                ) if discovered_urls else existing_map
                 brain = engagement_brain_from_dict(state.get("engagement_brain"))
-                new_brain = seed_hypotheses_from_capability_map(
-                    brain, new_map
-                ).to_dict()
+                if discovered_urls:
+                    brain = seed_hypotheses_from_capability_map(brain, new_map)
+                from app.services.agent.assessment_scope import allowed_hosts
+                from app.services.agent.recon_observation_adapter import (
+                    ingest_capability_observations, ingest_dnsx_cnames, ingest_httpx_observations,
+                )
+                scope_hosts = allowed_hosts(self.tool_manager)
+                if discovered_urls and isinstance(new_map, dict):
+                    ingest_capability_observations(brain, new_map, scope_hosts=scope_hosts)
+                if dns_rows:
+                    ingest_dnsx_cnames(
+                        brain, "\n".join(json.dumps(row) for row in dns_rows[:100]),
+                        scope_hosts=scope_hosts, evidence_ref=dns_evidence_ref,
+                    )
+                if httpx_rows:
+                    ingest_httpx_observations(
+                        brain, "\n".join(json.dumps(row) for row in httpx_rows[:100]),
+                        scope_hosts=scope_hosts, evidence_ref=httpx_evidence_ref,
+                    )
+                from app.services.agent.penetration_task_graph import sync_graph_from_brain
+                sync_graph_from_brain(brain)
+                new_brain = brain.to_dict()
                 recon_map_update = new_map
                 recon_brain_update = new_brain
                 drain_trace_extra.append(
@@ -2835,6 +2914,49 @@ class AgentOrchestrator:
                 brain_update = brain.to_dict()
             except Exception:
                 logger.exception("auto-seed engagement brain failed")
+
+        # Recon leads enter the same durable hypothesis graph as browser leads.
+        # Tool output is treated as data: only parsed, in-scope DNS rows and
+        # first-party API paths can create hypothesis cards.
+        if step_data.get("success") and (
+            tool_name in {"execute_dnsx", "execute_httpx"} or updates.get("capability_map")
+        ):
+            try:
+                from app.services.agent.assessment_scope import allowed_hosts
+                from app.services.agent.engagement_brain import engagement_brain_from_dict
+                from app.services.agent.recon_observation_adapter import (
+                    ingest_capability_observations, ingest_dnsx_cnames, ingest_httpx_observations,
+                )
+
+                scope_hosts = allowed_hosts(self.tool_manager)
+                recon_brain = engagement_brain_from_dict(
+                    brain_update or state.get("engagement_brain")
+                )
+                added = 0
+                if tool_name == "execute_dnsx":
+                    added += ingest_dnsx_cnames(
+                        recon_brain, str(step_data.get("tool_output") or ""),
+                        scope_hosts=scope_hosts,
+                        evidence_ref=str(step_data.get("artifact_id") or ""),
+                    )
+                if tool_name == "execute_httpx":
+                    added += ingest_httpx_observations(
+                        recon_brain, str(step_data.get("tool_output") or ""),
+                        scope_hosts=scope_hosts,
+                        evidence_ref=str(step_data.get("artifact_id") or ""),
+                    )
+                if updates.get("capability_map"):
+                    added += ingest_capability_observations(
+                        recon_brain, updates["capability_map"],
+                        scope_hosts=scope_hosts,
+                        evidence_ref=str(step_data.get("artifact_id") or ""),
+                    )
+                if added:
+                    from app.services.agent.penetration_task_graph import sync_graph_from_brain
+                    sync_graph_from_brain(recon_brain)
+                    brain_update = recon_brain.to_dict()
+            except Exception:
+                logger.exception("recon observation handoff failed")
 
         if brain_update:
             updates["engagement_brain"] = brain_update

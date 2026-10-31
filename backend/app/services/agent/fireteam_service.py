@@ -19,12 +19,18 @@ import asyncio
 import inspect
 import json
 import logging
+import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Awaitable, Callable, Dict, Iterable, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Iterable, Optional
+from urllib.parse import urlsplit
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+if TYPE_CHECKING:
+    from app.services.agent.operation_directive import OperationDirective
 
 logger = logging.getLogger(__name__)
 
@@ -1090,6 +1096,7 @@ class SpecialistReport:
     key_findings: list[str] = field(default_factory=list)
     tool_calls: list[ToolInvocation] = field(default_factory=list)
     duration_seconds: float = 0.0
+    reported_spend_usd: float = 0.0
     error: Optional[str] = None
     verdict: str = ""                     # proven | killed | blocked | retry | inconclusive
     hypothesis_ids: list[str] = field(default_factory=list)
@@ -1384,7 +1391,25 @@ async def _run_specialist(
     messages.append(HumanMessage(content="Begin."))
 
     iteration = 0
+    max_tool_calls = directive.max_tool_calls if isinstance(directive, OperationDirective) else 0
+    budget = _SpecialistBudget(directive) if isinstance(directive, OperationDirective) else None
+    from app.services.agent.autonomy_limits import current_autonomy_limits
+    strict_scope = bool(current_autonomy_limits.get())
+    scope_target = (
+        directive.target if isinstance(directive, OperationDirective) else
+        target_list[0] if target_list else ""
+    ) if strict_scope else ""
     while iteration < max_iter:
+        if budget and directive.max_spend_usd and report.reported_spend_usd >= directive.max_spend_usd:
+            report.verdict = "inconclusive"
+            report.rewrite_hint = "specialist reported spend budget exhausted"
+            report.summary = "Stopped at the specialist reported spend threshold."
+            break
+        if max_tool_calls and len(report.tool_calls) >= max_tool_calls:
+            report.verdict = "inconclusive"
+            report.rewrite_hint = "specialist tool budget exhausted"
+            report.summary = f"Stopped after {max_tool_calls} tool calls; remaining checks are open."
+            break
         iteration += 1
         try:
             from app.services.agent.orchestrator import _ledger_llm_call
@@ -1394,6 +1419,18 @@ async def _run_specialist(
                 target=target_list[0] if target_list else "",
                 phase=profile.name,
             )
+            if budget and directive.max_spend_usd:
+                from app.services.agent.observability import estimate_cost_usd, usage_from_llm_response
+                usage = usage_from_llm_response(response)
+                model = str(getattr(llm, "model_name", "") or getattr(llm, "model", "") or "")
+                report.reported_spend_usd += estimate_cost_usd(
+                    model, usage["input_tokens"], usage["output_tokens"],
+                )
+                if report.reported_spend_usd >= directive.max_spend_usd:
+                    report.verdict = "inconclusive"
+                    report.rewrite_hint = "specialist reported spend budget exhausted"
+                    report.summary = "Stopped after the model call reached the reported spend threshold."
+                    break
         except Exception as exc:
             logger.warning("fireteam %s: LLM failure: %s", profile.name, exc)
             report.error = f"LLM error: {exc}"
@@ -1422,6 +1459,10 @@ async def _run_specialist(
 
         # Enforce allowlist + max parallelism per turn.
         tool_calls = [tc for tc in tool_calls if tc.get("tool") in allowed_tools][: profile.max_tools_per_iteration]
+        if budget and directive.max_parallel_tool_calls:
+            tool_calls = tool_calls[:directive.max_parallel_tool_calls]
+        if max_tool_calls:
+            tool_calls = tool_calls[:max_tool_calls - len(report.tool_calls)]
 
         if not tool_calls:
             messages.append(HumanMessage(
@@ -1435,7 +1476,11 @@ async def _run_specialist(
             # effect. Completed batches are safe to resume from the ledger.
             execution_progress["tool_inflight"] = True
         tool_results = await asyncio.gather(*(
-            _safe_invoke(tools_manager, tc.get("tool", ""), tc.get("args") or {})
+            _safe_invoke(
+                tools_manager, tc.get("tool", ""), tc.get("args") or {},
+                scope_target=scope_target,
+                budget=budget,
+            )
             for tc in tool_calls
         ))
         if execution_progress is not None:
@@ -1484,7 +1529,106 @@ async def _run_specialist(
     return report
 
 
-async def _safe_invoke(tools_manager: Any, tool_name: str, args: dict) -> ToolInvocation:
+def _out_of_scope_url(args: dict, target: str) -> str:
+    """Reject an explicit cross-host URL before a scheduled specialist tool call."""
+    allowed = urlsplit(target if "://" in target else f"https://{target}").hostname
+    if not allowed:
+        return "invalid specialist target"
+    # The existing assessment scope checks resolved destinations; this catches
+    # a specialist's explicit URL argument before any tool is invoked.
+    for candidate in re.findall(r'https?://[^\s"\'<>},]+', json.dumps(args or {})):
+        host = urlsplit(candidate.rstrip(".)")).hostname
+        if host and host.lower().rstrip(".") != allowed.lower().rstrip("."):
+            return host
+    return ""
+
+
+def _requested_identities(value: Any) -> set[str]:
+    found: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key in {"identity", "identity_a", "identity_b", "requester_identity", "actor_identity"} and isinstance(item, str):
+                found.add(item)
+            else:
+                found.update(_requested_identities(item))
+    elif isinstance(value, list):
+        for item in value:
+            found.update(_requested_identities(item))
+    return found
+
+
+def _action_kind(tool_name: str, args: dict) -> str:
+    if (tool_name.startswith(("get_", "list_", "query_", "read_", "search_"))
+            or tool_name in {"execute_dnsx", "execute_httpx", "execute_whatweb", "execute_wafw00f"}):
+        return "read"
+    if tool_name in {"mutate_captured_request", "run_intruder_batch", "execute_hydra", "execute_brutus", "test_credential_spray"}:
+        return "state_change"
+    if tool_name in {"execute_browser", "execute_curl", "replay_http_request", "run_assessment_workflow"}:
+        blob = json.dumps(args or {}).lower()
+        if any(token in blob for token in ('"post"', '"put"', '"patch"', '"delete"', "-x post", "-x put", "-x delete", '"click"', '"fill"', '"submit"')):
+            return "state_change"
+    return "probe"
+
+
+class _SpecialistBudget:
+    def __init__(self, directive: OperationDirective):
+        self.directive = directive
+        self.count = 0
+        self.next_at = 0.0
+        self.lock = asyncio.Lock()
+
+    async def acquire(self, tool_name: str, args: dict) -> str:
+        directive = self.directive
+        if _action_kind(tool_name, args) not in set(directive.allowed_actions or []):
+            return "specialist_action_denied"
+        if _requested_identities(args) - set(directive.allowed_identities or []):
+            return "specialist_identity_denied"
+        if directive.allowed_hosts:
+            for host in re.findall(r'https?://[^\s"\'<>},]+', json.dumps(args or {})):
+                parsed = urlsplit(host.rstrip(".)"))
+                if parsed.hostname and not any(
+                    parsed.hostname.lower().rstrip(".") == allowed.lower().rstrip(".")
+                    or (allowed.startswith("*.") and parsed.hostname.lower().rstrip(".").endswith(allowed[1:].lower()))
+                    for allowed in directive.allowed_hosts
+                ):
+                    return "specialist_scope_denied"
+        async with self.lock:
+            if directive.max_requests and self.count >= directive.max_requests:
+                return "specialist_request_budget_exhausted"
+            delay = self.next_at - time.monotonic()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            self.count += 1
+            self.next_at = time.monotonic() + max(0, directive.interval_ms) / 1000
+        return ""
+
+
+async def _safe_invoke(
+    tools_manager: Any, tool_name: str, args: dict, *, scope_target: str = "",
+    budget: _SpecialistBudget | None = None,
+) -> ToolInvocation:
+    def denied_receipt(code: str) -> ToolInvocation:
+        from app.services.agent.action_ledger import active_run_id, append_action
+
+        append_action(
+            active_run_id.get(), uuid.uuid4().hex, "skipped", tool_name,
+            target=scope_target or (budget.directive.target if budget else ""),
+            phase=budget.directive.specialist if budget else "specialist",
+            detail=code,
+        )
+        return ToolInvocation(
+            tool=tool_name, args=args or {}, success=False,
+            summary=f"Specialist contract denied: {code}", error=code,
+        )
+
+    if scope_target:
+        denied = _out_of_scope_url(args, scope_target)
+        if denied:
+            return denied_receipt("specialist_scope_denied")
+    if budget:
+        denied = await budget.acquire(tool_name, args)
+        if denied:
+            return denied_receipt(denied)
     try:
         result = await tools_manager.execute(tool_name, args or {})
         success = bool(result.get("success"))
@@ -1674,8 +1818,13 @@ async def run_fireteam(
                 execution_progress=execution_progress,
             ))
             try:
+                directive = directives.get(p.name)
+                member_cap = min(
+                    member_timeout_sec,
+                    float(getattr(directive, "max_seconds", 0) or member_timeout_sec),
+                )
                 done, _ = await asyncio.wait(
-                    {member_task}, timeout=max(0.01, member_timeout_sec)
+                    {member_task}, timeout=max(0.01, member_cap)
                 )
                 if done:
                     rep = member_task.result()
@@ -1683,7 +1832,7 @@ async def run_fireteam(
                     member_task.cancel()
                     member_task.add_done_callback(_log_late_failure)
                     rep = _interrupted_report(
-                        p, f"specialist timed out after {member_timeout_sec:g}s",
+                        p, f"specialist timed out after {member_cap:g}s",
                         execution_progress=execution_progress,
                     )
             except asyncio.CancelledError:

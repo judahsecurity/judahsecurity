@@ -1155,23 +1155,49 @@ def _ready_hypothesis_wave(
     selected = ready_wave(graph, max_specialists=4)
     if not selected:
         return None
-    # A specialist lease picks its highest-priority ready node. Do not force a
-    # wave when that specialist has a node aimed at a different origin.
+    # A specialist lease picks its highest-priority ready node. Group the
+    # actual next leases by origin so a scoped recon subdomain is dispatched
+    # with its own target rather than silently dropped from the web run.
     by_id = {h.id: h for h in brain.hypotheses}
-    selected = [name for name in selected if all(
-        not by_id[node.id].target or _origin(by_id[node.id].target) == target_origin
-        for node in graph.nodes.values()
-        if node.status == NODE_READY and node.specialist == name and node.id in by_id
-    )]
+    priority = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    recon_hosts = {
+        str(row.get("host") or "")
+        for row in brain.recon_observations
+        if isinstance(row, dict) and row.get("kind") == "dns_cname"
+    }
+    groups: dict[str, list[str]] = {}
+    for name in selected:
+        candidates = [
+            node for node in graph.nodes.values()
+            if node.status == NODE_READY and node.specialist == name and node.id in by_id
+        ]
+        candidates.sort(key=lambda node: (
+            priority.get(node.priority, 9), node.attempts, node.title, node.id,
+        ))
+        if not candidates:
+            continue
+        hypothesis = by_id[candidates[0].id]
+        origin = _origin(hypothesis.target) if hypothesis.target else target_origin
+        from urllib.parse import urlsplit
+        host = urlsplit(origin).hostname or ""
+        if origin != target_origin and not (
+            hypothesis.source == "recon" and host in recon_hosts
+        ):
+            continue
+        groups.setdefault(origin, []).append(name)
+    dispatch_origin = target_origin if groups.get(target_origin) else next(iter(groups), "")
+    selected = groups.get(dispatch_origin, [])[:4]
     if not selected:
         return None
     ready = sorted(
         (node.id, node.attempts, node.specialist)
         for node in graph.nodes.values()
         if node.status == NODE_READY and node.specialist in selected
+        and node.id in by_id
+        and (_origin(by_id[node.id].target) if by_id[node.id].target else target_origin) == dispatch_origin
     )
     signature = hashlib.sha256(
-        json.dumps(ready, separators=(",", ":")).encode()
+        json.dumps([dispatch_origin, ready], separators=(",", ":")).encode()
     ).hexdigest()[:16]
     wave_steps = [
         step for step in trace
@@ -1187,7 +1213,7 @@ def _ready_hypothesis_wave(
     return {
         "tool_name": "fireteam_dispatch",
         "tool_args": {
-            "specialists": selected, "targets": [target], "mode": "attack",
+            "specialists": selected, "targets": [dispatch_origin], "mode": "attack",
             "hypothesis_signature": signature,
         },
         "thought": "New ready hypotheses need a bounded specialist wave.",

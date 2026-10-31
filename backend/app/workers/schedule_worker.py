@@ -539,6 +539,20 @@ class ScheduleWorker:
             schedule.consecutive_failures = (schedule.consecutive_failures or 0) + 1
             db.commit()
             return
+        if cfg.get("autonomous_followup") is True:
+            from app.services.agent.durable_hunt import enqueue_scheduled_hunts
+
+            created = enqueue_scheduled_hunts(
+                db, schedule, urls, user_id=operator.id,
+            )
+            schedule.last_run_at = datetime.now(timezone.utc)
+            schedule.run_count = (schedule.run_count or 0) + 1
+            schedule.next_run_at = schedule.calculate_next_run()
+            schedule.last_error = None
+            schedule.consecutive_failures = 0
+            db.commit()
+            logger.info("Queued %s durable tester-process target(s) for schedule %s", created, schedule.id)
+            return
         result = await run_tester_process_targets(
             organization_id=schedule.organization_id,
             user_id=str(operator.id),

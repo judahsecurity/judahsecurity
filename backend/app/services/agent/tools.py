@@ -10032,6 +10032,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             specialists_from_open_hypotheses,
         )
         from app.services.agent.fireteam_service import run_fireteam
+        from app.services.agent.autonomy_limits import current_autonomy_limits
         import time as _time
         from app.services.agent.coverage_cells import CELL_OPEN, seed_js_coverage_cells, seed_parameter_coverage_cells
         from app.services.agent.penetration_task_graph import (
@@ -10049,6 +10050,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         # specialist wave, optional rewrite, and final verification inside it
         # so completed reports and leases are reconciled before returning.
         outer_cap = max(1.0, float(getattr(settings, "AGENT_TOOL_HARD_TIMEOUT_SECONDS", 600) or 600))
+        autonomy_limits = current_autonomy_limits.get()
+        if autonomy_limits:
+            max_parallel = min(max(1, int(max_parallel)), autonomy_limits.max_parallel_specialists)
         outer_margin = min(60.0, outer_cap * 0.1)
         dispatch_deadline = _time.monotonic() + outer_cap - outer_margin
         reserve = min(180.0, outer_cap * 0.3)

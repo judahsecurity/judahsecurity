@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 
 from app.services.agent.aegis_pantheon import epithet_for, pantheon_line
+from app.services.agent.autonomy_limits import current_autonomy_limits
 from app.services.agent.coverage_cells import lead_packet_for_cell, scoped_replay_eligible
 
 
@@ -34,6 +35,15 @@ class OperationDirective:
     capec_ids: List[str] = field(default_factory=list)
     owasp: List[str] = field(default_factory=list)
     max_iterations: int = 6
+    max_tool_calls: int = 0  # Zero keeps existing interactive behavior.
+    max_seconds: int = 0
+    allowed_hosts: List[str] = field(default_factory=list)
+    allowed_identities: List[str] = field(default_factory=list)
+    allowed_actions: List[str] = field(default_factory=list)
+    max_requests: int = 0
+    max_parallel_tool_calls: int = 0
+    interval_ms: int = 0
+    max_spend_usd: float = 0.0
     priority: str = "medium"
     rewrite_note: str = ""
     brain_slice: str = ""
@@ -76,6 +86,14 @@ class OperationDirective:
             f"- Coverage cell: {self.coverage_cell_id or 'unassigned'}\n"
             f"- Coverage lease: {self.coverage_lease_id or 'unleased'}\n"
             f"- Max iterations: {self.max_iterations}\n"
+            f"- Max tool calls: {self.max_tool_calls or 'profile default'}\n"
+            f"- Time limit: {self.max_seconds or 'wave default'} seconds\n"
+            f"- Scope hosts: {', '.join(self.allowed_hosts) or self.target}\n"
+            f"- Identities: {', '.join(self.allowed_identities) or 'engagement default'}\n"
+            f"- Actions: {', '.join(self.allowed_actions) or 'engagement default'}\n"
+            f"- Request starts: {self.max_requests or 'engagement default'}, spacing {self.interval_ms or 0} ms\n"
+            f"- Parallel tool calls: {self.max_parallel_tool_calls or 'profile default'}\n"
+            f"- Reported spend limit: ${self.max_spend_usd:.2f}\n"
             f"- Priority: {self.priority}\n"
             f"- Allowed tools: {tools}\n"
             "Rules: stay in lane; do not call fireteam_dispatch; "
@@ -289,6 +307,7 @@ def directives_from_hypotheses(
         h for h in getattr(brain, "hypotheses", []) or []
         if getattr(h, "status", "") in ("open", "in_progress")
     ]
+    limits = current_autonomy_limits.get()
     out: Dict[str, OperationDirective] = {}
     for name in specialists:
         profile = profiles_by_name.get(name)
@@ -429,7 +448,7 @@ def directives_from_hypotheses(
                 if ow and ow not in owasps:
                     owasps.append(ow)
             priority = h0.priority
-            target = default_target or ""
+            target = h0.target or default_target or ""
         else:
             goal = profile.role.split(".")[0][:200]
             assumption = ""
@@ -465,6 +484,15 @@ def directives_from_hypotheses(
             capec_ids=capecs,
             owasp=owasps,
             max_iterations=int(getattr(profile, "max_iterations", 6) or 6),
+            max_tool_calls=limits.max_specialist_tool_calls if limits else 0,
+            max_seconds=limits.max_specialist_seconds if limits else 0,
+            allowed_hosts=list(limits.allowed_hosts) if limits else [],
+            allowed_identities=list(limits.allowed_identities) if limits else [],
+            allowed_actions=list(limits.allowed_actions) if limits else [],
+            max_requests=limits.max_specialist_requests if limits else 0,
+            max_parallel_tool_calls=limits.max_parallel_tool_calls if limits else 0,
+            interval_ms=limits.specialist_interval_ms if limits else 0,
+            max_spend_usd=limits.max_specialist_spend_usd if limits else 0.0,
             priority=priority,
             lease_id=lease_id,
             coverage_cell_id=coverage_cell_id,

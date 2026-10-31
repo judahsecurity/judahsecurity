@@ -7132,6 +7132,10 @@ class ScannerWorker:
 
             by_provider: dict[str, int] = {}
             by_severity: dict[str, int] = {}
+            from app.services.agent.recon_observation_adapter import takeover_finding_events
+            recon_observations = takeover_finding_events(
+                result.findings, scope_hosts=hostnames, evidence_ref=f"scan:{scan_id}",
+            )
             for f in result.findings:
                 by_provider[f.provider] = by_provider.get(f.provider, 0) + 1
                 sev = "high" if f.verdict == "confirmed" else ("low" if f.verdict == "manual_review" else "medium")
@@ -7152,6 +7156,7 @@ class ScannerWorker:
                     "by_severity": by_severity,
                     "errors": result.errors,
                     "persist": persist_summary,
+                    "recon_observations": recon_observations,
                 }
             db.commit()
 

@@ -166,7 +166,7 @@ async def test_scheduled_hunt_needs_opt_in_for_followup(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_schedule_worker_uses_creator_id_and_explicit_followup_opt_in(monkeypatch):
-    import app.services.agent.scheduled_hunt as hunt_module
+    import app.services.agent.durable_hunt as hunt_module
     from app.models.user import UserRole
     from app.workers.schedule_worker import ScheduleWorker
 
@@ -187,11 +187,11 @@ async def test_schedule_worker_uses_creator_id_and_explicit_followup_opt_in(monk
         def commit(self):
             pass
 
-    async def fake_run(**kwargs):
-        calls.append(kwargs)
-        return {"results": [{"target": TARGET, "complete": True}], "digest": "done"}
+    def fake_enqueue(db, schedule, targets, *, user_id):
+        calls.append({"schedule": schedule, "targets": targets, "user_id": user_id})
+        return 1
 
-    monkeypatch.setattr(hunt_module, "run_tester_process_targets", fake_run)
+    monkeypatch.setattr(hunt_module, "enqueue_scheduled_hunts", fake_enqueue)
     schedule = SimpleNamespace(
         id=9, organization_id=7, created_by="analyst", name="Autonomy pilot",
         config={"autonomous_followup": True},
@@ -202,8 +202,8 @@ async def test_schedule_worker_uses_creator_id_and_explicit_followup_opt_in(monk
     )
     worker = object.__new__(ScheduleWorker)
     await worker._run_tester_process_schedule(FakeDB(), schedule, [TARGET])
-    assert calls[0]["user_id"] == "11"
-    assert calls[0]["autonomous_followup"] is True
+    assert calls[0]["user_id"] == 11
+    assert calls[0]["targets"] == [TARGET]
     assert schedule.run_count == 1
 
 
