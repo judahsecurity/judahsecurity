@@ -31,6 +31,34 @@ COVERAGE_STATES = frozenset({
 _TESTED_STATES = frozenset({"tested_negative", "candidate", "validated", "rejected"})
 _IDENTITY_CLASSES = frozenset({"auth", "authz", "csrf", "business_logic", "oauth", "saml_sso"})
 
+# Which coverage vulnerability classes each parallel hunter owns, keyed by the
+# category slug derived from its name (`injection_hunter` -> `injection`). Used
+# to lease a focused, disjoint worklist to each specialist. A category that is
+# absent, or maps to an empty set, simply leases nothing and the hunter falls
+# back to the shared recon brief — so this map is a hint, never a gate.
+HUNTER_COVERAGE_CLASSES: Dict[str, frozenset] = {
+    "injection": frozenset({"sqli", "nosql", "command_injection", "ssti", "xxe", "crlf"}),
+    "xss": frozenset({"xss", "stored_xss"}),
+    "auth": frozenset({"auth"}),
+    "authz": frozenset({"authz"}),
+    "ssrf": frozenset({"ssrf"}),
+    "csrf": frozenset({"csrf"}),
+    "cors": frozenset({"cors"}),
+    "file_upload": frozenset({"file_upload"}),
+    "open_redirect": frozenset({"open_redirect", "path_traversal"}),
+    "race_condition": frozenset({"race_condition"}),
+    "business_logic": frozenset({"business_logic"}),
+    "oauth": frozenset({"oauth"}),
+    "llm_ai": frozenset({"llm_ai"}),
+    "saml_sso": frozenset({"saml_sso"}),
+    "host_header": frozenset({"crlf"}),
+}
+
+
+def coverage_classes_for(category: str) -> frozenset:
+    """Coverage classes a hunter category owns (empty set when unmapped)."""
+    return HUNTER_COVERAGE_CLASSES.get(str(category or "").strip().lower(), frozenset())
+
 _URLISH_RE = re.compile(
     r"(?:url|uri|href|src|callback|webhook|fetch|proxy|remote|avatar|image|feed)", re.I
 )
@@ -172,6 +200,7 @@ class CoverageLedger:
         self._records: Dict[tuple, dict] = {}
         self._lock = threading.RLock()
         self._planned_identities: List[str] = []
+        self._leases: Dict[str, List[tuple]] = {}
         for record in records or []:
             self._upsert(dict(record), planned=bool(record.get("planned", True)))
 
@@ -244,11 +273,56 @@ class CoverageLedger:
             _normalize_class(record.get("vulnerability_class")),
         )
 
-    def _upsert(self, record: dict, *, planned: bool) -> dict:
+    def _resolve_result_key(self, record: dict) -> tuple:
+        """Map a probe/finding result onto an existing planned cell when possible.
+
+        A deterministic result rarely reports the endpoint, identity, or
+        parameter exactly as the plan enumerated them (e.g. sqlmap reports
+        ``unspecified`` where the plan used ``anonymous``, or echoes the full
+        URL with its query string). Without reconciliation the result forks a
+        new ``planned=False`` row and the planned cell stays ``pending`` — so a
+        proven finding never closes its own cell. We attach the result to the
+        best matching planned row instead, relaxing only identity (never the
+        endpoint, class, method, or a concrete parameter).
+        """
+        exact = self._key(record)
+        if exact in self._records:
+            return exact
+        endpoint, method, identity, parameter, cls = exact
+        generic_identities = {"", "anonymous", "unspecified"}
+        best: Optional[tuple] = None
+        best_rank: Optional[tuple] = None
+        for key, row in self._records.items():
+            if not row.get("planned"):
+                continue
+            if key[4] != cls or key[0] != endpoint or key[1] != method:
+                continue
+            # Parameter must match, unless one side is endpoint-level scope.
+            if not (key[3] == parameter or key[3] == "endpoint" or parameter == "endpoint"):
+                continue
+            # Relax identity only between generic placeholders (e.g. a sqlmap
+            # result reporting "unspecified" closing an "anonymous" plan row).
+            # Never let a placeholder claim a named identity's cell, so
+            # identity-sensitive classes keep their per-identity gaps visible.
+            if key[2] != identity and not (
+                key[2] in generic_identities and identity in generic_identities
+            ):
+                continue
+            rank = (
+                key[2] != identity,                 # prefer same identity
+                key[3] != parameter,                # prefer the concrete parameter
+                row.get("state") not in {"pending", "in_progress"},  # prefer untested
+            )
+            if best_rank is None or rank < best_rank:
+                best_rank, best = rank, key
+        return best or exact
+
+    def _upsert(self, record: dict, *, planned: bool, key: Optional[tuple] = None) -> dict:
         state = str(record.get("state") or "pending")
         if state not in COVERAGE_STATES:
             raise ValueError(f"invalid coverage state: {state}")
-        key = self._key(record)
+        if key is None:
+            key = self._key(record)
         now = _now()
         with self._lock:
             existing = self._records.get(key)
@@ -310,7 +384,8 @@ class CoverageLedger:
             "evidence": evidence,
         }
         with self._lock:
-            row = self._upsert(record, planned=False)
+            key = self._resolve_result_key(record)
+            row = self._upsert(record, planned=False, key=key)
             if self._can_transition(row["state"], state):
                 row["state"] = state
                 row["updated_at"] = _now()
@@ -482,6 +557,93 @@ class CoverageLedger:
                 if len(result) >= limit:
                     break
         return result
+
+    def lease(
+        self,
+        *,
+        classes: Optional[Iterable[str]] = None,
+        limit: int = 20,
+        owner: str = "",
+    ) -> dict:
+        """Hand out a bounded, disjoint set of pending cells as a worklist.
+
+        Breadth before depth: leased cells move to ``in_progress`` so a
+        concurrent hunter's lease never returns them, and validated/tested cells
+        are never re-handed-out. This stops two specialists from both hammering
+        a single already-interesting input while most inputs go untouched.
+
+        Returns ``{"lease": token, "cells": [...]}``. ``release(token)`` reverts
+        any cell still ``in_progress`` so a failed handoff keeps its coverage.
+        """
+        import uuid
+
+        wanted = {_normalize_class(c) for c in classes} if classes is not None else None
+        token = owner or f"lease-{uuid.uuid4().hex[:10]}"
+        with self._lock:
+            candidates = [
+                (key, row) for key, row in self._records.items()
+                if row.get("planned") and row["state"] == "pending"
+                and (wanted is None or row["vulnerability_class"] in wanted)
+            ]
+            # Interleave classes so a large single-class surface can't crowd out
+            # breadth across the rest of the leased worklist.
+            by_class: Dict[str, List[tuple]] = {}
+            for key, row in candidates:
+                by_class.setdefault(row["vulnerability_class"], []).append((key, row))
+            for group in by_class.values():
+                group.sort(key=lambda kr: (kr[1]["endpoint"], kr[1]["parameter"], kr[1]["identity"]))
+            chosen: List[tuple] = []
+            while by_class and len(chosen) < max(0, limit):
+                for vuln_class in sorted(list(by_class)):
+                    chosen.append(by_class[vuln_class].pop(0))
+                    if not by_class[vuln_class]:
+                        del by_class[vuln_class]
+                    if len(chosen) >= limit:
+                        break
+            now = _now()
+            cells = []
+            for key, row in chosen:
+                row["state"] = "in_progress"
+                row["updated_at"] = now
+                cells.append(copy.deepcopy(row))
+            if chosen:
+                self._leases.setdefault(token, []).extend(key for key, _ in chosen)
+            return {"lease": token, "cells": cells}
+
+    def release(self, token: str) -> int:
+        """Revert a lease's still-``in_progress`` cells to ``pending``.
+
+        Called when a hunter handoff fails so its assigned inputs are not lost;
+        cells that advanced (evidence recorded) are left as-is.
+        """
+        reverted = 0
+        with self._lock:
+            keys = self._leases.pop(token, [])
+            now = _now()
+            for key in keys:
+                row = self._records.get(key)
+                if row and row["state"] == "in_progress":
+                    row["state"] = "pending"
+                    row["updated_at"] = now
+                    reverted += 1
+        return reverted
+
+    def release_stale(self) -> int:
+        """Flip any lingering ``in_progress`` cell back to ``pending``.
+
+        Run once at fan-in so the final ledger reports genuinely untested inputs
+        as gaps rather than leaving them stuck mid-flight.
+        """
+        reverted = 0
+        with self._lock:
+            now = _now()
+            for row in self._records.values():
+                if row.get("planned") and row["state"] == "in_progress":
+                    row["state"] = "pending"
+                    row["updated_at"] = now
+                    reverted += 1
+            self._leases.clear()
+        return reverted
 
     def snapshot(self, limit: Optional[int] = None) -> List[dict]:
         with self._lock:

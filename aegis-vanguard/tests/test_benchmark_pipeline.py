@@ -76,8 +76,9 @@ def test_parallel_pipeline_completes_every_phase_in_benchmark_mode(monkeypatch):
             return {"findings_total": 2}
 
     class FakePhase:
-        def __init__(self, runner, hunters):
+        def __init__(self, runner, hunters, coverage=None, **kwargs):
             assert hunters
+            self.coverage = coverage
 
         def run(self, task, shared_ctx, recon_brief):
             return FakePhaseResult()

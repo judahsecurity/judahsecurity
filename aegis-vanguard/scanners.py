@@ -3682,6 +3682,27 @@ def run_send_http_request(
     except (_json.JSONDecodeError, ValueError):
         return {"error": f"headers_json is not valid JSON: {headers_json[:200]}"}
 
+    # Breadth-before-depth throttle. When an assessment has activated the shared
+    # execution budget, suppress exact-repeat and over-budget requests before any
+    # network work so the remaining allowance reaches untested inputs. No-op when
+    # the budget is not activated (unit tests, deterministic probe fixtures).
+    try:
+        from agent.execution_budget import get_execution_budget
+        _budget = get_execution_budget()
+    except Exception:  # budget must never break a probe
+        _budget = None
+    if _budget is not None:
+        _decision = _budget.check(method, url, body)
+        if not _decision.allowed:
+            return {
+                "error": f"suppressed by execution budget: {_decision.reason}",
+                "suppressed": True,
+                "suppressed_reason": _decision.reason,
+                "repeat_index": _decision.repeat_index,
+                "url": url,
+                "budget": _budget.snapshot(),
+            }
+
     def _finish(result: dict) -> dict:
         """Record exchanges for cross-hunter replay and differential analysis."""
         try:

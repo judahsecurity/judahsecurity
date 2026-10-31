@@ -132,6 +132,8 @@ class ParallelVulnPhase:
         runner: AgentRunner,
         hunters: List[Agent],
         max_workers: Optional[int] = None,
+        coverage=None,
+        lease_limit: int = 24,
     ):
         if not hunters:
             raise ValueError("ParallelVulnPhase requires at least one hunter agent")
@@ -140,6 +142,12 @@ class ParallelVulnPhase:
         # Default: one worker per hunter so none queue behind each other.
         self.max_workers = max_workers or len(hunters)
         self._merge_lock = threading.Lock()
+        # Optional coverage ledger. When present, each hunter is leased a
+        # disjoint, bounded worklist of its own pending cells so breadth is
+        # guaranteed before any one input is deepened, and a failed handoff is
+        # retried once without losing its lease.
+        self.coverage = coverage
+        self.lease_limit = lease_limit
 
     # --------------------------------------------------------------- run()
 
@@ -241,18 +249,34 @@ class ParallelVulnPhase:
         # prompt during their own ReAct loops. Findings merge at fan-in.
         hunter_ctx = copy.deepcopy(shared_ctx)
 
-        hunter_task = self._build_hunter_task(hunter, task, recon_brief)
+        # Lease a disjoint, bounded worklist of this hunter's own pending cells
+        # so specialists spread across the surface instead of colliding on one
+        # input. The lease is retained across a single retry; only a final
+        # failure releases it so the inputs return to the pending pool.
+        lease_token, worklist = self._lease_worklist(hunter)
+
+        hunter_task = self._build_hunter_task(hunter, task, recon_brief, worklist)
 
         logger.info("[%s] starting (max_turns=%d)", hunter.name, hunter.max_turns)
 
-        try:
-            run_result = self.runner.run(
-                agent=hunter,
-                task=hunter_task,
-                context=hunter_ctx,
-            )
-        except Exception as e:  # noqa: BLE001
-            logger.exception("[%s] runner.run() raised", hunter.name)
+        run_result = None
+        last_error: Optional[Exception] = None
+        for attempt in (1, 2):  # retry a failed handoff once, keeping the lease
+            try:
+                run_result = self.runner.run(
+                    agent=hunter,
+                    task=hunter_task,
+                    context=copy.deepcopy(hunter_ctx),
+                )
+                break
+            except Exception as e:  # noqa: BLE001
+                last_error = e
+                logger.exception(
+                    "[%s] runner.run() raised (attempt %d/2)", hunter.name, attempt
+                )
+        if run_result is None:
+            if lease_token:
+                self.coverage.release(lease_token)  # don't lose the coverage
             return HunterResult(
                 name=hunter.name,
                 category=_category_of(hunter),
@@ -260,7 +284,7 @@ class ParallelVulnPhase:
                 tool_calls=0,
                 turns_used=0,
                 elapsed_sec=time.time() - start,
-                error=str(e),
+                error=str(last_error),
             )
 
         findings = self._extract_findings(run_result)
@@ -289,13 +313,41 @@ class ParallelVulnPhase:
 
     # -------------------------------------------------------- task prompt
 
+    def _lease_worklist(self, hunter: Agent):
+        """Reserve this hunter's disjoint, bounded set of pending cells.
+
+        Returns ``(lease_token, cells)``. When no coverage ledger is attached
+        (legacy callers, unit tests) leasing is skipped and the hunter runs
+        exactly as before.
+        """
+        if self.coverage is None:
+            return "", []
+        try:
+            from agent.coverage import coverage_classes_for
+            classes = coverage_classes_for(_category_of(hunter))
+            lease = self.coverage.lease(
+                classes=sorted(classes) if classes else None,
+                limit=self.lease_limit,
+                owner=f"{hunter.name}-{int(time.time()*1000) % 100000}",
+            )
+            return lease.get("lease", ""), lease.get("cells", [])
+        except Exception:  # leasing must never block a hunt
+            logger.exception("[%s] lease failed; running without a worklist", hunter.name)
+            return "", []
+
     @staticmethod
-    def _build_hunter_task(hunter: Agent, parent_task: str, recon_brief: str) -> str:
+    def _build_hunter_task(
+        hunter: Agent,
+        parent_task: str,
+        recon_brief: str,
+        worklist: Optional[List[dict]] = None,
+    ) -> str:
         """Assemble the per-hunter opening user message.
 
         The hunter's own system prompt (in owasp_hunters.py) already describes
-        its mission. Here we just feed it the recon brief + the parent task so
-        it has attack-surface context before its first tool call.
+        its mission. Here we feed it the recon brief, the parent task, and —
+        when coverage leasing is active — the concrete, bounded set of untested
+        inputs reserved for it, so it covers breadth before deepening any one.
         """
         sections = [parent_task.strip()] if parent_task.strip() else []
 
@@ -303,6 +355,26 @@ class ParallelVulnPhase:
             sections.append(
                 "## Recon Brief (summary from recon_agent)\n"
                 f"{recon_brief.strip()}"
+            )
+
+        if worklist:
+            compact = [
+                {
+                    "endpoint": c.get("endpoint"),
+                    "method": c.get("method"),
+                    "parameter": c.get("parameter"),
+                    "identity": c.get("identity"),
+                    "vulnerability_class": c.get("vulnerability_class"),
+                }
+                for c in worklist
+            ]
+            sections.append(
+                "## Your leased worklist (cover these FIRST, one pass each)\n"
+                "These untested input cells are reserved for you — no other "
+                "hunter will take them. Give every one a first pass before "
+                "deepening any single input, and do not re-probe an input once "
+                "it is proven. Repeat and over-budget requests are suppressed.\n"
+                "```json\n" + json.dumps(compact, indent=2, default=str) + "\n```"
             )
 
         sections.append(

@@ -186,3 +186,122 @@ def test_bounded_pending_list_includes_multiple_classes():
     } for index in range(30)]})
     classes = {row["vulnerability_class"] for row in ledger.pending(limit=10)}
     assert len(classes) >= 6
+
+
+def test_validated_finding_closes_its_planned_cell_despite_identity_drift():
+    # A proven finding rarely echoes endpoint/identity exactly as planned.
+    # It must still close its matching planned cell, not fork a new one.
+    ledger = CoverageLedger.from_input_surface({"forms": [{
+        "action_url": "https://example.test/catalog", "method": "GET",
+        "eligible_parameters": ["category"],
+    }]})
+    ledger.apply_findings([{
+        "vuln_type": "sqli",
+        "endpoint": "https://example.test/catalog?category=1",  # echoes query string
+        "parameter": "category",                                # plain, not location-aware
+        "method": "GET",
+        "identity": "unspecified",                              # drift from planned "anonymous"
+        "evidence": "sqlmap confirmed",
+    }], "validated", source="exploit_validation")
+
+    sqli_rows = [r for r in ledger.snapshot() if r["vulnerability_class"] == "sqli"]
+    validated = [r for r in sqli_rows if r["state"] == "validated"]
+    assert len(validated) == 1
+    assert validated[0]["planned"] is True
+    assert validated[0]["parameter"] == "query:category"
+    assert ledger.summary()["unplanned_observations"] == 0
+    assert ledger.summary()["planned_tested"] == 1
+
+
+def test_proof_does_not_close_a_different_parameter_cell():
+    ledger = CoverageLedger.from_input_surface({"forms": [{
+        "action_url": "https://example.test/catalog", "method": "GET",
+        "eligible_parameters": ["category", "q"],
+    }]})
+    ledger.apply_findings([{
+        "vuln_type": "sqli", "endpoint": "https://example.test/catalog",
+        "parameter": "q", "method": "GET", "identity": "anonymous",
+    }], "validated", source="exploit_validation")
+
+    by_param = {r["parameter"]: r["state"] for r in ledger.snapshot()
+                if r["vulnerability_class"] == "sqli"}
+    assert by_param["query:q"] == "validated"
+    assert by_param["query:category"] == "pending"
+
+
+def test_proof_does_not_cross_method_boundary():
+    ledger = CoverageLedger.from_input_surface({"forms": [{
+        "action_url": "https://example.test/item", "method": "POST",
+        "content_type": "application/x-www-form-urlencoded",
+        "eligible_parameters": ["name"],
+    }]})
+    # A GET-proven finding must not close the POST-planned cell.
+    ledger.apply_findings([{
+        "vuln_type": "sqli", "endpoint": "https://example.test/item",
+        "parameter": "name", "method": "GET", "identity": "anonymous",
+    }], "validated", source="exploit_validation")
+    planned_post = [r for r in ledger.snapshot()
+                    if r["planned"] and r["method"] == "POST"
+                    and r["vulnerability_class"] == "sqli"]
+    assert planned_post and planned_post[0]["state"] == "pending"
+
+
+def _multi_surface(n=6):
+    return {"forms": [{
+        "action_url": f"https://example.test/p{i}", "method": "GET",
+        "eligible_parameters": ["q"],
+    } for i in range(n)]}
+
+
+def test_leases_are_disjoint_across_concurrent_owners():
+    ledger = CoverageLedger.from_input_surface(_multi_surface(n=6))
+    a = ledger.lease(classes=["sqli"], limit=3, owner="hunterA")
+    b = ledger.lease(classes=["sqli"], limit=3, owner="hunterB")
+    a_keys = {(c["endpoint"], c["parameter"]) for c in a["cells"]}
+    b_keys = {(c["endpoint"], c["parameter"]) for c in b["cells"]}
+    assert a_keys and b_keys
+    assert a_keys.isdisjoint(b_keys)          # breadth: no overlap
+    assert all(c["state"] == "in_progress" for c in a["cells"] + b["cells"])
+
+
+def test_lease_excludes_already_validated_cells():
+    ledger = CoverageLedger.from_input_surface(_multi_surface(n=3))
+    ledger.apply_findings([{
+        "vuln_type": "sqli", "endpoint": "https://example.test/p0",
+        "parameter": "q", "method": "GET", "identity": "anonymous",
+    }], "validated", source="x")
+    leased = ledger.lease(classes=["sqli"], limit=10, owner="h")
+    assert "https://example.test/p0" not in {c["endpoint"] for c in leased["cells"]}
+
+
+def test_release_returns_unworked_cells_to_pending():
+    ledger = CoverageLedger.from_input_surface(_multi_surface(n=3))
+    lease = ledger.lease(classes=["sqli"], limit=10, owner="failing_hunter")
+    assert all(r["state"] == "pending" for r in ledger.snapshot()
+               if r["vulnerability_class"] == "sqli") is False  # now in_progress
+    reverted = ledger.release("failing_hunter")
+    assert reverted == len(lease["cells"])
+    assert all(r["state"] == "pending" for r in ledger.snapshot()
+               if r["vulnerability_class"] == "sqli")
+
+
+def test_release_keeps_cells_that_gathered_evidence():
+    ledger = CoverageLedger.from_input_surface(_multi_surface(n=2))
+    ledger.lease(classes=["sqli"], limit=10, owner="h")
+    # Evidence arrives for p0 while the lease is open.
+    ledger.record_probe_result({
+        "probe": "sqli", "target": "https://example.test/p0", "method": "GET",
+        "params_tested": ["query:q"], "candidates": [],
+    }, source="h")
+    ledger.release("h")
+    by_ep = {r["endpoint"]: r["state"] for r in ledger.snapshot()
+             if r["vulnerability_class"] == "sqli"}
+    assert by_ep["https://example.test/p0"] == "tested_negative"  # evidence kept
+    assert by_ep["https://example.test/p1"] == "pending"          # unworked, released
+
+
+def test_coverage_classes_for_mapping():
+    from agent.coverage import coverage_classes_for
+    assert "sqli" in coverage_classes_for("injection")
+    assert "xss" in coverage_classes_for("xss")
+    assert coverage_classes_for("nonexistent") == frozenset()
