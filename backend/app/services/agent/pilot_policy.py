@@ -30,6 +30,17 @@ PILOT_LOCAL_TOOLS = frozenset({
 PILOT_ALLOWED_TOOLS = PILOT_NETWORK_TOOLS | PILOT_LOCAL_TOOLS
 PILOT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
+# execute_browser verbs permitted during the anonymous read-only first pass.
+PILOT_READ_ONLY_BROWSER_ACTIONS = frozenset({
+    "navigate", "get_source", "screenshot", "wait", "check_response",
+})
+# Script-executing or state-changing verbs that run only after the first pass
+# (exploitation / scoped assessment), never in the anonymous read-only pilot.
+PILOT_DEFERRED_BROWSER_ACTIONS = frozenset({
+    "check_xss", "submit_form", "execute_js", "set_cookie",
+    "fill", "click", "type", "get_cookies",
+})
+
 
 class PilotDenied(ValueError):
     """The assessment policy refused a tool or request before network I/O."""
@@ -194,6 +205,33 @@ class PilotPolicy:
     def check_tool(self, tool_name: str) -> None:
         if tool_name not in PILOT_ALLOWED_TOOLS:
             raise PilotDenied(f"Tool '{tool_name}' is unavailable in the bounded pilot")
+
+    def check_browser_actions(self, actions) -> None:
+        """Reject execute_browser verbs outside the read-only first-pass allowlist.
+
+        The anonymous pilot pass may only read; script execution and state
+        changes (check_xss, submit_form, execute_js, ...) run after it. The
+        denial names the allowed verbs and which requested ones to defer, so the
+        model can reissue a valid read-only call instead of retrying a blocked
+        one and burning the coverage cell on identical rejections.
+        """
+        if not isinstance(actions, list):
+            raise PilotDenied("Pilot browser actions require a JSON object with an actions array")
+        requested = [a.get("action") if isinstance(a, dict) else None for a in actions]
+        disallowed = [verb for verb in requested if verb not in PILOT_READ_ONLY_BROWSER_ACTIONS]
+        if not disallowed:
+            return
+        allowed = ", ".join(sorted(PILOT_READ_ONLY_BROWSER_ACTIONS))
+        deferred = sorted({verb for verb in disallowed if verb in PILOT_DEFERRED_BROWSER_ACTIONS})
+        hint = (
+            f" {deferred} execute script or change state and run only after the"
+            " anonymous first pass -- defer them to the exploitation/scoped phase."
+            if deferred else ""
+        )
+        raise PilotDenied(
+            "Pilot browser action is outside the read-only allowlist. The anonymous"
+            f" first pass allows only: {allowed}.{hint}"
+        )
 
     @property
     def budget_key(self) -> str:

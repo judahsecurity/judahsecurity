@@ -51,6 +51,34 @@ class PilotPolicyTests(unittest.TestCase):
         with self.assertRaises(PilotDenied):
             item.check_tool("execute_feroxbuster")
 
+    def test_browser_actions_read_only_allowlist(self):
+        item = policy()
+        # Read-only verbs the anonymous first pass permits.
+        item.check_browser_actions([
+            {"action": "navigate", "url": "https://ginandjuice.shop/"},
+            {"action": "get_source"},
+            {"action": "check_response", "url": "https://ginandjuice.shop/"},
+        ])
+        # Deferred execution/state verbs are rejected with an actionable message
+        # that names the allowed verbs and which requested ones to defer.
+        with self.assertRaises(PilotDenied) as ctx:
+            item.check_browser_actions([
+                {"action": "navigate", "url": "https://ginandjuice.shop/"},
+                {"action": "check_xss", "url": "https://ginandjuice.shop/?q=x"},
+            ])
+        message = str(ctx.exception)
+        self.assertIn("read-only allowlist", message)
+        self.assertIn("navigate", message)
+        self.assertIn("check_xss", message)
+        self.assertIn("exploitation/scoped phase", message)
+        # Unknown verbs are rejected without a defer hint.
+        with self.assertRaisesRegex(PilotDenied, "read-only allowlist"):
+            item.check_browser_actions([{"action": "teleport"}])
+        # Malformed payloads fail closed.
+        for actions in (None, "navigate", {"action": "navigate"}):
+            with self.subTest(actions=actions), self.assertRaises(PilotDenied):
+                item.check_browser_actions(actions)
+
     def test_seed_accepts_fqdn_or_public_https_ip(self):
         with patch.dict("os.environ", {"AEGIS_AGENT_EGRESS_IP": "8.8.8.8"}):
             config = {"source_ip": "8.8.8.8",

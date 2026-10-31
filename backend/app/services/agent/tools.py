@@ -2126,10 +2126,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         raise PilotDenied("Pilot first pass does not accept credentials")
                     if len(spec["actions"]) > 10:
                         raise PilotDenied("Pilot browser call exceeds ten actions")
-                    allowed_actions = {"navigate", "get_source", "screenshot", "wait", "check_response"}
-                    if any(not isinstance(action, dict) or action.get("action") not in allowed_actions
-                           for action in spec["actions"]):
-                        raise PilotDenied("Pilot browser action is outside the read-only allowlist")
+                    pilot.check_browser_actions(spec["actions"])
                     explicit_urls = [str(action.get("url")) for action in spec["actions"]
                                      if action.get("url")]
                     if explicit_urls:
