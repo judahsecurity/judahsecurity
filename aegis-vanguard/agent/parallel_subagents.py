@@ -148,6 +148,8 @@ class ParallelVulnPhase:
         # retried once without losing its lease.
         self.coverage = coverage
         self.lease_limit = lease_limit
+        self._lease_lock = threading.Lock()
+        self.lease_errors = 0
 
     # --------------------------------------------------------------- run()
 
@@ -333,6 +335,8 @@ class ParallelVulnPhase:
             return lease.get("lease", ""), lease.get("cells", [])
         except Exception:  # leasing must never block a hunt
             logger.exception("[%s] lease failed; running without a worklist", hunter.name)
+            with self._lease_lock:
+                self.lease_errors += 1
             return "", []
 
     @staticmethod
@@ -365,6 +369,7 @@ class ParallelVulnPhase:
                     "parameter": c.get("parameter"),
                     "identity": c.get("identity"),
                     "vulnerability_class": c.get("vulnerability_class"),
+                    "baseline": c.get("baseline"),
                 }
                 for c in worklist
             ]
@@ -373,7 +378,15 @@ class ParallelVulnPhase:
                 "These untested input cells are reserved for you — no other "
                 "hunter will take them. Give every one a first pass before "
                 "deepening any single input, and do not re-probe an input once "
-                "it is proven. Repeat and over-budget requests are suppressed.\n"
+                "it is proven. Repeat and over-budget requests are suppressed.\n\n"
+                "Each cell carries a `baseline`: the concrete request recon "
+                "observed for that input (`method`, `url`, `headers_json`, "
+                "`body`). Send the baseline **unchanged** first (send_http_request) "
+                "to capture a control `request_id`, then change **one value at a "
+                "time** and diff_http_requests against that control — the "
+                "difference is your evidence. Prefer the structured probes "
+                "(probe_sqli_params, probe_xss_reflection) with these exact "
+                "baseline arguments over hand-built requests.\n"
                 "```json\n" + json.dumps(compact, indent=2, default=str) + "\n```"
             )
 

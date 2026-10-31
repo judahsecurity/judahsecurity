@@ -311,9 +311,22 @@ class AgentRunner:
 
                 tool_results = []
                 for tool_use in tool_uses:
-                    result_content = self._execute_tool(
-                        agent, tool_use.name, tool_use.input, tool_use.id,
-                    )
+                    try:
+                        result_content = self._execute_tool(
+                            agent, tool_use.name, tool_use.input, tool_use.id,
+                        )
+                    except Exception as tool_exc:  # noqa: BLE001
+                        # A tool crashing must not discard the partial run: keep
+                        # the conversation valid so earlier structured receipts
+                        # (coverage events, findings) survive for fan-in.
+                        logger.exception(
+                            "[%s] tool %s raised; preserving partial run",
+                            agent.name, tool_use.name,
+                        )
+                        result_content = json.dumps({
+                            "error": f"tool execution failed: {tool_exc}",
+                            "tool": tool_use.name,
+                        })
                     total_tool_calls += 1
                     tool_results.append({
                         "type": "tool_result",

@@ -9,6 +9,7 @@ that it exercised.  This makes gaps visible instead of rewarding activity.
 from __future__ import annotations
 
 import copy
+import json
 import re
 import threading
 from collections import Counter
@@ -201,6 +202,10 @@ class CoverageLedger:
         self._lock = threading.RLock()
         self._planned_identities: List[str] = []
         self._leases: Dict[str, List[tuple]] = {}
+        # Concrete baseline request per (endpoint, method), reconstructed from
+        # the observed input so a specialist mutates one value off the real
+        # request instead of reconstructing it from prose.
+        self._baselines: Dict[tuple, dict] = {}
         for record in records or []:
             self._upsert(dict(record), planned=bool(record.get("planned", True)))
 
@@ -228,6 +233,10 @@ class CoverageLedger:
             endpoint = _endpoint(item.get("action_url") or item.get("url"))
             method = str(item.get("method") or "GET").upper()
             content_type = str(item.get("content_type") or "")
+            if endpoint:
+                ledger._baselines.setdefault(
+                    (endpoint, method), cls._baseline_request(item)
+                )
             if not endpoint:
                 continue
             for vuln_class in _endpoint_classes(endpoint, method, content_type):
@@ -262,6 +271,36 @@ class CoverageLedger:
                             "evidence": "",
                         }, planned=True)
         return ledger
+
+    @staticmethod
+    def _baseline_request(item: dict) -> dict:
+        """Reconstruct the concrete baseline request for an observed input.
+
+        The specialist replays this exact request to get a control response,
+        then changes one value at a time and diffs against it. Values come
+        straight from recon's form/fetch templates, so the baseline exercises
+        the real code path rather than a model's reconstruction.
+        """
+        method = str(item.get("method") or "GET").upper()
+        action = str(item.get("action_url") or item.get("url") or "")
+        content_type = str(item.get("content_type") or "")
+        headers_json = item.get("headers_json")
+        if not headers_json:
+            headers = {"Content-Type": content_type} if content_type else {}
+            headers_json = json.dumps(headers, separators=(",", ":"))
+        body = str(item.get("body_template") or "")
+        url = action
+        if method == "GET":
+            query = str(item.get("query_template") or "")
+            if query and "?" not in action:
+                url = f"{action}?{query}"
+            body = ""
+        return {
+            "method": method,
+            "url": url,
+            "headers_json": headers_json,
+            "body": body,
+        }
 
     @staticmethod
     def _key(record: dict) -> tuple:
@@ -605,10 +644,20 @@ class CoverageLedger:
             for key, row in chosen:
                 row["state"] = "in_progress"
                 row["updated_at"] = now
-                cells.append(copy.deepcopy(row))
+                cell = copy.deepcopy(row)
+                baseline = self._baselines.get((row["endpoint"], row["method"]))
+                if baseline:
+                    cell["baseline"] = dict(baseline)
+                cells.append(cell)
             if chosen:
                 self._leases.setdefault(token, []).extend(key for key, _ in chosen)
             return {"lease": token, "cells": cells}
+
+    def baseline_for(self, endpoint: str, method: str = "GET") -> Optional[dict]:
+        """Return the captured baseline request for an observed input, if any."""
+        with self._lock:
+            baseline = self._baselines.get((_endpoint(endpoint), str(method or "GET").upper()))
+            return dict(baseline) if baseline else None
 
     def release(self, token: str) -> int:
         """Revert a lease's still-``in_progress`` cells to ``pending``.

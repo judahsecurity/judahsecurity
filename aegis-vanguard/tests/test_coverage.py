@@ -305,3 +305,44 @@ def test_coverage_classes_for_mapping():
     assert "sqli" in coverage_classes_for("injection")
     assert "xss" in coverage_classes_for("xss")
     assert coverage_classes_for("nonexistent") == frozenset()
+
+
+def test_lease_attaches_concrete_baseline_request():
+    ledger = CoverageLedger.from_input_surface({
+        "forms": [{
+            "action_url": "https://example.test/login", "method": "POST",
+            "content_type": "application/x-www-form-urlencoded",
+            "eligible_parameters": ["username", "password"],
+            "body_template": "username=aegis&password=aegis",
+        }],
+        "request_templates": [{
+            "action_url": "https://example.test/catalog", "method": "GET",
+            "content_type": "", "eligible_parameters": ["query:category"],
+            "headers_json": "{}", "query_template": "category=1",
+        }],
+    })
+    cells = ledger.lease(classes=["sqli"], limit=10, owner="injection_hunter")["cells"]
+    by_param = {c["parameter"]: c.get("baseline") for c in cells}
+
+    get_bl = by_param["query:category"]
+    assert get_bl["method"] == "GET"
+    assert get_bl["url"] == "https://example.test/catalog?category=1"
+    assert get_bl["body"] == ""
+
+    post_bl = by_param["form:username"]
+    assert post_bl["method"] == "POST"
+    assert post_bl["url"] == "https://example.test/login"
+    assert post_bl["body"] == "username=aegis&password=aegis"
+    assert "x-www-form-urlencoded" in post_bl["headers_json"]
+
+
+def test_lease_without_baseline_is_still_valid():
+    # Minimal surface (no body/query template) must not break leasing.
+    ledger = CoverageLedger.from_input_surface({"forms": [{
+        "action_url": "https://example.test/x", "method": "GET",
+        "eligible_parameters": ["q"],
+    }]})
+    cells = ledger.lease(classes=["sqli"], limit=5, owner="h")["cells"]
+    assert cells
+    bl = cells[0].get("baseline")
+    assert bl["method"] == "GET" and bl["url"].startswith("https://example.test/x")
