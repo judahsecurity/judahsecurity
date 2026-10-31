@@ -5530,7 +5530,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         Phase 1: validates the opt-in and scope, then returns not-provisioned
         without executing anything (the sandbox runner is not built yet).
         """
-        from app.services.agent.exploit_lane import preflight
+        from app.services.agent.exploit_lane import (
+            build_egress_policy, get_runner, preflight,
+        )
 
         hosts: List[str] = []
         if allowed_hosts:
@@ -5544,9 +5546,17 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if isinstance(cmap, dict) and cmap.get("target"):
             hosts.append(str(cmap.get("target")))
 
-        result = preflight(
+        pre = preflight(
             source, hosts, enabled=bool(getattr(self, "_exploit_lane_enabled", False)),
         )
+        if not pre.get("ok"):
+            result = pre
+        else:
+            # Opt-in and scope satisfied. Hand to the (fail-closed) runner with an
+            # egress policy keyed on in-scope hostnames — resolved fresh per
+            # connection so a target IP change does not break the lane.
+            egress = build_egress_policy(pre["allowed_hosts"])
+            result = await get_runner().run(source, egress=egress, timeout_sec=timeout_sec)
         if rationale:
             result["rationale"] = str(rationale)[:500]
         return json.dumps(result, default=str)[: int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)]
