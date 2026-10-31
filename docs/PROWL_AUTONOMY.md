@@ -1,8 +1,10 @@
-# Prowl scheduled autonomy pilot
+# Prowl scheduled autonomy
 
-Prowl's existing tester process remains the assessment engine. A schedule with
-`config.autonomous_followup: true` now enqueues one durable work item per target
-and due time. The `autonomy-worker` service claims one item, runs one bounded
+Prowl's existing tester process remains the assessment engine. New
+`tester_process` schedules enable `config.autonomous_followup` by default and
+enqueue one durable work item per target and due time. An explicit `false`
+disables it, and existing schedules retain their saved setting. The
+`autonomy-worker` service claims one item, runs one bounded
 agent turn, saves its redacted engagement state in Postgres, and queues another
 turn only when the saved hypothesis graph has new work. Other schedules keep
 their existing execution path.
@@ -17,7 +19,9 @@ their existing execution path.
 2. Configure the same database, AI provider, RoE, egress IP, and assessment
    proxy settings used by Prowl's existing agent. Confirm the worker is healthy
    before enabling a schedule.
-3. On a `tester_process` schedule, enable autonomous follow-up. The schedule
+3. On a new `tester_process` schedule, autonomous follow-up is already enabled.
+   Each work item uses its target host as its default observation and specialist
+   scope. The schedule
    config may also set `max_turns` (default 3, cap 4), `price_limit_usd`
    (default 8), `max_total_seconds` (default 3600, cap 7200),
    `max_specialist_tool_calls` (default 12, cap 40),
@@ -56,10 +60,10 @@ arguments, explicit URL hosts, action class, elapsed time, and parallel tool
 calls. Common recon CLIs also receive a request-rate flag. A CLI can still
 issue several outbound requests inside one tool start, and a model call can
 exceed a reported dollar threshold before usage is returned. Reported token
-spend need not gate a small, opted-in pilot. If its authorized scope includes a
+spend need not gate a small, controlled pilot. If its authorized scope includes a
 hard HTTP request count, enforce that count at the request boundary; tool-start
-limits alone do not meet it. Keep the feature opted in until the AWS pilot
-confirms actual traffic and finding quality.
+limits alone do not meet it. Compare AWS pilot traffic and finding quality
+before widening the scope or changing existing schedules.
 
 ## Offline benchmark
 
@@ -72,5 +76,5 @@ remain `null` until AWS pilot outcomes are supplied with `--results`. The
 results JSON accepts a `cases` array with `id`, `candidates`,
 `verified_candidates`, `false_positives`, `requests`, `time_seconds`, and
 `spend_usd`. Use the timeline and verified count from Prowl for those results.
-Keep the schedule flag off by default; compare pilot results before considering
-a default-on release.
+Compare pilot results before enabling existing schedules or widening target
+scope.

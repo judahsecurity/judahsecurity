@@ -513,7 +513,7 @@ CONTINUOUS_SCAN_TYPES = {
             "mode": "agent",
             "max_targets": 3,
             "price_limit_usd": 8.0,
-            "autonomous_followup": False,
+            "autonomous_followup": True,
             "max_turns": 3,
             "max_total_seconds": 3600,
         },

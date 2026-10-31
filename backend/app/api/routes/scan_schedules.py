@@ -27,6 +27,14 @@ import re
 
 router = APIRouter(prefix="/scan-schedules", tags=["Scan Schedules"])
 
+
+def config_for_new_schedule(scan_type: str, supplied: dict | None) -> dict:
+    """Apply current defaults only on creation; retain explicit opt-outs."""
+    defaults = CONTINUOUS_SCAN_TYPES[scan_type].get("default_config", {})
+    if scan_type == "tester_process":
+        return {**defaults, **(supplied or {})}
+    return supplied or defaults
+
 # Scan types that require IPv4 only (don't support IPv6)
 IPV4_ONLY_SCAN_TYPES = [
     "port_scan", "masscan", "critical_ports", 
@@ -311,7 +319,7 @@ def create_scan_schedule(
         targets=schedule_data.targets,
         label_ids=schedule_data.label_ids,
         match_all_labels=schedule_data.match_all_labels,
-        config=schedule_data.config or CONTINUOUS_SCAN_TYPES[schedule_data.scan_type].get("default_config", {}),
+        config=config_for_new_schedule(schedule_data.scan_type, schedule_data.config),
         frequency=schedule_data.frequency,
         run_at_hour=schedule_data.run_at_hour,
         run_on_day=schedule_data.run_on_day,

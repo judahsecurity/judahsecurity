@@ -193,7 +193,7 @@ export default function SchedulesPage() {
     run_on_day: '0',
     targets: '',
     is_enabled: true,
-    autonomous_followup: false,
+    autonomous_followup: true,
   });
   const [editFormData, setEditFormData] = useState({
     name: '',
@@ -292,7 +292,7 @@ export default function SchedulesPage() {
         run_on_day: '0',
         targets: '',
         is_enabled: true,
-        autonomous_followup: false,
+        autonomous_followup: true,
       });
       fetchData();
     } catch (error: any) {
@@ -912,7 +912,12 @@ export default function SchedulesPage() {
                 <Label>Scan Type *</Label>
                 <Select
                   value={editFormData.scan_type}
-                  onValueChange={(value) => setEditFormData({ ...editFormData, scan_type: value })}
+                  onValueChange={(value) => setEditFormData({
+                    ...editFormData,
+                    scan_type: value,
+                    autonomous_followup: value === 'tester_process' && editFormData.scan_type !== 'tester_process'
+                      ? true : editFormData.autonomous_followup,
+                  })}
                 >
                   <SelectTrigger>
                     <SelectValue />
@@ -940,7 +945,7 @@ export default function SchedulesPage() {
                     <Label>Continue partial hunts automatically</Label>
                   </div>
                   <p className="text-xs text-muted-foreground">
-                    Up to 3 turns per target, with time and reported model spend limits.
+                      Enabled for each approved target host by default. Up to 3 turns per target, with time and reported model spend limits.
                   </p>
                 </div>
               )}

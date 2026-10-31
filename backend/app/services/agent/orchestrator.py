@@ -1037,13 +1037,13 @@ class AgentOrchestrator:
                 from datetime import datetime, timedelta
                 from app.db.database import SessionLocal
                 from app.models.scan import Scan, ScanStatus, ScanType
-                from app.services.agent.assessment_scope import allowed_hosts
+                from app.services.agent.assessment_scope import observation_scope_hosts
                 from app.services.agent.engagement_brain import engagement_brain_from_dict
                 from app.services.agent.penetration_task_graph import sync_graph_from_brain
                 from app.services.agent.recon_observation_adapter import _allowed, ingest_event
 
                 brain = engagement_brain_from_dict(out.get("engagement_brain"))
-                scope_hosts = allowed_hosts(self.tool_manager)
+                scope_hosts = observation_scope_hosts(self.tool_manager)
                 with SessionLocal() as db:
                     scans = db.query(Scan).filter(
                         Scan.organization_id == org_id,
@@ -1389,11 +1389,11 @@ class AgentOrchestrator:
                 brain = engagement_brain_from_dict(state.get("engagement_brain"))
                 if discovered_urls:
                     brain = seed_hypotheses_from_capability_map(brain, new_map)
-                from app.services.agent.assessment_scope import allowed_hosts
+                from app.services.agent.assessment_scope import observation_scope_hosts
                 from app.services.agent.recon_observation_adapter import (
                     ingest_capability_observations, ingest_dnsx_cnames, ingest_httpx_observations,
                 )
-                scope_hosts = allowed_hosts(self.tool_manager)
+                scope_hosts = observation_scope_hosts(self.tool_manager)
                 if discovered_urls and isinstance(new_map, dict):
                     ingest_capability_observations(brain, new_map, scope_hosts=scope_hosts)
                 if dns_rows:
@@ -2922,13 +2922,13 @@ class AgentOrchestrator:
             tool_name in {"execute_dnsx", "execute_httpx"} or updates.get("capability_map")
         ):
             try:
-                from app.services.agent.assessment_scope import allowed_hosts
+                from app.services.agent.assessment_scope import observation_scope_hosts
                 from app.services.agent.engagement_brain import engagement_brain_from_dict
                 from app.services.agent.recon_observation_adapter import (
                     ingest_capability_observations, ingest_dnsx_cnames, ingest_httpx_observations,
                 )
 
-                scope_hosts = allowed_hosts(self.tool_manager)
+                scope_hosts = observation_scope_hosts(self.tool_manager)
                 recon_brain = engagement_brain_from_dict(
                     brain_update or state.get("engagement_brain")
                 )
