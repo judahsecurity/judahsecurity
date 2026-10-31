@@ -25,7 +25,10 @@ from app.services.agent.coverage_cells import (
 )
 from app.services.agent.engagement_brain import engagement_brain_from_dict
 from app.services.agent.parameter_inventory import _origin
-from app.services.agent.scoped_assessment_tools import first_pass_get_context
+from app.services.agent.scoped_assessment_tools import (
+    HUNTER_GET_BUDGET,
+    first_pass_get_context,
+)
 from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
 
 logger = logging.getLogger(__name__)
@@ -274,6 +277,29 @@ async def run_observed_input_batch(
         # The queue orders new inputs first, then balances SQLi and XSS.
         selected = pending[0]
         specialist = str(selected["specialist"])
+        if (specialist == "sqli"
+                and str(selected.get("method") or "").upper() == "GET"
+                and int(getattr(manager, "_scoped_get_count", 0) or 0) >= HUNTER_GET_BUDGET):
+            # No SQLi control can issue another GET. Close this scheduling
+            # attempt as budget-blocked so the queue can still reach XSS and
+            # other inputs instead of repeating the same failed proof call.
+            selected["status"] = "blocked"
+            selected["reason"] = "Scoped HTTP GET budget exhausted"
+            selected["first_pass_outcome"] = "unattempted"
+            selected["first_pass_reason"] = selected["reason"]
+            selected["first_pass_blocked_reason"] = "get_budget_exhausted"
+            selected["first_pass_at"] = time.time()
+            manager._engagement_brain = brain.to_dict()
+            results.append({
+                "coverage_cell_id": selected["id"], "test_type": "sqli",
+                "outcome": "unattempted", "reason": selected["reason"],
+                "evidence_id": "", "candidate_id": "", "evidence_source": "",
+                "candidate_handoff_error": "", "handoff_failed": False,
+                "candidate_handoff_pending": False,
+                "xss_techniques_attempted": [], "xss_pending_techniques": [],
+                "xss_variant_failures": {},
+            })
+            continue
         if _retryable_first_pass(selected, time.time()):
             # Preserve the attempt count but allow the lease selector to take
             # this exact cell for one more execution after the cooldown.
@@ -381,16 +407,26 @@ async def run_observed_input_batch(
                             + (["html_attribute", "html_attribute_single"] if "html_attribute" in contexts else [])
                             + (["js_single", "js_double"] if "javascript" in contexts else [])
                         )
-                        # GET is read-only: try every supported reflected context,
-                        # even when the first payload produces no visible reflection.
-                        # POST stays limited to context-led probes under its write policy.
+                        # Preserve all GET variants, but give other pending
+                        # input/class checks a first probe before this sweep.
+                        # A single remaining check still gets the full sweep.
                         full_get = list(XSS_GET_TECHNIQUES[1:]) if method == "GET" else []
                         techniques = [
                             technique for technique in dict.fromkeys([*contextual, *full_get])
                             if technique not in xss_attempted
                             and int(xss_variant_failures.get(technique) or 0) < 2
                         ]
-                        for technique in techniques:
+                        breadth_pending = (
+                            not int(cell.get("first_pass_attempts") or 0)
+                            and any(
+                                row.get("id") != cell["id"]
+                                for row in pending_first_pass_cells(
+                                    getattr(manager, "_engagement_brain", None),
+                                    target=active_target,
+                                )
+                            )
+                        )
+                        for technique in ([] if breadth_pending else techniques):
                             remaining = cell_deadline - time.monotonic()
                             if remaining < 5:
                                 break

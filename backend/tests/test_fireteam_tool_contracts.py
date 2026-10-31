@@ -19,6 +19,10 @@ def test_specialist_contracts_match_registered_tools():
         "  - read_evidence(evidence_id"
     )
     assert _tool_contract(manager, "execute_curl") == "  - execute_curl(args?)"
+    assert _tool_contract(manager, "execute_browser") == (
+        '  - execute_browser(actions=[{"action":"navigate","url":"..."},'
+        '{"action":"get_source"}])'
+    )
 
 
 def test_injection_specialists_can_record_evidence_backed_coverage():

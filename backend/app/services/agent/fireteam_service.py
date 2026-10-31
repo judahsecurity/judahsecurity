@@ -1213,6 +1213,14 @@ def _tool_contract(tools_manager: Any, tool_name: str) -> str:
     tool = registry.get(tool_name) if isinstance(registry, dict) else None
     if not callable(tool):
         return f"  - {tool_name}"
+    if tool_name == "execute_browser":
+        # The adapter accepts an actions object and serializes it to the MCP
+        # string itself. Asking the model to hand-escape JSON caused invalid
+        # browser calls that never reached an assessment request.
+        return (
+            '  - execute_browser(actions=[{"action":"navigate","url":"..."},'
+            '{"action":"get_source"}])'
+        )
     if getattr(tool, "__name__", "") == "execute_mcp_tool":
         return f"  - {tool_name}(args?)"
     try:

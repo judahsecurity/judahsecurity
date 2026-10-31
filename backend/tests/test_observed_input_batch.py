@@ -17,6 +17,7 @@ from app.services.agent.observed_input_batch import (
     run_observed_input_batch,
 )
 from app.services.agent.prompts import is_tool_allowed_in_phase
+from app.services.agent.scoped_assessment_tools import HUNTER_GET_BUDGET
 from app.services.agent.tester_loop import forced_next_step
 from app.services.agent.tester_loop import tester_loop_progress as loop_progress
 from app.services.agent.tools import ASMToolsManager
@@ -59,6 +60,57 @@ def test_first_pass_lease_prefers_untried_input_over_repeating_lead():
         brain, ["sqli"], first_pass_only=True, now=100,
     )["sqli"]
     assert claimed.coverage_cell_id == sqli[1]["id"]
+
+
+def test_xss_batch_touches_distinct_inputs_before_sweeping_variants():
+    class Manager:
+        def __init__(self):
+            brain = _brain()
+            for cell in brain.coverage_cells:
+                if cell["test_type"] == "sqli":
+                    cell["status"] = "skipped"
+            self._engagement_brain = brain.to_dict()
+            self._capability_map = {"target": "https://app.test"}
+            self.calls = []
+
+        async def scoped_input_probe_assigned(self, coverage_cell_id, coverage_lease_id, technique):
+            self.calls.append((coverage_cell_id, technique))
+            return {"success": True, "evidence_id": f"receipt-{len(self.calls)}",
+                    "proof_confirmed": False, "probe_result": {"reflection_contexts": []}}
+
+    manager = Manager()
+    first = asyncio.run(run_observed_input_batch(manager, max_checks=1))
+    second = asyncio.run(run_observed_input_batch(manager, max_checks=1))
+    assert first["results"][0]["coverage_cell_id"] != second["results"][0]["coverage_cell_id"]
+    assert [technique for _, technique in manager.calls] == ["html_body", "html_body"]
+    assert all(cell["xss_pending_techniques"] for cell in manager._engagement_brain["coverage_cells"]
+               if cell["test_type"] == "xss")
+
+
+def test_exhausted_get_budget_blocks_sqli_without_preventing_xss():
+    class Manager:
+        def __init__(self):
+            self._engagement_brain = _brain().to_dict()
+            self._capability_map = {"target": "https://app.test"}
+            self._scoped_get_count = HUNTER_GET_BUDGET
+            self.calls = []
+
+        async def scoped_input_probe_assigned(self, coverage_cell_id, coverage_lease_id, technique):
+            self.calls.append(technique)
+            return {"success": True, "evidence_id": f"receipt-{len(self.calls)}",
+                    "proof_confirmed": False, "probe_result": {"reflection_contexts": []}}
+
+    manager = Manager()
+    result = asyncio.run(run_observed_input_batch(manager, max_checks=4))
+    assert result["processed"] == 4
+    assert all(cell["status"] == "blocked" and
+               cell["first_pass_blocked_reason"] == "get_budget_exhausted"
+               for cell in manager._engagement_brain["coverage_cells"]
+               if cell["test_type"] == "sqli")
+    assert manager.calls
+    assert all(name in {"html_body", "html_body_svg", "html_attribute",
+                        "html_attribute_single", "js_single", "js_double"}
+               for name in manager.calls)
 
 
 def test_leasing_without_probe_does_not_count_as_attempted():
@@ -122,15 +174,16 @@ def test_batch_reaches_all_link_inputs_once_with_live_receipts():
 
     manager = Manager()
     first = asyncio.run(run_observed_input_batch(manager, max_checks=4))
-    assert first["processed"] == 4 and first["remaining"] == 0
+    assert first["processed"] == 4 and first["remaining"] == 2
     assert len(set(manager.calls)) == 4
     assert {row["first_pass_outcome"] for row in manager._engagement_brain["coverage_cells"]
             if row["source"] == "parameter_inventory"
             and row["test_type"] in {"sqli", "xss"}} == {"inconclusive"}
     calls_after_first = list(manager.calls)
     second = asyncio.run(run_observed_input_batch(manager, max_checks=4))
-    assert second["processed"] == 0 and second["remaining"] == 0
-    assert manager.calls == calls_after_first
+    assert second["processed"] == 2 and second["remaining"] == 0
+    assert manager.calls[:len(calls_after_first)] == calls_after_first
+    assert len(manager.calls) == 2 + 2 * 6
 
 
 def test_unavailable_identity_is_blocked_without_probe_and_reopens_after_login():
@@ -905,6 +958,11 @@ def test_eighteen_inputs_receive_both_class_first_pass_outcomes():
         asyncio.run(run_observed_input_batch(manager, max_checks=4))
     funnel = parameter_test_funnel(manager._engagement_brain)
     assert len(set(manager.calls)) == 36
+    assert len(manager.calls) == 36  # Every input gets SQLi and one XSS pass first.
+    assert len(pending_first_pass_cells(manager._engagement_brain)) == 18
+    for _ in range(5):
+        asyncio.run(run_observed_input_batch(manager, max_checks=4))
+    funnel = parameter_test_funnel(manager._engagement_brain)
     assert len(manager.calls) == 18 + 18 * 6  # SQLi once and six XSS variants per input
     assert funnel["inputs"] == 18 and funnel["checks"] == 54
     assert funnel["attempted"] == funnel["probed"] == 36
