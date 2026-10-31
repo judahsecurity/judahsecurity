@@ -109,14 +109,17 @@ echo "[4/7] Building images"
 sudo docker compose build backend scanner intel-refresher severity-worker frontend aegis-oracle
 
 echo "[5/7] Starting services"
-sudo docker compose up -d oast-worker backend scanner scheduler autonomy-worker intel-refresher severity-worker frontend aegis-oracle neo4j nginx
+sudo docker compose stop autonomy-worker
+sudo docker compose up -d oast-worker backend scanner scheduler intel-refresher severity-worker frontend aegis-oracle neo4j nginx
 # Re-resolve backend and frontend service names after Compose recreates them.
 sudo docker compose restart nginx
 
 echo "[6/7] Running additive migrations"
+sudo docker exec asm_backend python -m scripts.apply_agent_ledger_migration
 sudo docker exec asm_backend python scripts/migrate_add_oracle_columns.py --backfill 2>/dev/null || true
 sudo docker exec asm_backend python scripts/migrate_agent_knowledge_embeddings.py
 sudo docker exec asm_backend python scripts/migrate_commoncrawl_enum.py
+sudo docker compose up -d autonomy-worker
 
 # A host Interceptor worker imports the checked-out backend package. Restart it
 # after the checkout changes so its runtime contract matches the API revision.
@@ -125,6 +128,10 @@ if sudo systemctl list-unit-files asm-interceptor-worker.service --no-legend 2>/
 fi
 
 echo "[7/7] Running production gates"
+if ! sudo docker compose ps --status running --services | grep -qx autonomy-worker; then
+  echo "Autonomy worker did not start after the database migration" >&2
+  exit 1
+fi
 for attempt in $(seq 1 30); do
   if curl -fsS http://127.0.0.1:8000/health >/dev/null; then
     break

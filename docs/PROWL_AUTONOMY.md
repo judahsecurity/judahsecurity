@@ -9,10 +9,11 @@ their existing execution path.
 
 ## Enable in AWS
 
-1. Apply `db/migrations/add_agent_autonomy_work.sql`, deploy the backend and
-   scanner images, and start `autonomy-worker` alongside `scheduler`. The SQL
-   also adds the lease turn timestamp to an existing work table; `create_all`
-   only creates missing tables.
+1. If using the EC2 deployment workflow, its script now stops
+   `autonomy-worker`, applies the agent-ledger and autonomy table migration,
+   then starts and checks the worker. For a manual or other deployment path,
+   apply `db/migrations/add_agent_autonomy_work.sql` before starting the worker;
+   `create_all` only creates missing tables.
 2. Configure the same database, AI provider, RoE, egress IP, and assessment
    proxy settings used by Prowl's existing agent. Confirm the worker is healthy
    before enabling a schedule.
@@ -54,10 +55,11 @@ The per-specialist contract enforces tool starts, identity names in structured
 arguments, explicit URL hosts, action class, elapsed time, and parallel tool
 calls. Common recon CLIs also receive a request-rate flag. A CLI can still
 issue several outbound requests inside one tool start, and a model call can
-exceed a reported dollar threshold before usage is returned. Keep the feature
-opted in until an AWS pilot confirms the actual request and provider spend
-envelopes; use the existing bounded pilot request gate when strict per-request
-accounting is required.
+exceed a reported dollar threshold before usage is returned. Reported token
+spend need not gate a small, opted-in pilot. If its authorized scope includes a
+hard HTTP request count, enforce that count at the request boundary; tool-start
+limits alone do not meet it. Keep the feature opted in until the AWS pilot
+confirms actual traffic and finding quality.
 
 ## Offline benchmark
 
