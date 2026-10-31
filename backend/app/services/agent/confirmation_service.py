@@ -137,6 +137,14 @@ SAFE_RECON_TOOLS = {
     "check_cve_applicability",
 }
 
+# Tools that must ALWAYS reach an operator, regardless of org policy or
+# autonomous auto-approve. The high-privilege exploit lane runs arbitrary
+# agent-authored code, so every invocation is confirmed by a human and is
+# never silently auto-approved.
+ALWAYS_CONFIRM_TOOLS = {
+    "run_exploit_poc",
+}
+
 
 @dataclass
 class PendingConfirmation:
@@ -380,7 +388,12 @@ async def gate(
     from app.services.agent.pilot_policy import PILOT_NETWORK_TOOLS, current_pilot
     pilot_network_action = current_pilot() is not None and tool_name in PILOT_NETWORK_TOOLS
     login_crawl = _is_login_crawl(tool_name, tool_args)
-    if not policy_cfg.get("tool_confirmation_enabled", True) and not pilot_network_action and not login_crawl:
+    if (
+        not policy_cfg.get("tool_confirmation_enabled", True)
+        and not pilot_network_action
+        and not login_crawl
+        and tool_name not in ALWAYS_CONFIRM_TOOLS
+    ):
         if existing_token:
             tool_args.pop("_confirm_token", None)
         return {"decision": "auto"}
@@ -426,6 +439,12 @@ async def gate(
         decision = "confirm"
         roe_escalated = True
 
+    # High-privilege lanes always reach a human and are never auto-approved,
+    # even in autonomous mode (roe_escalated keeps the bypass below from firing).
+    if tool_name in ALWAYS_CONFIRM_TOOLS and decision != "deny":
+        decision = "confirm"
+        roe_escalated = True
+
     if decision == "deny":
         return {
             "decision": "deny",
@@ -442,6 +461,7 @@ async def gate(
         and _autonomous_mode.get()
         and not roe_escalated
         and tool_name not in {"run_intruder_batch"}
+        and tool_name not in ALWAYS_CONFIRM_TOOLS
         and policy_cfg.get("agent_autonomous_auto_approve", False)
     ):
         logger.info(

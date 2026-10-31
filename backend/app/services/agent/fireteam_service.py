@@ -28,6 +28,10 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 logger = logging.getLogger(__name__)
 
+# Specialists allowed the high-privilege exploit lane when the operator opts in.
+# Kept narrow on purpose: chain-heavy roles, not every hunter.
+_EXPLOIT_LANE_SPECIALISTS = {"business_logic", "ssrf", "api_authz", "auth_logic"}
+
 
 # ---------------------------------------------------------------------------
 # Built-in specialist profiles
@@ -1302,6 +1306,14 @@ async def _run_specialist(
             tool for tool in allowed_tools
             if tool not in {"execute_interactsh", "run_oob_callback_workflow"}
         ]
+    # High-privilege exploit lane: granted only to chain-heavy specialists and
+    # only when the operator opted in; stripped from everyone otherwise.
+    if (getattr(tools_manager, "_exploit_lane_enabled", False)
+            and profile.name in _EXPLOIT_LANE_SPECIALISTS):
+        if "run_exploit_poc" not in allowed_tools:
+            allowed_tools.append("run_exploit_poc")
+    else:
+        allowed_tools = [tool for tool in allowed_tools if tool != "run_exploit_poc"]
     if (isinstance(directive, OperationDirective)
             and directive.parameter_work
             and not directive.parameter_work.get("scoped_capture_id")):

@@ -60,6 +60,20 @@ def oob_callbacks_allowed(objective: str, operator_policy: dict | None = None) -
     return bool(_OOB_ACTION.search(text) and _OOB_POSITIVE.search(text))
 
 
+def exploit_lane_allowed(objective: str, operator_policy: dict | None = None) -> bool:
+    """High-privilege PoC lane: explicit operator policy only, never the objective.
+
+    Arbitrary agent-authored code execution is too consequential to enable from
+    a prompt phrase, so — unlike OOB/credential grants — there is no positive
+    free-text path. Only ``operator_policy['exploit_lane_enabled'] is True``
+    turns it on.
+    """
+    return bool(
+        isinstance(operator_policy, dict)
+        and operator_policy.get("exploit_lane_enabled") is True
+    )
+
+
 def permitted_specialists(names: Iterable[str], *, allow_credential_testing: bool) -> list[str]:
     """Keep a credential assault hypothesis from silently entering an auto wave."""
     return [

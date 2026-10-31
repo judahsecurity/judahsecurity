@@ -396,6 +396,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **mcp_list** / **mcp_disconnect**: List or detach attached MCP servers.
 - **mcp_call**: Invoke a tool on an attached MCP server. Args: **server**, **tool**, **arguments** (object).
 - **run_custom_probe** / **run_poc_python**: Sandboxed Python HTTP PoC (json/re/httpx only). In-scope hosts plus Interactsh/OAST. Never metadata/localhost. Args: **source** (Python that prints results), allowed_hosts (optional), timeout_sec (default 20). Not a shell.
+- **run_exploit_poc**: High-privilege exploit lane — arbitrary multi-step PoC code in a disposable, egress-restricted sandbox, for chains run_custom_probe cannot express. Requires an explicit operator opt-in (off by default) and is operator-confirmed on every call. Output is evidence only and must still pass independent verification. Prefer run_custom_probe. Args: **source**, allowed_hosts (optional), timeout_sec, rationale. (Phase 1: returns not-provisioned; the sandbox runner is not built yet.)
 - **list_captured_requests**: Index XHR/API samples from the crawl map. Use its sample_ref with mutate_captured_request so later map changes cannot switch the request being tested.
 - **plan_intruder_mutations**: Build a dry-run, bounded queue of one-field authorization, boundary, injection-canary, and URL-fetch mutations from captured requests. Read-only methods only by default. Review this before active execution.
 - **run_intruder_batch**: Execute up to 12 planned differential mutations at a bounded rate. Always confirmation-gated; state-changing methods remain excluded unless allow_state_change=true is explicitly approved. A difference is a lead, not a confirmed finding.
@@ -792,6 +793,7 @@ TOOL_PHASE_MAP = {
     "mcp_disconnect": ["informational", "exploitation", "post_exploitation"],
     "run_custom_probe": ["informational", "exploitation", "post_exploitation"],
     "run_poc_python": ["informational", "exploitation", "post_exploitation"],
+    "run_exploit_poc": ["exploitation", "post_exploitation"],
     "list_captured_requests": ["informational", "exploitation", "post_exploitation"],
     "plan_intruder_mutations": ["informational", "exploitation", "post_exploitation"],
     "run_intruder_batch": ["informational", "exploitation", "post_exploitation"],

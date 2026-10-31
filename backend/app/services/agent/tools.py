@@ -520,6 +520,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _fallback_target = SessionValue(lambda: "")
     _credential_testing_allowed = SessionValue(lambda: False)
     _oob_callbacks_allowed = SessionValue(lambda: False)
+    _exploit_lane_enabled = SessionValue(lambda: False)
 
     def __init__(self):
         self.tools = self._register_tools()
@@ -748,6 +749,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "mcp_disconnect": self.mcp_disconnect,
             "run_custom_probe": self.run_custom_probe,
             "run_poc_python": self.run_custom_probe,
+            "run_exploit_poc": self.run_exploit_poc,
             "list_captured_requests": self.list_captured_requests,
             "plan_intruder_mutations": self.plan_intruder_mutations,
             "run_intruder_batch": self.run_intruder_batch,
@@ -5506,6 +5508,47 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "In-scope hosts plus Interactsh/OAST. Never fetch 169.254.169.254 or "
             "localhost — Lictor blocks those. Print JSON proof to stdout."
         )
+        return json.dumps(result, default=str)[: int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)]
+
+    async def run_exploit_poc(
+        self,
+        source: str,
+        allowed_hosts: Optional[str] = None,
+        timeout_sec: float = 20,
+        rationale: str = "",
+        **kwargs: Any,
+    ) -> str:
+        """Run a multi-step exploit PoC in a disposable, egress-restricted sandbox.
+
+        High-privilege lane for chains the bounded run_custom_probe cannot express
+        (non-allowlisted libraries, sockets, stateful setup→attack→verify). It
+        requires an explicit operator opt-in (never inferred from the objective)
+        and in-scope hosts, and every call is operator-confirmed. Output is
+        evidence only — it must still pass proof_policy and independent_verify
+        before create_finding. Prefer run_custom_probe for bounded HTTP probes.
+
+        Phase 1: validates the opt-in and scope, then returns not-provisioned
+        without executing anything (the sandbox runner is not built yet).
+        """
+        from app.services.agent.exploit_lane import preflight
+
+        hosts: List[str] = []
+        if allowed_hosts:
+            hosts.extend(
+                p.strip() for p in str(allowed_hosts).replace(",", "\n").splitlines() if p.strip()
+            )
+        fallback = (getattr(self, "_fallback_target", "") or "").strip()
+        if fallback:
+            hosts.append(fallback)
+        cmap = getattr(self, "_capability_map", None) or {}
+        if isinstance(cmap, dict) and cmap.get("target"):
+            hosts.append(str(cmap.get("target")))
+
+        result = preflight(
+            source, hosts, enabled=bool(getattr(self, "_exploit_lane_enabled", False)),
+        )
+        if rationale:
+            result["rationale"] = str(rationale)[:500]
         return json.dumps(result, default=str)[: int(getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000) or 20000)]
 
     async def list_captured_requests(self, limit: int = 40, identity: Optional[str] = None, **kwargs: Any) -> str:
