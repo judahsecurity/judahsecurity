@@ -7,6 +7,7 @@ from app.services.agent.coverage_cells import (
     coverage_cell_id,
     lead_packet_for_cell,
     migrate_coverage_cells,
+    parameter_test_funnel,
     record_sqli_trace,
     recover_expired_coverage_leases,
     release_coverage_cell_lease,
@@ -384,3 +385,52 @@ def test_trace_fields_survive_request_evidence_and_candidate_ledgers():
     assert candidate.coverage_cell_id == cell_id
     assert candidate.evidence_ids == [evidence_id]
     assert candidate.id == candidate_id(candidate.title, candidate.target, cell_id)
+
+
+def test_published_confirmed_candidate_closes_only_its_exact_input_cell():
+    first = {
+        "id": coverage_cell_id(method="GET", path="/catalog", host="app.test",
+                               identity="anonymous", parameter="query:category",
+                               test_type="sqli"),
+        "method": "GET", "path": "/catalog", "host": "app.test",
+        "identity": "anonymous", "parameter": "query:category",
+        "test_type": "sqli", "source": "parameter_inventory",
+        "status": "inconclusive", "lease_id": "old-lease",
+    }
+    second = dict(first, id=coverage_cell_id(
+        method="GET", path="/catalog", host="app.test",
+        identity="anonymous", parameter="query:searchTerm", test_type="sqli"),
+        parameter="query:searchTerm")
+    brain = EngagementBrain(coverage_cells=[first, second], candidates=[{
+        "id": "candidate-1", "coverage_cell_id": first["id"],
+        "status": "confirmed", "finding_id": "5664",
+    }])
+    assert parameter_test_funnel(brain)["open"] == 1
+    migrate_coverage_cells(brain)
+    by_id = {row["id"]: row for row in brain.coverage_cells}
+    assert by_id[first["id"]]["status"] == "finding"
+    assert by_id[first["id"]]["finding_id"] == "5664"
+    assert by_id[first["id"]]["lease_id"] == ""
+    assert by_id[second["id"]]["status"] == "inconclusive"
+    assert parameter_test_funnel(brain)["published"] == 1
+    assert parameter_test_funnel(brain)["open"] == 1
+
+
+def test_unconfirmed_published_candidate_does_not_close_input_cell():
+    cell = {
+        "id": coverage_cell_id(method="GET", path="/catalog", host="app.test",
+                               identity="anonymous", parameter="query:category",
+                               test_type="sqli"),
+        "method": "GET", "path": "/catalog", "host": "app.test",
+        "identity": "anonymous", "parameter": "query:category",
+        "test_type": "sqli", "source": "parameter_inventory",
+        "status": "inconclusive",
+    }
+    brain = EngagementBrain(coverage_cells=[cell], candidates=[{
+        "id": "candidate-1", "coverage_cell_id": cell["id"],
+        "status": "pending", "finding_id": "5664",
+    }])
+    migrate_coverage_cells(brain)
+    assert brain.coverage_cells[0]["status"] == "inconclusive"
+    assert parameter_test_funnel(brain)["published"] == 0
+    assert parameter_test_funnel(brain)["open"] == 1

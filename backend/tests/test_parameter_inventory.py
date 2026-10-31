@@ -364,7 +364,7 @@ def test_parameter_funnel_counts_probes_and_verdicts_separately():
     report = parameter_test_funnel(brain)
     assert report["attempted"] == report["probed"] == 1
     assert report["candidates"] == report["verified"] == report["published"] == 1
-    assert report["open"] == 3
+    assert report["open"] == 2
 
 
 def test_specialist_lease_prioritizes_likely_input_but_keeps_other_inputs_open():

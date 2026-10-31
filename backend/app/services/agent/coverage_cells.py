@@ -481,6 +481,26 @@ def migrate_coverage_cells(
         )
         put(cell)
 
+    # A finding can be committed before its best-effort coverage write finishes.
+    # Recover only the exact cell named by an independently confirmed,
+    # published candidate; never infer closure from a shared path or parameter.
+    for candidate in getattr(brain, "candidates", None) or []:
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("status") != "confirmed" or not candidate.get("finding_id"):
+            continue
+        cell = cells.get(_text(candidate.get("coverage_cell_id")))
+        if cell is None:
+            continue
+        cell["status"] = "finding"
+        cell["candidate_id"] = _text(candidate.get("id")) or cell.get("candidate_id", "")
+        cell["finding_id"] = _text(candidate.get("finding_id"))
+        cell["reason"] = "Published candidate confirmed for this coverage cell"
+        for key in ("lease_id", "lease_owner", "task_lease_id"):
+            cell[key] = ""
+        for key in ("lease_started_at", "lease_deadline"):
+            cell[key] = 0.0
+
     brain.coverage_cells = sorted(
         cells.values(),
         key=lambda row: (
@@ -635,7 +655,8 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
         group = by_class.setdefault(kind, {key: 0 for key in counts})
         proof_signal = cell.get("first_pass_outcome") == "proof_signal"
         proof_id = str(cell.get("first_pass_evidence_id") or "")
-        matching_candidates = candidates.get(str(cell.get("id") or ""), [])
+        cell_candidates = candidates.get(str(cell.get("id") or ""), [])
+        matching_candidates = cell_candidates
         if proof_signal and proof_id:
             matching_candidates = [row for row in matching_candidates
                                    if proof_id in (row.get("evidence_ids") or [])]
@@ -647,6 +668,11 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
                 and proof_id in (cell.get("service_probe_artifact_ids") or []))
         )
         status = str(cell.get("status") or "untested")
+        published_candidate = any(
+            row.get("status") == "confirmed" and bool(row.get("finding_id"))
+            for row in cell_candidates
+        )
+        published = bool(cell.get("finding_id") or published_candidate)
         has_probe = bool(cell.get("service_probe_artifact_ids") or
                          cell.get("probe_artifact_ids") or
                          cell.get("first_pass_evidence_id") or
@@ -667,8 +693,8 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
             "service_candidate_handoffs_pending": service_handoff,
             "candidates": bool(candidate),
             "verified": candidate.get("status") == "confirmed",
-            "published": bool(cell.get("finding_id") or candidate.get("finding_id")),
-            "open": status not in CELL_TERMINAL,
+            "published": published,
+            "open": status not in CELL_TERMINAL and not published,
             "blocked": status == "blocked",
         }
         for key, matched in checks.items():
