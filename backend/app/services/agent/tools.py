@@ -4283,6 +4283,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                                     status="published",
                                     finding_id=str(vuln.id),
                                 )
+                # The finding is already committed. Save its candidate link
+                # before the legacy coverage write, which may fail independently.
+                # Coverage migration can then repair the exact cell on read.
+                self._engagement_brain = brain.to_dict()
                 record_surface_coverage(
                     brain,
                     path=target or target_clean,
@@ -4305,7 +4309,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 )
                 self._engagement_brain = brain.to_dict()
             except Exception:
-                logger.debug("create_finding coverage update failed", exc_info=True)
+                logger.warning("create_finding coverage update failed", exc_info=True)
             return msg
         except Exception as e:
             db.rollback()
