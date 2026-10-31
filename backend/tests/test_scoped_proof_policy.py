@@ -55,6 +55,47 @@ def test_response_header_proof_needs_two_fresh_controlled_canaries():
     assert not validate_proof(store, candidate, proof, ["verifier"])[0]
 
 
+def test_cors_proof_needs_two_fresh_credentialed_canaries():
+    payload = lambda nonce: {
+        "operation": "scoped_response_probe", "test_type": "cors",
+        "parameter": "origin", "request_context": "origin_header",
+        "nonce": nonce, "requests_sent": 2, "proof_confirmed": True,
+        "control": {"cors_canary": False}, "probe": {"cors_canary": True},
+    }
+    hunter = record("hunter", "scoped_response_probe", payload("aaaa"), 1)
+    verifier = record("verifier", "scoped_response_probe", payload("bbbb"), 2)
+    store = Store(hunter, verifier)
+    candidate = SimpleNamespace(
+        target=hunter["target"], evidence_ids=["hunter"],
+        title="Credentialed CORS origin reflection", description="",
+        vulnerability_class="cors",
+    )
+    proof = {"kind": "scoped_cors_credentialed", "hunter_artifact_id": "hunter",
+             "artifact_id": "verifier"}
+    assert validate_proof(store, candidate, proof, ["verifier"])[0]
+    # A wildcard / non-credentialed reflection never satisfies the signal.
+    verifier["payload"]["probe"]["cors_canary"] = False
+    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
+    verifier["payload"]["probe"]["cors_canary"] = True
+    # The two runs must carry distinct canary nonces.
+    verifier["payload"]["nonce"] = "aaaa"
+    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
+
+
+def test_cors_proof_kind_matches_only_cors_claims():
+    assert proof_kind_allowed(
+        SimpleNamespace(title="CORS misconfiguration", description="",
+                        vulnerability_class=""),
+        "scoped_cors_credentialed",
+    )[0]
+    # A CORS proof cannot confirm an unrelated class.
+    assert not proof_kind_allowed(
+        SimpleNamespace(title="Open redirect in return_to", description="",
+                        vulnerability_class=""),
+        "scoped_cors_credentialed",
+    )[0]
+
+
 def test_client_template_proof_requires_fresh_rendered_execution():
     payload = lambda nonce: {
         "operation": "check_client", "client_test_type": "client_template_injection",

@@ -699,6 +699,9 @@ async def run_independent_verifiers(
                 replayed = await _verify_scoped_response_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
+                replayed = await _verify_scoped_cors_candidate(tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
                 replayed = await _verify_scoped_xml_xxe_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
@@ -903,6 +906,93 @@ async def _verify_scoped_response_candidate(
             except Exception:
                 logging.getLogger(__name__).exception("Response verifier replay failed")
                 failure = "Response verifier replay failed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title,
+            "status": "inconclusive", "verifier_summary": failure,
+            "key_findings": [], "tool_calls": 1, "error": None}
+
+
+async def _verify_scoped_cors_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Repeat the credentialed CORS reflection on the same endpoint."""
+    import asyncio
+    import logging
+    import secrets
+    from urllib.parse import urlsplit
+
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.parameter_inventory import _origin
+    from app.services.agent.proof_policy import validate_proof
+    from app.services.agent.scoped_assessment.response_probe import probe_cors
+
+    claim = cand.vulnerability_class
+    if claim != "cors":
+        return None
+    store = evidence_store(tools_manager)
+    target = urlsplit(cand.target)
+    scoped_origin = f"{target.scheme}://{target.netloc}"
+    cell = next((row for row in _brain(tools_manager).coverage_cells
+                 if row.get("id") == cand.coverage_cell_id
+                 and row.get("test_type") == "cors"
+                 and row.get("source") == "surface_applicability"
+                 and row.get("path") == (target.path or "/")), None)
+    identity = str(cand.identity or "anonymous")
+    hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
+                   if eid in store.records
+                   and store.records[eid].get("kind") == "scoped_response_probe"
+                   and store.records[eid].get("target") == cand.target
+                   and store.records[eid].get("identity") == identity
+                   and store.records[eid].get("payload", {}).get("test_type") == "cors"
+                   and store.records[eid].get("payload", {}).get("proof_confirmed") is True), None)
+    failure = "A credentialed CORS reflection receipt is required"
+    if cell and hunter:
+        hunter_id, _receipt = hunter
+        nonce = secrets.token_hex(8)
+        try:
+            if _origin(scoped_origin) != _origin(str(cand.target)):
+                raise ValueError("Target origin changed")
+            tools_manager._scoped_origin(cand.target)
+            tools_manager._scoped_claim_gets(2)
+            replay = await asyncio.to_thread(
+                probe_cors, cand.target, allowed_origin=scoped_origin,
+                state=tools_manager._scoped_state(identity, cand.target),
+                nonce=nonce,
+            )
+            summary = {"test_type": "cors", "parameter": "origin",
+                       "path": cell["path"], "request_context": "origin_header",
+                       "nonce": nonce, **replay}
+            artifact_id = store.record(
+                "scoped_response_probe", summary, target=cand.target,
+                identity=identity, coverage_cell_id=cand.coverage_cell_id,
+                test_type="cors", success=replay["proof_confirmed"],
+            )
+            if replay.get("proof_confirmed") is True:
+                proof = {"kind": "scoped_cors_credentialed",
+                         "hunter_artifact_id": hunter_id, "artifact_id": artifact_id}
+                valid, why = validate_proof(store, cand, proof, [artifact_id])
+                fresh, fresh_why = store.validate(
+                    [artifact_id], candidate_id=cand.id, revision=cand.revision,
+                    run_id=run.id, target=cand.target,
+                )
+                if valid and fresh:
+                    verified = apply_verdict(
+                        tools_manager, candidate_id=cand.id, verdict="confirmed",
+                        evidence="Fresh CORS canary reproduced credentialed reflection.",
+                        evidence_ids=[artifact_id], proof=proof,
+                    )
+                    if verified and verified.status == "confirmed":
+                        return {"candidate_id": cand.id, "title": cand.title,
+                                "status": "confirmed", "verifier_summary":
+                                "Fresh CORS probe matched the hunter receipt",
+                                "key_findings": [], "tool_calls": 1, "error": None}
+                failure = why or fresh_why or "CORS proof policy rejected the replay"
+            else:
+                failure = "Fresh CORS probe did not reproduce credentialed reflection"
+        except Exception:
+            logging.getLogger(__name__).exception("CORS verifier replay failed")
+            failure = "CORS verifier replay failed"
     apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
                   evidence=failure, summary=failure)
     return {"candidate_id": cand.id, "title": cand.title,

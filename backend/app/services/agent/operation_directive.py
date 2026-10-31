@@ -191,6 +191,15 @@ class OperationDirective:
                     "following the redirect. Submit a positive candidate with "
                     "vulnerability_class=open_redirect and its evidence_id for independent replay."
                 )
+            elif kind == "cors":
+                block += (
+                    " Call scoped_cors_probe_assigned on this exact cell and lease. "
+                    "It compares a no-Origin control with a never-seen nonce canary "
+                    "origin and confirms only when the response echoes that exact "
+                    "origin with Access-Control-Allow-Credentials: true. ACAO=* or a "
+                    "reflected known origin is not this bug. Submit a positive candidate "
+                    "with vulnerability_class=cors and its evidence_id for independent replay."
+                )
         if self.js_work:
             if self.js_work.get("test_type") == "dom_xss":
                 block += (

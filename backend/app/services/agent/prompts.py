@@ -651,6 +651,7 @@ Do not put credentials or bearer tokens in tool arguments. Use the service's art
 - **scoped_dom_xss_assigned**: Probe a leased DOM XSS JavaScript cell when its observed rendering page and location.hash source lead are present. Args: coverage_cell_id, coverage_lease_id, technique (html_body|html_body_svg|html_attribute|html_attribute_single|js_single|js_double), variant (base|mixed_case|url_double; optional). Read xss_trace after each probe; static sink leads and reflection remain hypotheses until a fresh nonce executes.
 - **scoped_client_probe_assigned**: Replay one leased client-side parser or DOM lead on its observed rendering page with a fixed nonce marker. Args: coverage_cell_id, coverage_lease_id. Returns bounded navigation, link, request, template, or prototype observations. A behavior signal needs impact analysis and independent verification.
 - **scoped_response_probe_assigned**: Probe one leased observed GET query input for CRLF response-header injection or open redirect with a fixed canary and inert control. Args: coverage_cell_id, coverage_lease_id. It never follows redirects and never returns raw headers or body.
+- **scoped_cors_probe_assigned**: Probe one leased endpoint for credentialed CORS origin reflection. Args: coverage_cell_id, coverage_lease_id. It sends a no-Origin control and a never-seen nonce canary origin, and confirms only when the response echoes that exact origin with Access-Control-Allow-Credentials: true. ACAO=* or a reflected known origin is not this bug; submit a positive receipt with vulnerability_class=cors.
 - **scan_assigned_js_dependency**: Run Retire.js against one leased first-party script; check the captured content hash before associating matches. Args: coverage_cell_id, coverage_lease_id. A CVE/version match is a review lead, not exploit proof.
 - **scoped_xml_entity_assigned**: Probe a leased browser-captured XML POST. Args: coverage_cell_id, coverage_lease_id, technique (parser_control|external_callback). The exact POST path must be approved; external_callback also requires run-level OOB authorization. The model supplies no XML body or callback destination. A callback is a lead until independently replayed.
 - **scoped_stored_xss_assigned**: Probe a leased stored_xss POST form cell. Args: coverage_cell_id, coverage_lease_id, observed readback_url, cleanup_url_template with __PROWL_NONCE__ as its sole query value. Requires an operator-approved POST form path and cleanup path. Only execution on the separate read page followed by successful cleanup can support a candidate.
@@ -676,6 +677,7 @@ TOOL_PHASE_MAP = {
     "scoped_dom_xss_assigned": ["exploitation", "post_exploitation"],
     "scoped_client_probe_assigned": ["exploitation", "post_exploitation"],
     "scoped_response_probe_assigned": ["exploitation", "post_exploitation"],
+    "scoped_cors_probe_assigned": ["exploitation", "post_exploitation"],
     "scan_assigned_js_dependency": ["informational", "exploitation", "post_exploitation"],
     "scoped_xml_entity_assigned": ["exploitation", "post_exploitation"],
     "scoped_stored_xss_assigned": ["exploitation", "post_exploitation"],

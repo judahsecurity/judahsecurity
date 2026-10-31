@@ -30,6 +30,7 @@ PROOFS_BY_CLASS = {
     "xxe": frozenset({"oob_callback"}),
     "crlf": frozenset({"scoped_response_crlf"}),
     "open_redirect": frozenset({"scoped_response_redirect"}),
+    "cors": frozenset({"scoped_cors_credentialed"}),
     "dom_open_redirect": frozenset({"scoped_browser_client"}),
     "client_template_injection": frozenset({"scoped_browser_client"}),
     "client_prototype_pollution": frozenset({"scoped_browser_client"}),
@@ -46,6 +47,8 @@ _CLAIM_PATTERNS = (
     ("crlf", r"\bCRLF\b|\bresponse header injection\b|\bHTTP response splitting\b"),
     ("dom_open_redirect", r"\bDOM[ -]?based open redirect\b"),
     ("open_redirect", r"\bopen redirect\b"),
+    ("cors", r"\bCORS\b|cross[- ]origin resource sharing|\bACAO\b|"
+     r"access-control-allow-origin"),
     ("client_template_injection", r"\bclient[ -]?side template injection\b|\bCSTI\b"),
     ("client_prototype_pollution", r"\bclient[ -]?side prototype pollution\b"),
     ("ssrf", r"\bSSRF\b|server[ -]?side request forgery"),
@@ -126,7 +129,7 @@ def validate_proof(
     allowed, reason = proof_kind_allowed(candidate, kind)
     if not allowed:
         return False, reason
-    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "post_error_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "scoped_response_crlf", "scoped_response_redirect", "scoped_browser_client"):
+    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "post_error_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed", "scoped_browser_client"):
         hunter_id = proof.get("hunter_artifact_id")
         verifier = row("artifact_id")
         hunter = (store.records.get(hunter_id)
@@ -144,6 +147,7 @@ def validate_proof(
             "scoped_browser_stored_xss": "scoped_browser_check_stored_xss",
             "scoped_response_crlf": "scoped_response_probe",
             "scoped_response_redirect": "scoped_response_probe",
+            "scoped_cors_credentialed": "scoped_response_probe",
             "scoped_browser_client": "scoped_browser_check_client",
         }[kind]
         if (not hunter or not verifier or hunter["id"] == verifier["id"]
@@ -153,9 +157,14 @@ def validate_proof(
         first, second = hunter["payload"], verifier["payload"]
         if hunter["target"] != verifier["target"] or hunter["target"] != candidate.target:
             return False, "Both actors must prove the same candidate target"
-        if kind in {"scoped_response_crlf", "scoped_response_redirect"}:
-            expected_type = "crlf" if kind == "scoped_response_crlf" else "open_redirect"
-            signal = "header_marker" if expected_type == "crlf" else "redirect_canary"
+        if kind in {"scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed"}:
+            expected_type = {
+                "scoped_response_crlf": "crlf",
+                "scoped_response_redirect": "open_redirect",
+                "scoped_cors_credentialed": "cors",
+            }[kind]
+            signal = {"crlf": "header_marker", "open_redirect": "redirect_canary",
+                      "cors": "cors_canary"}[expected_type]
             if (candidate.vulnerability_class != expected_type
                     or hunter["identity"] != verifier["identity"]
                     or first.get("operation") != "scoped_response_probe"
@@ -170,7 +179,7 @@ def validate_proof(
                            or row.get("control", {}).get(signal) is not False
                            or row.get("probe", {}).get(signal) is not True
                            for row in (first, second))):
-                return False, "Independent response-header or redirect canary proof is required"
+                return False, "Independent response-header, redirect, or CORS canary proof is required"
             return True, ""
         if kind == "scoped_browser_client":
             claim = candidate.vulnerability_class

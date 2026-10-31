@@ -15,7 +15,7 @@ from app.services.agent.coverage_cells import (
 from app.services.agent.engagement_brain import EngagementBrain
 from app.services.agent.evidence_store import evidence_store
 from app.services.agent.independent_verify import run_independent_verifiers, submit_candidate
-from app.services.agent.scoped_assessment.response_probe import probe_response
+from app.services.agent.scoped_assessment.response_probe import probe_cors, probe_response
 from app.services.agent.tools import ASMToolsManager
 from app.services.retirejs_service import _fetch_url
 
@@ -99,6 +99,79 @@ async def test_response_probe_preserves_observed_query_and_checks_header(monkeyp
     assert "category=Gifts" in calls[0][0] and "category=Gifts" in calls[0][1]
     assert "%250D%250A" in calls[0][0] and "%0D%0A" in calls[0][1]
     assert calls[0][2]["test_type"] == "crlf"
+
+
+@pytest.mark.asyncio
+async def test_cors_probe_targets_endpoint_and_records_evidence(monkeypatch):
+    brain = EngagementBrain(target=TARGET)
+    seed_parameter_coverage_cells(brain, [{
+        "method": "GET", "path": "/api/account", "host": "app.example.test",
+        "name": "endpoint", "location": "query", "source": "browser_traffic",
+        "identity": "anonymous", "testable": True,
+    }])
+    lease = claim_coverage_cell_leases(
+        brain, ["injection"], allowed_test_types=frozenset({"cors"}),
+    )["injection"]
+    manager = _manager(brain)
+    calls = []
+
+    def fake_probe(url, **kwargs):
+        calls.append((url, kwargs))
+        return {"operation": "scoped_response_probe", "test_type": "cors",
+                "requests_sent": 2, "control": {"cors_canary": False},
+                "probe": {"cors_canary": True}, "canary_origin": "x",
+                "proof_confirmed": True, "finding": False}
+
+    monkeypatch.setattr(
+        "app.services.agent.scoped_assessment.response_probe.probe_cors", fake_probe,
+    )
+    assert (await manager.scoped_cors_probe_assigned(
+        lease.coverage_cell_id, "wrong"))["error"] == "invalid_coverage_lease"
+    result = await manager.scoped_cors_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert result["proof_confirmed"] is True
+    assert calls[0][0] == TARGET + "/api/account"
+    record = evidence_store(manager).records[result["evidence_id"]]
+    assert record["payload"]["test_type"] == "cors"
+    assert record["payload"]["parameter"] == "origin"
+    assert record["payload"]["request_context"] == "origin_header"
+
+
+def test_cors_transport_requires_credentialed_reflection_of_the_canary():
+    reflect = {"mode": "reflect"}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            origin = self.headers.get("Origin")
+            self.send_response(200)
+            if origin and reflect["mode"] == "reflect":
+                self.send_header("Access-Control-Allow-Origin", origin)
+                self.send_header("Access-Control-Allow-Credentials", "true")
+            elif reflect["mode"] == "wildcard":
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Credentials", "true")
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        confirmed = probe_cors(base + "/api/me", allowed_origin=base,
+                               state=None, nonce="abc123")
+        assert confirmed["proof_confirmed"] is True
+        assert confirmed["probe"]["acac"] == "true"
+        # ACAO=* carries no credentials in a browser, so it is not this bug.
+        reflect["mode"] = "wildcard"
+        wildcard = probe_cors(base + "/api/me", allowed_origin=base,
+                              state=None, nonce="def456")
+        assert wildcard["proof_confirmed"] is False
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 
 def test_response_probe_requires_differential_marker(monkeypatch):

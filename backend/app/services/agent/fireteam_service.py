@@ -557,6 +557,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "generate_injection_payloads",
             "scoped_xml_entity_assigned",
             "scoped_response_probe_assigned",
+            "scoped_cors_probe_assigned",
             "compare_requests",
             "mutate_list",
             "list_captured_requests",
