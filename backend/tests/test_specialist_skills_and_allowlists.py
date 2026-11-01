@@ -66,6 +66,33 @@ def test_every_default_specialist_has_skill_pack():
         assert pack, f"missing skill pack for {name}"
 
 
+def test_xss_and_sqli_specialists_load_markdown_skills(monkeypatch):
+    from app.services.agent import skill_md
+
+    ss = _load_specialist_skills()
+    original = skill_md.skill_body
+
+    def marked_skill(name):
+        body = original(name)
+        return body + f"\nmarkdown-skill:{name}" if name in {"xss", "sqli"} else body
+
+    monkeypatch.setattr(skill_md, "skill_body", marked_skill)
+    assert "markdown-skill:xss" in ss.skill_pack_for("xss")
+    assert "markdown-skill:sqli" in ss.skill_pack_for("sqli")
+
+
+def test_search_input_remains_assigned_to_xss_and_sqli():
+    from app.services.agent.vulnerability_catalog import parameter_test_classes
+
+    classes = parameter_test_classes({
+        "method": "GET", "location": "query", "name": "search", "path": "/catalog",
+    })
+    assert {"xss", "sqli"} <= set(classes)
+    sqli_skill = _load_specialist_skills().skill_pack_for("sqli")
+    assert "search" in sqli_skill.lower()
+    assert "skip pure" not in sqli_skill.lower()
+
+
 def test_no_stale_allowlist_tool_names():
     for name, tools in _specialist_allowlists_from_ast().items():
         bad = _FORBIDDEN.intersection(tools)

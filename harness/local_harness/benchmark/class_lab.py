@@ -6,6 +6,8 @@ Run one class/polarity per process. Never expose this fixture beyond loopback.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 from email import policy
 from email.parser import BytesParser
 import html
@@ -15,7 +17,7 @@ import sqlite3
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-CLASSES = ("sqli", "xss", "ssrf", "idor", "graphql_authz", "unsafe_file_upload", "csrf")
+CLASSES = ("sqli", "sqli_encoded", "xss", "xss_dom", "ssrf", "idor", "graphql_authz", "unsafe_file_upload", "csrf")
 
 
 def handler_for(bug_class: str, vulnerable: bool, callback_suffix: str):
@@ -52,7 +54,9 @@ def handler_for(bug_class: str, vulnerable: bool, callback_suffix: str):
             if path == "/":
                 links = {
                     "sqli": '<form action="/search"><input name="q"><button>Search</button></form>',
+                    "sqli_encoded": '<a href="/catalog?category=cHVibGlj">Public catalog</a><script>const category=btoa("public");document.querySelector("a").href="/catalog?category="+encodeURIComponent(category)</script>',
                     "xss": '<form action="/search"><input name="q"><button>Search</button></form>',
+                    "xss_dom": '<a href="/blog?search=hello">Search blog</a>',
                     "ssrf": '<a href="/api/fetch?url=https%3A%2F%2Fexample.com">URL preview</a>',
                     "idor": '<a href="/api/objects/1">Private object</a>',
                     "graphql_authz": '<a href="/graphql">GraphQL API</a><p>POST JSON query node(id: "1") { ownerId secret }</p>',
@@ -65,8 +69,16 @@ def handler_for(bug_class: str, vulnerable: bool, callback_suffix: str):
                 identity = self._identity()
                 self._json(200 if identity != "anonymous" else 401, {"principal_id": identity})
                 return
-            if bug_class == "sqli" and path == "/search":
-                value = query.get("q", [""])[0]
+            if (bug_class == "sqli" and path == "/search") or (
+                bug_class == "sqli_encoded" and path == "/catalog"
+            ):
+                value = query.get("q" if bug_class == "sqli" else "category", [""])[0]
+                if bug_class == "sqli_encoded":
+                    try:
+                        value = base64.b64decode(value, validate=True).decode("utf-8")
+                    except (ValueError, UnicodeDecodeError, binascii.Error):
+                        self._json(400, {"error": "invalid category encoding"})
+                        return
                 db = sqlite3.connect(":memory:")
                 db.execute("CREATE TABLE items (name TEXT, detail TEXT)")
                 db.executemany("INSERT INTO items VALUES (?, ?)", [
@@ -84,6 +96,13 @@ def handler_for(bug_class: str, vulnerable: bool, callback_suffix: str):
                 value = query.get("q", [""])[0]
                 rendered = value if vulnerable else html.escape(value, quote=True)
                 self._send(200, f"<h1>Search</h1><div>{rendered}</div>", "text/html")
+                return
+            if bug_class == "xss_dom" and path == "/blog":
+                sink = "innerHTML" if vulnerable else "textContent"
+                self._send(200, '<h1>Blog</h1><div id="results"></div>'
+                           '<script>const value=new URLSearchParams(location.search).get("search")||"";'
+                           f'document.getElementById("results").{sink}=value;'
+                           '</script>', "text/html")
                 return
             if bug_class == "ssrf" and path == "/api/fetch":
                 url = query.get("url", [""])[0]

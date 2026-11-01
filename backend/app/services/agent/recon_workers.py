@@ -6,6 +6,7 @@ Completed briefs are drained into the next think prompt / execution trace
 so results "come in" without serializing the whole turn on one tool.
 
 Worker kinds (bounded — not DirBuster-scale):
+  dns_cname    — bounded CNAME lookup for scoped takeover leads
   httpx_tech   — ProjectDiscovery-style HTTP + tech probe
   waf_probe    — wafw00f
   ferox_dirs   — depth-1 common dirs (app-dirs-common.txt)
@@ -16,6 +17,7 @@ Worker kinds (bounded — not DirBuster-scale):
 
 Packs:
   early        — httpx_tech + waf_probe + whatweb + archive_params
+  autonomy_early — early + dns_cname (opted-in scheduled assessments)
                  (auto on URL paste; interceptor queued separately)
   enrich       — ferox_dirs + katana_urls
   nuclei_recon — informational Nuclei only (explicit spawn)
@@ -38,6 +40,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 logger = logging.getLogger(__name__)
 
 WORKER_KINDS = (
+    "dns_cname",
     "httpx_tech",
     "waf_probe",
     "ferox_dirs",
@@ -49,9 +52,11 @@ WORKER_KINDS = (
 
 PACKS: Dict[str, List[str]] = {
     "early": ["httpx_tech", "waf_probe", "whatweb", "archive_params"],
+    "autonomy_early": ["dns_cname", "httpx_tech", "waf_probe", "whatweb", "archive_params"],
     "enrich": ["ferox_dirs", "katana_urls"],
     "nuclei_recon": ["nuclei_recon"],
     "full": [
+        "dns_cname",
         "httpx_tech",
         "waf_probe",
         "whatweb",
@@ -64,6 +69,7 @@ PACKS: Dict[str, List[str]] = {
 
 # Soft ceilings so background streams cannot eat the whole turn budget.
 _KIND_TIMEOUT_SEC: Dict[str, float] = {
+    "dns_cname": 30.0,
     "httpx_tech": 90.0,
     "waf_probe": 60.0,
     "whatweb": 60.0,
@@ -143,7 +149,7 @@ class WorkerRecord:
     url: str
     status: str = "queued"  # queued|running|completed|failed|cancelled
     brief: str = ""
-    observations: List[Dict[str, str]] = field(default_factory=list)
+    observations: List[Dict[str, Any]] = field(default_factory=list)
     error: Optional[str] = None
     started_at: float = field(default_factory=time.time)
     finished_at: Optional[float] = None
@@ -154,7 +160,7 @@ class WorkerRecord:
 # session_id → worker_id → record
 _registry: Dict[str, Dict[str, WorkerRecord]] = {}
 _reg_lock = asyncio.Lock()
-_capture_context: ContextVar[tuple[str, List[Dict[str, str]]] | None] = ContextVar(
+_capture_context: ContextVar[tuple[str, List[Dict[str, Any]]] | None] = ContextVar(
     "recon_capture_context", default=None,
 )
 
@@ -288,6 +294,11 @@ async def _run_mcp(
 ) -> Dict[str, Any]:
     """Execute an MCP tool with tenant context restored for the background task."""
     from app.services.agent.tools import set_tenant_context
+    from app.services.agent.autonomy_limits import current_autonomy_recon_gate
+
+    gate = current_autonomy_recon_gate.get()
+    if gate and not await gate.acquire():
+        return {"success": False, "output": "recon tool-start budget exhausted", "error": "recon_budget_exhausted"}
 
     if user_id is not None and org_id is not None:
         set_tenant_context(int(user_id), int(org_id), session_id=session_id)
@@ -335,13 +346,40 @@ async def _worker_body(
 ) -> str:
     host = _host_from_url(url)
     wl = _wordlist_path()
+    from app.services.agent.autonomy_limits import current_autonomy_limits
+    limits = current_autonomy_limits.get()
+    rate_flag = f" -rl {limits.request_rate_per_second}" if limits else ""
+
+    if kind == "dns_cname":
+        from app.services.agent.recon_observation_adapter import _dns_rows
+
+        res = await _run_mcp(
+            tools_manager, "execute_dnsx", f"-d {host} -cname -json -silent{rate_flag}",
+            user_id=user_id, org_id=org_id, session_id=session_id,
+        )
+        rows = [row for row in _dns_rows(str(res.get("output") or "")) if row.get("cname") or row.get("cname_chain")][:100]
+        capture = _capture_context.get()
+        if capture and res.get("success"):
+            capture[1].extend({
+                "type": "DNSX_ROW", "row": row,
+                "evidence_ref": str(res.get("artifact_id") or ""),
+            } for row in rows)
+        return f"[recon_worker:dns_cname] success={bool(res.get('success'))} cname_rows={len(rows)}"
 
     if kind == "httpx_tech":
-        args = f"-u {url} -silent -tech-detect -status-code -title -web-server -json"
+        args = f"-u {url} -silent -tech-detect -status-code -title -web-server -json{rate_flag}"
         res = await _run_mcp(
             tools_manager, "execute_httpx", args,
             user_id=user_id, org_id=org_id, session_id=session_id,
         )
+        if res.get("success"):
+            from app.services.agent.recon_observation_adapter import _dns_rows
+            capture = _capture_context.get()
+            if capture:
+                capture[1].extend({
+                    "type": "HTTPX_ROW", "row": row,
+                    "evidence_ref": str(res.get("artifact_id") or ""),
+                } for row in _dns_rows(str(res.get("output") or ""))[:100])
         out = _truncate(str(res.get("output") or res.get("error") or ""))
         ok = bool(res.get("success"))
         return f"[recon_worker:httpx_tech] success={ok}\n{out}"
@@ -366,7 +404,7 @@ async def _worker_body(
 
     if kind == "ferox_dirs":
         args = (
-            f"-u {url} -w {wl} -d 1 -t 15 --rate-limit 40 "
+            f"-u {url} -w {wl} -d 1 -t 15 --rate-limit {limits.request_rate_per_second if limits else 40} "
             f"--silent -C 404,429"
         )
         res = await _run_mcp(
@@ -382,7 +420,7 @@ async def _worker_body(
 
     if kind == "katana_urls":
         args = (
-            f"-u {url} -d 2 -jc -fx "
+            f"-u {url} -d 2 -jc{rate_flag} -fx "
             f"-ef woff,css,png,svg,jpg,woff2,jpeg,gif,ico -silent"
         )
         res = await _run_mcp(
@@ -396,6 +434,10 @@ async def _worker_body(
         )
 
     if kind == "archive_params":
+        from app.services.agent.autonomy_limits import current_autonomy_recon_gate
+        gate = current_autonomy_recon_gate.get()
+        if gate and not await gate.acquire():
+            return "[recon_worker:archive_params] skipped: recon tool-start budget exhausted"
         from app.services.paramspider_service import (
             ParamSpiderService,
             filter_scannable_domains,
@@ -427,6 +469,8 @@ async def _worker_body(
 
     if kind == "nuclei_recon":
         args = nuclei_recon_args(url)
+        if limits:
+            args = re.sub(r"-rate-limit \d+", f"-rate-limit {limits.request_rate_per_second}", args)
         res = await _run_mcp(
             tools_manager, "execute_nuclei", args,
             user_id=user_id, org_id=org_id, session_id=session_id,
@@ -647,7 +691,8 @@ async def drain_completed(
                         "status": rec.status,
                         "brief": rec.brief,
                         "observations": rec.observations if rec.status == "completed" else [],
-                        "urls": ([item["target"] for item in rec.observations]
+                        "urls": ([item["target"] for item in rec.observations
+                                  if item.get("type") == "HTTP_ENDPOINT" and item.get("target")]
                                  if rec.observations else extract_recon_urls(rec.kind, rec.brief, rec.url))
                         if rec.status == "completed" else [],
                         "url": rec.url,

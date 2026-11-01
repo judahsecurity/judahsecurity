@@ -33,6 +33,11 @@ _DOM_SOURCES = {
     "fragment": re.compile(r"(?:window\.)?location\.hash\b"),
     "query": re.compile(r"(?:window\.)?location\.search\b|\bURLSearchParams\s*\("),
 }
+_TRANSFORMS = {
+    "uri_decode": re.compile(r"\bdecodeURI(?:Component)?\s*\("),
+    "base64_decode": re.compile(r"\batob\s*\("),
+    "html_parse": re.compile(r"\bDOMParser\s*\(|\.parseFromString\s*\("),
+}
 _CLIENT_SINKS = {
     "dom_open_redirect": re.compile(r"(?:window\.)?location\.(?:href\s*=|assign\s*\(|replace\s*\()|window\.open\s*\("),
     "dom_link_manipulation": re.compile(r"\.href\s*=|\.setAttribute\s*\(\s*['\"]href['\"]\s*,"),
@@ -112,6 +117,10 @@ def analyze_javascript(data: bytes, *, source_url: str, expected_origin: str) ->
     for kind, pattern in _DOM_SOURCES.items():
         for match in islice(pattern.finditer(text), 5):
             sources.append({"kind": kind, "line": text.count("\n", 0, match.start()) + 1})
+    transforms = []
+    for kind, pattern in _TRANSFORMS.items():
+        for match in islice(pattern.finditer(text), 4):
+            transforms.append({"kind": kind, "line": text.count("\n", 0, match.start()) + 1})
     # Co-located source and sink patterns are review leads, never data-flow proof.
     client_leads = []
     if sources:
@@ -131,6 +140,7 @@ def analyze_javascript(data: bytes, *, source_url: str, expected_origin: str) ->
                    for path, methods in sorted(routes.items())[:80]],
         "sink_leads": sinks[:30],
         "source_leads": sources[:10],
+        "transform_leads": transforms[:12],
         "client_leads": client_leads[:18],
         "query_leads": [{"path": path, "method": method, "names": sorted(names)[:20]}
                         for (path, method), names in sorted(query_leads.items())[:40]],

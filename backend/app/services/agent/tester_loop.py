@@ -269,9 +269,34 @@ def _untested_observed_input_count(state: Dict[str, Any]) -> int:
 def _pending_first_pass_count(state: Dict[str, Any]) -> int:
     from app.services.agent.observed_input_batch import pending_first_pass_cells
 
+    target = primary_web_target(state)
     return len(pending_first_pass_cells(
-        state.get("engagement_brain") or {}, target=primary_web_target(state),
-    ))
+        state.get("engagement_brain") or {}, target=target,
+    )) + len(_resumable_identity_first_pass_cells(state, target))
+
+
+def _resumable_identity_first_pass_cells(
+    state: Dict[str, Any], target: str,
+) -> List[Dict[str, Any]]:
+    """Requeue auth-blocked inputs when the run gains a proven legacy session."""
+    from app.services.agent.parameter_inventory import _origin
+
+    auth = state.get("auth_session") or {}
+    if (not isinstance(auth, dict) or auth.get("authenticated") is not True
+            or not target or _origin(str(auth.get("target") or "")) != _origin(target)):
+        return []
+    active_origin = _origin(target)
+    scheme = urlparse(active_origin).scheme
+    return [
+        cell for cell in ((state.get("engagement_brain") or {}).get("coverage_cells") or [])
+        if isinstance(cell, dict)
+        and cell.get("source") == "parameter_inventory"
+        and cell.get("test_type") in {"sqli", "xss"}
+        and cell.get("identity") == "legacy"
+        and cell.get("status") == "blocked"
+        and cell.get("first_pass_blocked_reason") == "identity_unavailable"
+        and _origin(f"{scheme}://{cell.get('host') or ''}") == active_origin
+    ]
 
 
 def _observed_input_batch_step(
@@ -282,6 +307,8 @@ def _observed_input_batch_step(
     pending_cells = pending_first_pass_cells(
         state.get("engagement_brain") or {}, target=primary_web_target(state),
     )
+    resumable = _resumable_identity_first_pass_cells(state, primary_web_target(state))
+    pending_cells.extend(resumable)
     if not pending_cells:
         return None
     # A saved coverage queue can outlive the capability-map inventory used to
@@ -291,10 +318,12 @@ def _observed_input_batch_step(
         signature = "saved-coverage"
     # The queue count can stay flat or grow when crawling discovers new inputs
     # while a batch is running. Compare the actual pending work instead.
+    resumable_ids = {str(cell.get("id") or "") for cell in resumable}
     pending_signature = hashlib.sha256(json.dumps(sorted(
         (str(cell.get("id") or "|".join(str(cell.get(key) or "") for key in (
             "host", "method", "path", "parameter", "test_type",
-        ))) + ":" + str(cell.get("first_pass_attempts") or 0))
+        ))) + ":" + str(cell.get("first_pass_attempts") or 0)
+         + (":identity-ready" if str(cell.get("id") or "") in resumable_ids else ""))
         for cell in pending_cells
     ), separators=(",", ":")).encode()).hexdigest()[:16]
     prior = next((
@@ -1102,6 +1131,95 @@ def complete_blocked_reason(
     return None
 
 
+def _ready_hypothesis_wave(
+    state: Dict[str, Any], trace: List[Dict[str, Any]], target: str,
+) -> Optional[Dict[str, Any]]:
+    """Dispatch a new task-graph revision once, including on resumed turns."""
+    if state.get("mode") != "agent":
+        return None
+    from app.services.agent.parameter_inventory import _origin
+
+    cmap = state.get("capability_map") or {}
+    target_origin = _origin(target)
+    if not target_origin or _origin(str(cmap.get("target") or "")) != target_origin:
+        return None
+    from app.services.agent.engagement_brain import engagement_brain_from_dict
+    from app.services.agent.penetration_task_graph import (
+        NODE_READY, ready_wave, sync_graph_from_brain,
+    )
+
+    brain = engagement_brain_from_dict(state.get("engagement_brain"))
+    if not brain.hypotheses:
+        return None
+    graph = sync_graph_from_brain(brain)
+    selected = ready_wave(graph, max_specialists=4)
+    if not selected:
+        return None
+    # A specialist lease picks its highest-priority ready node. Group the
+    # actual next leases by origin so a scoped recon subdomain is dispatched
+    # with its own target rather than silently dropped from the web run.
+    by_id = {h.id: h for h in brain.hypotheses}
+    priority = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    recon_hosts = {
+        str(row.get("host") or "")
+        for row in brain.recon_observations
+        if isinstance(row, dict) and row.get("kind") == "dns_cname"
+    }
+    groups: dict[str, list[str]] = {}
+    for name in selected:
+        candidates = [
+            node for node in graph.nodes.values()
+            if node.status == NODE_READY and node.specialist == name and node.id in by_id
+        ]
+        candidates.sort(key=lambda node: (
+            priority.get(node.priority, 9), node.attempts, node.title, node.id,
+        ))
+        if not candidates:
+            continue
+        hypothesis = by_id[candidates[0].id]
+        origin = _origin(hypothesis.target) if hypothesis.target else target_origin
+        from urllib.parse import urlsplit
+        host = urlsplit(origin).hostname or ""
+        if origin != target_origin and not (
+            hypothesis.source == "recon" and host in recon_hosts
+        ):
+            continue
+        groups.setdefault(origin, []).append(name)
+    dispatch_origin = target_origin if groups.get(target_origin) else next(iter(groups), "")
+    selected = groups.get(dispatch_origin, [])[:4]
+    if not selected:
+        return None
+    ready = sorted(
+        (node.id, node.attempts, node.specialist)
+        for node in graph.nodes.values()
+        if node.status == NODE_READY and node.specialist in selected
+        and node.id in by_id
+        and (_origin(by_id[node.id].target) if by_id[node.id].target else target_origin) == dispatch_origin
+    )
+    signature = hashlib.sha256(
+        json.dumps([dispatch_origin, ready], separators=(",", ":")).encode()
+    ).hexdigest()[:16]
+    wave_steps = [
+        step for step in trace
+        if step.get("tool_name") == "fireteam_dispatch"
+        and (step.get("tool_args") or {}).get("hypothesis_signature") == signature
+    ]
+    # A tool error before the specialists run must not consume this revision.
+    # Retry it once, then stop a persistent dispatch failure from looping.
+    if (signature in brain.hypothesis_wave_history
+            or any(step.get("success") is True for step in wave_steps)
+            or sum(step.get("success") is False for step in wave_steps) >= 2):
+        return None
+    return {
+        "tool_name": "fireteam_dispatch",
+        "tool_args": {
+            "specialists": selected, "targets": [dispatch_origin], "mode": "attack",
+            "hypothesis_signature": signature,
+        },
+        "thought": "New ready hypotheses need a bounded specialist wave.",
+    }
+
+
 def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """
     Deterministic next tool for a web assessment.
@@ -1115,8 +1233,6 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         target = primary_web_target(state)
         ran = normalized_tools_run(_steps(state.get("execution_trace")))
         if target and "execute_browser" not in ran:
-            import json
-
             return {
                 "tool_name": "execute_browser",
                 "tool_args": {"args": json.dumps({"actions": [
@@ -1208,7 +1324,7 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         followup = _coverage_followup_wave(state, trace, target)
         if followup:
             return followup
-        return None
+        return _ready_hypothesis_wave(state, trace, target)
     ran = normalized_tools_run(trace)
     crawled = bool(ran & _CRAWL_TOOLS)
     # Respect an operator's no-directory constraint without stalling the
@@ -1223,6 +1339,7 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
     waits = sum(1 for s in trace if s.get("tool_name") == "wait_recon_workers")
 
     if not crawled:
+        auth_login = state.get("auth_login")
         interceptor_failed = any(
             step.get("tool_name") == "execute_interceptor"
             and step.get("success") is False
@@ -1260,7 +1377,11 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
         return {
             "tool_name": "execute_deep_crawl",
             "tool_args": {
-                "args": f'{{"url":"{target}","depth":3,"interact":true}}',
+                "args": (json.dumps({
+                    "url": target, "depth": 3, "interact": True,
+                    "login": auth_login,
+                }) if auth_login else
+                         f'{{"url":"{target}","depth":3,"interact":true}}'),
             },
             "thought": (
                 "Assessment pipeline: crawl the primary URL before any "
@@ -1405,6 +1526,10 @@ def forced_next_step(state: Optional[Dict[str, Any]] = None) -> Optional[Dict[st
                 "xss, sqli, ssrf, …). Fingerprints are not an assessment."
             ),
         }
+
+    hypothesis_wave = _ready_hypothesis_wave(state, trace, target)
+    if hypothesis_wave:
+        return hypothesis_wave
 
     try:
         from app.services.agent.wordpress_surface import wordpress_forced_step

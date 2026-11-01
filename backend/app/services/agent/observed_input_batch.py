@@ -25,7 +25,10 @@ from app.services.agent.coverage_cells import (
 )
 from app.services.agent.engagement_brain import engagement_brain_from_dict
 from app.services.agent.parameter_inventory import _origin
-from app.services.agent.scoped_assessment_tools import first_pass_get_context
+from app.services.agent.scoped_assessment_tools import (
+    HUNTER_GET_BUDGET,
+    first_pass_get_context,
+)
 from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
 
 logger = logging.getLogger(__name__)
@@ -36,6 +39,25 @@ _RETRYABLE_HANDOFF_ERRORS = frozenset({
     "invalid_coverage_lease", "lease_changed", "missing_probe_evidence",
     "First-pass probe timed out without a proof receipt",
 })
+XSS_GET_TECHNIQUES = (
+    "html_body", "html_body_svg", "html_attribute", "html_attribute_single",
+    "js_single", "js_double",
+)
+
+
+def _identity_unavailable(manager: Any, cell: dict[str, Any], active_origin: str) -> bool:
+    """Check local session state before a probe can reserve requests or a lease."""
+    identity = str(cell.get("identity") or "anonymous")
+    if identity == "anonymous":
+        return False
+    resolve = getattr(manager, "_scoped_state", None)
+    if not callable(resolve):
+        return True
+    try:
+        resolve(identity, f"{active_origin}{cell.get('path') or '/'}")
+    except (KeyError, ValueError):
+        return True
+    return False
 
 
 def _retryable_first_pass(cell: dict[str, Any], now: float) -> bool:
@@ -153,10 +175,12 @@ def pending_first_pass_cells(brain: Any, *, target: str = "") -> list[dict[str, 
                 or (cell.get("status") == "leased"
                     and float(cell.get("lease_deadline") or 0) <= time.time())
             )
-            and (not cell.get("first_pass_outcome") or _retryable_first_pass(cell, now))
+            and (not cell.get("first_pass_outcome") or _retryable_first_pass(cell, now)
+                 or (cell.get("test_type") == "xss" and cell.get("xss_pending_techniques")
+                     and float(cell.get("first_pass_retry_at") or 0) <= now))
             and not cell.get("candidate_id")
-            and not cell.get("probe_artifact_ids")
-            and not cell.get("service_probe_artifact_ids")
+            and (not cell.get("probe_artifact_ids") or cell.get("xss_pending_techniques"))
+            and (not cell.get("service_probe_artifact_ids") or cell.get("xss_pending_techniques"))
         ),
         key=lambda cell: (
             int(cell.get("first_pass_attempts") or 0),
@@ -199,11 +223,29 @@ async def run_observed_input_batch(
             "funnel": parameter_test_funnel(brain),
         }
     results: list[dict[str, Any]] = []
+    # Authentication may be established after mapping. Reopen only cells that
+    # this preflight blocked, and leave other policy decisions intact.
+    identity_reopened = 0
+    for cell in brain.coverage_cells:
+        if (cell.get("status") == "blocked"
+                and cell.get("first_pass_blocked_reason") == "identity_unavailable"
+                and _origin(f"{urlsplit(active_origin).scheme}://{cell.get('host') or ''}") == active_origin
+                and not _identity_unavailable(manager, cell, active_origin)):
+            cell["status"] = "untested"
+            identity_reopened += 1
+            cell.pop("reason", None)
+            for key in (
+                "first_pass_blocked_reason", "first_pass_outcome", "first_pass_reason",
+                "first_pass_at", "first_pass_handoff_error", "first_pass_retry_at",
+                "first_pass_attempts",
+            ):
+                cell.pop(key, None)
     # A discovered POST input is still open coverage when this run has no
     # operator-approved replay path. Record that fact before scheduling so a
     # rejected write does not consume a probe slot or masquerade as a test.
     approved_post_paths = set(getattr(manager, "_scoped_body_replay_paths", None) or ())
     policy_blocked = 0
+    identity_blocked = 0
     for cell in pending_first_pass_cells(brain, target=active_target):
         if (str(cell.get("method") or "").upper() == "POST"
                 and str(cell.get("path") or "") not in approved_post_paths):
@@ -214,7 +256,17 @@ async def run_observed_input_batch(
             cell["first_pass_reason"] = reason
             cell["first_pass_at"] = time.time()
             policy_blocked += 1
-    if policy_blocked:
+        elif _identity_unavailable(manager, cell, active_origin):
+            reason = "Captured identity has no usable session on this origin"
+            cell["status"] = "blocked"
+            cell["reason"] = reason
+            cell["first_pass_outcome"] = "unattempted"
+            cell["first_pass_reason"] = reason
+            cell["first_pass_blocked_reason"] = "identity_unavailable"
+            cell["first_pass_at"] = time.time()
+            cell.pop("first_pass_handoff_error", None)
+            identity_blocked += 1
+    if policy_blocked or identity_blocked or identity_reopened:
         manager._engagement_brain = brain.to_dict()
 
     while len(results) < max_checks and time.monotonic() < deadline - 5:
@@ -225,6 +277,29 @@ async def run_observed_input_batch(
         # The queue orders new inputs first, then balances SQLi and XSS.
         selected = pending[0]
         specialist = str(selected["specialist"])
+        if (specialist == "sqli"
+                and str(selected.get("method") or "").upper() == "GET"
+                and int(getattr(manager, "_scoped_get_count", 0) or 0) >= HUNTER_GET_BUDGET):
+            # No SQLi control can issue another GET. Close this scheduling
+            # attempt as budget-blocked so the queue can still reach XSS and
+            # other inputs instead of repeating the same failed proof call.
+            selected["status"] = "blocked"
+            selected["reason"] = "Scoped HTTP GET budget exhausted"
+            selected["first_pass_outcome"] = "unattempted"
+            selected["first_pass_reason"] = selected["reason"]
+            selected["first_pass_blocked_reason"] = "get_budget_exhausted"
+            selected["first_pass_at"] = time.time()
+            manager._engagement_brain = brain.to_dict()
+            results.append({
+                "coverage_cell_id": selected["id"], "test_type": "sqli",
+                "outcome": "unattempted", "reason": selected["reason"],
+                "evidence_id": "", "candidate_id": "", "evidence_source": "",
+                "candidate_handoff_error": "", "handoff_failed": False,
+                "candidate_handoff_pending": False,
+                "xss_techniques_attempted": [], "xss_pending_techniques": [],
+                "xss_variant_failures": {},
+            })
+            continue
         if _retryable_first_pass(selected, time.time()):
             # Preserve the attempt count but allow the lease selector to take
             # this exact cell for one more execution after the cooldown.
@@ -253,6 +328,11 @@ async def run_observed_input_batch(
         candidate_handoff_error = ""
         result: dict[str, Any] = {}
         followup_failure = ""
+        followup_deferred = False
+        xss_attempted = list(cell.get("xss_techniques_attempted") or [])
+        xss_pending = list(cell.get("xss_pending_techniques") or [])
+        xss_variant_failures = dict(cell.get("xss_variant_failures") or {})
+        first_technique = ""
 
         operation_name = ""
         # Limit one cell's first pass so a slow lead cannot monopolize a batch.
@@ -269,7 +349,9 @@ async def run_observed_input_batch(
                         probe_args["technique"] = "html_body"
                 else:
                     operation_name = "scoped_input_probe_assigned"
-                    probe_args["technique"] = "html_body"
+                    first_technique = (xss_pending[0] if specialist == "xss" and xss_pending
+                                       else "html_body")
+                    probe_args["technique"] = first_technique
             elif method == "POST" and location == "body_form" and specialist == "xss" and any(
                 isinstance(form, dict) and str(form.get("method") or "").upper() == "POST"
                 and _origin(str(form.get("action") or "")) == active_origin
@@ -278,7 +360,8 @@ async def run_observed_input_batch(
                 for form in (cmap.get("forms") or [])[:80]
             ):
                 operation_name = "scoped_input_probe_assigned"
-                probe_args["technique"] = "html_body"
+                first_technique = "html_body"
+                probe_args["technique"] = first_technique
             elif (cell.get("observation_source") == "browser_traffic"
                   and cell.get("capture_id") and method == "POST"
                   and location in {"body_json", "body_form"}):
@@ -311,30 +394,77 @@ async def run_observed_input_batch(
                 ))
                 if evidence_id:
                     evidence_source = "local" if result.get("evidence_id") else "service"
-                if (specialist == "xss" and result.get("success") is True
-                        and result.get("evidence_id")
-                        and result.get("proof_confirmed") is not True):
-                    contexts = set((result.get("probe_result") or {}).get("reflection_contexts") or [])
-                    techniques = (
-                        (["html_body_svg"] if "html_text" in contexts else [])
-                        + (["html_attribute", "html_attribute_single"] if "html_attribute" in contexts else [])
-                        + (["js_single", "js_double"] if "javascript" in contexts else [])
-                    )[:2]
-                    for technique in techniques:
-                        remaining = cell_deadline - time.monotonic()
-                        if remaining < 5:
-                            break
-                        followup = await asyncio.wait_for(_invoke(
-                            manager, "scoped_input_probe_assigned",
-                            {"coverage_cell_id": cell["id"], "coverage_lease_id": lease.id,
-                             "technique": technique},
-                        ), timeout=min(remaining, 20.0))
-                        if followup.get("success") is not True or not followup.get("evidence_id"):
-                            followup_failure = str(followup.get("error") or "missing_followup_receipt")[:100]
-                            break
-                        result = followup
-                        if result.get("proof_confirmed") is True:
-                            break
+                if (specialist == "xss" and first_technique
+                        and result.get("success") is True
+                        and result.get("evidence_id")):
+                    if first_technique and first_technique not in xss_attempted:
+                        xss_attempted.append(first_technique)
+                    xss_variant_failures.pop(first_technique, None)
+                    if result.get("proof_confirmed") is not True:
+                        contexts = set((result.get("probe_result") or {}).get("reflection_contexts") or [])
+                        contextual = (
+                            (["html_body_svg"] if "html_text" in contexts else [])
+                            + (["html_attribute", "html_attribute_single"] if "html_attribute" in contexts else [])
+                            + (["js_single", "js_double"] if "javascript" in contexts else [])
+                        )
+                        # Preserve all GET variants, but give other pending
+                        # input/class checks a first probe before this sweep.
+                        # A single remaining check still gets the full sweep.
+                        full_get = list(XSS_GET_TECHNIQUES[1:]) if method == "GET" else []
+                        techniques = [
+                            technique for technique in dict.fromkeys([*contextual, *full_get])
+                            if technique not in xss_attempted
+                            and int(xss_variant_failures.get(technique) or 0) < 2
+                        ]
+                        breadth_pending = (
+                            not int(cell.get("first_pass_attempts") or 0)
+                            and any(
+                                row.get("id") != cell["id"]
+                                for row in pending_first_pass_cells(
+                                    getattr(manager, "_engagement_brain", None),
+                                    target=active_target,
+                                )
+                            )
+                        )
+                        for technique in ([] if breadth_pending else techniques):
+                            remaining = cell_deadline - time.monotonic()
+                            if remaining < 5:
+                                break
+                            try:
+                                followup = await asyncio.wait_for(_invoke(
+                                    manager, "scoped_input_probe_assigned",
+                                    {"coverage_cell_id": cell["id"], "coverage_lease_id": lease.id,
+                                     "technique": technique},
+                                ), timeout=min(remaining, 20.0))
+                            except asyncio.TimeoutError:
+                                xss_variant_failures[technique] = int(
+                                    xss_variant_failures.get(technique) or 0
+                                ) + 1
+                                followup_deferred = True
+                                break
+                            if followup.get("success") is not True or not followup.get("evidence_id"):
+                                xss_variant_failures[technique] = int(
+                                    xss_variant_failures.get(technique) or 0
+                                ) + 1
+                                followup_failure = str(followup.get("error") or "missing_followup_receipt")[:100]
+                                break
+                            xss_variant_failures.pop(technique, None)
+                            xss_attempted.append(technique)
+                            result = followup
+                            if result.get("proof_confirmed") is True:
+                                break
+                        xss_pending = ([] if result.get("proof_confirmed") is True
+                                       else [technique for technique in techniques
+                                             if technique not in xss_attempted
+                                             and int(xss_variant_failures.get(technique) or 0) < 2])
+                    else:
+                        xss_pending = []
+                if (specialist == "xss" and method == "GET" and location == "query"
+                        and first_technique and (result.get("success") is not True
+                                                 or not result.get("evidence_id"))):
+                    xss_variant_failures[first_technique] = int(
+                        xss_variant_failures.get(first_technique) or 0
+                    ) + 1
                 evidence_id = str(result.get("evidence_id") or next(
                     iter(result.get("service_artifact_ids") or []), ""
                 ))
@@ -410,7 +540,7 @@ async def run_observed_input_batch(
                               in {"numeric_and_boolean_v1", "string_or_boolean_v1",
                                   "string_or_json_rows_v1",
                                   "string_and_boolean_v1", "string_error_v1",
-                                  "post_form_error_v1"}):
+                                  "post_form_error_v1", "post_json_error_v1"}):
                         # A bounded Boolean recipe is a proof attempt, not
                         # complete SQLi coverage. Preserve negative receipts
                         # without closing the input as tested_clean.
@@ -433,7 +563,13 @@ async def run_observed_input_batch(
                         )
                         if followup_failure:
                             reason += f"; follow-up blocked: {followup_failure}"
+                        elif followup_deferred:
+                            reason += "; follow-up deferred after timeout"
         except asyncio.TimeoutError:
+            if specialist == "xss" and method == "GET" and first_technique and not evidence_id:
+                xss_variant_failures[first_technique] = int(
+                    xss_variant_failures.get(first_technique) or 0
+                ) + 1
             outcome = "inconclusive" if evidence_id else "unattempted"
             reason = "First-pass probe timed out" + (" after a partial receipt" if evidence_id else " without a proof receipt")
             logger.warning("Observed input first pass timed out for %s", cell["id"])
@@ -446,6 +582,10 @@ async def run_observed_input_batch(
             manager._engagement_brain = interrupted.to_dict()
             raise
         except Exception as exc:
+            if specialist == "xss" and method == "GET" and first_technique and not evidence_id:
+                xss_variant_failures[first_technique] = int(
+                    xss_variant_failures.get(first_technique) or 0
+                ) + 1
             outcome = "inconclusive" if evidence_id else "unattempted"
             reason = f"First-pass probe failed: {type(exc).__name__}"
             logger.exception("Observed input first pass failed for %s", cell["id"])
@@ -474,6 +614,35 @@ async def run_observed_input_batch(
             if evidence_id:
                 current["first_pass_evidence_id"] = evidence_id
                 current["first_pass_evidence_source"] = evidence_source
+            if specialist == "xss" and method == "GET" and location == "query":
+                xss_pending = ([] if outcome == "proof_signal" else [
+                    technique for technique in XSS_GET_TECHNIQUES
+                    if technique not in xss_attempted
+                    and int(xss_variant_failures.get(technique) or 0) < 2
+                ])
+                current["xss_techniques_attempted"] = xss_attempted
+                current["xss_pending_techniques"] = xss_pending
+                current["xss_variant_failures"] = xss_variant_failures
+                exhausted = [
+                    technique for technique in XSS_GET_TECHNIQUES
+                    if technique not in xss_attempted
+                    and int(xss_variant_failures.get(technique) or 0) >= 2
+                ]
+                variant_error = (
+                    "XSS variants exhausted after two failed attempts: " + ", ".join(exhausted)
+                    if exhausted else followup_failure or (
+                        reason if outcome == "unattempted" and not xss_pending else ""
+                    )
+                )
+                if variant_error:
+                    current["xss_variant_error"] = variant_error
+                    current["xss_unattempted_techniques"] = [
+                        technique for technique in XSS_GET_TECHNIQUES
+                        if technique not in xss_attempted
+                    ]
+                else:
+                    current.pop("xss_variant_error", None)
+                    current.pop("xss_unattempted_techniques", None)
             if candidate_id:
                 current["candidate_id"] = candidate_id
             if candidate_handoff_error:
@@ -500,11 +669,16 @@ async def run_observed_input_batch(
             "candidate_handoff_error": candidate_handoff_error,
             "handoff_failed": outcome == "unattempted" and bool(operation_name),
             "candidate_handoff_pending": outcome == "proof_signal" and bool(evidence_id) and not candidate_id,
+            "xss_techniques_attempted": xss_attempted if specialist == "xss" else [],
+            "xss_pending_techniques": xss_pending if specialist == "xss" else [],
+            "xss_variant_failures": xss_variant_failures if specialist == "xss" else {},
         })
 
     brain = engagement_brain_from_dict(getattr(manager, "_engagement_brain", None))
     return {
         "processed": len(results), "policy_blocked": policy_blocked,
+        "identity_blocked": identity_blocked,
+        "identity_reopened": identity_reopened,
         "remaining": len(pending_first_pass_cells(
             brain, target=active_target,
         )),

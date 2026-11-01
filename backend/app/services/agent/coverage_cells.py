@@ -25,6 +25,51 @@ CELL_STATUSES = frozenset({*CELL_TERMINAL, *CELL_OPEN, "leased", "blocked"})
 MAX_COVERAGE_CELLS = 10_000
 
 
+def lead_packet_for_cell(cell: dict[str, Any]) -> dict[str, Any]:
+    """Carry bounded, value-free observations into the next specialist wave."""
+    xss = cell.get("xss_trace") if isinstance(cell.get("xss_trace"), dict) else {}
+    sqli = cell.get("sqli_trace") if isinstance(cell.get("sqli_trace"), dict) else {}
+    evidence = list(dict.fromkeys(str(value) for value in [
+        cell.get("first_pass_evidence_id"),
+        *(cell.get("probe_artifact_ids") or []),
+        *(cell.get("service_probe_artifact_ids") or []),
+        *(cell.get("evidence_ids") or []),
+    ] if value))[-6:]
+    return {
+        "capture_id": str(cell.get("capture_id") or ""),
+        "observation_source": str(cell.get("observation_source") or ""),
+        "attempts": int(cell.get("attempts") or 0),
+        "first_pass_outcome": str(cell.get("first_pass_outcome") or ""),
+        "first_pass_reason": str(cell.get("first_pass_reason") or "")[:240],
+        "last_probe": str(cell.get("last_probe") or ""),
+        "evidence_ids": evidence,
+        "xss_rendered_contexts": list(xss.get("rendered_contexts") or [])[:4],
+        "xss_next_tests": list(xss.get("next_tests") or [])[:2],
+        "xss_remaining_attempts": int(xss.get("remaining_attempts") or 0),
+        "sqli_trace": sqli,
+    }
+
+
+def record_sqli_trace(cell: dict[str, Any], proof: dict[str, Any]) -> None:
+    """Persist the last bounded SQLi result without storing query or body values."""
+    checks = proof.get("checks") if isinstance(proof.get("checks"), dict) else {}
+    cell["sqli_trace"] = {
+        "recipe": str(proof.get("proof_recipe") or "")[:60],
+        "input_encoding": str(proof.get("input_encoding") or "plain")[:30],
+        "proof_confirmed": proof.get("proof_confirmed") is True,
+        "statuses": {key: row.get("status") for key, row in checks.items()
+                     if isinstance(row, dict) and key in {
+                         "baseline_first", "baseline_last", "quote_error",
+                         "quote_first", "quote_second", "true_first",
+                         "false_first", "escaped_quote",
+                     }},
+        "next_test": (
+            "Submit the proof for independent verification" if proof.get("proof_confirmed") is True
+            else "Inspect the observed decode or request transform and choose a different controlled proof"
+        ),
+    }
+
+
 def scoped_replay_eligible(cell: dict[str, Any]) -> bool:
     """Whether the scoped service can replay this private browser capture."""
     location, separator, parameter = str(cell.get("parameter") or "").partition(":")
@@ -436,6 +481,26 @@ def migrate_coverage_cells(
         )
         put(cell)
 
+    # A finding can be committed before its best-effort coverage write finishes.
+    # Recover only the exact cell named by an independently confirmed,
+    # published candidate; never infer closure from a shared path or parameter.
+    for candidate in getattr(brain, "candidates", None) or []:
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("status") != "confirmed" or not candidate.get("finding_id"):
+            continue
+        cell = cells.get(_text(candidate.get("coverage_cell_id")))
+        if cell is None:
+            continue
+        cell["status"] = "finding"
+        cell["candidate_id"] = _text(candidate.get("id")) or cell.get("candidate_id", "")
+        cell["finding_id"] = _text(candidate.get("finding_id"))
+        cell["reason"] = "Published candidate confirmed for this coverage cell"
+        for key in ("lease_id", "lease_owner", "task_lease_id"):
+            cell[key] = ""
+        for key in ("lease_started_at", "lease_deadline"):
+            cell[key] = 0.0
+
     brain.coverage_cells = sorted(
         cells.values(),
         key=lambda row: (
@@ -590,7 +655,8 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
         group = by_class.setdefault(kind, {key: 0 for key in counts})
         proof_signal = cell.get("first_pass_outcome") == "proof_signal"
         proof_id = str(cell.get("first_pass_evidence_id") or "")
-        matching_candidates = candidates.get(str(cell.get("id") or ""), [])
+        cell_candidates = candidates.get(str(cell.get("id") or ""), [])
+        matching_candidates = cell_candidates
         if proof_signal and proof_id:
             matching_candidates = [row for row in matching_candidates
                                    if proof_id in (row.get("evidence_ids") or [])]
@@ -602,6 +668,11 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
                 and proof_id in (cell.get("service_probe_artifact_ids") or []))
         )
         status = str(cell.get("status") or "untested")
+        published_candidate = any(
+            row.get("status") == "confirmed" and bool(row.get("finding_id"))
+            for row in cell_candidates
+        )
+        published = bool(cell.get("finding_id") or published_candidate)
         has_probe = bool(cell.get("service_probe_artifact_ids") or
                          cell.get("probe_artifact_ids") or
                          cell.get("first_pass_evidence_id") or
@@ -622,8 +693,8 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
             "service_candidate_handoffs_pending": service_handoff,
             "candidates": bool(candidate),
             "verified": candidate.get("status") == "confirmed",
-            "published": bool(cell.get("finding_id") or candidate.get("finding_id")),
-            "open": status not in CELL_TERMINAL,
+            "published": published,
+            "open": status not in CELL_TERMINAL and not published,
             "blocked": status == "blocked",
         }
         for key, matched in checks.items():
@@ -707,17 +778,19 @@ def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, A
         if cell["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
             brain.coverage_cells.append(cell)
             existing.add(cell["id"])
-        if re.search(r"(?:^|[/_.-])\d+[._-]\d+(?:[._-]\d+)?(?:[._-]|\.js$)", parts.path, re.I):
-            dependency = _new_cell(
-                brain, method="GET", path=parts.path, host=parts.netloc,
-                identity="anonymous", parameter="script", test_type="js_dependency_review",
-                source="js_inventory", capture_id=source.get("artifact_id", ""),
-            )
-            dependency["script_url"] = script_url
-            dependency["priority_rank"] = 2
-            if dependency["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
-                brain.coverage_cells.append(dependency)
-                existing.add(dependency["id"])
+        dependency = _new_cell(
+            brain, method="GET", path=parts.path, host=parts.netloc,
+            identity="anonymous", parameter="script", test_type="js_dependency_review",
+            source="js_inventory", capture_id=source.get("artifact_id", ""),
+        )
+        dependency["script_url"] = script_url
+        dependency["expected_sha256"] = str(source.get("sha256") or "")[:64]
+        dependency["priority_rank"] = (1 if re.search(
+            r"(?:^|[/_.-])\d+[._-]\d+(?:[._-]\d+)?(?:[._-]|\.js$)",
+            parts.path, re.I) else 3)
+        if dependency["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
+            brain.coverage_cells.append(dependency)
+            existing.add(dependency["id"])
     client_classes = {
         "dom_open_redirect": "dom_open_redirect",
         "dom_link_manipulation": "dom_link_manipulation",
@@ -737,6 +810,7 @@ def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, A
         parameter = f"inline_script:{source.get('index', 0)}" if inline else "script"
         source_leads = list(source.get("source_leads") or [])[:10]
         sink_leads = list(source.get("sink_leads") or [])[:30]
+        transform_leads = list(source.get("transform_leads") or [])[:12]
         if source_leads and any(
             isinstance(lead, dict) and lead.get("kind") in {"html_assignment", "dynamic_code"}
             for lead in sink_leads
@@ -771,6 +845,7 @@ def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, A
                         dom["script_kind"] = "inline" if inline else "external"
                         dom["page_path"] = page_path
                         dom["source_leads"] = matching_leads
+                        dom["transform_leads"] = transform_leads
                         dom["sink_leads"] = sink_leads
                         dom["priority_rank"] = 2
                         if dom["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
@@ -788,6 +863,7 @@ def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, A
                 review["script_kind"] = "inline" if inline else "external"
                 review["page_path"] = str(source.get("page_path") or "")
                 review["source_leads"] = source_leads
+                review["transform_leads"] = transform_leads
                 review["sink_leads"] = sink_leads
                 if review["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
                     brain.coverage_cells.append(review)
@@ -796,19 +872,56 @@ def seed_js_coverage_cells(brain: Any, cmap: dict[str, Any]) -> list[dict[str, A
             kind = client_classes.get(lead.get("kind")) if isinstance(lead, dict) else None
             if not kind or not source_leads:
                 continue
-            cell = _new_cell(
-                brain, method="GET", path=parts.path, host=parts.netloc,
-                identity="anonymous", parameter=parameter, test_type=kind,
-                source="js_inventory", capture_id=source.get("artifact_id", ""),
-            )
-            cell["script_url"] = script_url
-            cell["script_kind"] = "inline" if inline else "external"
-            cell["source_leads"] = source_leads
-            cell["client_leads"] = [lead]
-            cell["priority_rank"] = 2
-            if cell["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
-                brain.coverage_cells.append(cell)
-                existing.add(cell["id"])
+            observed_pages = [
+                page for page in (source.get("page_paths") or [
+                    source.get("page_path") or (parts.path if inline else "")
+                ])[:20]
+                if isinstance(page, str) and page.startswith("/") and not page.startswith("//")
+                and "?" not in page and "#" not in page
+            ]
+            runnable = False
+            for page_path in dict.fromkeys(observed_pages):
+                for source_kind in ("fragment", "query"):
+                    matching = [row for row in source_leads
+                                if isinstance(row, dict) and row.get("kind") == source_kind]
+                    if not matching:
+                        continue
+                    fields = (["fragment"] if source_kind == "fragment" else
+                              ["query:" + name for name in
+                               sorted(observed_query_fields.get(page_path, set()))[:20]])
+                    if kind == "client_prototype_pollution" and source_kind == "query":
+                        fields.append("query:__proto__")
+                    for field in dict.fromkeys(fields):
+                        runnable = True
+                        cell = _new_cell(
+                            brain, method="GET", path=page_path, host=parts.netloc,
+                            identity="anonymous", parameter=field, test_type=kind,
+                            source="js_inventory", capture_id=source.get("artifact_id", ""),
+                        )
+                        cell["script_url"] = script_url
+                        cell["script_kind"] = "inline" if inline else "external"
+                        cell["page_path"] = page_path
+                        cell["source_leads"] = matching
+                        cell["client_leads"] = [lead]
+                        cell["priority_rank"] = 2
+                        if cell["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
+                            brain.coverage_cells.append(cell)
+                            existing.add(cell["id"])
+            if not runnable:
+                review = _new_cell(
+                    brain, method="GET", path=parts.path, host=parts.netloc,
+                    identity="anonymous", parameter=parameter, test_type=kind,
+                    source="js_inventory", capture_id=source.get("artifact_id", ""),
+                    reason="An observed rendering page and input are required for browser replay",
+                )
+                review["script_url"] = script_url
+                review["script_kind"] = "inline" if inline else "external"
+                review["source_leads"] = source_leads
+                review["client_leads"] = [lead]
+                review["priority_rank"] = 4
+                if review["id"] not in existing and len(existing) < MAX_COVERAGE_CELLS:
+                    brain.coverage_cells.append(review)
+                    existing.add(review["id"])
     return migrate_coverage_cells(brain)
 
 
@@ -1012,7 +1125,10 @@ def claim_coverage_cell_leases(
             and (not allowed_sources or cell.get("source") in allowed_sources)
             and (not excluded_test_types or cell.get("test_type") not in excluded_test_types)
             and (allowed_cell_ids is None or cell.get("id") in allowed_cell_ids)
-            and (not first_pass_only or not (
+            and (not first_pass_only or (
+                cell.get("test_type") == "xss" and cell.get("xss_pending_techniques")
+                and not cell.get("candidate_id")
+            ) or not (
                 cell.get("first_pass_outcome") or cell.get("candidate_id")
                 or cell.get("probe_artifact_ids") or cell.get("service_probe_artifact_ids")
             ))

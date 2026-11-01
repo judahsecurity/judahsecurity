@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "note": "Synthetic, non-routable examples derived from the NanoClaw takeover and JS/API discovery patterns plus current Prowl regression cases. No target traffic is sent.",
+  "cases": [
+    {
+      "id": "nanoclaw_takeover_pattern",
+      "source": "nanoclaw_sanitized",
+      "target": "https://docs.example.test",
+      "scope_hosts": ["docs.example.test"],
+      "dnsx_output": "{\"host\":\"docs.example.test\",\"cname\":\"unused.github.io\"}",
+      "js_endpoints": [],
+      "expected_leads": [{"specialist": "takeover", "target": "https://docs.example.test"}],
+      "expected_assets": ["docs.example.test"],
+      "expected_candidates": 1,
+      "expected_verified": 1
+    },
+    {
+      "id": "nanoclaw_js_api_pattern",
+      "source": "nanoclaw_sanitized",
+      "target": "https://login.example.test",
+      "scope_hosts": ["login.example.test"],
+      "dnsx_output": "",
+      "js_endpoints": ["/api/v1/profile", "https://outside.test/api/admin", "/static/app.js"],
+      "expected_leads": [{"specialist": "api_authz", "target": "https://login.example.test/api/v1/profile"}],
+      "expected_endpoints": ["https://login.example.test/api/v1/profile"],
+      "expected_verified": 0
+    },
+    {
+      "id": "benign_cname_control",
+      "source": "prowl_regression",
+      "target": "https://normal.example.test",
+      "scope_hosts": ["normal.example.test"],
+      "dnsx_output": "{\"host\":\"normal.example.test\",\"cname\":\"ordinary.example.net\"}",
+      "js_endpoints": [],
+      "expected_leads": [],
+      "expected_verified": 0
+    },
+    {
+      "id": "prowl_duplicate_api_regression",
+      "source": "prowl_regression",
+      "target": "https://api.example.test",
+      "scope_hosts": ["api.example.test"],
+      "js_endpoints": ["/api/orders?one=1", "/api/orders?two=2"],
+      "api_endpoints": [{"host": "api.example.test", "method": "GET", "path": "/api/orders"}],
+      "expected_leads": [{"specialist": "api_authz", "target": "https://api.example.test/api/orders"}],
+      "expected_endpoints": ["https://api.example.test/api/orders"],
+      "expected_verified": 0
+    },
+    {
+      "id": "prowl_live_technology_regression",
+      "source": "prowl_regression",
+      "target": "https://web.example.test",
+      "scope_hosts": ["web.example.test"],
+      "httpx_output": "{\"url\":\"https://web.example.test\",\"status_code\":200,\"tech\":[\"nginx\"]}",
+      "expected_assets": ["web.example.test"],
+      "expected_leads": [
+        {"specialist": "web_recon", "target": "https://web.example.test"},
+        {"specialist": "vuln_triage", "target": "https://web.example.test"}
+      ],
+      "expected_verified": 0
+    },
+    {
+      "id": "prowl_cross_scope_negative",
+      "source": "prowl_regression",
+      "target": "https://safe.example.test",
+      "scope_hosts": ["safe.example.test"],
+      "dnsx_output": "{\"host\":\"other.example.test\",\"cname\":\"unused.github.io\"}",
+      "js_endpoints": ["https://outside.test/api/private"],
+      "expected_leads": [],
+      "expected_verified": 0
+    }
+  ]
+}

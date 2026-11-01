@@ -6,6 +6,7 @@ by describing Nuclei templates.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from copy import deepcopy
@@ -88,6 +89,13 @@ def normalize_sample(
     }
 
 
+def sample_reference(sample: Dict[str, Any], *, fallback_origin: str = "") -> str:
+    """Content-address an exact request so list reordering cannot retarget a replay."""
+    request = normalize_sample(sample, fallback_origin=fallback_origin)
+    canonical = json.dumps(request, sort_keys=True, separators=(",", ":"))
+    return "req-" + hashlib.sha256(canonical.encode()).hexdigest()[:24]
+
+
 def summarize_samples(
     samples: List[Dict[str, Any]],
     *,
@@ -112,6 +120,8 @@ def summarize_samples(
                 pass
         out.append({
             "index": i,
+            "sample_ref": sample_reference(raw, fallback_origin=fallback_origin),
+            "capture_id": str(raw.get("artifact_id") or raw.get("capture_id") or ""),
             "method": norm["method"],
             "url": norm["url"][:300],
             "fields": keys[:16],

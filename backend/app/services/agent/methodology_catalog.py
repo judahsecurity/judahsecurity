@@ -1665,9 +1665,9 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
         ))
 
     if param_paths or has_search:
-        # Broader injection (SQLi/SSTI/cmd) when params exist
-        non_reflect = [p for p in param_paths if p not in reflect_paths] or param_paths
-        ev = non_reflect[0] if non_reflect else "params"
+        # Search and reflected inputs can also reach database queries. Keep
+        # their SQLi work independent of the XSS methodology above.
+        ev = param_paths[0] if param_paths else "search"
         add(Methodology(
             id="param_injection",
             title="Injection on mapped parameters (SQLi/SSTI/cmd)",
@@ -1676,8 +1676,8 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             priority="high",
             assumption="Query/body params from the map are unsafely interpolated into queries/templates/shell",
             test=(
-                "Probe ranked params with SQLi/SSTI/cmd canaries; escalate with sqlmap/xsstrike "
-                "only on anomalous hits"
+                "Probe ranked params, including search/reflect fields, with controlled "
+                "SQLi/SSTI/cmd differentials; escalate with sqlmap only on anomalous hits"
             ),
             pass_criteria="Error/time/boolean differential or template/command impact with concrete param",
             kill_criteria="No anomalous responses after disciplined probes",

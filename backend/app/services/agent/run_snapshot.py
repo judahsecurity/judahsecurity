@@ -19,7 +19,7 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-_DIR = Path.home() / ".aegis" / "sessions"
+_DIR = Path(os.environ.get("AEGIS_RUN_SNAPSHOT_DIR") or Path.home() / ".aegis" / "sessions")
 _SAFE = re.compile(r"[^a-zA-Z0-9._-]+")
 _MAX_SNAPSHOT_BYTES = 2_000_000
 _SCHEMA_VERSION = 3
@@ -165,15 +165,37 @@ def save_run_snapshot(
         "todo_list": state.get("todo_list"),
         "current_phase": state.get("current_phase"),
         "original_objective": state.get("original_objective"),
+        "reported_cost_usd": (state.get("token_usage") or {}).get("cost_usd"),
         "reauthentication_required": reauthentication_required,
     })
     if not payload["engagement_brain"] and not payload["capability_map"]:
         return
+    encoded = json.dumps(payload, default=str, separators=(",", ":")).encode()
+    if len(encoded) > _MAX_SNAPSHOT_BYTES:
+        logger.warning("run snapshot exceeds %d bytes; prior snapshot retained", _MAX_SNAPSHOT_BYTES)
+        return
+    payload = json.loads(encoded)
+    if str(session_id).startswith("sched-"):
+        try:
+            from app.db.database import SessionLocal
+            from app.models.agent_autonomy_work import AgentRunSnapshot
+
+            with SessionLocal() as db:
+                row = db.get(AgentRunSnapshot, str(session_id))
+                if row is None:
+                    row = AgentRunSnapshot(
+                        session_id=str(session_id), organization_id=int(organization_id),
+                        payload=payload,
+                    )
+                    db.add(row)
+                elif row.organization_id == int(organization_id):
+                    row.payload = payload
+                else:
+                    return
+                db.commit()
+        except Exception:
+            logger.exception("scheduled run snapshot database save failed")
     try:
-        encoded = json.dumps(payload, default=str, separators=(",", ":")).encode()
-        if len(encoded) > _MAX_SNAPSHOT_BYTES:
-            logger.warning("run snapshot exceeds %d bytes; prior snapshot retained", _MAX_SNAPSHOT_BYTES)
-            return
         _DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(_DIR, 0o700)
         destination = _path(int(organization_id), session_id)
@@ -201,6 +223,17 @@ def load_run_snapshot(
 ) -> Dict[str, Any]:
     if not organization_id or not session_id:
         return {}
+    if str(session_id).startswith("sched-"):
+        try:
+            from app.db.database import SessionLocal
+            from app.models.agent_autonomy_work import AgentRunSnapshot
+
+            with SessionLocal() as db:
+                row = db.get(AgentRunSnapshot, str(session_id))
+                if row and row.organization_id == int(organization_id):
+                    return _validated_snapshot(deepcopy(row.payload))
+        except Exception:
+            logger.debug("scheduled run snapshot database load failed", exc_info=True)
     path = _path(int(organization_id), session_id)
     if not path.is_file():
         return {}
@@ -210,6 +243,14 @@ def load_run_snapshot(
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
             return {}
+        return _validated_snapshot(data)
+    except Exception:
+        logger.debug("run snapshot load skipped", exc_info=True)
+        return {}
+
+
+def _validated_snapshot(data: Dict[str, Any]) -> Dict[str, Any]:
+    try:
         version = data.get("schema_version", 1)
         if version not in (1, 2, _SCHEMA_VERSION):
             return {}

@@ -1,15 +1,33 @@
 ---
 name: sqli
-description: SQLi/SSTI/command injection on mapped non-reflect params and login/auth fields. Canary then sqlmap on hits only.
+description: Test observed inputs, including search and filter fields, for SQLi with controlled differentials and independent proof.
 ---
 
-# SQLi / SSTI / cmd
+# SQLi on observed inputs
 
-Skip pure search/reflect params (those belong to XSS).
+Test every assigned SQLi coverage cell, including `search`, `query`, `filter`,
+`category`, `sort`, and other fields that also reflect into a page. Reflection
+does not exclude SQLi: the same input can have separate XSS and SQLi cells.
+Preserve the captured request, identity, parameter location, and any observed
+encoding when forming controls. Do not infer a database sink from a name alone.
 
-1. **Login/auth first** even when there are no query-string params. POST username/password or JSON `/login` `/signin` `/api/auth/login`: `compare_requests` baseline vs one mutation (error, then boolean pair, then timing pair). Timing that scales with SLEEP is SUBMIT with the table. Session from a canary is Critical. Not Appsmith `/user/login` email.
-2. Error / boolean / time canaries on other ranked params.
-3. `execute_sqlmap --batch` only on anomalous hits. No `--os-shell`.
-4. `execute_commix` only on command-looking fields.
-5. WAF/403: one `compare_requests` or `run_custom_probe` rewrite from the defense body, then prove or kill. Do not kill after a single scanner miss.
-6. PASS needs a differential (body/time/error), not a template match.
+1. Prioritize captured catalog search/filter/product inputs and real login/auth
+   requests. Probe login POST form or JSON fields only with a valid captured
+   session and CSRF workflow; do not guess a login request.
+2. Use the assigned scoped probe for an observed GET query. Compare repeated
+   baseline, true-condition, false-condition, and unrelated-invalid controls
+   with the same request shape. For approved POST replay, keep the captured
+   body and session context. A single quote error is only a lead.
+3. If an observed value is encoded, test the actual decode path before selecting
+   an SQLi payload. Compare the application response after decoding, not just
+   the reflected text. Dynamic content and transient errors need repeated
+   controls; a negative bounded recipe is inconclusive for other techniques.
+4. Escalate to `execute_sqlmap --batch` only on a repeatable anomaly. Use
+   `compare_requests` or `run_custom_probe` for a bounded rewrite if a WAF or
+   timeout blocks the initial check. Do not use `--os-shell` or treat a scanner
+   miss as proof of safety.
+5. Submit a candidate only with a reliable differential and its evidence ID.
+   The independent verifier must repeat the proof with a fresh control.
+
+Command-looking fields belong to the command injection path; use `execute_commix`
+only on a high-signal lead. A status code or template match alone is not SQLi.

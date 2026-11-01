@@ -1,10 +1,11 @@
 """String SQLi proof must be bounded, observed, and independently repeated."""
 
 import hashlib
+import base64
 import json
 from copy import deepcopy
 from types import SimpleNamespace
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 import pytest
 
@@ -27,6 +28,61 @@ from app.services.agent.tools import ASMToolsManager
 
 TARGET = "https://app.example.test/catalog"
 URL = TARGET + "?category=gin"
+
+
+def test_base64_query_planner_mutates_decoded_value_and_preserves_other_fields():
+    baseline = TARGET + "?other=1&category=" + quote(base64.b64encode(b"public").decode())
+    _, variants, _ = sqli_string.plan_string_boolean(
+        baseline, parameter="category", allowed_origins=["https://app.example.test"],
+    )
+    assert sqli_string.observed_query_encoding(baseline, "category") == "base64"
+    def decoded(key):
+        return base64.b64decode(
+            parse_qs(urlsplit(variants[key]).query)["category"][0]
+        ).decode()
+    assert decoded("quote_error") == "public'"
+    assert " OR " in decoded("true_first")
+    assert " OR " in decoded("false_first")
+    assert all("other=1" in url for url in variants.values())
+    _, and_variants, _ = sqli_string.plan_string_and_boolean(
+        baseline, parameter="category", allowed_origins=["https://app.example.test"],
+    )
+    assert " AND " in base64.b64decode(
+        parse_qs(urlsplit(and_variants["true_first"]).query)["category"][0]
+    ).decode()
+
+
+def test_base64_json_rows_proof_uses_decoded_boolean_controls(monkeypatch):
+    baseline = TARGET + "?category=" + quote(base64.b64encode(b"public").decode())
+
+    def observe(url, allowed_origins, storage_state):
+        value = base64.b64decode(parse_qs(urlsplit(url).query)["category"][0]).decode()
+        quote_error = value == "public'"
+        true_branch = " OR " in value and "'12345'='12345'" in value
+        rows = 2 if true_branch else 0 if value == "public''" else 1
+        body = (json.dumps({"results": list(range(rows))}) if not quote_error
+                else json.dumps({"error": "invalid search"})).encode()
+        return {
+            "status": 400 if quote_error else 200,
+            "content_type": "application/json", "bytes_captured": len(body),
+            "truncated": False, "redirected": False,
+            "body_sha256": hashlib.sha256(body).hexdigest(),
+            "json_array_lengths": {"results": rows} if not quote_error else {},
+        }
+
+    monkeypatch.setattr(sqli_string, "observe_get", observe)
+    monkeypatch.setattr(sqli_string.secrets, "randbelow", lambda _: 2345)
+    _, variants, nonce = sqli_string.plan_string_boolean(
+        baseline, parameter="category", allowed_origins=["https://app.example.test"],
+    )
+    result = sqli_string.probe_string_boolean(
+        baseline, variants, nonce, parameter="category",
+        allowed_origins=["https://app.example.test"], storage_state=None,
+        before_request=lambda: None,
+    )
+    assert result["proof_recipe"] == "string_or_json_rows_v1"
+    assert result["input_encoding"] == "base64"
+    assert result["proof_confirmed"] is True
 
 
 def _observe(url, allowed_origins, storage_state):
@@ -357,6 +413,25 @@ def test_independent_string_proof_accepts_changed_page_size_with_valid_controls(
     proof = {"kind": "string_boolean_sqli", "hunter_artifact_id": hunter,
              "artifact_id": verifier}
     assert validate_proof(store, candidate, proof, [verifier])[0]
+
+
+@pytest.mark.asyncio
+async def test_unusable_identity_does_not_consume_sqli_get_budget(monkeypatch):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    manager._capability_map = {
+        "scope": "https://app.example.test",
+        "api_samples": [{"method": "GET", "url": URL, "identity": "legacy"}],
+    }
+    manager._auth_session = {"target": "https://app.example.test", "authenticated": False}
+    monkeypatch.setattr(sqli_string, "probe_string_boolean", lambda *_args, **_kwargs:
+                        pytest.fail("probe ran without a usable identity"))
+
+    with pytest.raises(ValueError, match="requires an authenticated session"):
+        await manager.scoped_string_sqli(URL, "category", identity="legacy")
+    assert getattr(manager, "_scoped_get_count", 0) == 0
+    assert getattr(manager, "_scoped_general_get_count", 0) == 0
 
 
 @pytest.mark.asyncio

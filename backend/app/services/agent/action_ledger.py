@@ -221,6 +221,7 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
                 item["detail"] = "Run deadline passed without a terminal receipt"
     counts: dict[str, int] = {}
     repeated: dict[tuple[str, str], int] = {}
+    failures: dict[tuple[str, str, str], int] = {}
     exact: dict[str, int] = {}
     stages: dict[str, int] = {name: 0 for name in (
         "discovery", "surface_mapping", "logic_testing", "scanner_coverage", "http_requests",
@@ -231,6 +232,10 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
         if fingerprint and item["status"] != "skipped":
             exact[fingerprint] = exact.get(fingerprint, 0) + 1
         tool = item["tool_name"]
+        if item["status"] in ("failed", "interrupted"):
+            reason = str(item.get("detail") or "(no reason recorded)").splitlines()[0][:160]
+            failure_key = (tool, item["status"], reason)
+            failures[failure_key] = failures.get(failure_key, 0) + 1
         # A skipped duplicate records the reuse decision, not another tool run.
         if item["status"] != "skipped" and tool != "http_exchange" and not tool.startswith("agent_"):
             key = (tool, item["target"])
@@ -291,6 +296,13 @@ def latest_run(db, *, session_id: str, organization_id: int, user_id: int,
                                              "scoped_numeric_sqli", "scoped_string_sqli", "scoped_body_probe",
                                          )),
                      "completed_by_stage": stages,
+                     "failure_groups": [
+                         {"tool_name": tool, "status": status, "count": count,
+                          "reason": reason}
+                         for (tool, status, reason), count in sorted(
+                             failures.items(), key=lambda entry: (-entry[1], entry[0])
+                         )[:12]
+                     ],
                      "hypotheses_by_state": hypothesis_counts,
                      "untested_stages": [name for name, count in stages.items()
                                          if not count and name != "http_requests"],

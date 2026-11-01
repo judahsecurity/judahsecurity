@@ -7,11 +7,13 @@ allowed tools, hypothesis ids) instead of only a shared mission dump.
 
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, Iterable, List, Optional
 
 from app.services.agent.aegis_pantheon import epithet_for, pantheon_line
-from app.services.agent.coverage_cells import scoped_replay_eligible
+from app.services.agent.autonomy_limits import current_autonomy_limits
+from app.services.agent.coverage_cells import lead_packet_for_cell, scoped_replay_eligible
 
 
 @dataclass
@@ -33,6 +35,15 @@ class OperationDirective:
     capec_ids: List[str] = field(default_factory=list)
     owasp: List[str] = field(default_factory=list)
     max_iterations: int = 6
+    max_tool_calls: int = 0  # Zero keeps existing interactive behavior.
+    max_seconds: int = 0
+    allowed_hosts: List[str] = field(default_factory=list)
+    allowed_identities: List[str] = field(default_factory=list)
+    allowed_actions: List[str] = field(default_factory=list)
+    max_requests: int = 0
+    max_parallel_tool_calls: int = 0
+    interval_ms: int = 0
+    max_spend_usd: float = 0.0
     priority: str = "medium"
     rewrite_note: str = ""
     brain_slice: str = ""
@@ -41,6 +52,7 @@ class OperationDirective:
     coverage_lease_id: str = ""
     parameter_work: Dict[str, str] = field(default_factory=dict)
     js_work: Dict[str, str] = field(default_factory=dict)
+    lead_packet: Dict[str, Any] = field(default_factory=dict)
     proof_escalation_id: str = ""
     proof_strategy: str = ""
     proof_requirements: List[str] = field(default_factory=list)
@@ -74,6 +86,14 @@ class OperationDirective:
             f"- Coverage cell: {self.coverage_cell_id or 'unassigned'}\n"
             f"- Coverage lease: {self.coverage_lease_id or 'unleased'}\n"
             f"- Max iterations: {self.max_iterations}\n"
+            f"- Max tool calls: {self.max_tool_calls or 'profile default'}\n"
+            f"- Time limit: {self.max_seconds or 'wave default'} seconds\n"
+            f"- Scope hosts: {', '.join(self.allowed_hosts) or self.target}\n"
+            f"- Identities: {', '.join(self.allowed_identities) or 'engagement default'}\n"
+            f"- Actions: {', '.join(self.allowed_actions) or 'engagement default'}\n"
+            f"- Request starts: {self.max_requests or 'engagement default'}, spacing {self.interval_ms or 0} ms\n"
+            f"- Parallel tool calls: {self.max_parallel_tool_calls or 'profile default'}\n"
+            f"- Reported spend limit: ${self.max_spend_usd:.2f}\n"
             f"- Priority: {self.priority}\n"
             f"- Allowed tools: {tools}\n"
             "Rules: stay in lane; do not call fireteam_dispatch; "
@@ -86,6 +106,12 @@ class OperationDirective:
                 "\nTrace every replay/compare/candidate/coverage update with coverage_cell_id="
                 f"{self.coverage_cell_id}. When closing it, also pass coverage_lease_id="
                 f"{self.coverage_lease_id}."
+            )
+        if self.lead_packet:
+            block += (
+                "\nPrior evidence and follow-up context for this exact cell: "
+                + json.dumps(self.lead_packet, separators=(",", ":"))[:1200]
+                + ". Use only applicable next tests; do not repeat a failed probe without a new hypothesis."
             )
         if self.parameter_work and self.parameter_work.get("location") == "endpoint":
             work = self.parameter_work
@@ -124,8 +150,26 @@ class OperationDirective:
                 block += (
                     " For text SQLi, preserve the observed request shape and compare repeated "
                     "baseline, true-condition, false-condition, and unrelated-invalid controls. "
+                    " If the observed query value is base64, mutate its decoded value and "
+                    "re-encode every control before replay. "
                     "A lone quote response change is an inconclusive lead, not proof."
                 )
+                if work.get("method") == "POST" and work.get("location") in {"body_form", "body_json"}:
+                    block += (
+                        " For an approved captured POST, use the assigned scoped probe. "
+                        "A repeated database-specific error with an escaped-quote control "
+                        "can establish a candidate; hand its receipt to independent verification."
+                    )
+            elif kind in {"xss", "dom_xss"}:
+                block += (
+                    " Read xss_trace from each scoped browser probe. Use its observed "
+                    "rendered context and representation to choose one bounded next_test "
+                    "on this same cell and lease. Static JavaScript sink leads are not "
+                    "execution proof; require a fresh nonce browser dialog and independent "
+                    "verification before reporting."
+                )
+                if work.get("xss_next_tests"):
+                    block += f" Prior scoped probe suggested: {work['xss_next_tests']}."
             elif kind == "stored_xss":
                 block += (
                     " Stored XSS needs an approved reversible write, a unique harmless canary, "
@@ -141,29 +185,43 @@ class OperationDirective:
             elif kind == "xxe":
                 block += (
                     " XML parser testing requires an observed XML request and approved replay of "
-                    "this exact endpoint. If a captured XML sample is available, use "
-                    "mutate_captured_request location=body_xml, field=document and compare a "
-                    "harmless local entity canary with an inert XML control. The structured "
-                    "mutation blocks network callbacks; leave the proof inconclusive if no "
-                    "approved replay path exists."
+                    "this exact endpoint. For a private browser capture, call "
+                    "scoped_xml_entity_assigned with this cell and lease using "
+                    "technique=parser_control first. If the run separately authorizes "
+                    "out-of-band callbacks, choose technique=external_callback next; "
+                    "it constructs the XML from the private capture and uses a fresh callback. "
+                    "Only callback_observed=true is a candidate signal. Without a captured "
+                    "XML request, approved replay path, and callback authorization, leave "
+                    "the proof inconclusive."
                 )
             elif kind == "crlf":
                 block += (
-                    " Test this exact query input with a benign, unique X-Aegis-Probe "
-                    "response-header marker and an inert control. Inspect the raw response "
-                    "headers; body reflection or a status change is not header injection. "
-                    "Do not set cookies or alter application state for this first pass."
+                    " Call scoped_response_probe_assigned on this exact cell and lease. "
+                    "It compares a fixed X-Prowl-Probe response-header marker with an "
+                    "inert control without following redirects. A body change is not proof. "
+                    "For a positive receipt, submit a candidate with vulnerability_class=crlf "
+                    "and the exact evidence_id for independent replay."
+                )
+            elif kind == "open_redirect":
+                block += (
+                    " Call scoped_response_probe_assigned on this exact observed query "
+                    "input. Its fixed invalid-domain canary checks Location without "
+                    "following the redirect. Submit a positive candidate with "
+                    "vulnerability_class=open_redirect and its evidence_id for independent replay."
                 )
         if self.js_work:
             if self.js_work.get("test_type") == "dom_xss":
                 block += (
                     "\nAssigned DOM XSS lead in observed JavaScript: "
                     f"{self.js_work.get('url', '')}. Source leads: "
-                    f"{self.js_work.get('source_leads', '')}; sink leads: "
+                    f"{self.js_work.get('source_leads', '')}; transform leads: "
+                    f"{self.js_work.get('transform_leads', '')}; sink leads: "
                     f"{self.js_work.get('sink_leads', '')}. Trace actual data flow from "
                     "query or fragment to an executable sink and prove it with a fresh browser "
                     "nonce in the target origin. Co-located regex matches alone are not a finding."
                 )
+                if self.js_work.get("xss_next_tests"):
+                    block += f" Prior scoped probe suggested: {self.js_work['xss_next_tests']}."
             elif self.js_work.get("test_type") not in {"js_secret_review", "js_dependency_review"}:
                 block += (
                     "\nAssigned client-side lead in observed JavaScript: "
@@ -172,16 +230,20 @@ class OperationDirective:
                     f"kind={self.js_work.get('kind', '')}. Source leads: "
                     f"{self.js_work.get('source_leads', '')}; candidate sinks: "
                     f"{self.js_work.get('client_leads', '')}. Reproduce on an observed page "
-                    "in the allowed origin using a benign marker and an inert control. "
-                    "Show the resulting navigation, request change, DOM change, template "
-                    "execution, or prototype change and its security impact. Static pattern "
-                    "co-location alone cannot close this cell or support a finding."
+                    "in the allowed origin using scoped_client_probe_assigned with this "
+                    "cell and lease. Show the resulting navigation, request change, DOM "
+                    "change, template execution, or prototype change and its security "
+                    "impact. Static pattern co-location alone cannot support a finding. "
+                    "For a reproducible DOM redirect, client template execution, or "
+                    "prototype change, submit a candidate with the exact test_type as "
+                    "vulnerability_class, this cell ID, and the browser evidence ID. "
+                    "Link, text, and request changes remain leads until impact is demonstrated."
                 )
             elif self.js_work.get("test_type") == "js_dependency_review":
                 block += (
                     "\nAssigned observed JavaScript dependency: "
-                    f"{self.js_work.get('url', '')}. Run execute_retirejs on this exact "
-                    "first-party URL, then verify its library/version identity and whether "
+                    f"{self.js_work.get('url', '')}. Call scan_assigned_js_dependency "
+                    "with this cell and lease, then verify its library/version identity and whether "
                     "the reported vulnerable behavior is reachable. A filename or version "
                     "match alone is a lead, not a finding."
                 )
@@ -245,6 +307,7 @@ def directives_from_hypotheses(
         h for h in getattr(brain, "hypotheses", []) or []
         if getattr(h, "status", "") in ("open", "in_progress")
     ]
+    limits = current_autonomy_limits.get()
     out: Dict[str, OperationDirective] = {}
     for name in specialists:
         profile = profiles_by_name.get(name)
@@ -281,6 +344,9 @@ def directives_from_hypotheses(
             {},
         )
         parameter_work: Dict[str, str] = {}
+        prior_xss = coverage_cell.get("xss_trace") or {}
+        prior_xss = prior_xss if isinstance(prior_xss, dict) else {}
+        next_xss = str(prior_xss.get("next_tests") or "")[:200]
         if coverage_cell.get("source") in {"parameter_inventory", "surface_applicability"}:
             location, _, parameter_name = str(coverage_cell.get("parameter") or "").partition(":")
             if parameter_name or coverage_cell.get("source") == "surface_applicability":
@@ -297,6 +363,7 @@ def directives_from_hypotheses(
                     "capture_id": str(coverage_cell.get("capture_id") or ""),
                     "test_type": str(coverage_cell.get("test_type") or ""),
                     "value_type": str(coverage_cell.get("value_type") or ""),
+                    "xss_next_tests": next_xss,
                     "scoped_capture_id": (
                         str(coverage_cell.get("capture_id") or "")
                         if scoped_replay_eligible(coverage_cell)
@@ -311,7 +378,9 @@ def directives_from_hypotheses(
                 "test_type": str(coverage_cell.get("test_type") or ""),
                 "kind": str(coverage_cell.get("script_kind") or "external"),
                 "source_leads": str(coverage_cell.get("source_leads") or "")[:300],
+                "transform_leads": str(coverage_cell.get("transform_leads") or "")[:200],
                 "sink_leads": str(coverage_cell.get("sink_leads") or "")[:300],
+                "xss_next_tests": next_xss,
                 "client_leads": str(coverage_cell.get("client_leads") or "")[:300],
             }
         proof_escalation_id = str(coverage_cell.get("proof_escalation_id") or "")
@@ -379,7 +448,7 @@ def directives_from_hypotheses(
                 if ow and ow not in owasps:
                     owasps.append(ow)
             priority = h0.priority
-            target = default_target or ""
+            target = h0.target or default_target or ""
         else:
             goal = profile.role.split(".")[0][:200]
             assumption = ""
@@ -415,12 +484,22 @@ def directives_from_hypotheses(
             capec_ids=capecs,
             owasp=owasps,
             max_iterations=int(getattr(profile, "max_iterations", 6) or 6),
+            max_tool_calls=limits.max_specialist_tool_calls if limits else 0,
+            max_seconds=limits.max_specialist_seconds if limits else 0,
+            allowed_hosts=list(limits.allowed_hosts) if limits else [],
+            allowed_identities=list(limits.allowed_identities) if limits else [],
+            allowed_actions=list(limits.allowed_actions) if limits else [],
+            max_requests=limits.max_specialist_requests if limits else 0,
+            max_parallel_tool_calls=limits.max_parallel_tool_calls if limits else 0,
+            interval_ms=limits.specialist_interval_ms if limits else 0,
+            max_spend_usd=limits.max_specialist_spend_usd if limits else 0.0,
             priority=priority,
             lease_id=lease_id,
             coverage_cell_id=coverage_cell_id,
             coverage_lease_id=coverage_lease_id,
             parameter_work=parameter_work,
             js_work=js_work,
+            lead_packet=lead_packet_for_cell(coverage_cell) if coverage_cell else {},
             proof_escalation_id=proof_escalation_id,
             proof_strategy=str(proof_escalation.get("strategy") or ""),
             proof_requirements=list(proof_escalation.get("requirements") or []),

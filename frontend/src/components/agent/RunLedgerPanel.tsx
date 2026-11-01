@@ -16,6 +16,7 @@ export type AgentRunLedger = {
     repeated_tool_target_actions?: number;
     fingerprinted_tool_calls?: number;
     exact_repeated_tool_calls?: number;
+    failure_groups?: Array<{ tool_name: string; status: string; count: number; reason: string }>;
     model_calls?: number;
     test_actions?: number;
     completed_by_stage?: Record<string, number>;
@@ -85,6 +86,16 @@ export function RunLedgerPanel({ run }: { run: AgentRunLedger | null }) {
         <p className="text-muted-foreground">
           {run.coverage?.repeated_tool_target_actions || 0} additional same-tool/host calls (distinct tests and required controls included)
         </p>
+        {Boolean(run.coverage?.failure_groups?.length) && (
+          <div className="rounded-md border border-border/60 px-2.5 py-2 space-y-1">
+            <p className="font-medium text-foreground">Failed and interrupted actions by reason</p>
+            {run.coverage!.failure_groups!.map((group, index) => (
+              <p key={`${group.tool_name}:${group.status}:${group.reason}:${index}`} className="text-muted-foreground break-words">
+                {group.count} × {group.tool_name} · {group.status} · {group.reason}
+              </p>
+            ))}
+          </div>
+        )}
         {run.coverage?.completed_by_stage && (
           <p className="text-muted-foreground">
             Completed by stage: {Object.entries(run.coverage.completed_by_stage)

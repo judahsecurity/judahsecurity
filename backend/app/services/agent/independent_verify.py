@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -124,7 +125,7 @@ def observed_sql_cell_for_proof(
                     and _same_observed_origin(parsed.scheme, str(cell.get("host") or ""), target)
                     and cell.get("path") == (parsed.path or "/")
                     and cell.get("parameter") == (
-                        f"body_form:{parameter}" if proof.get("method") == "POST"
+                        f"body_{proof.get('location')}:{parameter}" if proof.get("method") == "POST"
                         else f"query:{parameter}"
                     )
                     and (proof.get("method") != "POST"
@@ -595,7 +596,9 @@ def verifier_mission(candidate: FindingCandidate, *, threat_slice: str = "") -> 
         "bounded Boolean controls. Use its new evidence_id with the hunter's earlier "
         "scoped_numeric_sqli evidence_id. "
         "For a mapped string-valued GET query input, scoped_string_sqli(url, parameter) "
-        "builds a fresh bounded SQLi proof without an XHR capture. It tries "
+        "builds a fresh bounded SQLi proof without an XHR capture. Preserve the "
+        "observed query value when it is base64 encoded; the proof tool mutates "
+        "the decoded value and re-encodes every control. It tries "
         "OR controls first, including small JSON result arrays; when unproven, "
         "it repeats a recognized database error "
         "or compares AND true/false responses against a stable baseline. "
@@ -690,6 +693,15 @@ async def run_independent_verifiers(
                 replayed = await _verify_scoped_browser_xss_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
+                replayed = await _verify_scoped_client_candidate(tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
+                replayed = await _verify_scoped_response_candidate(tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
+                replayed = await _verify_scoped_xml_xxe_candidate(tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
                 report = await _run_specialist(
                     profile, mission, [cand.target], llm, tools_manager,
                 )
@@ -712,6 +724,282 @@ async def run_independent_verifiers(
             }
 
     return list(await asyncio.gather(*(_one(c) for c in pending)))
+
+
+async def _verify_scoped_client_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Revisit the same observed page and require a fresh browser nonce."""
+    from urllib.parse import urlsplit
+
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.proof_policy import validate_proof
+
+    claim = cand.vulnerability_class
+    if claim not in {"dom_open_redirect", "client_template_injection",
+                     "client_prototype_pollution"}:
+        return None
+    store = evidence_store(tools_manager)
+    cell = next((row for row in _brain(tools_manager).coverage_cells
+                 if row.get("id") == cand.coverage_cell_id
+                 and row.get("test_type") == claim
+                 and row.get("source") == "js_inventory"
+                 and row.get("page_path") == (urlsplit(cand.target).path or "/")), None)
+    identity = str(cand.identity or "anonymous")
+    hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
+                   if eid in store.records
+                   and store.records[eid].get("kind") == "scoped_browser_check_client"
+                   and store.records[eid].get("target") == cand.target
+                   and store.records[eid].get("identity") == identity
+                   and store.records[eid].get("payload", {}).get("client_test_type") == claim
+                   and store.records[eid].get("payload", {}).get("behavior_observed") is True), None)
+    failure = "A scoped browser receipt on the observed client source is required"
+    if cell and hunter:
+        hunter_id, receipt = hunter
+        template = str(receipt["payload"].get("target_template") or "")
+        parsed = urlsplit(template)
+        if ("__PROWL_NONCE__" in template
+                and (parsed.scheme, parsed.netloc, parsed.path or "/") ==
+                (urlsplit(cand.target).scheme, urlsplit(cand.target).netloc,
+                 urlsplit(cand.target).path or "/")):
+            try:
+                wrapped = await tools_manager.execute("scoped_browser_assessment", {
+                    "operation": "check_client", "url": template,
+                    "identity": identity, "client_test_type": claim,
+                })
+                output = wrapped.get("output") if isinstance(wrapped, dict) else None
+                replay = json.loads(output) if isinstance(output, str) else output
+                artifact_id = str((replay or {}).get("evidence_id") or "")
+                verifier = store.records.get(artifact_id)
+                if (isinstance(replay, dict) and replay.get("behavior_observed") is True
+                        and verifier and verifier.get("run_id") == run.id):
+                    proof = {"kind": "scoped_browser_client",
+                             "hunter_artifact_id": hunter_id, "artifact_id": artifact_id}
+                    valid, why = validate_proof(store, cand, proof, [artifact_id])
+                    fresh, fresh_why = store.validate(
+                        [artifact_id], candidate_id=cand.id, revision=cand.revision,
+                        run_id=run.id, target=cand.target,
+                    )
+                    if valid and fresh:
+                        verified = apply_verdict(
+                            tools_manager, candidate_id=cand.id, verdict="confirmed",
+                            evidence="Fresh browser replay reproduced the client-side behavior.",
+                            evidence_ids=[artifact_id], proof=proof,
+                        )
+                        if verified and verified.status == "confirmed":
+                            return {"candidate_id": cand.id, "title": cand.title,
+                                    "status": "confirmed", "verifier_summary":
+                                    "Fresh browser replay matched the client-side receipt",
+                                    "key_findings": [], "tool_calls": 1, "error": None}
+                    failure = why or fresh_why or "Client proof policy rejected the replay"
+                else:
+                    failure = "Fresh browser replay did not reproduce the client-side behavior"
+            except Exception:
+                logging.getLogger(__name__).exception("Client-side verifier replay failed")
+                failure = "Client-side browser replay failed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title,
+            "status": "inconclusive", "verifier_summary": failure,
+            "key_findings": [], "tool_calls": 1, "error": None}
+
+
+async def _verify_scoped_response_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Repeat the fixed response-header or Location canary on the same input."""
+    import asyncio
+    import secrets
+    from urllib.parse import urlsplit
+
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.proof_policy import validate_proof
+    from app.services.agent.scoped_assessment.response_probe import probe_response
+
+    claim = cand.vulnerability_class
+    if claim not in {"crlf", "open_redirect"}:
+        return None
+    store = evidence_store(tools_manager)
+    cell = next((row for row in _brain(tools_manager).coverage_cells
+                 if row.get("id") == cand.coverage_cell_id
+                 and row.get("test_type") == claim
+                 and row.get("source") == "parameter_inventory"
+                 and row.get("method") == "GET"
+                 and row.get("path") == (urlsplit(cand.target).path or "/")), None)
+    identity = str(cand.identity or "anonymous")
+    hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
+                   if eid in store.records
+                   and store.records[eid].get("kind") == "scoped_response_probe"
+                   and store.records[eid].get("target") == cand.target
+                   and store.records[eid].get("identity") == identity
+                   and store.records[eid].get("payload", {}).get("test_type") == claim
+                   and store.records[eid].get("payload", {}).get("proof_confirmed") is True), None)
+    failure = "An observed-input response probe receipt is required"
+    if cell and hunter:
+        hunter_id, receipt = hunter
+        location, separator, parameter = str(cell.get("parameter") or "").partition(":")
+        if location == "query" and separator and parameter:
+            nonce = secrets.token_hex(8)
+            target = urlsplit(cand.target)
+            scoped_origin = f"{target.scheme}://{target.netloc}"
+            if claim == "crlf":
+                control_value = "%0D%0AX-Prowl-Probe: " + nonce
+                probe_value = "\r\nX-Prowl-Probe: " + nonce
+            else:
+                control_value = scoped_origin + "/__prowl_control_" + nonce
+                probe_value = "https://prowl.invalid/" + nonce
+            try:
+                control_url, context = tools_manager._observed_get_query_template(
+                    cand.target, parameter, control_value, identity,
+                    capture_id=cell.get("capture_id") or "",
+                )
+                probe_url, probe_context = tools_manager._observed_get_query_template(
+                    cand.target, parameter, probe_value, identity,
+                    capture_id=cell.get("capture_id") or "",
+                )
+                if (context == "single_parameter" or probe_context != context
+                        or context != receipt["payload"].get("request_context")):
+                    raise ValueError("Observed response baseline changed")
+                tools_manager._scoped_origin(control_url)
+                tools_manager._scoped_origin(probe_url)
+                tools_manager._scoped_claim_gets(2)
+                replay = await asyncio.to_thread(
+                    probe_response, control_url, probe_url, test_type=claim,
+                    allowed_origin=scoped_origin,
+                    state=tools_manager._scoped_state(identity, cand.target),
+                    nonce=nonce,
+                )
+                summary = {"test_type": claim, "parameter": parameter,
+                           "path": cell["path"], "request_context": context,
+                           "nonce": nonce, **replay}
+                artifact_id = store.record(
+                    "scoped_response_probe", summary, target=cand.target,
+                    identity=identity, coverage_cell_id=cand.coverage_cell_id,
+                    test_type=claim, success=replay["proof_confirmed"],
+                )
+                if replay.get("proof_confirmed") is True:
+                    proof = {"kind": "scoped_response_crlf" if claim == "crlf"
+                             else "scoped_response_redirect",
+                             "hunter_artifact_id": hunter_id, "artifact_id": artifact_id}
+                    valid, why = validate_proof(store, cand, proof, [artifact_id])
+                    fresh, fresh_why = store.validate(
+                        [artifact_id], candidate_id=cand.id, revision=cand.revision,
+                        run_id=run.id, target=cand.target,
+                    )
+                    if valid and fresh:
+                        verified = apply_verdict(
+                            tools_manager, candidate_id=cand.id, verdict="confirmed",
+                            evidence="Fresh response canary reproduced the behavior.",
+                            evidence_ids=[artifact_id], proof=proof,
+                        )
+                        if verified and verified.status == "confirmed":
+                            return {"candidate_id": cand.id, "title": cand.title,
+                                    "status": "confirmed", "verifier_summary":
+                                    "Fresh response probe matched the hunter receipt",
+                                    "key_findings": [], "tool_calls": 1, "error": None}
+                    failure = why or fresh_why or "Response proof policy rejected the replay"
+                else:
+                    failure = "Fresh response probe did not reproduce the canary"
+            except Exception:
+                logging.getLogger(__name__).exception("Response verifier replay failed")
+                failure = "Response verifier replay failed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title,
+            "status": "inconclusive", "verifier_summary": failure,
+            "key_findings": [], "tool_calls": 1, "error": None}
+
+
+async def _verify_scoped_xml_xxe_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Repeat a captured XML entity with a new callback in the verifier run."""
+    import logging
+
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.parameter_inventory import _origin
+    from app.services.agent.proof_policy import inferred_vulnerability_class, validate_proof
+    from app.services.agent.scoped_assessment.xml_entity import (
+        plan_xml_entity_probe, send_xml_callback,
+    )
+
+    if (cand.vulnerability_class or inferred_vulnerability_class(cand)) != "xxe":
+        return None
+    brain = _brain(tools_manager)
+    cell = next((row for row in brain.coverage_cells
+                 if row.get("id") == cand.coverage_cell_id), None)
+    if (not cell or cell.get("source") != "parameter_inventory"
+            or cell.get("observation_source") != "browser_traffic"
+            or cell.get("test_type") != "xxe" or cell.get("method") != "POST"
+            or cell.get("parameter") != "body_xml:document"
+            or not cell.get("capture_id") or not cell.get("path")):
+        return None
+    target = urlsplit(cand.target)
+    identity = str(cell.get("identity") or "anonymous")
+    if (target.scheme not in {"http", "https"} or target.query or target.fragment
+            or not _same_observed_origin(target.scheme, str(cell.get("host") or ""), cand.target)
+            or (target.path or "/") != cell["path"]
+            or (cand.identity and cand.identity != identity)
+            or (cand.parameter and cand.parameter != cell["parameter"])):
+        return None
+    store = evidence_store(tools_manager)
+    hunter_ids = [artifact_id for artifact_id in cand.evidence_ids
+                  if (artifact_id in store.records
+                      and store.records[artifact_id].get("kind") == "scoped_xml_xxe"
+                      and store.records[artifact_id].get("target") == cand.target
+                      and store.records[artifact_id].get("identity") == identity
+                      and store.records[artifact_id].get("payload", {}).get("source_artifact_id")
+                      == cell["capture_id"]
+                      and store.records[artifact_id].get("payload", {}).get("callback_observed") is True)]
+    if not hunter_ids:
+        return None
+    failure = "Fresh XML callback did not reproduce the hunter signal"
+    try:
+        if cell["path"] not in (getattr(tools_manager, "_scoped_body_replay_paths", None) or set()):
+            raise ValueError("The exact XML POST path was not approved for replay")
+        capture = tools_manager._scoped_capture_row(str(cell["capture_id"]))
+        if (not capture or capture.get("identity") != identity
+                or capture.get("verifier_run_id") is not None):
+            raise ValueError("The original browser XML capture is unavailable")
+        plan = plan_xml_entity_probe(
+            capture["private"], allowed_origin=_origin(cand.target),
+            expected_path=cell["path"],
+        )
+        if plan["url"] != cand.target:
+            raise ValueError("XML capture does not match the candidate target")
+        result = await send_xml_callback(tools_manager, plan, identity=identity)
+        if result.get("callback_observed") is True and isinstance(result.get("proof"), dict):
+            evidence_ids = [str(item) for item in result.get("evidence_ids") or []]
+            for hunter_id in hunter_ids:
+                proof = {**result["proof"], "hunter_artifact_id": hunter_id}
+                valid, why = validate_proof(store, cand, proof, evidence_ids)
+                fresh, fresh_why = store.validate(
+                    evidence_ids, candidate_id=cand.id, revision=cand.revision,
+                    run_id=run.id, target=cand.target,
+                )
+                if valid and fresh:
+                    verified = apply_verdict(
+                        tools_manager, candidate_id=cand.id, verdict="confirmed",
+                        evidence="A fresh external XML entity produced a matching callback on the observed endpoint.",
+                        evidence_ids=evidence_ids, proof=proof,
+                    )
+                    if verified and verified.status == "confirmed":
+                        return {"candidate_id": cand.id, "title": cand.title,
+                                "status": "confirmed", "verifier_summary": "Fresh XML callback matched the hunter signal",
+                                "key_findings": [], "tool_calls": 1, "error": None}
+                failure = why or fresh_why or "XML callback proof policy rejected the replay"
+        else:
+            failure = "No matching callback arrived during the fresh XML replay"
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Deterministic XXE verifier could not replay candidate %s", cand.id,
+        )
+        failure = "Scoped XML replay failed before verification completed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title, "status": "inconclusive",
+            "verifier_summary": failure, "key_findings": [], "tool_calls": 1,
+            "error": None}
 
 
 async def _verify_scoped_sql_candidate(
@@ -850,7 +1138,7 @@ async def _verify_scoped_sql_candidate(
 async def _verify_scoped_post_sql_candidate(
     tools_manager: Any, cand: FindingCandidate, run: Any, cell: dict,
 ) -> Optional[Dict[str, Any]]:
-    """Repeat the same captured form with fresh POST controls and identity."""
+    """Repeat the same captured form or JSON body with fresh POST controls."""
     import logging
 
     from app.services.agent.evidence_store import evidence_store
@@ -865,7 +1153,7 @@ async def _verify_scoped_post_sql_candidate(
     if (cell.get("source") != "parameter_inventory"
             or cell.get("observation_source") not in OBSERVED_INPUT_SOURCES
             or cell.get("observation_source") != "browser_traffic"
-            or cell.get("test_type") != "sqli" or location != "body_form"
+            or cell.get("test_type") != "sqli" or location not in {"body_form", "body_json"}
             or not separator or not parameter or not capture_id
             or target.scheme not in {"http", "https"}
             or not _same_observed_origin(target.scheme, str(cell.get("host") or ""), cand.target)
@@ -907,7 +1195,7 @@ async def _verify_scoped_post_sql_candidate(
                 if valid and fresh:
                     verified = apply_verdict(
                         tools_manager, candidate_id=cand.id, verdict="confirmed",
-                        evidence="Fresh scoped POST SQL error controls reproduced the candidate on the exact captured form input.",
+                        evidence="Fresh scoped POST SQL error controls reproduced the candidate on the exact captured input.",
                         evidence_ids=[artifact_id], proof=proof,
                     )
                     if verified and verified.status == "confirmed":

@@ -498,6 +498,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _scoped_body_replay_paths = SessionValue(set)
     _scoped_stored_xss_cleanup_paths = SessionValue(set)
     _scoped_owner_expectations = SessionValue(dict)
+    _scoped_auth_login_path = SessionValue(lambda: "")
     _scoped_assessment_started = SessionValue(lambda: False)
     _scoped_assessment_partial_reason = SessionValue(lambda: "")
     _proof_engine = SessionValue(lambda: None)
@@ -724,6 +725,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "scoped_assessment_probe_assigned": self.scoped_assessment_probe_assigned,
             "scoped_input_probe_assigned": self.scoped_input_probe_assigned,
             "scoped_dom_xss_assigned": self.scoped_dom_xss_assigned,
+            "scoped_response_probe_assigned": self.scoped_response_probe_assigned,
+            "scoped_client_probe_assigned": self.scoped_client_probe_assigned,
+            "scan_assigned_js_dependency": self.scan_assigned_js_dependency,
+            "scoped_xml_entity_assigned": self.scoped_xml_entity_assigned,
             "scoped_stored_xss_assigned": self.scoped_stored_xss_assigned,
             "probe_observed_input_batch": self.probe_observed_input_batch,
             "scoped_assessment_candidate": self.scoped_assessment_candidate,
@@ -908,7 +913,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
     async def scoped_input_probe_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
-        technique: str = "html_body",
+        technique: str = "html_body", variant: str = "base",
     ) -> Dict[str, Any]:
         """Probe one leased, observed GET input or approved POST form.
 
@@ -923,6 +928,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.engagement_brain import engagement_brain_from_dict
         from app.services.agent.parameter_inventory import _origin
         from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.scoped_assessment.xss_feedback import (
+            MAX_ATTEMPTS, payload_for, xss_trace,
+        )
         from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
 
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
@@ -964,9 +972,14 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             return {"success": False, "error": "assessment_scope_denied",
                     "output": str(exc)[:300]}
         identity = str(cell.get("identity") or "anonymous")
+        try:
+            self._scoped_state(identity, url)
+        except (KeyError, ValueError):
+            return {"success": False, "error": "identity_unavailable",
+                    "output": "Assigned input needs a usable session on this origin"}
 
         if cell["test_type"] == "sqli":
-            if technique != "html_body":
+            if technique != "html_body" or variant != "base":
                 return {"success": False, "error": "unsupported_technique"}
             numeric = cell.get("value_type") in {"positive_integer", "number"}
             if not numeric:
@@ -995,16 +1008,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "xss_browser_js_single": "js_single",
                 "xss_browser_js_double": "js_double",
             }.get(technique, technique)
-            payloads = {
-                "html_body": '<img src=x onerror=alert("__PROWL_NONCE__")>',
-                "html_body_svg": '<svg onload=alert("__PROWL_NONCE__")>',
-                "html_attribute": '"><img src=x onerror=alert("__PROWL_NONCE__")>',
-                "html_attribute_single": "'><img src=x onerror=alert(\"__PROWL_NONCE__\")>",
-                "js_single": "';alert(\"__PROWL_NONCE__\");//",
-                "js_double": '\";alert(\'__PROWL_NONCE__\');//',
-            }
-            if technique not in payloads:
-                return {"success": False, "error": "unsupported_technique"}
+            attempts = list(cell.get("xss_probe_attempts") or [])
+            if len(attempts) >= MAX_ATTEMPTS:
+                return {"success": False, "error": "xss_probe_budget_exhausted"}
+            if any(row.get("technique") == technique
+                   and row.get("variant", "base") == variant for row in attempts):
+                return {"success": False, "error": "technique_already_attempted"}
+            try:
+                payload = payload_for(technique, variant, allow_double_url=not form_xss)
+            except ValueError as exc:
+                return {"success": False, "error": str(exc)}
             if form_xss:
                 matching_forms = [form for form in (cmap.get("forms") or [])[:80]
                                   if isinstance(form, dict)
@@ -1022,7 +1035,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 proof = json.loads(await self.scoped_browser_assessment(
                     "check_form_xss", pages[0], identity=identity,
                     form_action=url, form_field=parameter,
-                    form_payload_template=payloads[technique],
+                    form_payload_template=payload,
                 ))
                 request_context = "observed_post_form"
                 operation = "scoped_browser_check_form_xss"
@@ -1058,7 +1071,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     proof = json.loads(await self.scoped_browser_assessment(
                         "check_xhr_xss", page_url, identity=identity,
                         xhr_path=cell["path"], xhr_parameter=parameter,
-                        xhr_payload_template=payloads[technique],
+                        xhr_payload_template=payload,
                         xhr_query_keys=query_keys,
                         **({"xhr_actions": captured["replay_actions"]}
                            if captured.get("replay_actions") else {}),
@@ -1067,7 +1080,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     operation = "scoped_browser_check_xhr_xss"
                 else:
                     template, request_context = self._observed_get_query_template(
-                        url, parameter, payloads[technique], identity,
+                        url, parameter, payload, identity,
                         capture_id=capture_id,
                     )
                     proof = json.loads(await self.scoped_browser_assessment(
@@ -1096,6 +1109,19 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             *(current.get("evidence_ids") or []), artifact_id,
         ]))[:30]
         current["last_probe"] = operation
+        if cell["test_type"] == "sqli":
+            from app.services.agent.coverage_cells import record_sqli_trace
+
+            record_sqli_trace(current, proof)
+        if cell["test_type"] == "xss":
+            current["xss_probe_attempts"] = [
+                *(current.get("xss_probe_attempts") or []),
+                {"technique": technique, "variant": variant,
+                 "evidence_id": artifact_id, "executed": confirmed},
+            ][:MAX_ATTEMPTS]
+            trace = xss_trace(current, proof, technique=technique,
+                              variant=variant, attempts=current["xss_probe_attempts"])
+            current["xss_trace"] = trace
         if confirmed:
             current["status"] = "in_focus"
             current["reason"] = "Execution-owned proof signal; independent verification required"
@@ -1105,11 +1131,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "evidence_id": artifact_id, "proof_confirmed": confirmed,
                 "probe_result": {key: proof[key] for key in (
                     "executed", "proof_confirmed", "requests_sent", "baseline_source",
-                    "reflection_contexts", "proof_recipe", "total_requests_sent",
+                    "proof_recipe", "total_requests_sent",
                     "and_followup_error", "error_followup_error",
                 ) if key in proof} | ({"request_context": request_context}
-                                   if cell["test_type"] == "xss" else {}),
-                "funnel": parameter_test_funnel(live)}
+                                   if cell["test_type"] == "xss" else {})
+                | ({"reflection_contexts": trace["rendered_contexts"],
+                    "reflection_observations": trace["render_observations"]}
+                   if cell["test_type"] == "xss" else {}),
+                "funnel": parameter_test_funnel(live),
+                **({"xss_trace": trace, "technique": technique, "variant": variant}
+                   if cell["test_type"] == "xss" else {})}
 
     async def probe_observed_input_batch(
         self, max_checks: int = 8, max_seconds: int = 180,
@@ -1129,13 +1160,17 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
     async def scoped_dom_xss_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
+        technique: str = "html_body", variant: str = "base",
     ) -> Dict[str, Any]:
-        """Probe an observed browser URL source on its rendering page."""
+        """Try one bounded browser technique on a leased DOM source."""
         import time
         from urllib.parse import quote, urlsplit
         from app.services.agent.engagement_brain import engagement_brain_from_dict
         from app.services.agent.parameter_inventory import _origin
         from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.scoped_assessment.xss_feedback import (
+            MAX_ATTEMPTS, payload_for, xss_trace,
+        )
 
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
         cell = next((row for row in brain.coverage_cells
@@ -1152,6 +1187,16 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                            {"html_assignment", "dynamic_code"}
                            for lead in cell.get("sink_leads") or [])):
             return {"success": False, "error": "invalid_dom_xss_lease"}
+        attempts = list(cell.get("dom_probe_attempts") or [])
+        if len(attempts) >= MAX_ATTEMPTS:
+            return {"success": False, "error": "dom_probe_budget_exhausted"}
+        if any(row.get("technique") == technique
+               and row.get("variant", "base") == variant for row in attempts):
+            return {"success": False, "error": "technique_already_attempted"}
+        try:
+            payload = payload_for(technique, variant)
+        except ValueError as exc:
+            return {"success": False, "error": str(exc)}
         location, separator, field = str(cell.get("parameter") or "").partition(":")
         source_kind = "query" if location == "query" and separator else "fragment"
         if (source_kind == "query"
@@ -1175,7 +1220,6 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
                 != scoped_origin):
             return {"success": False, "error": "scope_mismatch"}
-        payload = '<img src=x onerror=alert("__PROWL_NONCE__")>'
         identity = str(cell.get("identity") or "anonymous")
         page_url = scoped_origin + page_path
         if source_kind == "query":
@@ -1207,6 +1251,15 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         ]))[:30]
         operation = "scoped_browser_check_xss_" + source_kind
         current["last_probe"] = operation
+        current["dom_probe_attempts"] = [
+            *(current.get("dom_probe_attempts") or []),
+            {"technique": technique, "variant": variant,
+             "evidence_id": artifact_id,
+             "executed": proof.get("executed") is True},
+        ][:MAX_ATTEMPTS]
+        trace = xss_trace(current, proof, technique=technique,
+                          variant=variant, attempts=current["dom_probe_attempts"])
+        current["xss_trace"] = trace
         if proof.get("executed") is True:
             current["status"] = "in_focus"
             current["reason"] = "Browser execution signal; independent verification required"
@@ -1214,9 +1267,315 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         return {"success": True, "coverage_cell_id": coverage_cell_id,
                 "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
                 "operation": operation,
+                "technique": technique, "variant": variant,
                 "proof_confirmed": proof.get("executed") is True,
+                "xss_trace": trace,
                 "probe_result": {"executed": proof.get("executed") is True,
-                                 "request_context": request_context}}
+                                 "request_context": request_context,
+                                 "reflection_contexts": trace["rendered_contexts"],
+                                 "reflection_observations": trace["render_observations"]}}
+
+    async def scoped_client_probe_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+    ) -> Dict[str, Any]:
+        """Replay one observed client source with a fixed, harmless marker."""
+        import time
+        from urllib.parse import quote, urlsplit
+
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+
+        classes = {"dom_open_redirect", "dom_link_manipulation",
+                   "dom_data_manipulation", "request_url_override",
+                   "client_template_injection", "client_prototype_pollution"}
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        test_type = str((cell or {}).get("test_type") or "")
+        source_kind, separator, field = str((cell or {}).get("parameter") or "").partition(":")
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "js_inventory"
+                or cell.get("specialist") != "spa_client"
+                or test_type not in classes
+                or cell.get("method") != "GET"
+                or source_kind not in {"fragment", "query"}
+                or (source_kind == "query" and (not separator or not field or len(field) > 80))
+                or not any(isinstance(row, dict) and row.get("kind") == source_kind
+                           for row in cell.get("source_leads") or [])
+                or not any(isinstance(row, dict) and row.get("kind") ==
+                           ("prototype_pollution" if test_type == "client_prototype_pollution"
+                            else test_type) for row in cell.get("client_leads") or [])):
+            return {"success": False, "error": "invalid_client_lease"}
+        page_path = str(cell.get("page_path") or "")
+        if (not page_path or page_path != cell.get("path")
+                or not page_path.startswith("/") or page_path.startswith("//")
+                or any(char in page_path for char in "?#\\\r\n\t ")
+                or not allowed_discovery_path(page_path)):
+            return {"success": False, "error": "observed_rendering_page_missing"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        page_url = scoped_origin + page_path
+        payload = {
+            "dom_open_redirect": "https://prowl.invalid/__PROWL_NONCE__",
+            "dom_link_manipulation": "https://prowl.invalid/__PROWL_NONCE__",
+            "dom_data_manipulation": "__PROWL_NONCE__",
+            "request_url_override": "https://prowl.invalid/__PROWL_NONCE__",
+            "client_template_injection": "{{7*7}}__PROWL_NONCE__",
+            "client_prototype_pollution": "__proto__[prowl___PROWL_NONCE__]=1",
+        }[test_type]
+        identity = str(cell.get("identity") or "anonymous")
+        if source_kind == "fragment":
+            template = page_url + "#" + payload
+            request_context = "observed_fragment_render_page"
+        elif test_type == "client_prototype_pollution" and field == "__proto__":
+            template = page_url + "?" + quote("__proto__[prowl___PROWL_NONCE__]", safe="") + "=1"
+            request_context = "static_parser_lead_on_observed_page"
+        else:
+            template, request_context = self._observed_get_query_template(
+                page_url, field, payload, identity,
+            )
+            if request_context == "single_parameter":
+                return {"success": False, "error": "observed_query_baseline_missing"}
+        try:
+            proof = json.loads(await self.scoped_browser_assessment(
+                "check_client", template, identity=identity,
+                client_test_type=test_type,
+            ))
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__}
+        artifact_id = str(proof.get("evidence_id") or "")
+        if not artifact_id:
+            return {"success": False, "error": str(proof.get("error") or "missing_probe_evidence")[:100]}
+        live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        current = next((row for row in live.coverage_cells
+                        if row.get("id") == coverage_cell_id
+                        and row.get("lease_id") == coverage_lease_id), None)
+        if current is None:
+            return {"success": False, "error": "lease_changed"}
+        observed = proof.get("behavior_observed") is True
+        current["evidence_ids"] = list(dict.fromkeys([
+            *(current.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        current["last_probe"] = "scoped_browser_check_client"
+        if observed:
+            current["status"] = "in_focus"
+            current["reason"] = "Observed browser behavior requires impact and independent verification"
+        self._engagement_brain = live.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
+                "test_type": test_type, "request_context": request_context,
+                "behavior_observed": observed, "proof_confirmed": False,
+                "observations": proof.get("observations") or {}}
+
+    async def scoped_response_probe_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+    ) -> Dict[str, Any]:
+        """Test one observed GET input for response-header or redirect control."""
+        import asyncio
+        import secrets
+        import time
+        from urllib.parse import urlsplit
+
+        from app.services.agent.coverage_cells import parameter_test_funnel
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.scoped_assessment.response_probe import probe_response
+        from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        location, separator, parameter = str((cell or {}).get("parameter") or "").partition(":")
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "parameter_inventory"
+                or cell.get("observation_source") not in OBSERVED_INPUT_SOURCES
+                or cell.get("test_type") not in {"crlf", "open_redirect"}
+                or cell.get("method") != "GET" or location != "query"
+                or not separator or not parameter
+                or not allowed_discovery_path(str(cell.get("path") or "/"))):
+            return {"success": False, "error": "invalid_coverage_lease"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        url = scoped_origin + cell["path"]
+        identity = str(cell.get("identity") or "anonymous")
+        nonce = secrets.token_hex(8)
+        test_type = cell["test_type"]
+        if test_type == "crlf":
+            control_value = "%0D%0AX-Prowl-Probe: " + nonce
+            probe_value = "\r\nX-Prowl-Probe: " + nonce
+        else:
+            control_value = scoped_origin + "/__prowl_control_" + nonce
+            probe_value = "https://prowl.invalid/" + nonce
+        control_url, control_source = self._observed_get_query_template(
+            url, parameter, control_value, identity, capture_id=cell.get("capture_id") or "",
+        )
+        probe_url, probe_source = self._observed_get_query_template(
+            url, parameter, probe_value, identity, capture_id=cell.get("capture_id") or "",
+        )
+        if control_source == "single_parameter" or probe_source != control_source:
+            return {"success": False, "error": "observed_query_baseline_missing"}
+        try:
+            self._scoped_origin(control_url)
+            self._scoped_origin(probe_url)
+            self._scoped_claim_gets(2)
+            proof = await asyncio.to_thread(
+                probe_response, control_url, probe_url, test_type=test_type,
+                allowed_origin=scoped_origin, state=self._scoped_state(identity, url),
+                nonce=nonce,
+            )
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__}
+        summary = {"test_type": test_type, "parameter": parameter,
+                   "path": cell["path"], "request_context": control_source,
+                   "nonce": nonce,
+                   **proof}
+        artifact_id = evidence_store(self).record(
+            "scoped_response_probe", summary, target=url, identity=identity,
+            coverage_cell_id=coverage_cell_id, test_type=test_type,
+            capture_id=str(cell.get("capture_id") or ""),
+            success=proof["proof_confirmed"],
+        )
+        cell["evidence_ids"] = list(dict.fromkeys([
+            *(cell.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        cell["last_probe"] = "scoped_response_probe"
+        if proof["proof_confirmed"]:
+            cell["status"] = "in_focus"
+            cell["reason"] = "Response-header signal requires independent verification"
+        self._engagement_brain = brain.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
+                "proof_confirmed": proof["proof_confirmed"],
+                "probe_result": proof, "funnel": parameter_test_funnel(brain)}
+
+    async def scoped_xml_entity_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+        technique: str = "parser_control",
+    ) -> Dict[str, Any]:
+        """Test one leased, browser-captured XML POST without model-supplied bytes."""
+        import time
+        from urllib.parse import urlsplit
+
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment.xml_entity import (
+            plan_xml_entity_probe, send_xml_callback,
+        )
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "parameter_inventory"
+                or cell.get("observation_source") != "browser_traffic"
+                or cell.get("test_type") != "xxe"
+                or cell.get("method") != "POST"
+                or cell.get("parameter") != "body_xml:document"
+                or not cell.get("capture_id")):
+            return {"success": False, "error": "invalid_xml_coverage_lease"}
+        if technique not in {"parser_control", "external_callback"}:
+            return {"success": False, "error": "unsupported_technique"}
+        if technique in {row.get("technique") for row in cell.get("xxe_probe_attempts") or []}:
+            return {"success": False, "error": "technique_already_attempted"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or
+                                    getattr(self, "_fallback_target", "") or ""))
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        path = str(cell.get("path") or "")
+        if path not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
+            return {"success": False, "error": "operator_approval_required",
+                    "reason": "The exact XML POST path needs approved replay"}
+        identity = str(cell.get("identity") or "anonymous")
+        try:
+            private = self._scoped_exchange(str(cell["capture_id"]), identity)
+            plan = plan_xml_entity_probe(
+                private, allowed_origin=scoped_origin, expected_path=path,
+            )
+            self._scoped_origin(plan["url"])
+        except (TypeError, ValueError) as exc:
+            return {"success": False, "error": "invalid_xml_capture",
+                    "reason": str(exc)[:200]}
+        if technique == "external_callback" and not self._oob_callbacks_allowed:
+            return {"success": False, "error": "oob_callbacks_not_authorized"}
+        try:
+            if technique == "parser_control":
+                self._scoped_claim_posts(1)
+                exchange = await self._http_exchange(
+                    method="POST", url=plan["url"],
+                    headers={**plan["headers"], "Content-Type": plan["mime"]},
+                    body=plan["control_body"], identity=identity,
+                    use_auth_session=False, follow_redirects=False,
+                    coverage_cell_id=coverage_cell_id,
+                )
+                evidence_id = str(exchange["evidence_id"])
+                probe = {"status": exchange["response"]["status"],
+                         "parser_control_sent": True}
+                extra_ids: list[str] = []
+                confirmed = False
+            else:
+                callback = await send_xml_callback(self, plan, identity=identity)
+                extra_ids = [str(item) for item in callback.get("evidence_ids") or []]
+                confirmed = callback.get("callback_observed") is True
+                probe = {"callback_observed": confirmed,
+                         "poll_attempts": int(callback.get("poll_attempts") or 0)}
+                evidence_id = evidence_store(self).record(
+                    "scoped_xml_xxe", {
+                        "operation": "external_callback", "target": plan["url"],
+                        "source_artifact_id": cell["capture_id"],
+                        "callback_observed": confirmed,
+                        "oob_evidence_ids": extra_ids,
+                    }, target=plan["url"], identity=identity, success=confirmed,
+                )
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"success": False, "error": "xml_probe_failed",
+                    "reason": str(exc)[:200]}
+        live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        current = next((row for row in live.coverage_cells
+                        if row.get("id") == coverage_cell_id
+                        and row.get("lease_id") == coverage_lease_id), None)
+        if current is None:
+            return {"success": False, "error": "lease_changed"}
+        current["probe_artifact_ids"] = list(dict.fromkeys([
+            *(current.get("probe_artifact_ids") or []), evidence_id,
+        ]))[:20]
+        current["evidence_ids"] = list(dict.fromkeys([
+            *(current.get("evidence_ids") or []), evidence_id, *extra_ids,
+        ]))[:30]
+        current["xxe_probe_attempts"] = [
+            *(current.get("xxe_probe_attempts") or []),
+            {"technique": technique, "evidence_id": evidence_id,
+             "callback_observed": confirmed},
+        ][:2]
+        current["last_probe"] = "scoped_xml_" + technique
+        if confirmed:
+            current["status"] = "in_focus"
+            current["reason"] = "XML callback signal; independent verification required"
+        self._engagement_brain = live.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "operation": current["last_probe"],
+                "technique": technique, "evidence_id": evidence_id,
+                "proof_confirmed": confirmed, "probe_result": probe}
 
     async def scoped_stored_xss_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
@@ -1395,7 +1754,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     proof = json.loads(await self.scoped_body_probe(
                         cell["capture_id"], parameter, identity,
                     ))
-                    if proof.get("proof_recipe") == "post_form_error_v1":
+                    if proof.get("proof_recipe") in {"post_form_error_v1", "post_json_error_v1"}:
                         operation = "scoped_body_sqli_error"
                 else:
                     return {"success": False, "error": "unsupported_capture",
@@ -1418,6 +1777,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 *(current.get("evidence_ids") or []), artifact_id,
             ]))[:30]
             current["last_probe"] = operation
+            from app.services.agent.coverage_cells import record_sqli_trace
+
+            record_sqli_trace(current, proof)
             if proof.get("proof_confirmed") is True:
                 current["status"] = "in_focus"
                 current["reason"] = "Execution-owned SQLi proof signal; independent verification required"
@@ -3921,6 +4283,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                                     status="published",
                                     finding_id=str(vuln.id),
                                 )
+                # The finding is already committed. Save its candidate link
+                # before the legacy coverage write, which may fail independently.
+                # Coverage migration can then repair the exact cell on read.
+                self._engagement_brain = brain.to_dict()
                 record_surface_coverage(
                     brain,
                     path=target or target_clean,
@@ -3943,7 +4309,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 )
                 self._engagement_brain = brain.to_dict()
             except Exception:
-                logger.debug("create_finding coverage update failed", exc_info=True)
+                logger.warning("create_finding coverage update failed", exc_info=True)
             return msg
         except Exception as e:
             db.rollback()
@@ -4274,6 +4640,81 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "client_signing_findings": result.get("client_signing_findings") or [],
             },
         }, default=str)[:_tool_output_max_chars()]
+
+    async def scan_assigned_js_dependency(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+    ) -> str:
+        """Run Retire.js on one leased first-party script and retain its provenance."""
+        import asyncio
+        import time
+        from urllib.parse import urlsplit
+
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.retirejs_service import scan_js_urls_for_vulns
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "js_inventory"
+                or cell.get("specialist") != "spa_client"
+                or cell.get("test_type") != "js_dependency_review"):
+            return json.dumps({"success": False, "error": "invalid_coverage_lease"})
+        url = str(cell.get("script_url") or "")
+        cmap = getattr(self, "_capability_map", None) or {}
+        target = urlsplit(str(cmap.get("scope") or cmap.get("target") or ""))
+        script = urlsplit(url)
+        if ((script.scheme, script.netloc) != (target.scheme, target.netloc)
+                or script.scheme not in {"http", "https"} or not script.path
+                or script.path != cell.get("path") or script.query or script.fragment):
+            return json.dumps({"success": False, "error": "scope_mismatch"})
+        try:
+            result = await asyncio.to_thread(
+                scan_js_urls_for_vulns, url, 1, same_origin_only=True,
+            )
+        except Exception:
+            logger.exception("Assigned dependency review failed")
+            result = {"success": False, "downloads": [], "retire_error": "scanner_failed"}
+        downloads = result.get("downloads") or []
+        fetched = (len(downloads) == 1 and downloads[0].get("url") == url
+                   and downloads[0].get("ok") is True)
+        expected = str(cell.get("expected_sha256") or "")
+        source_matched = bool(fetched and (not expected or
+                              downloads[0].get("sha256") == expected))
+        complete = bool(source_matched and not result.get("retire_error")
+                        and result.get("success") is True)
+        candidates = [
+            {key: item.get(key) for key in ("component", "version", "severity", "cve")}
+            for item in (result.get("vulnerable_components") or [])[:20]
+            if isinstance(item, dict) and item.get("source_url") == url
+        ] if source_matched else []
+        status = "in_focus" if complete and candidates else "tested_clean" if complete else "inconclusive"
+        summary = {"url": url, "fetched": fetched, "source_matched": source_matched,
+                   "complete": complete, "candidate_count": len(candidates),
+                   "scanner_error": bool(result.get("retire_error")),
+                   "status": status, "candidates": candidates,
+                   "proof_confirmed": False}
+        artifact_id = evidence_store(self).record(
+            "js_dependency_review", summary, target=url,
+            coverage_cell_id=coverage_cell_id, test_type="js_dependency_review",
+            capture_id=str(cell.get("capture_id") or ""), success=complete,
+        )
+        cell["evidence_ids"] = list(dict.fromkeys([
+            *(cell.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        cell["status"] = status
+        cell["reason"] = (
+            "Known-vulnerability component match needs reachability validation" if candidates else
+            "Complete dependency scan found no known match" if complete else
+            "Script fetch, content hash, or Retire.js scan incomplete"
+        )
+        self._engagement_brain = brain.to_dict()
+        return json.dumps({"success": True, "coverage_cell_id": coverage_cell_id,
+                           "coverage_lease_id": coverage_lease_id,
+                           "evidence_id": artifact_id, "summary": summary})
 
     async def scan_js_urls_for_vulns(
         self,
@@ -5097,7 +5538,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "identity": identity,
             "samples": rows,
             "next": (
-                "mutate_captured_request(sample_index=N, location='query|header|body_json|body_form|path|method', "
+                "mutate_captured_request(sample_ref='req-...', location='query|header|body_json|body_form|path|method', "
                 "field='url', value='https://<interactsh>') — one field only."
             ),
         }, indent=2)[:_tool_output_max_chars()]
@@ -5209,12 +5650,14 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         timeout: int = 25,
         identity: Optional[str] = None,
         hypothesis_id: str = "",
+        sample_ref: str = "",
         **kwargs: Any,
     ) -> str:
         """Change one field on a captured request and send it (Repeater + one mutation)."""
         from app.services.agent.request_mutate import (
             apply_one_mutation,
             normalize_sample,
+            sample_reference,
             samples_from_map,
         )
 
@@ -5224,15 +5667,29 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             origin = str(cmap.get("target") or "")
         origin = origin or (getattr(self, "_fallback_target", None) or "") or (current_seed_target.get() or "")
         samples = samples_from_map(cmap if isinstance(cmap, dict) else {})
-        try:
-            idx = int(sample_index)
-            sample = samples[idx]
-        except Exception:
-            return json.dumps({
-                "ok": False,
-                "error": "sample_index out of range — call list_captured_requests first",
-                "count": len(samples),
-            })
+        if sample_ref:
+            matches = [(i, row) for i, row in enumerate(samples)
+                       if isinstance(row, dict)
+                       and sample_reference(row, fallback_origin=origin) == sample_ref]
+            if len(matches) != 1:
+                return json.dumps({
+                    "ok": False,
+                    "error": "sample_ref missing or ambiguous — refresh list_captured_requests",
+                    "matches": len(matches),
+                })
+            idx, sample = matches[0]
+        else:
+            try:
+                idx = int(sample_index)
+                sample = samples[idx]
+            except Exception:
+                return json.dumps({
+                    "ok": False,
+                    "error": "sample_index out of range — call list_captured_requests first",
+                    "count": len(samples),
+                })
+        if not isinstance(sample, dict):
+            return json.dumps({"ok": False, "error": "Captured sample is invalid"})
         try:
             baseline, mutant = apply_one_mutation(
                 sample,
@@ -5251,14 +5708,26 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 request["identity"] = identity
                 request["headers"] = {k: v for k, v in (request.get("headers") or {}).items()
                                       if k.lower() not in ("cookie", "authorization")}
+        source_ref = sample_reference(sample, fallback_origin=origin)
+        source_capture_id = str(sample.get("artifact_id") or sample.get("capture_id") or "")[:80]
         if compare:
-            return await self.compare_requests(
+            compared = await self.compare_requests(
                 baseline=baseline,
                 mutant=mutant,
                 use_auth_session=use_auth_session,
                 timeout=timeout,
                 hypothesis_id=hypothesis_id,
             )
+            try:
+                result = json.loads(compared)
+                if isinstance(result, dict):
+                    result["source_sample_ref"] = source_ref
+                    if source_capture_id:
+                        result["source_capture_id"] = source_capture_id
+                    return json.dumps(result, default=str)[:_tool_output_max_chars()]
+            except (TypeError, ValueError):
+                pass
+            return compared
         try:
             exchange = await self._http_exchange(
                 method=mutant["method"],
@@ -5274,6 +5743,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             exchange.pop("_body_text", None)
             return json.dumps({
                 "ok": True,
+                "source_sample_ref": source_ref,
+                "source_capture_id": source_capture_id,
                 "mutation": {"location": location, "field": field, "value": value},
                 "baseline": normalize_sample(baseline, fallback_origin=origin),
                 "sent": mutant,
@@ -7596,6 +8067,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         server: Optional[str] = None,
         token: Optional[str] = None,
         keep_session: bool = False,
+        summary_only: bool = False,
     ) -> str:
         """Run a correlated custom OAST probe using a fresh Interactsh session.
 
@@ -7623,6 +8095,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             token=token,
             keep_session=keep_session,
         )
+        if summary_only:
+            result = {key: result.get(key) for key in (
+                "success", "error", "callback_observed", "poll_attempts",
+                "evidence_ids", "proof",
+            ) if key in result}
         return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
 
     async def read_evidence(self, evidence_id: str, offset: int = 0, limit: int = 6000) -> str:
@@ -9525,6 +10002,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         capability_map: Optional[Dict[str, Any]] = None,
         mode: str = "attack",
         surface_signature: str = "",
+        hypothesis_signature: str = "",
         pending_input_count: int = 0,
         pending_coverage_count: int = 0,
         completed_coverage_count: int = 0,
@@ -9544,6 +10022,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             mode: ``attack`` (default), ``observed_inputs`` (leased browser inputs),
                 ``cms_followup`` (fingerprinted CMS), or ``recon`` (legacy triad).
             surface_signature: Value-free observed-input inventory revision for scheduling.
+            hypothesis_signature: Value-free ready-hypothesis revision for scheduling.
             pending_input_count: Number of untested observed input cells when queued.
             pending_coverage_count: Number of unattempted non-SQLi/XSS checks when queued.
             completed_coverage_count: Number of completed coverage checks when queued.
@@ -9561,6 +10040,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             specialists_from_open_hypotheses,
         )
         from app.services.agent.fireteam_service import run_fireteam
+        from app.services.agent.autonomy_limits import current_autonomy_limits
         import time as _time
         from app.services.agent.coverage_cells import CELL_OPEN, seed_js_coverage_cells, seed_parameter_coverage_cells
         from app.services.agent.penetration_task_graph import (
@@ -9578,6 +10058,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         # specialist wave, optional rewrite, and final verification inside it
         # so completed reports and leases are reconciled before returning.
         outer_cap = max(1.0, float(getattr(settings, "AGENT_TOOL_HARD_TIMEOUT_SECONDS", 600) or 600))
+        autonomy_limits = current_autonomy_limits.get()
+        if autonomy_limits:
+            max_parallel = min(max(1, int(max_parallel)), autonomy_limits.max_parallel_specialists)
         outer_margin = min(60.0, outer_cap * 0.1)
         dispatch_deadline = _time.monotonic() + outer_cap - outer_margin
         reserve = min(180.0, outer_cap * 0.3)
@@ -9783,6 +10266,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         profiles = {n: get_specialist(n) for n in chosen if get_specialist(n)}
         default_target = target_list[0] if target_list else (cmap.target if cmap else "")
+        if hypothesis_signature:
+            if hypothesis_signature in brain.hypothesis_wave_history:
+                return json.dumps({"selection_source": "already_dispatched_hypothesis_revision",
+                                   "hypothesis_signature": hypothesis_signature})
         # A class-coverage follow-up owns a coverage cell, not an arbitrary
         # methodology card of the same specialist. Claiming that card would
         # let a class probe close unrelated hypothesis work.
@@ -10159,6 +10646,12 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         # Specialist and verifier tools write to the manager-owned brain while
         # the wave runs. Preserve those receipts before persisting graph results.
         _preserve_live_execution_state()
+        if hypothesis_signature and result.specialists_run:
+            # Record only an executed wave. An exception before run_fireteam
+            # returns leaves this revision available for a bounded retry.
+            brain.hypothesis_wave_history = [
+                *brain.hypothesis_wave_history[-99:], hypothesis_signature,
+            ]
         persist_graph(brain, graph)
         self._engagement_brain = brain.to_dict()
         _checkpoint_task_graph()

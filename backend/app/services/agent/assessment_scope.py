@@ -41,6 +41,14 @@ def allowed_hosts(manager) -> set[str]:
     return hosts
 
 
+def observation_scope_hosts(manager) -> set[str]:
+    """A scheduled autonomous turn only admits its saved host contract."""
+    from app.services.agent.autonomy_limits import current_autonomy_limits
+
+    limits = current_autonomy_limits.get()
+    return set(limits.allowed_hosts) if limits else allowed_hosts(manager)
+
+
 def assert_url_in_scope(manager, url: str) -> str:
     """Reject network destinations not explicitly registered for this assessment."""
     parsed = urlsplit(str(url or ""))

@@ -161,7 +161,11 @@ async def test_assigned_xss_replays_observed_query_context(monkeypatch):
 
     async def fake_browser(operation, template, identity):
         sent.append((operation, template, identity))
-        return json.dumps({"evidence_id": "xss-proof-1", "executed": False})
+        return json.dumps({"evidence_id": f"xss-proof-{len(sent)}", "executed": False,
+                           "reflection_contexts": ["html_text"],
+                           "reflection_observations": [
+                               {"context": "html_text", "representation": "literal_markup_text"},
+                           ]})
 
     monkeypatch.setattr(manager, "scoped_browser_assessment", fake_browser)
     result = await manager.scoped_input_probe_assigned(lease.coverage_cell_id, lease.id)
@@ -172,6 +176,18 @@ async def test_assigned_xss_replays_observed_query_context(monkeypatch):
     query = parse_qs(urlsplit(template).query)
     assert query["sort"] == ["recent"] and query["page"] == ["2"]
     assert "__PROWL_NONCE__" in query["term"][0]
+    assert result["xss_trace"]["render_observations"][0]["representation"] == "literal_markup_text"
+    assert result["xss_trace"]["next_tests"][0] == {
+        "technique": "html_body_svg", "variant": "base",
+    }
+    variant = await manager.scoped_input_probe_assigned(
+        lease.coverage_cell_id, lease.id, technique="html_body", variant="mixed_case",
+    )
+    assert variant["success"] is True and "<ImG" in parse_qs(urlsplit(sent[1][1]).query)["term"][0]
+    repeated = await manager.scoped_input_probe_assigned(
+        lease.coverage_cell_id, lease.id, technique="html_body", variant="mixed_case",
+    )
+    assert repeated["error"] == "technique_already_attempted"
 
 
 def test_manual_specialist_leases_untouched_input_before_positive_receipt():

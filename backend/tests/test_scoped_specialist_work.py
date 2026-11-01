@@ -105,7 +105,8 @@ async def test_js_lease_scans_exact_script_and_records_receipt(monkeypatch):
     assert json.loads(await manager.scan_assigned_js(lease.coverage_cell_id, lease.id))["error"] == "invalid_coverage_lease"
     closed = manager._engagement_brain["coverage_cells"]
     assert next(row for row in closed if row["id"] == lease.coverage_cell_id)["evidence_ids"]
-    assert len([row for row in closed if row["status"] == "untested"]) == 1
+    assert len([row for row in closed if row["status"] == "untested"
+                and row["test_type"] == "js_secret_review"]) == 1
 
 
 @pytest.mark.asyncio
@@ -130,7 +131,8 @@ async def test_js_scan_error_stays_inconclusive_and_cannot_close_other_cell(monk
     assert result["summary"]["status"] == "inconclusive"
     rows = manager._engagement_brain["coverage_cells"]
     assert next(row for row in rows if row["id"] == lease.coverage_cell_id)["status"] == "inconclusive"
-    assert len([row for row in rows if row["status"] == "untested"]) == 1
+    assert len([row for row in rows if row["status"] == "untested"
+                and row["test_type"] == "js_secret_review"]) == 1
 
 
 @pytest.mark.asyncio
@@ -165,7 +167,10 @@ async def test_coverage_followup_leases_observed_client_script(monkeypatch):
     target = "https://app.test"
     cmap = {"target": target, "scope": target,
             "js_files": [target + "/client.js"],
-            "js_sources": [{"url": target + "/client.js",
+            "parameter_inventory": [{"method": "GET", "path": "/blog", "host": "app.test",
+                                     "name": "next", "location": "query",
+                                     "source": "browser_link", "identity": "anonymous"}],
+            "js_sources": [{"url": target + "/client.js", "page_paths": ["/blog"],
                             "source_leads": [{"kind": "query", "line": 1}],
                             "client_leads": [{"kind": "dom_open_redirect", "line": 2}]}]}
     manager = ASMToolsManager()

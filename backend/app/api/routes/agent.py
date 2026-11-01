@@ -107,6 +107,18 @@ class AgentAssessmentPolicy(BaseModel):
     body_replay_paths: list[str] = Field(default_factory=list, max_length=8)
     stored_xss_cleanup_paths: list[str] = Field(default_factory=list, max_length=8)
     owner_only_resources: list[OwnerOnlyResource] = Field(default_factory=list, max_length=8)
+    auth_login_path: Optional[str] = None
+
+    @field_validator("auth_login_path")
+    @classmethod
+    def validate_auth_login_path(cls, path: Optional[str]) -> Optional[str]:
+        if path is None:
+            return None
+        if (not path.startswith("/") or path.startswith("//") or path == "/"
+                or len(path) > 256 or ".." in path
+                or any(not (char.isascii() and (char.isalnum() or char in "/_.-")) for char in path)):
+            raise ValueError("Authenticated login path must be an exact same-origin path")
+        return path
 
     @field_validator("body_replay_paths", "stored_xss_cleanup_paths")
     @classmethod

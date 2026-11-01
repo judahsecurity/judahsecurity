@@ -1,5 +1,30 @@
 # Evidence-backed assessments
 
+## Autonomous hypothesis follow-up
+
+In Prowl Agent mode, the tester loop dispatches a bounded specialist wave when
+the saved task graph contains a new ready hypothesis revision, including after
+an assessment is resumed. The revision is recorded in the engagement snapshot
+so the same wave is not launched again on a later turn. The existing specialist
+leases, scope checks, and independent finding verification still apply.
+
+Scheduled `tester_process` hunts continue partial runs in the same assessment
+session while saved hypotheses, coverage cells, or candidates remain actionable
+when the schedule config sets `autonomous_followup: true`. Without that opt-in,
+the schedule runs one turn as before. The schedule config also accepts
+`max_turns` (default 3, maximum 4),
+`max_total_seconds` (default 3600, maximum 7200), and `price_limit_usd`
+(default 8 per target, shared across its turns). Continuation stops on required operator input,
+missing spend data, an unchanged work revision, or a budget limit. Each result
+includes its session ID, turn count, spend, and stop reason. A worker restart
+does not yet resume the remaining turns of an interrupted schedule occurrence;
+its saved assessment can still be continued by the operator.
+The spend figure comes from the orchestrator's reported usage; nested specialist
+model calls may not be included. The turn and elapsed-time caps still bound the
+scheduled loop, but the reported spend limit is not an all-provider hard cap.
+The schedule executes under its active creator's analyst account; if that
+account loses organization access, the worker records a schedule error.
+
 The product agent now requires execution-owned evidence before publishing medium-or-higher findings. These checks apply to both direct orchestration and fireteam discovery. `skip_judge_gate` and the old verification-disable environment flag do not bypass publication.
 
 ## Execution and verification
@@ -33,8 +58,13 @@ Candidates now carry `vulnerability_class`. Hunters can set it on `submit_findin
 | `xss` | `browser_xss`, `scoped_browser_xss`, `upload_xss` |
 | `authorization` | `authorization`, `owner_only`, `state_change`, `workflow` |
 | `ssrf` | `oob_callback` |
+| `xxe` | `oob_callback` only for an approved, browser-captured XML POST with an external entity and a fresh matching callback |
 
-`xxe`, `command_injection`, `path_traversal`, `csrf`, `known_cve`, and `account_enumeration` have no confirmation recipe yet. Keep these candidates inconclusive until a dedicated validator demonstrates the claimed behavior. Version-in-range is a CVE applicability lead; the separate named-CVE applicability workflow reports that classification and must not be read as exploit verification. Assessment progress includes counts of pending, confirmed, refuted, and inconclusive candidates, plus concise inconclusive reasons.
+`command_injection`, `path_traversal`, `csrf`, `known_cve`, and `account_enumeration` have no confirmation recipe yet. Keep these candidates inconclusive until a dedicated validator demonstrates the claimed behavior. Version-in-range is a CVE applicability lead; the separate named-CVE applicability workflow reports that classification and must not be read as exploit verification. Assessment progress includes counts of pending, confirmed, refuted, and inconclusive candidates, plus concise inconclusive reasons.
+
+For a leased `body_xml:document` input, `scoped_xml_entity_assigned` derives a parser control or external-entity callback from the private browser capture. It requires an exact operator-approved POST path; the callback technique also requires the run's out-of-band authorization. The model supplies neither request bytes nor a callback destination. A callback is a candidate signal. The verifier generates a new callback from the same observed request and requires the XML external-entity syntax, a matching interaction, and fresh evidence before confirmation. Other XML shapes remain inconclusive.
+
+Scoped XSS probes return `xss_trace`: the leased input source, passive JavaScript source/transform/sink leads where available, bounded browser render contexts and representations, the last attempted technique/variant, and up to two suggested next tests. The browser does not return reflected page text. The specialist may select one backend-generated `base`, `mixed_case` (HTML only), or `url_double` (URL inputs only) variant per call. Duplicate attempts are rejected and each input has an eight-attempt cap. The reflected GET first pass still sweeps its base contexts; the trace persists on the coverage cell so a later specialist can continue from its remaining variants. Static leads, DOM reflection, and rendered markup without a fresh nonce dialog remain inconclusive. URL and CSS contexts currently have no scoped execution recipe.
 
 These are minimum proof requirements, not a universal vulnerability oracle. The verifier still has to establish intended access policy, context, and impact. A public object accessible to two users is not an IDOR. A legitimate authorized write is not an authorization flaw. Unsupported proof types stay inconclusive rather than falling back to a prose confirmation.
 
@@ -122,6 +152,10 @@ The `discover_parameters` tool now puts query names from the fetched URL and fie
 For string GET SQLi returning a small JSON result array, the scoped proof checks repeated baseline, true, and false responses plus array cardinality. It accepts a result expansion only when the false responses exactly match the baseline, the true responses agree with each other, and a fresh verifier repeats the same recipe. The receipt contains counts and hashes, not result values. This covers the local SQLi class lab's small JSON response without relaxing the HTML size threshold.
 
 The first-pass batch receives the active assessment target from the scheduler. It runs only when the saved capability map names that origin and leases only cells on that origin; a stale map returns `assessment_target_mismatch` without network probes. Resumed assessments continue pending first passes on their current target before completion, without restarting the broad crawl.
+
+Client-side JavaScript leads now receive one source-bound browser probe when an observed rendering page and query field or fragment are available. The scoped probe uses fixed markers to observe DOM navigation, link or text changes, request URL changes, client template evaluation, and prototype pollution. A behavior observation stays a candidate lead until its security impact is independently verified. A script with no observed rendering page remains inconclusive.
+
+Observed GET query inputs assigned to `crlf` or `open_redirect` receive an inert control and one fixed canary request. The response probe does not follow redirects and returns only header-marker and Location-canary booleans, never raw headers or body content. JavaScript dependency cells cover all observed first-party scripts. Their assigned Retire.js scan rejects redirects, compares the fetched bytes with the captured script hash when available, and treats a component/CVE match as a reachability lead rather than exploit proof. Scanner failures and changed script hashes remain inconclusive.
 
 Chromium runs with its sandbox enabled by default. Containers that cannot support it must opt in with `AEGIS_BROWSER_DISABLE_SANDBOX=true`; prefer fixing the container runtime and seccomp/user-namespace configuration instead.
 

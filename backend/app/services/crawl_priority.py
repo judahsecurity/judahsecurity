@@ -45,3 +45,12 @@ def next_crawl_url_index(
             index,
         ),
     )
+
+
+def route_visit_allowed(
+    url: str,
+    visited_families: Mapping[tuple[str, tuple[str, ...]], int],
+    max_visits: int,
+) -> bool:
+    """Reserve crawl page slots for new route shapes after sampling siblings."""
+    return visited_families.get(route_family(url), 0) < max_visits

@@ -37,6 +37,7 @@ class Hypothesis:
     priority: str = "high"  # high | medium | low
     target: str = ""
     evidence: str = ""
+    observation_id: str = ""
     source: str = "map"  # map | chain | manual | finding | methodology | threat_model
     parent_finding: str = ""
     methodology_id: str = ""
@@ -109,6 +110,7 @@ class EngagementBrain:
     notes: List[str] = field(default_factory=list)
     threat_model: Dict[str, Any] = field(default_factory=dict)
     surfaces: List[Dict[str, Any]] = field(default_factory=list)
+    recon_observations: List[Dict[str, Any]] = field(default_factory=list)
     focus_areas: List[Dict[str, Any]] = field(default_factory=list)
     candidates: List[Dict[str, Any]] = field(default_factory=list)
     coverage: List[Dict[str, Any]] = field(default_factory=list)
@@ -116,6 +118,7 @@ class EngagementBrain:
     proof_escalations: List[Dict[str, Any]] = field(default_factory=list)
     verification_receipts: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     task_graph: Dict[str, Any] = field(default_factory=dict)
+    hypothesis_wave_history: List[str] = field(default_factory=list)
     pending_risk_assessments: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -135,6 +138,7 @@ class EngagementBrain:
             "notes": list(self.notes),
             "threat_model": dict(self.threat_model or {}),
             "surfaces": list(self.surfaces or []),
+            "recon_observations": list(self.recon_observations[-200:]),
             "focus_areas": list(self.focus_areas or []),
             "candidates": list(self.candidates or []),
             "coverage": list(self.coverage or []),
@@ -142,6 +146,7 @@ class EngagementBrain:
             "proof_escalations": list(self.proof_escalations or []),
             "verification_receipts": dict(self.verification_receipts or {}),
             "task_graph": dict(self.task_graph or {}),
+            "hypothesis_wave_history": list(self.hypothesis_wave_history[-100:]),
             "pending_risk_assessments": list(self.pending_risk_assessments or []),
         }
 
@@ -241,7 +246,7 @@ _HUNT_CARDS: Dict[str, Dict[str, str]] = {
     "sqli": {
         "title": "SQLi/SSTI/command injection on mapped params",
         "assumption": "Query/body params (including login username/password) are unsafely interpolated into queries/templates/shell",
-        "test": "Login fields first even with no query params: compare_requests error/boolean/time; then other ranked params. sqlmap/commix only on anomalous hits",
+        "test": "Test assigned observed inputs, including search/filter and captured login fields, with repeated error/boolean/time controls; sqlmap/commix only on anomalous hits",
         "pass_criteria": "Error/time/boolean differential or template/command impact with a concrete param",
         "kill_criteria": "No anomalous responses after disciplined probes and one blocked-probe rewrite",
         "specialist": "sqli",
