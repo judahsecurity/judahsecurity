@@ -115,7 +115,7 @@ sudo docker compose up -d oast-worker backend scanner scheduler intel-refresher 
 sudo docker compose restart nginx
 
 echo "[6/7] Running additive migrations"
-sudo docker exec asm_backend python -m scripts.apply_agent_ledger_migration
+sudo docker exec -e PYTHONPATH=/app asm_backend python /app/scripts/apply_agent_ledger_migration.py
 sudo docker exec asm_backend python scripts/migrate_add_oracle_columns.py --backfill 2>/dev/null || true
 sudo docker exec asm_backend python scripts/migrate_agent_knowledge_embeddings.py
 sudo docker exec asm_backend python scripts/migrate_commoncrawl_enum.py
