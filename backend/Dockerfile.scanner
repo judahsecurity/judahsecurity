@@ -68,7 +68,7 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then PD_ARCH="arm64"; else PD_ARCH="amd64"; 
 
 # Install Go tools (GAU, puredns, subjack, jsluice, uncover) built with a recent toolchain
 # Debian bookworm ships Go 1.19 which is too old; use a pinned Go from golang.org.
-# Note: bumped to 1.25.1 because haccer/subjack@latest now requires go>=1.25.1.
+# Keep Go at 1.25.1 and pin subjack to a compatible release; @latest requires Go 1.26.
 ENV GOTOOLCHAIN=go1.25.1
 ENV GO_VERSION=1.25.1
 RUN ARCH=$(dpkg --print-architecture) && \
@@ -81,7 +81,7 @@ ENV CGO_ENABLED=1
 RUN go install github.com/lc/gau/v2/cmd/gau@latest && \
     go install github.com/tomnomnom/waybackurls@v0.1.0 && \
     go install github.com/d3mondev/puredns/v2@latest && \
-    go install github.com/haccer/subjack@latest && \
+    go install github.com/haccer/subjack@v3.0.0 && \
     go install github.com/BishopFox/jsluice/cmd/jsluice@latest && \
     go install github.com/projectdiscovery/uncover/cmd/uncover@latest && \
     go install github.com/projectdiscovery/interactsh/cmd/interactsh-client@v1.3.1 && \
