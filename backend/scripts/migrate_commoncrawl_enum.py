@@ -1,8 +1,8 @@
-"""
-Migration: add commoncrawl_enum to the scantype PostgreSQL enum and
-ensure the commoncrawl project-settings module exists for all orgs.
+"""Synchronize the PostgreSQL scan type enum and CommonCrawl settings.
 
-Safe to run multiple times (idempotent).
+SQLAlchemy persists ScanType member names (for example COMMONCRAWL_ENUM), not
+their lowercase Python values. Keep every model member available to scheduled
+and direct scans. Safe to run repeatedly.
 
 Usage:
     python scripts/migrate_commoncrawl_enum.py
@@ -15,6 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
+
+from app.models.scan import ScanType
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
@@ -29,24 +31,28 @@ SessionLocal = sessionmaker(bind=engine)
 
 
 def add_enum_value():
-    """Add commoncrawl_enum to the scantype PostgreSQL enum type."""
-    with engine.connect() as conn:
-        # Check if the value already exists
-        result = conn.execute(text("""
-            SELECT 1
-            FROM pg_enum e
-            JOIN pg_type t ON t.oid = e.enumtypid
-            WHERE t.typname = 'scantype'
-              AND e.enumlabel = 'commoncrawl_enum'
-        """))
-        if result.fetchone():
-            logger.info("✓ scantype enum already has 'commoncrawl_enum' — skipping")
-            return
+    """Add every ScanType member name missing from the PostgreSQL enum."""
+    with engine.begin() as conn:
+        existing = {
+            row[0]
+            for row in conn.execute(text("""
+                SELECT e.enumlabel
+                FROM pg_enum e
+                JOIN pg_type t ON t.oid = e.enumtypid
+                WHERE t.typname = 'scantype'
+            """))
+        }
+        if not existing:
+            raise RuntimeError("PostgreSQL scantype enum is missing")
 
-        # PostgreSQL requires COMMIT before ALTER TYPE
-        conn.execute(text("COMMIT"))
-        conn.execute(text("ALTER TYPE scantype ADD VALUE 'commoncrawl_enum'"))
-        logger.info("✓ Added 'commoncrawl_enum' to scantype enum")
+        missing = sorted({member.name for member in ScanType} - existing)
+        for label in missing:
+            conn.execute(
+                text("ALTER TYPE scantype ADD VALUE IF NOT EXISTS :label"),
+                {"label": label},
+            )
+
+    logger.info("Added %d missing scantype labels", len(missing))
 
 
 def ensure_commoncrawl_settings():
@@ -61,13 +67,13 @@ def ensure_commoncrawl_settings():
         for org in orgs:
             ProjectSettings.ensure_defaults(db, org.id)
             created += 1
-        logger.info(f"✓ Ensured commoncrawl settings for {created} organization(s)")
+        logger.info(f"Ensured commoncrawl settings for {created} organization(s)")
     finally:
         db.close()
 
 
 if __name__ == "__main__":
-    logger.info("Running CommonCrawl migration...")
+    logger.info("Running scan type and CommonCrawl migration...")
     add_enum_value()
     ensure_commoncrawl_settings()
     logger.info("Migration complete.")
