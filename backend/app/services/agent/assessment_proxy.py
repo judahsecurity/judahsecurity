@@ -7,9 +7,33 @@ internal services. Callers opt in when sending an in-scope target request.
 from __future__ import annotations
 
 import inspect
+import logging
 import os
+import socket
 from pathlib import Path
 from urllib.parse import urlsplit
+
+logger = logging.getLogger(__name__)
+
+_WARNED_DIRECT = False
+
+
+def _warn_if_direct(proxy_url: str | None) -> None:
+    """Warn once per process when target traffic bypasses the capture proxy.
+
+    When AEGIS_ASSESSMENT_PROXY_URL is unset the assessment transports send
+    requests straight to the target with no capture. That silent fall-through
+    is why a run's traffic can go unrecorded by Caido; surface it loudly.
+    """
+    global _WARNED_DIRECT
+    if proxy_url is None and not _WARNED_DIRECT:
+        _WARNED_DIRECT = True
+        logger.warning(
+            "AEGIS_ASSESSMENT_PROXY_URL is not set: assessment target traffic is "
+            "going DIRECT to the target and is NOT being captured by Caido. Set "
+            "AEGIS_ASSESSMENT_PROXY_URL to the Caido assessment proxy to capture "
+            "this run's traffic."
+        )
 
 
 def assessment_proxy_url() -> str | None:
@@ -50,6 +74,7 @@ def assessment_ca_bundle(proxy_url: str | None) -> str | bool:
 
 def assessment_httpx_options() -> dict:
     proxy_url = assessment_proxy_url()
+    _warn_if_direct(proxy_url)
     options = {"verify": assessment_ca_bundle(proxy_url), "trust_env": False}
     if proxy_url:
         import httpx
@@ -65,6 +90,7 @@ def assessment_urllib_handlers() -> list:
     from urllib.request import HTTPSHandler, ProxyHandler
 
     proxy_url = assessment_proxy_url()
+    _warn_if_direct(proxy_url)
     certificate = assessment_ca_bundle(proxy_url)
     handlers = [ProxyHandler({"http": proxy_url, "https": proxy_url} if proxy_url else {})]
     if isinstance(certificate, str):
@@ -74,7 +100,56 @@ def assessment_urllib_handlers() -> list:
 
 def assessment_browser_proxy() -> dict | None:
     proxy_url = assessment_proxy_url()
+    _warn_if_direct(proxy_url)
     if proxy_url:
         assessment_ca_bundle(proxy_url)
         return {"server": proxy_url}
     return None
+
+
+def assessment_proxy_status(timeout: float = 2.0) -> dict:
+    """Confirm whether this run's target traffic can reach the capture proxy.
+
+    The backend has no Caido API binding, so it cannot read back a capture
+    count. What it *can* confirm — and previously did not expose anywhere — is
+    whether an assessment proxy is configured at all and whether it is actually
+    accepting connections. A zero "logged HTTP exchanges" ledger plus
+    ``configured: false`` here means traffic went direct and nothing captured
+    it; ``configured: true, reachable: true`` means the proxy is in the path
+    (though Caido still only retains captures when a project database is
+    selected). This is a reachability signal, not a retention guarantee.
+    """
+    try:
+        proxy_url = assessment_proxy_url()
+    except ValueError as exc:
+        return {
+            "configured": False, "reachable": False, "url": "",
+            "capture_expected": False,
+            "detail": f"invalid AEGIS_ASSESSMENT_PROXY_URL: {exc}",
+        }
+    if not proxy_url:
+        return {
+            "configured": False, "reachable": None, "url": "",
+            "capture_expected": False,
+            "detail": (
+                "AEGIS_ASSESSMENT_PROXY_URL is not set; target traffic went "
+                "direct to the target and was not captured by Caido"
+            ),
+        }
+    parsed = urlsplit(proxy_url)
+    try:
+        with socket.create_connection((parsed.hostname, parsed.port), timeout=timeout):
+            return {
+                "configured": True, "reachable": True, "url": proxy_url,
+                "capture_expected": True,
+                "detail": (
+                    "assessment proxy is configured and accepting connections; "
+                    "Caido retains captures only when a project database is selected"
+                ),
+            }
+    except OSError as exc:
+        return {
+            "configured": True, "reachable": False, "url": proxy_url,
+            "capture_expected": False,
+            "detail": f"assessment proxy configured but unreachable: {exc}",
+        }

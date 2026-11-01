@@ -1036,6 +1036,9 @@ async def get_conversation_ledger(
     from app.services.agent.coverage_cells import parameter_test_funnel
 
     result["input_testing"] = parameter_test_funnel(snapshot.get("engagement_brain"))
+    from app.services.agent.assessment_proxy import assessment_proxy_status
+
+    result["assessment_capture"] = assessment_proxy_status()
     return result
 
 

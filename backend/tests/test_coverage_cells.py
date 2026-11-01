@@ -434,3 +434,90 @@ def test_unconfirmed_published_candidate_does_not_close_input_cell():
     assert brain.coverage_cells[0]["status"] == "inconclusive"
     assert parameter_test_funnel(brain)["published"] == 0
     assert parameter_test_funnel(brain)["open"] == 1
+
+
+def test_published_finding_cell_counts_as_attempted_and_probed():
+    # Regression: a confirmed, published finding whose best-effort coverage
+    # write lost its race with the finding commit (no backfilled evidence_ids)
+    # must not read back as "never attempted". The funnel now treats a
+    # published cell as attempted + probed.
+    cell_id = coverage_cell_id(
+        method="GET", path="/catalog", host="app.test",
+        identity="anonymous", parameter="query:category", test_type="sqli",
+    )
+    brain = EngagementBrain(coverage_cells=[{
+        "id": cell_id, "method": "GET", "path": "/catalog", "host": "app.test",
+        "identity": "anonymous", "parameter": "query:category",
+        "test_type": "sqli", "source": "parameter_inventory",
+        "status": "finding", "finding_id": "5668",
+    }], candidates=[{
+        "id": "candidate-1", "coverage_cell_id": cell_id,
+        "status": "confirmed", "finding_id": "5668",
+    }])
+    funnel = parameter_test_funnel(brain)
+    assert funnel["published"] == 1
+    assert funnel["attempted"] == 1
+    assert funnel["probed"] == 1
+    assert funnel["unattempted"] == 0
+
+
+def test_direct_probe_stamps_planned_coverage_cell():
+    # A directly-called scoped probe fires traffic and stores evidence but does
+    # not go through the leased wrapper; it must still mark its planned cell as
+    # attempted/probed so coverage reflects the work done.
+    import json as _json
+
+    from app.services.agent.scoped_assessment_tools import ScopedAssessmentTools
+
+    class _Stamper(ScopedAssessmentTools):
+        def __init__(self, brain_dict):
+            self._engagement_brain = brain_dict
+
+    cell_id = coverage_cell_id(
+        method="GET", path="/catalog", host="app.test",
+        identity="anonymous", parameter="query:category", test_type="sqli",
+    )
+    brain = EngagementBrain(coverage_cells=[{
+        "id": cell_id, "method": "GET", "path": "/catalog", "host": "app.test",
+        "identity": "anonymous", "parameter": "query:category",
+        "test_type": "sqli", "source": "parameter_inventory", "status": "untested",
+    }])
+    assert parameter_test_funnel(brain)["attempted"] == 0
+
+    stamper = _Stamper(brain.to_dict())
+    out = stamper._stamp_direct_probe_coverage(
+        {"target": "https://app.test/catalog", "evidence_id": "ev-1",
+         "inconclusive": True},
+        method="GET", parameter="category", test_type="sqli", identity="anonymous",
+    )
+    assert _json.loads(out)["evidence_id"] == "ev-1"
+    funnel = parameter_test_funnel(stamper._engagement_brain)
+    assert funnel["attempted"] == 1
+    assert funnel["probed"] == 1
+
+
+def test_direct_probe_stamp_skips_leased_cell():
+    # Never race the executor that owns an active lease on the cell.
+    from app.services.agent.scoped_assessment_tools import ScopedAssessmentTools
+
+    class _Stamper(ScopedAssessmentTools):
+        def __init__(self, brain_dict):
+            self._engagement_brain = brain_dict
+
+    cell_id = coverage_cell_id(
+        method="GET", path="/catalog", host="app.test",
+        identity="anonymous", parameter="query:category", test_type="sqli",
+    )
+    brain = EngagementBrain(coverage_cells=[{
+        "id": cell_id, "method": "GET", "path": "/catalog", "host": "app.test",
+        "identity": "anonymous", "parameter": "query:category",
+        "test_type": "sqli", "source": "parameter_inventory", "status": "leased",
+        "lease_id": "live-lease",
+    }])
+    stamper = _Stamper(brain.to_dict())
+    stamper._stamp_direct_probe_coverage(
+        {"target": "https://app.test/catalog", "evidence_id": "ev-1"},
+        method="GET", parameter="category", test_type="sqli", identity="anonymous",
+    )
+    cell = stamper._engagement_brain["coverage_cells"][0]
+    assert not cell.get("probe_artifact_ids")

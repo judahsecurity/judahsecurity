@@ -90,3 +90,56 @@ def test_urllib_scoped_probes_use_caido_and_its_ca(monkeypatch, tmp_path):
         "http": "http://caido-assessment:8082", "https": "http://caido-assessment:8082",
     }
     assert isinstance(handlers[1], HTTPSHandler)
+
+
+def test_capture_status_reports_unconfigured_when_proxy_unset(monkeypatch):
+    monkeypatch.delenv("AEGIS_ASSESSMENT_PROXY_URL", raising=False)
+    from app.services.agent.assessment_proxy import assessment_proxy_status
+
+    status = assessment_proxy_status()
+    assert status["configured"] is False
+    assert status["capture_expected"] is False
+    assert "not set" in status["detail"]
+
+
+def test_capture_status_reports_unreachable_proxy(monkeypatch):
+    # Reserved TEST-NET-1 port that refuses/never answers → unreachable.
+    monkeypatch.setenv("AEGIS_ASSESSMENT_PROXY_URL", "http://192.0.2.1:8082")
+    monkeypatch.setenv("AEGIS_ASSESSMENT_CA_BUNDLE", "")
+    from app.services.agent.assessment_proxy import assessment_proxy_status
+
+    status = assessment_proxy_status(timeout=0.25)
+    assert status["configured"] is True
+    assert status["reachable"] is False
+    assert status["capture_expected"] is False
+
+
+def test_capture_status_confirms_reachable_proxy(monkeypatch):
+    import socket
+    import threading
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    stop = threading.Event()
+
+    def _serve():
+        try:
+            conn, _ = listener.accept()
+            conn.close()
+        except OSError:
+            pass
+        stop.set()
+
+    threading.Thread(target=_serve, daemon=True).start()
+    monkeypatch.setenv("AEGIS_ASSESSMENT_PROXY_URL", f"http://127.0.0.1:{port}")
+    from app.services.agent.assessment_proxy import assessment_proxy_status
+
+    try:
+        status = assessment_proxy_status(timeout=1.0)
+    finally:
+        listener.close()
+    assert status["configured"] is True
+    assert status["reachable"] is True
+    assert status["capture_expected"] is True

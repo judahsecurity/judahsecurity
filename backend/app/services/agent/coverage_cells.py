@@ -677,14 +677,19 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
                          cell.get("probe_artifact_ids") or
                          cell.get("first_pass_evidence_id") or
                          candidate.get("evidence_ids"))
-        attempted = has_probe or cell.get("first_pass_outcome") in {
+        # A published (independently verified) finding on this exact cell is
+        # proof the check was attempted and probed, even when the best-effort
+        # coverage write that would have stamped an evidence id lost its race
+        # with the finding commit (see migrate_coverage_cells recovery). Without
+        # this, a confirmed finding can read back as "never attempted".
+        attempted = has_probe or published or cell.get("first_pass_outcome") in {
             "proof_signal", "tested_clean", "inconclusive",
         } or (status in {"tested_clean", "finding"} and bool(cell.get("evidence_ids")))
         checks = {
             "checks": True,
             "attempted": attempted,
             "unattempted": not attempted,
-            "probed": has_probe or (
+            "probed": has_probe or published or (
                 status in {"tested_clean", "finding"} and bool(cell.get("evidence_ids"))
             ),
             "tested_clean": status == "tested_clean",

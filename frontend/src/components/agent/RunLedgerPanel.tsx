@@ -61,6 +61,13 @@ export type AgentRunLedger = {
     handoff_rows?: Array<{ coverage_cell_id: string; method: string; path: string; parameter: string; test_type: string; evidence_id: string; evidence_source: string; error: string }>;
   };
   scenario_surface?: ScenarioSurface;
+  assessment_capture?: {
+    configured: boolean;
+    reachable?: boolean | null;
+    url?: string;
+    capture_expected?: boolean;
+    detail?: string;
+  };
 };
 
 export function RunLedgerPanel({ run }: { run: AgentRunLedger | null }) {
@@ -105,6 +112,12 @@ export function RunLedgerPanel({ run }: { run: AgentRunLedger | null }) {
         <p className="text-muted-foreground">
           Logged HTTP exchanges exclude requests made inside recon and scanner tools.
         </p>
+        {run.assessment_capture && (
+          <p className={run.assessment_capture.capture_expected ? "text-muted-foreground" : "text-amber-400"}>
+            Traffic capture: {run.assessment_capture.detail
+              || (run.assessment_capture.capture_expected ? "proxy reachable" : "not captured")}
+          </p>
+        )}
         {Boolean(run.input_testing?.checks) && (
           <div className="rounded-md border border-border/60 px-2.5 py-2 space-y-1">
             <p className="font-medium text-foreground">Input testing</p>

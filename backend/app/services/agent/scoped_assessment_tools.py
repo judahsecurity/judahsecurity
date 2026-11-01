@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import secrets
 from contextvars import ContextVar
 from urllib.parse import parse_qsl, quote, unquote_plus, urlencode, urljoin, urlsplit, urlunsplit
@@ -22,6 +23,8 @@ from app.services.agent.scoped_assessment import (
     sqli_boolean, sqli_string, technology,
 )
 from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+
+logger = logging.getLogger(__name__)
 
 
 SCOPED_ASSESSMENT_TOOLS = (
@@ -612,6 +615,76 @@ class ScopedAssessmentTools:
         )
         return json.dumps(result)
 
+    def _stamp_direct_probe_coverage(
+        self, result: dict, *, method: str, parameter: str,
+        test_type: str, identity: str,
+    ) -> str:
+        """Reflect a directly-called probe onto its planned coverage cell.
+
+        The leased wrapper (scoped_assessment_probe_assigned) stamps cells it
+        owns, but the model can also call scoped_*_sqli / scoped_body_probe /
+        scoped_query_probe directly (they are registered tools). Those calls
+        fire real traffic and store evidence, yet without this they never touch
+        a coverage cell, so parameter_test_funnel reports the input as
+        "unattempted". This appends the probe's evidence id to the matching
+        planned cell so attempted/probed reflect the work actually done.
+
+        It is deliberately non-destructive: it never changes a cell's status,
+        source, or lease fields, and it skips any cell held under an active
+        lease so it cannot race the owning executor. Returns json.dumps(result)
+        so callers can `return self._stamp_direct_probe_coverage(...)`.
+        """
+        output = json.dumps(result)
+        evidence_id = str(result.get("evidence_id") or "")
+        if not evidence_id:
+            return output
+        try:
+            from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+            brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+            parts = urlsplit(str(result.get("target") or ""))
+            host = (parts.netloc or "").lower()
+            path = parts.path or "/"
+            kind = (test_type or "").lower()
+            want_method = (method or "GET").upper()
+
+            def _name(spec: object) -> str:
+                # Planned cells store a location-qualified spec ("query:category");
+                # probe tools pass the bare field name ("category"). Match on the
+                # name component so either form lines up.
+                text = str(spec or "")
+                return text.split(":", 1)[1] if ":" in text else text
+
+            def _counted(cell: dict) -> bool:
+                return (
+                    isinstance(cell, dict)
+                    and cell.get("source") in {"parameter_inventory", "surface_applicability"}
+                    and (cell.get("method") or "GET").upper() == want_method
+                    and (cell.get("path") or "/") == path
+                    and (not host or (cell.get("host") or "").lower() == host)
+                    and _name(cell.get("parameter")) == _name(parameter)
+                    and (cell.get("test_type") or "").lower() == kind
+                    and not cell.get("lease_id")
+                )
+
+            matches = [cell for cell in brain.coverage_cells if _counted(cell)]
+            preferred = [c for c in matches if (c.get("identity") or "") == identity] or matches
+            changed = False
+            for cell in preferred:
+                cell["probe_artifact_ids"] = list(dict.fromkeys([
+                    *(cell.get("probe_artifact_ids") or []), evidence_id,
+                ]))[:20]
+                cell["evidence_ids"] = list(dict.fromkeys([
+                    *(cell.get("evidence_ids") or []), evidence_id,
+                ]))[:30]
+                cell["last_probe"] = f"{kind or 'probe'}_direct"
+                changed = True
+            if changed:
+                self._engagement_brain = brain.to_dict()
+        except Exception:  # coverage stamping must never break a probe
+            logger.debug("direct probe coverage stamp failed", exc_info=True)
+        return output
+
     async def scoped_query_probe(self, artifact_id: str, parameter: str, identity: str = "anonymous") -> str:
         """Replay one browser observed GET field with a fixed quote probe; lead only."""
         private = self._scoped_exchange(artifact_id, identity)
@@ -631,7 +704,9 @@ class ScopedAssessmentTools:
             "scoped_query_probe", result, target=result["target"], identity=identity,
             success=not result["inconclusive"],
         )
-        return json.dumps(result)
+        return self._stamp_direct_probe_coverage(
+            result, method="GET", parameter=parameter, test_type="sqli", identity=identity,
+        )
 
     async def scoped_body_probe(self, artifact_id: str, parameter: str, identity: str = "anonymous") -> str:
         """Probe one approved POST form or JSON field with bounded SQL controls."""
@@ -673,7 +748,9 @@ class ScopedAssessmentTools:
             success=result.get("proof_confirmed") is True if result.get("operation") in {"sqli_error_form", "sqli_error_json"}
                     else not result["inconclusive"],
         )
-        return json.dumps(result)
+        return self._stamp_direct_probe_coverage(
+            result, method="POST", parameter=parameter, test_type="sqli", identity=identity,
+        )
 
     async def _scoped_body_sql_error_verifier(
         self, artifact_id: str, parameter: str, identity: str,
@@ -851,7 +928,9 @@ class ScopedAssessmentTools:
             "scoped_numeric_sqli", result, target=result["target"], identity=identity,
             success=result["proof_confirmed"],
         )
-        return json.dumps(result)
+        return self._stamp_direct_probe_coverage(
+            result, method="GET", parameter=parameter, test_type="sqli", identity=identity,
+        )
 
     async def scoped_string_sqli(self, url: str, parameter: str, identity: str = "anonymous") -> str:
         """Try bounded OR and, if needed, AND controls on an observed GET input."""
@@ -1005,7 +1084,10 @@ class ScopedAssessmentTools:
             except Exception as exc:
                 result["error_followup_error"] = type(exc).__name__
                 result["evidence_id"] = or_evidence_id
-                return json.dumps(result)
+                return self._stamp_direct_probe_coverage(
+                    result, method="GET", parameter=parameter,
+                    test_type="sqli", identity=identity,
+                )
             error_result["prior_or_evidence_id"] = or_evidence_id
             error_result["total_requests_sent"] = (
                 int(result.get("requests_sent") or 0)
@@ -1037,7 +1119,10 @@ class ScopedAssessmentTools:
                 # pattern cannot run. Never turn this into a clean verdict.
                 result["and_followup_error"] = type(exc).__name__
                 result["evidence_id"] = or_evidence_id
-                return json.dumps(result)
+                return self._stamp_direct_probe_coverage(
+                    result, method="GET", parameter=parameter,
+                    test_type="sqli", identity=identity,
+                )
             and_result["prior_or_evidence_id"] = or_evidence_id
             and_result["total_requests_sent"] = (
                 int(result.get("requests_sent") or 0)
@@ -1054,4 +1139,6 @@ class ScopedAssessmentTools:
             "scoped_string_sqli", result, target=result["target"], identity=identity,
             success=result["proof_confirmed"],
         )
-        return json.dumps(result)
+        return self._stamp_direct_probe_coverage(
+            result, method="GET", parameter=parameter, test_type="sqli", identity=identity,
+        )
