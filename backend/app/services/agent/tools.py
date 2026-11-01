@@ -1537,6 +1537,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         concurrency: int = 10,
     ) -> Dict[str, Any]:
         """Prove a limit the server enforces in series but not under concurrency."""
+        import secrets
         import time
         from urllib.parse import urlsplit
 
