@@ -349,6 +349,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "bypass_403",
             "test_saml_sso",
             "execute_jwt",
+            "scoped_race_assigned",
             "compare_requests",
             "list_captured_requests",
             "mutate_captured_request",

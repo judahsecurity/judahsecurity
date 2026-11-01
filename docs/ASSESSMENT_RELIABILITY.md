@@ -62,6 +62,9 @@ Candidates now carry `vulnerability_class`. Hunters can set it on `submit_findin
 | `ssrf` | `oob_callback` |
 | `xxe` | `oob_callback` only for an approved, browser-captured XML POST with an external entity and a fresh matching callback |
 | `cors` | `scoped_cors_credentialed` — two distinct-nonce control/probe pairs where a never-seen canary origin is echoed with `Access-Control-Allow-Credentials: true` |
+| `race_condition` | `scoped_race_overrun` — a control canary the server enforces in series (one survivor) and a fresh canary that a bounded concurrent burst lands two or more times, confirmed through an independent readback and cleaned up, reproduced by hunter and verifier |
+
+An endpoint assigned to `race_condition` needs an operator-approved `race_action_paths` entry, an observed readback URL that lists written records, and a `race_cleanup_paths` cleanup path. `scoped_race_assigned` submits a control canary twice in series (single-use holds when exactly one survives in the readback), then fires a bounded concurrent burst with a fresh canary (an overrun when two or more survive), and cleans up both. A burst of errors or duplicate successes without a readback is not proof. The independent verifier repeats the whole sequence with a fresh canary before publication. Race bursts draw on a separate small per-actor reservation, not the single-probe POST budget.
 
 `command_injection`, `path_traversal`, `csrf`, `known_cve`, and `account_enumeration` have no confirmation recipe yet. Keep these candidates inconclusive until a dedicated validator demonstrates the claimed behavior. Version-in-range is a CVE applicability lead; the separate named-CVE applicability workflow reports that classification and must not be read as exploit verification. Assessment progress includes counts of pending, confirmed, refuted, and inconclusive candidates, plus concise inconclusive reasons.
 

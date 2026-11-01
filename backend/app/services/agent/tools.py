@@ -727,6 +727,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "scoped_dom_xss_assigned": self.scoped_dom_xss_assigned,
             "scoped_response_probe_assigned": self.scoped_response_probe_assigned,
             "scoped_cors_probe_assigned": self.scoped_cors_probe_assigned,
+            "scoped_race_assigned": self.scoped_race_assigned,
             "scoped_client_probe_assigned": self.scoped_client_probe_assigned,
             "scan_assigned_js_dependency": self.scan_assigned_js_dependency,
             "scoped_xml_entity_assigned": self.scoped_xml_entity_assigned,
@@ -1529,6 +1530,93 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
                 "proof_confirmed": proof["proof_confirmed"],
                 "probe_result": proof, "funnel": parameter_test_funnel(brain)}
+
+    async def scoped_race_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+        field: str, readback_url: str, cleanup_url_template: str,
+        concurrency: int = 10,
+    ) -> Dict[str, Any]:
+        """Prove a limit the server enforces in series but not under concurrency."""
+        import time
+        from urllib.parse import urlsplit
+
+        from app.services.agent.coverage_cells import parameter_test_funnel
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.scoped_assessment.race_probe import probe_race
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "surface_applicability"
+                or cell.get("test_type") != "race_condition"
+                or str(cell.get("method") or "POST").upper() not in {"POST", "PUT", "PATCH"}
+                or not allowed_discovery_path(str(cell.get("path") or "/"))):
+            return {"success": False, "error": "invalid_coverage_lease"}
+        action_path = str(cell.get("path") or "/")
+        if action_path not in (getattr(self, "_scoped_race_action_paths", None) or set()):
+            return {"success": False, "error": "operator_approval_required",
+                    "reason": "race action path is not in race_action_paths"}
+        if "__PROWL_NONCE__" not in cleanup_url_template:
+            return {"success": False, "error": "cleanup_template_missing_nonce"}
+        cleanup_path = urlsplit(cleanup_url_template.replace("__PROWL_NONCE__", "x")).path or "/"
+        if cleanup_path not in (getattr(self, "_scoped_race_cleanup_paths", None) or set()):
+            return {"success": False, "error": "operator_approval_required",
+                    "reason": "cleanup path is not in race_cleanup_paths"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        observed = set(cmap.get("pages_visited") or []) | {
+            row.get("url") for row in (cmap.get("discovered_links") or [])
+            if isinstance(row, dict)}
+        if readback_url not in observed or _origin(readback_url) != scoped_origin:
+            return {"success": False, "error": "observed_readback_page_missing"}
+        action_url = scoped_origin + action_path
+        identity = str(cell.get("identity") or "anonymous")
+        method = str(cell.get("method") or "POST").upper()
+        nonce = secrets.token_hex(8)
+        try:
+            self._scoped_origin(action_url)
+            self._scoped_claim_race()
+            proof = await probe_race(
+                action_url, readback_url, cleanup_url_template, method=method,
+                field=str(field or ""), allowed_origin=scoped_origin,
+                state=self._scoped_state(identity, action_url), nonce=nonce,
+                concurrency=int(concurrency or 10),
+            )
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__,
+                    "reason": str(exc)[:200]}
+        summary = {"nonce": nonce, "path": action_path,
+                   "readback_url": readback_url,
+                   "cleanup_template": cleanup_url_template, **proof}
+        artifact_id = evidence_store(self).record(
+            "scoped_race_probe", summary, target=action_url, identity=identity,
+            coverage_cell_id=coverage_cell_id, test_type="race_condition",
+            success=proof["proof_confirmed"],
+        )
+        cell["evidence_ids"] = list(dict.fromkeys([
+            *(cell.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        cell["last_probe"] = "scoped_race_probe"
+        if proof["proof_confirmed"]:
+            cell["status"] = "in_focus"
+            cell["reason"] = "Concurrency overrun signal requires independent verification"
+        self._engagement_brain = brain.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
+                "proof_confirmed": proof["proof_confirmed"],
+                "probe_result": {k: proof[k] for k in
+                                 ("control", "probe", "cleanup_confirmed", "requests_sent")},
+                "funnel": parameter_test_funnel(brain)}
 
     async def scoped_xml_entity_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,

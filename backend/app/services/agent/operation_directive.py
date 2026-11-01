@@ -200,6 +200,20 @@ class OperationDirective:
                     "reflected known origin is not this bug. Submit a positive candidate "
                     "with vulnerability_class=cors and its evidence_id for independent replay."
                 )
+            elif kind == "race_condition":
+                block += (
+                    " This needs an operator-approved race_action_paths entry, an observed "
+                    "readback URL that lists written records, and a race_cleanup_paths "
+                    "cleanup template with __PROWL_NONCE__. Call scoped_race_assigned with "
+                    "this cell and lease, the action field, the readback URL, and the "
+                    "cleanup template. It enforces the limit in series with a control canary, "
+                    "then fires a bounded concurrent burst with a fresh canary; one sequential "
+                    "survivor and two or more concurrent survivors in the readback is the "
+                    "overrun. A burst of errors or duplicate successes without a readback is "
+                    "not proof. Submit a positive candidate with vulnerability_class=race_condition "
+                    "and its evidence_id for independent replay. Without the approvals and a "
+                    "readback, leave the proof inconclusive."
+                )
         if self.js_work:
             if self.js_work.get("test_type") == "dom_xss":
                 block += (

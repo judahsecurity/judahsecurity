@@ -702,6 +702,9 @@ async def run_independent_verifiers(
                 replayed = await _verify_scoped_cors_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
+                replayed = await _verify_scoped_race_candidate(tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
                 replayed = await _verify_scoped_xml_xxe_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
@@ -993,6 +996,92 @@ async def _verify_scoped_cors_candidate(
         except Exception:
             logging.getLogger(__name__).exception("CORS verifier replay failed")
             failure = "CORS verifier replay failed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title,
+            "status": "inconclusive", "verifier_summary": failure,
+            "key_findings": [], "tool_calls": 1, "error": None}
+
+
+async def _verify_scoped_race_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Repeat the sequential-vs-concurrent overrun with a fresh canary."""
+    import logging
+    import secrets
+    from urllib.parse import urlsplit
+
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.parameter_inventory import _origin
+    from app.services.agent.proof_policy import validate_proof
+    from app.services.agent.scoped_assessment.race_probe import probe_race
+
+    claim = cand.vulnerability_class
+    if claim != "race_condition":
+        return None
+    store = evidence_store(tools_manager)
+    target = urlsplit(cand.target)
+    scoped_origin = f"{target.scheme}://{target.netloc}"
+    identity = str(cand.identity or "anonymous")
+    hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
+                   if eid in store.records
+                   and store.records[eid].get("kind") == "scoped_race_probe"
+                   and store.records[eid].get("target") == cand.target
+                   and store.records[eid].get("identity") == identity
+                   and store.records[eid].get("payload", {}).get("proof_confirmed") is True), None)
+    failure = "A sequential-vs-concurrent overrun receipt is required"
+    if hunter:
+        hunter_id, receipt = hunter
+        payload = receipt.get("payload", {})
+        field = str(payload.get("field") or "")
+        readback_url = str(payload.get("readback_url") or "")
+        cleanup_template = str(payload.get("cleanup_template") or "")
+        method = str(payload.get("method") or "POST").upper()
+        nonce = secrets.token_hex(8)
+        try:
+            if _origin(scoped_origin) != _origin(str(cand.target)):
+                raise ValueError("Target origin changed")
+            tools_manager._scoped_origin(cand.target)
+            tools_manager._scoped_claim_race()
+            replay = await probe_race(
+                cand.target, readback_url, cleanup_template, method=method,
+                field=field, allowed_origin=scoped_origin,
+                state=tools_manager._scoped_state(identity, cand.target),
+                nonce=nonce, concurrency=int(payload.get("concurrency") or 10),
+            )
+            summary = {"nonce": nonce, "path": payload.get("path"),
+                       "readback_url": readback_url,
+                       "cleanup_template": cleanup_template, **replay}
+            artifact_id = store.record(
+                "scoped_race_probe", summary, target=cand.target,
+                identity=identity, coverage_cell_id=cand.coverage_cell_id,
+                test_type="race_condition", success=replay["proof_confirmed"],
+            )
+            if replay.get("proof_confirmed") is True:
+                proof = {"kind": "scoped_race_overrun",
+                         "hunter_artifact_id": hunter_id, "artifact_id": artifact_id}
+                valid, why = validate_proof(store, cand, proof, [artifact_id])
+                fresh, fresh_why = store.validate(
+                    [artifact_id], candidate_id=cand.id, revision=cand.revision,
+                    run_id=run.id, target=cand.target,
+                )
+                if valid and fresh:
+                    verified = apply_verdict(
+                        tools_manager, candidate_id=cand.id, verdict="confirmed",
+                        evidence="Fresh concurrent burst reproduced the limit overrun.",
+                        evidence_ids=[artifact_id], proof=proof,
+                    )
+                    if verified and verified.status == "confirmed":
+                        return {"candidate_id": cand.id, "title": cand.title,
+                                "status": "confirmed", "verifier_summary":
+                                "Fresh race burst matched the hunter receipt",
+                                "key_findings": [], "tool_calls": 1, "error": None}
+                failure = why or fresh_why or "Race proof policy rejected the replay"
+            else:
+                failure = "Fresh concurrent burst did not reproduce the overrun"
+        except Exception:
+            logging.getLogger(__name__).exception("Race verifier replay failed")
+            failure = "Race verifier replay failed"
     apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
                   evidence=failure, summary=failure)
     return {"candidate_id": cand.id, "title": cand.title,

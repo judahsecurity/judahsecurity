@@ -49,6 +49,10 @@ first_pass_get_context: ContextVar[bool] = ContextVar(
 )
 HUNTER_POST_BUDGET = 10
 VERIFIER_POST_BUDGET = 10
+# A race burst is high-volume by nature, so it is reserved separately from the
+# careful single-probe POST budget and bounded to a few attempts per actor.
+HUNTER_RACE_BUDGET = 3
+VERIFIER_RACE_BUDGET = 3
 
 
 class ScopedAssessmentTools:
@@ -108,6 +112,8 @@ class ScopedAssessmentTools:
         policy = policy or {}
         paths = policy.get("body_replay_paths") or []
         cleanup_paths = policy.get("stored_xss_cleanup_paths") or []
+        race_action_paths = policy.get("race_action_paths") or []
+        race_cleanup_paths = policy.get("race_cleanup_paths") or []
         expectations = policy.get("owner_only_resources") or []
         auth_login_path = policy.get("auth_login_path") or ""
         if (auth_login_path and (not isinstance(auth_login_path, str)
@@ -118,9 +124,11 @@ class ScopedAssessmentTools:
             raise ValueError("Invalid authenticated login path")
         if (not isinstance(paths, list) or len(paths) > 8
                 or not isinstance(cleanup_paths, list) or len(cleanup_paths) > 8
+                or not isinstance(race_action_paths, list) or len(race_action_paths) > 8
+                or not isinstance(race_cleanup_paths, list) or len(race_cleanup_paths) > 8
                 or not isinstance(expectations, list) or len(expectations) > 8):
             raise ValueError("Invalid bounded assessment policy")
-        for path in [*paths, *cleanup_paths]:
+        for path in [*paths, *cleanup_paths, *race_action_paths, *race_cleanup_paths]:
             if (not isinstance(path, str) or not path.startswith("/") or path.startswith("//")
                     or path == "/" or len(path) > 256 or any(char in path for char in "?#\\\r\n\t ")):
                 raise ValueError("Invalid approved write or cleanup path")
@@ -141,9 +149,11 @@ class ScopedAssessmentTools:
             approved[target] = (owner, other)
         self._scoped_body_replay_paths = set(paths)
         self._scoped_stored_xss_cleanup_paths = set(cleanup_paths)
+        self._scoped_race_action_paths = set(race_action_paths)
+        self._scoped_race_cleanup_paths = set(race_cleanup_paths)
         self._scoped_owner_expectations = approved
         self._scoped_auth_login_path = auth_login_path
-        if paths or cleanup_paths or approved:
+        if paths or cleanup_paths or race_action_paths or race_cleanup_paths or approved:
             self._scoped_assessment_started = True
 
     def _scoped_origin(self, url: str) -> str:
@@ -276,6 +286,16 @@ class ScopedAssessmentTools:
         if used + count > limit:
             raise ValueError("Scoped POST request budget exhausted for this assessment session")
         setattr(self, counter, used + count)
+
+    def _scoped_claim_race(self) -> None:
+        """Reserve one bounded concurrency burst for the hunter or verifier."""
+        verifier = verification_run.get() is not None
+        counter = "_scoped_verifier_race_count" if verifier else "_scoped_race_count"
+        limit = VERIFIER_RACE_BUDGET if verifier else HUNTER_RACE_BUDGET
+        used = int(getattr(self, counter, 0) or 0)
+        if used + 1 > limit:
+            raise ValueError("Scoped race-burst budget exhausted for this assessment session")
+        setattr(self, counter, used + 1)
 
     def _scoped_capture_row(self, artifact_id: str) -> dict | None:
         row = (getattr(self, "_scoped_browser_exchanges", None) or {}).get(artifact_id)
