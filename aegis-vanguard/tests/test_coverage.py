@@ -186,3 +186,83 @@ def test_bounded_pending_list_includes_multiple_classes():
     } for index in range(30)]})
     classes = {row["vulnerability_class"] for row in ledger.pending(limit=10)}
     assert len(classes) >= 6
+
+
+# --- Inconclusive state (timeouts/crashes stay OPEN, never counted as clean) ---
+
+from agent.coverage import _payload_is_inconclusive
+
+
+def test_payload_is_inconclusive_helper():
+    assert _payload_is_inconclusive({"inconclusive": True}) is True
+    assert _payload_is_inconclusive({"status": "timeout"}) is True
+    assert _payload_is_inconclusive({"status": "unavailable"}) is True
+    assert _payload_is_inconclusive({"status": "error"}) is True
+    assert _payload_is_inconclusive({"status": "ok"}) is False
+    assert _payload_is_inconclusive({"vulnerable": False}) is False
+
+
+def test_timeout_probe_is_inconclusive_not_tested_clean():
+    ledger = CoverageLedger.from_input_surface(_surface(method="GET", params=["q"]))
+    ledger.record_probe_result(
+        {
+            "probe": "xss",
+            "target": "https://example.test/orders",
+            "method": "GET",
+            "tested_params": ["query:q"],
+            "status": "timeout",
+            "inconclusive": True,
+        },
+        source="xss_hunter",
+    )
+    row = next(
+        r for r in ledger.snapshot()
+        if r["vulnerability_class"] == "xss" and r["parameter"] == "query:q"
+    )
+    assert row["state"] == "inconclusive"
+    # The whole point: a timed-out probe must NOT count toward tested coverage.
+    assert ledger.summary()["planned_tested"] == 0
+    assert ledger.summary()["coverage_rate"] == 0.0
+
+
+def test_inconclusive_is_superseded_by_a_later_real_verdict():
+    ledger = CoverageLedger.from_input_surface(_surface(method="GET", params=["q"]))
+    ledger.record_probe_result(
+        {"probe": "xss", "target": "https://example.test/orders", "method": "GET",
+         "tested_params": ["query:q"], "status": "timeout", "inconclusive": True},
+        source="xss_hunter",
+    )
+    # A completed retest supersedes the inconclusive state.
+    ledger.record_probe_result(
+        {"probe": "xss", "target": "https://example.test/orders", "method": "GET",
+         "tested_params": ["query:q"], "candidates": []},
+        source="xss_hunter",
+    )
+    row = next(
+        r for r in ledger.snapshot()
+        if r["vulnerability_class"] == "xss" and r["parameter"] == "query:q"
+    )
+    assert row["state"] == "tested_negative"
+    assert ledger.summary()["planned_tested"] == 1
+
+
+def test_inconclusive_does_not_downgrade_an_existing_candidate():
+    ledger = CoverageLedger.from_input_surface(_surface(params=["name"]))
+    ledger.record_probe_result(
+        {"url": "https://example.test/orders", "method": "POST",
+         "params_tested": ["form:name"],
+         "coverage": [{"parameter_spec": "form:name", "status": "candidate",
+                       "signals": ["sql_error"]}]},
+        source="injection_hunter",
+    )
+    # A subsequent timeout must not erase a real candidate signal.
+    ledger.record_probe_result(
+        {"url": "https://example.test/orders", "method": "POST",
+         "params_tested": ["form:name"], "status": "timeout", "inconclusive": True},
+        source="injection_hunter",
+    )
+    row = next(
+        r for r in ledger.snapshot()
+        if r["vulnerability_class"] == "sqli" and r["parameter"] == "form:name"
+    )
+    assert row["state"] == "candidate"
