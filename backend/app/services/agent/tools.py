@@ -2249,6 +2249,38 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                                     *([result["artifact_id"]] if result.get("artifact_id") else [])])
         return result
 
+    def _ingest_scanner_leads(self, rows: List[Dict[str, Any]]) -> int:
+        """Fold ffuf/sqlmap lead rows into the inventory and re-seed cells.
+
+        Rows are leads, not findings: they become coverage cells that the typed
+        scoped probes and the independent verifier must still confirm. Returns
+        the number of new coverage cells created.
+        """
+        from app.services.agent.coverage_cells import seed_parameter_coverage_cells
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.parameter_inventory import collect_parameter_inventory
+
+        if not rows:
+            return 0
+        cmap = dict(getattr(self, "_capability_map", None) or {})
+        existing = [r for r in (cmap.get("parameter_inventory") or []) if isinstance(r, dict)]
+
+        def _key(row: Dict[str, Any]):
+            return (row.get("method"), row.get("url") or row.get("path"),
+                    row.get("name"), row.get("location"), row.get("source"))
+
+        seen = {_key(r) for r in existing}
+        added = [r for r in rows if _key(r) not in seen]
+        if not added:
+            return 0
+        cmap["parameter_inventory"] = existing + added
+        self._capability_map = cmap
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        before = len(brain.coverage_cells)
+        seed_parameter_coverage_cells(brain, collect_parameter_inventory(cmap))
+        self._engagement_brain = brain.to_dict()
+        return max(0, len(brain.coverage_cells) - before)
+
     async def _execute_impl(self, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool with the given arguments."""
         tool_args = dict(tool_args or {}) if isinstance(tool_args, dict) else {}
@@ -2766,6 +2798,29 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                              "source": tool_name}
                             for discovered in extract_recon_urls(kind, candidate_text, crawl_target)
                         ]
+                    if tool_name in ("execute_ffuf", "execute_sqlmap"):
+                        # Scanner hits are leads: normalize to in-scope coverage
+                        # cells that the typed verifier must still confirm.
+                        try:
+                            from app.services.agent.assessment_scope import allowed_hosts
+                            from app.services.agent.scoped_assessment.scanner_leads import scanner_rows
+
+                            lead_rows = scanner_rows(
+                                tool_name, output, allowed_hosts=allowed_hosts(self),
+                            )
+                            if lead_rows:
+                                new_cells = self._ingest_scanner_leads(lead_rows)
+                                payload["scanner_leads"] = {
+                                    "source": lead_rows[0]["source"],
+                                    "leads": len(lead_rows),
+                                    "new_coverage_cells": new_cells,
+                                    "note": "Leads only; confirmation runs through the "
+                                            "scoped probes and independent verifier.",
+                                }
+                                if self._capability_map:
+                                    payload["capability_map"] = self._capability_map
+                        except Exception:
+                            logger.exception("Scanner lead ingestion failed for %s", tool_name)
                     if len(output) > max_chars and not augur_block:
                         from app.services.agent.evidence_store import evidence_store
                         payload["artifact_id"] = evidence_store(self).record("tool_output", {"output": output})

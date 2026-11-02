@@ -586,7 +586,10 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "query fields as SSRF: if this run authorizes OOB, register a callback, plant "
             "a unique payload URL, and poll; otherwise keep checks local and read-only. "
             "then compare benign vs internal canary (do not use cloud-metadata/loopback if Lictor blocks). "
-            "Do not use Canarytokens. Status 200 is not a finding. Unknown-bug hunting beats Nuclei templates."
+            "Do not use Canarytokens. Status 200 is not a finding. Unknown-bug hunting beats Nuclei templates. "
+            "Run execute_ffuf with -of json so discovered paths auto-seed in-scope coverage cells; "
+            "an execute_sqlmap or execute_ffuf hit is a lead that seeds a cell, not a finding — "
+            "confirm it with the scoped probes and independent verifier before submitting a candidate."
         ),
     ),
     SpecialistProfile(

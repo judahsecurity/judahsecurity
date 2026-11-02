@@ -29,6 +29,8 @@ The product agent now requires execution-owned evidence before publishing medium
 
 Each published finding records a `verification_level`. A finding the independent verifier reproduced against the running target is `exploit_verified`; a static/source-only finding (SAST: Semgrep, Gitleaks, Trivy) with a reachable-exploit argument but no runtime reproduction is `source_verified`. A finding that was not reproduced at runtime cannot claim `exploit_verified`, whatever the caller passes. Agent-published `source_verified` findings are capped at `medium` severity (the requested severity and the cap reason are kept in finding metadata) until a runtime proof upgrades them, so a source lead cannot be filed as high or critical on static evidence alone.
 
+External scanners feed the same gates as leads, never as findings. `execute_ffuf` (run with `-of json`) and `execute_sqlmap` output is normalized into in-scope parameter-inventory rows — ffuf discovered paths (`source=ffuf_discovery`) and sqlmap injectable parameters (`source=sqlmap_lead`) — that seed coverage cells. Out-of-scope hosts, miss statuses, and cookie-only injection points are dropped. A scanner's own verdict confirms nothing: the resulting cell is proved by the scoped probes and the independent verifier before any candidate is published.
+
 ## Execution and verification
 
 `replay_http_request` and `compare_requests` return an `evidence_id` for each HTTP exchange. Browser XSS checks and Interactsh registration/polling return `evidence_ids`. `read_evidence(evidence_id, offset, limit)` retrieves observations beyond the specialist's preview.
