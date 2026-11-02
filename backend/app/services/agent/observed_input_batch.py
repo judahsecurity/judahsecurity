@@ -45,6 +45,13 @@ XSS_GET_TECHNIQUES = (
 )
 
 
+def _proof_signal(result: dict[str, Any]) -> bool:
+    probe = result.get("probe_result") or {}
+    return (result.get("proof_confirmed") is True
+            or probe.get("proof_confirmed") is True
+            or probe.get("executed") is True)
+
+
 def _identity_unavailable(manager: Any, cell: dict[str, Any], active_origin: str) -> bool:
     """Check local session state before a probe can reserve requests or a lease."""
     identity = str(cell.get("identity") or "anonymous")
@@ -400,7 +407,7 @@ async def run_observed_input_batch(
                     if first_technique and first_technique not in xss_attempted:
                         xss_attempted.append(first_technique)
                     xss_variant_failures.pop(first_technique, None)
-                    if result.get("proof_confirmed") is not True:
+                    if not _proof_signal(result):
                         contexts = set((result.get("probe_result") or {}).get("reflection_contexts") or [])
                         contextual = (
                             (["html_body_svg"] if "html_text" in contexts else [])
@@ -451,9 +458,9 @@ async def run_observed_input_batch(
                             xss_variant_failures.pop(technique, None)
                             xss_attempted.append(technique)
                             result = followup
-                            if result.get("proof_confirmed") is True:
+                            if _proof_signal(result):
                                 break
-                        xss_pending = ([] if result.get("proof_confirmed") is True
+                        xss_pending = ([] if _proof_signal(result)
                                        else [technique for technique in techniques
                                              if technique not in xss_attempted
                                              and int(xss_variant_failures.get(technique) or 0) < 2])
@@ -477,11 +484,7 @@ async def run_observed_input_batch(
                 elif not evidence_id:
                     reason = "Probe completed without an evidence receipt"
                 else:
-                    signal = result.get("proof_confirmed") is True or (
-                        result.get("probe_result") or {}
-                    ).get("proof_confirmed") is True or (
-                        result.get("probe_result") or {}
-                    ).get("executed") is True
+                    signal = _proof_signal(result)
                     if signal:
                         outcome = "proof_signal"
                         reason = "Execution-owned proof signal; fresh verification required"

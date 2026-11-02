@@ -100,6 +100,44 @@ def test_cli_fallback_still_blocks_command_chaining():
     assert not verdict.ok
 
 
+def test_curl_accepts_inert_xss_and_sqli_query_bytes():
+    censor = Censor()
+    for url in (
+        "https://example.com/catalog?q=%3Cimg%20onerror%3Dalert(1)%3E&a=1",
+        "https://example.com/catalog?q='%20OR%201=1--&a=$probe",
+    ):
+        verdict = censor.validate("execute_curl", {"args": f'-s -i "{url}"'})
+        assert verdict.ok, verdict.error
+
+
+def test_curl_read_only_flags_preserve_scope_and_file_guards():
+    censor = Censor()
+    rejected = (
+        "-s https://example.com/ ; whoami",
+        "-s -L https://example.com/",
+        "-s --proxy http://example.net:8080 https://example.com/",
+        "-s --data x=1 https://example.com/",
+        "-s -X POST https://example.com/",
+        "-s --config /etc/passwd https://example.com/",
+        "-s https://127.0.0.1/",
+        "-s https://example.com/ https://other.example/",
+    )
+    for args in rejected:
+        assert not censor.validate("execute_curl", {"args": args}).ok, args
+
+
+def test_xsstrike_accepts_one_query_input_and_rejects_unbounded_modes():
+    censor = Censor()
+    args = '-u "https://example.com/catalog?searchTerm=a&category=b" --skip-dom -t 2'
+    assert censor.validate("execute_xsstrike", {"args": args}).ok
+    for unsafe in (
+        args + " --crawl", args + " --proxy", args + " --data x=y",
+        args + " -t 20", args + " -u https://other.example/",
+        "-u https://127.0.0.1/ --skip",
+    ):
+        assert not censor.validate("execute_xsstrike", {"args": unsafe}).ok, unsafe
+
+
 def test_non_shell_agent_data_is_not_treated_as_cli():
     censor = Censor()
     verdicts = [

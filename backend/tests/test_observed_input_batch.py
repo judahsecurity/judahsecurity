@@ -797,6 +797,45 @@ def test_xss_first_pass_uses_reflection_context_before_proof_candidate():
     assert result["results"][0]["candidate_id"] == "xss-candidate"
 
 
+def test_xss_browser_execution_receipt_is_not_overwritten_by_followup():
+    class Manager:
+        def __init__(self):
+            brain = EngagementBrain(target="https://app.test")
+            seed_parameter_coverage_cells(brain, [{
+                "method": "GET", "host": "app.test", "path": "/catalog",
+                "name": "searchTerm", "location": "query", "identity": "anonymous",
+                "source": "browser_link", "testable": True,
+            }])
+            for cell in brain.coverage_cells:
+                if cell["test_type"] == "sqli":
+                    cell["status"] = "skipped"
+            self._engagement_brain = brain.to_dict()
+            self._capability_map = {"target": "https://app.test"}
+            self.techniques = []
+
+        async def scoped_input_probe_assigned(self, coverage_cell_id, coverage_lease_id, technique):
+            self.techniques.append(technique)
+            return {"success": True, "evidence_id": "executed-xss-receipt",
+                    "proof_confirmed": False,
+                    "probe_result": {"executed": True, "reflection_contexts": ["html_attribute"]}}
+
+        async def submit_finding_candidate(self, **kwargs):
+            assert kwargs["evidence_ids"] == ["executed-xss-receipt"]
+            self._engagement_brain["candidates"] = [{
+                "id": "executed-xss-candidate", "status": "pending",
+                "coverage_cell_id": kwargs["coverage_cell_id"],
+                "evidence_ids": kwargs["evidence_ids"],
+            }]
+            return "candidate queued"
+
+    manager = Manager()
+    result = asyncio.run(run_observed_input_batch(manager, max_checks=1))
+    assert manager.techniques == ["html_body"]
+    assert result["results"][0]["outcome"] == "proof_signal"
+    assert result["results"][0]["evidence_id"] == "executed-xss-receipt"
+    assert result["results"][0]["candidate_id"] == "executed-xss-candidate"
+
+
 
 def test_xss_html_text_reflection_gets_alternate_execution_check():
     class Manager:
