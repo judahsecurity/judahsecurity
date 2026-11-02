@@ -5,7 +5,7 @@ from app.services.agent.penetration_task_graph import NODE_READY, sync_graph_fro
 from app.services.agent.recon_observation_adapter import (
     ingest_dnsx_cnames, ingest_httpx_observations, ingest_js_api_paths,
     ingest_takeover_findings, ingest_capability_observations,
-    observation_event, ingest_event,
+    ingest_subfinder_hosts, observation_event, ingest_event,
 )
 from types import SimpleNamespace
 
@@ -37,6 +37,44 @@ def test_dns_output_needs_recognized_provider_and_explicit_scope():
     assert ingest_dnsx_cnames(brain, output, scope_hosts={"example.test"}) == 0
     assert ingest_dnsx_cnames(brain, output, scope_hosts={"*.example.test"}) == 1
     assert brain.hypotheses[0].target == "https://sub.example.test"
+
+
+def test_subfinder_hosts_are_scoped_deduplicated_and_dispatchable():
+    from app.services.agent.tester_loop import _ready_hypothesis_wave
+
+    brain = EngagementBrain(target="https://example.test")
+    output = (
+        '{"host":"api.example.test","source":"crtsh"}\n'
+        'api.example.test\n'
+        'outside.test\n'
+        '*.example.test\n'
+        'bad host.example.test\n'
+    )
+    scope = {"example.test", "*.example.test"}
+    assert ingest_subfinder_hosts(brain, output, scope_hosts=scope, evidence_ref="artifact:3") == 1
+    assert ingest_subfinder_hosts(brain, output, scope_hosts=scope, evidence_ref="artifact:3") == 0
+    assert len(brain.recon_observations) == len(brain.hypotheses) == 1
+    assert brain.hypotheses[0].target == "https://api.example.test"
+    assert brain.hypotheses[0].specialist == "web_recon"
+    assert sync_graph_from_brain(brain).nodes[brain.hypotheses[0].id].status == NODE_READY
+    wave = _ready_hypothesis_wave({
+        "mode": "agent", "capability_map": {"target": "https://example.test"},
+        "engagement_brain": brain.to_dict(),
+    }, [], "https://example.test")
+    assert wave and wave["tool_args"]["targets"] == ["https://api.example.test"]
+    assert ingest_subfinder_hosts(EngagementBrain(), output, scope_hosts={"example.test"}) == 0
+
+
+def test_httpx_preserves_observed_scheme_and_port():
+    from app.services.agent.recon_observation_adapter import ingest_httpx_observations
+
+    brain = EngagementBrain(target="https://example.test")
+    output = '{"url":"http://api.example.test:8080/login?token=private","status_code":200,"tech":["nginx"]}'
+    assert ingest_httpx_observations(
+        brain, output, scope_hosts={"*.example.test"}, evidence_ref="artifact:4",
+    ) == 2
+    assert {hyp.target for hyp in brain.hypotheses} == {"http://api.example.test:8080"}
+    assert "private" not in str(brain.to_dict())
 
 
 def test_js_api_handoff_is_first_party_and_deduplicated():

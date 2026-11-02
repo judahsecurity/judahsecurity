@@ -1315,6 +1315,7 @@ class AgentOrchestrator:
                 wait_sec=soft_wait,
             )
             discovered_urls: list[str] = []
+            subdomain_batches: list[tuple[list[str], str]] = []
             dns_rows: list[dict] = []
             httpx_rows: list[dict] = []
             dns_evidence_ref = ""
@@ -1325,6 +1326,20 @@ class AgentOrchestrator:
                     continue
                 if item.get("status") == "completed":
                     discovered_urls.extend(item.get("urls") or [])
+                    item_hosts = [
+                        str(observation["host"]) for observation in (item.get("observations") or [])
+                        if isinstance(observation, dict)
+                        and observation.get("type") == "SUBDOMAIN_HOST"
+                        and isinstance(observation.get("host"), str)
+                    ]
+                    if item_hosts:
+                        subdomain_batches.append((item_hosts, next((
+                            str(observation.get("evidence_ref") or "")
+                            for observation in (item.get("observations") or [])
+                            if isinstance(observation, dict)
+                            and observation.get("type") == "SUBDOMAIN_HOST"
+                            and observation.get("evidence_ref")
+                        ), "")))
                     dns_rows.extend(
                         observation["row"] for observation in (item.get("observations") or [])
                         if isinstance(observation, dict)
@@ -1369,7 +1384,7 @@ class AgentOrchestrator:
                     "phase": phase,
                     "thought": f"Recon stream [{item.get('kind')}] results ready",
                 })
-            if discovered_urls or dns_rows or httpx_rows:
+            if discovered_urls or subdomain_batches or dns_rows or httpx_rows:
                 from app.services.agent.capability_map import ingest_passive_urls
                 from app.services.agent.engagement_brain import (
                     engagement_brain_from_dict,
@@ -1383,17 +1398,24 @@ class AgentOrchestrator:
                     if isinstance(existing_map, dict) else ""
                 ) or (state.get("target_info") or {}).get("primary_target") or ""
                 new_map = ingest_passive_urls(
-                    existing_map, discovered_urls, target=target,
+                    existing_map if isinstance(existing_map, dict) else None,
+                    discovered_urls, target=target,
                     source="parallel_recon",
-                ) if discovered_urls else existing_map
+                ) if target or discovered_urls else existing_map
                 brain = engagement_brain_from_dict(state.get("engagement_brain"))
                 if discovered_urls:
                     brain = seed_hypotheses_from_capability_map(brain, new_map)
                 from app.services.agent.assessment_scope import observation_scope_hosts
                 from app.services.agent.recon_observation_adapter import (
-                    ingest_capability_observations, ingest_dnsx_cnames, ingest_httpx_observations,
+                    ingest_capability_observations, ingest_dnsx_cnames,
+                    ingest_httpx_observations, ingest_subfinder_hosts,
                 )
                 scope_hosts = observation_scope_hosts(self.tool_manager)
+                for hosts, evidence_ref in subdomain_batches:
+                    ingest_subfinder_hosts(
+                        brain, "\n".join(hosts[:100]),
+                        scope_hosts=scope_hosts, evidence_ref=evidence_ref,
+                    )
                 if discovered_urls and isinstance(new_map, dict):
                     ingest_capability_observations(brain, new_map, scope_hosts=scope_hosts)
                 if dns_rows:
@@ -1419,19 +1441,21 @@ class AgentOrchestrator:
                         reasoning="Deterministic URL ingestion from completed crawl workers",
                         tool_name="recon_observation_ingest",
                         tool_args={"source": "parallel_recon"},
-                        tool_output=f"{len(discovered_urls)} in-origin URLs ingested",
+                        tool_output=(f"{len(discovered_urls)} in-origin URLs and "
+                                     f"{sum(len(hosts) for hosts, _ in subdomain_batches)} scoped subdomains ingested"),
                         success=True,
                     ).model_dump()
                 )
-                await self._emit_status({
-                    "type": "capability_map_update",
-                    "quality_score": recon_map_update.get("quality_score"),
-                    "ready_for_attack": recon_map_update.get("ready_for_attack"),
-                    "capabilities": recon_map_update.get("capabilities", []),
-                    "ranked_hunt_queue": (recon_map_update.get("ranked_hunt_queue") or [])[:8],
-                    "authenticated": recon_map_update.get("authenticated"),
-                    "api_sample_count": len(recon_map_update.get("api_samples") or []),
-                })
+                if isinstance(recon_map_update, dict):
+                    await self._emit_status({
+                        "type": "capability_map_update",
+                        "quality_score": recon_map_update.get("quality_score"),
+                        "ready_for_attack": recon_map_update.get("ready_for_attack"),
+                        "capabilities": recon_map_update.get("capabilities", []),
+                        "ranked_hunt_queue": (recon_map_update.get("ranked_hunt_queue") or [])[:8],
+                        "authenticated": recon_map_update.get("authenticated"),
+                        "api_sample_count": len(recon_map_update.get("api_samples") or []),
+                    })
                 if org_id and session_id:
                     from app.services.agent.run_snapshot import save_run_snapshot
 
@@ -2919,13 +2943,14 @@ class AgentOrchestrator:
         # Tool output is treated as data: only parsed, in-scope DNS rows and
         # first-party API paths can create hypothesis cards.
         if step_data.get("success") and (
-            tool_name in {"execute_dnsx", "execute_httpx"} or updates.get("capability_map")
+            tool_name in {"execute_subfinder", "execute_dnsx", "execute_httpx"} or updates.get("capability_map")
         ):
             try:
                 from app.services.agent.assessment_scope import observation_scope_hosts
                 from app.services.agent.engagement_brain import engagement_brain_from_dict
                 from app.services.agent.recon_observation_adapter import (
-                    ingest_capability_observations, ingest_dnsx_cnames, ingest_httpx_observations,
+                    ingest_capability_observations, ingest_dnsx_cnames,
+                    ingest_httpx_observations, ingest_subfinder_hosts,
                 )
 
                 scope_hosts = observation_scope_hosts(self.tool_manager)
@@ -2933,6 +2958,12 @@ class AgentOrchestrator:
                     brain_update or state.get("engagement_brain")
                 )
                 added = 0
+                if tool_name == "execute_subfinder":
+                    added += ingest_subfinder_hosts(
+                        recon_brain, str(step_data.get("tool_output") or ""),
+                        scope_hosts=scope_hosts,
+                        evidence_ref=str(step_data.get("artifact_id") or ""),
+                    )
                 if tool_name == "execute_dnsx":
                     added += ingest_dnsx_cnames(
                         recon_brain, str(step_data.get("tool_output") or ""),
