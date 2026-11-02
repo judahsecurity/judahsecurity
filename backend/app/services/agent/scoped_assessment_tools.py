@@ -47,8 +47,10 @@ VERIFIER_GET_BUDGET = 80
 first_pass_get_context: ContextVar[bool] = ContextVar(
     "prowl_first_pass_get", default=False,
 )
-HUNTER_POST_BUDGET = 10
-VERIFIER_POST_BUDGET = 10
+# One blind SQLi first pass uses eight POSTs including its exploratory pair.
+# Keep the full eight-input batch reachable while still bounding the session.
+HUNTER_POST_BUDGET = 64
+VERIFIER_POST_BUDGET = 24
 # A race burst is high-volume by nature, so it is reserved separately from the
 # careful single-probe POST budget and bounded to a few attempts per actor.
 HUNTER_RACE_BUDGET = 3
@@ -363,10 +365,7 @@ class ScopedAssessmentTools:
                         or (urlsplit(cleanup_url_template).path or "/") not in
                         (getattr(self, "_scoped_stored_xss_cleanup_paths", None) or set())):
                     raise ValueError("Stored XSS cleanup path was not approved by the assessment operator")
-            used = int(getattr(self, "_scoped_post_count", 0) or 0)
-            if used >= 10:
-                raise ValueError("Scoped POST budget exhausted for this assessment session")
-            self._scoped_post_count = used + 1
+            self._scoped_claim_posts(1)
         state = self._scoped_state(identity, url)
         sources: list[dict] = []
         exchanges: list[dict] = []
@@ -686,14 +685,67 @@ class ScopedAssessmentTools:
                 )
             except (ValueError, OSError, TimeoutError) as exc:
                 result["error_followup_blocked"] = type(exc).__name__
+        elif (result.get("inconclusive") is False
+              and (result.get("baseline") or {}).get("status") == 200
+              and (result.get("probe") or {}).get("status") == 200):
+            try:
+                _, _, variants, nonce = body_probe.plan_sql_boolean_body(
+                    private, parameter=parameter, allowed_origins=[allowed],
+                )
+                self._scoped_claim_posts(6)
+                result = await asyncio.to_thread(
+                    body_probe.probe_sql_boolean_body, url, mime, variants, nonce,
+                    parameter=parameter, allowed_origins=[allowed], storage_state=state,
+                    replay_headers=body_probe.safe_replay_headers(private),
+                )
+            except (ValueError, OSError, TimeoutError) as exc:
+                result["boolean_followup_blocked"] = type(exc).__name__
         result["source_artifact_id"] = artifact_id
+        operation = result.get("operation")
         result["evidence_id"] = evidence_store(self).record(
-            "scoped_body_sqli_error" if result.get("operation") in {"sqli_error_form", "sqli_error_json"} else "scoped_body_probe",
+            "scoped_body_sqli_boolean" if operation == "sqli_boolean_body" else
+            "scoped_body_sqli_error" if operation in {"sqli_error_form", "sqli_error_json"} else
+            "scoped_body_probe",
             result, target=result["target"], identity=identity,
-            success=result.get("proof_confirmed") is True if result.get("operation") in {"sqli_error_form", "sqli_error_json"}
+            success=result.get("proof_confirmed") is True if operation in {
+                "sqli_error_form", "sqli_error_json", "sqli_boolean_body",
+            }
                     else not result["inconclusive"],
         )
         return json.dumps(result)
+
+    async def _scoped_body_sql_boolean_verifier(
+        self, artifact_id: str, parameter: str, identity: str,
+    ) -> dict:
+        """Repeat a hunter capture with a fresh Boolean nonce in the verifier run."""
+        run = verification_run.get()
+        record = evidence_store(self).records.get(artifact_id)
+        row = self._scoped_capture_row(artifact_id)
+        if (run is None or not record or record.get("kind") != "scoped_browser_exchange"
+                or record.get("run_id") or not row or row.get("identity") != identity
+                or row.get("verifier_run_id")):
+            raise ValueError("Verifier requires a hunter-owned browser capture for this identity")
+        private = row["private"]
+        observed = json.loads(private)
+        allowed = self._scoped_origin(observed["url"])
+        url, mime, variants, nonce = body_probe.plan_sql_boolean_body(
+            private, parameter=parameter, allowed_origins=[allowed],
+        )
+        if (urlsplit(url).path or "/") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
+            raise ValueError("POST path was not approved by the assessment operator")
+        self._scoped_claim_posts(6)
+        result = await asyncio.to_thread(
+            body_probe.probe_sql_boolean_body, url, mime, variants, nonce,
+            parameter=parameter, allowed_origins=[allowed],
+            storage_state=self._scoped_state(identity, url),
+            replay_headers=body_probe.safe_replay_headers(private),
+        )
+        result["source_artifact_id"] = artifact_id
+        result["evidence_id"] = evidence_store(self).record(
+            "scoped_body_sqli_boolean", result, target=result["target"], identity=identity,
+            success=result["proof_confirmed"],
+        )
+        return result
 
     async def _scoped_body_sql_error_verifier(
         self, artifact_id: str, parameter: str, identity: str,

@@ -78,7 +78,7 @@ def test_upload_and_csrf_negatives_reject_active_or_forged_content():
 
 def test_manifest_has_positive_and_negative_cases_for_each_class():
     cases = build_manifest("http://127.0.0.1:8765")["cases"]
-    assert len(cases) == 18
+    assert len(cases) == 20
     for bug_class in {case["bug_class"] for case in cases}:
         assert {case["polarity"] for case in cases if case["bug_class"] == bug_class} == {
             "positive", "negative"
@@ -92,3 +92,20 @@ def test_dom_xss_fixture_has_executable_sink_only_in_positive_case():
         assert status == 200
         assert ('getElementById("results").innerHTML=value' in body) is vulnerable
         assert ('getElementById("results").textContent=value' in body) is not vulnerable
+
+
+def test_post_blind_sql_fixture_has_vulnerable_and_patched_responses():
+    for vulnerable in (True, False):
+        handler = handler_for("sqli_post_blind", vulnerable, "")
+        baseline = request(handler, "/api/filter", method="POST", body={
+            "template": "botox", "page": 2,
+        })
+        true = request(handler, "/api/filter", method="POST", body={
+            "template": "botox' OR '12345'='12345'-- ", "page": 2,
+        })
+        false = request(handler, "/api/filter", method="POST", body={
+            "template": "botox' OR '12345'='12346'-- ", "page": 2,
+        })
+        assert all(status == 200 for status, _ in (baseline, true, false))
+        assert json.loads(baseline[1])["results"] == json.loads(false[1])["results"] == []
+        assert bool(json.loads(true[1])["results"]) is vulnerable

@@ -54,3 +54,22 @@ def test_empty_rows_do_nothing():
     manager = _manager()
     assert manager._ingest_scanner_leads([]) == 0
     assert "parameter_inventory" not in manager._capability_map
+
+
+def test_post_scanner_lead_reports_capture_gap_until_browser_exchange_arrives():
+    from app.services.agent.coverage_cells import parameter_test_funnel, seed_parameter_coverage_cells
+    from app.services.agent.engagement_brain import engagement_brain_from_dict
+
+    manager = _manager()
+    manager._ingest_scanner_leads([{
+        "method": "POST", "url": TARGET + "/search", "name": "template",
+        "location": "body_form", "source": "sqlmap_lead",
+    }])
+    brain = engagement_brain_from_dict(manager._engagement_brain)
+    assert parameter_test_funnel(brain)["capture_needed"] >= 1
+    seed_parameter_coverage_cells(brain, [{
+        "method": "POST", "host": "app.example.test", "path": "/search",
+        "name": "template", "location": "body_form", "source": "browser_traffic",
+        "artifact_id": "capture-1", "identity": "anonymous", "testable": True,
+    }])
+    assert parameter_test_funnel(brain)["capture_needed"] == 0

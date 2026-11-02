@@ -10,6 +10,7 @@ from pathlib import Path
 CASES = {
     "sqli": ("sqli", "/search", "sqli"),
     "sqli_encoded": ("sqli", "/catalog", "sqli"),
+    "sqli_post_blind": ("sqli", "/api/filter", "sqli"),
     "xss": ("xss", "/search", "xss"),
     "xss_dom": ("xss", "/blog", "xss"),
     "ssrf": ("ssrf", "/api/fetch", "ssrf"),

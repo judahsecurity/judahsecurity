@@ -91,7 +91,9 @@ def observed_sql_cell_for_proof(
     from urllib.parse import urlsplit
     from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
     from app.services.agent.scoped_assessment.sqli_boolean import numeric_sql_proof_valid
-    from app.services.agent.scoped_assessment.body_probe import post_sql_error_proof_valid
+    from app.services.agent.scoped_assessment.body_probe import (
+        post_sql_boolean_proof_valid, post_sql_error_proof_valid,
+    )
     from app.services.agent.scoped_assessment.sqli_string import (
         string_error_proof_valid, string_sql_proof_valid,
     )
@@ -103,14 +105,15 @@ def observed_sql_cell_for_proof(
     matches: Dict[str, Dict[str, Any]] = {}
     for evidence_id in evidence_ids:
         receipt = store.records.get(str(evidence_id))
-        if (not receipt or receipt.get("kind") not in {"scoped_string_sqli", "scoped_numeric_sqli", "scoped_body_sqli_error"}
+        if (not receipt or receipt.get("kind") not in {"scoped_string_sqli", "scoped_numeric_sqli", "scoped_body_sqli_error", "scoped_body_sqli_boolean"}
                 or receipt.get("target") != target):
             continue
         proof = receipt.get("payload")
         if (not isinstance(proof, dict) or proof.get("proof_confirmed") is not True
                 or proof.get("target") != target):
             continue
-        valid = (post_sql_error_proof_valid(proof) if receipt.get("kind") == "scoped_body_sqli_error"
+        valid = (post_sql_boolean_proof_valid(proof) if receipt.get("kind") == "scoped_body_sqli_boolean"
+                 else post_sql_error_proof_valid(proof) if receipt.get("kind") == "scoped_body_sqli_error"
                  else numeric_sql_proof_valid(proof) if receipt.get("kind") == "scoped_numeric_sqli"
                  else string_error_proof_valid(proof) if proof.get("proof_recipe") == "string_error_v1"
                  else string_sql_proof_valid(proof))
@@ -158,7 +161,7 @@ def resolve_observed_sql_candidate_proof(
     matches: list[tuple[str, Dict[str, Any], float]] = []
     for artifact_id in ids:
         receipt = store.records.get(artifact_id)
-        if (not receipt or receipt.get("kind") not in {"scoped_string_sqli", "scoped_numeric_sqli", "scoped_body_sqli_error"}
+        if (not receipt or receipt.get("kind") not in {"scoped_string_sqli", "scoped_numeric_sqli", "scoped_body_sqli_error", "scoped_body_sqli_boolean"}
                 or receipt.get("target") != canonical or receipt.get("run_id")):
             continue
         proof = receipt.get("payload") or {}
@@ -1322,7 +1325,9 @@ async def _verify_scoped_post_sql_candidate(
 
     from app.services.agent.evidence_store import evidence_store
     from app.services.agent.proof_policy import validate_proof
-    from app.services.agent.scoped_assessment.body_probe import post_sql_error_proof_valid
+    from app.services.agent.scoped_assessment.body_probe import (
+        post_sql_boolean_proof_valid, post_sql_error_proof_valid,
+    )
     from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
 
     target = urlsplit(cand.target)
@@ -1342,29 +1347,42 @@ async def _verify_scoped_post_sql_candidate(
             or (cand.parameter and cand.parameter != cell.get("parameter"))):
         return None
     store = evidence_store(tools_manager)
+    validators = {
+        "scoped_body_sqli_error": post_sql_error_proof_valid,
+        "scoped_body_sqli_boolean": post_sql_boolean_proof_valid,
+    }
     hunter_ids = [artifact_id for artifact_id in cand.evidence_ids
                   if (artifact_id in store.records
-                      and store.records[artifact_id]["kind"] == "scoped_body_sqli_error"
+                      and store.records[artifact_id]["kind"] in validators
                       and store.records[artifact_id]["target"] == cand.target
                       and store.records[artifact_id]["identity"] == identity
                       and store.records[artifact_id]["payload"].get("parameter") == parameter
                       and store.records[artifact_id]["payload"].get("source_artifact_id") == capture_id
                       and store.records[artifact_id]["payload"].get("proof_confirmed") is True
-                      and post_sql_error_proof_valid(store.records[artifact_id]["payload"]))]
+                      and validators[store.records[artifact_id]["kind"]](
+                          store.records[artifact_id]["payload"]))]
     if not hunter_ids:
         return None
+    hunter_kind = store.records[hunter_ids[0]]["kind"]
+    hunter_ids = [artifact_id for artifact_id in hunter_ids
+                  if store.records[artifact_id]["kind"] == hunter_kind]
+    boolean = hunter_kind == "scoped_body_sqli_boolean"
     failure = "Fresh POST SQLi controls did not reproduce the hunter proof"
     try:
-        result = await tools_manager._scoped_body_sql_error_verifier(capture_id, parameter, identity)
+        result = await (
+            tools_manager._scoped_body_sql_boolean_verifier(capture_id, parameter, identity)
+            if boolean else tools_manager._scoped_body_sql_error_verifier(capture_id, parameter, identity)
+        )
         artifact_id = str(result.get("evidence_id") or "")
         verifier = store.records.get(artifact_id)
-        if (not post_sql_error_proof_valid(result) or result.get("proof_confirmed") is not True
-                or not verifier or verifier.get("kind") != "scoped_body_sqli_error"
+        if (not validators[hunter_kind](result) or result.get("proof_confirmed") is not True
+                or not verifier or verifier.get("kind") != hunter_kind
                 or verifier.get("run_id") != run.id):
-            failure = "Fresh POST SQL error controls did not confirm injection"
+            failure = "Fresh POST SQL controls did not confirm injection"
         else:
             for hunter_id in hunter_ids:
-                proof = {"kind": "post_error_sqli", "hunter_artifact_id": hunter_id,
+                proof = {"kind": "post_boolean_sqli" if boolean else "post_error_sqli",
+                         "hunter_artifact_id": hunter_id,
                          "artifact_id": artifact_id}
                 valid, why = validate_proof(store, cand, proof, [artifact_id])
                 fresh, fresh_why = store.validate(
@@ -1374,14 +1392,14 @@ async def _verify_scoped_post_sql_candidate(
                 if valid and fresh:
                     verified = apply_verdict(
                         tools_manager, candidate_id=cand.id, verdict="confirmed",
-                        evidence="Fresh scoped POST SQL error controls reproduced the candidate on the exact captured input.",
+                        evidence="Fresh scoped POST SQL controls reproduced the candidate on the exact captured input.",
                         evidence_ids=[artifact_id], proof=proof,
                     )
                     if verified and verified.status == "confirmed":
                         return {"candidate_id": cand.id, "title": cand.title,
-                                "status": "confirmed", "verifier_summary": "Fresh POST SQL error proof matched the hunter receipt",
+                                "status": "confirmed", "verifier_summary": "Fresh POST SQL proof matched the hunter receipt",
                                 "key_findings": [], "tool_calls": 1, "error": None}
-                failure = why or fresh_why or "POST SQL error proof policy rejected the replay"
+                failure = why or fresh_why or "POST SQL proof policy rejected the replay"
     except Exception:
         logging.getLogger(__name__).exception(
             "Deterministic POST SQLi verifier could not replay candidate %s", cand.id,

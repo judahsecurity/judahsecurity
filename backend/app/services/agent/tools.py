@@ -1912,6 +1912,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     ))
                     if proof.get("proof_recipe") in {"post_form_error_v1", "post_json_error_v1"}:
                         operation = "scoped_body_sqli_error"
+                    elif proof.get("proof_recipe") == "post_or_boolean_v1":
+                        operation = "scoped_body_sqli_boolean"
                 else:
                     return {"success": False, "error": "unsupported_capture",
                             "output": "No built-in replay for this captured input shape"}

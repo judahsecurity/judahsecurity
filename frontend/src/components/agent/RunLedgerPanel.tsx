@@ -56,6 +56,7 @@ export type AgentRunLedger = {
     verified: number;
     published: number;
     open: number;
+    capture_needed?: number;
     by_class: Record<string, { checks: number; probed: number; verified: number }>;
     open_rows: Array<{ method: string; path: string; parameter: string; test_type: string; status: string; reason: string }>;
     handoff_rows?: Array<{ coverage_cell_id: string; method: string; path: string; parameter: string; test_type: string; evidence_id: string; evidence_source: string; error: string }>;
@@ -109,7 +110,7 @@ export function RunLedgerPanel({ run }: { run: AgentRunLedger | null }) {
           <div className="rounded-md border border-border/60 px-2.5 py-2 space-y-1">
             <p className="font-medium text-foreground">Input testing</p>
             <p className="text-muted-foreground">
-              {run.input_testing!.inputs} inputs · {run.input_testing!.checks} class checks · {run.input_testing!.attempted} attempted · {run.input_testing!.probed} with probe evidence · {run.input_testing!.candidates} candidates · {run.input_testing!.verified} verified · {run.input_testing!.published} published · {run.input_testing!.open} open
+              {run.input_testing!.inputs} inputs · {run.input_testing!.checks} class checks · {run.input_testing!.attempted} attempted · {run.input_testing!.probed} with probe evidence · {run.input_testing!.capture_needed || 0} need browser capture · {run.input_testing!.candidates} candidates · {run.input_testing!.verified} verified · {run.input_testing!.published} published · {run.input_testing!.open} open
             </p>
             {Boolean(run.input_testing!.proof_signals) && (
               <p className={run.input_testing!.candidate_handoffs_pending ? "text-amber-400" : "text-muted-foreground"}>
