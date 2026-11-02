@@ -280,7 +280,11 @@ class MCPServer:
         # Curl HTTP client
         self.registry.register(MCPTool(
             name="execute_curl",
-            description="Execute curl for HTTP requests. Useful for probing endpoints and testing APIs.",
+            description=(
+                "Read-only GET/HEAD HTTP request. One in-scope URL; encoded SQLi/XSS "
+                "query bytes are allowed as data. For POST bodies or browser execution "
+                "proof, use scoped request replay or browser tools."
+            ),
             tool_type=ToolType.QUERY,
             parameters={
                 "args": {
@@ -1064,9 +1068,9 @@ class MCPServer:
         self.registry.register(MCPTool(
             name="execute_xsstrike",
             description=(
-                "Run XSStrike on a specific observed, browser-reachable XSS input after "
-                "a reflection or DOM-sink lead. Its output is a lead until a fresh browser "
-                "execution proof confirms the exact context."
+                "Run bounded XSStrike on one observed GET URL after a reflection or "
+                "DOM-sink lead. No crawl, POST, or proxy override. Its output is a "
+                "lead until fresh browser execution confirms the exact context."
             ),
             tool_type=ToolType.EXPLOIT,
             parameters={
@@ -1675,6 +1679,8 @@ class MCPServer:
         max_output_chars: int = 2_000_000,
         success_exit_codes: Optional[set] = None,
         capture_discovery_urls: bool = False,
+        capture_partial_on_timeout: bool = False,
+        env: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         """Run a shell command and return the result. Kills process on timeout; caps output size.
 
@@ -1711,6 +1717,14 @@ class MCPServer:
                     preview.extend(chunk[: max_output_chars - len(preview)])
             return bytes(preview)
 
+        async def drain_preview(stream, preview):
+            total = 0
+            while chunk := await stream.read(65536):
+                total += len(chunk)
+                if len(preview) < max_output_chars:
+                    preview.extend(chunk[: max_output_chars - len(preview)])
+            return total
+
         async def kill_process() -> None:
             if process is None:
                 return
@@ -1741,8 +1755,11 @@ class MCPServer:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=(os.name == "posix"),
+                env=env,
             )
             start = time.monotonic()
+            partial_stdout = bytearray()
+            partial_stderr = bytearray()
             try:
                 if capture_discovery_urls:
                     (stdout, stdout_bytes, discovered), stderr, _ = await asyncio.wait_for(
@@ -1753,6 +1770,18 @@ class MCPServer:
                         ),
                         timeout=timeout,
                     )
+                elif capture_partial_on_timeout:
+                    stdout_bytes, _, _ = await asyncio.wait_for(
+                        asyncio.gather(
+                            drain_preview(process.stdout, partial_stdout),
+                            drain_preview(process.stderr, partial_stderr),
+                            process.wait(),
+                        ),
+                        timeout=timeout,
+                    )
+                    stdout = bytes(partial_stdout)
+                    stderr = bytes(partial_stderr)
+                    discovered = []
                 else:
                     stdout, stderr = await asyncio.wait_for(
                         process.communicate(), timeout=timeout,
@@ -1764,9 +1793,14 @@ class MCPServer:
                 logger.warning(f"MCP command timed out after {timeout}s: {command[:3]}...")
                 return {
                     "success": False,
-                    "output": "",
+                    "output": partial_stdout.decode("utf-8", errors="replace")
+                    if capture_partial_on_timeout else "",
                     "error": f"Command timed out after {timeout} seconds (process killed)",
                     "exit_code": -1,
+                    "timed_out": True,
+                    "partial_output": bool(partial_stdout or partial_stderr),
+                    "stderr": partial_stderr.decode("utf-8", errors="replace")
+                    if capture_partial_on_timeout else "",
                 }
             elapsed = time.monotonic() - start
             out_str = stdout.decode("utf-8", errors="ignore")
@@ -2379,8 +2413,32 @@ class MCPServer:
         return await self._run_command(["wpscan", "-h"], timeout=MCP_HELP_TIMEOUT)
     
     async def _execute_xsstrike(self, args: str) -> Dict[str, Any]:
-        cmd = ["xsstrike"] + self._parse_args(args)
-        return await self._run_command(cmd, timeout=300)
+        from app.services.agent.assessment_proxy import (
+            assessment_ca_bundle, assessment_proxy_url,
+        )
+
+        parsed = self._parse_args(args)
+        # XSStrike's --proxy switch uses a hard-coded localhost proxy. Requests
+        # honors HTTP(S)_PROXY when that switch is absent, so set it only in
+        # this child process. Never change the backend's model-provider traffic.
+        proxy = assessment_proxy_url()
+        env = None
+        if proxy:
+            assessment_ca_bundle(proxy)
+            env = dict(os.environ)
+            env.update({
+                "HTTP_PROXY": proxy, "HTTPS_PROXY": proxy, "ALL_PROXY": proxy,
+                "http_proxy": proxy, "https_proxy": proxy, "all_proxy": proxy,
+                "NO_PROXY": "", "no_proxy": "",
+            })
+        cmd = ["xsstrike"] + parsed
+        if "--skip" not in parsed:
+            cmd.append("--skip")
+        return await self._run_command(
+            cmd, timeout=300, max_output_chars=100_000,
+            capture_partial_on_timeout=True,
+            env=env,
+        )
     
     async def _xsstrike_help(self) -> Dict[str, Any]:
         return await self._run_command(["xsstrike", "-h"], timeout=MCP_HELP_TIMEOUT)
@@ -2847,7 +2905,10 @@ class MCPServer:
                 result = post_result.modified_result
 
         # 6. Augur — smart output interpretation + next-step pivots
-        if getattr(settings, "AGENT_AUGUR_ENABLED", True) and result.get("output"):
+        # Incomplete scanner output is a lead for review, not a completed
+        # scan result for Augur to summarize or promote into next steps.
+        if (getattr(settings, "AGENT_AUGUR_ENABLED", True)
+                and result.get("output") and not result.get("timed_out")):
             max_chars = getattr(settings, "AGENT_TOOL_OUTPUT_MAX_CHARS", 20000)
             reading = get_augur().interpret(name, result["output"], max_chars=max_chars)
             if reading is not None:
