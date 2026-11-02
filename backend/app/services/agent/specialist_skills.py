@@ -525,6 +525,9 @@ SPECIALIST_SKILL_PACKS: Dict[str, str] = {
         "- Semgrep/Gitleaks/Trivy on the checkout. Never execute target code.\n"
         "- A Semgrep hit is a lead: require a reachable exploit scenario that "
         "instantiates a threat row before submit_finding_candidate.\n"
+        "- Static source findings are not runtime-exploited: file them with "
+        "verification_level='source_verified'. They are capped at medium until "
+        "a runtime proof upgrades them; do not claim high/critical from source alone.\n"
         "- Mitigated one layer up (caller sanitizes) → kill, don't report."
     ),
 }

@@ -726,6 +726,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "scoped_input_probe_assigned": self.scoped_input_probe_assigned,
             "scoped_dom_xss_assigned": self.scoped_dom_xss_assigned,
             "scoped_response_probe_assigned": self.scoped_response_probe_assigned,
+            "scoped_cors_probe_assigned": self.scoped_cors_probe_assigned,
+            "scoped_race_assigned": self.scoped_race_assigned,
             "scoped_client_probe_assigned": self.scoped_client_probe_assigned,
             "scan_assigned_js_dependency": self.scan_assigned_js_dependency,
             "scoped_xml_entity_assigned": self.scoped_xml_entity_assigned,
@@ -1462,6 +1464,160 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
                 "proof_confirmed": proof["proof_confirmed"],
                 "probe_result": proof, "funnel": parameter_test_funnel(brain)}
+
+    async def scoped_cors_probe_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+    ) -> Dict[str, Any]:
+        """Test one leased endpoint for credentialed CORS origin reflection."""
+        import asyncio
+        import secrets
+        import time
+        from urllib.parse import urlsplit
+
+        from app.services.agent.coverage_cells import parameter_test_funnel
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.scoped_assessment.response_probe import probe_cors
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "surface_applicability"
+                or cell.get("test_type") != "cors"
+                or not allowed_discovery_path(str(cell.get("path") or "/"))):
+            return {"success": False, "error": "invalid_coverage_lease"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        url = scoped_origin + cell["path"]
+        identity = str(cell.get("identity") or "anonymous")
+        nonce = secrets.token_hex(8)
+        try:
+            self._scoped_origin(url)
+            self._scoped_claim_gets(2)
+            proof = await asyncio.to_thread(
+                probe_cors, url, allowed_origin=scoped_origin,
+                state=self._scoped_state(identity, url), nonce=nonce,
+            )
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__}
+        summary = {"test_type": "cors", "parameter": "origin",
+                   "path": cell["path"], "request_context": "origin_header",
+                   "nonce": nonce,
+                   **proof}
+        artifact_id = evidence_store(self).record(
+            "scoped_response_probe", summary, target=url, identity=identity,
+            coverage_cell_id=coverage_cell_id, test_type="cors",
+            success=proof["proof_confirmed"],
+        )
+        cell["evidence_ids"] = list(dict.fromkeys([
+            *(cell.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        cell["last_probe"] = "scoped_cors_probe"
+        if proof["proof_confirmed"]:
+            cell["status"] = "in_focus"
+            cell["reason"] = "Credentialed CORS reflection requires independent verification"
+        self._engagement_brain = brain.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
+                "proof_confirmed": proof["proof_confirmed"],
+                "probe_result": proof, "funnel": parameter_test_funnel(brain)}
+
+    async def scoped_race_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+        field: str, readback_url: str, cleanup_url_template: str,
+        concurrency: int = 10,
+    ) -> Dict[str, Any]:
+        """Prove a limit the server enforces in series but not under concurrency."""
+        import secrets
+        import time
+        from urllib.parse import urlsplit
+
+        from app.services.agent.coverage_cells import parameter_test_funnel
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.scoped_assessment.race_probe import probe_race
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "surface_applicability"
+                or cell.get("test_type") != "race_condition"
+                or str(cell.get("method") or "POST").upper() not in {"POST", "PUT", "PATCH"}
+                or not allowed_discovery_path(str(cell.get("path") or "/"))):
+            return {"success": False, "error": "invalid_coverage_lease"}
+        action_path = str(cell.get("path") or "/")
+        if action_path not in (getattr(self, "_scoped_race_action_paths", None) or set()):
+            return {"success": False, "error": "operator_approval_required",
+                    "reason": "race action path is not in race_action_paths"}
+        if "__PROWL_NONCE__" not in cleanup_url_template:
+            return {"success": False, "error": "cleanup_template_missing_nonce"}
+        cleanup_path = urlsplit(cleanup_url_template.replace("__PROWL_NONCE__", "x")).path or "/"
+        if cleanup_path not in (getattr(self, "_scoped_race_cleanup_paths", None) or set()):
+            return {"success": False, "error": "operator_approval_required",
+                    "reason": "cleanup path is not in race_cleanup_paths"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        observed = set(cmap.get("pages_visited") or []) | {
+            row.get("url") for row in (cmap.get("discovered_links") or [])
+            if isinstance(row, dict)}
+        if readback_url not in observed or _origin(readback_url) != scoped_origin:
+            return {"success": False, "error": "observed_readback_page_missing"}
+        action_url = scoped_origin + action_path
+        identity = str(cell.get("identity") or "anonymous")
+        method = str(cell.get("method") or "POST").upper()
+        nonce = secrets.token_hex(8)
+        try:
+            self._scoped_origin(action_url)
+            self._scoped_claim_race()
+            proof = await probe_race(
+                action_url, readback_url, cleanup_url_template, method=method,
+                field=str(field or ""), allowed_origin=scoped_origin,
+                state=self._scoped_state(identity, action_url), nonce=nonce,
+                concurrency=int(concurrency or 10),
+            )
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__,
+                    "reason": str(exc)[:200]}
+        summary = {"nonce": nonce, "path": action_path,
+                   "readback_url": readback_url,
+                   "cleanup_template": cleanup_url_template, **proof}
+        artifact_id = evidence_store(self).record(
+            "scoped_race_probe", summary, target=action_url, identity=identity,
+            coverage_cell_id=coverage_cell_id, test_type="race_condition",
+            success=proof["proof_confirmed"],
+        )
+        cell["evidence_ids"] = list(dict.fromkeys([
+            *(cell.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        cell["last_probe"] = "scoped_race_probe"
+        if proof["proof_confirmed"]:
+            cell["status"] = "in_focus"
+            cell["reason"] = "Concurrency overrun signal requires independent verification"
+        self._engagement_brain = brain.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
+                "proof_confirmed": proof["proof_confirmed"],
+                "probe_result": {k: proof[k] for k in
+                                 ("control", "probe", "cleanup_confirmed", "requests_sent")},
+                "funnel": parameter_test_funnel(brain)}
 
     async def scoped_xml_entity_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
@@ -4068,6 +4224,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
           Complete is blocked while RA is pending.
         Default/weak login alone is not a finding until privileged impact is proven.
         If demonstrated_chain is omitted, the last live execute_* calls against this target are attached.
+        - verification_level: pass "source_verified" for a static/source-only (SAST) finding
+          with a reachable-exploit argument but no runtime reproduction. Such findings are
+          capped at medium severity until a runtime proof upgrades them. A finding confirmed
+          by the independent verifier is recorded as "exploit_verified" automatically; you
+          cannot claim exploit_verified without that runtime proof.
         """
         from app.services.agent.independent_verify import finding_publish_allowed
 
@@ -4098,6 +4259,26 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             )
             if not valid_claim:
                 return mismatch
+
+        # Label how the finding was verified, and bound an un-exploited source
+        # finding so a SAST lead cannot be filed as high/critical without a
+        # runtime proof.
+        from app.services.agent.finding_gate import (
+            cap_source_verified_severity,
+            classify_verification_level,
+        )
+
+        verification_level = classify_verification_level(
+            runtime_confirmed=verified is not None,
+            explicit=kwargs.get("verification_level"),
+            detected_by="agent",
+            specialist=kwargs.get("specialist"),
+            evidence=evidence,
+        )
+        requested_severity = (severity or "info").strip().lower()
+        severity, severity_capped = cap_source_verified_severity(
+            severity, verification_level
+        )
 
         # Normalize target for asset lookup: strip scheme and path
         target_clean = (target or "").strip()
@@ -4176,8 +4357,15 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 affected_component=(str(component)[:1000] if component else None),
                 impact=(str(impact_text)[:5000] if impact_text else None),
                 references=parsed_refs or None,
+                verification_level=verification_level,
                 metadata_={"agent_detection": agent_detection,
                            "verification": self._verify_receipts.get(verify_receipt_key(title, target)) if str(gate_msg).startswith("verify_ok") else None,
+                           "verification_level": verification_level,
+                           "severity_cap": {"requested": requested_severity,
+                                            "published": severity,
+                                            "reason": "source_verified findings are "
+                                            "capped at medium without a runtime proof"}
+                           if severity_capped else None,
                            "trace": trace_metadata},
             )
             db.add(vuln)

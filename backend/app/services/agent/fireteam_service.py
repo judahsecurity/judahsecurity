@@ -355,6 +355,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "bypass_403",
             "test_saml_sso",
             "execute_jwt",
+            "scoped_race_assigned",
             "compare_requests",
             "list_captured_requests",
             "mutate_captured_request",
@@ -563,6 +564,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "generate_injection_payloads",
             "scoped_xml_entity_assigned",
             "scoped_response_probe_assigned",
+            "scoped_cors_probe_assigned",
             "compare_requests",
             "mutate_list",
             "list_captured_requests",
@@ -965,6 +967,9 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "get_threat_model first; hunt shapes from ranked threats. "
             "A Semgrep hit is a lead — require a reachable exploit scenario that "
             "instantiates a threat row before submit_finding_candidate. "
+            "Source-only findings are not runtime-exploited: set "
+            "verification_level='source_verified' (capped at medium until a runtime "
+            "proof upgrades them). "
             "Mitigated one layer up → kill. Never execute target binaries."
         ),
     ),

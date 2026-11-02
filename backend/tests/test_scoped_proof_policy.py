@@ -55,6 +55,94 @@ def test_response_header_proof_needs_two_fresh_controlled_canaries():
     assert not validate_proof(store, candidate, proof, ["verifier"])[0]
 
 
+def test_cors_proof_needs_two_fresh_credentialed_canaries():
+    payload = lambda nonce: {
+        "operation": "scoped_response_probe", "test_type": "cors",
+        "parameter": "origin", "request_context": "origin_header",
+        "nonce": nonce, "requests_sent": 2, "proof_confirmed": True,
+        "control": {"cors_canary": False}, "probe": {"cors_canary": True},
+    }
+    hunter = record("hunter", "scoped_response_probe", payload("aaaa"), 1)
+    verifier = record("verifier", "scoped_response_probe", payload("bbbb"), 2)
+    store = Store(hunter, verifier)
+    candidate = SimpleNamespace(
+        target=hunter["target"], evidence_ids=["hunter"],
+        title="Credentialed CORS origin reflection", description="",
+        vulnerability_class="cors",
+    )
+    proof = {"kind": "scoped_cors_credentialed", "hunter_artifact_id": "hunter",
+             "artifact_id": "verifier"}
+    assert validate_proof(store, candidate, proof, ["verifier"])[0]
+    # A wildcard / non-credentialed reflection never satisfies the signal.
+    verifier["payload"]["probe"]["cors_canary"] = False
+    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
+    verifier["payload"]["probe"]["cors_canary"] = True
+    # The two runs must carry distinct canary nonces.
+    verifier["payload"]["nonce"] = "aaaa"
+    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
+
+
+def test_cors_proof_kind_matches_only_cors_claims():
+    assert proof_kind_allowed(
+        SimpleNamespace(title="CORS misconfiguration", description="",
+                        vulnerability_class=""),
+        "scoped_cors_credentialed",
+    )[0]
+    # A CORS proof cannot confirm an unrelated class.
+    assert not proof_kind_allowed(
+        SimpleNamespace(title="Open redirect in return_to", description="",
+                        vulnerability_class=""),
+        "scoped_cors_credentialed",
+    )[0]
+
+
+def test_race_overrun_needs_sequential_enforcement_and_concurrent_overrun():
+    payload = lambda burst: {
+        "operation": "scoped_race_probe", "test_type": "race_condition",
+        "field": "coupon", "method": "POST", "requests_sent": 12, "concurrency": 10,
+        "control": {"canary": "aegis-race-seq", "successes": 1,
+                    "readback_count": 1, "single_use_enforced": True},
+        "probe": {"canary": burst, "successes": 4, "readback_count": 4, "overrun": True},
+        "cleanup_confirmed": True, "proof_confirmed": True,
+    }
+    hunter = record("hunter", "scoped_race_probe", payload("aegis-race-burst-aaaa"), 1)
+    verifier = record("verifier", "scoped_race_probe", payload("aegis-race-burst-bbbb"), 2)
+    store = Store(hunter, verifier)
+    candidate = SimpleNamespace(
+        target=hunter["target"], evidence_ids=["hunter"],
+        title="Race condition on coupon redemption", description="",
+        vulnerability_class="race_condition",
+    )
+    proof = {"kind": "scoped_race_overrun", "hunter_artifact_id": "hunter",
+             "artifact_id": "verifier"}
+    assert validate_proof(store, candidate, proof, ["verifier"])[0]
+    # A control that itself allowed duplicates is not single-use enforcement.
+    verifier["payload"]["control"]["readback_count"] = 2
+    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
+    verifier["payload"]["control"]["readback_count"] = 1
+    # One concurrent survivor is not an overrun.
+    verifier["payload"]["probe"]["readback_count"] = 1
+    verifier["payload"]["probe"]["overrun"] = False
+    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
+    verifier["payload"]["probe"]["readback_count"] = 4
+    verifier["payload"]["probe"]["overrun"] = True
+    # The two runs must use distinct canaries.
+    verifier["payload"]["probe"]["canary"] = "aegis-race-burst-aaaa"
+    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
+
+
+def test_race_proof_kind_matches_only_race_claims():
+    assert proof_kind_allowed(
+        SimpleNamespace(title="TOCTOU race condition in checkout", description="",
+                        vulnerability_class=""),
+        "scoped_race_overrun",
+    )[0]
+    assert not proof_kind_allowed(
+        SimpleNamespace(title="Reflected XSS", description="", vulnerability_class=""),
+        "scoped_race_overrun",
+    )[0]
+
+
 def test_client_template_proof_requires_fresh_rendered_execution():
     payload = lambda nonce: {
         "operation": "check_client", "client_test_type": "client_template_injection",

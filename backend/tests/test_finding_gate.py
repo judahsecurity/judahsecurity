@@ -88,3 +88,43 @@ def test_acr_anonymous_pull_signals():
     )
     assert pats["has_secret_class"]
     assert pats["live_privileged_token"]
+
+
+def test_verification_level_runtime_beats_any_claim():
+    g = _load()
+    # A runtime-confirmed finding is exploit_verified regardless of a passed label.
+    assert g.classify_verification_level(
+        runtime_confirmed=True, explicit="source_verified"
+    ) == "exploit_verified"
+    # Without runtime proof, an exploit_verified claim is not honored.
+    assert g.classify_verification_level(
+        runtime_confirmed=False, explicit="exploit_verified",
+        detected_by="agent", specialist="code_sast",
+    ) == "source_verified"
+
+
+def test_verification_level_detects_source_findings():
+    g = _load()
+    assert g.classify_verification_level(
+        runtime_confirmed=False, specialist="code_sast"
+    ) == "source_verified"
+    assert g.classify_verification_level(
+        runtime_confirmed=False, evidence="Semgrep rule python.lang.security hit"
+    ) == "source_verified"
+    assert g.classify_verification_level(
+        runtime_confirmed=False, explicit="source_verified"
+    ) == "source_verified"
+    # A non-source finding with no runtime proof is left unlabeled.
+    assert g.classify_verification_level(
+        runtime_confirmed=False, detected_by="agent", evidence="observed response body"
+    ) is None
+
+
+def test_source_verified_severity_is_capped_at_medium():
+    g = _load()
+    assert g.cap_source_verified_severity("critical", "source_verified") == ("medium", True)
+    assert g.cap_source_verified_severity("high", "source_verified") == ("medium", True)
+    assert g.cap_source_verified_severity("medium", "source_verified") == ("medium", False)
+    # Exploit-verified findings keep their severity.
+    assert g.cap_source_verified_severity("critical", "exploit_verified") == ("critical", False)
+    assert g.cap_source_verified_severity("high", None) == ("high", False)
