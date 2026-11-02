@@ -176,6 +176,32 @@ def _anthropic_create_kwargs(create_fn: Callable, kwargs: Dict[str, Any]) -> Dic
     return {k: v for k, v in kwargs.items() if k in params}
 
 
+# --- Loop breaker: stop a hunter spinning on identical, no-progress tool calls ---
+_REPEAT_WARN_THRESHOLD = int(os.environ.get("VANGUARD_REPEAT_WARN", "3") or 3)
+_REPEAT_BLOCK_THRESHOLD = int(os.environ.get("VANGUARD_REPEAT_BLOCK", "6") or 6)
+
+
+def _call_signature(name: str, tool_input: Any) -> str:
+    """Stable identity for a tool call so identical repeats can be detected."""
+    try:
+        return name + "|" + json.dumps(tool_input, sort_keys=True, default=str)
+    except Exception:
+        return name + "|" + str(tool_input)
+
+
+def _loop_action(
+    count: int,
+    warn: int = _REPEAT_WARN_THRESHOLD,
+    block: int = _REPEAT_BLOCK_THRESHOLD,
+) -> str:
+    """Decide what to do about the Nth identical tool call: ok | warn | block."""
+    if block and count >= block:
+        return "block"
+    if warn and count >= warn:
+        return "warn"
+    return "ok"
+
+
 class AgentRunner:
     """Executes the ReACT loop for one or more agents."""
 
@@ -241,6 +267,7 @@ class AgentRunner:
         total_tool_calls = 0
         final_text = ""
         backend = self._backend_for_model(model)
+        call_signatures: Dict[str, int] = {}
 
         for turn in range(agent.max_turns):
             spent = self.tracer.tokens.cost(model)
@@ -311,9 +338,39 @@ class AgentRunner:
 
                 tool_results = []
                 for tool_use in tool_uses:
-                    result_content = self._execute_tool(
-                        agent, tool_use.name, tool_use.input, tool_use.id,
-                    )
+                    # Loop breaker: identical, repeated calls that make no progress.
+                    # Handoffs are exempt (never blocked).
+                    is_handoff = tool_use.name.startswith("handoff_to_")
+                    sig = _call_signature(tool_use.name, tool_use.input)
+                    repeat_count = call_signatures.get(sig, 0) + 1
+                    call_signatures[sig] = repeat_count
+                    action = "ok" if is_handoff else _loop_action(repeat_count)
+
+                    if action == "block":
+                        result_content = (
+                            f"[loop-breaker] This exact '{tool_use.name}' call with "
+                            f"identical arguments has been issued {repeat_count} times "
+                            f"and was NOT executed again — repeating it is not making "
+                            f"progress. Choose a different action: confirm an existing "
+                            f"candidate (e.g. confirm_xss / test_dom_xss), change the "
+                            f"parameter or target, or advance to the next stage."
+                        )
+                        logger.warning(
+                            "[%s] loop-breaker blocked repeated call %s (x%d)",
+                            agent.name, tool_use.name, repeat_count,
+                        )
+                    else:
+                        result_content = self._execute_tool(
+                            agent, tool_use.name, tool_use.input, tool_use.id,
+                        )
+                        if action == "warn":
+                            result_content = (
+                                f"{result_content}\n\n[loop-warning] You have issued this "
+                                f"exact '{tool_use.name}' call {repeat_count} times. If it "
+                                f"is not yielding new information, change approach instead "
+                                f"of repeating it."
+                            )
+
                     total_tool_calls += 1
                     tool_results.append({
                         "type": "tool_result",

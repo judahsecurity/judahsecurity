@@ -26,6 +26,10 @@ COVERAGE_STATES = frozenset({
     "rejected",
     "error",
     "skipped",
+    # A probe that could not reach a verdict — timed out, crashed, the tool was
+    # unavailable, or no stable baseline could be established. Deliberately NOT a
+    # "tested" state: the input stays open for retry instead of counting as clean.
+    "inconclusive",
 })
 
 _TESTED_STATES = frozenset({"tested_negative", "candidate", "validated", "rejected"})
@@ -55,6 +59,24 @@ _AI_RE = re.compile(r"(?:/chat|/completions|/messages|/mcp|chatbot|copilot|assis
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+_INCONCLUSIVE_STATUSES = frozenset({"timeout", "error", "unavailable", "no_baseline"})
+
+
+def _payload_is_inconclusive(payload: dict) -> bool:
+    """A tool result that reached no verdict and should keep its inputs open.
+
+    Scanners signal this with an explicit inconclusive flag or a status of
+    timeout/error/unavailable (see run_xsstrike / run_arjun / run_sqlmap). Without
+    it, an unresolved probe would default to tested_negative and be silently
+    counted as clean.
+    """
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("inconclusive"):
+        return True
+    return str(payload.get("status") or "").lower() in _INCONCLUSIVE_STATUSES
 
 
 def _endpoint(value: Any) -> str:
@@ -283,6 +305,9 @@ class CoverageLedger:
             return new in {"validated", "rejected", "error"}
         if current == "tested_negative":
             return new in {"candidate", "validated"}
+        if current == "inconclusive":
+            # Weak state: any real verdict (including a clean retest) supersedes it.
+            return True
         return True
 
     def update(
@@ -345,6 +370,11 @@ class CoverageLedger:
         )
         touched = 0
 
+        # A probe that reached no verdict (timeout/crash/unavailable/no baseline)
+        # keeps its inputs OPEN instead of defaulting to tested_negative, which
+        # _TESTED_STATES would otherwise count as clean.
+        neg_state = "inconclusive" if _payload_is_inconclusive(payload) else "tested_negative"
+
         coverage = payload.get("coverage")
         if isinstance(coverage, list):
             for item in coverage:
@@ -352,9 +382,9 @@ class CoverageLedger:
                     continue
                 parameter = item.get("parameter_spec") or item.get("parameter") or "endpoint"
                 item_identity = str(item.get("identity") or chosen_identity)
-                state = str(item.get("status") or "tested_negative")
+                state = str(item.get("status") or neg_state)
                 if state not in COVERAGE_STATES:
-                    state = "candidate" if item.get("signals") else "tested_negative"
+                    state = "candidate" if item.get("signals") else neg_state
                 self.update(
                     endpoint=endpoint,
                     method=method,
@@ -381,7 +411,7 @@ class CoverageLedger:
             }
             for parameter in tested if isinstance(tested, list) else []:
                 spec = _parameter_spec(parameter, method)
-                state = "candidate" if spec in candidate_params else "tested_negative"
+                state = "candidate" if spec in candidate_params else neg_state
                 self.update(
                     endpoint=endpoint,
                     method=method,
@@ -400,7 +430,7 @@ class CoverageLedger:
                 identity=chosen_identity,
                 parameter="endpoint",
                 vulnerability_class=vuln_class,
-                state="error",
+                state="inconclusive" if _payload_is_inconclusive(payload) else "error",
                 source=source,
                 evidence=str(payload.get("error")),
             )
