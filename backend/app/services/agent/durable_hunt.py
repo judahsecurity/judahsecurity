@@ -27,10 +27,10 @@ from app.services.agent.scheduled_hunt import continuation_plan, notify_emails
 logger = logging.getLogger(__name__)
 _LEASE_SECONDS = 120
 _RECOVERY_READ_ONLY = {
-    "assessment_kickoff", "execute_dnsx", "execute_httpx",
+    "assessment_kickoff", "execute_subfinder", "execute_dnsx", "execute_httpx",
     "execute_wafw00f", "execute_whatweb", "spawn_recon_workers",
     "get_engagement_brain", "get_coverage", "get_methodology_progress",
-    "recon_worker:dns_cname", "recon_worker:httpx_tech",
+    "recon_worker:subdomain_enum", "recon_worker:dns_cname", "recon_worker:httpx_tech",
     "recon_worker:waf_probe", "recon_worker:whatweb",
 }
 
@@ -244,7 +244,9 @@ def _finish(work_id: str, owner: str, *, status: str, reason: str, answer: str =
             cost_usd: float = 0.0, revision: str = "", prompt: str = "",
             count_turn: bool = True) -> dict[str, Any]:
     with SessionLocal() as db:
-        row = db.get(AgentAutonomyWork, work_id)
+        row = db.query(AgentAutonomyWork).filter(
+            AgentAutonomyWork.id == work_id,
+        ).with_for_update().first()
         if not row or row.status != "running" or row.lease_owner != owner:
             return {"id": work_id, "status": "lost_lease"}
         if count_turn:

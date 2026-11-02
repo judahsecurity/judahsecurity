@@ -29,7 +29,7 @@ def test_early_pack_defers_nuclei_recon():
         "whatweb",
         "archive_params",
     ]
-    assert PACKS["autonomy_early"] == ["dns_cname", *PACKS["early"]]
+    assert PACKS["autonomy_early"] == ["subdomain_enum", "dns_cname", *PACKS["early"]]
     assert PACKS["nuclei_recon"] == ["nuclei_recon"]
     assert "nuclei_recon" in PACKS["full"]
     assert "nuclei_recon" not in PACKS["enrich"]
@@ -38,6 +38,41 @@ def test_early_pack_defers_nuclei_recon():
 def test_normalize_url():
     assert _normalize_url("example.com") == "https://example.com"
     assert _normalize_url("https://example.com/") == "https://example.com"
+
+
+def test_subdomain_worker_requires_explicit_wildcard_scope(monkeypatch):
+    from app.services.agent import action_ledger, recon_workers
+    from app.services.agent.autonomy_limits import current_autonomy_limits, limits_from_config
+
+    monkeypatch.setattr(action_ledger, "append_action", lambda *args, **kwargs: None)
+
+    async def exercise():
+        await recon_workers.spawn_workers(
+            url="https://example.test", session_id="no-wildcard",
+            kinds=["subdomain_enum"], tools_manager=_FakeTools({"success": True, "output": ""}),
+        )
+        assert not await recon_workers.list_workers("no-wildcard")
+
+    asyncio.run(exercise())
+    limits = limits_from_config({"allowed_hosts": ["*.example.test"]}, target="https://example.test")
+    token = current_autonomy_limits.set(limits)
+    try:
+        assert "subdomain_enum" in recon_workers.PACKS["autonomy_early"]
+        assert "subdomain_enum" in asyncio.run(exercise_with_wildcard(recon_workers))
+    finally:
+        current_autonomy_limits.reset(token)
+
+
+async def exercise_with_wildcard(recon_workers):
+    tools = _FakeTools({"success": True, "output": "api.example.test\noutside.test"})
+    spawned = await recon_workers.spawn_workers(
+        url="https://example.test", session_id="wildcard",
+        kinds=["subdomain_enum"], tools_manager=tools,
+    )
+    await asyncio.gather(*(row.task for row in recon_workers._registry["wildcard"].values()))
+    completed = await recon_workers.drain_completed("wildcard")
+    assert [item["host"] for item in completed[0]["observations"]] == ["api.example.test"]
+    return [row["kind"] for row in spawned]
 
 
 def test_archive_params_pack_and_exact_host_filter():

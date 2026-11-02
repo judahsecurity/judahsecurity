@@ -128,6 +128,7 @@ def test_scoped_cname_hypothesis_dispatches_on_its_own_origin():
         "engagement_brain": {
             "recon_observations": [{
                 "id": "dns-1", "kind": "dns_cname", "host": "docs.example.test",
+                "target": child, "scope": {"allowed_hosts": ["*.example.test"]},
                 "value": "unused.github.io", "source": "execute_dnsx",
             }],
             "hypotheses": [{
@@ -140,6 +141,26 @@ def test_scoped_cname_hypothesis_dispatches_on_its_own_origin():
     wave = _ready_hypothesis_wave(state, [], target)
     assert wave and wave["tool_args"]["specialists"] == ["takeover"]
     assert wave["tool_args"]["targets"] == [child]
+
+
+def test_recon_hypothesis_cannot_dispatch_from_mismatched_observation():
+    target = "https://app.example.test"
+    child = "https://docs.example.test"
+    state = {
+        "mode": "agent", "capability_map": {"target": target},
+        "engagement_brain": {
+            "recon_observations": [{
+                "id": "dns-1", "kind": "dns_cname", "host": "app.example.test",
+                "target": child, "scope": {"allowed_hosts": ["*.example.test"]},
+            }],
+            "hypotheses": [{
+                "id": "h1", "title": "Check provider CNAME", "assumption": "A",
+                "test": "T", "pass_criteria": "P", "kill_criteria": "K",
+                "specialist": "takeover", "target": child, "source": "recon",
+            }],
+        },
+    }
+    assert _ready_hypothesis_wave(state, [], target) is None
 
 
 def test_404_root_needs_dir_brute():

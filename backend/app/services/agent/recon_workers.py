@@ -6,6 +6,7 @@ Completed briefs are drained into the next think prompt / execution trace
 so results "come in" without serializing the whole turn on one tool.
 
 Worker kinds (bounded — not DirBuster-scale):
+  subdomain_enum — passive Subfinder discovery when wildcard scope is approved
   dns_cname    — bounded CNAME lookup for scoped takeover leads
   httpx_tech   — ProjectDiscovery-style HTTP + tech probe
   waf_probe    — wafw00f
@@ -17,7 +18,7 @@ Worker kinds (bounded — not DirBuster-scale):
 
 Packs:
   early        — httpx_tech + waf_probe + whatweb + archive_params
-  autonomy_early — early + dns_cname (opted-in scheduled assessments)
+  autonomy_early — early + scoped subdomain discovery + dns_cname
                  (auto on URL paste; interceptor queued separately)
   enrich       — ferox_dirs + katana_urls
   nuclei_recon — informational Nuclei only (explicit spawn)
@@ -40,6 +41,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 logger = logging.getLogger(__name__)
 
 WORKER_KINDS = (
+    "subdomain_enum",
     "dns_cname",
     "httpx_tech",
     "waf_probe",
@@ -52,10 +54,11 @@ WORKER_KINDS = (
 
 PACKS: Dict[str, List[str]] = {
     "early": ["httpx_tech", "waf_probe", "whatweb", "archive_params"],
-    "autonomy_early": ["dns_cname", "httpx_tech", "waf_probe", "whatweb", "archive_params"],
+    "autonomy_early": ["subdomain_enum", "dns_cname", "httpx_tech", "waf_probe", "whatweb", "archive_params"],
     "enrich": ["ferox_dirs", "katana_urls"],
     "nuclei_recon": ["nuclei_recon"],
     "full": [
+        "subdomain_enum",
         "dns_cname",
         "httpx_tech",
         "waf_probe",
@@ -69,6 +72,7 @@ PACKS: Dict[str, List[str]] = {
 
 # Soft ceilings so background streams cannot eat the whole turn budget.
 _KIND_TIMEOUT_SEC: Dict[str, float] = {
+    "subdomain_enum": 90.0,
     "dns_cname": 30.0,
     "httpx_tech": 90.0,
     "waf_probe": 60.0,
@@ -350,6 +354,29 @@ async def _worker_body(
     limits = current_autonomy_limits.get()
     rate_flag = f" -rl {limits.request_rate_per_second}" if limits else ""
 
+    if kind == "subdomain_enum":
+        from app.services.agent.recon_observation_adapter import subfinder_hosts
+
+        domain = urlparse(url).hostname or ""
+        scope_hosts = limits.allowed_hosts if limits else ()
+        if not any(
+            item.startswith("*.") and (domain == item[2:] or domain.endswith(item[1:]))
+            for item in scope_hosts
+        ):
+            return "[recon_worker:subdomain_enum] skipped: wildcard host scope required"
+        res = await _run_mcp(
+            tools_manager, "execute_subfinder", f"-d {domain} -silent -json",
+            user_id=user_id, org_id=org_id, session_id=session_id,
+        )
+        hosts = subfinder_hosts(str(res.get("output") or ""), scope_hosts=scope_hosts) if res.get("success") else []
+        capture = _capture_context.get()
+        if capture:
+            capture[1].extend({
+                "type": "SUBDOMAIN_HOST", "host": host,
+                "evidence_ref": str(res.get("artifact_id") or ""),
+            } for host in hosts)
+        return f"[recon_worker:subdomain_enum] success={bool(res.get('success'))} scoped_hosts={len(hosts)}"
+
     if kind == "dns_cname":
         from app.services.agent.recon_observation_adapter import _dns_rows
 
@@ -527,6 +554,16 @@ async def spawn_workers(
     if not wanted:
         wanted = list(PACKS["early"])
     wanted = [k for k in wanted if k in WORKER_KINDS and k not in skip]
+    if "subdomain_enum" in wanted:
+        from app.services.agent.autonomy_limits import current_autonomy_limits
+
+        limits = current_autonomy_limits.get()
+        domain = urlparse(target).hostname or ""
+        if not limits or not any(
+            item.startswith("*.") and (domain == item[2:] or domain.endswith(item[1:]))
+            for item in limits.allowed_hosts
+        ):
+            wanted.remove("subdomain_enum")
     if not wanted:
         return []
 

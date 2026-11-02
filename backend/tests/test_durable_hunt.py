@@ -76,7 +76,8 @@ def test_interrupted_turn_is_quarantined_not_replayed(sessions):
 
 
 @pytest.mark.parametrize("run_status", ["running", "completed"])
-def test_expired_read_only_turn_resumes_once_from_costed_snapshot(sessions, run_status):
+@pytest.mark.parametrize("tool_name", ["execute_dnsx", "execute_subfinder", "recon_worker:subdomain_enum"])
+def test_expired_read_only_turn_resumes_once_from_costed_snapshot(sessions, run_status, tool_name):
     started = datetime.utcnow() - timedelta(seconds=10)
     with sessions() as db:
         db.add(_work(
@@ -91,12 +92,12 @@ def test_expired_read_only_turn_resumes_once_from_costed_snapshot(sessions, run_
         ))
         db.add(AgentActionReceipt(
             run_id="run-1", action_id="action-1", event="started",
-            tool_name="execute_dnsx", target=TARGET,
+            tool_name=tool_name, target=TARGET,
             created_at=started + timedelta(seconds=2),
         ))
         db.add(AgentActionReceipt(
             run_id="run-1", action_id="action-1", event="completed",
-            tool_name="execute_dnsx", target=TARGET,
+            tool_name=tool_name, target=TARGET,
             created_at=started + timedelta(seconds=3),
         ))
         db.add(AgentRunSnapshot(
