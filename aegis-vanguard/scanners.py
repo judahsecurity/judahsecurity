@@ -1605,17 +1605,25 @@ def run_ffuf(target_url: str, bridge: ASMBridge, wordlist: str = "/usr/share/wor
     return findings
 
 
-def run_arjun(target_url: str, bridge: ASMBridge, timeout: int = 60) -> List[str]:
-    """HTTP parameter discovery via arjun."""
+def run_arjun(target_url: str, bridge: ASMBridge, timeout: int = 60) -> dict:
+    """HTTP parameter discovery via arjun.
+
+    Returns a status-tagged dict so a timed-out or unavailable discovery reads as
+    *inconclusive* (attack surface not fully mapped) rather than an empty result
+    indistinguishable from "no parameters found".
+    """
     if not _tool_available("arjun"):
-        logger.error("arjun not installed"); return []
+        logger.error("arjun not installed")
+        return {"status": "unavailable", "error": "arjun not installed",
+                "inconclusive": True, "parameters": [], "count": 0}
     timeout = max(1, min(int(timeout or 60), 60))
     cmd = ["arjun", "-u", target_url, "--stable", "-T", "5", "-oJ", "-"]
     try:
         result = _run(cmd, timeout=timeout)
     except subprocess.TimeoutExpired:
         logger.warning("arjun timed out after %ss on %s", timeout, target_url)
-        return []
+        return {"status": "timeout", "error": f"arjun timed out after {timeout}s",
+                "inconclusive": True, "parameters": [], "count": 0}
     params = []
     try:
         data = json.loads(result.stdout)
@@ -1627,7 +1635,8 @@ def run_arjun(target_url: str, bridge: ASMBridge, timeout: int = 60) -> List[str
         pass
     bridge.flush()
     logger.info(f"arjun: {len(params)} parameters on {target_url}")
-    return params
+    return {"status": "ok", "inconclusive": False,
+            "parameters": params, "count": len(params)}
 
 
 # =========================================================================
@@ -2431,27 +2440,58 @@ def _resolve_xsstrike() -> Optional[str]:
     return None
 
 
-def run_xsstrike(target_url: str, bridge: ASMBridge, timeout: int = 300) -> List[dict]:
-    """XSS detection via XSStrike with structured findings."""
+def run_xsstrike(target_url: str, bridge: ASMBridge, timeout: int = 300) -> dict:
+    """XSS detection via XSStrike with structured findings.
+
+    Returns a status-tagged dict (never a bare list), mirroring run_sqlmap, so a
+    scan that times out, crashes, or never ran is recorded as *inconclusive*
+    rather than silently indistinguishable from a clean result. Partial output
+    captured before a kill is salvaged for triage instead of discarded; a finding
+    is only submitted to the platform on a scan that completed.
+    """
     xsstrike_path = _resolve_xsstrike()
     if not xsstrike_path:
         logger.error("xsstrike not installed")
-        return []
+        return {
+            "status": "unavailable", "error": "xsstrike not installed",
+            "inconclusive": True, "partial_signal": False, "evidence": "",
+            "findings": [], "results": [], "vulnerable": False, "count": 0,
+        }
 
     if xsstrike_path.endswith(".py"):
         cmd = ["python3", xsstrike_path, "-u", target_url, "--skip", "--blind"]
     else:
         cmd = [xsstrike_path, "-u", target_url, "--skip", "--blind"]
 
+    host = urlparse(target_url).hostname or target_url
+    status = "ok"
+    error = ""
+    partial = False
+
     try:
         result = _run(cmd, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        logger.warning("xsstrike timed out on %s", target_url)
-        return []
+        output = (result.stdout or "") + "\n" + (result.stderr or "")
+        returncode = result.returncode
+    except subprocess.TimeoutExpired as exc:
+        # TimeoutExpired carries whatever was captured before the kill. Salvage it
+        # so we can tell "stuck" from "making progress" instead of throwing it away.
+        stdout, stderr = exc.stdout or "", exc.stderr or ""
+        if isinstance(stdout, bytes):
+            stdout = stdout.decode("utf-8", "replace")
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode("utf-8", "replace")
+        output = stdout + "\n" + stderr
+        returncode = None
+        partial = True
+        status = "timeout"
+        error = f"xsstrike timed out after {timeout}s"
+        logger.warning("%s on %s (%d bytes salvaged)", error, target_url, len(output.strip()))
 
-    output = (result.stdout or "") + "\n" + (result.stderr or "")
-    findings: List[dict] = []
-    host = urlparse(target_url).hostname or target_url
+    # A non-timeout, non-zero exit is also inconclusive, not clean.
+    if status == "ok" and returncode not in (0, None):
+        status = "error"
+        error = output.strip()[-1500:] or f"xsstrike exited with code {returncode}"
+        logger.error("xsstrike failed on %s (exit %s)", target_url, returncode)
 
     # XSStrike prints payloads and "Vulnerable webpage" / efficiency scores
     hit = bool(re.search(
@@ -2464,7 +2504,11 @@ def run_xsstrike(target_url: str, bridge: ASMBridge, timeout: int = 300) -> List
         hit = True
 
     payloads = re.findall(r"Payload:\s*(.+)", output)
-    if hit or payloads:
+    findings: List[dict] = []
+    # Only submit a platform finding on a COMPLETE run. On a timeout/error we keep
+    # any signal as evidence but do not auto-submit — the param stays inconclusive
+    # and must be confirmed by test_dom_xss (browser execution).
+    if status == "ok" and (hit or payloads):
         payload_sample = (payloads[0] if payloads else "").strip()[:300]
         title = "Reflected XSS Detected"
         bridge.submit_vulnerability(
@@ -2493,8 +2537,23 @@ def run_xsstrike(target_url: str, bridge: ASMBridge, timeout: int = 300) -> List
         })
         bridge.flush()
 
-    logger.info("xsstrike: %d XSS on %s", len(findings), target_url)
-    return findings
+    inconclusive = status != "ok"
+    # An incomplete scan whose salvaged output already looked like it was finding
+    # something — signals that a retry (or test_dom_xss) is worthwhile.
+    partial_signal = bool(partial and (hit or payloads))
+
+    logger.info("xsstrike: status=%s %d XSS on %s", status, len(findings), target_url)
+    return {
+        "status": status,
+        "inconclusive": inconclusive,
+        "partial_signal": partial_signal,
+        "error": error,
+        "findings": findings,
+        "results": findings,
+        "vulnerable": len(findings) > 0,
+        "count": len(findings),
+        "evidence": output[-800:] if (partial or status == "error") else "",
+    }
 
 
 # =========================================================================

@@ -297,8 +297,15 @@ def discover_parameters(target_url: str, timeout: int = 60) -> str:
         timeout: Max seconds to run (capped at 60)
     """
     import scanners
-    results = scanners.run_arjun(target_url, _get_bridge(), timeout=timeout)
-    return json.dumps({"parameters": results, "count": len(results)})
+    result = scanners.run_arjun(target_url, _get_bridge(), timeout=timeout)
+    params = result.get("parameters", [])
+    return json.dumps({
+        "status": result.get("status"),
+        "inconclusive": result.get("inconclusive", False),
+        "error": result.get("error", ""),
+        "parameters": params,
+        "count": result.get("count", len(params)),
+    })
 
 
 @security_tool(category="recon", risk="low")
@@ -747,12 +754,26 @@ def xss_test(target_url: str, timeout: int = 300) -> str:
         timeout: Max seconds to run
     """
     import scanners
-    results = scanners.run_xsstrike(target_url, _get_bridge(), timeout=timeout)
+    result = scanners.run_xsstrike(target_url, _get_bridge(), timeout=timeout)
+    findings = result.get("findings", [])
+    inconclusive = result.get("inconclusive", False)
     return json.dumps({
-        "results": results,
-        "findings": results,
-        "vulnerable": len(results) > 0,
-        "count": len(results),
+        "status": result.get("status"),
+        "inconclusive": inconclusive,
+        "partial_signal": result.get("partial_signal", False),
+        "error": result.get("error", ""),
+        "results": findings,
+        "findings": findings,
+        "vulnerable": result.get("vulnerable", len(findings) > 0),
+        "count": result.get("count", len(findings)),
+        "evidence": result.get("evidence", ""),
+        "next_step": (
+            "Inconclusive — scan did not complete, so this param is NOT tested. "
+            "Confirm observed reflections with test_dom_xss (browser execution), "
+            "or retry (ideally proxied with a request budget)."
+            if inconclusive else
+            "Confirm any candidate with test_dom_xss, then confirm_vulnerability_poc."
+        ),
     }, default=str)
 
 

@@ -192,9 +192,80 @@ def test_arjun_timeout_is_capped(monkeypatch):
         return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({}), stderr="")
 
     monkeypatch.setattr(scanners, "_run", fake_run)
-    assert scanners.run_arjun("http://example.test/", DummyBridge(), timeout=300) == []
+    result = scanners.run_arjun("http://example.test/", DummyBridge(), timeout=300)
+    assert result["status"] == "ok"
+    assert result["inconclusive"] is False
+    assert result["parameters"] == []
     assert captured["timeout"] == 60
     assert captured["cmd"][captured["cmd"].index("-T") + 1] == "5"
+
+
+def test_arjun_timeout_is_inconclusive_not_clean(monkeypatch):
+    monkeypatch.setattr(scanners, "_tool_available", lambda _name: True)
+
+    def fake_run(cmd, timeout=600):
+        raise subprocess.TimeoutExpired(cmd, timeout)
+
+    monkeypatch.setattr(scanners, "_run", fake_run)
+    result = scanners.run_arjun("http://example.test/", DummyBridge(), timeout=60)
+    # A timed-out discovery must NOT look like "no parameters found".
+    assert result["status"] == "timeout"
+    assert result["inconclusive"] is True
+    assert result["parameters"] == []
+
+
+def test_xsstrike_timeout_salvages_partial_and_is_inconclusive(monkeypatch):
+    monkeypatch.setattr(scanners, "_resolve_xsstrike", lambda: "/opt/xsstrike/xsstrike.py")
+
+    def fake_run(cmd, timeout=600):
+        # Simulate a kill mid-scan that had already printed a promising payload.
+        raise subprocess.TimeoutExpired(
+            cmd, timeout,
+            output="Payload: <svg/onload=alert(1)>\nefficiency: 90",
+            stderr="",
+        )
+
+    monkeypatch.setattr(scanners, "_run", fake_run)
+    bridge = DummyBridge()
+    result = scanners.run_xsstrike("http://example.test/?q=1", bridge, timeout=5)
+    assert result["status"] == "timeout"
+    assert result["inconclusive"] is True
+    # Partial output had signal, so flag a retry is worthwhile...
+    assert result["partial_signal"] is True
+    assert "Payload:" in result["evidence"]
+    # ...but a timed-out scan must NOT auto-submit a finding.
+    assert result["vulnerable"] is False
+    assert result["count"] == 0
+    assert bridge.vulnerabilities == []
+
+
+def test_xsstrike_unavailable_is_inconclusive_not_clean(monkeypatch):
+    monkeypatch.setattr(scanners, "_resolve_xsstrike", lambda: None)
+    result = scanners.run_xsstrike("http://example.test/?q=1", DummyBridge(), timeout=5)
+    # Tool missing means the check never ran — inconclusive, not a clean pass.
+    assert result["status"] == "unavailable"
+    assert result["inconclusive"] is True
+    assert result["vulnerable"] is False
+
+
+def test_xsstrike_complete_run_submits_finding(monkeypatch):
+    monkeypatch.setattr(scanners, "_resolve_xsstrike", lambda: "/opt/xsstrike/xsstrike.py")
+
+    def fake_run(cmd, timeout=600):
+        return subprocess.CompletedProcess(
+            cmd, 0,
+            stdout="Vulnerable webpage\nPayload: <svg/onload=alert(1)>",
+            stderr="",
+        )
+
+    monkeypatch.setattr(scanners, "_run", fake_run)
+    bridge = DummyBridge()
+    result = scanners.run_xsstrike("http://example.test/?q=1", bridge, timeout=5)
+    assert result["status"] == "ok"
+    assert result["inconclusive"] is False
+    assert result["vulnerable"] is True
+    assert result["count"] == 1
+    assert len(bridge.vulnerabilities) == 1
 
 
 def test_nested_json_and_graphql_mutation_preserve_request_shape():
