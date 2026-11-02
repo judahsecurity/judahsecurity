@@ -27,6 +27,8 @@ account loses organization access, the worker records a schedule error.
 
 The product agent now requires execution-owned evidence before publishing medium-or-higher findings. These checks apply to both direct orchestration and fireteam discovery. `skip_judge_gate` and the old verification-disable environment flag do not bypass publication.
 
+External scanners feed the same gates as leads, never as findings. `execute_ffuf` (run with `-of json`) and `execute_sqlmap` output is normalized into in-scope parameter-inventory rows — ffuf discovered paths (`source=ffuf_discovery`) and sqlmap injectable parameters (`source=sqlmap_lead`) — that seed coverage cells. Out-of-scope hosts, miss statuses, and cookie-only injection points are dropped. A scanner's own verdict confirms nothing: the resulting cell is proved by the scoped probes and the independent verifier before any candidate is published.
+
 ## Execution and verification
 
 `replay_http_request` and `compare_requests` return an `evidence_id` for each HTTP exchange. Browser XSS checks and Interactsh registration/polling return `evidence_ids`. `read_evidence(evidence_id, offset, limit)` retrieves observations beyond the specialist's preview.
