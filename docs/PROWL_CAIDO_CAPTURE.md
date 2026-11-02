@@ -64,3 +64,34 @@ so restrict its UI to authorized
 analysts and avoid treating its traffic store as a per-tenant isolation
 boundary. Disable routing by removing the two environment values and
 recreating the backend; its native evidence receipts continue to work.
+
+## Import analyst-browsed history (optional)
+
+An analyst can browse an authenticated or multi-step flow through the same
+Caido project, then let Prowl fingerprint it. `fingerprint_api` with
+`source="caido"` reads that project's history back through Caido's GraphQL API.
+
+Create a Caido API token in the assessment instance's UI, then set in
+`/opt/asm/.env` and recreate the backend:
+
+```dotenv
+AEGIS_CAIDO_API_URL=http://caido-assessment:8080
+AEGIS_CAIDO_API_TOKEN=<token>
+# Optional extra HTTPQL clause, AND-ed with the host filter:
+# AEGIS_CAIDO_IMPORT_FILTER=req.created_at.gt:"2026-11-01T00:00:00Z"
+```
+
+The URL is the UI listener on the Compose network, not the 8082 proxy port.
+The import:
+
+- keeps only hosts under the target's apex and drops static assets;
+- skips requests carrying Prowl's own probe markers (`X-Prowl-Probe`,
+  `X-Aegis-Verify`, and Prowl's assessment user agents);
+- never reads request bodies, and redacts `Authorization`, API-key headers,
+  and cookie values (cookie *names* are kept for stack detection);
+- returns samples to the fingerprint report only. They are not added to the
+  replayable `api_samples`, so mutation tools never resend an analyst request.
+
+Imported traffic is a lead. Re-observe an endpoint in the current run before
+testing or reporting it. Without the two variables, `source="caido"` reports
+that the import was skipped and fingerprints the capability map as before.

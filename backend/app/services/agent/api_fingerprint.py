@@ -432,10 +432,16 @@ def fingerprint_from_samples(
     return report
 
 
-def fingerprint_from_map(cmap: Dict[str, Any], *, target: str = "") -> Dict[str, Any]:
+def fingerprint_from_map(
+    cmap: Dict[str, Any],
+    *,
+    target: str = "",
+    caido_samples: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
     from app.services.agent.request_mutate import samples_from_map
 
     samples = samples_from_map(cmap if isinstance(cmap, dict) else {})
+    caido_samples = list(caido_samples or [])
     observed_metadata: List[Dict[str, Any]] = []
     extra: List[str] = []
     if isinstance(cmap, dict):
@@ -460,9 +466,20 @@ def fingerprint_from_map(cmap: Dict[str, Any], *, target: str = "") -> Dict[str,
         extra.extend(str(u) for u in (cmap.get("js_files") or [])[:20])
         extra.extend(str(u) for u in (cmap.get("pages_visited") or [])[:20])
         target = target or str(cmap.get("target") or "")
-    report = fingerprint_from_samples(samples + observed_metadata, target=target, extra_urls=extra)
+    report = fingerprint_from_samples(
+        samples + caido_samples + observed_metadata, target=target, extra_urls=extra,
+    )
     report["captured_sample_count"] = len(samples)
     report["observed_api_metadata_count"] = len(observed_metadata)
+    if caido_samples:
+        report["caido_sample_count"] = len(caido_samples)
+        report["source"] = "captured_traffic_with_caido_history"
+        report["note"] = (
+            "Includes analyst-browsed Caido history (redacted, in-scope only). Caido samples "
+            "are leads for fingerprinting and endpoint discovery, not finding evidence; "
+            "re-observe any endpoint in this run before testing or reporting it."
+        )
+        return report
     if observed_metadata:
         report["source"] = "captured_traffic_and_observed_api_metadata" if samples else "observed_api_metadata"
         report["note"] = (

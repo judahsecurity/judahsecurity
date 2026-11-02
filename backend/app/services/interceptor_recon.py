@@ -167,6 +167,7 @@ class ReconResult:
     sse: Set[str] = field(default_factory=set)
     endpoints_from_js: Set[str] = field(default_factory=set)
     auth_headers: List[str] = field(default_factory=list)  # names only (CSRF/auth surface)
+    login_plan: Optional[str] = None  # name of a replayed recorded login, if any
     errors: List[str] = field(default_factory=list)
 
     def record_call(self, method: str, url: str) -> None:
@@ -423,6 +424,7 @@ async def _run_native_spider(
     # Drain passive nets after spider if the session is still live
     try:
         await _drain(cli, result)
+        await _collect_loaded_scripts(cli, result)
         await _mine_headers(cli, result)
     except Exception as e:
         result.errors.append(f"post-spider drain: {str(e)[:120]}")
@@ -468,6 +470,8 @@ async def run_recon(url: str, opts: Optional[Dict[str, Any]] = None) -> ReconRes
         return result
 
     await cli.run("net", "monitor", "on", "--reload")
+    if opts.get("login_plan"):
+        await replay_login_plan(cli, str(opts["login_plan"]), result)
     await _emit_progress(
         f"interceptor: starting pentester crawl depth={max_depth} "
         f"max_pages={max_pages} interact={interact}"
@@ -523,6 +527,10 @@ async def run_recon(url: str, opts: Optional[Dict[str, Any]] = None) -> ReconRes
             await _drive(cli, result, click_budget)
 
         await _drain(cli, result)
+        try:
+            await _collect_loaded_scripts(cli, result)
+        except Exception as e:
+            result.errors.append(f"script enumeration {page_url[:80]}: {str(e)[:100]}")
 
         tree = await cli.run("tree", "--filter", "all")
         _harvest_forms(tree, page_url, result)
@@ -625,6 +633,70 @@ async def _drain(cli: InterceptorCLI, result: ReconResult) -> None:
             result.websockets.add(u[:400])
 
 
+# ``net log`` only records fetch/XHR, never ``<script>`` loads, so bundles and
+# lazy chunks must be read from the page itself. Resource timing also catches
+# chunks injected after interaction; ``document.scripts`` catches cached ones.
+_LOADED_SCRIPTS_JS = (
+    "JSON.stringify([...new Set(["
+    "...performance.getEntriesByType('resource')"
+    ".filter(e=>e.initiatorType==='script'||/\\.m?js(\\?|$)/.test(e.name))"
+    ".map(e=>e.name),"
+    "...[...document.scripts].map(s=>s.src).filter(Boolean)"
+    "])])"
+)
+_CSP_BLOCK_RE = re.compile(r"content security policy|unsafe-eval|evalerror", re.I)
+
+
+def _parse_script_urls(out: str) -> List[str]:
+    """Return URLs from the first JSON string array in an ``eval`` dump."""
+    text = out or ""
+    start = text.find("[")
+    while start >= 0:
+        end = text.find("]", start)
+        if end < 0:
+            break
+        try:
+            data = json.loads(text[start : end + 1])
+        except (json.JSONDecodeError, ValueError):
+            start = text.find("[", start + 1)
+            continue
+        if isinstance(data, list):
+            return [u for u in data if isinstance(u, str) and u.startswith("http")]
+        break
+    return []
+
+
+def _add_loaded_scripts(urls: List[str], result: ReconResult) -> int:
+    added = 0
+    for raw in urls:
+        url = raw.split("#")[0].split("?")[0]
+        host = urlparse(url).netloc
+        if not host or not re.search(r"\.m?js$", url, re.I):
+            continue
+        if not _in_scope(host, result.scope):
+            result.third_party.add(host)
+            continue
+        if url not in result.js_files:
+            result.js_files.add(url)
+            added += 1
+    return added
+
+
+async def _collect_loaded_scripts(cli: InterceptorCLI, result: ReconResult) -> int:
+    """Add first-party scripts the current tab loaded; return how many were new.
+
+    Tries the isolated world first. A strict CSP without ``'unsafe-eval'`` blocks
+    that, so retry once in the page's own world (``--main``), which is exempt.
+    The expression only reads timing entries and script ``src`` attributes.
+    """
+    out = await cli.run("eval", _LOADED_SCRIPTS_JS, timeout=20)
+    urls = _parse_script_urls(out)
+    if not urls and (_CSP_BLOCK_RE.search(out or "") or "__error__" in (out or "")):
+        out = await cli.run("eval", _LOADED_SCRIPTS_JS, "--main", timeout=20)
+        urls = _parse_script_urls(out)
+    return _add_loaded_scripts(urls, result)
+
+
 async def _mine_headers(cli: InterceptorCLI, result: ReconResult) -> None:
     """Record captured request-header *names* (CSRF/auth token surface)."""
     headers = await cli.run("net", "headers")
@@ -710,6 +782,7 @@ def to_normalized_dict(result: ReconResult) -> Dict[str, Any]:
         "sse": sorted(result.sse),
         "endpoints_from_js": sorted(result.endpoints_from_js),
         "auth_headers": result.auth_headers,
+        "login_plan": result.login_plan,
         "errors": result.errors[:10],
     }
 
@@ -725,6 +798,8 @@ def format_output(result: ReconResult) -> str:
         + (f"  coverage={d['coverage']}" if d.get("coverage") else ""),
         f"Forms observed: {len(d.get('forms') or [])}",
     ]
+    if d.get("login_plan"):
+        lines.append(f"Authenticated via recorded login plan: {d['login_plan']}")
     for p in d["pages_visited"][:25]:
         lines.append(f"  - {p}")
 
@@ -779,6 +854,93 @@ def _post_to_bridge(payload: Dict[str, Any], post_url: str, token: str, org: Opt
         sys.stderr.write(f"[bridge] {resp.status} {resp.reason}\n")
 
 
+# ---------------------------------------------------------------------------
+# Recorded login replay
+# ---------------------------------------------------------------------------
+# An analyst records a login once (``interceptor monitor start`` ... ``stop``),
+# exports it with ``interceptor monitor export <sid> --plan`` and saves it on the
+# worker host as ``$INTERCEPTOR_LOGIN_PLAN_DIR/<name>.plan``. Jobs reference the
+# plan by name only, so credentials in the plan never transit the ASM API or DB.
+_PLAN_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+# Navigation and form input only — no eval, overrides, header/cookie rules,
+# CDP network control, native macOS input, or other bridges.
+_PLAN_VERBS = {
+    "open", "navigate", "act", "click", "type", "select", "keys", "focus",
+    "hover", "scroll", "wait", "wait-stable", "find", "read", "tree", "back", "forward",
+}
+_PLAN_URL_VERBS = {"open", "navigate"}
+_PLAN_PREFIXES = {"interceptor", "$intc", '"$intc"', "${intc}"}
+MAX_PLAN_STEPS = 40
+
+
+def login_plan_dir() -> str:
+    return os.environ.get("INTERCEPTOR_LOGIN_PLAN_DIR") or os.path.expanduser("~/.interceptor-plans")
+
+
+def parse_login_plan(text: str, scope: str) -> List[List[str]]:
+    """Validate an exported plan; return argv steps or raise ``ValueError``."""
+    import shlex
+
+    steps: List[List[str]] = []
+    for lineno, line in enumerate((text or "").splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            argv = shlex.split(line)
+        except ValueError as exc:
+            raise ValueError(f"line {lineno}: {exc}") from exc
+        if argv and argv[0].lower() in _PLAN_PREFIXES:
+            argv = argv[1:]
+        if not argv:
+            continue
+        verb = argv[0].lower()
+        if verb not in _PLAN_VERBS:
+            raise ValueError(f"line {lineno}: '{argv[0]}' is not allowed in a login plan")
+        if any(a in ("--any-tab", "--os", "--main") for a in argv[1:]):
+            raise ValueError(f"line {lineno}: flag not allowed in a login plan")
+        if verb in _PLAN_URL_VERBS:
+            urls = [a for a in argv[1:] if not a.startswith("-")]
+            if not urls:
+                raise ValueError(f"line {lineno}: {verb} needs a URL")
+            parsed = urlparse(urls[0])
+            if parsed.scheme not in ("http", "https") or not _in_scope(parsed.hostname or "", scope):
+                raise ValueError(f"line {lineno}: {urls[0][:80]} is outside scope {scope}")
+        steps.append(argv)
+        if len(steps) > MAX_PLAN_STEPS:
+            raise ValueError(f"plan exceeds {MAX_PLAN_STEPS} steps")
+    if not steps or steps[0][0].lower() not in _PLAN_URL_VERBS:
+        raise ValueError("plan must start with an in-scope open/navigate")
+    return steps
+
+
+async def replay_login_plan(cli: InterceptorCLI, name: str, result: ReconResult) -> bool:
+    """Replay a recorded login before the crawl. Failure is noted, never fatal."""
+    if not _PLAN_NAME_RE.match(name or ""):
+        result.errors.append("login plan: invalid name")
+        return False
+    path = os.path.join(login_plan_dir(), f"{name}.plan")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            steps = parse_login_plan(fh.read(), result.scope)
+    except FileNotFoundError:
+        result.errors.append(f"login plan '{name}' not found on this worker")
+        return False
+    except ValueError as exc:
+        result.errors.append(f"login plan '{name}' rejected: {exc}")
+        return False
+    for index, argv in enumerate(steps, 1):
+        out = await cli.run(*argv, timeout=45)
+        if "__timeout__" in out or "__error__" in out[:80]:
+            # Never echo step output: it may contain typed credentials.
+            result.errors.append(f"login plan '{name}' stopped at step {index}/{len(steps)} ({argv[0]})")
+            return False
+    await cli.run("wait-stable", timeout=20)
+    result.login_plan = name
+    await _emit_progress(f"interceptor: replayed login plan '{name}' ({len(steps)} steps)")
+    return True
+
+
 def _main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="interceptor_recon",
@@ -797,6 +959,8 @@ def _main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--probe-text", default=None, help="type into text inputs (chat UIs)")
     parser.add_argument("--no-spider", action="store_true", help="force verb-loop even if spider exists")
     parser.add_argument("--context", default=None, help="interceptor --context id (multi-profile)")
+    parser.add_argument("--login-plan", default=None,
+                        help="replay $INTERCEPTOR_LOGIN_PLAN_DIR/<name>.plan before crawling")
     parser.add_argument("--json", dest="json_out", default=None, help="write normalised JSON here")
     parser.add_argument("--post", default=None, help="ASM bridge ingest URL to POST results to")
     parser.add_argument("--token", default=os.environ.get("ASM_TOKEN", ""), help="bearer token for --post")
@@ -818,6 +982,7 @@ def _main(argv: Optional[List[str]] = None) -> int:
         "probe_text": args.probe_text,
         "prefer_spider": not args.no_spider,
         "context": args.context,
+        "login_plan": args.login_plan,
     }
     result = asyncio.run(run_recon(args.url, opts))
     payload = to_normalized_dict(result)

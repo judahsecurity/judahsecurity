@@ -102,6 +102,45 @@ python -m app.services.interceptor_recon https://www.emulate3d.com/ \
   --token "$ASM_TOKEN" --org 1
 ```
 
+## Script bundles and lazy chunks
+
+Interceptor's passive `net log` records fetch/XHR only, never `<script>` loads.
+After interaction on each page (and once after a native spider run) the worker
+reads `performance.getEntriesByType('resource')` and `document.scripts` from the
+tab and adds first-party `.js` URLs to `js_files`. If a strict CSP blocks
+isolated-world `eval`, it retries once with `--main`. This runs in the logged-in
+tab, so chunks loaded after sign-in reach `fetch_lazy_chunks` and
+`extract_js_endpoints`.
+
+## Recorded login replay
+
+Record a login once on the worker host, export it as a plan, and store it there:
+
+```bash
+interceptor monitor start --instruction "log in to app.example.com"
+# perform the login in the worker browser
+interceptor monitor stop
+interceptor monitor list
+mkdir -p ~/.interceptor-plans && chmod 700 ~/.interceptor-plans
+interceptor monitor export <sessionId> --plan > ~/.interceptor-plans/acme.plan
+chmod 600 ~/.interceptor-plans/acme.plan
+```
+
+Set `INTERCEPTOR_LOGIN_PLAN_DIR` to use another directory. Pass the plan *name*
+in the job opts (`"login_plan": "acme"`) or with `--login-plan acme` on a
+one-shot run. The worker replays it before crawling. The plan, and any password
+typed in it, stays on the worker host and never goes to the ASM API or database.
+
+The replay accepts only navigation and form-input verbs (`open`, `navigate`,
+`act`, `click`, `type`, `select`, `keys`, `find`, `wait`, …). It rejects `eval`,
+overrides, header or cookie rules, CDP network control, `macos`, and the `--os`,
+`--main`, and `--any-tab` flags. It must start with an in-scope `open` or
+`navigate`, every URL must be in scope, and it is capped at 40 steps. A failed
+step is reported by step number only, without command output, and the crawl
+continues unauthenticated. `login_plan` in the recon result shows whether the
+replay succeeded. Element refs in a recording can change between page versions;
+re-record if a replay stops partway.
+
 ## Ubuntu Interceptor worker (production)
 
 Run Interceptor on the host because the native messaging daemon, browser

@@ -30,10 +30,10 @@ Compound analog of open / read / act / inspect:
 2. **Passive param mutate** — `mutate_captured_request` / `mutate_list`. Do not
    attach a debugger to rewrite bodies unless you must.
 3. **Script tags ≠ XHR.** `net log` / `api_samples` do **not** list `<script>`
-   loads. Judah records Playwright `resource_type=script` as `js_files`. If that
-   list is thin: `execute_browser` `execute_js` with
-   `performance.getEntriesByType('resource')` filtered to first-party `.js`, then
-   `fetch_lazy_chunks` — crawl only saw what this page state loaded.
+   loads. Judah records Playwright `resource_type=script` as `js_files`, and the
+   Interceptor crawl reads the tab's resource timing after interaction, so
+   chunks loaded after sign-in are included. If that list is still thin, run
+   `fetch_lazy_chunks` — the crawl only saw what each page state loaded.
 
 Code-split SPAs lazy-load on sign-in / opening tools. Interact, re-enumerate,
 then `fetch_lazy_chunks` for the complete webpack/Vite manifest.

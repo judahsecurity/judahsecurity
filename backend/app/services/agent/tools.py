@@ -5946,8 +5946,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             ])
         return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
 
-    async def fingerprint_api(self, **kwargs: Any) -> str:
-        """Fingerprint API hosts/tech from captured Interceptor/crawl samples (no Caido/Codex)."""
+    async def fingerprint_api(self, source: str = "map", **kwargs: Any) -> str:
+        """Fingerprint API hosts/tech from captured samples; ``source="caido"`` adds Caido history."""
         from app.services.agent.api_fingerprint import fingerprint_from_map
 
         cmap = getattr(self, "_capability_map", None) or {}
@@ -5955,7 +5955,25 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         if isinstance(cmap, dict):
             target = str(cmap.get("target") or "")
         target = target or (getattr(self, "_fallback_target", None) or "")
-        result = fingerprint_from_map(cmap if isinstance(cmap, dict) else {}, target=target)
+        caido_samples: list = []
+        caido_note = ""
+        if str(source or "map").strip().lower() in ("caido", "all"):
+            from app.services.agent.caido_import import CaidoImportError, fetch_caido_samples
+
+            try:
+                imported = await fetch_caido_samples(target, limit=int(kwargs.get("limit") or 200))
+                caido_samples = imported["samples"]
+                caido_note = (
+                    f"Caido: read {imported['requests_read']} requests for *.{imported['apex']}, "
+                    f"kept {len(caido_samples)} redacted in-scope samples."
+                )
+            except CaidoImportError as exc:
+                caido_note = f"Caido import skipped: {exc}. Continuing with the capability map."
+        result = fingerprint_from_map(
+            cmap if isinstance(cmap, dict) else {}, target=target, caido_samples=caido_samples,
+        )
+        if caido_note:
+            result["caido_import"] = caido_note
         return json.dumps(result, indent=2, default=str)[:_tool_output_max_chars()]
 
     async def fingerprint_passive_stack(self, url: str = "", **kwargs: Any) -> str:
