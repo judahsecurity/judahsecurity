@@ -854,6 +854,45 @@ def probe_xss_reflection(
     return json.dumps(result, default=str)
 
 
+@security_tool(category="exploit", risk="high")
+def confirm_xss(
+    target_url: str,
+    param: str = "",
+    contexts: str = "",
+    timeout: int = 60,
+) -> str:
+    """Confirm reflected/DOM XSS by EXECUTING a context-matched breakout payload in a
+    real Chromium browser — proof of execution, not just reflection.
+
+    The confirmation step for probe_xss_reflection. Pass the reflected `param` and the
+    `contexts` the probe classified; this carries the matching breakout (e.g. a
+    single-quote attribute or </script> break) into the browser and only records a
+    finding if window.__vanguard_xss (or a dialog) actually fires. Succeeds where
+    xss_test (XSStrike) and plain reflection matching cannot — and, unlike test_dom_xss,
+    it is driven by the classified context instead of a fixed generic payload list, so
+    attribute / script-block / comment reflected XSS gets verified.
+
+    Scope: GET query-parameter injection. Use test_dom_xss for fragment/client-side sinks.
+
+    Args:
+        target_url: URL to test (with or without the vulnerable param present)
+        param: Parameter name to inject (from probe_xss_reflection). Comma-separated ok.
+        contexts: Comma-separated reflection contexts from probe_xss_reflection
+            (html_body, attr_double, attr_single, script_block, js_string,
+            html_comment). Empty tries every context.
+        timeout: Max seconds to run
+    """
+    import scanners
+    result = scanners.run_confirm_xss_reflection(
+        target_url,
+        _get_bridge(),
+        param=param,
+        contexts=contexts,
+        timeout=timeout,
+    )
+    return json.dumps(result, default=str)
+
+
 @security_tool(category="exploit", risk="medium")
 def wordpress_scan(target_url: str, timeout: int = 600) -> str:
     """Scan a WordPress site for vulnerabilities using wpscan.
@@ -2073,7 +2112,7 @@ VULN_TOOLS = [
 ]
 
 EXPLOIT_TOOLS = [
-    "sql_injection_test", "xss_test", "test_dom_xss", "wordpress_scan",
+    "sql_injection_test", "xss_test", "test_dom_xss", "confirm_xss", "wordpress_scan",
     "deep_tls_test", "scan_nuclei", "confirm_vulnerability_poc",
     "janus_dast_full",
     # Manual probing tools
