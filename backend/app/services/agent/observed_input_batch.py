@@ -374,7 +374,7 @@ async def run_observed_input_batch(
                   and location in {"body_json", "body_form"}):
                 operation_name = "scoped_assessment_probe_assigned"
                 if specialist == "xss":
-                    probe_args["technique"] = "xss_reflection"
+                    probe_args["technique"] = "captured"
             elif method == "POST" and location in {"body_json", "body_form"}:
                 reason = "POST input needs a private browser capture and approved replay"
             if operation_name:

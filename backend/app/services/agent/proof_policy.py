@@ -369,7 +369,19 @@ def validate_proof(
             or not first.get("xhr_parameter")
             or first.get("xhr_query_keys") != second.get("xhr_query_keys")
             or not isinstance(first.get("xhr_query_keys"), list)
-            or first.get("xhr_parameter") not in first["xhr_query_keys"]
+            or first.get("xhr_method", "GET") != second.get("xhr_method", "GET")
+            or (first.get("xhr_query_keys") != [] if first.get("xhr_method", "GET") == "POST"
+                else first.get("xhr_parameter") not in first["xhr_query_keys"])
+            or (first.get("xhr_method", "GET") == "POST" and (
+                first.get("xhr_capture_id") != second.get("xhr_capture_id")
+                or not first.get("xhr_capture_id")
+                or first.get("xhr_body_location") != second.get("xhr_body_location")
+                or first.get("xhr_body_location") not in {"body_form", "body_json"}
+                or first.get("xhr_baseline_request_sha256") != second.get("xhr_baseline_request_sha256")
+                or not first.get("xhr_baseline_request_sha256")
+                or (candidate.parameter and candidate.parameter !=
+                    f"{first.get('xhr_body_location')}:{first.get('xhr_parameter')}")
+            ))
             or first.get("xhr_payload_template") != second.get("xhr_payload_template")
             or first.get("xhr_actions", []) != second.get("xhr_actions", [])
             or any(not isinstance(row.get("xhr_actions", []), list)

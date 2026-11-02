@@ -691,7 +691,7 @@ def test_scoped_service_proof_does_not_enter_local_verifier_queue():
                for item in loop_progress(state)["missing"])
 
 
-def test_captured_post_xss_uses_reflection_canary_and_stays_inconclusive():
+def test_captured_post_xss_first_pass_stays_inconclusive_without_browser_execution():
     class Manager:
         def __init__(self):
             brain = EngagementBrain(target="https://app.test")
@@ -720,7 +720,7 @@ def test_captured_post_xss_uses_reflection_canary_and_stays_inconclusive():
 
     manager = Manager()
     result = asyncio.run(run_observed_input_batch(manager, max_checks=1))
-    assert manager.techniques == ["xss_reflection"]
+    assert manager.techniques == ["captured"]
     assert result["results"][0]["outcome"] == "inconclusive"
     assert "browser execution" in result["results"][0]["reason"]
 

@@ -224,10 +224,16 @@ def observed_xss_cell_for_proof(
                     matches[str(cell["id"])] = cell
             continue
         if xhr_xss:
+            post_xhr = proof.get("xhr_method") == "POST"
             if (proof.get("xhr_path") != (parsed_target.path or "/")
                     or "__PROWL_NONCE__" not in str(proof.get("xhr_payload_template") or "")
                     or not isinstance(proof.get("xhr_query_keys"), list)
-                    or proof.get("xhr_parameter") not in proof["xhr_query_keys"]
+                    or (proof.get("xhr_query_keys") != [] if post_xhr
+                        else proof.get("xhr_parameter") not in proof["xhr_query_keys"])
+                    or (post_xhr and (not proof.get("xhr_capture_id")
+                                      or proof.get("xhr_body_location") not in {"body_form", "body_json"}
+                                      or not proof.get("xhr_baseline_request_sha256")
+                                      or parsed.query))
                     or proof.get("xhr_mutated") is not True
                     or proof.get("xhr_response_seen") is not True):
                 continue
@@ -242,10 +248,15 @@ def observed_xss_cell_for_proof(
         for cell in getattr(brain, "coverage_cells", None) or []:
             if (cell.get("source") == "parameter_inventory"
                     and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
-                    and cell.get("test_type") == "xss" and cell.get("method") == "GET"
+                    and cell.get("test_type") == "xss"
+                    and cell.get("method") == ("POST" if xhr_xss and post_xhr else "GET")
                     and _same_observed_origin(parsed_target.scheme, str(cell.get("host") or ""), target)
                     and cell.get("path") == (parsed_target.path or "/")
-                    and cell.get("parameter") in {f"query:{name}" for name in parameters}
+                    and cell.get("parameter") in {
+                        f"{proof['xhr_body_location'] if xhr_xss and post_xhr else 'query'}:{name}"
+                        for name in parameters}
+                    and (not xhr_xss or not post_xhr
+                         or cell.get("capture_id") == proof.get("xhr_capture_id"))
                     and (cell.get("identity") or "anonymous") == receipt.get("identity")):
                 matches[str(cell["id"])] = cell
     return next(iter(matches.values())) if len(matches) == 1 else None
@@ -1453,10 +1464,17 @@ async def _verify_scoped_browser_xss_candidate(
         return None
     location, separator, parameter = str(cell.get("parameter") or "").partition(":")
     dom_query = dom_xss and location == "query" and bool(separator and parameter)
-    form_xss = cell.get("method") == "POST" and location == "body_form"
+    post_xhr_xss = (cell.get("method") == "POST"
+                    and location in {"body_form", "body_json"}
+                    and any((store_row := evidence_store(tools_manager).records.get(evidence_id))
+                            and store_row.get("kind") == "scoped_browser_check_xhr_xss"
+                            and isinstance(store_row.get("payload"), dict)
+                            and store_row["payload"].get("xhr_method") == "POST"
+                            for evidence_id in cand.evidence_ids))
+    form_xss = cell.get("method") == "POST" and location == "body_form" and not post_xhr_xss
     target = urlsplit(cand.target)
     identity = str(cell.get("identity") or "anonymous")
-    if (not (dom_xss or (location == "query" and not form_xss) or form_xss)
+    if (not (dom_xss or (location == "query" and not form_xss) or form_xss or post_xhr_xss)
             or (not dom_xss and (not separator or not parameter))
             or target.scheme not in {"http", "https"}
             or not _same_observed_origin(target.scheme, str(cell.get("host") or ""), cand.target)
@@ -1536,8 +1554,14 @@ async def _verify_scoped_browser_xss_candidate(
                     or not _same_observed_origin(parsed.scheme, parsed.netloc, cand.target)
                     or parsed.fragment or proof.get("xhr_path") != (target.path or "/")
                     or proof.get("xhr_parameter") != parameter
+                    or (proof.get("xhr_method") == "POST") != post_xhr_xss
                     or not isinstance(proof.get("xhr_query_keys"), list)
-                    or parameter not in proof["xhr_query_keys"]
+                    or (proof.get("xhr_query_keys") != [] if post_xhr_xss
+                        else parameter not in proof["xhr_query_keys"])
+                    or (post_xhr_xss and (proof.get("xhr_capture_id") != cell.get("capture_id")
+                                          or proof.get("xhr_body_location") != location
+                                          or not proof.get("xhr_baseline_request_sha256")
+                                          or parsed.query))
                     or "__PROWL_NONCE__" not in str(proof.get("xhr_payload_template") or "")
                     or proof.get("xhr_mutated") is not True
                     or proof.get("xhr_response_seen") is not True):
@@ -1571,6 +1595,8 @@ async def _verify_scoped_browser_xss_candidate(
                                     "xhr_parameter": parameter,
                                     "xhr_query_keys": hunter_proof["xhr_query_keys"],
                                     "xhr_payload_template": hunter_proof["xhr_payload_template"]})
+                if post_xhr_xss:
+                    replay_args["xhr_capture_id"] = hunter_proof["xhr_capture_id"]
                 if hunter_proof.get("xhr_actions"):
                     replay_args["xhr_actions"] = hunter_proof["xhr_actions"]
             wrapped = await tools_manager.execute("scoped_browser_assessment", replay_args)

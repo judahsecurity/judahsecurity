@@ -1,6 +1,7 @@
 """An observed XSS input is confirmed only after fresh browser execution."""
 
 import json
+import hashlib
 from urllib.parse import quote
 
 import pytest
@@ -20,6 +21,90 @@ from app.services.agent.scoped_assessment.browser_traffic import package_exchang
 
 TARGET = "https://app.example.test/catalog"
 TEMPLATE = TARGET + "?searchTerm=" + quote('<img src=x onerror=alert("__PROWL_NONCE__")>')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("linked", [False, True])
+@pytest.mark.parametrize("verifier_mode", ["confirmed", "no_execution", "changed_baseline"])
+@pytest.mark.parametrize("mime,body,field,location", [
+    ("application/x-www-form-urlencoded", b"message=hello", "message", "body_form"),
+    ("application/json", b'{"message":"hello"}', "/message", "body_json"),
+])
+async def test_captured_post_xhr_xss_requires_exact_body_and_fresh_execution(
+    monkeypatch, linked, verifier_mode, mime, body, field, location,
+):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    manager.set_scoped_assessment_policy({"body_replay_paths": ["/api/render"]})
+    endpoint = "https://app.example.test/api/render"
+    public, private = package_exchange(
+        url=endpoint, page_url=TARGET, action_ref="navigate",
+        expected_origin="https://app.example.test", method="POST", resource_type="fetch",
+        status=200, content_type="text/html", request_content_type=mime,
+        request_body=body, response_body=b"hello",
+    )
+    browser_calls = []
+
+    async def fake_browser(**kwargs):
+        if kwargs["operation"] == "inspect_js":
+            kwargs["traffic_exchanges"].append({"public": public, "private": private})
+            return ({"operation": "inspect_js", "final_origin": "https://app.example.test",
+                     "final_path": "/catalog", "status": 200, "requests": [], "actions": []}, None)
+        browser_calls.append(kwargs)
+        assert kwargs["operation"] == "check_xhr_xss"
+        assert kwargs["url"] == TARGET and kwargs["xhr_path"] == "/api/render"
+        assert kwargs["xhr_post_baseline"] == body
+        assert kwargs["xhr_post_content_type"] == mime
+        assert kwargs["xhr_query_keys"] == []
+        assert kwargs["xhr_post_template"].count(b"__PROWL_NONCE__") == 1
+        assert kwargs["xhr_post_template"] != body
+        assert kwargs["xhr_baseline_request_sha256"] == hashlib.sha256(body).hexdigest()
+        return ({"operation": "check_xhr_xss", "target_template": TARGET,
+                 "xhr_method": "POST", "xhr_path": "/api/render",
+                 "xhr_parameter": field, "xhr_query_keys": [],
+                 "xhr_payload_template": kwargs["xhr_payload_template"],
+                 "xhr_capture_id": kwargs["xhr_capture_id"],
+                 "xhr_body_location": location,
+                 "xhr_baseline_request_sha256": (
+                     "0" * 64 if len(browser_calls) == 2 and verifier_mode == "changed_baseline"
+                     else kwargs["xhr_baseline_request_sha256"]),
+                 "xhr_actions": [], "xhr_actions_replayed": 0,
+                 "xhr_mutated": True, "xhr_response_seen": True,
+                 "executed": not (len(browser_calls) == 2 and verifier_mode == "no_execution"),
+                 "nonce": f"nonce-{len(browser_calls)}"}, None)
+
+    monkeypatch.setattr("app.services.agent.scoped_assessment_tools.browser.check_browser", fake_browser)
+    mapped = json.loads(await manager.scoped_browser_assessment("inspect_js", TARGET))
+    capture_id = mapped["traffic"][0]["artifact_id"]
+    brain = EngagementBrain(target="https://app.example.test")
+    seed_parameter_coverage_cells(brain, [{"method": "POST", "host": "app.example.test",
+        "path": "/api/render", "name": field, "location": location,
+        "identity": "anonymous", "source": "browser_traffic", "testable": True,
+        "artifact_id": capture_id}])
+    lease = claim_coverage_cell_leases(brain, ["xss"], first_pass_only=True)["xss"]
+    manager._engagement_brain = brain.to_dict()
+    first = await manager.scoped_assessment_probe_assigned(lease.coverage_cell_id, lease.id)
+    assert first["proof_confirmed"] is True
+    cell = next(row for row in manager._engagement_brain["coverage_cells"]
+                if row.get("id") == lease.coverage_cell_id)
+    live = engagement_brain_from_dict(manager._engagement_brain)
+    candidate = submit_candidate(
+        live,
+        title="Rendered POST XSS", target=endpoint, vulnerability_class="xss",
+        coverage_cell_id=cell["id"] if linked else "",
+        identity="anonymous", parameter=cell["parameter"],
+        evidence_ids=[first["evidence_id"]],
+    )
+    manager._engagement_brain = live.to_dict()
+    reports = await run_independent_verifiers(
+        [candidate], llm=None, tools_manager=manager, targets=[endpoint],
+    )
+    assert len(browser_calls) == 2
+    assert browser_calls[0]["xhr_capture_id"] == browser_calls[1]["xhr_capture_id"]
+    assert reports[0]["status"] == (
+        "confirmed" if verifier_mode == "confirmed" else "inconclusive"
+    ), reports
 
 
 @pytest.mark.asyncio
