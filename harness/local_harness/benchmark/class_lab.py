@@ -17,7 +17,7 @@ import sqlite3
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-CLASSES = ("sqli", "sqli_encoded", "xss", "xss_dom", "ssrf", "idor", "graphql_authz", "unsafe_file_upload", "csrf")
+CLASSES = ("sqli", "sqli_encoded", "sqli_post_blind", "xss", "xss_dom", "ssrf", "idor", "graphql_authz", "unsafe_file_upload", "csrf")
 
 
 def handler_for(bug_class: str, vulnerable: bool, callback_suffix: str):
@@ -55,6 +55,13 @@ def handler_for(bug_class: str, vulnerable: bool, callback_suffix: str):
                 links = {
                     "sqli": '<form action="/search"><input name="q"><button>Search</button></form>',
                     "sqli_encoded": '<a href="/catalog?category=cHVibGlj">Public catalog</a><script>const category=btoa("public");document.querySelector("a").href="/catalog?category="+encodeURIComponent(category)</script>',
+                    "sqli_post_blind": '<button id="load">Load catalog</button><div id="results"></div>'
+                                       '<script>document.getElementById("load").onclick=async()=>{'
+                                       'const response=await fetch("/api/filter",{method:"POST",'
+                                       'headers:{"Content-Type":"application/json"},'
+                                       'body:JSON.stringify({template:"botox",page:2})});'
+                                       'document.getElementById("results").textContent='
+                                       'JSON.stringify(await response.json())}</script>',
                     "xss": '<form action="/search"><input name="q"><button>Search</button></form>',
                     "xss_dom": '<a href="/blog?search=hello">Search blog</a>',
                     "ssrf": '<a href="/api/fetch?url=https%3A%2F%2Fexample.com">URL preview</a>',
@@ -150,6 +157,32 @@ def handler_for(bug_class: str, vulnerable: bool, callback_suffix: str):
         def do_POST(self):
             path = urllib.parse.urlsplit(self.path).path
             body = self._body()
+            if bug_class == "sqli_post_blind" and path == "/api/filter":
+                try:
+                    data = json.loads(body)
+                    value = data["template"]
+                    if not isinstance(value, str):
+                        raise ValueError("template must be a string")
+                except (ValueError, KeyError, TypeError):
+                    self._json(400, {"error": "invalid request"})
+                    return
+                db = sqlite3.connect(":memory:")
+                db.execute("CREATE TABLE items (name TEXT, detail TEXT)")
+                db.executemany("INSERT INTO items VALUES (?, ?)", [
+                    ("public", "public item"), ("private", "aegis-lab-private-record"),
+                ])
+                try:
+                    sql = ("SELECT name, detail FROM items WHERE name = '" + value + "'"
+                           if vulnerable else "SELECT name, detail FROM items WHERE name = ?")
+                    rows = db.execute(sql, () if vulnerable else (value,)).fetchall()
+                    self._json(200, {"results": rows})
+                except sqlite3.Error:
+                    # Intentionally suppress database errors so this fixture
+                    # tests Boolean detection, not the SQL-error recipe.
+                    self._json(200, {"results": []})
+                finally:
+                    db.close()
+                return
             if bug_class == "csrf" and path == "/login":
                 form = urllib.parse.parse_qs(body.decode())
                 name = form.get("username", [""])[0]

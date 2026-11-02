@@ -957,17 +957,19 @@ and severity unchanged between submit_finding_candidate and create_finding.
 scoped_body_probe requires an operator-approved POST path in the assessment
 request. It replays the captured body unchanged as a baseline, then changes
 one form or JSON field. A response difference is a lead. For an ordinary
-captured form value with a database-specific quote error, it repeats the error
-with clean and escaped-quote controls. Only proof_confirmed=True from that
-bounded recipe may become a POST SQLi candidate; the independent verifier
-replays the same captured template with fresh requests before publication.
+captured form or JSON string with a database-specific quote error, it repeats
+the error with clean and escaped-quote controls. Without a database error, it
+can test bounded, repeated Boolean controls against the same baseline. Only
+proof_confirmed=True from a controlled recipe may become a POST SQLi candidate;
+the independent verifier replays the same captured request with fresh requests
+and a fresh Boolean nonce before publication.
 scoped_owner_only requires an operator-declared exact owner-only GET
 resource and two registered test identities. Neither may invent its own policy.
 For a scoped proof candidate, include the hunter tool evidence_id in
 submit_finding_candidate. A verifier must repeat the same operation with fresh
 browser capture when required, then call record_verify_verdict with both
 execution IDs: proof={"kind":"numeric_boolean_sqli"|"string_boolean_sqli"|
-"string_error_sqli"|"post_error_sqli"|"owner_only"|
+"string_error_sqli"|"post_error_sqli"|"post_boolean_sqli"|"owner_only"|
 "public_directory_index"|"scoped_browser_xss",
 "hunter_artifact_id":"...","artifact_id":"<fresh verifier evidence>"}.
 The proof gate checks both records, same target, and operation-specific evidence.

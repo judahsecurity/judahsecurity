@@ -543,7 +543,8 @@ async def run_observed_input_batch(
                               in {"numeric_and_boolean_v1", "string_or_boolean_v1",
                                   "string_or_json_rows_v1",
                                   "string_and_boolean_v1", "string_error_v1",
-                                  "post_form_error_v1", "post_json_error_v1"}):
+                                  "post_form_error_v1", "post_json_error_v1",
+                                  "post_or_boolean_v1"}):
                         # A bounded Boolean recipe is a proof attempt, not
                         # complete SQLi coverage. Preserve negative receipts
                         # without closing the input as tested_clean.

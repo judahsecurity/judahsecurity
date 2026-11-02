@@ -58,7 +58,7 @@ Candidates now carry `vulnerability_class`. Hunters can set it on `submit_findin
 | Class | Accepted proof kinds |
 |---|---|
 | `exposure` | `response_match`, `public_directory_index` |
-| `sql_injection` | `numeric_boolean_sqli`, `string_boolean_sqli` |
+| `sql_injection` | `numeric_boolean_sqli`, `string_boolean_sqli`, `string_error_sqli`, `post_error_sqli`, `post_boolean_sqli` |
 | `xss` | `browser_xss`, `scoped_browser_xss`, `upload_xss` |
 | `authorization` | `authorization`, `owner_only`, `state_change`, `workflow` |
 | `ssrf` | `oob_callback` |
@@ -192,6 +192,12 @@ Scoring uses one-to-one category/endpoint matching. Paths preserve case and segm
 Existing `recall`/`precision` describe candidate findings for compatibility. `verified_recall`/`verified_precision` count findings marked confirmed by the engine; use `--min-verified-recall` for a verified-result gate. For third-party scanners, the harness trusts the engine's confirmed flag; only the product engine binds that flag to its execution receipt.
 
 Run vulnerable and patched counterparts and hold out variants when measuring detection quality. Regression test counts and scripted verifier results are not live-agent precision/recall measurements.
+The `sqli_post_blind` class-lab pair exercises an observed JSON POST whose
+database errors are suppressed. The vulnerable target expands a result array
+for a true Boolean condition; the patched target does not. Compare the two
+through the normal product-agent adapter and require a fresh verifier receipt
+before counting the positive case. A passing local proof test alone is not a
+measured agent recall result.
 
 ## Regression checks
 
