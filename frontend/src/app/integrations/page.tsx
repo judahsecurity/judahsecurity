@@ -60,6 +60,7 @@ import { cn } from '@/lib/utils';
 import { JiraProjectPicker } from '@/components/integrations/JiraProjectPicker';
 import { ServiceNowSection } from '@/components/integrations/ServiceNowSection';
 import { WizSection } from '@/components/integrations/WizSection';
+import { CrowdStrikeSection } from '@/components/integrations/CrowdStrikeSection';
 import { NetBrainSection } from '@/components/integrations/NetBrainSection';
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'] as const;
@@ -3211,6 +3212,9 @@ export default function IntegrationsPage() {
 
         {/* Wiz cloud exposure integration */}
         <WizSection />
+
+        {/* Falcon external assets, hosts, and Spotlight findings */}
+        <CrowdStrikeSection />
 
         {/* HackerOne Bug Bounty Integration Card */}
         <HackerOneSection />

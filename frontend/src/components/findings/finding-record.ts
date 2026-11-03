@@ -2,6 +2,19 @@ import type { AgentDetection } from './DemonstratedChain';
 import type { ScannerDetection } from './DetectionPanel';
 import type { RiskAssessment } from './RiskAssessmentPanel';
 
+export interface SourceEvidenceRecord {
+  id: number;
+  source: string;
+  source_finding_id: string;
+  detection_method: string;
+  basis: string;
+  source_status?: string;
+  summary?: string;
+  details?: Record<string, unknown>;
+  observed_at?: string;
+  last_ingested_at?: string;
+}
+
 export interface FindingRecord {
   id: number;
   title: string;
@@ -33,6 +46,7 @@ export interface FindingRecord {
   resolved_at?: string;
   last_validated_at?: string;
   validation_status?: string;
+  source_evidence?: SourceEvidenceRecord[];
   agent_detection?: AgentDetection;
   detection?: ScannerDetection;
   risk_assessment?: RiskAssessment;

@@ -1061,6 +1061,16 @@ class ScannerWorker:
                 db.commit()
                 return
 
+            if vuln.detected_by == "crowdstrike":
+                imported_asset = db.query(Asset).filter(Asset.id == vuln.asset_id).first()
+                if imported_asset is None or not imported_asset.in_scope:
+                    validation.status = ValidationStatus.FAILED
+                    validation.error = "asset_out_of_scope"
+                    validation.completed_at = datetime.utcnow()
+                    vuln.validation_status = "failed"
+                    db.commit()
+                    return
+
             # Ensure claimed (SQS path may not have gone through the DB poller).
             if validation.status != ValidationStatus.RUNNING:
                 validation.status = ValidationStatus.RUNNING

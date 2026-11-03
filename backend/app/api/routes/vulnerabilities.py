@@ -138,11 +138,13 @@ def build_vuln_response(
 ) -> dict:
     """Build vulnerability response with computed fields. Ensures required fields are never None."""
     d = {k: v for k, v in vuln.__dict__.items() if k != "_sa_instance_state" and k != "metadata_"}
+    d.pop("source_evidence", None)
     d["name"] = vuln.title
     d["host"] = vuln.asset.value if vuln.asset else None
     d["organization_id"] = vuln.asset.organization_id if vuln.asset else None
     if include_detection_dumps:
         d["analyst_triage"] = triage_state(vuln)
+        d["source_evidence"] = vuln.source_evidence
         if db is not None:
             from app.models.business_application import BusinessApplication
             app_id = vuln.business_app_id or (getattr(vuln.asset, "business_app_id", None) if vuln.asset else None)
@@ -1807,6 +1809,11 @@ def validate_finding(
         return _validation_to_dict(in_flight)
 
     asset = db.query(Asset).filter(Asset.id == vuln.asset_id).first()
+    if vuln.detected_by == "crowdstrike" and asset and not asset.in_scope:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Approve this imported asset for Judah scan scope before validating its finding.",
+        )
     organization_id = asset.organization_id if asset else current_user.organization_id
 
     validation = FindingValidation(
