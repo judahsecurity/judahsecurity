@@ -263,6 +263,36 @@ def match_browser_post_body(
     return (changed, "volatile_fields", sorted(changed_fields)) if changed.count(b"__PROWL_NONCE__") == 1 else None
 
 
+def captured_volatile_post_fields(body: bytes, mime: str) -> list[str]:
+    """Identify token-like fields that make a stale direct replay unreliable."""
+    try:
+        if mime == "application/x-www-form-urlencoded":
+            names = [unquote_plus(field.split("=", 1)[0]) for field in body.decode("ascii").split("&")]
+        elif mime == "application/json" or mime.endswith("+json"):
+            document = json.loads(body, object_pairs_hook=_unique_json_object,
+                                  parse_constant=_reject_json_constant)
+            names = []
+
+            def visit(value: object, depth: int = 0) -> None:
+                if depth > 8 or len(names) > 200:
+                    return
+                if isinstance(value, dict):
+                    for key, child in value.items():
+                        names.append(key)
+                        visit(child, depth + 1)
+                elif isinstance(value, list):
+                    for child in value[:40]:
+                        visit(child, depth + 1)
+
+            visit(document)
+        else:
+            return []
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return []
+    return sorted({name for name in names
+                   if name.lower().replace("-", "_") in VOLATILE_POST_FIELDS})
+
+
 def plan_observed_body(private_exchange: bytes, *, parameter: str,
                        allowed_origins: list[str], payload: str = "'") -> tuple[str, str, bytes, bytes]:
     """Validate a captured POST and change one JSON or form field."""
@@ -456,12 +486,22 @@ def post_sql_error_proof_valid(result: dict) -> bool:
            or not isinstance(row.get("bytes_captured"), int)
            for row in rows.values()):
         return False
+    fresh = all("variant_sha256" in row for row in rows.values())
+    if any("variant_sha256" in row for row in rows.values()) and not fresh:
+        return False
+    if fresh and any(
+        row.get("body_match_mode") not in {"exact", "volatile_fields"}
+        or not _DIGEST.fullmatch(str(row.get("variant_sha256", "")))
+        for row in rows.values()
+    ):
+        return False
+    request_digest = lambda row: row["variant_sha256"] if fresh else row["request_sha256"]
     baseline_digest = result["baseline_request_sha256"]
-    quote_digest = rows["quote_first"]["request_sha256"]
-    escape_digest = rows["escaped_quote"]["request_sha256"]
-    if (rows["baseline_first"]["request_sha256"] != baseline_digest
-            or rows["baseline_last"]["request_sha256"] != baseline_digest
-            or rows["quote_second"]["request_sha256"] != quote_digest
+    quote_digest = request_digest(rows["quote_first"])
+    escape_digest = request_digest(rows["escaped_quote"])
+    if (request_digest(rows["baseline_first"]) != baseline_digest
+            or request_digest(rows["baseline_last"]) != baseline_digest
+            or request_digest(rows["quote_second"]) != quote_digest
             or len({baseline_digest, quote_digest, escape_digest}) != 3):
         return False
     normal = (rows["baseline_first"], rows["escaped_quote"], rows["baseline_last"])
@@ -507,13 +547,23 @@ def post_sql_boolean_proof_valid(result: dict) -> bool:
            or not isinstance(row.get("bytes_captured"), int)
            for row in rows.values()):
         return False
+    fresh = all("variant_sha256" in row for row in rows.values())
+    if any("variant_sha256" in row for row in rows.values()) and not fresh:
+        return False
+    if fresh and any(
+        row.get("body_match_mode") not in {"exact", "volatile_fields"}
+        or not _DIGEST.fullmatch(str(row.get("variant_sha256", "")))
+        for row in rows.values()
+    ):
+        return False
+    request_digest = lambda row: row["variant_sha256"] if fresh else row["request_sha256"]
     baseline_digest = result["baseline_request_sha256"]
-    true_digest = rows["true_first"]["request_sha256"]
-    false_digest = rows["false_first"]["request_sha256"]
-    if (rows["baseline_first"]["request_sha256"] != baseline_digest
-            or rows["baseline_last"]["request_sha256"] != baseline_digest
-            or rows["true_second"]["request_sha256"] != true_digest
-            or rows["false_second"]["request_sha256"] != false_digest
+    true_digest = request_digest(rows["true_first"])
+    false_digest = request_digest(rows["false_first"])
+    if (request_digest(rows["baseline_first"]) != baseline_digest
+            or request_digest(rows["baseline_last"]) != baseline_digest
+            or request_digest(rows["true_second"]) != true_digest
+            or request_digest(rows["false_second"]) != false_digest
             or len({baseline_digest, true_digest, false_digest}) != 3):
         return False
     content_type = rows["baseline_first"].get("content_type")
@@ -563,6 +613,14 @@ def probe_sql_boolean_body(url: str, mime: str, variants: dict[str, bytes], nonc
             url, mime, variants[key], allowed_origins, storage_state,
             replay_headers=replay_headers, timeout=8,
         )
+    return build_sql_boolean_result(url, mime, variants, nonce, parameter=parameter,
+                                    checks=checks, replay_headers=replay_headers)
+
+
+def build_sql_boolean_result(url: str, mime: str, variants: dict[str, bytes], nonce: str, *,
+                             parameter: str, checks: dict[str, dict],
+                             replay_headers: dict[str, str] | None = None) -> dict:
+    """Apply the same proof policy to direct and fresh browser POST receipts."""
     parts = urlsplit(url)
     result = {
         "operation": "sqli_boolean_body", "proof_recipe": "post_or_boolean_v1",
@@ -604,6 +662,14 @@ def probe_sql_error_body(url: str, mime: str, body: bytes, quote_body: bytes,
             url, mime, request_body, allowed_origins, storage_state,
             replay_headers=replay_headers, timeout=8,
         )
+    return build_sql_error_result(url, mime, body, parameter=parameter,
+                                  checks=checks, replay_headers=replay_headers)
+
+
+def build_sql_error_result(url: str, mime: str, body: bytes, *, parameter: str,
+                           checks: dict[str, dict],
+                           replay_headers: dict[str, str] | None = None) -> dict:
+    """Apply the same repeated SQL error policy to browser POST receipts."""
     parts = urlsplit(url)
     is_form = mime == "application/x-www-form-urlencoded"
     result = {

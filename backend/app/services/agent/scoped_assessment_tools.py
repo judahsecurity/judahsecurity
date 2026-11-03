@@ -18,7 +18,7 @@ from app.services.agent.assessment_sessions import browser_storage_state, identi
 from app.services.agent.evidence_store import evidence_store, verification_run
 from app.services.agent.private_capture_store import delete_capture, load_capture, persist_capture
 from app.services.agent.scoped_assessment import (
-    authz_proof, body_probe, browser, http_observe, planning, query_probe,
+    authz_proof, body_probe, browser, browser_post_replay, http_observe, planning, query_probe,
     sqli_boolean, sqli_string, technology,
 )
 from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
@@ -689,6 +689,77 @@ class ScopedAssessmentTools:
         )
         return json.dumps(result)
 
+    async def _scoped_fresh_post_sql(self, private: bytes, parameter: str, identity: str,
+                                     allowed: str, *, recipe: str = "hunter") -> dict:
+        """Replay token-bearing SQLi controls from the observed page, never a stale POST."""
+        url, mime, baseline, _, _ = body_probe.plan_sql_error_body(
+            private, parameter=parameter, allowed_origins=[allowed],
+        )
+        state = self._scoped_state(identity, url)
+        replay = browser_post_replay.replay_observed_post_controls
+        if recipe == "error":
+            self._scoped_claim_posts(5)
+            checks = await replay(private, parameter=parameter, payloads={
+                "baseline_first": "", "quote_first": "'", "escaped_quote": "''",
+                "quote_second": "'", "baseline_last": "",
+            }, allowed_origins=[allowed], storage_state=state)
+            result = body_probe.build_sql_error_result(
+                url, mime, baseline, parameter=parameter, checks=checks,
+            )
+        elif recipe == "boolean":
+            _, _, variants, nonce = body_probe.plan_sql_boolean_body(
+                private, parameter=parameter, allowed_origins=[allowed],
+            )
+            other = nonce[:-1] + str((int(nonce[-1]) + 1) % 10)
+            self._scoped_claim_posts(6)
+            checks = await replay(private, parameter=parameter, payloads={
+                "baseline_first": "", "true_first": f"' OR '{nonce}'='{nonce}'-- ",
+                "false_first": f"' OR '{nonce}'='{other}'-- ",
+                "true_second": f"' OR '{nonce}'='{nonce}'-- ",
+                "false_second": f"' OR '{nonce}'='{other}'-- ",
+                "baseline_last": "",
+            }, allowed_origins=[allowed], storage_state=state)
+            result = body_probe.build_sql_boolean_result(
+                url, mime, variants, nonce, parameter=parameter, checks=checks,
+            )
+        elif recipe == "hunter":
+            self._scoped_claim_posts(2)
+            initial = await replay(private, parameter=parameter, payloads={
+                "baseline_first": "", "quote_first": "'",
+            }, allowed_origins=[allowed], storage_state=state)
+            base, quote = initial["baseline_first"], initial["quote_first"]
+            inconclusive = any(row["truncated"] or row["redirected"] or row["status"] in (401, 403)
+                               for row in initial.values())
+            result = {
+                "operation": "body_probe", "target": allowed + (urlsplit(url).path or "/"),
+                "method": "POST", "parameter": parameter,
+                "location": "form" if mime == "application/x-www-form-urlencoded" else "json",
+                "technique": "append_single_quote", "requests_sent": 2,
+                "identity_transport": "named_identity_browser_state",
+                "baseline": base, "probe": quote,
+                "changed": base["status"] != quote["status"] or base["body_sha256"] != quote["body_sha256"],
+                "sql_error_signal": bool(quote.get("sql_error_family") and not base.get("sql_error_family")),
+                "inconclusive": inconclusive, "finding": False,
+            }
+            if not inconclusive and result["sql_error_signal"]:
+                self._scoped_claim_posts(3)
+                more = await replay(private, parameter=parameter, payloads={
+                    "escaped_quote": "''", "quote_second": "'", "baseline_last": "",
+                }, allowed_origins=[allowed], storage_state=state)
+                result = body_probe.build_sql_error_result(
+                    url, mime, baseline, parameter=parameter, checks={**initial, **more},
+                )
+            elif not inconclusive and base["status"] == quote["status"] == 200:
+                result = await self._scoped_fresh_post_sql(
+                    private, parameter, identity, allowed, recipe="boolean",
+                )
+        else:
+            raise ValueError("Unsupported fresh POST SQL recipe")
+        result["replay_mode"] = "browser_fresh_post"
+        result["identity_transport"] = "named_identity_browser_state"
+        result["captured_volatile_fields"] = body_probe.captured_volatile_post_fields(baseline, mime)
+        return result
+
     async def scoped_body_probe(self, artifact_id: str, parameter: str, identity: str = "anonymous") -> str:
         """Probe one approved POST form or JSON field with bounded SQL controls."""
         private = self._scoped_exchange(artifact_id, identity)
@@ -701,14 +772,17 @@ class ScopedAssessmentTools:
         if (urlsplit(url).path or "/") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
             raise ValueError("POST path was not approved by the assessment operator")
         state = self._scoped_state(identity, url)
-        self._scoped_claim_posts(2)
-        result = await asyncio.to_thread(
+        if body_probe.captured_volatile_post_fields(baseline, mime):
+            result = await self._scoped_fresh_post_sql(private, parameter, identity, allowed)
+        else:
+            self._scoped_claim_posts(2)
+            result = await asyncio.to_thread(
             body_probe.probe_observed_body, url, mime, baseline, changed,
             parameter=parameter, allowed_origins=[allowed],
             storage_state=state,
             replay_headers=body_probe.safe_replay_headers(private),
-        )
-        if result.get("sql_error_signal") and result.get("inconclusive") is False:
+            )
+        if result.get("replay_mode") != "browser_fresh_post" and result.get("sql_error_signal") and result.get("inconclusive") is False:
             try:
                 _, _, baseline, quote_body, escaped_body = body_probe.plan_sql_error_body(
                     private, parameter=parameter, allowed_origins=[allowed],
@@ -722,7 +796,7 @@ class ScopedAssessmentTools:
                 )
             except (ValueError, OSError, TimeoutError) as exc:
                 result["error_followup_blocked"] = type(exc).__name__
-        elif (result.get("inconclusive") is False
+        elif (result.get("replay_mode") != "browser_fresh_post" and result.get("inconclusive") is False
               and (result.get("baseline") or {}).get("status") == 200
               and (result.get("probe") or {}).get("status") == 200):
             try:
@@ -770,13 +844,18 @@ class ScopedAssessmentTools:
         )
         if (urlsplit(url).path or "/") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
             raise ValueError("POST path was not approved by the assessment operator")
-        self._scoped_claim_posts(6)
-        result = await asyncio.to_thread(
-            body_probe.probe_sql_boolean_body, url, mime, variants, nonce,
-            parameter=parameter, allowed_origins=[allowed],
-            storage_state=self._scoped_state(identity, url),
-            replay_headers=body_probe.safe_replay_headers(private),
-        )
+        if body_probe.captured_volatile_post_fields(variants["baseline_first"], mime):
+            result = await self._scoped_fresh_post_sql(
+                private, parameter, identity, allowed, recipe="boolean",
+            )
+        else:
+            self._scoped_claim_posts(6)
+            result = await asyncio.to_thread(
+                body_probe.probe_sql_boolean_body, url, mime, variants, nonce,
+                parameter=parameter, allowed_origins=[allowed],
+                storage_state=self._scoped_state(identity, url),
+                replay_headers=body_probe.safe_replay_headers(private),
+            )
         result["source_artifact_id"] = artifact_id
         result["evidence_id"] = evidence_store(self).record(
             "scoped_body_sqli_boolean", result, target=result["target"], identity=identity,
@@ -804,13 +883,18 @@ class ScopedAssessmentTools:
         if (urlsplit(url).path or "/") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
             raise ValueError("POST path was not approved by the assessment operator")
         state = self._scoped_state(identity, url)
-        self._scoped_claim_posts(5)
-        result = await asyncio.to_thread(
-            body_probe.probe_sql_error_body, url, mime, baseline, quote_body, escaped_body,
-            parameter=parameter, allowed_origins=[allowed],
-            storage_state=state,
-            replay_headers=body_probe.safe_replay_headers(private),
-        )
+        if body_probe.captured_volatile_post_fields(baseline, mime):
+            result = await self._scoped_fresh_post_sql(
+                private, parameter, identity, allowed, recipe="error",
+            )
+        else:
+            self._scoped_claim_posts(5)
+            result = await asyncio.to_thread(
+                body_probe.probe_sql_error_body, url, mime, baseline, quote_body, escaped_body,
+                parameter=parameter, allowed_origins=[allowed],
+                storage_state=state,
+                replay_headers=body_probe.safe_replay_headers(private),
+            )
         result["source_artifact_id"] = artifact_id
         result["evidence_id"] = evidence_store(self).record(
             "scoped_body_sqli_error", result, target=result["target"], identity=identity,

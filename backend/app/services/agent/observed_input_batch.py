@@ -234,10 +234,25 @@ async def run_observed_input_batch(
             "funnel": parameter_test_funnel(brain),
         }
     results: list[dict[str, Any]] = []
+    approved_post_paths = set(getattr(manager, "_scoped_body_replay_paths", None) or ())
     # Authentication may be established after mapping. Reopen only cells that
     # this preflight blocked, and leave other policy decisions intact.
     identity_reopened = 0
+    policy_reopened = 0
     for cell in brain.coverage_cells:
+        if (cell.get("status") == "blocked"
+                and cell.get("first_pass_blocked_reason") == "post_path_not_approved"
+                and str(cell.get("path") or "") in approved_post_paths
+                and _origin(f"{urlsplit(active_origin).scheme}://{cell.get('host') or ''}") == active_origin):
+            cell["status"] = "untested"
+            policy_reopened += 1
+            cell.pop("reason", None)
+            for key in (
+                "first_pass_blocked_reason", "first_pass_outcome", "first_pass_reason",
+                "first_pass_at", "first_pass_handoff_error", "first_pass_retry_at",
+                "first_pass_attempts",
+            ):
+                cell.pop(key, None)
         if (cell.get("status") == "blocked"
                 and cell.get("first_pass_blocked_reason") == "identity_unavailable"
                 and _origin(f"{urlsplit(active_origin).scheme}://{cell.get('host') or ''}") == active_origin
@@ -254,7 +269,6 @@ async def run_observed_input_batch(
     # A discovered POST input is still open coverage when this run has no
     # operator-approved replay path. Record that fact before scheduling so a
     # rejected write does not consume a probe slot or masquerade as a test.
-    approved_post_paths = set(getattr(manager, "_scoped_body_replay_paths", None) or ())
     policy_blocked = 0
     identity_blocked = 0
     for cell in pending_first_pass_cells(brain, target=active_target):
@@ -265,6 +279,7 @@ async def run_observed_input_batch(
             cell["reason"] = reason
             cell["first_pass_outcome"] = "unattempted"
             cell["first_pass_reason"] = reason
+            cell["first_pass_blocked_reason"] = "post_path_not_approved"
             cell["first_pass_at"] = time.time()
             policy_blocked += 1
         elif _identity_unavailable(manager, cell, active_origin):
@@ -277,7 +292,7 @@ async def run_observed_input_batch(
             cell["first_pass_at"] = time.time()
             cell.pop("first_pass_handoff_error", None)
             identity_blocked += 1
-    if policy_blocked or identity_blocked or identity_reopened:
+    if policy_blocked or identity_blocked or identity_reopened or policy_reopened:
         manager._engagement_brain = brain.to_dict()
 
     while len(results) < max_checks and time.monotonic() < deadline - 5:
@@ -718,6 +733,7 @@ async def run_observed_input_batch(
         "processed": len(results), "policy_blocked": policy_blocked,
         "identity_blocked": identity_blocked,
         "identity_reopened": identity_reopened,
+        "policy_reopened": policy_reopened,
         "remaining": len(pending_first_pass_cells(
             brain, target=active_target,
         )),

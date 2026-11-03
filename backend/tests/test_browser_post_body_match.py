@@ -5,7 +5,9 @@ from urllib.parse import parse_qs
 
 import pytest
 
-from app.services.agent.scoped_assessment.body_probe import match_browser_post_body
+from app.services.agent.scoped_assessment.body_probe import (
+    captured_volatile_post_fields, match_browser_post_body,
+)
 
 
 PAYLOAD = '<img src=x onerror=alert("__PROWL_NONCE__")>'
@@ -85,3 +87,12 @@ def test_more_than_three_rotating_fields_are_not_replayed():
     assert match_browser_post_body(
         baseline, live, mime="application/json", parameter="/message", payload=PAYLOAD,
     ) is None
+
+
+@pytest.mark.parametrize("mime,body,expected", [
+    ("application/x-www-form-urlencoded", b"template=botox&csrf_token=old", ["csrf_token"]),
+    ("application/json", b'{"filter":{"template":"botox","request_id":"old"}}', ["request_id"]),
+    ("application/json", b'{"template":"botox","page":2}', []),
+])
+def test_token_field_detection_selects_fresh_browser_replay(mime, body, expected):
+    assert captured_volatile_post_fields(body, mime) == expected

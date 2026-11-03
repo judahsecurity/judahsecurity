@@ -650,6 +650,7 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
     inputs: set[tuple[str, str, str, str, str]] = set()
     open_rows: list[dict[str, str]] = []
     handoff_rows: list[dict[str, str]] = []
+    replay_block_reasons: dict[str, int] = {}
     for cell in cells:
         kind = str(cell.get("test_type") or "unknown")
         group = by_class.setdefault(kind, {key: 0 for key in counts})
@@ -685,6 +686,28 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
                     and kind == "sqli" and not scoped_replay_eligible(cell))
             )
         )
+        if (cell.get("first_pass_outcome") == "unattempted" or capture_needed) and not has_probe:
+            blocked_code = str(cell.get("first_pass_blocked_reason") or "")
+            handoff_code = str(cell.get("first_pass_handoff_error") or "").split(":", 1)[0]
+            if blocked_code == "post_path_not_approved":
+                replay_reason = "post_path_not_approved"
+            elif blocked_code == "identity_unavailable":
+                replay_reason = "identity_unavailable"
+            elif blocked_code == "get_budget_exhausted":
+                replay_reason = "get_budget_exhausted"
+            elif "operator approval" in str(cell.get("first_pass_reason") or "").lower():
+                replay_reason = "post_path_not_approved"
+            elif capture_needed:
+                replay_reason = "capture_missing_or_ineligible"
+            elif handoff_code in {
+                "post_xhr_replay_blocked", "local_probe_blocked", "unsupported_capture",
+                "missing_capture", "missing_probe_evidence", "scope_mismatch",
+                "invalid_coverage_lease", "lease_changed", "post_token_refresh_blocked",
+            }:
+                replay_reason = handoff_code
+            else:
+                replay_reason = "other_unattempted"
+            replay_block_reasons[replay_reason] = replay_block_reasons.get(replay_reason, 0) + 1
         attempted = has_probe or cell.get("first_pass_outcome") in {
             "proof_signal", "tested_clean", "inconclusive",
         } or (status in {"tested_clean", "finding"} and bool(cell.get("evidence_ids")))
@@ -742,6 +765,7 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
             kind for kind, group in by_class.items() if group["probed"] == 0
         ),
         "open_rows": open_rows, "handoff_rows": handoff_rows,
+        "replay_block_reasons": dict(sorted(replay_block_reasons.items())),
     }
 
 
