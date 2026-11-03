@@ -35,8 +35,8 @@ PROOFS_BY_CLASS = {
     "dom_open_redirect": frozenset({"scoped_browser_client"}),
     "client_template_injection": frozenset({"scoped_browser_client"}),
     "client_prototype_pollution": frozenset({"scoped_browser_client"}),
-    "command_injection": frozenset(),
-    "path_traversal": frozenset(),
+    "command_injection": frozenset({"oob_callback", "command_timing"}),
+    "path_traversal": frozenset({"path_canary"}),
     "csrf": frozenset(),
     "known_cve": frozenset(),
     "account_enumeration": frozenset(),
@@ -147,7 +147,7 @@ def validate_proof(
     allowed, reason = proof_kind_allowed(candidate, kind)
     if not allowed:
         return False, reason
-    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "post_error_sqli", "post_boolean_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed", "scoped_race_overrun", "scoped_browser_client"):
+    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "post_error_sqli", "post_boolean_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed", "scoped_race_overrun", "scoped_browser_client", "command_timing", "path_canary"):
         hunter_id = proof.get("hunter_artifact_id")
         verifier = row("artifact_id")
         hunter = (store.records.get(hunter_id)
@@ -169,6 +169,8 @@ def validate_proof(
             "scoped_cors_credentialed": "scoped_response_probe",
             "scoped_race_overrun": "scoped_race_probe",
             "scoped_browser_client": "scoped_browser_check_client",
+            "command_timing": "scoped_command_timing",
+            "path_canary": "scoped_path_canary",
         }[kind]
         if (not hunter or not verifier or hunter["id"] == verifier["id"]
                 or hunter["kind"] != expected_kind or verifier["kind"] != expected_kind
@@ -253,6 +255,32 @@ def validate_proof(
                 for row in (first, second)
             ):
                 return False, "Client template expression must execute after the HTTP response"
+            return True, ""
+        if kind == "command_timing":
+            from app.services.agent.scoped_assessment.command_injection import command_timing_proof_valid
+            claim = candidate.vulnerability_class or inferred_vulnerability_class(candidate)
+            if (claim != "command_injection"
+                    or not command_timing_proof_valid(first)
+                    or not command_timing_proof_valid(second)
+                    or first.get("proof_confirmed") is not True
+                    or second.get("proof_confirmed") is not True
+                    or first.get("parameter") != second.get("parameter")
+                    or first.get("delay_seconds") != second.get("delay_seconds")
+                    or not first.get("nonce") or first.get("nonce") == second.get("nonce")
+                    or hunter["identity"] != verifier["identity"]):
+                return False, "Independent matching bounded time-based command-injection proof is required"
+            return True, ""
+        if kind == "path_canary":
+            from app.services.agent.scoped_assessment.path_traversal import path_canary_proof_valid
+            if (not path_canary_proof_valid(first) or not path_canary_proof_valid(second)
+                    or first.get("proof_confirmed") is not True
+                    or second.get("proof_confirmed") is not True
+                    or first.get("marker_sha256") != second.get("marker_sha256")
+                    or first.get("traversal_template") != second.get("traversal_template")
+                    or first.get("control_template") != second.get("control_template")
+                    or not first.get("nonce") or first.get("nonce") == second.get("nonce")
+                    or hunter["identity"] != verifier["identity"]):
+                return False, "Independent matching out-of-root sentinel read is required"
             return True, ""
         if kind == "numeric_boolean_sqli":
             from app.services.agent.scoped_assessment.sqli_boolean import numeric_sql_proof_valid

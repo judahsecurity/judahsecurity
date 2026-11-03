@@ -453,6 +453,7 @@ class EvidenceStore:
                 "scoped_browser_check_form_xss", "scoped_browser_check_xhr_xss",
                 "scoped_browser_check_stored_xss",
                 "scoped_browser_check_client", "scoped_response_probe",
+                "scoped_command_timing", "scoped_path_canary",
             }:
                 try:
                     if origin(row["target"]) != origin(target):
