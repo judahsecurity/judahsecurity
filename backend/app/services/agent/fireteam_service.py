@@ -605,6 +605,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "scoped_stored_xss_assigned",
             "scoped_assessment_probe_assigned",
             "scoped_assessment_candidate",
+            "scoped_adaptive_experiment",
             "execute_xsstrike",
             "execute_dalfox",
             "execute_browser",
@@ -649,6 +650,10 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "Submit a local candidate with the execution receipt and exact cell; the independent "
             "verifier repeats it. "
             "A quote differential alone is not XSS. Status 200 is not XSS."
+            " If a captured GET input needs a new hypothesis, use scoped_adaptive_experiment "
+            "with a neutral control, one chosen probe, and the assigned cell and lease IDs. "
+            "Treat its response difference as a lead; "
+            "use browser execution proof before a candidate."
             " For a leased dom_xss cell with an observed rendering page, call "
             "scoped_dom_xss_assigned with the cell and lease IDs. Choose html_body, "
             "html_body_svg, html_attribute, html_attribute_single, js_single, or js_double "
@@ -683,6 +688,7 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "scoped_numeric_sqli",
             "scoped_assessment_probe_assigned",
             "scoped_assessment_candidate",
+            "scoped_adaptive_experiment",
             "discover_parameters",
             "execute_arjun",
             "execute_sqlmap",
@@ -712,6 +718,11 @@ DEFAULT_SPECIALISTS: list[SpecialistProfile] = [
             "with the coverage cell and lease IDs. Numeric GET inputs use the scoped boolean "
             "proof; a single quote differential is only a lead. Submit a scoped candidate "
             "only on proof_confirmed=true and cite its service artifact ID. "
+            "For a captured GET input needing a new syntax hypothesis, use "
+            "scoped_adaptive_experiment with a neutral control, one probe, and the assigned "
+            "cell and lease IDs. "
+            "Its diagnostic lead is exploratory; obtain a scoped Boolean or repeated "
+            "database-error proof before submitting a candidate. "
             "For an assigned string GET query without a private browser capture, call "
             "scoped_input_probe_assigned with its coverage cell and lease IDs; it preflights "
             "an ordinary baseline when the browser disclosed only parameter names and "

@@ -1,6 +1,12 @@
-"""Bounded CodeAgent sandbox — no shell, no os, in-scope hosts only."""
+"""Regression checks for the legacy bounded Python probe."""
+
+import json
+
+import pytest
 
 from app.services.agent.custom_probe import run_custom_probe, validate_probe_source
+from app.services.agent.assessment_scope import register_scope
+from app.services.agent.tools import ASMToolsManager
 
 
 def test_rejects_eval_and_os():
@@ -43,7 +49,7 @@ def test_blocks_out_of_scope_http():
     assert "blocked" in (out.get("stdout") or "")
 
 
-def test_allows_interactsh_oob_host():
+def test_oob_host_is_disabled_by_default():
     src = (
         "raised = False\n"
         "try:\n"
@@ -56,4 +62,33 @@ def test_allows_interactsh_oob_host():
     )
     out = run_custom_probe(src, allowed_hosts=["example.com"], timeout_sec=8)
     assert out["ok"] is True, out
-    assert "oob-ok" in (out.get("stdout") or "")
+    assert "oob-blocked" in (out.get("stdout") or "")
+
+
+def test_urllib_request_cannot_bypass_httpx_scope():
+    assert any("urllib.request" in error for error in validate_probe_source(
+        "from urllib.request import urlopen\nurlopen('https://evil.invalid')"
+    ))
+    assert validate_probe_source("import httpx._client")
+    assert validate_probe_source("httpx.AsyncClient()")
+    assert validate_probe_source("httpx.Client()._transport")
+
+
+@pytest.mark.asyncio
+async def test_agent_cannot_add_custom_probe_hosts(monkeypatch):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    called = []
+
+    async def fake_run(source, **kwargs):
+        called.append(kwargs)
+        return {"ok": True, "allowed_hosts": kwargs["allowed_hosts"]}
+
+    monkeypatch.setattr("app.services.agent.custom_probe.run_custom_probe_async", fake_run)
+    with pytest.raises(ValueError, match="Out-of-scope"):
+        await manager.run_custom_probe("print('test')", allowed_hosts="attacker.test")
+    assert called == []
+    result = json.loads(await manager.run_custom_probe("print('test')"))
+    assert result["allowed_hosts"] == ["app.example.test"]
+    assert called[0]["oob_allowed"] is False

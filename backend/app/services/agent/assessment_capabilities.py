@@ -22,6 +22,7 @@ CAPABILITY_TOOLS = (
     "scoped_http_get",
     "scoped_http_compare",
     "scoped_query_probe",
+    "scoped_adaptive_experiment",
     "scoped_numeric_sqli",
     "scoped_string_sqli",
     "scoped_body_probe",
