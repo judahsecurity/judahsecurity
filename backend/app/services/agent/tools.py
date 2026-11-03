@@ -1915,7 +1915,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         "proof_confirmed": proof.get("executed") is True,
                         "probe_result": {"executed": proof.get("executed") is True,
                                          "xhr_mutated": proof.get("xhr_mutated") is True,
-                                         "xhr_response_seen": proof.get("xhr_response_seen") is True}}
+                                         "xhr_response_seen": proof.get("xhr_response_seen") is True,
+                                         "reflection_contexts": proof.get("reflection_contexts") or [],
+                                         "reflection_observations": proof.get("reflection_observations") or []}}
             try:
                 proof = json.loads(await self.scoped_body_xss_reflection(
                     cell["capture_id"], parameter, identity,

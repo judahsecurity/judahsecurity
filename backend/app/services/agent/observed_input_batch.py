@@ -43,6 +43,10 @@ XSS_GET_TECHNIQUES = (
     "html_body", "html_body_svg", "html_attribute", "html_attribute_single",
     "js_single", "js_double",
 )
+XSS_POST_XHR_TECHNIQUES = (
+    "xss_browser", "xss_browser_svg", "xss_browser_attribute",
+    "xss_browser_attribute_single", "xss_browser_js_single", "xss_browser_js_double",
+)
 
 
 def _proof_signal(result: dict[str, Any]) -> bool:
@@ -365,16 +369,19 @@ async def run_observed_input_batch(
                 and urlsplit(str(form.get("action") or "")).path == cell.get("path")
                 and parameter in (form.get("inputs") or []) and form.get("page")
                 for form in (cmap.get("forms") or [])[:80]
-            ):
+            ) and (not xss_pending or xss_pending[0] in XSS_GET_TECHNIQUES):
                 operation_name = "scoped_input_probe_assigned"
-                first_technique = "html_body"
+                first_technique = xss_pending[0] if xss_pending else "html_body"
                 probe_args["technique"] = first_technique
             elif (cell.get("observation_source") == "browser_traffic"
                   and cell.get("capture_id") and method == "POST"
                   and location in {"body_json", "body_form"}):
                 operation_name = "scoped_assessment_probe_assigned"
                 if specialist == "xss":
-                    probe_args["technique"] = "captured"
+                    first_technique = (xss_pending[0] if xss_pending
+                                       and xss_pending[0] in XSS_POST_XHR_TECHNIQUES
+                                       else "xss_browser")
+                    probe_args["technique"] = first_technique
             elif method == "POST" and location in {"body_json", "body_form"}:
                 reason = "POST input needs a private browser capture and approved replay"
             if operation_name:
@@ -409,17 +416,38 @@ async def run_observed_input_batch(
                     xss_variant_failures.pop(first_technique, None)
                     if not _proof_signal(result):
                         contexts = set((result.get("probe_result") or {}).get("reflection_contexts") or [])
-                        contextual = (
-                            (["html_body_svg"] if "html_text" in contexts else [])
-                            + (["html_attribute", "html_attribute_single"] if "html_attribute" in contexts else [])
-                            + (["js_single", "js_double"] if "javascript" in contexts else [])
-                        )
-                        # Preserve all GET variants, but give other pending
+                        post_xhr = (method == "POST"
+                                    and result.get("operation") == "scoped_browser_check_xhr_xss"
+                                    and (result.get("probe_result") or {}).get("xhr_mutated") is True
+                                    and (result.get("probe_result") or {}).get("xhr_response_seen") is True)
+                        if post_xhr:
+                            contextual = (
+                                (["xss_browser_svg"] if "html_text" in contexts else [])
+                                + (["xss_browser_attribute", "xss_browser_attribute_single"]
+                                   if "html_attribute" in contexts else [])
+                                + (["xss_browser_js_single", "xss_browser_js_double"]
+                                   if "javascript" in contexts else [])
+                            )
+                        else:
+                            contextual = (
+                                (["html_body_svg"] if "html_text" in contexts else [])
+                                + (["html_attribute", "html_attribute_single"]
+                                   if "html_attribute" in contexts else [])
+                                + (["js_single", "js_double"] if "javascript" in contexts else [])
+                            )
+                        # Preserve the bounded variants, but give other pending
                         # input/class checks a first probe before this sweep.
                         # A single remaining check still gets the full sweep.
-                        full_get = list(XSS_GET_TECHNIQUES[1:]) if method == "GET" else []
+                        full_get = list(XSS_GET_TECHNIQUES[1:]) if (
+                            method == "GET" or
+                            result.get("operation") == "scoped_browser_check_form_xss"
+                        ) else []
+                        full_post = list(XSS_POST_XHR_TECHNIQUES[1:]) if post_xhr else []
                         techniques = [
-                            technique for technique in dict.fromkeys([*contextual, *full_get])
+                            technique for technique in dict.fromkeys([
+                                *(contextual if post_xhr or full_get else []),
+                                *full_post, *full_get,
+                            ])
                             if technique not in xss_attempted
                             and int(xss_variant_failures.get(technique) or 0) < 2
                         ]
@@ -439,7 +467,7 @@ async def run_observed_input_batch(
                                 break
                             try:
                                 followup = await asyncio.wait_for(_invoke(
-                                    manager, "scoped_input_probe_assigned",
+                                    manager, operation_name,
                                     {"coverage_cell_id": cell["id"], "coverage_lease_id": lease.id,
                                      "technique": technique},
                                 ), timeout=min(remaining, 20.0))
@@ -466,8 +494,8 @@ async def run_observed_input_batch(
                                              and int(xss_variant_failures.get(technique) or 0) < 2])
                     else:
                         xss_pending = []
-                if (specialist == "xss" and method == "GET" and location == "query"
-                        and first_technique and (result.get("success") is not True
+                if (specialist == "xss" and first_technique
+                        and (result.get("success") is not True
                                                  or not result.get("evidence_id"))):
                     xss_variant_failures[first_technique] = int(
                         xss_variant_failures.get(first_technique) or 0
@@ -570,7 +598,7 @@ async def run_observed_input_batch(
                         elif followup_deferred:
                             reason += "; follow-up deferred after timeout"
         except asyncio.TimeoutError:
-            if specialist == "xss" and method == "GET" and first_technique and not evidence_id:
+            if specialist == "xss" and first_technique and not evidence_id:
                 xss_variant_failures[first_technique] = int(
                     xss_variant_failures.get(first_technique) or 0
                 ) + 1
@@ -586,7 +614,7 @@ async def run_observed_input_batch(
             manager._engagement_brain = interrupted.to_dict()
             raise
         except Exception as exc:
-            if specialist == "xss" and method == "GET" and first_technique and not evidence_id:
+            if specialist == "xss" and first_technique and not evidence_id:
                 xss_variant_failures[first_technique] = int(
                     xss_variant_failures.get(first_technique) or 0
                 ) + 1
@@ -618,9 +646,16 @@ async def run_observed_input_batch(
             if evidence_id:
                 current["first_pass_evidence_id"] = evidence_id
                 current["first_pass_evidence_source"] = evidence_source
-            if specialist == "xss" and method == "GET" and location == "query":
+            xss_techniques = ()
+            if specialist == "xss":
+                if ((method == "GET" and location == "query")
+                        or (method == "POST" and result.get("operation") == "scoped_browser_check_form_xss")):
+                    xss_techniques = XSS_GET_TECHNIQUES
+                elif method == "POST" and result.get("operation") == "scoped_browser_check_xhr_xss":
+                    xss_techniques = XSS_POST_XHR_TECHNIQUES
+            if xss_techniques:
                 xss_pending = ([] if outcome == "proof_signal" else [
-                    technique for technique in XSS_GET_TECHNIQUES
+                    technique for technique in xss_techniques
                     if technique not in xss_attempted
                     and int(xss_variant_failures.get(technique) or 0) < 2
                 ])
@@ -628,7 +663,7 @@ async def run_observed_input_batch(
                 current["xss_pending_techniques"] = xss_pending
                 current["xss_variant_failures"] = xss_variant_failures
                 exhausted = [
-                    technique for technique in XSS_GET_TECHNIQUES
+                    technique for technique in xss_techniques
                     if technique not in xss_attempted
                     and int(xss_variant_failures.get(technique) or 0) >= 2
                 ]
@@ -641,7 +676,7 @@ async def run_observed_input_batch(
                 if variant_error:
                     current["xss_variant_error"] = variant_error
                     current["xss_unattempted_techniques"] = [
-                        technique for technique in XSS_GET_TECHNIQUES
+                        technique for technique in xss_techniques
                         if technique not in xss_attempted
                     ]
                 else:
