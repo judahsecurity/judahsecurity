@@ -117,6 +117,11 @@ async def assess(args, orchestrator=None):
     from .agent_eval import summarize_run_ledgers
 
     ledger_metrics = summarize_run_ledgers(run_ledgers)
+    final_run_status = run_ledgers[-1].get("status") if run_ledgers else None
+    assessment_complete = bool(
+        response and response.task_complete
+        and (not real_runtime or final_run_status == "completed")
+    )
     summary = {
         "session_id": session_id,
         "target": args.target,
@@ -124,7 +129,8 @@ async def assess(args, orchestrator=None):
         "max_turns": args.max_turns,
         "max_iterations": args.max_iterations,
         "price_limit_usd": args.price_limit_usd,
-        "complete": bool(response and response.task_complete),
+        "complete": assessment_complete,
+        "final_run_status": final_run_status,
         "error": response.error if response else "No response",
         "turns": turn + 1,
         "cost_usd": getattr(response, "cost_usd", None),

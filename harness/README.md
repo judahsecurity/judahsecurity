@@ -62,7 +62,8 @@ Repeat the lab server and agent command for each manifest case, changing
 command. Use a fresh sink path for every run; the adapter refuses an existing
 findings file. The scorer exits `0` only when all classes pass, `2` for measured
 failures, and `3` for incomplete or missing run artifacts. It does not turn an
-interrupted assessment into a false negative. The lab is a controlled regression
+interrupted or partial assessment into a false negative, even if the agent
+response says the task is complete. The lab is a controlled regression
 fixture; benchmark results should also be checked against representative
 authorized applications before treating them as production recall.
 
