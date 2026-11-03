@@ -225,7 +225,7 @@ pytest harness/tests
 ```
 
 Remaining work is explicit: AST-based and computed webpack-chunk discovery;
-GraphQL authorization proofs and schema-aware parameter mutation; gRPC descriptors
+GraphQL schema-aware parameter mutation; gRPC descriptors
 and frame decoding; WebSocket message semantics; SOAP mutation proofs;
 business-workflow strategies; preconfigured provider validation adapters; durable
 workflow-plan restoration and a frontend matrix view. REST JSON now supports captured

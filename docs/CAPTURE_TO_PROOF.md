@@ -1,6 +1,6 @@
 # Capture-to-proof authorization testing
 
-Stage 1 connects successful, execution-observed REST requests to disposable
+Stage 1 connects successful, execution-observed REST and single-operation GraphQL requests to disposable
 authorization proofs. It supports cross-user and cross-tenant reads, string
 mutations, boolean/numeric property changes, and deletion. A confirmed hunter
 receipt still requires a fresh independent verifier run before publication.
@@ -16,7 +16,7 @@ receipt still requires a fresh independent verifier run before publication.
    execution-owned templates. The older `list_captured_requests` remains the
    capability-map index for generic request mutation.
 3. Generate an authorization matrix using the capture's `operation_id`, with
-   explicit deny expectations for each attacker and selected body property.
+   explicit deny expectations for each attacker and selected reference or property.
 4. Call `prepare_captured_authorization_proof` with `hypothesis_id`, `capture_id`,
    `owner_identity`, the original captured `object_id`, and `configuration`.
    Preparation sends no requests. Example configuration for a captured PATCH:
@@ -44,6 +44,21 @@ canary by the engine. The original captured object is never the proof victim:
 its complete URL path segment is replaced with the ID returned by setup.
 Recipes must describe operator-controlled disposable fixtures. The engine
 cannot infer whether a customer object is safe to modify or delete.
+
+For a POST form request such as `view=full&record=7`, select
+`object_parameter: "form:record"` and the matrix parameter `body:record`.
+For JSON `{"input":{"record":"7"}}`, use `body:/input/record` and
+`body:input`. For GraphQL variables with `{"input":{"record":"7"}}`,
+use `variable:/input/record` and `variable:input`. The exact captured body
+is replayed with only that reference replaced by the fresh setup ID. Form
+encoding is preserved for every other field. A REST POST read also requires
+`post_read_only: true`; GraphQL `query` maps to a read proof and `mutation`
+maps to a mutation/property proof. For a nested mutation field, set
+`attack_value_path` to its captured JSON pointer (or `form:<field>`) and
+`value_path` to the property in the owner's GET readback. GraphQL read
+responses can use `attack_object_path` and `attack_canary_path`, such as
+`/data/item/id` and `/data/item/marker`. Setup remains JSON POST; owner
+readback remains GET; cleanup remains DELETE.
 
 5. Call `run_authorization_proof(hypothesis_id)`. Every run creates fresh objects
    and canaries, including independent reruns. Registered plans cannot be edited
@@ -91,17 +106,21 @@ consistency may make results inconclusive and need dedicated recipes.
 
 ## Limits and validation
 
-This slice supports REST JSON, whole-segment object IDs and top-level properties.
-Query-bearing requests, credential-like body fields, multipart/binary bodies,
-GraphQL and other protocols are unsupported replay templates. Read proofs need
+This slice supports REST JSON/form and single-operation GraphQL POST captures,
+with path, query, form, nested JSON and GraphQL variable object references.
+Credential-like body fields, multipart/binary bodies and other protocols remain
+unsupported replay templates. GraphQL schema-aware mutations and arbitrary
+business workflows need separate recipes. Read proofs need
 an authenticated attacker able to create a control. Unavailable fixtures, missing
 identity/policy and unsupported surfaces cannot count as tested. Templates/plans
 remain in memory; durable restoration belongs to Stage 4.
 
 `backend/tests/test_capture_to_proof.py` uses a real local HTTP application with
-three principals in two tenants. Five recipes, two identity relationships and
-vulnerable/patched variants form 20 detection cases. Each vulnerable case also
-passes the existing independent publication gate. Further controls cover misleading
+three principals in two tenants. Five original recipes, two identity relationships
+and vulnerable/patched variants form 20 detection cases. Another 12 cases exercise
+POST form, nested JSON and GraphQL reads and mutations against vulnerable and
+patched endpoints. The original vulnerable cases also pass the existing independent
+publication gate. Further controls cover misleading
 successes, expired identities, cleanup failure, actionful timeouts, altered plans,
 capture isolation and patching between discovery and verification.
 

@@ -984,8 +984,9 @@ Record an inconclusive cell with the missing proof and next test instead of
 calling it tested_clean. Do not repeat a failed completion call unchanged.
 
 For capture-to-proof testing, browse_as_identity or replay_http_request with a named
-owner records supported successful REST requests. list_authorization_leads ranks
-captured path and query references, gives the matching capture ID and operation ID,
+owner records supported successful REST and single-operation GraphQL requests.
+list_authorization_leads ranks captured path, query, form, JSON body, and GraphQL
+variable references, gives the matching capture ID and operation ID,
 and shows whether a deny policy and proof exist. A lead is not an access verdict.
 Review its owner, establish a distinct test identity and explicit expected deny
 policy, then generate the matching authorization matrix cell. list_proof_captures
@@ -997,12 +998,16 @@ After defining explicit deny policy, prepare_captured_authorization_proof takes
 hypothesis_id, capture_id, owner_identity, captured object_id and configuration:
 strategy captured_read/captured_mutation/captured_property/captured_delete; setup
 POST JSON for a disposable object; verify GET; cleanup DELETE of the same object.
-The object ID may be a complete URL path segment or query value. For a unique
-query field, pass object_parameter like query:record_id and an empty object_id;
-choose the matching query parameter matrix cell. Query values remain private
-in the capture; list_proof_captures shows field names only. Use {{object_id}}
-in object URLs. canary_path defaults /marker, object_path /id;
-value_path selects the property; captured_property requires numeric/boolean
+The object ID may be a URL path segment, query value, form field, JSON pointer,
+or GraphQL variable pointer. Pass object_parameter as path, query:record_id,
+form:record, body:/input/record, or variable:/input/record. Select the matching
+matrix parameter (query:record_id, body:record, body:input, or variable:input).
+Values stay private in captures; list_proof_captures shows field names only.
+For REST POST reads, assert post_read_only=true. For a nested mutation body,
+attack_value_path selects the captured field while value_path selects its owner
+readback field. For GraphQL read responses, set attack_object_path and
+attack_canary_path into the response data. Use {{object_id}} in object URLs.
+canary_path defaults /marker, object_path /id; captured_property requires numeric/boolean
 attack_value; captured_delete requires an owner inventory with inventory_path /items.
 Then run_authorization_proof(hypothesis_id) runs the registered recipe. Readback,
 identity checks, fresh objects and cleanup are execution-owned. Refuted means this

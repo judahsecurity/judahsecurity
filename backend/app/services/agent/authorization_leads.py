@@ -83,6 +83,72 @@ def leads_for_capture(capture: dict) -> list[dict]:
                 "reason": "object-like field" if name_hint else "observed query field",
             }
         )
+    body_format = capture.get("body_format", "none")
+    if body_format == "form":
+        form_pairs = parse_qsl(spec["body"], keep_blank_values=True)
+        for name in sorted({name for name, value in form_pairs if value}):
+            values = [value for key, value in form_pairs if key == name]
+            shape = _shape(values[0])
+            name_hint = bool(_OBJECT_NAME.search(name))
+            reference = "form:" + name
+            leads.append({
+                **common,
+                "id": _lead_id(capture["id"], reference, None),
+                "target": base_url,
+                "reference": reference,
+                "matrix_parameter": "body:" + name,
+                "path_index": None,
+                "value_shape": shape,
+                "priority_score": (3 if name_hint else 0) + (2 if shape != "string" else 0),
+                "replayable": len(values) == 1,
+                "reason": "object-like form field" if name_hint else "observed form field",
+            })
+    elif body_format == "json":
+        graphql = capture.get("protocol") == "graphql"
+
+        def visit(value, parts=(), depth=0):
+            if depth > 5 or len(leads) >= 48:
+                return
+            if isinstance(value, dict):
+                for key, child in list(value.items())[:32]:
+                    if not isinstance(key, str) or not key:
+                        continue
+                    if graphql and not parts and key != "variables":
+                        continue
+                    visit(child, (*parts, key), depth + 1)
+            elif isinstance(value, list):
+                for index, child in enumerate(value[:3]):
+                    visit(child, (*parts, str(index)), depth + 1)
+            elif type(value) in (str, int) and str(value) and parts:
+                if graphql:
+                    if len(parts) < 2 or parts[0] != "variables":
+                        return
+                    field_parts = parts[1:]
+                    reference = "variable:/" + "/".join(
+                        part.replace("~", "~0").replace("/", "~1") for part in field_parts
+                    )
+                    matrix_parameter = "variable:" + field_parts[0]
+                else:
+                    reference = "body:/" + "/".join(
+                        part.replace("~", "~0").replace("/", "~1") for part in parts
+                    )
+                    matrix_parameter = "body:" + parts[0]
+                name_hint = bool(_OBJECT_NAME.search(parts[-1]))
+                shape = _shape(str(value))
+                leads.append({
+                    **common,
+                    "id": _lead_id(capture["id"], reference, None),
+                    "target": base_url,
+                    "reference": reference,
+                    "matrix_parameter": matrix_parameter,
+                    "path_index": None,
+                    "value_shape": shape,
+                    "priority_score": (3 if name_hint else 0) + (2 if shape != "string" else 0),
+                    "replayable": True,
+                    "reason": "object-like body field" if name_hint else "observed body field",
+                })
+
+        visit(spec["body"])
     segments = parts.path.split("/")
     for index, raw in enumerate(segments):
         value = unquote(raw)
