@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,7 @@ from app.services.agent.observed_input_batch import (
 from app.services.agent.prompts import is_tool_allowed_in_phase
 from app.services.agent.scoped_assessment_tools import HUNTER_GET_BUDGET
 from app.services.agent.tester_loop import forced_next_step
+from app.services.agent.tester_loop import _observed_input_batch_step
 from app.services.agent.tester_loop import tester_loop_progress as loop_progress
 from app.services.agent.tools import ASMToolsManager
 
@@ -37,6 +39,22 @@ def _brain():
 def test_batch_tool_is_allowed_during_active_assessment():
     assert is_tool_allowed_in_phase("probe_observed_input_batch", "exploitation")
     assert not is_tool_allowed_in_phase("probe_observed_input_batch", "informational")
+
+
+def test_first_pass_scheduler_reserves_time_for_approval_and_verification():
+    from app.services.agent.orchestrator import _turn_deadline_var
+
+    state = {"engagement_brain": _brain().to_dict(),
+             "capability_map": {"target": "https://app.test"}}
+    token = _turn_deadline_var.set(time.monotonic() + 700)
+    try:
+        assert _observed_input_batch_step(state, [], "sample") is None
+        _turn_deadline_var.set(time.monotonic() + 1100)
+        assert _observed_input_batch_step(state, [], "sample")["tool_name"] == (
+            "probe_observed_input_batch"
+        )
+    finally:
+        _turn_deadline_var.reset(token)
 
 
 def test_first_pass_queue_includes_link_inputs_and_skips_recorded_outcomes():
@@ -226,6 +244,55 @@ def test_default_batch_reaches_distinct_inputs_across_112_sqli_xss_checks():
     assert first["processed"] == second["processed"] == 32
     assert len({path for path, _ in manager.calls}) == 56
     assert len(manager.calls) == 64
+
+
+def test_fast_sweep_reaches_all_112_checks_before_triaging_a_lead():
+    class Manager:
+        def __init__(self):
+            brain = EngagementBrain(target="https://app.test")
+            seed_parameter_coverage_cells(brain, [
+                {"method": "GET", "host": "app.test", "path": f"/search/{index}",
+                 "name": "q", "location": "query", "identity": "anonymous",
+                 "source": "browser_link", "testable": True}
+                for index in range(56)
+            ])
+            self._engagement_brain = brain.to_dict()
+            self._capability_map = {"target": "https://app.test"}
+            self.calls = []
+
+        async def scoped_input_sweep_assigned(self, coverage_cell_id, **_kwargs):
+            cell = next(row for row in self._engagement_brain["coverage_cells"]
+                        if row["id"] == coverage_cell_id)
+            self.calls.append(("sweep", coverage_cell_id))
+            lead = cell["path"] == "/search/0" and cell["test_type"] == "xss"
+            if lead:
+                cell["triage_pending"] = True
+                cell["first_pass_signal"] = "reflected"
+            return {"success": True, "first_pass_mode": "sweep",
+                    "evidence_id": "probe-" + coverage_cell_id,
+                    "baseline_evidence_id": "base-" + coverage_cell_id,
+                    "probe_evidence_id": "probe-" + coverage_cell_id,
+                    "proof_confirmed": False,
+                    "probe_result": {"lead_kind": "reflected" if lead else ""}}
+
+        async def scoped_input_probe_assigned(self, coverage_cell_id, **_kwargs):
+            self.calls.append(("triage", coverage_cell_id))
+            return {"success": True, "evidence_id": "browser-" + coverage_cell_id,
+                    "proof_confirmed": False,
+                    "probe_result": {"reflection_contexts": []}}
+
+    manager = Manager()
+    for _ in range(4):
+        batch = asyncio.run(run_observed_input_batch(manager))
+        assert batch["handoff_failures"] == 0
+    assert len([call for call in manager.calls if call[0] == "sweep"]) == 112
+    assert [name for name, _ in manager.calls[:112]] == ["sweep"] * 112
+    assert any(name == "triage" for name, _ in manager.calls[112:])
+    cells = [row for row in manager._engagement_brain["coverage_cells"]
+             if row["test_type"] in {"sqli", "xss"}]
+    assert len(cells) == 112
+    assert all(row["first_pass_outcome"] == "inconclusive" for row in cells)
+    assert all(row["first_pass_evidence_id"] for row in cells)
 
 
 def test_unavailable_identity_is_blocked_without_probe_and_reopens_after_login():

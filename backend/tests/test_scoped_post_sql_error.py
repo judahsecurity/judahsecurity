@@ -521,6 +521,10 @@ async def test_blind_post_first_pass_submits_a_candidate(monkeypatch):
         return {"output": output}
     manager.execute = execute
     batch = await run_observed_input_batch(manager, target="https://app.example.test",
-                                           max_checks=1)
-    assert batch["results"][0]["outcome"] == "proof_signal"
-    assert batch["results"][0]["candidate_id"]
+                                           max_checks=2)
+    assert [row["outcome"] for row in batch["results"]] == [
+        "inconclusive", "proof_signal",
+    ]
+    assert batch["results"][0]["baseline_evidence_id"]
+    assert batch["results"][0]["probe_evidence_id"]
+    assert batch["results"][1]["candidate_id"]

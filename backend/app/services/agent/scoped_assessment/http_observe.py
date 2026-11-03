@@ -97,10 +97,17 @@ def _cookie_header(storage_state: dict | None, url: str) -> str:
     return "; ".join(selected)
 
 
-def observe_get(url: str, allowed_origins: list[str], storage_state: dict | None = None) -> dict:
+def observe_get(url: str, allowed_origins: list[str], storage_state: dict | None = None,
+                *, replay_headers: dict[str, str] | None = None,
+                reflection_marker: str = "", capture_body: bool = False) -> dict:
     """GET one in-scope URL without redirects; return bounded response metadata."""
     assert_in_scope(url, allowed_origins)
+    # Callers may supply only the sanitized, non-credential headers from an
+    # observed browser exchange. Credentials still come from the named identity.
+    from .browser_traffic import _replay_headers
     headers = {"Accept": "application/json, text/html;q=0.9, */*;q=0.8"}
+    headers.update(_replay_headers(replay_headers, expected_origin=urlsplit(url).scheme
+                                   + "://" + urlsplit(url).netloc))
     cookies = _cookie_header(storage_state, url)
     if cookies:
         headers["Cookie"] = cookies
@@ -132,7 +139,7 @@ def observe_get(url: str, allowed_origins: list[str], storage_state: dict | None
                     shape = {"type": "array", "items": min(len(parsed), 1000)}
             except (UnicodeDecodeError, ValueError):
                 pass
-        return {
+        result = {
             "operation": "http_get",
             "target_template": url,
             "method": "GET",
@@ -146,4 +153,11 @@ def observe_get(url: str, allowed_origins: list[str], storage_state: dict | None
             "sql_error_family": _sql_error_family(data),
             "directory_index": _directory_index_detected(data, content_type),
             "redirected": bool(location),
+            "location_sha256": hashlib.sha256(location.encode()).hexdigest() if location else "",
+            "reflection_detected": bool(reflection_marker and
+                                        reflection_marker.encode() in data),
         }
+        if capture_body:
+            result["_private_body"] = data
+            result["_private_location"] = location
+        return result
