@@ -35,7 +35,7 @@ const ForceGraph2D = dynamic(() => import('react-force-graph-2d'), {
 export interface GraphNode {
   id: string;
   label: string;
-  type: 'domain' | 'subdomain' | 'ip' | 'port' | 'service' | 'service_observation' | 'technology' | 'vulnerability' | 'cve' | 'cwe' | 'discovery_source' | 'asn' | 'hosting_provider' | 'certificate' | 'script' | 'endpoint' | 'source_file' | 'source_route' | 'code_symbol' | 'package' | 'source_commit' | 'source_repository' | 'memory';
+  type: 'domain' | 'subdomain' | 'ip' | 'port' | 'service' | 'service_observation' | 'technology' | 'vulnerability' | 'cve' | 'cwe' | 'discovery_source' | 'asn' | 'hosting_provider' | 'cloud_subscription' | 'cloud_region' | 'certificate' | 'script' | 'endpoint' | 'source_file' | 'source_route' | 'code_symbol' | 'package' | 'source_commit' | 'source_repository' | 'memory';
   properties?: Record<string, any>;
   x?: number;
   y?: number;
@@ -81,6 +81,8 @@ const NODE_COLORS: Record<string, string> = {
   discovery_source: '#84cc16', // lime green
   asn: '#14b8a6',             // teal
   hosting_provider: '#6366f1', // indigo
+  cloud_subscription: '#0ea5e9',
+  cloud_region: '#38bdf8',
   certificate: '#ec4899',     // pink
   service_observation: '#34d399',
   script: '#facc15',
@@ -108,6 +110,8 @@ const NODE_SIZES: Record<string, number> = {
   discovery_source: 12,  // larger — anchor nodes in provenance view
   asn: 11,
   hosting_provider: 11,
+  cloud_subscription: 11,
+  cloud_region: 9,
   certificate: 9,
   service_observation: 5,
   script: 8,
@@ -135,6 +139,8 @@ const NODE_ICONS: Record<string, React.ElementType> = {
   discovery_source: Search,
   asn: Network,
   hosting_provider: Server,
+  cloud_subscription: Globe,
+  cloud_region: Globe,
   certificate: Shield,
   service_observation: Server,
   script: Cpu,
@@ -205,7 +211,7 @@ export function GraphVisualization({
       ctx.shadowBlur = 0;
 
       // Draw ring for discovery-layer nodes (dashed outer ring)
-      const isProvenance = ['discovery_source', 'asn', 'hosting_provider', 'certificate'].includes(node.type);
+      const isProvenance = ['discovery_source', 'asn', 'hosting_provider', 'cloud_subscription', 'cloud_region', 'certificate'].includes(node.type);
       if (isProvenance) {
         ctx.beginPath();
         ctx.arc(node.x, node.y, nodeSize + 3 / globalScale, 0, 2 * Math.PI);
@@ -354,7 +360,7 @@ export function GraphVisualization({
         <div>
           <div className="text-xs text-muted-foreground mb-1">Discovery Provenance</div>
           <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-xs">
-            {(['discovery_source', 'asn', 'hosting_provider', 'certificate'] as const).map((type) => (
+            {(['discovery_source', 'asn', 'hosting_provider', 'cloud_subscription', 'cloud_region', 'certificate'] as const).map((type) => (
               <div key={type} className="flex items-center gap-1">
                 <div className="w-2.5 h-2.5 rounded-full border border-dashed flex-shrink-0" style={{ backgroundColor: NODE_COLORS[type], borderColor: NODE_COLORS[type] }} />
                 <span className="capitalize truncate">{type.replace('_', ' ')}</span>

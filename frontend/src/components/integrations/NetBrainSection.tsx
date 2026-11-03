@@ -12,6 +12,7 @@ import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 import { api, getApiErrorMessage, type NetBrainIntegration } from '@/lib/api';
+import { NetBrainPathPanel } from './NetBrainPathPanel';
 
 interface FormState {
   name: string;
@@ -204,6 +205,7 @@ export function NetBrainSection() {
                 <Trash2 className="h-4 w-4 mr-2" />Remove
               </Button>
             </div>
+            <NetBrainPathPanel integrationId={connection.id} />
           </div>
         )) : !loading && (
           <div className="flex flex-col sm:flex-row gap-4 sm:items-center">

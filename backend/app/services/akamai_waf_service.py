@@ -410,6 +410,7 @@ async def sync_integration(db: Session, integration: AkamaiWafIntegration) -> Di
         return {"ok": False, "message": str(exc)}
 
     stats = _Stats()
+    touched_values: set[str] = set()
 
     try:
         configs, err = await client.list_configs()
@@ -470,7 +471,7 @@ async def sync_integration(db: Session, integration: AkamaiWafIntegration) -> Di
             if integration.import_configurations and cfg_id is not None:
                 # Store WAF configuration as a CLOUD_RESOURCE asset.
                 cfg_value = f"akamai-waf-config:{cfg_id}"
-                _upsert_asset(
+                asset = _upsert_asset(
                     db,
                     org_id,
                     cfg_value,
@@ -495,6 +496,8 @@ async def sync_integration(db: Session, integration: AkamaiWafIntegration) -> Di
                         "asset_kind": "waf_configuration",
                     },
                 )
+                if asset:
+                    touched_values.add(asset.value)
 
             if integration.import_hostnames:
                 for hn in hostnames:
@@ -502,7 +505,7 @@ async def sync_integration(db: Session, integration: AkamaiWafIntegration) -> Di
                         continue
                     # Store wildcard as value with leading "*." preserved.
                     atype = _asset_type_for_hostname(hn)
-                    _upsert_asset(
+                    asset = _upsert_asset(
                         db,
                         org_id,
                         hn,
@@ -518,6 +521,8 @@ async def sync_integration(db: Session, integration: AkamaiWafIntegration) -> Di
                             "protected_by_waf": True,
                         },
                     )
+                    if asset:
+                        touched_values.add(asset.value)
 
         db.commit()
 
@@ -526,6 +531,9 @@ async def sync_integration(db: Session, integration: AkamaiWafIntegration) -> Di
         integration.last_error = None
         integration.last_sync_stats = stats.as_dict()
         db.commit()
+
+        from app.services.integration_graph_sync import sync_integration_assets_to_graph
+        await sync_integration_assets_to_graph(org_id, touched_values)
 
         return {
             "ok": True,

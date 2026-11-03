@@ -353,6 +353,11 @@ async def sync_integration(db: Session, integration: CensysAsmIntegration) -> Di
         integration.last_sync_stats = stats.as_dict()
         db.commit()
 
+        from app.services.integration_graph_sync import sync_integration_assets_to_graph
+        await sync_integration_assets_to_graph(
+            org_id, {asset.value for asset in asset_index.values()}
+        )
+
         return {
             "ok": True,
             "message": (
@@ -417,6 +422,7 @@ def _import_risk(
                 asset_index[ref_id] = asset
         if asset is None:
             continue
+        asset_index[asset.value] = asset
 
         # Dedup: match by Censys risk id in metadata, else by title+asset.
         existing = None
