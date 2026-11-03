@@ -37,6 +37,19 @@ def test_capture_queues_path_and_query_references_without_query_values():
     assert all(row["capture_id"] == second["id"] for row in store.authorization_leads())
 
 
+def test_resource_path_slug_is_a_reference_lead():
+    store = RequestCaptureStore()
+    capture = store.record(
+        {"method": "GET", "url": "https://app.test/objects/customer-123"},
+        identity="owner",
+        source="browser",
+    )
+    lead = store.authorization_leads()[0]
+    assert lead["reference"] == "path:2"
+    assert lead["priority_score"] >= 3
+    assert lead["capture_id"] == capture["id"]
+
+
 def test_ambiguous_reference_stays_blocked_and_never_mints_policy():
     store = RequestCaptureStore()
     capture = store.record(

@@ -16,7 +16,7 @@ _OBJECT_NAME = re.compile(
     re.IGNORECASE,
 )
 _RESOURCE = re.compile(
-    r"^(?:users?|accounts?|tenants?|orgs?|organizations?|orders?|records?|"
+    r"^(?:users?|accounts?|tenants?|orgs?|organizations?|objects?|orders?|records?|"
     r"items?|invoices?|projects?|documents?|files?|photos?|tickets?|profiles?)$",
     re.IGNORECASE,
 )
