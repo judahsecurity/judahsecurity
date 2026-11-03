@@ -38,6 +38,7 @@ CAPABILITY_TOOLS = (
     "validate_js_secret_candidate",
     "browse_as_identity",
     "list_proof_captures",
+    "list_authorization_leads",
     "prepare_captured_authorization_proof",
 )
 
@@ -68,9 +69,56 @@ class AssessmentCapabilities:
             self._request_capture_store = RequestCaptureStore()
         return self._request_capture_store
 
+    def _queue_captured_authorization_leads(self):
+        from app.services.agent.coverage_cells import seed_authorization_capture_cells
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        active = {row["id"] for row in self._capture_requests().list()}
+        for cell in brain.coverage_cells:
+            if (
+                cell.get("source") == "authorization_capture"
+                and cell.get("capture_id")
+                and cell["capture_id"] not in active
+                and cell.get("status") in {"untested", "in_focus", "inconclusive"}
+                and not cell.get("lease_id")
+            ):
+                cell["capture_id"] = ""
+                cell["status"] = "inconclusive"
+                cell["reason"] = "Proof capture expired; repeat the owner request"
+        seed_authorization_capture_cells(
+            brain, self._capture_requests().authorization_leads()
+        )
+        self._engagement_brain = brain.to_dict()
+
+    def _authorization_handoff(self, brain, operation_id=None):
+        from app.services.agent.authorization_leads import handoff_report
+
+        store = self._capture_requests()
+        report = handoff_report(
+            store.authorization_leads(operation_id),
+            brain,
+            getattr(self, "_captured_proof_plans", {}) or {},
+        )
+        report["summary"]["captures"] = len(store.list(operation_id))
+        report["summary"]["evicted_captures_session"] = store.evicted
+        report["summary"]["capture_rejections_session"] = dict(store.rejected)
+        report["summary"]["eligible_captures"] = len({
+            lead["capture_id"] for lead in report["leads"] if lead["replayable"]
+        })
+        return report
+
     async def list_proof_captures(self, operation_id: str | None = None) -> str:
         """List execution-owned REST replay templates, without body values or credentials."""
         return json.dumps(dict(captures=self._capture_requests().list(operation_id)))
+
+    async def list_authorization_leads(
+        self, operation_id: str | None = None, limit: int = 50
+    ) -> str:
+        """List prioritized captured object-reference leads and their proof handoff state."""
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        report = self._authorization_handoff(brain, operation_id)
+        report["leads"] = report["leads"][: max(1, min(int(limit), 100))]
+        return json.dumps(report)
 
     async def prepare_captured_authorization_proof(
         self,
@@ -351,7 +399,10 @@ class AssessmentCapabilities:
     async def get_assessment_coverage(self) -> str:
         """Expose tested, untested, blocked and inconclusive cells by hypothesis, identity, tenant, parameter and operation."""
         brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
-        return json.dumps(coverage_report(brain))
+        return json.dumps({
+            **coverage_report(brain),
+            "authorization_handoff": self._authorization_handoff(brain)["summary"],
+        })
 
     async def collect_js_intelligence(
         self, url: str, identity: str = "anonymous", max_files: int = 20
@@ -432,6 +483,7 @@ class AssessmentCapabilities:
             json.dumps(spec), capture_callback=capture_request
         )
         self._ingest_observed_operations(result.get("application_operations", []))
+        self._queue_captured_authorization_leads()
         artifact = evidence_store(self).record(
             "browser_capture",
             dict(operations=result.get("application_operations", [])),
@@ -451,6 +503,9 @@ class AssessmentCapabilities:
                 evidence_id=artifact,
                 operations=result.get("application_operations", []),
                 captures=captures,
+                authorization_handoff=self._authorization_handoff(
+                    engagement_brain_from_dict(self._engagement_brain)
+                )["summary"],
                 errors=result.get("error"),
                 engagement_brain=self._engagement_brain,
             )

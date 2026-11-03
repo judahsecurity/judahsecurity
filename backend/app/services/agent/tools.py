@@ -9043,6 +9043,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 parameter=trace.get("parameter", ""),
                 test_type=trace.get("test_type", ""),
                 proof_escalation_id=trace.get("proof_escalation_id", ""))
+            if capture:
+                self._queue_captured_authorization_leads()
         from app.services.agent.evidence_store import redact_artifact
         public = redact_artifact(exchange)
         public["response"].pop("body", None)

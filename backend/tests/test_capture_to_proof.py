@@ -373,6 +373,26 @@ async def test_query_object_id_is_captured_and_proved_with_two_identities(
     m, cell, capture, _ = await prepare(base, strategy, query_object=True)
     assert capture["url"] == base + "/lookup"
     assert capture["query_fields"] == ["record", "view"]
+    handoff = json.loads(await m.list_authorization_leads(capture["operation_id"]))
+    lead = next(row for row in handoff["leads"] if row["reference"] == "query:record")
+    assert lead["capture_id"] == capture["id"]
+    assert lead["status"] == "proof_prepared"
+    assert handoff["summary"]["proof_prepared"] >= 1
+    assert handoff["summary"]["eligible_captures"] >= 1
+    assert handoff["summary"]["capture_rejections_session"]["unsupported_method"] >= 1
+    coverage_before = json.loads(await m.get_assessment_coverage())
+    assert coverage_before["authorization_handoff"]["candidates"] >= 1
+    assert any(
+        row["capture_id"] == capture["id"]
+        and row["test_type"] == "authz"
+        and row["parameter"] == "query:record"
+        for row in m._engagement_brain["coverage_cells"]
+    )
+    assert not any(
+        row["source"] == "authorization_capture"
+        and row["parameter"] == "query:view"
+        for row in m._engagement_brain["coverage_cells"]
+    )
     private = m._capture_requests().get(capture["id"])
     assert private["request"]["url"].endswith("?record=1&view=full")
     receipt = json.loads(await m.run_authorization_proof(cell["hypothesis_id"]))[
@@ -383,6 +403,8 @@ async def test_query_object_id_is_captured_and_proved_with_two_identities(
         if strategy == "captured_read" else "refuted"
     )
     assert receipt["verdict"] == expected
+    after = json.loads(await m.list_authorization_leads(capture["operation_id"]))
+    assert next(row for row in after["leads"] if row["reference"] == "query:record")["status"] == "proof_attempted"
     assert receipt["cleanup_status"] == "attempted"
     assert not state["objects"]
     assert any(
@@ -538,7 +560,10 @@ def test_new_tools_registered_and_guided():
     )
 
     m = ASMToolsManager()
-    for name in ("list_proof_captures", "prepare_captured_authorization_proof"):
+    for name in (
+        "list_proof_captures", "list_authorization_leads",
+        "prepare_captured_authorization_proof",
+    ):
         assert name in m.tools and is_tool_allowed_in_phase(name, "exploitation")
         assert name in APPLICATION_ASSESSMENT_GUIDANCE
 
