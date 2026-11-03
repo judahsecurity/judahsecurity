@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import hashlib
 import ipaddress
 import logging
+import re
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -138,6 +139,57 @@ class NetBrainClient:
         if not isinstance(configuration, str) or not configuration.strip():
             raise RuntimeError(f"NetBrain returned no configuration for {hostname}.")
         return configuration, payload.get("time")
+
+    async def _path_request(self, method: str, path: str, *, action: str,
+                            params: dict | None = None, body: dict | None = None) -> dict[str, Any]:
+        response = await self._http().request(
+            method, f"{self.base_url}{API_ROOT}{path}", params=params, json=body,
+            headers=self._headers(),
+        )
+        payload = response.json() if response.headers.get("content-type", "").startswith("application/json") else {}
+        if not isinstance(payload, dict) or response.status_code >= 400 or not _status_ok(payload):
+            raise _api_error(action, response, payload if isinstance(payload, dict) else {})
+        return payload
+
+    async def get_path_gateways(self, source_ip: str) -> list[dict[str, Any]]:
+        payload = await self._path_request(
+            "GET", "/CMDB/Path/Gateways", action="gateway lookup", params={"ipOrHost": source_ip}
+        )
+        gateways = payload.get("gatewayList")
+        if not isinstance(gateways, list):
+            raise RuntimeError("NetBrain returned no gateway list.")
+        return [item for item in gateways if isinstance(item, dict)][:100]
+
+    async def start_path_calculation(self, body: dict[str, Any]) -> str:
+        payload = await self._path_request(
+            "POST", "/CMDB/Path/Calculation", action="path calculation", body=body
+        )
+        task_id = str(payload.get("taskId") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task_id):
+            raise RuntimeError("NetBrain returned an invalid path task ID.")
+        return task_id
+
+    async def get_path_status(self, task_id: str) -> int:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task_id):
+            raise ValueError("Invalid NetBrain path task ID.")
+        payload = await self._path_request(
+            "GET", f"/CMDB/Path/Calculation/{task_id}/Status", action="path status"
+        )
+        result = payload.get("result")
+        if not isinstance(result, dict) or result.get("resultCode") not in (0, 1, 2, 3, 4):
+            raise RuntimeError("NetBrain returned an unknown path status.")
+        return result["resultCode"]
+
+    async def get_path_hops(self, task_id: str) -> list[dict[str, Any]]:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", task_id):
+            raise ValueError("Invalid NetBrain path task ID.")
+        payload = await self._path_request(
+            "GET", f"/CMDB/Path/Calculation/{task_id}/Result", action="path result"
+        )
+        hops = payload.get("hopList")
+        if not isinstance(hops, list) or len(hops) > 500:
+            raise RuntimeError("NetBrain returned an invalid or oversized hop list.")
+        return [item for item in hops if isinstance(item, dict)]
 
 
 def _config_lines(configuration: str) -> set[str]:

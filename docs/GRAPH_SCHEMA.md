@@ -56,6 +56,10 @@ IP    ──[HOSTED_BY]──────> HostingProvider
 | **IP**          | **FORWARDS_TO**   | **IP**            | **LB reachability: VIP → pool member (F5)** |
 | Asset           | IN_CLOUD_SUBSCRIPTION | CloudSubscription | Wiz-reported cloud account context |
 | Asset           | IN_CLOUD_REGION | CloudRegion | Wiz-reported location context |
+| Asset           | HAS_CALCULATED_PATH | NetworkPath | NetBrain calculation from an exact source asset |
+| NetworkPath     | REQUESTED_TARGET | Asset | Target selected by the analyst; destination match is not independently proven |
+| NetworkPath     | HAS_HOP | NetworkHop | NetBrain hop in this calculation |
+| NetworkHop      | NEXT_CALCULATED_HOP | NetworkHop | Directed hop sequence returned by NetBrain |
 
 **Bold rows** are the discovery provenance relationships added in the June 2026 update.
 
@@ -64,9 +68,11 @@ IP    ──[HOSTED_BY]──────> HostingProvider
 **FORWARDS_TO** links a specific VIP asset's IP to a specific pool-member asset's IP discovered via F5 BIG-IP. Edge properties include `source` (`f5`), `vip_asset_id`, `member_asset_id`, `pool`, `virtual`, `port`, and `organization_id`. Use it to answer "what pool members does this VIP forward to?" An enabled VIP supplies the internet-facing entry point.
 
 Wiz cloud subscription and region edges provide context, not network reachability.
+NetBrain calculated paths retain tenant, domain, gateway, protocol, addresses, hop
+sequence, and network scopes. They are not proof that policy permits traffic.
 Attack-path queries currently use direct internet exposure reported by Wiz or
-one F5 VIP-to-member forwarding hop. Internal multi-hop routing awaits a network
-integration with VRF, route, interface, and policy evidence.
+one F5 VIP-to-member forwarding hop. Internal multi-hop attack-path reachability
+requires policy evidence in addition to calculated routes.
 
 `ASN`, `Certificate`, `DiscoverySource`, `HostingProvider`, `Service`, and
 `Technology` are shared references. Globally routable `IP` addresses are shared

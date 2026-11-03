@@ -144,6 +144,8 @@ class GraphService:
                 "CREATE CONSTRAINT ip_key IF NOT EXISTS FOR (i:IP) REQUIRE i.ip_key IS UNIQUE",
                 "CREATE CONSTRAINT cloud_subscription_key IF NOT EXISTS FOR (c:CloudSubscription) REQUIRE c.key IS UNIQUE",
                 "CREATE CONSTRAINT cloud_region_key IF NOT EXISTS FOR (c:CloudRegion) REQUIRE c.key IS UNIQUE",
+                "CREATE CONSTRAINT network_path_key IF NOT EXISTS FOR (p:NetworkPath) REQUIRE p.key IS UNIQUE",
+                "CREATE CONSTRAINT network_hop_key IF NOT EXISTS FOR (h:NetworkHop) REQUIRE h.key IS UNIQUE",
                 "CREATE CONSTRAINT port_id IF NOT EXISTS FOR (p:Port) REQUIRE p.port_id IS UNIQUE",
                 "CREATE CONSTRAINT service_name IF NOT EXISTS FOR (s:Service) REQUIRE s.name IS UNIQUE",
                 "CREATE CONSTRAINT service_observation_id IF NOT EXISTS FOR (s:ServiceObservation) REQUIRE s.port_id IS UNIQUE",
