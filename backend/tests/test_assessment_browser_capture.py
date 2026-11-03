@@ -334,6 +334,62 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("vulnerable", [True, False])
+async def test_xss_lab_sweep_browser_controls_and_independent_repeat(vulnerable):
+    """A reflected marker becomes a finding only after fresh browser execution."""
+    from app.services.agent.coverage_cells import seed_parameter_coverage_cells
+    from app.services.agent.engagement_brain import EngagementBrain
+    from app.services.agent.independent_verify import (
+        candidate_from_dict, run_independent_verifiers,
+    )
+    from app.services.agent.observed_input_batch import run_observed_input_batch
+    from app.services.agent.tools import ASMToolsManager
+    from harness.local_harness.benchmark.class_lab import handler_for
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), handler_for("xss", vulnerable, ""))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        manager = ASMToolsManager()
+        register_scope(manager, base)
+        manager._fallback_target = base
+        observed_url = base + "/search?q=public&view=full"
+        manager._capability_map = {"target": base, "scope": base}
+        manager._scoped_link_baselines = {"anonymous": [observed_url]}
+        brain = EngagementBrain(target=base)
+        seed_parameter_coverage_cells(brain, [{
+            "method": "GET", "host": f"127.0.0.1:{server.server_port}",
+            "path": "/search", "name": "q", "location": "query",
+            "identity": "anonymous", "source": "browser_link", "testable": True,
+        }])
+        for row in brain.coverage_cells:
+            if row["test_type"] != "xss":
+                row["status"] = "skipped"
+        manager._engagement_brain = brain.to_dict()
+        batch = await run_observed_input_batch(manager, target=base, max_checks=2)
+        assert batch["processed"] == 2
+        assert batch["results"][0]["outcome"] == "inconclusive"
+        assert batch["results"][0]["baseline_evidence_id"]
+        assert batch["results"][0]["probe_evidence_id"]
+        assert batch["results"][1]["outcome"] == (
+            "proof_signal" if vulnerable else "inconclusive"
+        )
+        candidates = [candidate_from_dict(row)
+                      for row in manager._engagement_brain["candidates"]]
+        reports = await run_independent_verifiers(
+            candidates, llm=None, tools_manager=manager, targets=[base],
+        ) if candidates else []
+        assert [report["status"] for report in reports] == (
+            ["confirmed"] if vulnerable else []
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
 async def test_browser_capture_flows_into_controlled_authorization_proof(crud_app, monkeypatch):
     from playwright.async_api import BrowserType
     from app.services.agent.tools import ASMToolsManager

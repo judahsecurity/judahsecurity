@@ -399,7 +399,7 @@ def plan_sql_boolean_body(private_exchange: bytes, *, parameter: str,
 def _observe_post(url: str, mime: str, body: bytes,
                   allowed_origins: list[str], storage_state: dict | None,
                   reflection_text: str = "", replay_headers: dict[str, str] | None = None,
-                  timeout: int = 15) -> dict:
+                  timeout: int = 15, capture_body: bool = False) -> dict:
     assert_in_scope(url, allowed_origins)
     headers = {"Accept": "application/json, text/html;q=0.9, */*;q=0.8", "Content-Type": mime}
     headers.update(_replay_headers(replay_headers, expected_origin=origin(url)))
@@ -438,11 +438,18 @@ def _observe_post(url: str, mime: str, body: bytes,
             "json_array_lengths": json_array_lengths,
             "sql_error_family": _sql_error_family(data),
             "redirected": bool(response.headers.get("Location", "")),
+            "location_sha256": hashlib.sha256(
+                response.headers.get("Location", "").encode()
+            ).hexdigest() if response.headers.get("Location", "") else "",
         }
         if reflection_text:
             page = data.decode("utf-8", errors="replace")
             result["raw_reflection"] = reflection_text in page
             result["html_encoded_reflection"] = html.escape(reflection_text) in page
+        if capture_body:
+            result["_private_body"] = data
+            result["_private_request_body"] = body
+            result["_private_location"] = response.headers.get("Location", "")
         return result
 
 

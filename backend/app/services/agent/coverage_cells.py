@@ -643,6 +643,8 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
             candidates.setdefault(str(row["coverage_cell_id"]), []).append(row)
     counts = {key: 0 for key in (
         "checks", "attempted", "unattempted", "probed", "tested_clean",
+        "baselines_saved", "probe_responses_saved", "reflections",
+        "sql_differences", "blind_sql_followups", "triage_pending",
         "proof_signals", "candidate_handoffs_pending", "service_candidate_handoffs_pending",
         "candidates", "verified", "published", "open", "blocked", "capture_needed",
     )}
@@ -721,6 +723,12 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
                 status in {"tested_clean", "finding"} and bool(cell.get("evidence_ids"))
             ),
             "tested_clean": status == "tested_clean",
+            "baselines_saved": bool(cell.get("first_pass_baseline_id")),
+            "probe_responses_saved": bool(cell.get("first_pass_probe_id")),
+            "reflections": cell.get("first_pass_signal") == "reflected",
+            "sql_differences": cell.get("first_pass_signal") == "sql_difference",
+            "blind_sql_followups": cell.get("first_pass_signal") == "sql_blind_followup",
+            "triage_pending": bool(cell.get("triage_pending")),
             "proof_signals": proof_signal,
             "candidate_handoffs_pending": handoff_pending,
             "service_candidate_handoffs_pending": service_handoff,
@@ -1165,6 +1173,7 @@ def claim_coverage_cell_leases(
             and (not first_pass_only or (
                 cell.get("test_type") == "xss" and cell.get("xss_pending_techniques")
                 and not cell.get("candidate_id")
+            ) or (cell.get("triage_pending") and not cell.get("candidate_id")
             ) or not (
                 cell.get("first_pass_outcome") or cell.get("candidate_id")
                 or cell.get("probe_artifact_ids") or cell.get("service_probe_artifact_ids")
