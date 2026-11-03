@@ -21,7 +21,10 @@ from app.services.agent.observed_input_batch import pending_first_pass_cells
 from app.services.agent.operation_directive import directives_from_hypotheses
 from app.services.agent.parameter_inventory import collect_parameter_inventory
 from app.services.agent.scoped_assessment.body_probe import plan_observed_body
-from app.services.agent.scoped_assessment.browser_traffic import package_exchange
+from app.services.agent.scoped_assessment.browser_traffic import (
+    capture_priority, likely_input_request, package_exchange, retain_exchange,
+)
+from app.services.agent.scoped_assessment.surface_inventory import build_surface_inventory
 from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES, forced_next_step
 from app.services.agent.tools import ASMToolsManager
 
@@ -122,6 +125,60 @@ def test_browser_json_array_fields_keep_exact_replayable_indexes():
             private, parameter=path, allowed_origins=["https://app.test"],
         )
         assert original != mutated
+
+
+def test_browser_capture_prioritizes_testable_inputs_without_exposing_values():
+    assert not likely_input_request("https://app.test/api/status", b"")
+    assert likely_input_request("https://app.test/api/search?q=private-value", b"")
+    assert likely_input_request("https://app.test/api/search", b"q=private-value")
+    token_only, _ = package_exchange(
+        url="https://app.test/api/search?csrf_token=private", expected_origin="https://app.test",
+        action_ref="navigate", method="GET", resource_type="fetch", status=200,
+        content_type="application/json", request_body=b"", response_body=b"{}",
+    )
+    testable, _ = package_exchange(
+        url="https://app.test/api/search?term=private-value", expected_origin="https://app.test",
+        action_ref="navigate", method="GET", resource_type="fetch", status=200,
+        content_type="application/json", request_body=b"", response_body=b"{}",
+    )
+    assert capture_priority(testable) > capture_priority(token_only)
+    assert "private-value" not in json.dumps(testable)
+
+    entries, shapes = [], set()
+    assert retain_exchange(entries, shapes, {"public": token_only, "private": b"first"}, limit=1) == "added"
+    assert retain_exchange(entries, shapes, {"public": testable, "private": b"second"}, limit=1) == "replaced"
+    assert entries[0]["private"] == b"second"
+    assert retain_exchange(entries, shapes, {"public": testable, "private": b"third"}, limit=1) == "duplicate"
+
+
+def test_multipart_capture_exposes_field_names_and_keeps_response_truncation_explicit():
+    body = (b"--boundary\r\nContent-Disposition: form-data; name=\"template\"\r\n\r\n"
+            b"private-value\r\n--boundary\r\n"
+            b"Content-Disposition: form-data; name=\"upload\"; filename=\"proof.txt\"\r\n"
+            b"Content-Type: text/plain\r\n\r\nprivate-file\r\n--boundary--\r\n")
+    public, private = package_exchange(
+        url="https://app.test/api/upload", expected_origin="https://app.test",
+        action_ref="navigate", method="POST", resource_type="fetch", status=200,
+        content_type="text/html", request_content_type="multipart/form-data; boundary=boundary",
+        request_body=body, response_body=b"",
+        response_body_truncated=True, response_bytes_declared=300_000,
+    )
+    assert public["body_fields_status"] == "parsed"
+    assert {(field["path"], field["value_type"]) for field in public["body_fields"]} == {
+        ("template", "string"), ("upload", "file"),
+    }
+    assert public["response_body_truncated"] is True
+    assert public["response_bytes"] == 0
+    assert public["response_bytes_declared"] == 300_000
+    assert public["response_sha256"] == ""
+    assert json.loads(private)["response_body_truncated"] is True
+    assert "private-value" not in json.dumps(public)
+    inventory = build_surface_inventory({
+        "final_origin": "https://app.test",
+        "traffic": [{**public, "artifact_id": "capture-1"}],
+    }, body_replay_paths={"/api/upload"})
+    assert {row["name"] for row in inventory["parameters"]} == {"template", "upload"}
+    assert inventory["test_suggestions"] == []
 
 
 def test_captured_json_pointer_joins_private_browser_replay():
