@@ -9,7 +9,7 @@ import re
 import secrets
 from collections import OrderedDict
 from copy import deepcopy
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from app.services.agent.evidence_store import origin, redact_artifact
 from app.services.agent.runtime_mapper import normalize_request
@@ -42,9 +42,24 @@ class RequestCaptureStore:
         try:
             origin(request["url"])
             parts = urlsplit(request["url"])
-            # Query credentials, multipart, binary and templated values require
-            # dedicated adapters. Do not silently replay a modified approximation.
-            if parts.query or parts.fragment or "{{" in request["url"]:
+            # Keep the original query privately for faithful replay. Credential
+            # parameters, fragments and templated URLs are not proof captures.
+            if parts.fragment or "{{" in request["url"]:
+                return None
+            query = parse_qsl(parts.query, keep_blank_values=True)
+            if (
+                len(parts.query) > 8192
+                or len(query) > 32
+                or any(
+                    not key
+                    or re.search(
+                        r"password|passwd|secret|token|credential|api.?key|authorization|cookie|session|csrf",
+                        key,
+                        re.IGNORECASE,
+                    )
+                    for key, _ in query
+                )
+            ):
                 return None
             method = request.get("method", "GET").upper()
             if method not in ("GET", "PATCH", "PUT", "DELETE"):
@@ -110,10 +125,14 @@ class RequestCaptureStore:
     @staticmethod
     def describe(row):
         spec = row["request"]
+        parts = urlsplit(spec["url"])
         return {
             **{k: v for k, v in row.items() if k != "request"},
             "method": spec["method"],
-            "url": spec["url"],
+            "url": urlunsplit(parts._replace(query="", fragment="")),
+            "query_fields": sorted(
+                {key for key, _ in parse_qsl(parts.query, keep_blank_values=True)}
+            ),
             "body_fields": sorted((spec["body"] or {}).keys()),
         }
 
