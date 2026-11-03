@@ -25,21 +25,22 @@ the default autonomous experiment path.
 
 ## Next implementation steps
 
-1. Add a browser experiment variant that accepts a bounded, agent-chosen XSS
-   payload template for an observed sink, records a fresh nonce execution result,
-   and hands it to the existing independent verifier.
-2. Add a POST variant only for operator-approved, synthetic-data paths. Require
-   a cleanup action and record its outcome alongside the control and probe.
+1. Run the product-agent class lab's vulnerable and patched pairs with equal
+   model and request budgets. Measure verified recall, false positives, request
+   count, time, and spend before expanding mutation choices.
+2. Main now has context-aware browser XSS variants and approved POST XSS/SQLi
+   replay. If paired runs show a recall gap, extend those executors with a
+   bounded agent-chosen variant on an observed sink or approved synthetic-data
+   POST path. Preserve fresh nonce proof and cleanup requirements.
 3. Persist an experiment decision (`hypothesis`, source capture, cell, control,
    mutation, outcome, follow-up) so specialists can choose the next check from
    observed results and stop when the request budget or coverage lease expires.
-4. Put any arbitrary-code runner behind OS-level network egress policy and a
-   per-request meter. Validate destination, redirect, method, and byte limits at
-   the network boundary rather than relying on Python source validation.
-5. Evaluate on seeded XSS and SQLi fixtures: measure confirmed findings,
-   false positives, requests per confirmed finding, scope violations, and
-   replay success. Promote only after the independent verifier reproduces the
-   proof and the coverage report accounts for inconclusive cells.
+4. Enforce the scheduled assessment's actual HTTP request and rate limits at
+   the shared network boundary. The current specialist limit counts tool starts;
+   a browser or CLI tool may send several outbound requests per start.
+5. Put any arbitrary-code runner behind OS-level network egress policy. Validate
+   destination, redirect, method, and byte limits at the network boundary
+   rather than relying on Python source validation.
 
-The current implementation is a local code change. It has no deployed
-assessment run attached to it.
+The current implementation is in draft PR #96. It has no deployed assessment
+run attached to it.
