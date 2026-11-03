@@ -348,7 +348,7 @@ def _observed_input_batch_step(
     return {
         "tool_name": "probe_observed_input_batch",
         "tool_args": {
-            "max_checks": 8, "max_seconds": 180,
+            "max_checks": 32, "max_seconds": 180,
             "target": primary_web_target(state),
             "surface_signature": signature,
             "pending_batch_signature": pending_signature,

@@ -18,7 +18,10 @@ def test_specialist_contracts_match_registered_tools():
     assert _tool_contract(manager, "read_evidence").startswith(
         "  - read_evidence(evidence_id"
     )
-    assert _tool_contract(manager, "execute_curl") == "  - execute_curl(args?)"
+    curl_contract = _tool_contract(manager, "execute_curl")
+    assert "separate flags" in curl_contract
+    assert "-i" in curl_contract and "-H <header>" in curl_contract
+    assert "compare_requests" in curl_contract
     assert _tool_contract(manager, "execute_browser") == (
         '  - execute_browser(actions=[{"action":"navigate","url":"..."},'
         '{"action":"get_source"}])'
