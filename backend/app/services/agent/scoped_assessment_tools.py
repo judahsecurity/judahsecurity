@@ -47,6 +47,9 @@ VERIFIER_GET_BUDGET = 80
 first_pass_get_context: ContextVar[bool] = ContextVar(
     "prowl_first_pass_get", default=False,
 )
+get_sql_verifier_capture: ContextVar[str] = ContextVar(
+    "prowl_get_sql_verifier_capture", default="",
+)
 # One blind SQLi first pass uses eight POSTs including its exploratory pair.
 # Keep the full eight-input batch reachable while still bounding the session.
 HUNTER_POST_BUDGET = 64
@@ -324,6 +327,21 @@ class ScopedAssessmentTools:
         current = verification_run.get()
         if row.get("verifier_run_id") != (current.id if current else None):
             raise ValueError("Browser exchange must be fresh for this verifier run")
+        return row["private"]
+
+    def _scoped_get_sql_capture(self, artifact_id: str, identity: str) -> bytes:
+        """Allow one exact hunter GET capture to an independent SQL verifier."""
+        run = verification_run.get()
+        if run is None or get_sql_verifier_capture.get() != artifact_id:
+            return self._scoped_exchange(artifact_id, identity)
+        record = evidence_store(self).records.get(artifact_id)
+        row = self._scoped_capture_row(artifact_id)
+        if (not record or record.get("kind") != "scoped_browser_exchange"
+                or record.get("run_id") or not row or row.get("identity") != identity
+                or row.get("verifier_run_id") or not isinstance(row.get("private"), bytes)):
+            raise ValueError("Verifier requires a hunter-owned GET capture for this identity")
+        if json.loads(row["private"]).get("method") != "GET":
+            raise ValueError("Verifier GET capture method changed")
         return row["private"]
 
     async def list_scoped_browser_exchanges(self) -> str:
@@ -678,10 +696,23 @@ class ScopedAssessmentTools:
         )
         state = self._scoped_state(identity, baseline)
         self._scoped_claim_gets(2)
-        result = await asyncio.to_thread(
-            query_probe.probe_observed_query, baseline, mutated, parameter=parameter,
-            allowed_origins=[allowed], storage_state=state,
-        )
+        observed = json.loads(private)
+        if (observed.get("resource_type") in {"xhr", "fetch"}
+                and browser_post_replay.has_replayable_source(private, [allowed])):
+            checks = await browser_post_replay.replay_observed_get_controls(
+                private, parameter=parameter,
+                variants={"baseline": baseline, "probe": mutated},
+                allowed_origins=[allowed], storage_state=state,
+            )
+            result = query_probe.build_observed_query_result(
+                baseline, parameter=parameter, baseline=checks["baseline"],
+                probe=checks["probe"], browser_replay=True,
+            )
+        else:
+            result = await asyncio.to_thread(
+                query_probe.probe_observed_query, baseline, mutated, parameter=parameter,
+                allowed_origins=[allowed], storage_state=state,
+            )
         result["source_artifact_id"] = artifact_id
         result["evidence_id"] = evidence_store(self).record(
             "scoped_query_probe", result, target=result["target"], identity=identity,
@@ -691,7 +722,7 @@ class ScopedAssessmentTools:
 
     async def _scoped_fresh_post_sql(self, private: bytes, parameter: str, identity: str,
                                      allowed: str, *, recipe: str = "hunter") -> dict:
-        """Replay token-bearing SQLi controls from the observed page, never a stale POST."""
+        """Replay SQLi controls from current browser headers, cookies, and body."""
         url, mime, baseline, _, _ = body_probe.plan_sql_error_body(
             private, parameter=parameter, allowed_origins=[allowed],
         )
@@ -772,7 +803,8 @@ class ScopedAssessmentTools:
         if (urlsplit(url).path or "/") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
             raise ValueError("POST path was not approved by the assessment operator")
         state = self._scoped_state(identity, url)
-        if body_probe.captured_volatile_post_fields(baseline, mime):
+        if (body_probe.captured_volatile_post_fields(baseline, mime)
+                or browser_post_replay.has_replayable_source(private, [allowed])):
             result = await self._scoped_fresh_post_sql(private, parameter, identity, allowed)
         else:
             self._scoped_claim_posts(2)
@@ -844,7 +876,8 @@ class ScopedAssessmentTools:
         )
         if (urlsplit(url).path or "/") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
             raise ValueError("POST path was not approved by the assessment operator")
-        if body_probe.captured_volatile_post_fields(variants["baseline_first"], mime):
+        if (body_probe.captured_volatile_post_fields(variants["baseline_first"], mime)
+                or browser_post_replay.has_replayable_source(private, [allowed])):
             result = await self._scoped_fresh_post_sql(
                 private, parameter, identity, allowed, recipe="boolean",
             )
@@ -883,7 +916,8 @@ class ScopedAssessmentTools:
         if (urlsplit(url).path or "/") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
             raise ValueError("POST path was not approved by the assessment operator")
         state = self._scoped_state(identity, url)
-        if body_probe.captured_volatile_post_fields(baseline, mime):
+        if (body_probe.captured_volatile_post_fields(baseline, mime)
+                or browser_post_replay.has_replayable_source(private, [allowed])):
             result = await self._scoped_fresh_post_sql(
                 private, parameter, identity, allowed, recipe="error",
             )
@@ -1015,7 +1049,7 @@ class ScopedAssessmentTools:
             raise ValueError("Provide exactly one captured artifact or mapped URL")
         baseline_source = "browser_traffic"
         if artifact_id:
-            private = self._scoped_exchange(artifact_id, identity)
+            private = self._scoped_get_sql_capture(artifact_id, identity)
             allowed = self._scoped_origin(browser.origin(json.loads(private)["url"]))
             baseline, true_url, false_url, nonce = sqli_boolean.plan_numeric_boolean(
                 private, parameter=parameter, allowed_origins=[allowed],
@@ -1029,13 +1063,26 @@ class ScopedAssessmentTools:
         self._scoped_assessment_started = True
         state = self._scoped_state(identity, baseline)
         self._scoped_claim_gets(6)
-        result = await asyncio.to_thread(
-            sqli_boolean.probe_numeric_boolean,
-            baseline, true_url, false_url, nonce,
-            parameter=parameter, allowed_origins=[allowed],
-            storage_state=state,
-            before_request=lambda: None,
-        )
+        if (artifact_id and json.loads(private).get("resource_type") in {"xhr", "fetch"}
+                and browser_post_replay.has_replayable_source(private, [allowed])):
+            keys = sqli_boolean.CHECK_ORDER
+            urls = (baseline, true_url, false_url, true_url, false_url, baseline)
+            checks = await browser_post_replay.replay_observed_get_controls(
+                private, parameter=parameter, variants=dict(zip(keys, urls, strict=True)),
+                allowed_origins=[allowed], storage_state=state,
+            )
+            result = sqli_boolean.build_numeric_boolean_result(
+                baseline, nonce, parameter=parameter, checks=checks,
+                browser_replay=True,
+            )
+        else:
+            result = await asyncio.to_thread(
+                sqli_boolean.probe_numeric_boolean,
+                baseline, true_url, false_url, nonce,
+                parameter=parameter, allowed_origins=[allowed],
+                storage_state=state,
+                before_request=lambda: None,
+            )
         if artifact_id:
             result["source_artifact_id"] = artifact_id
         result["baseline_source"] = baseline_source
@@ -1046,8 +1093,21 @@ class ScopedAssessmentTools:
         )
         return json.dumps(result)
 
-    async def scoped_string_sqli(self, url: str, parameter: str, identity: str = "anonymous") -> str:
+    async def scoped_string_sqli(self, url: str, parameter: str, identity: str = "anonymous",
+                                 artifact_id: str = "") -> str:
         """Try bounded OR and, if needed, AND controls on an observed GET input."""
+        private = self._scoped_get_sql_capture(artifact_id, identity) if artifact_id else b""
+        if private:
+            captured_url = json.loads(private).get("url")
+            if not isinstance(captured_url, str):
+                raise ValueError("Captured GET has no URL")
+            source = urlsplit(captured_url)
+            requested = urlsplit(url)
+            if ((source.scheme, source.netloc, source.path or "/") !=
+                    (requested.scheme, requested.netloc, requested.path or "/")
+                    or requested.fragment or requested.query and url != captured_url):
+                raise ValueError("Captured GET does not match the requested input")
+            url = captured_url
         allowed = self._scoped_origin(url)
         parts = urlsplit(url)
         from app.services.agent.parameter_inventory import collect_parameter_inventory
@@ -1165,17 +1225,30 @@ class ScopedAssessmentTools:
             )
         self._scoped_assessment_started = True
         state = self._scoped_state(identity, baseline)
+        browser_ready = bool(private and json.loads(private).get("resource_type") in {"xhr", "fetch"}
+                             and browser_post_replay.has_replayable_source(private, [allowed]))
         self._scoped_claim_gets(9 if needs_preflight else 8)
         preflight = None
         if needs_preflight:
             preflight = await asyncio.to_thread(http_observe.observe_get, baseline, [allowed], state)
-        result = await asyncio.to_thread(
-            sqli_string.probe_string_boolean,
-            baseline, variants, nonce,
-            parameter=parameter, allowed_origins=[allowed],
-            storage_state=state,
-            before_request=lambda: None,
-        )
+        if browser_ready:
+            checks = await browser_post_replay.replay_observed_get_controls(
+                private, parameter=parameter, variants=variants,
+                allowed_origins=[allowed], storage_state=state,
+            )
+            result = sqli_string.build_string_boolean_result(
+                baseline, nonce, parameter=parameter, checks=checks, browser_replay=True,
+            )
+        else:
+            result = await asyncio.to_thread(
+                sqli_string.probe_string_boolean,
+                baseline, variants, nonce,
+                parameter=parameter, allowed_origins=[allowed],
+                storage_state=state,
+                before_request=lambda: None,
+            )
+        if artifact_id:
+            result["source_artifact_id"] = artifact_id
         result["source"] = observed["source"]
         result["baseline_source"] = baseline_source
         if preflight is not None:
@@ -1203,11 +1276,23 @@ class ScopedAssessmentTools:
             )
             try:
                 self._scoped_claim_gets(len(sqli_string.ERROR_CHECK_ORDER))
-                error_result = await asyncio.to_thread(
-                    sqli_string.probe_string_error,
-                    baseline, variants, parameter=parameter, allowed_origins=[allowed],
-                    storage_state=state, before_request=lambda: None,
-                )
+                if browser_ready:
+                    checks = await browser_post_replay.replay_observed_get_controls(
+                        private, parameter=parameter, variants={
+                            "baseline_first": baseline, "quote_first": variants["quote_error"],
+                            "escaped_quote": variants["escaped_quote"],
+                            "quote_second": variants["quote_error"], "baseline_last": baseline,
+                        }, allowed_origins=[allowed], storage_state=state,
+                    )
+                    error_result = sqli_string.build_string_error_result(
+                        baseline, parameter=parameter, checks=checks, browser_replay=True,
+                    )
+                else:
+                    error_result = await asyncio.to_thread(
+                        sqli_string.probe_string_error,
+                        baseline, variants, parameter=parameter, allowed_origins=[allowed],
+                        storage_state=state, before_request=lambda: None,
+                    )
             except Exception as exc:
                 result["error_followup_error"] = type(exc).__name__
                 result["evidence_id"] = or_evidence_id
@@ -1231,13 +1316,23 @@ class ScopedAssessmentTools:
                 _, and_variants, and_nonce = sqli_string.plan_string_and_boolean(
                     baseline, parameter=parameter, allowed_origins=[allowed],
                 )
-                and_result = await asyncio.to_thread(
-                    sqli_string.probe_string_and_boolean,
-                    baseline, and_variants, and_nonce,
-                    parameter=parameter, allowed_origins=[allowed],
-                    storage_state=state,
-                    before_request=lambda: None,
-                )
+                if browser_ready:
+                    checks = await browser_post_replay.replay_observed_get_controls(
+                        private, parameter=parameter, variants=and_variants,
+                        allowed_origins=[allowed], storage_state=state,
+                    )
+                    and_result = sqli_string.build_string_and_result(
+                        baseline, and_nonce, parameter=parameter, checks=checks,
+                        browser_replay=True,
+                    )
+                else:
+                    and_result = await asyncio.to_thread(
+                        sqli_string.probe_string_and_boolean,
+                        baseline, and_variants, and_nonce,
+                        parameter=parameter, allowed_origins=[allowed],
+                        storage_state=state,
+                        before_request=lambda: None,
+                    )
             except Exception as exc:
                 # Preserve the completed OR receipt if the optional second
                 # pattern cannot run. Never turn this into a clean verdict.
@@ -1255,6 +1350,8 @@ class ScopedAssessmentTools:
             result["total_requests_sent"] = int(result.get("requests_sent") or 0) + int(needs_preflight)
         result["source"] = observed["source"]
         result["baseline_source"] = baseline_source
+        if artifact_id:
+            result["source_artifact_id"] = artifact_id
         if preflight is not None:
             result["baseline_preflight"] = {
                 key: preflight.get(key) for key in (

@@ -63,10 +63,16 @@ def plan_observed_query(private_exchange: bytes, *, parameter: str,
 def probe_observed_query(url: str, mutated: str, *, parameter: str,
                          allowed_origins: list[str], storage_state: dict | None) -> dict:
     """Make one baseline and one one-field probe request, without publishing a finding."""
-    parts = urlsplit(url)
-
     baseline = observe_get(url, allowed_origins, storage_state)
     probe = observe_get(mutated, allowed_origins, storage_state)
+    return build_observed_query_result(url, parameter=parameter,
+                                       baseline=baseline, probe=probe)
+
+
+def build_observed_query_result(url: str, *, parameter: str, baseline: dict,
+                                probe: dict, browser_replay: bool = False) -> dict:
+    """Summarize the same lead from direct or live browser GET observations."""
+    parts = urlsplit(url)
 
     def summary(result: dict) -> dict:
         return {key: result[key] for key in (
@@ -75,12 +81,12 @@ def probe_observed_query(url: str, mutated: str, *, parameter: str,
         )}
 
     changed = baseline["status"] != probe["status"] or baseline["body_sha256"] != probe["body_sha256"]
-    return {
+    result = {
         "operation": "query_probe",
         "target": origin(url) + (parts.path or "/"),
         "method": "GET", "location": "query", "parameter": parameter,
         "technique": "append_single_quote", "requests_sent": 2,
-        "identity_transport": "named_identity_cookies_only",
+        "identity_transport": "named_identity_browser_state" if browser_replay else "named_identity_cookies_only",
         "baseline": summary(baseline), "probe": summary(probe),
         "changed": changed,
         "inconclusive": baseline["truncated"] or probe["truncated"]
@@ -88,3 +94,10 @@ def probe_observed_query(url: str, mutated: str, *, parameter: str,
         or baseline["status"] in (401, 403) or probe["status"] in (401, 403),
         "finding": False,
     }
+    if browser_replay:
+        result["replay_mode"] = "browser_live_get"
+        result["browser_request_counts"] = {
+            "baseline": baseline.get("browser_requests_seen", 0),
+            "probe": probe.get("browser_requests_seen", 0),
+        }
+    return result

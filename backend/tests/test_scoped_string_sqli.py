@@ -15,11 +15,13 @@ from app.services.agent.engagement_brain import EngagementBrain
 from app.services.agent.coverage_cells import seed_parameter_coverage_cells
 from app.services.agent.fireteam_service import get_specialist
 from app.services.agent.independent_verify import (
-    apply_verdict, check_verify_receipt, run_independent_verifiers,
+    FindingCandidate, _verify_scoped_sql_candidate, apply_verdict,
+    check_verify_receipt, run_independent_verifiers,
     submit_candidate,
 )
 from app.services.agent.proof_policy import validate_proof
 from app.services.agent.scoped_assessment import sqli_string
+from app.services.agent.scoped_assessment import browser_post_replay
 from app.services.agent.scoped_assessment.browser_traffic import package_exchange
 from app.services.agent.scoped_assessment.http_observe import _sql_error_family
 from app.services.agent.scoped_assessment_tools import HUNTER_GET_BUDGET
@@ -101,6 +103,66 @@ def _observe(url, allowed_origins, storage_state):
         "truncated": False, "redirected": False,
         "body_sha256": hashlib.sha256(body).hexdigest(),
     }
+
+
+@pytest.mark.asyncio
+async def test_captured_string_get_uses_browser_for_hunter_and_verifier(monkeypatch):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    manager._capability_map = {"scope": "https://app.example.test", "pages_visited": [URL]}
+    public, private = package_exchange(
+        url=URL, expected_origin="https://app.example.test",
+        page_url="https://app.example.test/shop", action_ref="navigate",
+        method="GET", resource_type="fetch", status=200,
+        content_type="text/html", request_body=b"", response_body=b"one product",
+    )
+    store = evidence_store(manager)
+    capture_id = store.record("scoped_browser_exchange", public, target=TARGET,
+                              identity="anonymous")
+    manager._scoped_browser_exchanges = {
+        capture_id: {"identity": "anonymous", "private": private,
+                     "public": public, "verifier_run_id": None},
+    }
+    calls = []
+
+    async def replay(capture, *, parameter, variants, allowed_origins, storage_state):
+        assert capture == private and parameter == "category"
+        calls.append(list(variants))
+        return {key: {**_observe(url, allowed_origins, storage_state),
+                      "sql_error_family": "", "json_array_lengths": {}}
+                for key, url in variants.items()}
+
+    monkeypatch.setattr(browser_post_replay, "replay_observed_get_controls", replay)
+    hunter = json.loads(await manager.scoped_string_sqli(
+        URL, "category", artifact_id=capture_id,
+    ))
+    assert hunter["proof_confirmed"] is True
+    assert hunter["replay_mode"] == "browser_live_get"
+    assert hunter["source_artifact_id"] == capture_id
+
+    brain = EngagementBrain(target=TARGET)
+    brain.coverage_cells = [{
+        "id": "cell-1", "source": "parameter_inventory",
+        "observation_source": "browser_traffic", "test_type": "sqli",
+        "method": "GET", "host": "app.example.test", "path": "/catalog",
+        "parameter": "query:category", "identity": "anonymous", "capture_id": capture_id,
+    }]
+    candidate = FindingCandidate(
+        id="candidate-1", title="SQL injection in category", target=TARGET,
+        vulnerability_class="sql_injection", coverage_cell_id="cell-1",
+        parameter="query:category", evidence_ids=[hunter["evidence_id"]],
+    )
+    brain.candidates = [candidate.to_dict()]
+    manager._engagement_brain = brain.to_dict()
+    run = VerificationRun("fresh-string-get-run", "candidate-1", 1, "nonce")
+    token = verification_run.set(run)
+    try:
+        verdict = await _verify_scoped_sql_candidate(manager, candidate, run)
+    finally:
+        verification_run.reset(token)
+    assert verdict["status"] == "confirmed"
+    assert len(calls) == 2
 
 
 def _proof(monkeypatch, nonce):

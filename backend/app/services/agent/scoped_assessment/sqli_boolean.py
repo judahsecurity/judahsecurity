@@ -99,13 +99,22 @@ def probe_numeric_boolean(baseline: str, true_url: str, false_url: str, nonce: s
         checks[key] = {name: response[name] for name in (
             "status", "content_type", "bytes_captured", "truncated", "body_sha256", "redirected",
         )}
+    return build_numeric_boolean_result(baseline, nonce, parameter=parameter, checks=checks)
+
+
+def build_numeric_boolean_result(baseline: str, nonce: str, *, parameter: str,
+                                 checks: dict[str, dict], browser_replay: bool = False) -> dict:
+    """Apply one proof policy to direct and live browser GET observations."""
     parts = urlsplit(baseline)
     result = {
         "operation": "sqli_boolean_numeric", "proof_recipe": "numeric_and_boolean_v1",
         "target": origin(baseline) + (parts.path or "/"),
         "method": "GET", "location": "query", "parameter": parameter,
         "nonce": nonce, "requests_sent": 6,
-        "identity_transport": "named_identity_cookies_only", "checks": checks,
+        "identity_transport": "named_identity_browser_state" if browser_replay else "named_identity_cookies_only",
+        "checks": checks,
     }
+    if browser_replay:
+        result["replay_mode"] = "browser_live_get"
     result["proof_confirmed"] = numeric_sql_proof_valid(result)
     return result

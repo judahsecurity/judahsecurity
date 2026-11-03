@@ -119,6 +119,214 @@ async def test_fresh_token_post_sqli_controls_keep_repeated_proof(mode):
         server.server_close()
         thread.join(timeout=2)
 
+
+@pytest.mark.asyncio
+async def test_post_replay_uses_fresh_header_and_cookie_with_static_body():
+    from app.services.agent.scoped_assessment import body_probe
+    from app.services.agent.scoped_assessment.browser_post_replay import replay_observed_post_controls
+
+    class Handler(BaseHTTPRequestHandler):
+        issued = 0
+        used = set()
+        seen = []
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            Handler.issued += 1
+            token = f"page-{Handler.issued}"
+            body = ("<script>fetch('/api/filter',{method:'POST',headers:{"
+                    "'Content-Type':'application/x-www-form-urlencoded',"
+                    f"'X-CSRF-Token':'{token}'"
+                    "},body:'template=botox'})</script>").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Set-Cookie", f"page_session={token}; Path=/; SameSite=Lax")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers["Content-Length"]))
+            token = self.headers.get("X-CSRF-Token", "")
+            Handler.seen.append((token, self.headers.get("Cookie", ""), body))
+            if (not token.startswith("page-") or token in Handler.used
+                    or f"page_session={token}" not in self.headers.get("Cookie", "")):
+                self.send_response(403)
+                self.end_headers()
+                return
+            Handler.used.add(token)
+            value = parse_qs(body.decode())["template"][0]
+            response = (b"You have an error in your SQL syntax" if value.endswith("'")
+                        and not value.endswith("''") else b"ordinary response")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    private = json.dumps({
+        "url": base + "/api/filter", "method": "POST", "resource_type": "fetch",
+        "action_ref": "navigate", "page_url": base + "/catalog",
+        "request_content_type": "application/x-www-form-urlencoded",
+        "request_body_base64": base64.b64encode(b"template=botox").decode(),
+    }).encode()
+    try:
+        url, mime, baseline, _, _ = body_probe.plan_sql_error_body(
+            private, parameter="template", allowed_origins=[base],
+        )
+        checks = await replay_observed_post_controls(
+            private, parameter="template", allowed_origins=[base], storage_state=None,
+            payloads={
+                "baseline_first": "", "quote_first": "'", "escaped_quote": "''",
+                "quote_second": "'", "baseline_last": "",
+            },
+        )
+        result = body_probe.build_sql_error_result(
+            url, mime, baseline, parameter="template", checks=checks,
+        )
+        assert result["proof_confirmed"] is True
+        assert len({row[0] for row in Handler.seen}) == 5
+        assert all(row["body_match_mode"] == "exact" for row in checks.values())
+        assert all(row["browser_requests_seen"] <= 24 for row in checks.values())
+        assert all(row["status"] == 200 for row in checks.values())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_post_replay_caps_incidental_page_requests():
+    from app.services.agent.scoped_assessment.browser_post_replay import (
+        MAX_HTTP_REQUESTS_PER_CONTROL, replay_observed_post_controls,
+    )
+
+    class Handler(BaseHTTPRequestHandler):
+        seen = 0
+        posts = 0
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            Handler.seen += 1
+            body = (b"<script>(async()=>{for(let i=0;i<35;i++){try{await fetch('/asset?i='+i)}"
+                    b"catch(e){}}fetch('/api/filter',{method:'POST',headers:{'Content-Type':"
+                    b"'application/x-www-form-urlencoded'},body:'template=botox'})})()</script>"
+                    if self.path == "/catalog" else b"ok")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            Handler.posts += 1
+            self.send_response(200)
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    private = json.dumps({
+        "url": base + "/api/filter", "method": "POST", "resource_type": "fetch",
+        "action_ref": "navigate", "page_url": base + "/catalog",
+        "request_content_type": "application/x-www-form-urlencoded",
+        "request_body_base64": base64.b64encode(b"template=botox").decode(),
+    }).encode()
+    try:
+        with pytest.raises(ValueError, match="request cap exceeded"):
+            await replay_observed_post_controls(
+                private, parameter="template", allowed_origins=[base],
+                storage_state=None, payloads={"baseline_first": ""},
+            )
+        assert Handler.seen <= MAX_HTTP_REQUESTS_PER_CONTROL
+        assert Handler.posts == 0
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_get_replay_uses_fresh_header_and_cookie():
+    from app.services.agent.scoped_assessment.browser_post_replay import replay_observed_get_controls
+    from app.services.agent.scoped_assessment.query_probe import plan_observed_query
+
+    class Handler(BaseHTTPRequestHandler):
+        issued = 0
+        used = set()
+        seen = []
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            if self.path == "/catalog":
+                Handler.issued += 1
+                token = f"page-{Handler.issued}"
+                body = ("<script>fetch('/api/filter?template=botox',{headers:{"
+                        f"'X-CSRF-Token':'{token}'"
+                        "}})</script>").encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Set-Cookie", f"page_session={token}; Path=/; SameSite=Lax")
+            elif self.path.startswith("/api/filter?"):
+                token = self.headers.get("X-CSRF-Token", "")
+                Handler.seen.append((token, self.headers.get("Cookie", ""), self.path))
+                if (not token.startswith("page-") or token in Handler.used
+                        or f"page_session={token}" not in self.headers.get("Cookie", "")):
+                    self.send_response(403)
+                    self.end_headers()
+                    return
+                Handler.used.add(token)
+                value = parse_qs(self.path.split("?", 1)[1])["template"][0]
+                body = (b"You have an error in your SQL syntax" if value.endswith("'")
+                        else b"ordinary response")
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+            else:
+                body = b"missing"
+                self.send_response(404)
+                self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    private = json.dumps({
+        "url": base + "/api/filter?template=botox", "method": "GET",
+        "resource_type": "fetch", "action_ref": "navigate",
+        "page_url": base + "/catalog", "request_body_base64": "",
+    }).encode()
+    try:
+        baseline, mutated = plan_observed_query(
+            private, parameter="template", allowed_origins=[base],
+        )
+        checks = await replay_observed_get_controls(
+            private, parameter="template", allowed_origins=[base], storage_state=None,
+            variants={"baseline": baseline, "probe": mutated},
+        )
+        assert len(Handler.seen) == 2
+        assert len({token for token, _, _ in Handler.seen}) == 2
+        assert all(row["status"] == 200 for row in checks.values())
+        assert checks["probe"]["sql_error_family"] == "mysql"
+        assert all(row["browser_requests_seen"] <= 24 for row in checks.values())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_ASSESSMENT_BROWSER_TESTS") != "1",
     reason="Opt-in local Chromium fixture",

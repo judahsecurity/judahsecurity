@@ -703,6 +703,8 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
                 "post_xhr_replay_blocked", "local_probe_blocked", "unsupported_capture",
                 "missing_capture", "missing_probe_evidence", "scope_mismatch",
                 "invalid_coverage_lease", "lease_changed", "post_token_refresh_blocked",
+                "browser_replay_request_cap", "browser_replay_no_match",
+                "browser_replay_response_missing", "browser_replay_source_missing",
             }:
                 replay_reason = handoff_code
             else:

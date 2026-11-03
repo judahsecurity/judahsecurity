@@ -1,12 +1,16 @@
 """Captured POST replay keeps current rotating tokens and rejects changed inputs."""
 
 import json
+import base64
 from urllib.parse import parse_qs
 
 import pytest
 
 from app.services.agent.scoped_assessment.body_probe import (
     captured_volatile_post_fields, match_browser_post_body,
+)
+from app.services.agent.scoped_assessment.browser_post_replay import (
+    _valid_get_variant, has_replayable_source,
 )
 
 
@@ -125,3 +129,31 @@ def test_sql_suffix_is_encoded_into_live_body(mime, baseline, live, parameter):
             "template": ["botox" + suffix], "csrf_token": ["fresh"],
         }
         assert b"%27" in changed and b"%20" in changed
+
+
+def test_browser_source_is_replayable_without_a_body_token():
+    captured = {
+        "url": "https://app.test/api/filter", "method": "POST",
+        "resource_type": "fetch", "page_url": "https://app.test/catalog",
+        "action_ref": "navigate", "request_content_type": "application/json",
+        "request_body_base64": base64.b64encode(b'{"template":"botox"}').decode(),
+    }
+    private = json.dumps(captured).encode()
+    assert has_replayable_source(private, ["https://app.test"])
+    captured["action_ref"] = "unknown-button"
+    assert not has_replayable_source(json.dumps(captured).encode(), ["https://app.test"])
+    captured["page_url"] = "https://offsite.test/catalog"
+    assert not has_replayable_source(json.dumps(captured).encode(), ["https://app.test"])
+
+
+def test_get_replay_rejects_changes_to_other_observed_fields():
+    baseline = "https://app.test/api/filter?template=botox&page=2"
+    assert _valid_get_variant(
+        baseline, "https://app.test/api/filter?template=botox%27&page=2", "template",
+    )
+    assert not _valid_get_variant(
+        baseline, "https://app.test/api/filter?template=botox%27&page=3", "template",
+    )
+    assert not _valid_get_variant(
+        baseline, "https://offsite.test/api/filter?template=botox%27&page=2", "template",
+    )
