@@ -265,6 +265,8 @@ def validate_proof(
                     or first.get("proof_confirmed") is not True
                     or second.get("proof_confirmed") is not True
                     or first.get("parameter") != second.get("parameter")
+                    or not first.get("injection_template")
+                    or first.get("injection_template") != second.get("injection_template")
                     or first.get("delay_seconds") != second.get("delay_seconds")
                     or not first.get("nonce") or first.get("nonce") == second.get("nonce")
                     or hunter["identity"] != verifier["identity"]):

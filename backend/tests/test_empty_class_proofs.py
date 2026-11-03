@@ -7,12 +7,15 @@ tests pin the new deterministic recipes and their independent-verification gate.
 
 from types import SimpleNamespace
 
+import pytest
+
 from app.services.agent.proof_policy import proof_kind_allowed, validate_proof
 from app.services.agent.scoped_assessment.command_injection import (
     SEPARATION_RATIO,
     command_timing_proof_valid,
 )
 from app.services.agent.scoped_assessment.path_traversal import path_canary_proof_valid
+from app.services.agent.tools import ASMToolsManager
 
 _MARKER_SHA = "a" * 64
 
@@ -54,13 +57,17 @@ def test_new_classes_now_have_proof_kinds():
 # command_injection — bounded time-based proof
 # --------------------------------------------------------------------------
 
+_TIMING_TEMPLATE = "https://app.example.test/api/items?path=x;sleep __PROWL_DELAY__"
+
+
 def _timing_payload(nonce, *, control=(0.10, 0.12, 0.11), probe=(4.3, 4.2, 4.5),
-                    delay=4, parameter="path"):
+                    delay=4, parameter="path", injection_template=_TIMING_TEMPLATE):
     control = list(control)
     probe = list(probe)
     separation = min(probe) - max(control)
     return {
         "operation": "scoped_command_timing", "test_type": "command_injection",
+        "injection_template": injection_template,
         "parameter": parameter, "nonce": nonce, "delay_seconds": delay,
         "trials": len(control), "requests_sent": len(control) + len(probe),
         "control": {"samples": control, "max": max(control)},
@@ -108,6 +115,13 @@ def test_command_timing_needs_two_independent_bounded_delays():
 
     # Both actors must probe the same parameter.
     verifier["payload"]["parameter"] = "other"
+    assert not validate_proof(store, candidate, proof, ["verifier"])[0]
+    verifier["payload"]["parameter"] = "path"
+
+    # Both actors must fire the same injection template.
+    verifier["payload"]["injection_template"] = (
+        "https://app.example.test/api/items?path=y;sleep __PROWL_DELAY__"
+    )
     assert not validate_proof(store, candidate, proof, ["verifier"])[0]
 
 
@@ -183,3 +197,35 @@ def test_path_canary_needs_two_reads_of_the_same_sentinel():
     # Reused nonce is not an independent read.
     verifier["payload"]["nonce"] = "aaaa"
     assert not validate_proof(store, candidate, proof, ["verifier"])[0]
+
+
+# --------------------------------------------------------------------------
+# Operator policy intake for the new probe paths
+# --------------------------------------------------------------------------
+
+def test_policy_installs_command_and_traversal_allowlists():
+    manager = ASMToolsManager()
+    manager.set_scoped_assessment_policy({
+        "command_injection_paths": ["/api/export"],
+        "path_traversal_sentinels": [
+            {"path": "/download", "marker": "PROWL-SENTINEL-OUT-OF-ROOT"},
+        ],
+    })
+    assert manager._scoped_command_injection_paths == {"/api/export"}
+    assert manager._scoped_path_traversal_sentinels == {
+        "/download": "PROWL-SENTINEL-OUT-OF-ROOT"}
+    assert manager._scoped_assessment_started is True
+
+
+def test_policy_rejects_weak_traversal_sentinel():
+    manager = ASMToolsManager()
+    # Marker shorter than the 8-char floor is not a usable signature.
+    with pytest.raises(ValueError):
+        manager.set_scoped_assessment_policy({
+            "path_traversal_sentinels": [{"path": "/download", "marker": "short"}],
+        })
+    # A sentinel without a safe path is rejected.
+    with pytest.raises(ValueError):
+        manager.set_scoped_assessment_policy({
+            "path_traversal_sentinels": [{"marker": "PROWL-SENTINEL-OUT-OF-ROOT"}],
+        })

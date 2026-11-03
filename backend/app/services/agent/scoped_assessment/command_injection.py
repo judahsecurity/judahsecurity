@@ -82,9 +82,11 @@ def _timed_get(opener, url: str, headers: dict) -> float | None:
     return round(time.perf_counter() - start, 4)
 
 
-def _unconfirmed(parameter: str, nonce: str, delay: int, trials: int) -> dict:
+def _unconfirmed(injection_template: str, parameter: str, nonce: str,
+                 delay: int, trials: int) -> dict:
     return {
         "operation": "scoped_command_timing", "test_type": "command_injection",
+        "injection_template": injection_template,
         "parameter": parameter, "nonce": nonce, "delay_seconds": delay,
         "trials": trials, "requests_sent": 0,
         "control": {"samples": [], "max": None},
@@ -130,7 +132,7 @@ def probe_command_timing(injection_template: str, *, parameter: str,
         for _ in range(trials):
             elapsed = _timed_get(opener, url, headers)
             if elapsed is None:
-                return _unconfirmed(parameter, nonce, delay, trials)
+                return _unconfirmed(injection_template, parameter, nonce, delay, trials)
             samples.append(elapsed)
 
     control_max = max(control_samples)
@@ -139,6 +141,7 @@ def probe_command_timing(injection_template: str, *, parameter: str,
     confirmed = separation >= SEPARATION_RATIO * delay
     return {
         "operation": "scoped_command_timing", "test_type": "command_injection",
+        "injection_template": injection_template,
         "parameter": parameter, "nonce": nonce, "delay_seconds": delay,
         "trials": trials, "requests_sent": 2 * trials,
         "control": {"samples": control_samples, "max": control_max},

@@ -730,6 +730,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "scoped_response_probe_assigned": self.scoped_response_probe_assigned,
             "scoped_cors_probe_assigned": self.scoped_cors_probe_assigned,
             "scoped_race_assigned": self.scoped_race_assigned,
+            "scoped_command_timing_assigned": self.scoped_command_timing_assigned,
+            "scoped_path_canary_assigned": self.scoped_path_canary_assigned,
             "scoped_client_probe_assigned": self.scoped_client_probe_assigned,
             "scan_assigned_js_dependency": self.scan_assigned_js_dependency,
             "scoped_xml_entity_assigned": self.scoped_xml_entity_assigned,
@@ -1964,6 +1966,197 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "proof_confirmed": proof["proof_confirmed"],
                 "probe_result": {k: proof[k] for k in
                                  ("control", "probe", "cleanup_confirmed", "requests_sent")},
+                "funnel": parameter_test_funnel(brain)}
+
+    async def scoped_command_timing_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+        injection_template: str, delay_seconds: int = 4, trials: int = 3,
+    ) -> Dict[str, Any]:
+        """Prove time-based OS command injection on an operator-approved path.
+
+        ``injection_template`` is a model-formed in-scope GET URL carrying the
+        ``__PROWL_DELAY__`` token; it only fires when its path is in the
+        operator's ``command_injection_paths`` allowlist. The payload sleeps.
+        """
+        import asyncio
+        import secrets
+        import time
+        from urllib.parse import urlsplit
+
+        from app.services.agent.coverage_cells import parameter_test_funnel
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.scoped_assessment.command_injection import (
+            DELAY_TOKEN, probe_command_timing,
+        )
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        location, separator, parameter = str((cell or {}).get("parameter") or "").partition(":")
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "parameter_inventory"
+                or cell.get("test_type") != "command_injection"
+                or cell.get("method") != "GET" or location != "query"
+                or not separator or not parameter
+                or not allowed_discovery_path(str(cell.get("path") or "/"))):
+            return {"success": False, "error": "invalid_coverage_lease"}
+        if DELAY_TOKEN not in injection_template or len(injection_template) > 2048:
+            return {"success": False, "error": "injection_template_missing_delay_token"}
+        try:
+            tparts = urlsplit(injection_template)
+        except ValueError:
+            return {"success": False, "error": "invalid_injection_template"}
+        inj_path = tparts.path or "/"
+        if inj_path not in (getattr(self, "_scoped_command_injection_paths", None) or set()):
+            return {"success": False, "error": "operator_approval_required",
+                    "reason": "injection path is not in command_injection_paths"}
+        if inj_path != str(cell.get("path") or "/"):
+            return {"success": False, "error": "injection_path_mismatch"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin or _origin(injection_template) != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        url = scoped_origin + cell["path"]
+        identity = str(cell.get("identity") or "anonymous")
+        nonce = secrets.token_hex(8)
+        delay = max(2, min(8, int(delay_seconds or 4)))
+        trials = max(2, min(4, int(trials or 3)))
+        try:
+            self._scoped_origin(injection_template.replace(DELAY_TOKEN, "0"))
+            self._scoped_origin(injection_template.replace(DELAY_TOKEN, str(delay)))
+            self._scoped_claim_gets(2 * trials)
+            proof = await asyncio.to_thread(
+                probe_command_timing, injection_template, parameter=parameter,
+                delay_seconds=delay, allowed_origin=scoped_origin,
+                state=self._scoped_state(identity, url), nonce=nonce, trials=trials,
+            )
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__, "reason": str(exc)[:200]}
+        summary = {"path": cell["path"], **proof}
+        artifact_id = evidence_store(self).record(
+            "scoped_command_timing", summary, target=url, identity=identity,
+            coverage_cell_id=coverage_cell_id, test_type="command_injection",
+            success=proof["proof_confirmed"],
+        )
+        cell["evidence_ids"] = list(dict.fromkeys([
+            *(cell.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        cell["last_probe"] = "scoped_command_timing"
+        if proof["proof_confirmed"]:
+            cell["status"] = "in_focus"
+            cell["reason"] = "Time-based command-injection signal requires independent verification"
+        self._engagement_brain = brain.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
+                "proof_confirmed": proof["proof_confirmed"],
+                "probe_result": {k: proof[k] for k in
+                                 ("control", "probe", "separation", "delay_seconds",
+                                  "requests_sent")},
+                "funnel": parameter_test_funnel(brain)}
+
+    async def scoped_path_canary_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+        traversal_url: str,
+    ) -> Dict[str, Any]:
+        """Prove directory traversal by reading an operator-approved out-of-root sentinel.
+
+        ``traversal_url`` is a model-formed in-scope GET URL; it only fires when
+        its path has an operator-nominated sentinel marker in
+        ``path_traversal_sentinels``. Confirmation requires that marker to appear
+        only through traversal. The read is non-destructive.
+        """
+        import asyncio
+        import secrets
+        import time
+        from urllib.parse import urlsplit
+
+        from app.services.agent.coverage_cells import parameter_test_funnel
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.scoped_assessment.path_traversal import probe_path_canary
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        location, separator, parameter = str((cell or {}).get("parameter") or "").partition(":")
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "parameter_inventory"
+                or cell.get("test_type") != "path_traversal"
+                or cell.get("method") != "GET" or location != "query"
+                or not separator or not parameter
+                or not allowed_discovery_path(str(cell.get("path") or "/"))):
+            return {"success": False, "error": "invalid_coverage_lease"}
+        if len(traversal_url) > 2048:
+            return {"success": False, "error": "invalid_traversal_url"}
+        try:
+            tparts = urlsplit(traversal_url)
+        except ValueError:
+            return {"success": False, "error": "invalid_traversal_url"}
+        trav_path = tparts.path or "/"
+        sentinels = getattr(self, "_scoped_path_traversal_sentinels", None) or {}
+        marker = sentinels.get(trav_path)
+        if not marker:
+            return {"success": False, "error": "operator_approval_required",
+                    "reason": "traversal path is not in path_traversal_sentinels"}
+        if trav_path != str(cell.get("path") or "/"):
+            return {"success": False, "error": "traversal_path_mismatch"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin or _origin(traversal_url) != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        url = scoped_origin + cell["path"]
+        identity = str(cell.get("identity") or "anonymous")
+        nonce = secrets.token_hex(8)
+        # A stable benign control value keeps the control URL identical across the
+        # hunter and the verifier, as the path-canary proof policy requires.
+        control_url, control_source = self._observed_get_query_template(
+            url, parameter, "prowl_control", identity, capture_id=cell.get("capture_id") or "",
+        )
+        if control_source == "single_parameter":
+            return {"success": False, "error": "observed_query_baseline_missing"}
+        try:
+            self._scoped_origin(control_url)
+            self._scoped_origin(traversal_url)
+            self._scoped_claim_gets(2)
+            proof = await asyncio.to_thread(
+                probe_path_canary, control_url, traversal_url,
+                sentinel_marker=marker, allowed_origin=scoped_origin,
+                state=self._scoped_state(identity, url), nonce=nonce,
+            )
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__, "reason": str(exc)[:200]}
+        summary = {"path": cell["path"], "parameter": parameter, **proof}
+        artifact_id = evidence_store(self).record(
+            "scoped_path_canary", summary, target=url, identity=identity,
+            coverage_cell_id=coverage_cell_id, test_type="path_traversal",
+            success=proof["proof_confirmed"],
+        )
+        cell["evidence_ids"] = list(dict.fromkeys([
+            *(cell.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        cell["last_probe"] = "scoped_path_canary"
+        if proof["proof_confirmed"]:
+            cell["status"] = "in_focus"
+            cell["reason"] = "Out-of-root sentinel read requires independent verification"
+        self._engagement_brain = brain.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
+                "proof_confirmed": proof["proof_confirmed"],
+                "probe_result": {k: proof[k] for k in
+                                 ("control", "probe", "requests_sent")},
                 "funnel": parameter_test_funnel(brain)}
 
     async def scoped_xml_entity_assigned(

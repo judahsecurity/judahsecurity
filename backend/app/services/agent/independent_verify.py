@@ -719,6 +719,12 @@ async def run_independent_verifiers(
                 replayed = await _verify_scoped_race_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
+                replayed = await _verify_scoped_command_candidate(tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
+                replayed = await _verify_scoped_path_candidate(tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
                 replayed = await _verify_scoped_xml_xxe_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
@@ -1096,6 +1102,191 @@ async def _verify_scoped_race_candidate(
         except Exception:
             logging.getLogger(__name__).exception("Race verifier replay failed")
             failure = "Race verifier replay failed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title,
+            "status": "inconclusive", "verifier_summary": failure,
+            "key_findings": [], "tool_calls": 1, "error": None}
+
+
+async def _verify_scoped_command_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Repeat the operator-approved bounded sleep on the same injection template."""
+    import asyncio
+    import secrets
+    from urllib.parse import urlsplit
+
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.proof_policy import validate_proof
+    from app.services.agent.scoped_assessment.command_injection import (
+        DELAY_TOKEN, probe_command_timing,
+    )
+
+    if (cand.vulnerability_class or "") != "command_injection":
+        return None
+    store = evidence_store(tools_manager)
+    target_path = urlsplit(cand.target).path or "/"
+    cell = next((row for row in _brain(tools_manager).coverage_cells
+                 if row.get("id") == cand.coverage_cell_id
+                 and row.get("test_type") == "command_injection"
+                 and row.get("source") == "parameter_inventory"
+                 and row.get("method") == "GET"
+                 and row.get("path") == target_path), None)
+    identity = str(cand.identity or "anonymous")
+    hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
+                   if eid in store.records
+                   and store.records[eid].get("kind") == "scoped_command_timing"
+                   and store.records[eid].get("target") == cand.target
+                   and store.records[eid].get("identity") == identity
+                   and store.records[eid].get("payload", {}).get("test_type") == "command_injection"
+                   and store.records[eid].get("payload", {}).get("proof_confirmed") is True), None)
+    failure = "An observed command-injection timing receipt is required"
+    if cell and hunter:
+        hunter_id, receipt = hunter
+        payload = receipt.get("payload", {})
+        injection_template = payload.get("injection_template")
+        parameter = payload.get("parameter")
+        delay = int(payload.get("delay_seconds") or 0)
+        trials = max(2, min(4, int(payload.get("trials") or 3)))
+        inj_path = urlsplit(injection_template or "").path or "/"
+        approved = inj_path in (getattr(tools_manager, "_scoped_command_injection_paths", None) or set())
+        if injection_template and parameter and approved and DELAY_TOKEN in injection_template:
+            nonce = secrets.token_hex(8)
+            target = urlsplit(cand.target)
+            scoped_origin = f"{target.scheme}://{target.netloc}"
+            try:
+                tools_manager._scoped_origin(injection_template.replace(DELAY_TOKEN, "0"))
+                tools_manager._scoped_origin(injection_template.replace(DELAY_TOKEN, str(delay)))
+                tools_manager._scoped_claim_gets(2 * trials)
+                replay = await asyncio.to_thread(
+                    probe_command_timing, injection_template, parameter=parameter,
+                    delay_seconds=delay, allowed_origin=scoped_origin,
+                    state=tools_manager._scoped_state(identity, cand.target),
+                    nonce=nonce, trials=trials,
+                )
+                summary = {"path": cell["path"], **replay}
+                artifact_id = store.record(
+                    "scoped_command_timing", summary, target=cand.target,
+                    identity=identity, coverage_cell_id=cand.coverage_cell_id,
+                    test_type="command_injection", success=replay["proof_confirmed"],
+                )
+                if replay.get("proof_confirmed") is True:
+                    proof = {"kind": "command_timing",
+                             "hunter_artifact_id": hunter_id, "artifact_id": artifact_id}
+                    valid, why = validate_proof(store, cand, proof, [artifact_id])
+                    fresh, fresh_why = store.validate(
+                        [artifact_id], candidate_id=cand.id, revision=cand.revision,
+                        run_id=run.id, target=cand.target,
+                    )
+                    if valid and fresh:
+                        verified = apply_verdict(
+                            tools_manager, candidate_id=cand.id, verdict="confirmed",
+                            evidence="Fresh bounded sleep reproduced the injected delay.",
+                            evidence_ids=[artifact_id], proof=proof,
+                        )
+                        if verified and verified.status == "confirmed":
+                            return {"candidate_id": cand.id, "title": cand.title,
+                                    "status": "confirmed", "verifier_summary":
+                                    "Fresh timing probe matched the hunter receipt",
+                                    "key_findings": [], "tool_calls": 1, "error": None}
+                    failure = why or fresh_why or "Command-injection proof policy rejected the replay"
+                else:
+                    failure = "Fresh timing probe did not reproduce the injected delay"
+            except Exception:
+                logging.getLogger(__name__).exception("Command verifier replay failed")
+                failure = "Command verifier replay failed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title,
+            "status": "inconclusive", "verifier_summary": failure,
+            "key_findings": [], "tool_calls": 1, "error": None}
+
+
+async def _verify_scoped_path_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Repeat the out-of-root sentinel read using the operator-nominated marker."""
+    import asyncio
+    import secrets
+    from urllib.parse import urlsplit
+
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.proof_policy import validate_proof
+    from app.services.agent.scoped_assessment.path_traversal import probe_path_canary
+
+    if (cand.vulnerability_class or "") != "path_traversal":
+        return None
+    store = evidence_store(tools_manager)
+    target_path = urlsplit(cand.target).path or "/"
+    cell = next((row for row in _brain(tools_manager).coverage_cells
+                 if row.get("id") == cand.coverage_cell_id
+                 and row.get("test_type") == "path_traversal"
+                 and row.get("source") == "parameter_inventory"
+                 and row.get("method") == "GET"
+                 and row.get("path") == target_path), None)
+    identity = str(cand.identity or "anonymous")
+    hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
+                   if eid in store.records
+                   and store.records[eid].get("kind") == "scoped_path_canary"
+                   and store.records[eid].get("target") == cand.target
+                   and store.records[eid].get("identity") == identity
+                   and store.records[eid].get("payload", {}).get("test_type") == "path_traversal"
+                   and store.records[eid].get("payload", {}).get("proof_confirmed") is True), None)
+    failure = "An observed traversal sentinel receipt is required"
+    if cell and hunter:
+        hunter_id, receipt = hunter
+        payload = receipt.get("payload", {})
+        traversal_url = payload.get("traversal_template")
+        control_url = payload.get("control_template")
+        trav_path = urlsplit(traversal_url or "").path or "/"
+        sentinels = getattr(tools_manager, "_scoped_path_traversal_sentinels", None) or {}
+        marker = sentinels.get(trav_path)
+        if traversal_url and control_url and marker:
+            nonce = secrets.token_hex(8)
+            target = urlsplit(cand.target)
+            scoped_origin = f"{target.scheme}://{target.netloc}"
+            try:
+                tools_manager._scoped_origin(control_url)
+                tools_manager._scoped_origin(traversal_url)
+                tools_manager._scoped_claim_gets(2)
+                replay = await asyncio.to_thread(
+                    probe_path_canary, control_url, traversal_url,
+                    sentinel_marker=marker, allowed_origin=scoped_origin,
+                    state=tools_manager._scoped_state(identity, cand.target), nonce=nonce,
+                )
+                summary = {"path": cell["path"], "parameter":
+                           str(cell.get("parameter") or "").partition(":")[2], **replay}
+                artifact_id = store.record(
+                    "scoped_path_canary", summary, target=cand.target,
+                    identity=identity, coverage_cell_id=cand.coverage_cell_id,
+                    test_type="path_traversal", success=replay["proof_confirmed"],
+                )
+                if replay.get("proof_confirmed") is True:
+                    proof = {"kind": "path_canary",
+                             "hunter_artifact_id": hunter_id, "artifact_id": artifact_id}
+                    valid, why = validate_proof(store, cand, proof, [artifact_id])
+                    fresh, fresh_why = store.validate(
+                        [artifact_id], candidate_id=cand.id, revision=cand.revision,
+                        run_id=run.id, target=cand.target,
+                    )
+                    if valid and fresh:
+                        verified = apply_verdict(
+                            tools_manager, candidate_id=cand.id, verdict="confirmed",
+                            evidence="Fresh traversal read reproduced the out-of-root sentinel.",
+                            evidence_ids=[artifact_id], proof=proof,
+                        )
+                        if verified and verified.status == "confirmed":
+                            return {"candidate_id": cand.id, "title": cand.title,
+                                    "status": "confirmed", "verifier_summary":
+                                    "Fresh traversal read matched the hunter receipt",
+                                    "key_findings": [], "tool_calls": 1, "error": None}
+                    failure = why or fresh_why or "Path-traversal proof policy rejected the replay"
+                else:
+                    failure = "Fresh traversal read did not reproduce the sentinel"
+            except Exception:
+                logging.getLogger(__name__).exception("Path verifier replay failed")
+                failure = "Path verifier replay failed"
     apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
                   evidence=failure, summary=failure)
     return {"candidate_id": cand.id, "title": cand.title,

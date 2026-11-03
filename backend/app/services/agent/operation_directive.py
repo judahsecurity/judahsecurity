@@ -178,9 +178,27 @@ class OperationDirective:
                 )
             elif kind == "command_injection":
                 block += (
-                    " Command injection needs a benign output marker or repeatable timing "
-                    "differential against controls. Do not use file reads or outbound callbacks "
-                    "as the first proof. A changed status alone is not evidence of execution."
+                    " Command injection needs a repeatable timing differential against controls "
+                    "or an out-of-band callback — not a file read or a changed status. For a "
+                    "bounded time-based proof, call scoped_command_timing_assigned with this "
+                    "cell and lease and an in-scope GET injection_template carrying __PROWL_DELAY__ "
+                    "where the sleep seconds are substituted; its path must be in the operator's "
+                    "command_injection_paths. A zero-delay control must stay fast while the "
+                    "bounded-delay probe clears it repeatably. For blind execution with an "
+                    "authorized collaborator, use the out-of-band callback path instead. Submit a "
+                    "positive candidate with vulnerability_class=command_injection and its "
+                    "evidence_id for independent replay; without an operator-approved path, leave "
+                    "the proof inconclusive."
+                )
+            elif kind == "path_traversal":
+                block += (
+                    " Path traversal needs an out-of-root read differential, not a 404/200 guess. "
+                    "Call scoped_path_canary_assigned with this cell and lease and an in-scope GET "
+                    "traversal_url whose path has an operator-nominated sentinel in "
+                    "path_traversal_sentinels; it confirms only when that sentinel marker appears "
+                    "through traversal and not in the benign control. Submit a positive candidate "
+                    "with vulnerability_class=path_traversal and its evidence_id for independent "
+                    "replay; without an approved sentinel, leave the proof inconclusive."
                 )
             elif kind == "xxe":
                 block += (

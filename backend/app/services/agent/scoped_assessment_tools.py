@@ -119,6 +119,8 @@ class ScopedAssessmentTools:
         cleanup_paths = policy.get("stored_xss_cleanup_paths") or []
         race_action_paths = policy.get("race_action_paths") or []
         race_cleanup_paths = policy.get("race_cleanup_paths") or []
+        command_injection_paths = policy.get("command_injection_paths") or []
+        path_traversal_sentinels = policy.get("path_traversal_sentinels") or []
         expectations = policy.get("owner_only_resources") or []
         auth_login_path = policy.get("auth_login_path") or ""
         if (auth_login_path and (not isinstance(auth_login_path, str)
@@ -131,12 +133,30 @@ class ScopedAssessmentTools:
                 or not isinstance(cleanup_paths, list) or len(cleanup_paths) > 8
                 or not isinstance(race_action_paths, list) or len(race_action_paths) > 8
                 or not isinstance(race_cleanup_paths, list) or len(race_cleanup_paths) > 8
+                or not isinstance(command_injection_paths, list) or len(command_injection_paths) > 8
+                or not isinstance(path_traversal_sentinels, list) or len(path_traversal_sentinels) > 8
                 or not isinstance(expectations, list) or len(expectations) > 8):
             raise ValueError("Invalid bounded assessment policy")
-        for path in [*paths, *cleanup_paths, *race_action_paths, *race_cleanup_paths]:
+        for path in [*paths, *cleanup_paths, *race_action_paths, *race_cleanup_paths,
+                     *command_injection_paths]:
             if (not isinstance(path, str) or not path.startswith("/") or path.startswith("//")
                     or path == "/" or len(path) > 256 or any(char in path for char in "?#\\\r\n\t ")):
                 raise ValueError("Invalid approved write or cleanup path")
+        # Path-traversal sentinels pair an operator-approved traversal path with the
+        # out-of-root marker that only a successful traversal can return. The marker
+        # is operator policy — never model supplied — so the verifier can re-read it.
+        sentinels: dict[str, str] = {}
+        for row in path_traversal_sentinels:
+            if not isinstance(row, dict):
+                raise ValueError("Invalid path-traversal sentinel")
+            trav_path, marker = row.get("path"), row.get("marker")
+            if (not isinstance(trav_path, str) or not trav_path.startswith("/")
+                    or trav_path.startswith("//") or trav_path == "/" or len(trav_path) > 256
+                    or any(char in trav_path for char in "\\\r\n\t ")
+                    or not isinstance(marker, str) or not 8 <= len(marker) <= 256
+                    or not marker.isprintable()):
+                raise ValueError("Path-traversal sentinel needs a safe path and a bounded marker")
+            sentinels[trav_path] = marker
         approved = {}
         for row in expectations:
             if not isinstance(row, dict):
@@ -156,9 +176,12 @@ class ScopedAssessmentTools:
         self._scoped_stored_xss_cleanup_paths = set(cleanup_paths)
         self._scoped_race_action_paths = set(race_action_paths)
         self._scoped_race_cleanup_paths = set(race_cleanup_paths)
+        self._scoped_command_injection_paths = set(command_injection_paths)
+        self._scoped_path_traversal_sentinels = sentinels
         self._scoped_owner_expectations = approved
         self._scoped_auth_login_path = auth_login_path
-        if paths or cleanup_paths or race_action_paths or race_cleanup_paths or approved:
+        if (paths or cleanup_paths or race_action_paths or race_cleanup_paths
+                or command_injection_paths or sentinels or approved):
             self._scoped_assessment_started = True
 
     def _scoped_origin(self, url: str) -> str:

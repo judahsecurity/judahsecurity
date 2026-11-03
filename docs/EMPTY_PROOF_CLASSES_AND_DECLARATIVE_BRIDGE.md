@@ -117,32 +117,48 @@ target. The per-class branches add:
 `evidence_store.py`'s accepted scoped-proof-kind allowlist was extended with the
 two new kinds; their `proven` check is the generic `proof_confirmed is True`.
 
-### What is shipped vs. remaining glue
+### What is shipped
 
-**Shipped and unit-tested** (`backend/tests/test_empty_class_proofs.py`, plus an
-updated assertion in `test_scoped_proof_policy.py` that previously pinned the
-*absence* of a command-injection proof):
+**Proof core** (`backend/tests/test_empty_class_proofs.py`, plus an updated
+assertion in `test_scoped_proof_policy.py` that previously pinned the *absence*
+of a command-injection proof):
 
 - Both probe modules and their pure `*_proof_valid` checkers.
 - `PROOFS_BY_CLASS`, `validate_proof` branches + `expected_kind` entries.
 - `evidence_store` kind allowlist.
 
-**Remaining glue to make the live agent select these** (mechanical, best done
-with the full agent runtime in front of you — not unit-testable in isolation):
+**Live-agent wiring** (so the fireteam actually selects these — the funnel
+already emits `command_injection` and `path_traversal` cells via
+`vulnerability_catalog.py`, routed to the `injection` specialist, which
+previously dead-ended at `unsupported_input`):
 
-1. A `scoped_command_timing_assigned` / `scoped_path_canary_assigned` tool
-   method in `backend/app/services/agent/tools.py`, registered in the tool map,
-   that calls the probe, records the evidence (`record("scoped_command_timing",
-   …)` / `record("scoped_path_canary", …)`), and attaches it to the coverage
-   cell — model the method on `scoped_response_probe_assigned`.
-2. A `_verify_scoped_command_candidate` / `_verify_scoped_path_candidate`
-   replay function in `independent_verify.py`, registered alongside
-   `_verify_scoped_response_candidate`, that re-runs the probe with a fresh
-   nonce in the verifier session. `verifier_mission()` already surfaces the new
-   proof options automatically from `PROOFS_BY_CLASS`.
-3. A directive/skill-pack line so the relevant specialists know the recipe
-   exists (an injection lane for `command_timing`, a traversal/LFI lane for
-   `path_canary`).
+1. `scoped_command_timing_assigned` / `scoped_path_canary_assigned` tool methods
+   in `tools.py`, registered in the tool map, modelled on `scoped_race_assigned`
+   — the model proposes the injection/traversal attempt, but it only fires when
+   the path is in an operator allowlist.
+2. `set_scoped_assessment_policy` now accepts `command_injection_paths` (approved
+   paths for the timing probe) and `path_traversal_sentinels`
+   (`[{path, marker}]`, the out-of-root marker is **operator policy**, never
+   model-supplied, so the verifier can re-read it and only the marker hash is
+   retained in evidence).
+3. `_verify_scoped_command_candidate` / `_verify_scoped_path_candidate` replay
+   functions in `independent_verify.py`, registered in the verifier dispatch,
+   re-run the probe with a fresh nonce in the verifier session.
+   `verifier_mission()` surfaces the new proof options automatically.
+4. Directive text (`operation_directive.py`) and tool docs (`prompts.py`) point
+   the injection specialist at the two recipes and their operator-approval
+   requirements.
+
+**Safety posture:** no OS-command gadget catalog or LFI payload list is shipped.
+Like `race_probe`, the model forms the exact attempt but the probe refuses any
+path the operator has not allowlisted, and the command-timing payload only
+induces a bounded sleep while the path-canary read is non-destructive.
+
+### Still open
+
+- `csrf` (the third empty class) — needs a same-site-cookie + cross-origin
+  state-change differential reusing the authz/state-change machinery.
+- POST-body variants of both recipes (v1 covers the GET/query surface).
 
 ---
 
