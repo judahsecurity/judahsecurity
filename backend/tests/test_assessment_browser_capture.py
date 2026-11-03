@@ -458,6 +458,16 @@ async def test_browser_capture_flows_into_controlled_authorization_proof(crud_ap
     assert result["success"], result
     capture = next(c for c in result["captures"] if c["url"] == base + "/objects/1")
     assert capture["source"] == "browser"
+    assert any(
+        row["reference"] == "path:2"
+        for row in capture["authorization_references"]
+    )
+    leads = json.loads(await manager.list_authorization_leads(capture["operation_id"]))
+    assert any(
+        row["capture_id"] == capture["id"] and row["status"] == "needs_policy"
+        for row in leads["leads"]
+    )
+    assert result["authorization_handoff"]["candidates"] >= 1
     assert "browser-seed" not in json.dumps(result)
     manager, cell, _, _ = await prepare(base, "captured_read", m=manager, capture=capture)
     receipt = json.loads(await manager.run_authorization_proof(cell["hypothesis_id"]))["receipt"]

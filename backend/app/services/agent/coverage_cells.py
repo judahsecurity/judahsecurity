@@ -612,6 +612,55 @@ def seed_parameter_coverage_cells(brain: Any, inventory: Iterable[dict[str, Any]
     return migrate_coverage_cells(brain)
 
 
+def seed_authorization_capture_cells(brain: Any, leads: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Queue captured reference locations for auth logic without asserting a policy."""
+    operations = {
+        str(op.get("id")): op for op in (getattr(brain, "application_operations", []) or [])
+        if isinstance(op, dict)
+    }
+    existing = {
+        row.get("id"): row for row in (getattr(brain, "coverage_cells", []) or [])
+        if isinstance(row, dict)
+    }
+    for lead in leads:
+        # Keep generic query fields visible in the lead list, but reserve
+        # automatic coverage work for a name or value that resembles an object.
+        if not lead.get("replayable") or lead.get("priority_score", 0) < 2:
+            continue
+        op = operations.get(str(lead.get("operation_id") or ""))
+        if not op:
+            continue
+        cell = _new_cell(
+            brain,
+            method=op.get("method", "GET"),
+            path=op.get("path") or "/",
+            host=op.get("host", ""),
+            operation_id=op.get("id", ""),
+            identity=lead.get("owner_identity", ""),
+            parameter=lead.get("matrix_parameter") or "endpoint",
+            test_type="authz",
+            source="authorization_capture",
+            reason="Captured reference lead; establish the expected access policy",
+            capture_id=lead.get("capture_id", ""),
+        )
+        cell["priority_rank"] = 0 if lead.get("priority_score", 0) >= 3 else 2
+        cell["observation_source"] = "execution_owned_capture"
+        prior = existing.get(cell["id"])
+        if prior and prior.get("status") in CELL_OPEN and not prior.get("lease_id"):
+            prior["capture_id"] = cell["capture_id"]
+            prior["observation_source"] = cell["observation_source"]
+            prior["priority_rank"] = min(
+                int(prior.get("priority_rank", 2)), cell["priority_rank"]
+            )
+            if prior.get("source") == "parameter_inventory":
+                prior["source"] = "authorization_capture"
+            continue
+        if not prior and len(existing) < MAX_COVERAGE_CELLS:
+            brain.coverage_cells.append(cell)
+            existing[cell["id"]] = cell
+    return migrate_coverage_cells(brain)
+
+
 def verified_input_paths(brain: Any) -> set[str]:
     """Return paths with an independently confirmed input finding in this run."""
     cells = brain.get("coverage_cells", []) if isinstance(brain, dict) else getattr(brain, "coverage_cells", [])

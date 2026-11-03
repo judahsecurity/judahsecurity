@@ -882,6 +882,7 @@ TOOL_PHASE_MAP = {
     "generate_authorization_matrix": ["informational", "exploitation", "post_exploitation"],
     "run_authorization_proof": ["exploitation", "post_exploitation"],
     "list_proof_captures": ["informational", "exploitation", "post_exploitation"],
+    "list_authorization_leads": ["informational", "exploitation", "post_exploitation"],
     "prepare_captured_authorization_proof": ["informational", "exploitation", "post_exploitation"],
     "get_assessment_coverage": ["informational", "exploitation", "post_exploitation"],
     "collect_js_intelligence": ["informational", "exploitation", "post_exploitation"],
@@ -983,9 +984,15 @@ Record an inconclusive cell with the missing proof and next test instead of
 calling it tested_clean. Do not repeat a failed completion call unchanged.
 
 For capture-to-proof testing, browse_as_identity or replay_http_request with a named
-owner records supported successful REST requests. list_proof_captures exposes
-their capture IDs and operation IDs without credentials or body values. Imported
+owner records supported successful REST requests. list_authorization_leads ranks
+captured path and query references, gives the matching capture ID and operation ID,
+and shows whether a deny policy and proof exist. A lead is not an access verdict.
+Review its owner, establish a distinct test identity and explicit expected deny
+policy, then generate the matching authorization matrix cell. list_proof_captures
+exposes capture IDs and operation IDs without credentials or body values. Imported
 map_application_traffic hints cannot be used as execution-owned captures.
+get_assessment_coverage.authorization_handoff counts queued references, policy
+gaps, proof attempts, confirmed results, evictions and rejected capture shapes.
 After defining explicit deny policy, prepare_captured_authorization_proof takes
 hypothesis_id, capture_id, owner_identity, captured object_id and configuration:
 strategy captured_read/captured_mutation/captured_property/captured_delete; setup
