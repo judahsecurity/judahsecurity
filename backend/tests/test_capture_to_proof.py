@@ -96,7 +96,7 @@ def crud_app():
                 if state["mode"] == "empty_inventory" and state.get("attacked"):
                     result = {"items": []}
             elif urlsplit(self.path).path == "/lookup" and self.command in (
-                "GET", "PATCH"
+                "GET", "PATCH", "DELETE"
             ):
                 oid = parse_qs(urlsplit(self.path).query).get("record", [""])[0]
                 obj = state["objects"].get(oid)
@@ -104,9 +104,13 @@ def crud_app():
                     status, result = 404, {"error": "missing"}
                 else:
                     allowed = who == obj["owner"] or state["vulnerable"]
-                    if self.command == "PATCH" and who != obj["owner"]:
+                    if self.command != "GET" and who != obj["owner"]:
                         state["attacked"] = True
-                    if not allowed:
+                    if self.command == "DELETE":
+                        if allowed:
+                            del state["objects"][oid]
+                        status, result = 204, None
+                    elif not allowed:
                         status, result = 403, {"error": "denied"}
                     else:
                         if self.command == "PATCH":
@@ -360,7 +364,7 @@ async def test_detection_matrix_with_fresh_independent_verification(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("vulnerable", [True, False])
-@pytest.mark.parametrize("strategy", ["captured_read", "captured_mutation"])
+@pytest.mark.parametrize("strategy", ["captured_read", "captured_mutation", "captured_delete"])
 async def test_query_object_id_is_captured_and_proved_with_two_identities(
     crud_app, vulnerable, strategy
 ):
@@ -374,10 +378,11 @@ async def test_query_object_id_is_captured_and_proved_with_two_identities(
     receipt = json.loads(await m.run_authorization_proof(cell["hypothesis_id"]))[
         "receipt"
     ]
-    assert receipt["verdict"] == (
+    expected = (
         "confirmed" if vulnerable else "inconclusive"
         if strategy == "captured_read" else "refuted"
     )
+    assert receipt["verdict"] == expected
     assert receipt["cleanup_status"] == "attempted"
     assert not state["objects"]
     assert any(
