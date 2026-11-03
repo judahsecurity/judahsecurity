@@ -199,6 +199,13 @@ through the normal product-agent adapter and require a fresh verifier receipt
 before counting the positive case. A passing local proof test alone is not a
 measured agent recall result.
 
+The `xss_post_xhr` class-lab pair exercises a POST JSON XHR discovered by
+clicking an observed tab. Each page load issues a new one-use `csrf_token`.
+The browser replay must keep that current token while changing only `message`;
+the vulnerable response renders the canary, and the patched response escapes
+it. Score the pair through the product-agent adapter so capture, replay,
+candidate handoff, and independent verification are measured together.
+
 ## Regression checks
 
 ```bash

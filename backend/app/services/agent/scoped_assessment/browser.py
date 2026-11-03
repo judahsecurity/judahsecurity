@@ -344,6 +344,8 @@ async def check_browser(
     xhr_response_seen = False
     xhr_response_dialogs: list[str] = []
     xhr_request = None
+    xhr_body_match_mode = ""
+    xhr_volatile_fields: list[str] = []
     readback_active = False
     readback_response_seen = False
     readback_status = None
@@ -365,7 +367,9 @@ async def check_browser(
 
             async def route_request(route):
                 nonlocal blocked_requests, approved_post_requests, xhr_mutated, xhr_request
+                nonlocal xhr_body_match_mode, xhr_volatile_fields
                 nonlocal blocked_marker_navigation, blocked_marker_fetch
+                post_mutation = None
                 try:
                     allowed = origin(route.request.url) == expected_origin
                     if allowed and post_action_active:
@@ -381,17 +385,24 @@ async def check_browser(
 
                         method = route.request.method.upper()
                         path = urlsplit(route.request.url).path or "/"
+                        if (operation == "check_xhr_xss" and post_xhr
+                                and method == "POST" and path == xhr_path
+                                and not xhr_mutated
+                                and route.request.resource_type in {"xhr", "fetch"}
+                                and not urlsplit(route.request.url).query
+                                and not urlsplit(route.request.url).fragment
+                                and route.request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                                    == xhr_post_content_type):
+                            from .body_probe import match_browser_post_body
+
+                            post_mutation = match_browser_post_body(
+                                xhr_post_baseline, route.request.post_data_buffer,
+                                mime=xhr_post_content_type, parameter=xhr_parameter,
+                                payload=xhr_payload_template,
+                            )
                         allowed = ((method in {"GET", "HEAD", "OPTIONS"}
                                     and allowed_discovery_path(path))
-                                   or (operation == "check_xhr_xss" and post_xhr
-                                       and method == "POST" and path == xhr_path
-                                       and not xhr_mutated
-                                       and route.request.resource_type in {"xhr", "fetch"}
-                                       and not urlsplit(route.request.url).query
-                                       and not urlsplit(route.request.url).fragment
-                                       and route.request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-                                           == xhr_post_content_type
-                                       and route.request.post_data_buffer == xhr_post_baseline))
+                                   or post_mutation is not None)
                 except ValueError:
                     allowed = False
                 if allowed:
@@ -400,7 +411,8 @@ async def check_browser(
                         if not xhr_actions or current_action_ref == f"xhr-replay-{len(xhr_actions)}":
                             xhr_request = route.request
                             xhr_mutated = True
-                            changed_body = xhr_post_template.replace(NONCE_MARKER.encode(), nonce.encode())
+                            changed_body, xhr_body_match_mode, xhr_volatile_fields = post_mutation
+                            changed_body = changed_body.replace(NONCE_MARKER.encode(), nonce.encode())
                             await route.continue_(post_data=changed_body)
                         else:
                             blocked_requests += 1
@@ -1133,6 +1145,8 @@ async def check_browser(
                         result["xhr_capture_id"] = xhr_capture_id
                         result["xhr_body_location"] = xhr_body_location
                         result["xhr_baseline_request_sha256"] = xhr_baseline_request_sha256
+                        result["xhr_body_match_mode"] = xhr_body_match_mode
+                        result["xhr_volatile_fields"] = xhr_volatile_fields
                 # Give the specialist bounded render feedback without page
                 # source or attacker-controlled text. This is not proof.
                 try:

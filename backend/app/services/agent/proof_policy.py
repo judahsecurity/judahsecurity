@@ -42,6 +42,21 @@ PROOFS_BY_CLASS = {
     "account_enumeration": frozenset(),
 }
 
+
+def _post_xhr_match_valid(row: dict) -> bool:
+    from app.services.agent.scoped_assessment.body_probe import VOLATILE_POST_FIELDS
+
+    mode = row.get("xhr_body_match_mode", "exact")
+    fields = row.get("xhr_volatile_fields") or []
+    if mode == "exact":
+        return fields == []
+    return (mode == "volatile_fields" and isinstance(fields, list)
+            and 1 <= len(fields) <= 3
+            and all(isinstance(field, str)
+                    and field.lower().replace("-", "_") in VOLATILE_POST_FIELDS
+                    for field in fields)
+            and len(fields) == len(set(fields)))
+
 _CLAIM_PATTERNS = (
     ("sql_injection", r"\bSQLi\b|\bSQL\s+injection\b"),
     ("xss", r"\bXSS\b|cross[ -]?site scripting|\bscript injection\b"),
@@ -379,6 +394,9 @@ def validate_proof(
                 or first.get("xhr_body_location") not in {"body_form", "body_json"}
                 or first.get("xhr_baseline_request_sha256") != second.get("xhr_baseline_request_sha256")
                 or not first.get("xhr_baseline_request_sha256")
+                or not all(_post_xhr_match_valid(row) for row in (first, second))
+                or (first.get("xhr_body_match_mode") == second.get("xhr_body_match_mode") == "volatile_fields"
+                    and first.get("xhr_volatile_fields") != second.get("xhr_volatile_fields"))
                 or (candidate.parameter and candidate.parameter !=
                     f"{first.get('xhr_body_location')}:{first.get('xhr_parameter')}")
             ))

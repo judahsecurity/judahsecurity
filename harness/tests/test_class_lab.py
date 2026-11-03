@@ -1,5 +1,6 @@
 import json
 import base64
+import re
 import urllib.parse
 from io import BytesIO
 from types import SimpleNamespace
@@ -78,7 +79,7 @@ def test_upload_and_csrf_negatives_reject_active_or_forged_content():
 
 def test_manifest_has_positive_and_negative_cases_for_each_class():
     cases = build_manifest("http://127.0.0.1:8765")["cases"]
-    assert len(cases) == 20
+    assert len(cases) == 22
     for bug_class in {case["bug_class"] for case in cases}:
         assert {case["polarity"] for case in cases if case["bug_class"] == bug_class} == {
             "positive", "negative"
@@ -109,3 +110,21 @@ def test_post_blind_sql_fixture_has_vulnerable_and_patched_responses():
         assert all(status == 200 for status, _ in (baseline, true, false))
         assert json.loads(baseline[1])["results"] == json.loads(false[1])["results"] == []
         assert bool(json.loads(true[1])["results"]) is vulnerable
+
+
+def test_post_xhr_xss_fixture_rotates_token_and_escapes_patched_response():
+    payload = '<img src=x onerror=alert("lab")>'
+    for vulnerable in (True, False):
+        handler = handler_for("xss_post_xhr", vulnerable, "")
+        status, page = request(handler, "/")
+        assert status == 200 and 'role="tab"' in page
+        token = re.search(r'csrf_token:"([0-9a-f]{16})"', page).group(1)
+        status, body = request(handler, "/api/render", method="POST", body={
+            "message": payload, "csrf_token": token,
+        })
+        assert status == 200
+        assert (payload in body) is vulnerable
+        assert ("&lt;img" in body) is not vulnerable
+        assert request(handler, "/api/render", method="POST", body={
+            "message": payload, "csrf_token": token,
+        })[0] == 403
