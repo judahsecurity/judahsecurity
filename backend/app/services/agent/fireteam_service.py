@@ -1236,6 +1236,10 @@ def _tool_contract(tools_manager: Any, tool_name: str) -> str:
             '  - execute_browser(actions=[{"action":"navigate","url":"..."},'
             '{"action":"get_source"}])'
         )
+    if tool_name == "execute_curl":
+        from aegis_praetorium.censor import curl_arg_contract
+
+        return f"  - execute_curl(args: {curl_arg_contract()})"
     if getattr(tool, "__name__", "") == "execute_mcp_tool":
         return f"  - {tool_name}(args?)"
     try:

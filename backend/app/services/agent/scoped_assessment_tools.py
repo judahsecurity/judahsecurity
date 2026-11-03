@@ -1204,7 +1204,7 @@ class ScopedAssessmentTools:
                     # Browser maps intentionally expose parameter names without
                     # link values. A fresh, harmless value can still establish
                     # an execution-owned baseline for an observed safe GET input.
-                    # The preflight below must succeed before SQL controls run.
+                    # The preflight records the response shape before controls run.
                     from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
 
                     if allowed_discovery_path(parts.path or "/"):
@@ -1228,11 +1228,9 @@ class ScopedAssessmentTools:
         browser_ready = bool(private and json.loads(private).get("resource_type") in {"xhr", "fetch"}
                              and browser_post_replay.has_replayable_source(private, [allowed]))
         self._scoped_claim_gets(9 if needs_preflight else 8)
+        preflight = None
         if needs_preflight:
             preflight = await asyncio.to_thread(http_observe.observe_get, baseline, [allowed], state)
-            if (preflight.get("status") != 200 or preflight.get("redirected")
-                    or preflight.get("truncated")):
-                raise ValueError("Observed GET form did not produce a stable baseline response")
         if browser_ready:
             checks = await browser_post_replay.replay_observed_get_controls(
                 private, parameter=parameter, variants=variants,
@@ -1253,6 +1251,21 @@ class ScopedAssessmentTools:
             result["source_artifact_id"] = artifact_id
         result["source"] = observed["source"]
         result["baseline_source"] = baseline_source
+        if preflight is not None:
+            result["baseline_preflight"] = {
+                key: preflight.get(key) for key in (
+                    "status", "body_sha256", "redirected", "truncated",
+                )
+            }
+            preflight_issues = [
+                label for condition, label in (
+                    (preflight.get("status") != 200, "non_200_status"),
+                    (preflight.get("redirected"), "redirect"),
+                    (preflight.get("truncated"), "truncated_body"),
+                ) if condition
+            ]
+            if preflight_issues:
+                result["baseline_preflight_issues"] = preflight_issues
         result["finding"] = False  # One actor's proof is a candidate, never publication.
         if result.get("proof_confirmed") is not True and sqli_string.error_followup_eligible(result):
             # A database-specific diagnostic needs a second controlled run;
@@ -1339,6 +1352,14 @@ class ScopedAssessmentTools:
         result["baseline_source"] = baseline_source
         if artifact_id:
             result["source_artifact_id"] = artifact_id
+        if preflight is not None:
+            result["baseline_preflight"] = {
+                key: preflight.get(key) for key in (
+                    "status", "body_sha256", "redirected", "truncated",
+                )
+            }
+            if preflight_issues:
+                result["baseline_preflight_issues"] = preflight_issues
         result["finding"] = False
         result["evidence_id"] = evidence_store(self).record(
             "scoped_string_sqli", result, target=result["target"], identity=identity,

@@ -114,6 +114,24 @@ def _check_cli_string(value: str, schema: FieldSchema) -> Optional[str]:
     return None
 
 
+_CURL_SIMPLE_FLAGS = frozenset({
+    "-s", "-S", "-i", "-I", "-g", "--silent", "--show-error",
+    "--include", "--head", "--globoff",
+})
+_CURL_VALUE_FLAGS = frozenset({"-H", "--header", "-X", "--request", "--url"})
+
+
+def curl_arg_contract() -> str:
+    """Describe the curl flags accepted by the same validator used at execution."""
+    value_suffix = {"-H": "<header>", "--header": "<header>",
+                    "-X": "GET|HEAD", "--request": "GET|HEAD", "--url": "<URL>"}
+    return ("one HTTP(S) URL; separate flags " + ", ".join(sorted(_CURL_SIMPLE_FLAGS))
+            + "; value flags "
+            + ", ".join(f"{flag} {value_suffix[flag]}" for flag in sorted(_CURL_VALUE_FLAGS))
+            + "; "
+            "use compare_requests or mutate_captured_request for bodies and writes")
+
+
 def _check_curl_args(value: str, schema: FieldSchema) -> Optional[str]:
     """Allow inert query payload bytes in a tightly limited read-only curl call.
 
@@ -131,17 +149,14 @@ def _check_curl_args(value: str, schema: FieldSchema) -> Optional[str]:
         return f"unparseable curl quoting: {exc}"
     if len(tokens) > 24:
         return "too many curl arguments"
-    simple = {"-s", "-S", "-i", "-I", "-g", "--silent", "--show-error",
-              "--include", "--head", "--globoff"}
-    value_flags = {"-H", "--header", "-X", "--request", "--url"}
     urls = []
     i = 0
     while i < len(tokens):
         token = tokens[i]
-        if token in simple:
+        if token in _CURL_SIMPLE_FLAGS:
             i += 1
             continue
-        if token in value_flags:
+        if token in _CURL_VALUE_FLAGS:
             if i + 1 >= len(tokens):
                 return f"missing value for {token}"
             argument = tokens[i + 1]

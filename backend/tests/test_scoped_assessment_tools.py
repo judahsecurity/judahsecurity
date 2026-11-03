@@ -55,6 +55,53 @@ async def test_unusable_identity_does_not_consume_numeric_sqli_get_budget(monkey
 
 
 @pytest.mark.asyncio
+async def test_generated_get_baseline_records_redirect_and_still_runs_controls(monkeypatch):
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    manager._capability_map = {
+        "target": "https://app.example.test",
+        "forms": [{"method": "GET", "action": "https://app.example.test/catalog",
+                   "inputs": ["category"]}],
+    }
+    sent = []
+
+    def observe(url, _origins, _state):
+        sent.append(("preflight", url))
+        return {"status": 302, "body_sha256": "a" * 64,
+                "redirected": True, "truncated": False}
+
+    def controls(baseline, _variants, _nonce, **_kwargs):
+        sent.append(("controls", baseline))
+        return {"target": "https://app.example.test/catalog",
+                "proof_confirmed": False, "requests_sent": 8, "checks": {}}
+
+    monkeypatch.setattr(
+        "app.services.agent.scoped_assessment_tools.http_observe.observe_get", observe,
+    )
+    monkeypatch.setattr(
+        "app.services.agent.scoped_assessment_tools.sqli_string.probe_string_boolean", controls,
+    )
+    monkeypatch.setattr(
+        "app.services.agent.scoped_assessment_tools.sqli_string.error_followup_eligible",
+        lambda _result: False,
+    )
+    monkeypatch.setattr(
+        "app.services.agent.scoped_assessment_tools.sqli_string.and_fallback_eligible",
+        lambda _result: False,
+    )
+
+    result = json.loads(await manager.scoped_string_sqli(
+        "https://app.example.test/catalog", "category",
+    ))
+    assert [kind for kind, _ in sent] == ["preflight", "controls"]
+    assert result["baseline_preflight"]["status"] == 302
+    assert result["baseline_preflight_issues"] == ["non_200_status", "redirect"]
+    assert result["proof_confirmed"] is False
+    assert result["evidence_id"]
+
+
+@pytest.mark.asyncio
 async def test_agent_browser_inventory_keeps_private_exchange_values_out_of_tool_output(monkeypatch):
     manager = ASMToolsManager()
     manager._fallback_target = "https://app.example.test"

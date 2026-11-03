@@ -482,7 +482,7 @@ The `execute_browser` tool uses Playwright with a real Chromium browser. Use it 
 
 **CMS/WordPress workflow (run as soon as WordPress is fingerprinted — do not wait for WPScan, methodology cards, or phase promotion):**
 1. Fingerprint: `execute_wappalyzer` / `execute_whatweb` / httpx tech-detect
-2. Unauth REST user enum: `execute_curl(args="-sS -D- https://target.com/wp-json/wp/v2/users?per_page=100")`. HTTP 200 with `slug`/`name` is a finding. Call `create_finding` with title, description, severity, target.
+2. Unauth REST user enum: `execute_curl(args="-s -i https://target.com/wp-json/wp/v2/users?per_page=100")`. HTTP 200 with `slug`/`name` is a finding. Call `create_finding` with title, description, severity, target.
 3. Time-based SQLi on `POST /wp-admin/admin-ajax.php` — this is how a human tester finds plugin injection, **not WPScan**. `compare_requests` baseline vs mutant:
    - headers: `Content-Type: application/x-www-form-urlencoded`
    - baseline body: `action=loadmore&page=1&query={{"tax_query":{{"0":{{"terms":["1"]}}}}}}`

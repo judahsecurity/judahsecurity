@@ -1145,7 +1145,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                    if cell["test_type"] == "xss" else {})}
 
     async def probe_observed_input_batch(
-        self, max_checks: int = 8, max_seconds: int = 180,
+        self, max_checks: int = 32, max_seconds: int = 180,
         surface_signature: str = "", pending_input_count: int = 0,
         pending_batch_signature: str = "",
         target: str = "",
@@ -2189,7 +2189,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
 
         run_id = active_run_id.get()
         if (run_id and not verification_run.get() and tool_name in {
-            "execute_browser", "scoped_input_probe_assigned",
+            "execute_browser", "execute_curl", "scoped_input_probe_assigned",
             "scoped_assessment_probe_assigned",
         }):
             import time as _time
@@ -2220,7 +2220,9 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 result = await self._execute_recorded(tool_name, tool_args)
                 inner = result.get("output") if isinstance(result.get("output"), dict) else result
                 error = str(inner.get("error") or "") if isinstance(inner, dict) else ""
-                if error in {"invalid_coverage_lease", "assessment_scope_denied"}:
+                if (error in {"invalid_coverage_lease", "assessment_scope_denied"}
+                        or (tool_name == "execute_curl"
+                            and error.startswith("Censor rejected execute_curl"))):
                     self._nonretryable_failures[key] = (_time.time(), deepcopy(result))
                     if len(self._nonretryable_failures) > 128:
                         self._nonretryable_failures.pop(next(iter(self._nonretryable_failures)))

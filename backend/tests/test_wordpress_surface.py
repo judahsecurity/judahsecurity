@@ -137,13 +137,17 @@ def test_forced_wp_probes_after_crawl():
     step = wordpress_forced_step(after_cves)
     assert step and step["tool_name"] == "execute_curl"
     assert "wp-json/wp/v2/users" in (step.get("tool_args") or {}).get("args", "")
+    from aegis_praetorium.censor import Censor
+
+    verdict = Censor().validate("execute_curl", step["tool_args"])
+    assert verdict.ok, verdict.error
 
     after_users = {
         **after_cves,
         "execution_trace": after_cves["execution_trace"] + [
             {
                 "tool_name": "execute_curl",
-                "tool_args": {"args": f"-sS -D- {url}/wp-json/wp/v2/users?per_page=100"},
+                "tool_args": {"args": f"-s -i {url}/wp-json/wp/v2/users?per_page=100"},
                 "success": True,
             }
         ],

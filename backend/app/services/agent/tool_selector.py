@@ -403,7 +403,7 @@ class ToolSelector:
         if es_hit:
             recs.append(ToolRecommendation(
                 tool_name="execute_curl",
-                args_template="-sS -D- http://{target}:9200/",
+                args_template="-s -i http://{target}:9200/",
                 priority=2,
                 rationale=(
                     "Elasticsearch :9200 observed — unauth GET / for cluster name/version/node. "
@@ -422,11 +422,14 @@ class ToolSelector:
         )
         if arango_hit:
             recs.append(ToolRecommendation(
-                tool_name="execute_curl",
-                args_template='-sS -D- -H Content-Type: application/json -d {"username":"root","password":""} http://{target}:8529/_open/auth',
+                tool_name="replay_http_request",
+                args_template=('method=POST url=http://{target}:8529/_open/auth '
+                               'headers={{"Content-Type":"application/json"}} '
+                               'body={{"username":"root","password":""}} '
+                               'use_auth_session=false'),
                 priority=2,
                 rationale=(
-                    "ArangoDB :8529 observed — POST /_open/auth root with empty password only. "
+                    "ArangoDB :8529 observed — send one structured POST /_open/auth root with an empty password. "
                     "On JWT: list databases + one collection sample. No PII dump."
                 ),
                 phase_required="exploitation",
@@ -453,7 +456,7 @@ class ToolSelector:
             ))
             recs.append(ToolRecommendation(
                 tool_name="execute_curl",
-                args_template="-sS -D- https://{target}/wp-json/wp/v2/users?per_page=100",
+                args_template="-s -i https://{target}/wp-json/wp/v2/users?per_page=100",
                 priority=1,
                 rationale=(
                     "WordPress REST user enumeration — unauthenticated "
@@ -478,7 +481,7 @@ class ToolSelector:
         if "api" in self._target_types:
             recs.append(ToolRecommendation(
                 tool_name="execute_curl",
-                args_template="-sS -D- https://{target}/api/schema/",
+                args_template="-s -i https://{target}/api/schema/",
                 priority=4,
                 rationale=(
                     "OpenAPI/Swagger likely — GET /api/schema/ (or swagger.json). Hunt "
@@ -739,7 +742,7 @@ class ToolSelector:
             if sqli_params or xss_params:
                 recs.append(ToolRecommendation(
                     tool_name="probe_observed_input_batch",
-                    args_template="max_checks=8",
+                    args_template="max_checks=32",
                     priority=7,
                     rationale=("Test mapped SQLi/XSS inputs with their observed request shape and "
                                "execution-owned proof controls before escalating a specific lead."),
