@@ -61,7 +61,6 @@ import { JiraProjectPicker } from '@/components/integrations/JiraProjectPicker';
 import { ServiceNowSection } from '@/components/integrations/ServiceNowSection';
 import { WizSection } from '@/components/integrations/WizSection';
 import { NetBrainSection } from '@/components/integrations/NetBrainSection';
-import { ZpaSection } from '@/components/integrations/ZpaSection';
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'] as const;
 
@@ -3227,9 +3226,6 @@ export default function IntegrationsPage() {
 
         {/* NetBrain configuration-evidence integration */}
         <NetBrainSection />
-
-        {/* ZPA LSS observed destinations */}
-        <ZpaSection />
 
         {/* Cloudflare WAF Integration Card */}
         <CloudflareSection />

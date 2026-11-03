@@ -144,7 +144,6 @@ class GraphService:
                 "CREATE CONSTRAINT ip_key IF NOT EXISTS FOR (i:IP) REQUIRE i.ip_key IS UNIQUE",
                 "CREATE CONSTRAINT cloud_subscription_key IF NOT EXISTS FOR (c:CloudSubscription) REQUIRE c.key IS UNIQUE",
                 "CREATE CONSTRAINT cloud_region_key IF NOT EXISTS FOR (c:CloudRegion) REQUIRE c.key IS UNIQUE",
-                "CREATE CONSTRAINT zpa_source_key IF NOT EXISTS FOR (s:ZpaSource) REQUIRE s.key IS UNIQUE",
                 "CREATE CONSTRAINT port_id IF NOT EXISTS FOR (p:Port) REQUIRE p.port_id IS UNIQUE",
                 "CREATE CONSTRAINT service_name IF NOT EXISTS FOR (s:Service) REQUIRE s.name IS UNIQUE",
                 "CREATE CONSTRAINT service_observation_id IF NOT EXISTS FOR (s:ServiceObservation) REQUIRE s.port_id IS UNIQUE",
@@ -1446,11 +1445,10 @@ class GraphService:
                 for rel in path.relationships:
                     sid = rel.start_node.element_id
                     tid = rel.end_node.element_id
-                    key = rel.element_id
+                    key = (sid, tid, rel.type)
                     if key not in seen_edges:
                         seen_edges.add(key)
-                        edges_out.append({"source": sid, "target": tid, "type": rel.type,
-                                          "properties": dict(rel)})
+                        edges_out.append({"source": sid, "target": tid, "type": rel.type})
         return {"nodes": nodes_out, "edges": edges_out}
     
     def get_discovery_tree(self, asset_id: int, organization_id: int) -> Dict[str, Any]:

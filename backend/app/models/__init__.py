@@ -65,7 +65,6 @@ from app.models.workflow import (
 )
 from app.models.wiz_integration import WizIntegration
 from app.models.netbrain_integration import NetBrainIntegration
-from app.models.zpa_integration import ZpaIntegration, ZpaObservation
 
 __all__ = [
     "User",
