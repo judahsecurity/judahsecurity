@@ -12,6 +12,7 @@ import hashlib
 import html
 import json
 import re
+import secrets
 from urllib.error import HTTPError
 from urllib.parse import unquote_plus, urlsplit
 from urllib.request import Request, build_opener
@@ -24,10 +25,18 @@ from .http_observe import MAX_BODY, _NoRedirect, _cookie_header, _sql_error_fami
 
 
 MAX_REPLAY_BODY = min(MAX_BODY_BYTES, 64 * 1024)
+VOLATILE_POST_FIELDS = frozenset({
+    "csrf", "_csrf", "csrf_token", "_csrf_token", "csrftoken",
+    "csrfmiddlewaretoken", "xsrf_token", "_xsrf", "authenticity_token",
+    "request_id", "request_nonce", "timestamp",
+})
 _SAFE_SQL_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _-]{0,39}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 SQL_ERROR_CHECK_ORDER = (
     "baseline_first", "quote_first", "escaped_quote", "quote_second", "baseline_last",
+)
+SQL_BOOLEAN_CHECK_ORDER = (
+    "baseline_first", "true_first", "false_first", "true_second", "false_second", "baseline_last",
 )
 
 
@@ -43,12 +52,17 @@ def safe_replay_headers(private_exchange: bytes) -> dict[str, str]:
                            expected_origin=origin(url) if isinstance(url, str) else "")
 
 
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("Invalid JSON number")
+
+
 def _mutate_json(data: bytes, pointer: str, payload: str = "'") -> bytes:
     if not pointer.startswith("/") or len(pointer) > 300:
         raise ValueError("A bounded JSON pointer is required")
     try:
-        document = json.loads(data)
-    except (UnicodeDecodeError, ValueError) as exc:
+        document = json.loads(data, object_pairs_hook=_unique_json_object,
+                              parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise ValueError("Captured JSON body is invalid") from exc
     current = document
     tokens = pointer.split("/")[1:]
@@ -78,7 +92,8 @@ def _mutate_json(data: bytes, pointer: str, payload: str = "'") -> bytes:
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         raise ValueError("Body probe requires a string or numeric field")
     setter(str(value) + payload)
-    changed = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode()
+    changed = json.dumps(document, ensure_ascii=False, separators=(",", ":"),
+                         allow_nan=False).encode()
     if len(changed) > MAX_REPLAY_BODY:
         raise ValueError("Mutated body exceeds replay limit")
     return changed
@@ -107,6 +122,178 @@ def _mutate_form(data: bytes, parameter: str, payload: str = "'") -> bytes:
     if len(changed) > MAX_REPLAY_BODY:
         raise ValueError("Mutated body exceeds replay limit")
     return changed
+
+
+def _volatile_value(value: object) -> bool:
+    return (type(value) in {str, int} and 0 < len(str(value)) <= 128
+            and not any(char in str(value) for char in "\r\n\x00"))
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON key in browser POST")
+        result[key] = value
+    return result
+
+
+def _json_pointer_value(document: object, pointer: str) -> object:
+    if not pointer.startswith("/") or len(pointer) > 300:
+        raise ValueError("A bounded JSON pointer is required")
+    current = document
+    for raw in pointer.split("/")[1:]:
+        if re.search(r"~(?![01])", raw):
+            raise ValueError("Invalid JSON pointer escape")
+        key = raw.replace("~1", "/").replace("~0", "~")
+        if isinstance(current, dict) and key in current:
+            current = current[key]
+        elif isinstance(current, list) and (
+            key == "*" and len(current) == 1 or key.isdecimal() and int(key) < len(current)
+        ):
+            current = current[0 if key == "*" else int(key)]
+        else:
+            raise ValueError("JSON pointer does not identify an observed field")
+    return current
+
+
+def match_browser_post_body(
+    baseline: bytes, live: bytes | None, *, mime: str, parameter: str, payload: str,
+    require_nonce: bool = True,
+) -> tuple[bytes, str, list[str]] | None:
+    """Mutate the live POST only when its captured input and stable fields agree.
+
+    A short named token may rotate between capture and replay. Other value or
+    field changes are a different request and are not sent by the browser.
+    """
+    if (not isinstance(live, bytes) or not live or len(live) > MAX_REPLAY_BODY
+            or not baseline or len(baseline) > MAX_REPLAY_BODY
+            or not isinstance(mime, str)
+            or not isinstance(payload, str) or not 0 <= len(payload) <= 300
+            or (require_nonce and not payload)
+            or b"__PROWL_NONCE__" in live):
+        return None
+    json_body = mime == "application/json" or mime.endswith("+json")
+    if not json_body and mime != "application/x-www-form-urlencoded":
+        return None
+    if live == baseline:
+        try:
+            changed = (live if not payload else
+                       _mutate_json(live, parameter, payload) if json_body
+                       else _mutate_form(live, parameter, payload))
+        except (ValueError, TypeError, RecursionError):
+            return None
+        return (changed, "exact", []) if not require_nonce or changed.count(b"__PROWL_NONCE__") == 1 else None
+
+    changed_fields: list[str] = []
+    if json_body:
+        try:
+            def parse(data: bytes) -> object:
+                return json.loads(data, object_pairs_hook=_unique_json_object,
+                                  parse_constant=_reject_json_constant)
+
+            original, current = parse(baseline), parse(live)
+            selected_before = _json_pointer_value(original, parameter)
+            selected_now = _json_pointer_value(current, parameter)
+            if (type(selected_before) is not type(selected_now)
+                    or selected_before != selected_now):
+                return None
+            nodes = 0
+
+            def same_shape(before: object, now: object, depth: int = 0) -> bool:
+                nonlocal nodes
+                nodes += 1
+                if depth > 8 or nodes > 200 or type(before) is not type(now):
+                    return False
+                if isinstance(before, dict):
+                    if len(before) > 40 or before.keys() != now.keys():
+                        return False
+                    for key, value in before.items():
+                        live_value = now[key]
+                        if value != live_value and key.lower().replace("-", "_") in VOLATILE_POST_FIELDS:
+                            if (not _volatile_value(value) or not _volatile_value(live_value)
+                                    or type(value) is not type(live_value)
+                                    or key in changed_fields
+                                    or len(changed_fields) >= 3):
+                                return False
+                            changed_fields.append(key)
+                        elif not same_shape(value, live_value, depth + 1):
+                            return False
+                    return True
+                if isinstance(before, list):
+                    return len(before) <= 40 and len(before) == len(now) and all(
+                        same_shape(a, b, depth + 1) for a, b in zip(before, now)
+                    )
+                return before == now
+
+            if not same_shape(original, current) or not changed_fields:
+                return None
+            changed = live if not payload else _mutate_json(live, parameter, payload)
+        except (UnicodeDecodeError, TypeError, ValueError, RecursionError):
+            return None
+    else:
+        try:
+            def fields(data: bytes) -> list[tuple[str, str, str]]:
+                raw = data.decode("ascii").split("&")
+                if len(raw) > 40 or any("=" not in field for field in raw):
+                    raise ValueError("Ambiguous form body")
+                parts = [(name, unquote_plus(name), value)
+                         for name, value in (field.split("=", 1) for field in raw)]
+                if len({name for _, name, _ in parts}) != len(parts):
+                    raise ValueError("Duplicate form field")
+                return parts
+
+            original, current = fields(baseline), fields(live)
+            if (len(original) != len(current)
+                    or sum(name == parameter for _, name, _ in original) != 1):
+                return None
+            for (raw_name, name, value), (live_raw_name, live_name, live_value) in zip(original, current):
+                if raw_name != live_raw_name or name != live_name:
+                    return None
+                if value == live_value:
+                    continue
+                if (name == parameter or name.lower().replace("-", "_") not in VOLATILE_POST_FIELDS
+                        or not _volatile_value(unquote_plus(value))
+                        or not _volatile_value(unquote_plus(live_value))
+                        or len(changed_fields) >= 3):
+                    return None
+                changed_fields.append(name)
+            if not changed_fields:
+                return None
+            changed = live if not payload else _mutate_form(live, parameter, payload)
+        except (UnicodeDecodeError, ValueError):
+            return None
+    return (changed, "volatile_fields", sorted(changed_fields)) if not require_nonce or changed.count(b"__PROWL_NONCE__") == 1 else None
+
+
+def captured_volatile_post_fields(body: bytes, mime: str) -> list[str]:
+    """Identify token-like fields that make a stale direct replay unreliable."""
+    try:
+        if mime == "application/x-www-form-urlencoded":
+            names = [unquote_plus(field.split("=", 1)[0]) for field in body.decode("ascii").split("&")]
+        elif mime == "application/json" or mime.endswith("+json"):
+            document = json.loads(body, object_pairs_hook=_unique_json_object,
+                                  parse_constant=_reject_json_constant)
+            names = []
+
+            def visit(value: object, depth: int = 0) -> None:
+                if depth > 8 or len(names) > 200:
+                    return
+                if isinstance(value, dict):
+                    for key, child in value.items():
+                        names.append(key)
+                        visit(child, depth + 1)
+                elif isinstance(value, list):
+                    for child in value[:40]:
+                        visit(child, depth + 1)
+
+            visit(document)
+        else:
+            return []
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return []
+    return sorted({name for name in names
+                   if name.lower().replace("-", "_") in VOLATILE_POST_FIELDS})
 
 
 def plan_observed_body(private_exchange: bytes, *, parameter: str,
@@ -189,6 +376,26 @@ def plan_sql_error_form(private_exchange: bytes, *, parameter: str,
     return planned
 
 
+def plan_sql_boolean_body(private_exchange: bytes, *, parameter: str,
+                          allowed_origins: list[str]) -> tuple[str, str, dict[str, bytes], str]:
+    """Build equal-length OR controls from one ordinary captured string field."""
+    url, mime, body, _, _ = plan_sql_error_body(
+        private_exchange, parameter=parameter, allowed_origins=allowed_origins,
+    )
+    nonce = str(secrets.randbelow(90000) + 10000)
+    other = nonce[:-1] + str((int(nonce[-1]) + 1) % 10)
+    variants = {"baseline_first": body, "baseline_last": body}
+    for key, comparison in (("true_first", nonce), ("false_first", other)):
+        suffix = f"' OR '{nonce}'='{comparison}'-- "
+        _, _, _, variants[key] = plan_observed_body(
+            private_exchange, parameter=parameter, allowed_origins=allowed_origins,
+            payload=suffix,
+        )
+    variants["true_second"] = variants["true_first"]
+    variants["false_second"] = variants["false_first"]
+    return url, mime, variants, nonce
+
+
 def _observe_post(url: str, mime: str, body: bytes,
                   allowed_origins: list[str], storage_state: dict | None,
                   reflection_text: str = "", replay_headers: dict[str, str] | None = None,
@@ -209,12 +416,26 @@ def _observe_post(url: str, mime: str, body: bytes,
         data = response.read(MAX_BODY + 1)
         truncated = len(data) > MAX_BODY
         data = data[:MAX_BODY]
+        content_type = response.headers.get("Content-Type", "").split(";", 1)[0].lower()[:100]
+        json_array_lengths: dict[str, int] = {}
+        if content_type == "application/json" and not truncated:
+            try:
+                parsed = json.loads(data)
+                if isinstance(parsed, dict):
+                    json_array_lengths = {
+                        key: min(len(parsed[key]), 1000)
+                        for key in ("results", "items", "records", "data")
+                        if isinstance(parsed.get(key), list)
+                    }
+            except (UnicodeDecodeError, ValueError):
+                pass
         result = {
             "status": response.status,
-            "content_type": response.headers.get("Content-Type", "").split(";", 1)[0].lower()[:100],
+            "content_type": content_type,
             "bytes_captured": len(data), "truncated": truncated,
             "body_sha256": hashlib.sha256(data).hexdigest(),
             "request_sha256": hashlib.sha256(body).hexdigest(),
+            "json_array_lengths": json_array_lengths,
             "sql_error_family": _sql_error_family(data),
             "redirected": bool(response.headers.get("Location", "")),
         }
@@ -268,12 +489,22 @@ def post_sql_error_proof_valid(result: dict) -> bool:
            or not isinstance(row.get("bytes_captured"), int)
            for row in rows.values()):
         return False
+    fresh = all("variant_sha256" in row for row in rows.values())
+    if any("variant_sha256" in row for row in rows.values()) and not fresh:
+        return False
+    if fresh and any(
+        row.get("body_match_mode") not in {"exact", "volatile_fields"}
+        or not _DIGEST.fullmatch(str(row.get("variant_sha256", "")))
+        for row in rows.values()
+    ):
+        return False
+    request_digest = lambda row: row["variant_sha256"] if fresh else row["request_sha256"]
     baseline_digest = result["baseline_request_sha256"]
-    quote_digest = rows["quote_first"]["request_sha256"]
-    escape_digest = rows["escaped_quote"]["request_sha256"]
-    if (rows["baseline_first"]["request_sha256"] != baseline_digest
-            or rows["baseline_last"]["request_sha256"] != baseline_digest
-            or rows["quote_second"]["request_sha256"] != quote_digest
+    quote_digest = request_digest(rows["quote_first"])
+    escape_digest = request_digest(rows["escaped_quote"])
+    if (request_digest(rows["baseline_first"]) != baseline_digest
+            or request_digest(rows["baseline_last"]) != baseline_digest
+            or request_digest(rows["quote_second"]) != quote_digest
             or len({baseline_digest, quote_digest, escape_digest}) != 3):
         return False
     normal = (rows["baseline_first"], rows["escaped_quote"], rows["baseline_last"])
@@ -294,6 +525,119 @@ def post_sql_error_proof_valid(result: dict) -> bool:
     stable = lambda a, b: abs(a - b) <= max(64, max(a, b) // 100)
     return (stable(normal[0]["bytes_captured"], normal[2]["bytes_captured"])
             and stable(errors[0]["bytes_captured"], errors[1]["bytes_captured"]))
+
+
+def post_sql_boolean_proof_valid(result: dict) -> bool:
+    """Accept only a repeated expansion beyond stable baseline/false controls."""
+    if (result.get("operation") != "sqli_boolean_body"
+            or result.get("proof_recipe") != "post_or_boolean_v1"
+            or result.get("method") != "POST"
+            or result.get("location") not in {"form", "json"}
+            or not result.get("target") or not result.get("parameter")
+            or not re.fullmatch(r"[1-9][0-9]{4}", str(result.get("nonce", "")))
+            or not _DIGEST.fullmatch(str(result.get("baseline_request_sha256", "")))
+            or result.get("requests_sent") != len(SQL_BOOLEAN_CHECK_ORDER)):
+        return False
+    checks = result.get("checks")
+    if not isinstance(checks, dict) or any(not isinstance(checks.get(key), dict)
+                                            for key in SQL_BOOLEAN_CHECK_ORDER):
+        return False
+    rows = {key: checks[key] for key in SQL_BOOLEAN_CHECK_ORDER}
+    if any(row.get("status") != 200 or row.get("truncated") is not False
+           or row.get("redirected") is not False or row.get("sql_error_family")
+           or not _DIGEST.fullmatch(str(row.get("body_sha256", "")))
+           or not _DIGEST.fullmatch(str(row.get("request_sha256", "")))
+           or not isinstance(row.get("bytes_captured"), int)
+           for row in rows.values()):
+        return False
+    fresh = all("variant_sha256" in row for row in rows.values())
+    if any("variant_sha256" in row for row in rows.values()) and not fresh:
+        return False
+    if fresh and any(
+        row.get("body_match_mode") not in {"exact", "volatile_fields"}
+        or not _DIGEST.fullmatch(str(row.get("variant_sha256", "")))
+        for row in rows.values()
+    ):
+        return False
+    request_digest = lambda row: row["variant_sha256"] if fresh else row["request_sha256"]
+    baseline_digest = result["baseline_request_sha256"]
+    true_digest = request_digest(rows["true_first"])
+    false_digest = request_digest(rows["false_first"])
+    if (request_digest(rows["baseline_first"]) != baseline_digest
+            or request_digest(rows["baseline_last"]) != baseline_digest
+            or request_digest(rows["true_second"]) != true_digest
+            or request_digest(rows["false_second"]) != false_digest
+            or len({baseline_digest, true_digest, false_digest}) != 3):
+        return False
+    content_type = rows["baseline_first"].get("content_type")
+    if not content_type or any(row.get("content_type") != content_type for row in rows.values()):
+        return False
+    size = lambda key: rows[key]["bytes_captured"]
+    stable = lambda a, b: abs(a - b) <= max(64, max(a, b) // 100)
+    if not (stable(size("baseline_first"), size("baseline_last"))
+            and stable(size("false_first"), size("false_second"))
+            and stable(size("true_first"), size("true_second"))
+            and stable(size("baseline_first"), size("false_first"))):
+        return False
+    controls = max(size("baseline_first"), size("baseline_last"),
+                   size("false_first"), size("false_second"))
+    true_size = min(size("true_first"), size("true_second"))
+    if (true_size - controls >= max(256, controls // 10)
+            and rows["true_first"]["body_sha256"] != rows["false_first"]["body_sha256"]):
+        return True
+    if content_type != "application/json":
+        return False
+    hashes = {key: row["body_sha256"] for key, row in rows.items()}
+    if (hashes["baseline_first"] != hashes["baseline_last"]
+            or hashes["baseline_first"] != hashes["false_first"]
+            or hashes["false_first"] != hashes["false_second"]
+            or hashes["true_first"] != hashes["true_second"]
+            or hashes["true_first"] == hashes["baseline_first"]):
+        return False
+    for collection in ("results", "items", "records", "data"):
+        lengths = [((rows[key].get("json_array_lengths") or {}).get(collection)
+                    if isinstance(rows[key].get("json_array_lengths"), dict) else None)
+                   for key in SQL_BOOLEAN_CHECK_ORDER]
+        if (all(type(length) is int and 0 <= length < 1000 for length in lengths)
+                and lengths[0] == lengths[2] == lengths[4] == lengths[5]
+                and lengths[1] == lengths[3] and lengths[1] > lengths[0]):
+            return True
+    return False
+
+
+def probe_sql_boolean_body(url: str, mime: str, variants: dict[str, bytes], nonce: str, *,
+                           parameter: str, allowed_origins: list[str],
+                           storage_state: dict | None,
+                           replay_headers: dict[str, str] | None = None) -> dict:
+    """Run six bounded POST controls without returning response contents."""
+    checks = {}
+    for key in SQL_BOOLEAN_CHECK_ORDER:
+        checks[key] = _observe_post(
+            url, mime, variants[key], allowed_origins, storage_state,
+            replay_headers=replay_headers, timeout=8,
+        )
+    return build_sql_boolean_result(url, mime, variants, nonce, parameter=parameter,
+                                    checks=checks, replay_headers=replay_headers)
+
+
+def build_sql_boolean_result(url: str, mime: str, variants: dict[str, bytes], nonce: str, *,
+                             parameter: str, checks: dict[str, dict],
+                             replay_headers: dict[str, str] | None = None) -> dict:
+    """Apply the same proof policy to direct and fresh browser POST receipts."""
+    parts = urlsplit(url)
+    result = {
+        "operation": "sqli_boolean_body", "proof_recipe": "post_or_boolean_v1",
+        "target": origin(url) + (parts.path or "/"), "method": "POST",
+        "location": "form" if mime == "application/x-www-form-urlencoded" else "json",
+        "parameter": parameter, "nonce": nonce,
+        "baseline_request_sha256": hashlib.sha256(variants["baseline_first"]).hexdigest(),
+        "requests_sent": len(SQL_BOOLEAN_CHECK_ORDER),
+        "identity_transport": "named_identity_cookies_only",
+        "replay_header_names": sorted(_replay_headers(replay_headers, expected_origin=origin(url))),
+        "checks": checks, "finding": False,
+    }
+    result["proof_confirmed"] = post_sql_boolean_proof_valid(result)
+    return result
 
 
 def probe_sql_error_body(url: str, mime: str, body: bytes, quote_body: bytes,
@@ -321,6 +665,14 @@ def probe_sql_error_body(url: str, mime: str, body: bytes, quote_body: bytes,
             url, mime, request_body, allowed_origins, storage_state,
             replay_headers=replay_headers, timeout=8,
         )
+    return build_sql_error_result(url, mime, body, parameter=parameter,
+                                  checks=checks, replay_headers=replay_headers)
+
+
+def build_sql_error_result(url: str, mime: str, body: bytes, *, parameter: str,
+                           checks: dict[str, dict],
+                           replay_headers: dict[str, str] | None = None) -> dict:
+    """Apply the same repeated SQL error policy to browser POST receipts."""
     parts = urlsplit(url)
     is_form = mime == "application/x-www-form-urlencoded"
     result = {

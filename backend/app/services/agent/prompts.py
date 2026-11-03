@@ -328,7 +328,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **execute_katana**: CLI HTTP crawler (ProjectDiscovery). Good for bulk URL/JS asset lists and enrichment **after** the Chrome-tab crawl — **not** a substitute for execute_interceptor on Cloudflare/Akamai/SPA apps (those often block or starve CLI crawlers). Prefer **-list** for multiple seeds or **-u** for one URL. Typical: `execute_katana(args="-list /path/to/live_sites.txt -d 5 -jc -fx -ef woff,css,png,svg,jpg,woff2,jpeg,gif -jsonl -silent")`. See https://github.com/projectdiscovery/katana
 - **execute_interceptor**: **Preferred** Site Spider — **katana running inside a real Chrome tab** (Hacker-Valley skill). Preference: (1) Mac worker, (2) Ubuntu worker, (3) local `interceptor` CLI, (4) Playwright **execute_deep_crawl**. Native `interceptor spider` when available: interaction primary, BFS secondary, optional `robots`/`sitemap`. Maps functionality + Application Capability Map + auth_session. Args: bare URL or JSON `{url, max_pages, depth, interact, robots, sitemap, prefer:["mac","ubuntu"], login, …}`. Example: execute_interceptor(args='{"url":"https://www.emulate3d.com/","depth":3,"max_pages":20,"interact":true}').
 - **execute_deep_crawl**: Playwright fallback with the same skill contract (interaction-first “katana in Chrome”, functionality priority queue, hop `depth` default 3). Use when Interceptor workers are offline or for server-side `login` automation.
-- **execute_curl**: HTTP client for simple, unmodified requests. Example: execute_curl(args="-s -i https://target.com/"). For SQLi/XSS payloads containing quotes, semicolons, angle brackets, or other shell metacharacters, use structured compare_requests, mutate_captured_request, run_custom_probe, or execute_browser instead; the curl wrapper rejects shell-like arguments.
+- **execute_curl**: Read-only GET/HEAD on one in-scope URL. Example: execute_curl(args="-s -i https://target.com/"). Encode spaces in query values; metacharacters within the URL are request data. For POST bodies, paired response controls, or browser execution proof, use structured compare_requests, mutate_captured_request, scoped probes, or execute_browser. A reflection in curl output is only a lead.
 - **probe_registry_anonymous**: Read-only Azure Container Registry anonymous-pull check. Args: **host** (required, `*.azurecr.io` hostname). GETs `/oauth2/token?service=<host>&scope=registry:catalog:*` then `/v2/_catalog?n=50`. Never pulls image layers, never pushes, never re-authenticates recovered PATs. If `verdict=SUBMIT`, call `create_finding` High (Critical only if a later bounded secret scan recovers live `ghp_*`). Example: probe_registry_anonymous(host="contoso.azurecr.io")
 - **execute_tldfinder**: TLD/domain discovery. Example: execute_tldfinder(args="-d example.com -dm domain -oJ")
 - **execute_waybackurls**: Historical URLs. Example: execute_waybackurls(args="example.com")
@@ -363,7 +363,7 @@ def get_phase_tools(phase: str, post_expl_enabled: bool = False, post_expl_type:
 - **execute_sqlmap**: SQL injection confirmation (exploitation phase). Run only on an observed request and exact parameter after controlled baseline/true/false probes show a repeatable lead. Use bounded detection-only arguments; database enumeration is not proof.
 - **execute_nikto**: Web server vulnerability scanner (exploitation phase). Checks 6,700+ dangerous CGIs, outdated servers, insecure configs, and default files. Example: execute_nikto(args="-h https://target.com -Format json")
 - **execute_wpscan**: WordPress vulnerability scanner. Runs as soon as WordPress is detected (informational phase OK — this is targeted CMS recon, not a broad spray). Detects WP version, plugins, users, and known CVEs. The WPScan API token is configured server-side (enables vulnerable-plugin CVE mapping). Prefer fast passive plugin detection so it fits the turn budget. Example: execute_wpscan(args="--url https://target.com --enumerate vp,u --plugins-detection passive --random-user-agent")
-- **execute_xsstrike**: Context-aware XSS lead scanner (exploitation phase). Run on a specific observed input or DOM-sink lead; require fresh browser execution evidence before submitting a finding.
+- **execute_xsstrike**: Bounded XSS lead scanner (exploitation phase). Run on one observed GET input, for example `-u "https://target.com/search?q=canary" --skip-dom`; no crawl, POST data, or proxy override. A timeout can return incomplete output. Require fresh browser execution evidence before submitting a finding.
 - **execute_dalfox**: Fast XSS scanner/verifier (exploitation). Prefer for confirmation after xsstrike or on reflected params. Example: execute_dalfox(args='url "https://target.com/search?q=test" --skip-bav')
 - **execute_commix**: OS command-injection automation (exploitation). Use only on high-signal params. Example: execute_commix(args='--url="https://target.com/ping?host=1" --batch')
 - **execute_hydra**: Bounded credential testing (exploitation). Always use tiny lists + -f. Prefer test_credential_spray for light web sprays.
@@ -651,6 +651,8 @@ Do not put credentials or bearer tokens in tool arguments. Use the service's art
 - **scoped_dom_xss_assigned**: Probe a leased DOM XSS JavaScript cell when its observed rendering page and location.hash source lead are present. Args: coverage_cell_id, coverage_lease_id, technique (html_body|html_body_svg|html_attribute|html_attribute_single|js_single|js_double), variant (base|mixed_case|url_double; optional). Read xss_trace after each probe; static sink leads and reflection remain hypotheses until a fresh nonce executes.
 - **scoped_client_probe_assigned**: Replay one leased client-side parser or DOM lead on its observed rendering page with a fixed nonce marker. Args: coverage_cell_id, coverage_lease_id. Returns bounded navigation, link, request, template, or prototype observations. A behavior signal needs impact analysis and independent verification.
 - **scoped_response_probe_assigned**: Probe one leased observed GET query input for CRLF response-header injection or open redirect with a fixed canary and inert control. Args: coverage_cell_id, coverage_lease_id. It never follows redirects and never returns raw headers or body.
+- **scoped_cors_probe_assigned**: Probe one leased endpoint for credentialed CORS origin reflection. Args: coverage_cell_id, coverage_lease_id. It sends a no-Origin control and a never-seen nonce canary origin, and confirms only when the response echoes that exact origin with Access-Control-Allow-Credentials: true. ACAO=* or a reflected known origin is not this bug; submit a positive receipt with vulnerability_class=cors.
+- **scoped_race_assigned**: Probe one leased race_condition endpoint for a TOCTOU limit overrun. Args: coverage_cell_id, coverage_lease_id, field, readback_url, cleanup_url_template (with __PROWL_NONCE__). Requires an operator-approved race_action_paths entry, an observed readback URL that lists written records, and a race_cleanup_paths cleanup path. It establishes sequential enforcement with a control canary (one survivor), then fires a bounded concurrent burst with a fresh canary and confirms only when two or more survive in the readback. Submit a positive receipt with vulnerability_class=race_condition.
 - **scan_assigned_js_dependency**: Run Retire.js against one leased first-party script; check the captured content hash before associating matches. Args: coverage_cell_id, coverage_lease_id. A CVE/version match is a review lead, not exploit proof.
 - **scoped_xml_entity_assigned**: Probe a leased browser-captured XML POST. Args: coverage_cell_id, coverage_lease_id, technique (parser_control|external_callback). The exact POST path must be approved; external_callback also requires run-level OOB authorization. The model supplies no XML body or callback destination. A callback is a lead until independently replayed.
 - **scoped_stored_xss_assigned**: Probe a leased stored_xss POST form cell. Args: coverage_cell_id, coverage_lease_id, observed readback_url, cleanup_url_template with __PROWL_NONCE__ as its sole query value. Requires an operator-approved POST form path and cleanup path. Only execution on the separate read page followed by successful cleanup can support a candidate.
@@ -676,6 +678,8 @@ TOOL_PHASE_MAP = {
     "scoped_dom_xss_assigned": ["exploitation", "post_exploitation"],
     "scoped_client_probe_assigned": ["exploitation", "post_exploitation"],
     "scoped_response_probe_assigned": ["exploitation", "post_exploitation"],
+    "scoped_cors_probe_assigned": ["exploitation", "post_exploitation"],
+    "scoped_race_assigned": ["exploitation", "post_exploitation"],
     "scan_assigned_js_dependency": ["informational", "exploitation", "post_exploitation"],
     "scoped_xml_entity_assigned": ["exploitation", "post_exploitation"],
     "scoped_stored_xss_assigned": ["exploitation", "post_exploitation"],
@@ -958,17 +962,19 @@ and severity unchanged between submit_finding_candidate and create_finding.
 scoped_body_probe requires an operator-approved POST path in the assessment
 request. It replays the captured body unchanged as a baseline, then changes
 one form or JSON field. A response difference is a lead. For an ordinary
-captured form value with a database-specific quote error, it repeats the error
-with clean and escaped-quote controls. Only proof_confirmed=True from that
-bounded recipe may become a POST SQLi candidate; the independent verifier
-replays the same captured template with fresh requests before publication.
+captured form or JSON string with a database-specific quote error, it repeats
+the error with clean and escaped-quote controls. Without a database error, it
+can test bounded, repeated Boolean controls against the same baseline. Only
+proof_confirmed=True from a controlled recipe may become a POST SQLi candidate;
+the independent verifier replays the same captured request with fresh requests
+and a fresh Boolean nonce before publication.
 scoped_owner_only requires an operator-declared exact owner-only GET
 resource and two registered test identities. Neither may invent its own policy.
 For a scoped proof candidate, include the hunter tool evidence_id in
 submit_finding_candidate. A verifier must repeat the same operation with fresh
 browser capture when required, then call record_verify_verdict with both
 execution IDs: proof={"kind":"numeric_boolean_sqli"|"string_boolean_sqli"|
-"string_error_sqli"|"post_error_sqli"|"owner_only"|
+"string_error_sqli"|"post_error_sqli"|"post_boolean_sqli"|"owner_only"|
 "public_directory_index"|"scoped_browser_xss",
 "hunter_artifact_id":"...","artifact_id":"<fresh verifier evidence>"}.
 The proof gate checks both records, same target, and operation-specific evidence.

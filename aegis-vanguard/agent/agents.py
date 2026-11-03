@@ -297,8 +297,15 @@ def discover_parameters(target_url: str, timeout: int = 60) -> str:
         timeout: Max seconds to run (capped at 60)
     """
     import scanners
-    results = scanners.run_arjun(target_url, _get_bridge(), timeout=timeout)
-    return json.dumps({"parameters": results, "count": len(results)})
+    result = scanners.run_arjun(target_url, _get_bridge(), timeout=timeout)
+    params = result.get("parameters", [])
+    return json.dumps({
+        "status": result.get("status"),
+        "inconclusive": result.get("inconclusive", False),
+        "error": result.get("error", ""),
+        "parameters": params,
+        "count": result.get("count", len(params)),
+    })
 
 
 @security_tool(category="recon", risk="low")
@@ -747,12 +754,26 @@ def xss_test(target_url: str, timeout: int = 300) -> str:
         timeout: Max seconds to run
     """
     import scanners
-    results = scanners.run_xsstrike(target_url, _get_bridge(), timeout=timeout)
+    result = scanners.run_xsstrike(target_url, _get_bridge(), timeout=timeout)
+    findings = result.get("findings", [])
+    inconclusive = result.get("inconclusive", False)
     return json.dumps({
-        "results": results,
-        "findings": results,
-        "vulnerable": len(results) > 0,
-        "count": len(results),
+        "status": result.get("status"),
+        "inconclusive": inconclusive,
+        "partial_signal": result.get("partial_signal", False),
+        "error": result.get("error", ""),
+        "results": findings,
+        "findings": findings,
+        "vulnerable": result.get("vulnerable", len(findings) > 0),
+        "count": result.get("count", len(findings)),
+        "evidence": result.get("evidence", ""),
+        "next_step": (
+            "Inconclusive — scan did not complete, so this param is NOT tested. "
+            "Confirm observed reflections with test_dom_xss (browser execution), "
+            "or retry (ideally proxied with a request budget)."
+            if inconclusive else
+            "Confirm any candidate with test_dom_xss, then confirm_vulnerability_poc."
+        ),
     }, default=str)
 
 
@@ -828,6 +849,45 @@ def probe_xss_reflection(
         body=body,
         params=params,
         headers_json=headers_json,
+        timeout=timeout,
+    )
+    return json.dumps(result, default=str)
+
+
+@security_tool(category="exploit", risk="high")
+def confirm_xss(
+    target_url: str,
+    param: str = "",
+    contexts: str = "",
+    timeout: int = 60,
+) -> str:
+    """Confirm reflected/DOM XSS by EXECUTING a context-matched breakout payload in a
+    real Chromium browser — proof of execution, not just reflection.
+
+    The confirmation step for probe_xss_reflection. Pass the reflected `param` and the
+    `contexts` the probe classified; this carries the matching breakout (e.g. a
+    single-quote attribute or </script> break) into the browser and only records a
+    finding if window.__vanguard_xss (or a dialog) actually fires. Succeeds where
+    xss_test (XSStrike) and plain reflection matching cannot — and, unlike test_dom_xss,
+    it is driven by the classified context instead of a fixed generic payload list, so
+    attribute / script-block / comment reflected XSS gets verified.
+
+    Scope: GET query-parameter injection. Use test_dom_xss for fragment/client-side sinks.
+
+    Args:
+        target_url: URL to test (with or without the vulnerable param present)
+        param: Parameter name to inject (from probe_xss_reflection). Comma-separated ok.
+        contexts: Comma-separated reflection contexts from probe_xss_reflection
+            (html_body, attr_double, attr_single, script_block, js_string,
+            html_comment). Empty tries every context.
+        timeout: Max seconds to run
+    """
+    import scanners
+    result = scanners.run_confirm_xss_reflection(
+        target_url,
+        _get_bridge(),
+        param=param,
+        contexts=contexts,
         timeout=timeout,
     )
     return json.dumps(result, default=str)
@@ -2052,7 +2112,7 @@ VULN_TOOLS = [
 ]
 
 EXPLOIT_TOOLS = [
-    "sql_injection_test", "xss_test", "test_dom_xss", "wordpress_scan",
+    "sql_injection_test", "xss_test", "test_dom_xss", "confirm_xss", "wordpress_scan",
     "deep_tls_test", "scan_nuclei", "confirm_vulnerability_poc",
     "janus_dast_full",
     # Manual probing tools

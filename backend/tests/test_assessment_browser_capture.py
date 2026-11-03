@@ -1,15 +1,123 @@
 """Opt-in real Chromium smoke: RUN_ASSESSMENT_BROWSER_TESTS=1 pytest this file."""
 
 import json
+import base64
+import hashlib
 import os
 import threading
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 import pytest
 from app.services.agent.assessment_scope import register_scope
 from test_capture_to_proof import crud_app as crud_app, prepare
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["error", "blind", "patched"])
+async def test_fresh_token_post_sqli_controls_keep_repeated_proof(mode):
+    """Every control needs a new browser token; a patched endpoint stays negative."""
+    from app.services.agent.scoped_assessment import body_probe
+    from app.services.agent.scoped_assessment.browser_post_replay import replay_observed_post_controls
+
+    class Handler(BaseHTTPRequestHandler):
+        issued = 0
+        used = set()
+        seen = []
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            Handler.issued += 1
+            token = f"fresh-{Handler.issued}"
+            body = ("<script>fetch('/api/filter',{method:'POST',headers:{'Content-Type':"
+                    "'application/x-www-form-urlencoded'},body:new URLSearchParams({"
+                    f"template:'botox',csrf_token:'{token}'"
+                    "})})</script>").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            data = parse_qs(self.rfile.read(int(self.headers["Content-Length"])).decode())
+            token = data.get("csrf_token", [""])[0]
+            value = data.get("template", [""])[0]
+            Handler.seen.append((token, value))
+            if token in Handler.used or not token.startswith("fresh-"):
+                self.send_response(403)
+                self.end_headers()
+                return
+            Handler.used.add(token)
+            if mode == "error" and value.endswith("'") and not value.endswith("''"):
+                body = b"SQLSTATE[42000]: Syntax error 1064 You have an error in your SQL syntax"
+            elif mode == "blind" and " OR '" in value:
+                import re
+                match = re.search(r" OR '(\d{5})'='(\d{5})'-- $", value)
+                body = b"A" * (700 if match and match.group(1) == match.group(2) else 100)
+            else:
+                body = b"A" * 100
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    private = json.dumps({
+        "url": base + "/api/filter", "method": "POST", "resource_type": "fetch",
+        "page_url": base + "/catalog", "request_content_type": "application/x-www-form-urlencoded",
+        "request_body_base64": base64.b64encode(b"template=botox&csrf_token=captured-old").decode(),
+    }).encode()
+    try:
+        url, mime, baseline, _, _ = body_probe.plan_sql_error_body(
+            private, parameter="template", allowed_origins=[base],
+        )
+        if mode == "blind":
+            _, _, variants, nonce = body_probe.plan_sql_boolean_body(
+                private, parameter="template", allowed_origins=[base],
+            )
+            other = nonce[:-1] + str((int(nonce[-1]) + 1) % 10)
+            checks = await replay_observed_post_controls(
+                private, parameter="template", allowed_origins=[base], storage_state=None,
+                payloads={
+                    "baseline_first": "", "true_first": f"' OR '{nonce}'='{nonce}'-- ",
+                    "false_first": f"' OR '{nonce}'='{other}'-- ",
+                    "true_second": f"' OR '{nonce}'='{nonce}'-- ",
+                    "false_second": f"' OR '{nonce}'='{other}'-- ",
+                    "baseline_last": "",
+                },
+            )
+            result = body_probe.build_sql_boolean_result(
+                url, mime, variants, nonce, parameter="template", checks=checks,
+            )
+            assert result["proof_confirmed"] is True
+        else:
+            checks = await replay_observed_post_controls(
+                private, parameter="template", allowed_origins=[base], storage_state=None,
+                payloads={
+                    "baseline_first": "", "quote_first": "'", "escaped_quote": "''",
+                    "quote_second": "'", "baseline_last": "",
+                },
+            )
+            result = body_probe.build_sql_error_result(
+                url, mime, baseline, parameter="template", checks=checks,
+            )
+            assert result["proof_confirmed"] is (mode == "error")
+        assert len(Handler.seen) == len(checks)
+        assert len({token for token, _ in Handler.seen}) == len(checks)
+        assert all(row["body_match_mode"] == "volatile_fields" for row in checks.values())
+        assert all(row["status"] == 200 for row in checks.values())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_ASSESSMENT_BROWSER_TESTS") != "1",
@@ -310,6 +418,202 @@ async def test_scoped_xhr_xss_replays_observed_tab_before_mutating_request(monke
             assert result["xhr_mutated"] is True
             assert result["xhr_response_seen"] is True
             assert result["executed"] is not encoded
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_scoped_post_xhr_xss_mutates_only_matching_capture_and_needs_execution(monkeypatch):
+    from app.services.agent.scoped_assessment.browser import check_browser
+    from playwright.async_api import BrowserType
+
+    executable = os.environ.get("ASSESSMENT_TEST_CHROMIUM")
+    if executable:
+        original = BrowserType.launch
+
+        async def launch(self, **kwargs):
+            return await original(self, **dict(kwargs, executable_path=executable))
+
+        monkeypatch.setattr(BrowserType, "launch", launch)
+
+    seen_posts = []
+
+    class Handler(BaseHTTPRequestHandler):
+        encode = False
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            body = (b'<div id="result"></div><script>'
+                    b'fetch("/api/render", {method:"POST", headers:{"Content-Type":'
+                    b'"application/x-www-form-urlencoded"}, body:"message=seed"})'
+                    b'.then(r => r.text()).then(v => '
+                    b'document.getElementById("result").innerHTML = v)'
+                    b'</script>')
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            seen_posts.append(body)
+            value = parse_qs(body.decode()).get("message", [""])[0]
+            rendered = (escape(value) if self.encode else value).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(rendered)))
+            self.end_headers()
+            self.wfile.write(rendered)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    payload = '<img src=x onerror=alert("__PROWL_NONCE__")>'
+    template = ("message=" + quote(payload, safe="")).encode()
+    try:
+        for encoded in (False, True):
+            Handler.encode = encoded
+            result, _ = await check_browser(
+                operation="check_xhr_xss", url=base + "/catalog",
+                allowed_origins=[base], xhr_path="/api/render",
+                xhr_parameter="message", xhr_query_keys=[],
+                xhr_payload_template=payload, xhr_post_baseline=b"message=seed",
+                xhr_post_template=template,
+                xhr_post_content_type="application/x-www-form-urlencoded",
+                xhr_capture_id="fixture",
+                xhr_body_location="body_form",
+            )
+            assert result["xhr_mutated"] is True
+            assert result["xhr_response_seen"] is True
+            assert result["executed"] is not encoded
+        count = len(seen_posts)
+        mismatch, _ = await check_browser(
+            operation="check_xhr_xss", url=base + "/catalog",
+            allowed_origins=[base], xhr_path="/api/render",
+            xhr_parameter="message", xhr_query_keys=[],
+            xhr_payload_template=payload, xhr_post_baseline=b"message=other",
+            xhr_post_template=template,
+            xhr_post_content_type="application/x-www-form-urlencoded",
+            xhr_capture_id="fixture",
+            xhr_body_location="body_form",
+        )
+        assert mismatch["xhr_mutated"] is False
+        assert mismatch["executed"] is False
+        assert len(seen_posts) == count
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_scoped_post_xhr_xss_replays_with_current_page_token(monkeypatch):
+    from app.services.agent.scoped_assessment.body_probe import plan_observed_body
+    from app.services.agent.scoped_assessment.browser import check_browser
+    from playwright.async_api import BrowserType
+
+    executable = os.environ.get("ASSESSMENT_TEST_CHROMIUM")
+    if executable:
+        original = BrowserType.launch
+
+        async def launch(self, **kwargs):
+            return await original(self, **dict(kwargs, executable_path=executable))
+
+        monkeypatch.setattr(BrowserType, "launch", launch)
+
+    class Handler(BaseHTTPRequestHandler):
+        encode = False
+        issued = 0
+        valid_tokens = set()
+        accepted_tokens = []
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            Handler.issued += 1
+            token = f"csrf-{Handler.issued:04d}"
+            Handler.valid_tokens.add(token)
+            body = ('<button role="tab" aria-controls="results">Preview</button>'
+                    '<div id="results"></div><script>'
+                    'document.querySelector("[role=tab]").onclick=async()=>{'
+                    'const r=await fetch("/api/render",{method:"POST",'
+                    'headers:{"Content-Type":"application/json"},'
+                    'body:JSON.stringify({message:"hello",csrf_token:"' + token + '"})});'
+                    'document.getElementById("results").innerHTML=await r.text()}'
+                    '</script>').encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            data = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
+            token = data.get("csrf_token")
+            if token not in Handler.valid_tokens:
+                status, body = 403, b"invalid token"
+            else:
+                Handler.valid_tokens.remove(token)
+                Handler.accepted_tokens.append(token)
+                value = data.get("message", "")
+                status, body = 200, (escape(value) if Handler.encode else value).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    payload = '<img src=x onerror=alert("__PROWL_NONCE__")>'
+    try:
+        sources, traffic = [], []
+        observed, _ = await check_browser(
+            operation="inspect_js", url=base + "/", allowed_origins=[base],
+            javascript_sources=sources, traffic_exchanges=traffic,
+            max_pages=1, max_actions=1,
+        )
+        action = next(row for row in observed["actions"] if row["kind"] == "tab")
+        captured = next(row for row in traffic if row["public"]["path"] == "/api/render")
+        private = captured["private"]
+        _, mime, baseline, template = plan_observed_body(
+            private, parameter="/message", allowed_origins=[base], payload=payload,
+        )
+        captured_token = json.loads(base64.b64decode(
+            json.loads(private)["request_body_base64"]
+        ))["csrf_token"]
+        actions = [{key: action[key] for key in (
+            "kind", "label", "aria_controls", "before_path",
+        )}]
+        for encoded in (False, True):
+            Handler.encode = encoded
+            result, _ = await check_browser(
+                operation="check_xhr_xss", url=base + "/", allowed_origins=[base],
+                xhr_path="/api/render", xhr_parameter="/message",
+                xhr_query_keys=[], xhr_payload_template=payload,
+                xhr_actions=actions, xhr_post_baseline=baseline,
+                xhr_post_template=template, xhr_post_content_type=mime,
+                xhr_capture_id="fixture", xhr_body_location="body_json",
+                xhr_baseline_request_sha256=hashlib.sha256(baseline).hexdigest(),
+            )
+            assert result["xhr_actions_replayed"] == 1
+            assert result["xhr_mutated"] is True
+            assert result["xhr_response_seen"] is True
+            assert result["xhr_body_match_mode"] == "volatile_fields"
+            assert result["xhr_volatile_fields"] == ["csrf_token"]
+            assert result["executed"] is not encoded
+        assert len(Handler.accepted_tokens) == 3
+        assert captured_token == Handler.accepted_tokens[0]
+        assert all(token != captured_token for token in Handler.accepted_tokens[1:])
     finally:
         server.shutdown()
         server.server_close()

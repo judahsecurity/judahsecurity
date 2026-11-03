@@ -10,8 +10,10 @@ from pathlib import Path
 CASES = {
     "sqli": ("sqli", "/search", "sqli"),
     "sqli_encoded": ("sqli", "/catalog", "sqli"),
+    "sqli_post_blind": ("sqli", "/api/filter", "sqli"),
     "xss": ("xss", "/search", "xss"),
     "xss_dom": ("xss", "/blog", "xss"),
+    "xss_post_xhr": ("xss", "/api/render", "xss"),
     "ssrf": ("ssrf", "/api/fetch", "ssrf"),
     "idor": ("idor", "/api/objects/1", "api_authz"),
     "graphql_authz": ("idor", "/graphql", "graphql_api"),

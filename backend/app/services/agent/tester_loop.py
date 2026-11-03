@@ -1160,10 +1160,19 @@ def _ready_hypothesis_wave(
     # with its own target rather than silently dropped from the web run.
     by_id = {h.id: h for h in brain.hypotheses}
     priority = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    from app.services.agent.autonomy_limits import current_autonomy_limits
+    from app.services.agent.recon_observation_adapter import _allowed, _host
+
+    limits = current_autonomy_limits.get()
     recon_hosts = {
-        str(row.get("host") or "")
+        host
         for row in brain.recon_observations
-        if isinstance(row, dict) and row.get("kind") == "dns_cname"
+        if isinstance(row, dict)
+        and row.get("kind") in {"dns_cname", "discovered_host", "live_host"}
+        if (host := _host(str(row.get("target") or "")))
+        and host == str(row.get("host") or "")
+        and _allowed(host, (row.get("scope") or {}).get("allowed_hosts") or [])
+        and (not limits or _allowed(host, limits.allowed_hosts))
     }
     groups: dict[str, list[str]] = {}
     for name in selected:

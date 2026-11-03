@@ -12,6 +12,17 @@ They run in Aegis's existing session-scoped tool manager and evidence ledger;
 the PROWL service and Claude SDK are not needed to execute these tools. Aegis's
 model provider remains configurable through its existing agent settings.
 
+For scheduled autonomous assessments, the early recon pack also runs passive
+Subfinder discovery when the saved `allowed_hosts` contract explicitly includes
+a matching `*.domain` wildcard. Exact-host schedules skip this worker. Only
+discovered hosts covered by that saved scope become `discovered_host` observations
+and ready `web_recon` hypotheses. Discovery alone does not mark a host live or
+publish a finding. HTTPX live-host leads preserve the observed scheme
+and port so subsequent specialist work targets the service actually seen. The
+observation, hypothesis, and specialist outcome appear in the run timeline.
+Completed Subfinder work is eligible for the existing costed-snapshot recovery
+path; an interrupted or unreceipted action still requires reconciliation.
+
 | PROWL MCP tool | Aegis `/agent` capability |
 |---|---|
 | `recall_assessment_memory` | `search_memory` plus target-specific Palace wakeup |

@@ -114,6 +114,99 @@ def _check_cli_string(value: str, schema: FieldSchema) -> Optional[str]:
     return None
 
 
+def _check_curl_args(value: str, schema: FieldSchema) -> Optional[str]:
+    """Allow inert query payload bytes in a tightly limited read-only curl call.
+
+    curl is launched with subprocess_exec, so characters inside a URL are not
+    shell syntax. Restrict the flags instead: file reads, proxy overrides,
+    redirects, and request bodies belong in the scoped HTTP replay tools.
+    """
+    if not value or len(value) > schema.max_length or "\x00" in value:
+        return "curl arguments are empty, too long, or contain a NUL byte"
+    if "\n" in value or "\r" in value:
+        return "curl arguments contain control characters"
+    try:
+        tokens = shlex.split(value)
+    except ValueError as exc:
+        return f"unparseable curl quoting: {exc}"
+    if len(tokens) > 24:
+        return "too many curl arguments"
+    simple = {"-s", "-S", "-i", "-I", "-g", "--silent", "--show-error",
+              "--include", "--head", "--globoff"}
+    value_flags = {"-H", "--header", "-X", "--request", "--url"}
+    urls = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token in simple:
+            i += 1
+            continue
+        if token in value_flags:
+            if i + 1 >= len(tokens):
+                return f"missing value for {token}"
+            argument = tokens[i + 1]
+            if token in {"-X", "--request"} and argument.upper() not in {"GET", "HEAD"}:
+                return "curl supports GET or HEAD only; use scoped request replay for writes"
+            if token in {"-H", "--header"} and (":" not in argument or
+                    "\n" in argument or "\r" in argument):
+                return "invalid curl header"
+            if token == "--url":
+                urls.append(argument)
+            i += 2
+            continue
+        if token.startswith(("http://", "https://")):
+            urls.append(token)
+            i += 1
+            continue
+        return (f"unsupported curl argument {token!r}; use compare_requests or "
+                "mutate_captured_request for request payloads")
+    if len(urls) != 1:
+        return "curl requires exactly one HTTP(S) URL"
+    return _check_request_url(urls[0], schema)
+
+
+def _check_xsstrike_args(value: str, schema: FieldSchema) -> Optional[str]:
+    """Keep XSStrike on one observed GET URL with bounded concurrency."""
+    if not value or len(value) > schema.max_length or any(
+        ch in value for ch in ("\x00", "\n", "\r")
+    ):
+        return "invalid XSStrike arguments"
+    try:
+        tokens = shlex.split(value)
+    except ValueError as exc:
+        return f"unparseable XSStrike quoting: {exc}"
+    if len(tokens) > 16:
+        return "too many XSStrike arguments"
+    urls = []
+    i = 0
+    while i < len(tokens):
+        flag = tokens[i]
+        if flag in {"--skip", "--skip-dom"}:
+            i += 1
+            continue
+        if flag in {"-u", "--url", "-t", "--threads", "-d", "--delay", "--timeout"}:
+            if i + 1 >= len(tokens):
+                return f"missing value for {flag}"
+            argument = tokens[i + 1]
+            if flag in {"-u", "--url"}:
+                urls.append(argument)
+            else:
+                try:
+                    amount = int(argument)
+                except ValueError:
+                    return f"invalid value for {flag}"
+                limit = 4 if flag in {"-t", "--threads"} else 5 if flag in {"-d", "--delay"} else 30
+                if amount < (0 if flag in {"-d", "--delay"} else 1) or amount > limit:
+                    return f"{flag} exceeds the bounded XSStrike limit ({limit})"
+            i += 2
+            continue
+        return (f"unsupported XSStrike argument {flag!r}; use one -u URL, "
+                "--skip, and optionally --skip-dom")
+    if len(urls) != 1:
+        return "XSStrike requires exactly one observed HTTP(S) URL"
+    return _check_request_url(urls[0], schema)
+
+
 def _check_payload(value: str, schema: FieldSchema) -> Optional[str]:
     """Validate non-shell request data without interpreting attack syntax.
 
@@ -209,6 +302,8 @@ def _check_integer(value: Any, schema: FieldSchema) -> Optional[str]:
 
 _TYPE_DISPATCH: Dict[str, Callable[[Any, FieldSchema], Optional[str]]] = {
     "cli_string": _check_cli_string,
+    "curl_args": _check_curl_args,
+    "xsstrike_args": _check_xsstrike_args,
     "payload": _check_payload,
     "request_url": _check_request_url,
     "url": _check_url,
@@ -276,12 +371,13 @@ def _build_default_schemas() -> Dict[str, ToolSchema]:
         fields={"args": FieldSchema(type="hostname", max_length=253)},
     )
 
-    # curl: cli_string + schema-level SSRF substrings (Lictor blocks too — defense in depth).
+    # Read-only curl: allow payload characters in URLs, but never CLI flags
+    # that read local files, change proxy/scope, follow redirects, or write.
     s["curl"] = ToolSchema(
         tool_name="curl",
         fields={
             "args": FieldSchema(
-                type="cli_string",
+                type="curl_args",
                 max_length=2048,
                 forbidden_substrings=[
                     "169.254.169.254", "metadata.google", "metadata.azure",
@@ -290,6 +386,16 @@ def _build_default_schemas() -> Dict[str, ToolSchema]:
                 ],
             ),
         },
+    )
+
+    s["xsstrike"] = ToolSchema(
+        tool_name="xsstrike",
+        fields={"args": FieldSchema(type="xsstrike_args", max_length=2048,
+                                     forbidden_substrings=[
+                                         "169.254.169.254", "metadata.google", "metadata.azure",
+                                         "127.0.0.1", "localhost", "[::1]", "file://",
+                                         "gopher://", "dict://",
+                                     ])},
     )
 
     s["sqlmap"] = ToolSchema(

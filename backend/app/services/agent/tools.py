@@ -726,6 +726,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "scoped_input_probe_assigned": self.scoped_input_probe_assigned,
             "scoped_dom_xss_assigned": self.scoped_dom_xss_assigned,
             "scoped_response_probe_assigned": self.scoped_response_probe_assigned,
+            "scoped_cors_probe_assigned": self.scoped_cors_probe_assigned,
+            "scoped_race_assigned": self.scoped_race_assigned,
             "scoped_client_probe_assigned": self.scoped_client_probe_assigned,
             "scan_assigned_js_dependency": self.scan_assigned_js_dependency,
             "scoped_xml_entity_assigned": self.scoped_xml_entity_assigned,
@@ -1463,6 +1465,160 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "proof_confirmed": proof["proof_confirmed"],
                 "probe_result": proof, "funnel": parameter_test_funnel(brain)}
 
+    async def scoped_cors_probe_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+    ) -> Dict[str, Any]:
+        """Test one leased endpoint for credentialed CORS origin reflection."""
+        import asyncio
+        import secrets
+        import time
+        from urllib.parse import urlsplit
+
+        from app.services.agent.coverage_cells import parameter_test_funnel
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.scoped_assessment.response_probe import probe_cors
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "surface_applicability"
+                or cell.get("test_type") != "cors"
+                or not allowed_discovery_path(str(cell.get("path") or "/"))):
+            return {"success": False, "error": "invalid_coverage_lease"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        url = scoped_origin + cell["path"]
+        identity = str(cell.get("identity") or "anonymous")
+        nonce = secrets.token_hex(8)
+        try:
+            self._scoped_origin(url)
+            self._scoped_claim_gets(2)
+            proof = await asyncio.to_thread(
+                probe_cors, url, allowed_origin=scoped_origin,
+                state=self._scoped_state(identity, url), nonce=nonce,
+            )
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__}
+        summary = {"test_type": "cors", "parameter": "origin",
+                   "path": cell["path"], "request_context": "origin_header",
+                   "nonce": nonce,
+                   **proof}
+        artifact_id = evidence_store(self).record(
+            "scoped_response_probe", summary, target=url, identity=identity,
+            coverage_cell_id=coverage_cell_id, test_type="cors",
+            success=proof["proof_confirmed"],
+        )
+        cell["evidence_ids"] = list(dict.fromkeys([
+            *(cell.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        cell["last_probe"] = "scoped_cors_probe"
+        if proof["proof_confirmed"]:
+            cell["status"] = "in_focus"
+            cell["reason"] = "Credentialed CORS reflection requires independent verification"
+        self._engagement_brain = brain.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
+                "proof_confirmed": proof["proof_confirmed"],
+                "probe_result": proof, "funnel": parameter_test_funnel(brain)}
+
+    async def scoped_race_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+        field: str, readback_url: str, cleanup_url_template: str,
+        concurrency: int = 10,
+    ) -> Dict[str, Any]:
+        """Prove a limit the server enforces in series but not under concurrency."""
+        import secrets
+        import time
+        from urllib.parse import urlsplit
+
+        from app.services.agent.coverage_cells import parameter_test_funnel
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.scoped_assessment.race_probe import probe_race
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        if (not cell or cell.get("status") != "leased"
+                or cell.get("lease_id") != coverage_lease_id
+                or float(cell.get("lease_deadline") or 0) <= time.time()
+                or cell.get("source") != "surface_applicability"
+                or cell.get("test_type") != "race_condition"
+                or str(cell.get("method") or "POST").upper() not in {"POST", "PUT", "PATCH"}
+                or not allowed_discovery_path(str(cell.get("path") or "/"))):
+            return {"success": False, "error": "invalid_coverage_lease"}
+        action_path = str(cell.get("path") or "/")
+        if action_path not in (getattr(self, "_scoped_race_action_paths", None) or set()):
+            return {"success": False, "error": "operator_approval_required",
+                    "reason": "race action path is not in race_action_paths"}
+        if "__PROWL_NONCE__" not in cleanup_url_template:
+            return {"success": False, "error": "cleanup_template_missing_nonce"}
+        cleanup_path = urlsplit(cleanup_url_template.replace("__PROWL_NONCE__", "x")).path or "/"
+        if cleanup_path not in (getattr(self, "_scoped_race_cleanup_paths", None) or set()):
+            return {"success": False, "error": "operator_approval_required",
+                    "reason": "cleanup path is not in race_cleanup_paths"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        scoped_origin = _origin(str(cmap.get("target") or cmap.get("scope") or ""))
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(f"{parts.scheme}://{cell.get('host') or ''}")
+                != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        observed = set(cmap.get("pages_visited") or []) | {
+            row.get("url") for row in (cmap.get("discovered_links") or [])
+            if isinstance(row, dict)}
+        if readback_url not in observed or _origin(readback_url) != scoped_origin:
+            return {"success": False, "error": "observed_readback_page_missing"}
+        action_url = scoped_origin + action_path
+        identity = str(cell.get("identity") or "anonymous")
+        method = str(cell.get("method") or "POST").upper()
+        nonce = secrets.token_hex(8)
+        try:
+            self._scoped_origin(action_url)
+            self._scoped_claim_race()
+            proof = await probe_race(
+                action_url, readback_url, cleanup_url_template, method=method,
+                field=str(field or ""), allowed_origin=scoped_origin,
+                state=self._scoped_state(identity, action_url), nonce=nonce,
+                concurrency=int(concurrency or 10),
+            )
+        except (ValueError, OSError) as exc:
+            return {"success": False, "error": type(exc).__name__,
+                    "reason": str(exc)[:200]}
+        summary = {"nonce": nonce, "path": action_path,
+                   "readback_url": readback_url,
+                   "cleanup_template": cleanup_url_template, **proof}
+        artifact_id = evidence_store(self).record(
+            "scoped_race_probe", summary, target=action_url, identity=identity,
+            coverage_cell_id=coverage_cell_id, test_type="race_condition",
+            success=proof["proof_confirmed"],
+        )
+        cell["evidence_ids"] = list(dict.fromkeys([
+            *(cell.get("evidence_ids") or []), artifact_id,
+        ]))[:30]
+        cell["last_probe"] = "scoped_race_probe"
+        if proof["proof_confirmed"]:
+            cell["status"] = "in_focus"
+            cell["reason"] = "Concurrency overrun signal requires independent verification"
+        self._engagement_brain = brain.to_dict()
+        return {"success": True, "coverage_cell_id": coverage_cell_id,
+                "coverage_lease_id": coverage_lease_id, "evidence_id": artifact_id,
+                "proof_confirmed": proof["proof_confirmed"],
+                "probe_result": {k: proof[k] for k in
+                                 ("control", "probe", "cleanup_confirmed", "requests_sent")},
+                "funnel": parameter_test_funnel(brain)}
+
     async def scoped_xml_entity_assigned(
         self, coverage_cell_id: str, coverage_lease_id: str,
         technique: str = "parser_control",
@@ -1700,9 +1856,68 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         body = {"artifact_id": cell["capture_id"], "parameter": parameter, "identity": identity}
         method = str(cell.get("method") or "GET")
         if cell.get("specialist") == "xss" and method == "POST" and location in {"body_json", "body_form"}:
-            if technique not in {"captured", "xss_reflection"}:
+            if technique not in {"captured", "xss_reflection", *xss_payloads}:
                 return {"success": False, "error": "unsupported_xss_browser",
-                        "output": "POST XSS first pass requires an approved captured body"}
+                        "output": "POST XSS requires an approved captured body"}
+            captured_row = self._scoped_capture_row(str(cell["capture_id"]))
+            captured = {}
+            if captured_row and captured_row.get("identity") == identity:
+                try:
+                    captured = json.loads(captured_row["private"])
+                except (TypeError, ValueError):
+                    pass
+            page_url = str(captured.get("page_url") or "")
+            captured_url = str(captured.get("url") or "")
+            browser_ready = (technique != "xss_reflection"
+                             and captured.get("method") == "POST"
+                             and captured.get("resource_type") in {"xhr", "fetch"}
+                             and (urlsplit(captured_url).path or "/") == cell.get("path")
+                             and bool(page_url)
+                             and not urlsplit(page_url).query
+                             and not urlsplit(page_url).fragment)
+            if browser_ready:
+                try:
+                    proof = json.loads(await self.scoped_browser_assessment(
+                        "check_xhr_xss", page_url, identity=identity,
+                        xhr_path=cell["path"], xhr_parameter=parameter,
+                        xhr_payload_template=xss_payloads.get(
+                            technique, xss_payloads["xss_browser"]),
+                        xhr_query_keys=[], xhr_capture_id=cell["capture_id"],
+                        xhr_actions=captured.get("replay_actions") or [],
+                    ))
+                except ValueError as exc:
+                    return {"success": False, "error": "post_xhr_replay_blocked",
+                            "reason": str(exc)[:200]}
+                artifact_id = str(proof.get("evidence_id") or "")
+                if not artifact_id:
+                    return {"success": False, "error": "missing_probe_evidence"}
+                live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+                current = next((row for row in live.coverage_cells
+                                if row.get("id") == coverage_cell_id
+                                and row.get("lease_id") == coverage_lease_id), None)
+                if current is None:
+                    return {"success": False, "error": "lease_changed"}
+                current["probe_artifact_ids"] = list(dict.fromkeys([
+                    *(current.get("probe_artifact_ids") or []), artifact_id,
+                ]))[:20]
+                current["evidence_ids"] = list(dict.fromkeys([
+                    *(current.get("evidence_ids") or []), artifact_id,
+                ]))[:30]
+                current["last_probe"] = "scoped_browser_check_xhr_xss"
+                if proof.get("executed") is True:
+                    current["status"] = "in_focus"
+                    current["reason"] = "Captured POST XHR executed in browser; independent verification required"
+                self._engagement_brain = live.to_dict()
+                return {"success": True, "coverage_cell_id": coverage_cell_id,
+                        "coverage_lease_id": coverage_lease_id,
+                        "operation": "scoped_browser_check_xhr_xss",
+                        "evidence_id": artifact_id,
+                        "proof_confirmed": proof.get("executed") is True,
+                        "probe_result": {"executed": proof.get("executed") is True,
+                                         "xhr_mutated": proof.get("xhr_mutated") is True,
+                                         "xhr_response_seen": proof.get("xhr_response_seen") is True,
+                                         "reflection_contexts": proof.get("reflection_contexts") or [],
+                                         "reflection_observations": proof.get("reflection_observations") or []}}
             try:
                 proof = json.loads(await self.scoped_body_xss_reflection(
                     cell["capture_id"], parameter, identity,
@@ -1756,6 +1971,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     ))
                     if proof.get("proof_recipe") in {"post_form_error_v1", "post_json_error_v1"}:
                         operation = "scoped_body_sqli_error"
+                    elif proof.get("proof_recipe") == "post_or_boolean_v1":
+                        operation = "scoped_body_sqli_boolean"
                 else:
                     return {"success": False, "error": "unsupported_capture",
                             "output": "No built-in replay for this captured input shape"}
@@ -2092,6 +2309,38 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                       evidence_ids=[*evidence_ids,
                                     *([result["artifact_id"]] if result.get("artifact_id") else [])])
         return result
+
+    def _ingest_scanner_leads(self, rows: List[Dict[str, Any]]) -> int:
+        """Fold ffuf/sqlmap lead rows into the inventory and re-seed cells.
+
+        Rows are leads, not findings: they become coverage cells that the typed
+        scoped probes and the independent verifier must still confirm. Returns
+        the number of new coverage cells created.
+        """
+        from app.services.agent.coverage_cells import seed_parameter_coverage_cells
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.parameter_inventory import collect_parameter_inventory
+
+        if not rows:
+            return 0
+        cmap = dict(getattr(self, "_capability_map", None) or {})
+        existing = [r for r in (cmap.get("parameter_inventory") or []) if isinstance(r, dict)]
+
+        def _key(row: Dict[str, Any]):
+            return (row.get("method"), row.get("url") or row.get("path"),
+                    row.get("name"), row.get("location"), row.get("source"))
+
+        seen = {_key(r) for r in existing}
+        added = [r for r in rows if _key(r) not in seen]
+        if not added:
+            return 0
+        cmap["parameter_inventory"] = existing + added
+        self._capability_map = cmap
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        before = len(brain.coverage_cells)
+        seed_parameter_coverage_cells(brain, collect_parameter_inventory(cmap))
+        self._engagement_brain = brain.to_dict()
+        return max(0, len(brain.coverage_cells) - before)
 
     async def _execute_impl(self, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool with the given arguments."""
@@ -2610,6 +2859,29 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                              "source": tool_name}
                             for discovered in extract_recon_urls(kind, candidate_text, crawl_target)
                         ]
+                    if tool_name in ("execute_ffuf", "execute_sqlmap"):
+                        # Scanner hits are leads: normalize to in-scope coverage
+                        # cells that the typed verifier must still confirm.
+                        try:
+                            from app.services.agent.assessment_scope import allowed_hosts
+                            from app.services.agent.scoped_assessment.scanner_leads import scanner_rows
+
+                            lead_rows = scanner_rows(
+                                tool_name, output, allowed_hosts=allowed_hosts(self),
+                            )
+                            if lead_rows:
+                                new_cells = self._ingest_scanner_leads(lead_rows)
+                                payload["scanner_leads"] = {
+                                    "source": lead_rows[0]["source"],
+                                    "leads": len(lead_rows),
+                                    "new_coverage_cells": new_cells,
+                                    "note": "Leads only; confirmation runs through the "
+                                            "scoped probes and independent verifier.",
+                                }
+                                if self._capability_map:
+                                    payload["capability_map"] = self._capability_map
+                        except Exception:
+                            logger.exception("Scanner lead ingestion failed for %s", tool_name)
                     if len(output) > max_chars and not augur_block:
                         from app.services.agent.evidence_store import evidence_store
                         payload["artifact_id"] = evidence_store(self).record("tool_output", {"output": output})
@@ -4013,6 +4285,11 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
           Complete is blocked while RA is pending.
         Default/weak login alone is not a finding until privileged impact is proven.
         If demonstrated_chain is omitted, the last live execute_* calls against this target are attached.
+        - verification_level: pass "source_verified" for a static/source-only (SAST) finding
+          with a reachable-exploit argument but no runtime reproduction. Such findings are
+          capped at medium severity until a runtime proof upgrades them. A finding confirmed
+          by the independent verifier is recorded as "exploit_verified" automatically; you
+          cannot claim exploit_verified without that runtime proof.
         """
         from app.services.agent.independent_verify import finding_publish_allowed
 
@@ -4043,6 +4320,26 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             )
             if not valid_claim:
                 return mismatch
+
+        # Label how the finding was verified, and bound an un-exploited source
+        # finding so a SAST lead cannot be filed as high/critical without a
+        # runtime proof.
+        from app.services.agent.finding_gate import (
+            cap_source_verified_severity,
+            classify_verification_level,
+        )
+
+        verification_level = classify_verification_level(
+            runtime_confirmed=verified is not None,
+            explicit=kwargs.get("verification_level"),
+            detected_by="agent",
+            specialist=kwargs.get("specialist"),
+            evidence=evidence,
+        )
+        requested_severity = (severity or "info").strip().lower()
+        severity, severity_capped = cap_source_verified_severity(
+            severity, verification_level
+        )
 
         # Normalize target for asset lookup: strip scheme and path
         target_clean = (target or "").strip()
@@ -4121,8 +4418,15 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 affected_component=(str(component)[:1000] if component else None),
                 impact=(str(impact_text)[:5000] if impact_text else None),
                 references=parsed_refs or None,
+                verification_level=verification_level,
                 metadata_={"agent_detection": agent_detection,
                            "verification": self._verify_receipts.get(verify_receipt_key(title, target)) if str(gate_msg).startswith("verify_ok") else None,
+                           "verification_level": verification_level,
+                           "severity_cap": {"requested": requested_severity,
+                                            "published": severity,
+                                            "reason": "source_verified findings are "
+                                            "capped at medium without a runtime proof"}
+                           if severity_capped else None,
                            "trace": trace_metadata},
             )
             db.add(vuln)

@@ -210,6 +210,12 @@ async def check_browser(
     xhr_payload_template: str = "",
     xhr_query_keys: list[str] | None = None,
     xhr_actions: list[dict] | None = None,
+    xhr_post_baseline: bytes | None = None,
+    xhr_post_template: bytes | None = None,
+    xhr_post_content_type: str = "",
+    xhr_capture_id: str = "",
+    xhr_body_location: str = "",
+    xhr_baseline_request_sha256: str = "",
     readback_url: str = "", cleanup_url_template: str = "",
     client_test_type: str = "",
 ) -> tuple[dict, bytes | None]:
@@ -267,22 +273,33 @@ async def check_browser(
             raise ValueError("Stored XSS needs an exact read page and nonce-addressed cleanup")
         assert_in_scope(readback_url, allowed_origins)
         assert_in_scope(cleanup_url_template.replace(NONCE_MARKER, nonce), allowed_origins)
+    post_xhr = xhr_post_baseline is not None
     if operation == "check_xhr_xss":
         from .browser_actions import allowed_discovery_path
         import re
         if (urlsplit(url).query or urlsplit(url).fragment
                 or not xhr_path.startswith("/") or xhr_path.startswith("//")
                 or len(xhr_path) > 512 or not allowed_discovery_path(xhr_path)
-                or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,79}", xhr_parameter)
+                or not (re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,79}", xhr_parameter)
+                        or post_xhr and xhr_body_location == "body_json"
+                        and xhr_parameter.startswith("/") and len(xhr_parameter) <= 160)
                 or not isinstance(xhr_query_keys, list)
-                or not 1 <= len(xhr_query_keys) <= 20
-                or xhr_parameter not in xhr_query_keys
+                or (xhr_query_keys != [] if post_xhr else not 1 <= len(xhr_query_keys) <= 20)
+                or (not post_xhr and xhr_parameter not in xhr_query_keys)
                 or xhr_query_keys != sorted(set(xhr_query_keys))
                 or any(not isinstance(key, str) or not re.fullmatch(
                     r"[A-Za-z_][A-Za-z0-9_.-]{0,79}", key) for key in xhr_query_keys)
                 or NONCE_MARKER not in xhr_payload_template
                 or len(xhr_payload_template) > 300):
             raise ValueError("An exact rendering page, safe XHR path, field, and nonce payload are required")
+        if post_xhr and (not isinstance(xhr_post_template, bytes)
+                         or not xhr_post_baseline or len(xhr_post_baseline) > 65536
+                         or len(xhr_post_template) > 65536
+                         or xhr_post_template.count(NONCE_MARKER.encode()) != 1
+                         or not xhr_post_content_type
+                         or not xhr_capture_id
+                         or xhr_body_location not in {"body_form", "body_json"}):
+            raise ValueError("POST XHR requires one bounded captured body mutation")
         if not isinstance(xhr_actions, list) or len(xhr_actions) > 6:
             raise ValueError("XHR replay actions must be a bounded observed sequence")
         for action in xhr_actions:
@@ -327,6 +344,8 @@ async def check_browser(
     xhr_response_seen = False
     xhr_response_dialogs: list[str] = []
     xhr_request = None
+    xhr_body_match_mode = ""
+    xhr_volatile_fields: list[str] = []
     readback_active = False
     readback_response_seen = False
     readback_status = None
@@ -348,7 +367,9 @@ async def check_browser(
 
             async def route_request(route):
                 nonlocal blocked_requests, approved_post_requests, xhr_mutated, xhr_request
+                nonlocal xhr_body_match_mode, xhr_volatile_fields
                 nonlocal blocked_marker_navigation, blocked_marker_fetch
+                post_mutation = None
                 try:
                     allowed = origin(route.request.url) == expected_origin
                     if allowed and post_action_active:
@@ -362,12 +383,43 @@ async def check_browser(
                     elif allowed and read_only_interaction:
                         from .browser_actions import allowed_discovery_path
 
-                        allowed = (route.request.method.upper() in {"GET", "HEAD", "OPTIONS"}
-                                   and allowed_discovery_path(urlsplit(route.request.url).path or "/"))
+                        method = route.request.method.upper()
+                        path = urlsplit(route.request.url).path or "/"
+                        if (operation == "check_xhr_xss" and post_xhr
+                                and method == "POST" and path == xhr_path
+                                and not xhr_mutated
+                                and route.request.resource_type in {"xhr", "fetch"}
+                                and not urlsplit(route.request.url).query
+                                and not urlsplit(route.request.url).fragment
+                                and route.request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                                    == xhr_post_content_type):
+                            from .body_probe import match_browser_post_body
+
+                            post_mutation = match_browser_post_body(
+                                xhr_post_baseline, route.request.post_data_buffer,
+                                mime=xhr_post_content_type, parameter=xhr_parameter,
+                                payload=xhr_payload_template,
+                            )
+                        allowed = ((method in {"GET", "HEAD", "OPTIONS"}
+                                    and allowed_discovery_path(path))
+                                   or post_mutation is not None)
                 except ValueError:
                     allowed = False
                 if allowed:
+                    if (operation == "check_xhr_xss" and post_xhr
+                            and route.request.method.upper() == "POST"):
+                        if not xhr_actions or current_action_ref == f"xhr-replay-{len(xhr_actions)}":
+                            xhr_request = route.request
+                            xhr_mutated = True
+                            changed_body, xhr_body_match_mode, xhr_volatile_fields = post_mutation
+                            changed_body = changed_body.replace(NONCE_MARKER.encode(), nonce.encode())
+                            await route.continue_(post_data=changed_body)
+                        else:
+                            blocked_requests += 1
+                            await route.abort()
+                        return
                     if (operation == "check_xhr_xss" and not xhr_mutated
+                            and not post_xhr
                             and (not xhr_actions or current_action_ref == f"xhr-replay-{len(xhr_actions)}")
                             and route.request.method.upper() == "GET"
                             and route.request.resource_type in {"xhr", "fetch"}
@@ -1088,6 +1140,13 @@ async def check_browser(
                     result["xhr_response_seen"] = xhr_response_seen
                     result["xhr_actions"] = xhr_actions
                     result["xhr_actions_replayed"] = xhr_actions_replayed
+                    result["xhr_method"] = "POST" if post_xhr else "GET"
+                    if post_xhr:
+                        result["xhr_capture_id"] = xhr_capture_id
+                        result["xhr_body_location"] = xhr_body_location
+                        result["xhr_baseline_request_sha256"] = xhr_baseline_request_sha256
+                        result["xhr_body_match_mode"] = xhr_body_match_mode
+                        result["xhr_volatile_fields"] = xhr_volatile_fields
                 # Give the specialist bounded render feedback without page
                 # source or attacker-controlled text. This is not proof.
                 try:

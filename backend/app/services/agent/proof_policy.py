@@ -23,13 +23,15 @@ Keep observations, candidates, confirmed findings, refutations, and inconclusive
 # Keep unsupported classes inconclusive until they have their own validator.
 PROOFS_BY_CLASS = {
     "exposure": frozenset({"response_match", "public_directory_index"}),
-    "sql_injection": frozenset({"numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "post_error_sqli"}),
+    "sql_injection": frozenset({"numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "post_error_sqli", "post_boolean_sqli"}),
     "xss": frozenset({"browser_xss", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "upload_xss"}),
     "authorization": frozenset({"authorization", "owner_only", "state_change", "workflow"}),
     "ssrf": frozenset({"oob_callback"}),
     "xxe": frozenset({"oob_callback"}),
     "crlf": frozenset({"scoped_response_crlf"}),
     "open_redirect": frozenset({"scoped_response_redirect"}),
+    "cors": frozenset({"scoped_cors_credentialed"}),
+    "race_condition": frozenset({"scoped_race_overrun"}),
     "dom_open_redirect": frozenset({"scoped_browser_client"}),
     "client_template_injection": frozenset({"scoped_browser_client"}),
     "client_prototype_pollution": frozenset({"scoped_browser_client"}),
@@ -40,12 +42,31 @@ PROOFS_BY_CLASS = {
     "account_enumeration": frozenset(),
 }
 
+
+def _post_xhr_match_valid(row: dict) -> bool:
+    from app.services.agent.scoped_assessment.body_probe import VOLATILE_POST_FIELDS
+
+    mode = row.get("xhr_body_match_mode", "exact")
+    fields = row.get("xhr_volatile_fields") or []
+    if mode == "exact":
+        return fields == []
+    return (mode == "volatile_fields" and isinstance(fields, list)
+            and 1 <= len(fields) <= 3
+            and all(isinstance(field, str)
+                    and field.lower().replace("-", "_") in VOLATILE_POST_FIELDS
+                    for field in fields)
+            and len(fields) == len(set(fields)))
+
 _CLAIM_PATTERNS = (
     ("sql_injection", r"\bSQLi\b|\bSQL\s+injection\b"),
     ("xss", r"\bXSS\b|cross[ -]?site scripting|\bscript injection\b"),
     ("crlf", r"\bCRLF\b|\bresponse header injection\b|\bHTTP response splitting\b"),
     ("dom_open_redirect", r"\bDOM[ -]?based open redirect\b"),
     ("open_redirect", r"\bopen redirect\b"),
+    ("cors", r"\bCORS\b|cross[- ]origin resource sharing|\bACAO\b|"
+     r"access-control-allow-origin"),
+    ("race_condition", r"\brace condition\b|\bTOCTOU\b|\bdouble[- ]spend\b|"
+     r"\bconcurrenc(?:y|e) (?:bug|flaw|abuse)\b|\blimit overrun\b"),
     ("client_template_injection", r"\bclient[ -]?side template injection\b|\bCSTI\b"),
     ("client_prototype_pollution", r"\bclient[ -]?side prototype pollution\b"),
     ("ssrf", r"\bSSRF\b|server[ -]?side request forgery"),
@@ -126,7 +147,7 @@ def validate_proof(
     allowed, reason = proof_kind_allowed(candidate, kind)
     if not allowed:
         return False, reason
-    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "post_error_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "scoped_response_crlf", "scoped_response_redirect", "scoped_browser_client"):
+    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "post_error_sqli", "post_boolean_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed", "scoped_race_overrun", "scoped_browser_client"):
         hunter_id = proof.get("hunter_artifact_id")
         verifier = row("artifact_id")
         hunter = (store.records.get(hunter_id)
@@ -136,6 +157,7 @@ def validate_proof(
             "string_boolean_sqli": "scoped_string_sqli",
             "string_error_sqli": "scoped_string_sqli",
             "post_error_sqli": "scoped_body_sqli_error",
+            "post_boolean_sqli": "scoped_body_sqli_boolean",
             "owner_only": "scoped_owner_only",
             "public_directory_index": "scoped_http_get",
             "scoped_browser_xss": "scoped_browser_check_xss",
@@ -144,6 +166,8 @@ def validate_proof(
             "scoped_browser_stored_xss": "scoped_browser_check_stored_xss",
             "scoped_response_crlf": "scoped_response_probe",
             "scoped_response_redirect": "scoped_response_probe",
+            "scoped_cors_credentialed": "scoped_response_probe",
+            "scoped_race_overrun": "scoped_race_probe",
             "scoped_browser_client": "scoped_browser_check_client",
         }[kind]
         if (not hunter or not verifier or hunter["id"] == verifier["id"]
@@ -153,9 +177,14 @@ def validate_proof(
         first, second = hunter["payload"], verifier["payload"]
         if hunter["target"] != verifier["target"] or hunter["target"] != candidate.target:
             return False, "Both actors must prove the same candidate target"
-        if kind in {"scoped_response_crlf", "scoped_response_redirect"}:
-            expected_type = "crlf" if kind == "scoped_response_crlf" else "open_redirect"
-            signal = "header_marker" if expected_type == "crlf" else "redirect_canary"
+        if kind in {"scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed"}:
+            expected_type = {
+                "scoped_response_crlf": "crlf",
+                "scoped_response_redirect": "open_redirect",
+                "scoped_cors_credentialed": "cors",
+            }[kind]
+            signal = {"crlf": "header_marker", "open_redirect": "redirect_canary",
+                      "cors": "cors_canary"}[expected_type]
             if (candidate.vulnerability_class != expected_type
                     or hunter["identity"] != verifier["identity"]
                     or first.get("operation") != "scoped_response_probe"
@@ -170,7 +199,27 @@ def validate_proof(
                            or row.get("control", {}).get(signal) is not False
                            or row.get("probe", {}).get(signal) is not True
                            for row in (first, second))):
-                return False, "Independent response-header or redirect canary proof is required"
+                return False, "Independent response-header, redirect, or CORS canary proof is required"
+            return True, ""
+        if kind == "scoped_race_overrun":
+            if (candidate.vulnerability_class != "race_condition"
+                    or hunter["identity"] != verifier["identity"]
+                    or first.get("operation") != "scoped_race_probe"
+                    or second.get("operation") != "scoped_race_probe"
+                    or first.get("test_type") != "race_condition"
+                    or second.get("test_type") != "race_condition"
+                    or first.get("field") != second.get("field")
+                    or any(row.get("proof_confirmed") is not True
+                           or row.get("cleanup_confirmed") is not True
+                           or row.get("control", {}).get("single_use_enforced") is not True
+                           or row.get("control", {}).get("readback_count") != 1
+                           or row.get("probe", {}).get("overrun") is not True
+                           or int(row.get("probe", {}).get("readback_count") or 0) < 2
+                           or int(row.get("probe", {}).get("successes") or 0) < 2
+                           for row in (first, second))
+                    # The two runs must use distinct nonce-bound canaries.
+                    or first.get("probe", {}).get("canary") == second.get("probe", {}).get("canary")):
+                return False, "Independent sequential-vs-concurrent overrun proof is required"
             return True, ""
         if kind == "scoped_browser_client":
             claim = candidate.vulnerability_class
@@ -272,6 +321,19 @@ def validate_proof(
                     or hunter["identity"] != verifier["identity"]):
                 return False, "Independent matching POST SQL error proof is required"
             return True, ""
+        if kind == "post_boolean_sqli":
+            from app.services.agent.scoped_assessment.body_probe import post_sql_boolean_proof_valid
+            if (not post_sql_boolean_proof_valid(first) or not post_sql_boolean_proof_valid(second)
+                    or first.get("proof_confirmed") is not True
+                    or second.get("proof_confirmed") is not True
+                    or first.get("parameter") != second.get("parameter")
+                    or first.get("location") != second.get("location")
+                    or first.get("source_artifact_id") != second.get("source_artifact_id")
+                    or first.get("baseline_request_sha256") != second.get("baseline_request_sha256")
+                    or first.get("nonce") == second.get("nonce")
+                    or hunter["identity"] != verifier["identity"]):
+                return False, "Independent matching POST Boolean proof with a fresh nonce is required"
+            return True, ""
         if kind == "owner_only":
             from app.services.agent.scoped_assessment.authz_proof import owner_only_proof_valid
             if (not owner_only_proof_valid(first) or not owner_only_proof_valid(second)
@@ -322,7 +384,22 @@ def validate_proof(
             or not first.get("xhr_parameter")
             or first.get("xhr_query_keys") != second.get("xhr_query_keys")
             or not isinstance(first.get("xhr_query_keys"), list)
-            or first.get("xhr_parameter") not in first["xhr_query_keys"]
+            or first.get("xhr_method", "GET") != second.get("xhr_method", "GET")
+            or (first.get("xhr_query_keys") != [] if first.get("xhr_method", "GET") == "POST"
+                else first.get("xhr_parameter") not in first["xhr_query_keys"])
+            or (first.get("xhr_method", "GET") == "POST" and (
+                first.get("xhr_capture_id") != second.get("xhr_capture_id")
+                or not first.get("xhr_capture_id")
+                or first.get("xhr_body_location") != second.get("xhr_body_location")
+                or first.get("xhr_body_location") not in {"body_form", "body_json"}
+                or first.get("xhr_baseline_request_sha256") != second.get("xhr_baseline_request_sha256")
+                or not first.get("xhr_baseline_request_sha256")
+                or not all(_post_xhr_match_valid(row) for row in (first, second))
+                or (first.get("xhr_body_match_mode") == second.get("xhr_body_match_mode") == "volatile_fields"
+                    and first.get("xhr_volatile_fields") != second.get("xhr_volatile_fields"))
+                or (candidate.parameter and candidate.parameter !=
+                    f"{first.get('xhr_body_location')}:{first.get('xhr_parameter')}")
+            ))
             or first.get("xhr_payload_template") != second.get("xhr_payload_template")
             or first.get("xhr_actions", []) != second.get("xhr_actions", [])
             or any(not isinstance(row.get("xhr_actions", []), list)

@@ -19,7 +19,7 @@ from app.services.agent.assessment_sessions import browser_storage_state, identi
 from app.services.agent.evidence_store import evidence_store, verification_run
 from app.services.agent.private_capture_store import delete_capture, load_capture, persist_capture
 from app.services.agent.scoped_assessment import (
-    authz_proof, body_probe, browser, http_observe, planning, query_probe,
+    authz_proof, body_probe, browser, browser_post_replay, http_observe, planning, query_probe,
     sqli_boolean, sqli_string, technology,
 )
 from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
@@ -49,8 +49,14 @@ VERIFIER_GET_BUDGET = 80
 first_pass_get_context: ContextVar[bool] = ContextVar(
     "prowl_first_pass_get", default=False,
 )
-HUNTER_POST_BUDGET = 10
-VERIFIER_POST_BUDGET = 10
+# One blind SQLi first pass uses eight POSTs including its exploratory pair.
+# Keep the full eight-input batch reachable while still bounding the session.
+HUNTER_POST_BUDGET = 64
+VERIFIER_POST_BUDGET = 24
+# A race burst is high-volume by nature, so it is reserved separately from the
+# careful single-probe POST budget and bounded to a few attempts per actor.
+HUNTER_RACE_BUDGET = 3
+VERIFIER_RACE_BUDGET = 3
 
 
 class ScopedAssessmentTools:
@@ -110,6 +116,8 @@ class ScopedAssessmentTools:
         policy = policy or {}
         paths = policy.get("body_replay_paths") or []
         cleanup_paths = policy.get("stored_xss_cleanup_paths") or []
+        race_action_paths = policy.get("race_action_paths") or []
+        race_cleanup_paths = policy.get("race_cleanup_paths") or []
         expectations = policy.get("owner_only_resources") or []
         auth_login_path = policy.get("auth_login_path") or ""
         if (auth_login_path and (not isinstance(auth_login_path, str)
@@ -120,9 +128,11 @@ class ScopedAssessmentTools:
             raise ValueError("Invalid authenticated login path")
         if (not isinstance(paths, list) or len(paths) > 8
                 or not isinstance(cleanup_paths, list) or len(cleanup_paths) > 8
+                or not isinstance(race_action_paths, list) or len(race_action_paths) > 8
+                or not isinstance(race_cleanup_paths, list) or len(race_cleanup_paths) > 8
                 or not isinstance(expectations, list) or len(expectations) > 8):
             raise ValueError("Invalid bounded assessment policy")
-        for path in [*paths, *cleanup_paths]:
+        for path in [*paths, *cleanup_paths, *race_action_paths, *race_cleanup_paths]:
             if (not isinstance(path, str) or not path.startswith("/") or path.startswith("//")
                     or path == "/" or len(path) > 256 or any(char in path for char in "?#\\\r\n\t ")):
                 raise ValueError("Invalid approved write or cleanup path")
@@ -143,9 +153,11 @@ class ScopedAssessmentTools:
             approved[target] = (owner, other)
         self._scoped_body_replay_paths = set(paths)
         self._scoped_stored_xss_cleanup_paths = set(cleanup_paths)
+        self._scoped_race_action_paths = set(race_action_paths)
+        self._scoped_race_cleanup_paths = set(race_cleanup_paths)
         self._scoped_owner_expectations = approved
         self._scoped_auth_login_path = auth_login_path
-        if paths or cleanup_paths or approved:
+        if paths or cleanup_paths or race_action_paths or race_cleanup_paths or approved:
             self._scoped_assessment_started = True
 
     def _scoped_origin(self, url: str) -> str:
@@ -279,6 +291,16 @@ class ScopedAssessmentTools:
             raise ValueError("Scoped POST request budget exhausted for this assessment session")
         setattr(self, counter, used + count)
 
+    def _scoped_claim_race(self) -> None:
+        """Reserve one bounded concurrency burst for the hunter or verifier."""
+        verifier = verification_run.get() is not None
+        counter = "_scoped_verifier_race_count" if verifier else "_scoped_race_count"
+        limit = VERIFIER_RACE_BUDGET if verifier else HUNTER_RACE_BUDGET
+        used = int(getattr(self, counter, 0) or 0)
+        if used + 1 > limit:
+            raise ValueError("Scoped race-burst budget exhausted for this assessment session")
+        setattr(self, counter, used + 1)
+
     def _scoped_capture_row(self, artifact_id: str) -> dict | None:
         row = (getattr(self, "_scoped_browser_exchanges", None) or {}).get(artifact_id)
         if row is not None:
@@ -324,13 +346,42 @@ class ScopedAssessmentTools:
         xhr_payload_template: str = "",
         xhr_query_keys: list[str] | None = None,
         xhr_actions: list[dict] | None = None,
+        xhr_capture_id: str = "",
         readback_url: str = "", cleanup_url_template: str = "",
         client_test_type: str = "",
     ) -> str:
         """Run scoped map, crawl, JS inspection, or nonce XSS execution in Chromium."""
         if operation not in ("map", "crawl", "inspect_js", "check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss", "check_client"):
             raise ValueError("Unsupported scoped browser operation")
+        if xhr_capture_id and operation != "check_xhr_xss":
+            raise ValueError("A POST XHR capture requires the XHR browser check")
         allowed = self._scoped_origin(url)
+        xhr_post = None
+        if operation == "check_xhr_xss" and xhr_capture_id:
+            record = evidence_store(self).records.get(xhr_capture_id)
+            row = self._scoped_capture_row(xhr_capture_id)
+            run = verification_run.get()
+            if (not record or record.get("kind") != "scoped_browser_exchange"
+                    or not row or row.get("identity") != identity
+                    or row.get("verifier_run_id")
+                    or (run is not None and record.get("run_id"))):
+                raise ValueError("POST XHR requires an execution-owned browser capture")
+            private = row["private"]
+            observed = json.loads(private)
+            if (observed.get("page_url") != url
+                    or observed.get("replay_actions", []) != (xhr_actions or [])):
+                raise ValueError("POST XHR rendering page or actions differ from capture")
+            captured_url, mime, baseline, changed = body_probe.plan_observed_body(
+                private, parameter=xhr_parameter, allowed_origins=[allowed],
+                payload=xhr_payload_template,
+            )
+            if (captured_url != allowed + xhr_path or xhr_query_keys not in (None, [])
+                    or (urlsplit(captured_url).path or "/") not in
+                    (getattr(self, "_scoped_body_replay_paths", None) or set())
+                    or browser.NONCE_MARKER.encode() not in changed):
+                raise ValueError("POST XHR must match an approved captured request")
+            xhr_post = (baseline, changed, mime)
+            self._scoped_claim_posts(1)
         if operation in {"check_form_xss", "check_stored_xss"}:
             if self._scoped_origin(form_action) != allowed:
                 raise ValueError("Form action is outside the assessment origin")
@@ -345,10 +396,7 @@ class ScopedAssessmentTools:
                         or (urlsplit(cleanup_url_template).path or "/") not in
                         (getattr(self, "_scoped_stored_xss_cleanup_paths", None) or set())):
                     raise ValueError("Stored XSS cleanup path was not approved by the assessment operator")
-            used = int(getattr(self, "_scoped_post_count", 0) or 0)
-            if used >= 10:
-                raise ValueError("Scoped POST budget exhausted for this assessment session")
-            self._scoped_post_count = used + 1
+            self._scoped_claim_posts(1)
         state = self._scoped_state(identity, url)
         sources: list[dict] = []
         exchanges: list[dict] = []
@@ -366,6 +414,14 @@ class ScopedAssessmentTools:
             xhr_payload_template=xhr_payload_template,
             xhr_query_keys=xhr_query_keys,
             xhr_actions=xhr_actions,
+            xhr_post_baseline=xhr_post[0] if xhr_post else None,
+            xhr_post_template=xhr_post[1] if xhr_post else None,
+            xhr_post_content_type=xhr_post[2] if xhr_post else "",
+            xhr_capture_id=xhr_capture_id,
+            xhr_body_location=("body_json" if xhr_post and
+                               (xhr_post[2] == "application/json" or xhr_post[2].endswith("+json"))
+                               else "body_form" if xhr_post else ""),
+            xhr_baseline_request_sha256=hashlib.sha256(xhr_post[0]).hexdigest() if xhr_post else "",
             readback_url=readback_url, cleanup_url_template=cleanup_url_template,
             client_test_type=client_test_type,
         )
@@ -706,6 +762,77 @@ class ScopedAssessmentTools:
                 self._engagement_brain = live.to_dict()
         return json.dumps(result)
 
+    async def _scoped_fresh_post_sql(self, private: bytes, parameter: str, identity: str,
+                                     allowed: str, *, recipe: str = "hunter") -> dict:
+        """Replay token-bearing SQLi controls from the observed page, never a stale POST."""
+        url, mime, baseline, _, _ = body_probe.plan_sql_error_body(
+            private, parameter=parameter, allowed_origins=[allowed],
+        )
+        state = self._scoped_state(identity, url)
+        replay = browser_post_replay.replay_observed_post_controls
+        if recipe == "error":
+            self._scoped_claim_posts(5)
+            checks = await replay(private, parameter=parameter, payloads={
+                "baseline_first": "", "quote_first": "'", "escaped_quote": "''",
+                "quote_second": "'", "baseline_last": "",
+            }, allowed_origins=[allowed], storage_state=state)
+            result = body_probe.build_sql_error_result(
+                url, mime, baseline, parameter=parameter, checks=checks,
+            )
+        elif recipe == "boolean":
+            _, _, variants, nonce = body_probe.plan_sql_boolean_body(
+                private, parameter=parameter, allowed_origins=[allowed],
+            )
+            other = nonce[:-1] + str((int(nonce[-1]) + 1) % 10)
+            self._scoped_claim_posts(6)
+            checks = await replay(private, parameter=parameter, payloads={
+                "baseline_first": "", "true_first": f"' OR '{nonce}'='{nonce}'-- ",
+                "false_first": f"' OR '{nonce}'='{other}'-- ",
+                "true_second": f"' OR '{nonce}'='{nonce}'-- ",
+                "false_second": f"' OR '{nonce}'='{other}'-- ",
+                "baseline_last": "",
+            }, allowed_origins=[allowed], storage_state=state)
+            result = body_probe.build_sql_boolean_result(
+                url, mime, variants, nonce, parameter=parameter, checks=checks,
+            )
+        elif recipe == "hunter":
+            self._scoped_claim_posts(2)
+            initial = await replay(private, parameter=parameter, payloads={
+                "baseline_first": "", "quote_first": "'",
+            }, allowed_origins=[allowed], storage_state=state)
+            base, quote = initial["baseline_first"], initial["quote_first"]
+            inconclusive = any(row["truncated"] or row["redirected"] or row["status"] in (401, 403)
+                               for row in initial.values())
+            result = {
+                "operation": "body_probe", "target": allowed + (urlsplit(url).path or "/"),
+                "method": "POST", "parameter": parameter,
+                "location": "form" if mime == "application/x-www-form-urlencoded" else "json",
+                "technique": "append_single_quote", "requests_sent": 2,
+                "identity_transport": "named_identity_browser_state",
+                "baseline": base, "probe": quote,
+                "changed": base["status"] != quote["status"] or base["body_sha256"] != quote["body_sha256"],
+                "sql_error_signal": bool(quote.get("sql_error_family") and not base.get("sql_error_family")),
+                "inconclusive": inconclusive, "finding": False,
+            }
+            if not inconclusive and result["sql_error_signal"]:
+                self._scoped_claim_posts(3)
+                more = await replay(private, parameter=parameter, payloads={
+                    "escaped_quote": "''", "quote_second": "'", "baseline_last": "",
+                }, allowed_origins=[allowed], storage_state=state)
+                result = body_probe.build_sql_error_result(
+                    url, mime, baseline, parameter=parameter, checks={**initial, **more},
+                )
+            elif not inconclusive and base["status"] == quote["status"] == 200:
+                result = await self._scoped_fresh_post_sql(
+                    private, parameter, identity, allowed, recipe="boolean",
+                )
+        else:
+            raise ValueError("Unsupported fresh POST SQL recipe")
+        result["replay_mode"] = "browser_fresh_post"
+        result["identity_transport"] = "named_identity_browser_state"
+        result["captured_volatile_fields"] = body_probe.captured_volatile_post_fields(baseline, mime)
+        return result
+
     async def scoped_body_probe(self, artifact_id: str, parameter: str, identity: str = "anonymous") -> str:
         """Probe one approved POST form or JSON field with bounded SQL controls."""
         private = self._scoped_exchange(artifact_id, identity)
@@ -718,14 +845,17 @@ class ScopedAssessmentTools:
         if (urlsplit(url).path or "/") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
             raise ValueError("POST path was not approved by the assessment operator")
         state = self._scoped_state(identity, url)
-        self._scoped_claim_posts(2)
-        result = await asyncio.to_thread(
+        if body_probe.captured_volatile_post_fields(baseline, mime):
+            result = await self._scoped_fresh_post_sql(private, parameter, identity, allowed)
+        else:
+            self._scoped_claim_posts(2)
+            result = await asyncio.to_thread(
             body_probe.probe_observed_body, url, mime, baseline, changed,
             parameter=parameter, allowed_origins=[allowed],
             storage_state=state,
             replay_headers=body_probe.safe_replay_headers(private),
-        )
-        if result.get("sql_error_signal") and result.get("inconclusive") is False:
+            )
+        if result.get("replay_mode") != "browser_fresh_post" and result.get("sql_error_signal") and result.get("inconclusive") is False:
             try:
                 _, _, baseline, quote_body, escaped_body = body_probe.plan_sql_error_body(
                     private, parameter=parameter, allowed_origins=[allowed],
@@ -739,14 +869,72 @@ class ScopedAssessmentTools:
                 )
             except (ValueError, OSError, TimeoutError) as exc:
                 result["error_followup_blocked"] = type(exc).__name__
+        elif (result.get("replay_mode") != "browser_fresh_post" and result.get("inconclusive") is False
+              and (result.get("baseline") or {}).get("status") == 200
+              and (result.get("probe") or {}).get("status") == 200):
+            try:
+                _, _, variants, nonce = body_probe.plan_sql_boolean_body(
+                    private, parameter=parameter, allowed_origins=[allowed],
+                )
+                self._scoped_claim_posts(6)
+                result = await asyncio.to_thread(
+                    body_probe.probe_sql_boolean_body, url, mime, variants, nonce,
+                    parameter=parameter, allowed_origins=[allowed], storage_state=state,
+                    replay_headers=body_probe.safe_replay_headers(private),
+                )
+            except (ValueError, OSError, TimeoutError) as exc:
+                result["boolean_followup_blocked"] = type(exc).__name__
         result["source_artifact_id"] = artifact_id
+        operation = result.get("operation")
         result["evidence_id"] = evidence_store(self).record(
-            "scoped_body_sqli_error" if result.get("operation") in {"sqli_error_form", "sqli_error_json"} else "scoped_body_probe",
+            "scoped_body_sqli_boolean" if operation == "sqli_boolean_body" else
+            "scoped_body_sqli_error" if operation in {"sqli_error_form", "sqli_error_json"} else
+            "scoped_body_probe",
             result, target=result["target"], identity=identity,
-            success=result.get("proof_confirmed") is True if result.get("operation") in {"sqli_error_form", "sqli_error_json"}
+            success=result.get("proof_confirmed") is True if operation in {
+                "sqli_error_form", "sqli_error_json", "sqli_boolean_body",
+            }
                     else not result["inconclusive"],
         )
         return json.dumps(result)
+
+    async def _scoped_body_sql_boolean_verifier(
+        self, artifact_id: str, parameter: str, identity: str,
+    ) -> dict:
+        """Repeat a hunter capture with a fresh Boolean nonce in the verifier run."""
+        run = verification_run.get()
+        record = evidence_store(self).records.get(artifact_id)
+        row = self._scoped_capture_row(artifact_id)
+        if (run is None or not record or record.get("kind") != "scoped_browser_exchange"
+                or record.get("run_id") or not row or row.get("identity") != identity
+                or row.get("verifier_run_id")):
+            raise ValueError("Verifier requires a hunter-owned browser capture for this identity")
+        private = row["private"]
+        observed = json.loads(private)
+        allowed = self._scoped_origin(observed["url"])
+        url, mime, variants, nonce = body_probe.plan_sql_boolean_body(
+            private, parameter=parameter, allowed_origins=[allowed],
+        )
+        if (urlsplit(url).path or "/") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
+            raise ValueError("POST path was not approved by the assessment operator")
+        if body_probe.captured_volatile_post_fields(variants["baseline_first"], mime):
+            result = await self._scoped_fresh_post_sql(
+                private, parameter, identity, allowed, recipe="boolean",
+            )
+        else:
+            self._scoped_claim_posts(6)
+            result = await asyncio.to_thread(
+                body_probe.probe_sql_boolean_body, url, mime, variants, nonce,
+                parameter=parameter, allowed_origins=[allowed],
+                storage_state=self._scoped_state(identity, url),
+                replay_headers=body_probe.safe_replay_headers(private),
+            )
+        result["source_artifact_id"] = artifact_id
+        result["evidence_id"] = evidence_store(self).record(
+            "scoped_body_sqli_boolean", result, target=result["target"], identity=identity,
+            success=result["proof_confirmed"],
+        )
+        return result
 
     async def _scoped_body_sql_error_verifier(
         self, artifact_id: str, parameter: str, identity: str,
@@ -768,13 +956,18 @@ class ScopedAssessmentTools:
         if (urlsplit(url).path or "/") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
             raise ValueError("POST path was not approved by the assessment operator")
         state = self._scoped_state(identity, url)
-        self._scoped_claim_posts(5)
-        result = await asyncio.to_thread(
-            body_probe.probe_sql_error_body, url, mime, baseline, quote_body, escaped_body,
-            parameter=parameter, allowed_origins=[allowed],
-            storage_state=state,
-            replay_headers=body_probe.safe_replay_headers(private),
-        )
+        if body_probe.captured_volatile_post_fields(baseline, mime):
+            result = await self._scoped_fresh_post_sql(
+                private, parameter, identity, allowed, recipe="error",
+            )
+        else:
+            self._scoped_claim_posts(5)
+            result = await asyncio.to_thread(
+                body_probe.probe_sql_error_body, url, mime, baseline, quote_body, escaped_body,
+                parameter=parameter, allowed_origins=[allowed],
+                storage_state=state,
+                replay_headers=body_probe.safe_replay_headers(private),
+            )
         result["source_artifact_id"] = artifact_id
         result["evidence_id"] = evidence_store(self).record(
             "scoped_body_sqli_error", result, target=result["target"], identity=identity,

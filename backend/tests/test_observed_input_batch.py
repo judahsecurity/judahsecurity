@@ -123,6 +123,19 @@ def test_leasing_without_probe_does_not_count_as_attempted():
     assert funnel["unattempted"] == funnel["checks"]
 
 
+def test_funnel_reports_specific_replay_blockers_without_raw_error_text():
+    brain = _brain()
+    first, second = brain.coverage_cells[:2]
+    first.update(first_pass_outcome="unattempted",
+                 first_pass_handoff_error="post_xhr_replay_blocked: secret token value")
+    second.update(first_pass_outcome="unattempted",
+                  first_pass_blocked_reason="identity_unavailable")
+    reasons = parameter_test_funnel(brain)["replay_block_reasons"]
+    assert reasons["post_xhr_replay_blocked"] == 1
+    assert reasons["identity_unavailable"] == 1
+    assert "secret token value" not in str(reasons)
+
+
 def test_sql_xss_batch_does_not_consume_xxe_work():
     brain = _brain()
     seed_parameter_coverage_cells(brain, [{
@@ -335,15 +348,18 @@ def test_observed_post_form_xss_is_sent_to_browser_execution():
 
         async def scoped_input_probe_assigned(self, **kwargs):
             self.calls.append(kwargs)
-            return {"success": True, "evidence_id": "post-browser-proof",
+            return {"success": True, "operation": "scoped_browser_check_form_xss",
+                    "evidence_id": "post-browser-proof",
                     "proof_confirmed": False, "probe_result": {"reflection_contexts": []}}
 
     manager = Manager()
     assert {row["test_type"] for row in pending_first_pass_cells(manager._engagement_brain)} == {"xss"}
     result = asyncio.run(run_observed_input_batch(manager, max_checks=2))
     assert result["processed"] == 1
-    assert len(manager.calls) == 1
-    assert manager.calls[0]["technique"] == "html_body"
+    assert [call["technique"] for call in manager.calls] == [
+        "html_body", "html_body_svg", "html_attribute", "html_attribute_single",
+        "js_single", "js_double",
+    ]
     assert any(row["outcome"] == "inconclusive" for row in result["results"])
 
 
@@ -358,11 +374,18 @@ def test_unapproved_post_form_is_recorded_as_open_blocked_coverage():
                 "source": "observed_form", "testable": True,
             }])
             self._engagement_brain = brain.to_dict()
-            self._capability_map = {"target": "https://app.test"}
+            self._capability_map = {"target": "https://app.test", "forms": [{
+                "method": "POST", "action": "https://app.test/newsletter",
+                "inputs": ["email"], "page": "https://app.test/newsletter",
+            }]}
             self._scoped_body_replay_paths = set()
+            self.calls = 0
 
         async def scoped_input_probe_assigned(self, **_kwargs):
-            raise AssertionError("Unapproved POST must not reach the executor")
+            self.calls += 1
+            return {"success": True, "operation": "scoped_browser_check_form_xss",
+                    "evidence_id": "approved-post-receipt", "proof_confirmed": False,
+                    "probe_result": {"reflection_contexts": []}}
 
     manager = Manager()
     result = asyncio.run(run_observed_input_batch(manager, max_checks=2))
@@ -374,6 +397,13 @@ def test_unapproved_post_form_is_recorded_as_open_blocked_coverage():
                 if row["test_type"] == "xss")
     assert cell["status"] == "blocked"
     assert cell["first_pass_outcome"] == "unattempted"
+    assert cell["first_pass_blocked_reason"] == "post_path_not_approved"
+    assert result["funnel"]["replay_block_reasons"]["post_path_not_approved"] == 1
+    assert manager.calls == 0
+    manager._scoped_body_replay_paths.add("/newsletter")
+    resumed = asyncio.run(run_observed_input_batch(manager, max_checks=1))
+    assert resumed["policy_reopened"] == 1
+    assert resumed["processed"] == 1 and manager.calls > 0
 
 def test_transient_first_pass_handoff_gets_one_delayed_retry():
     class Manager:
@@ -691,7 +721,7 @@ def test_scoped_service_proof_does_not_enter_local_verifier_queue():
                for item in loop_progress(state)["missing"])
 
 
-def test_captured_post_xss_uses_reflection_canary_and_stays_inconclusive():
+def test_captured_post_xss_first_pass_stays_inconclusive_without_browser_execution():
     class Manager:
         def __init__(self):
             brain = EngagementBrain(target="https://app.test")
@@ -720,9 +750,93 @@ def test_captured_post_xss_uses_reflection_canary_and_stays_inconclusive():
 
     manager = Manager()
     result = asyncio.run(run_observed_input_batch(manager, max_checks=1))
-    assert manager.techniques == ["xss_reflection"]
+    assert manager.techniques == ["xss_browser"]
     assert result["results"][0]["outcome"] == "inconclusive"
     assert "browser execution" in result["results"][0]["reason"]
+
+
+def test_captured_post_xss_sweeps_bounded_context_variants_after_rendered_response():
+    class Manager:
+        def __init__(self):
+            brain = EngagementBrain(target="https://app.test")
+            seed_parameter_coverage_cells(brain, [{
+                "method": "POST", "host": "app.test", "path": "/feedback",
+                "name": "message", "location": "body_form", "identity": "anonymous",
+                "source": "browser_traffic", "artifact_id": "capture-1", "testable": True,
+            }])
+            for cell in brain.coverage_cells:
+                if cell["test_type"] == "sqli":
+                    cell["status"] = "skipped"
+            self._engagement_brain = brain.to_dict()
+            self._capability_map = {"target": "https://app.test"}
+            self._scoped_body_replay_paths = {"/feedback"}
+            self.techniques = []
+
+        async def scoped_assessment_probe_assigned(self, **kwargs):
+            self.techniques.append(kwargs["technique"])
+            return {"success": True, "operation": "scoped_browser_check_xhr_xss",
+                    "evidence_id": f"xss-browser-{len(self.techniques)}",
+                    "proof_confirmed": False,
+                    "probe_result": {"executed": False, "xhr_mutated": True,
+                                     "xhr_response_seen": True,
+                                     "reflection_contexts": ["html_attribute"]}}
+
+        async def submit_finding_candidate(self, **_kwargs):
+            raise AssertionError("Reflection alone is not browser execution proof")
+
+    manager = Manager()
+    result = asyncio.run(run_observed_input_batch(manager, max_checks=1))
+    assert manager.techniques == [
+        "xss_browser", "xss_browser_attribute", "xss_browser_attribute_single",
+        "xss_browser_svg", "xss_browser_js_single", "xss_browser_js_double",
+    ]
+    assert result["results"][0]["outcome"] == "inconclusive"
+
+
+def test_captured_post_xss_resumes_saved_variants_without_repeating_probe():
+    class Manager:
+        def __init__(self):
+            brain = EngagementBrain(target="https://app.test")
+            seed_parameter_coverage_cells(brain, [{
+                "method": "POST", "host": "app.test", "path": "/feedback",
+                "name": "message", "location": "body_form", "identity": "anonymous",
+                "source": "browser_traffic", "artifact_id": "capture-1", "testable": True,
+            }])
+            for cell in brain.coverage_cells:
+                if cell["test_type"] == "sqli":
+                    cell["status"] = "skipped"
+                else:
+                    cell["status"] = "inconclusive"
+                    cell["first_pass_outcome"] = "inconclusive"
+                    cell["probe_artifact_ids"] = ["prior-browser-receipt"]
+                    cell["xss_techniques_attempted"] = ["xss_browser", "xss_browser_svg"]
+                    cell["xss_pending_techniques"] = [
+                        "xss_browser_attribute", "xss_browser_attribute_single",
+                        "xss_browser_js_single", "xss_browser_js_double",
+                    ]
+            self._engagement_brain = brain.to_dict()
+            self._capability_map = {"target": "https://app.test"}
+            self._scoped_body_replay_paths = {"/feedback"}
+            self.techniques = []
+
+        async def scoped_assessment_probe_assigned(self, **kwargs):
+            self.techniques.append(kwargs["technique"])
+            return {"success": True, "operation": "scoped_browser_check_xhr_xss",
+                    "evidence_id": "browser-" + kwargs["technique"],
+                    "proof_confirmed": False,
+                    "probe_result": {"executed": False, "xhr_mutated": True,
+                                     "xhr_response_seen": True}}
+
+    manager = Manager()
+    result = asyncio.run(run_observed_input_batch(manager, max_checks=1))
+    assert result["processed"] == 1
+    assert manager.techniques == [
+        "xss_browser_attribute", "xss_browser_attribute_single",
+        "xss_browser_js_single", "xss_browser_js_double",
+    ]
+    cell = next(row for row in manager._engagement_brain["coverage_cells"]
+                if row["test_type"] == "xss")
+    assert cell["xss_pending_techniques"] == []
 
 
 def test_successful_candidate_retry_clears_saved_handoff_error():
@@ -795,6 +909,45 @@ def test_xss_first_pass_uses_reflection_context_before_proof_candidate():
     assert manager.techniques == ["html_body", "html_attribute"]
     assert result["results"][0]["outcome"] == "proof_signal"
     assert result["results"][0]["candidate_id"] == "xss-candidate"
+
+
+def test_xss_browser_execution_receipt_is_not_overwritten_by_followup():
+    class Manager:
+        def __init__(self):
+            brain = EngagementBrain(target="https://app.test")
+            seed_parameter_coverage_cells(brain, [{
+                "method": "GET", "host": "app.test", "path": "/catalog",
+                "name": "searchTerm", "location": "query", "identity": "anonymous",
+                "source": "browser_link", "testable": True,
+            }])
+            for cell in brain.coverage_cells:
+                if cell["test_type"] == "sqli":
+                    cell["status"] = "skipped"
+            self._engagement_brain = brain.to_dict()
+            self._capability_map = {"target": "https://app.test"}
+            self.techniques = []
+
+        async def scoped_input_probe_assigned(self, coverage_cell_id, coverage_lease_id, technique):
+            self.techniques.append(technique)
+            return {"success": True, "evidence_id": "executed-xss-receipt",
+                    "proof_confirmed": False,
+                    "probe_result": {"executed": True, "reflection_contexts": ["html_attribute"]}}
+
+        async def submit_finding_candidate(self, **kwargs):
+            assert kwargs["evidence_ids"] == ["executed-xss-receipt"]
+            self._engagement_brain["candidates"] = [{
+                "id": "executed-xss-candidate", "status": "pending",
+                "coverage_cell_id": kwargs["coverage_cell_id"],
+                "evidence_ids": kwargs["evidence_ids"],
+            }]
+            return "candidate queued"
+
+    manager = Manager()
+    result = asyncio.run(run_observed_input_batch(manager, max_checks=1))
+    assert manager.techniques == ["html_body"]
+    assert result["results"][0]["outcome"] == "proof_signal"
+    assert result["results"][0]["evidence_id"] == "executed-xss-receipt"
+    assert result["results"][0]["candidate_id"] == "executed-xss-candidate"
 
 
 

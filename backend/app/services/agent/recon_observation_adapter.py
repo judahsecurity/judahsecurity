@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any, Iterable
 from urllib.parse import urlsplit
@@ -61,7 +62,8 @@ def ingest_event(brain: EngagementBrain, event: dict[str, Any]) -> bool:
     kind = str(event.get("kind") or "")
     host = _host(str(event.get("target") or ""))
     scope = (event.get("scope") or {}).get("allowed_hosts") or []
-    if not host or not _allowed(host, scope):
+    if (not host or host != str(event.get("host") or "")
+            or not _allowed(host, scope)):
         return False
     key = str(event.get("dedupe_key") or "")
     if not key or any(row.get("dedupe_key", row.get("id")) == key for row in brain.recon_observations):
@@ -92,12 +94,13 @@ def ingest_event(brain: EngagementBrain, event: dict[str, Any]) -> bool:
         passed = "A live first-party route or security-relevant client behavior is independently observed"
         killed = "Script is unavailable or contains no actionable first-party route"
         priority = "low"
-    elif kind == "live_host":
-        specialist, title = "web_recon", f"Map live host {host}"
-        assumption = "A live in-scope host has an application surface to map"
-        test = "Check first-party endpoints and technology without expanding scope"
+    elif kind in {"discovered_host", "live_host"}:
+        specialist = "web_recon"
+        title = f"Map {'live' if kind == 'live_host' else 'discovered'} host {host}"
+        assumption = "An in-scope host may have an application surface to map"
+        test = "Resolve and check the host, then map first-party endpoints without expanding scope"
         passed = "A live application surface is mapped"
-        killed = "Host is unavailable or outside the approved scope"
+        killed = "Host does not resolve, is unavailable, or is outside the approved scope"
         priority = "low"
     elif kind == "technology":
         specialist, title = "vuln_triage", f"Review observed technology {event.get('value')} on {host}"
@@ -136,6 +139,49 @@ def _dns_rows(output: str) -> list[dict[str, Any]]:
             if len(rows) >= 200:
                 return rows
     return rows
+
+
+def subfinder_hosts(output: str, *, scope_hosts: Iterable[str]) -> list[str]:
+    """Parse bounded Subfinder JSONL/plain output and keep only scoped DNS names."""
+    scope_hosts = tuple(scope_hosts)
+    found: list[str] = []
+    seen: set[str] = set()
+    for line in output[:200_000].splitlines()[:400]:
+        line = line.strip()
+        if not line or len(line) > 1000:
+            continue
+        try:
+            row = json.loads(line)
+        except (ValueError, TypeError):
+            row = line
+        raw = (row.get("host") or row.get("subdomain")) if isinstance(row, dict) else row
+        if not isinstance(raw, str):
+            continue
+        host = raw.lower().rstrip(".")
+        if (len(host) > 253 or any(len(label) > 63 for label in host.split("."))
+                or not re.fullmatch(
+            r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+",
+            host,
+        ) or not _allowed(host, scope_hosts) or host in seen):
+            continue
+        seen.add(host)
+        found.append(host)
+        if len(found) >= 100:
+            break
+    return found
+
+
+def ingest_subfinder_hosts(
+    brain: EngagementBrain, output: str, *, scope_hosts: Iterable[str],
+    evidence_ref: str = "",
+) -> int:
+    """Create scoped host-mapping leads from passive subdomain discovery."""
+    scope_hosts = tuple(scope_hosts)
+    return sum(int(ingest_event(brain, observation_event(
+        "discovered_host", f"https://{host}", host,
+        source="execute_subfinder", scope_hosts=scope_hosts,
+        evidence_ref=evidence_ref,
+    ))) for host in subfinder_hosts(output, scope_hosts=scope_hosts))
 
 
 def ingest_dnsx_cnames(
@@ -213,7 +259,14 @@ def ingest_httpx_observations(
         status = row.get("status_code") or row.get("status-code")
         if not isinstance(status, int) or status < 100 or status > 599:
             continue
-        target = f"https://{host}"
+        parsed = urlsplit(raw_target if "://" in raw_target else f"https://{raw_target}")
+        if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password:
+            continue
+        try:
+            port = f":{parsed.port}" if parsed.port else ""
+        except ValueError:
+            continue
+        target = f"{parsed.scheme}://{host}{port}"
         added += int(ingest_event(brain, observation_event(
             "live_host", target, str(status), source="execute_httpx",
             scope_hosts=scope_hosts, evidence_ref=evidence_ref,

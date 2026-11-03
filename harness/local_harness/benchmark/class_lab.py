@@ -12,16 +12,17 @@ from email import policy
 from email.parser import BytesParser
 import html
 import json
+import secrets
 import socket
 import sqlite3
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-CLASSES = ("sqli", "sqli_encoded", "xss", "xss_dom", "ssrf", "idor", "graphql_authz", "unsafe_file_upload", "csrf")
+CLASSES = ("sqli", "sqli_encoded", "sqli_post_blind", "xss", "xss_dom", "xss_post_xhr", "ssrf", "idor", "graphql_authz", "unsafe_file_upload", "csrf")
 
 
 def handler_for(bug_class: str, vulnerable: bool, callback_suffix: str):
-    state = {"profile": "initial", "uploads": {}}
+    state = {"profile": "initial", "uploads": {}, "csrf_tokens": set()}
 
     class LabHandler(BaseHTTPRequestHandler):
         def _send(self, status, body, content_type="application/json", headers=None):
@@ -52,11 +53,29 @@ def handler_for(bug_class: str, vulnerable: bool, callback_suffix: str):
             path = parsed.path
             query = urllib.parse.parse_qs(parsed.query)
             if path == "/":
+                csrf_token = secrets.token_hex(8) if bug_class == "xss_post_xhr" else ""
+                if csrf_token:
+                    state["csrf_tokens"].add(csrf_token)
                 links = {
                     "sqli": '<form action="/search"><input name="q"><button>Search</button></form>',
                     "sqli_encoded": '<a href="/catalog?category=cHVibGlj">Public catalog</a><script>const category=btoa("public");document.querySelector("a").href="/catalog?category="+encodeURIComponent(category)</script>',
+                    "sqli_post_blind": '<button id="load">Load catalog</button><div id="results"></div>'
+                                       '<script>document.getElementById("load").onclick=async()=>{'
+                                       'const response=await fetch("/api/filter",{method:"POST",'
+                                       'headers:{"Content-Type":"application/json"},'
+                                       'body:JSON.stringify({template:"botox",page:2})});'
+                                       'document.getElementById("results").textContent='
+                                       'JSON.stringify(await response.json())}</script>',
                     "xss": '<form action="/search"><input name="q"><button>Search</button></form>',
                     "xss_dom": '<a href="/blog?search=hello">Search blog</a>',
+                    "xss_post_xhr": '<button role="tab" aria-controls="results">Preview</button>'
+                                    '<div id="results"></div><script>'
+                                    'document.querySelector("[role=tab]").onclick=async()=>{'
+                                    'const response=await fetch("/api/render",{method:"POST",'
+                                    'headers:{"Content-Type":"application/json"},'
+                                    'body:JSON.stringify({message:"hello",csrf_token:"' + csrf_token + '"})});'
+                                    'document.getElementById("results").innerHTML=await response.text()}'
+                                    '</script>',
                     "ssrf": '<a href="/api/fetch?url=https%3A%2F%2Fexample.com">URL preview</a>',
                     "idor": '<a href="/api/objects/1">Private object</a>',
                     "graphql_authz": '<a href="/graphql">GraphQL API</a><p>POST JSON query node(id: "1") { ownerId secret }</p>',
@@ -150,6 +169,47 @@ def handler_for(bug_class: str, vulnerable: bool, callback_suffix: str):
         def do_POST(self):
             path = urllib.parse.urlsplit(self.path).path
             body = self._body()
+            if bug_class == "xss_post_xhr" and path == "/api/render":
+                try:
+                    data = json.loads(body)
+                    value, token = data["message"], data["csrf_token"]
+                    if not isinstance(value, str) or not isinstance(token, str):
+                        raise ValueError("invalid field type")
+                except (ValueError, KeyError, TypeError):
+                    self._json(400, {"error": "invalid request"})
+                    return
+                if token not in state["csrf_tokens"]:
+                    self._json(403, {"error": "invalid token"})
+                    return
+                state["csrf_tokens"].remove(token)
+                self._send(200, value if vulnerable else html.escape(value, quote=True), "text/html")
+                return
+            if bug_class == "sqli_post_blind" and path == "/api/filter":
+                try:
+                    data = json.loads(body)
+                    value = data["template"]
+                    if not isinstance(value, str):
+                        raise ValueError("template must be a string")
+                except (ValueError, KeyError, TypeError):
+                    self._json(400, {"error": "invalid request"})
+                    return
+                db = sqlite3.connect(":memory:")
+                db.execute("CREATE TABLE items (name TEXT, detail TEXT)")
+                db.executemany("INSERT INTO items VALUES (?, ?)", [
+                    ("public", "public item"), ("private", "aegis-lab-private-record"),
+                ])
+                try:
+                    sql = ("SELECT name, detail FROM items WHERE name = '" + value + "'"
+                           if vulnerable else "SELECT name, detail FROM items WHERE name = ?")
+                    rows = db.execute(sql, () if vulnerable else (value,)).fetchall()
+                    self._json(200, {"results": rows})
+                except sqlite3.Error:
+                    # Intentionally suppress database errors so this fixture
+                    # tests Boolean detection, not the SQL-error recipe.
+                    self._json(200, {"results": []})
+                finally:
+                    db.close()
+                return
             if bug_class == "csrf" and path == "/login":
                 form = urllib.parse.parse_qs(body.decode())
                 name = form.get("username", [""])[0]

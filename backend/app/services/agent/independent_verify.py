@@ -91,7 +91,9 @@ def observed_sql_cell_for_proof(
     from urllib.parse import urlsplit
     from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
     from app.services.agent.scoped_assessment.sqli_boolean import numeric_sql_proof_valid
-    from app.services.agent.scoped_assessment.body_probe import post_sql_error_proof_valid
+    from app.services.agent.scoped_assessment.body_probe import (
+        post_sql_boolean_proof_valid, post_sql_error_proof_valid,
+    )
     from app.services.agent.scoped_assessment.sqli_string import (
         string_error_proof_valid, string_sql_proof_valid,
     )
@@ -103,14 +105,15 @@ def observed_sql_cell_for_proof(
     matches: Dict[str, Dict[str, Any]] = {}
     for evidence_id in evidence_ids:
         receipt = store.records.get(str(evidence_id))
-        if (not receipt or receipt.get("kind") not in {"scoped_string_sqli", "scoped_numeric_sqli", "scoped_body_sqli_error"}
+        if (not receipt or receipt.get("kind") not in {"scoped_string_sqli", "scoped_numeric_sqli", "scoped_body_sqli_error", "scoped_body_sqli_boolean"}
                 or receipt.get("target") != target):
             continue
         proof = receipt.get("payload")
         if (not isinstance(proof, dict) or proof.get("proof_confirmed") is not True
                 or proof.get("target") != target):
             continue
-        valid = (post_sql_error_proof_valid(proof) if receipt.get("kind") == "scoped_body_sqli_error"
+        valid = (post_sql_boolean_proof_valid(proof) if receipt.get("kind") == "scoped_body_sqli_boolean"
+                 else post_sql_error_proof_valid(proof) if receipt.get("kind") == "scoped_body_sqli_error"
                  else numeric_sql_proof_valid(proof) if receipt.get("kind") == "scoped_numeric_sqli"
                  else string_error_proof_valid(proof) if proof.get("proof_recipe") == "string_error_v1"
                  else string_sql_proof_valid(proof))
@@ -158,7 +161,7 @@ def resolve_observed_sql_candidate_proof(
     matches: list[tuple[str, Dict[str, Any], float]] = []
     for artifact_id in ids:
         receipt = store.records.get(artifact_id)
-        if (not receipt or receipt.get("kind") not in {"scoped_string_sqli", "scoped_numeric_sqli", "scoped_body_sqli_error"}
+        if (not receipt or receipt.get("kind") not in {"scoped_string_sqli", "scoped_numeric_sqli", "scoped_body_sqli_error", "scoped_body_sqli_boolean"}
                 or receipt.get("target") != canonical or receipt.get("run_id")):
             continue
         proof = receipt.get("payload") or {}
@@ -221,10 +224,16 @@ def observed_xss_cell_for_proof(
                     matches[str(cell["id"])] = cell
             continue
         if xhr_xss:
+            post_xhr = proof.get("xhr_method") == "POST"
             if (proof.get("xhr_path") != (parsed_target.path or "/")
                     or "__PROWL_NONCE__" not in str(proof.get("xhr_payload_template") or "")
                     or not isinstance(proof.get("xhr_query_keys"), list)
-                    or proof.get("xhr_parameter") not in proof["xhr_query_keys"]
+                    or (proof.get("xhr_query_keys") != [] if post_xhr
+                        else proof.get("xhr_parameter") not in proof["xhr_query_keys"])
+                    or (post_xhr and (not proof.get("xhr_capture_id")
+                                      or proof.get("xhr_body_location") not in {"body_form", "body_json"}
+                                      or not proof.get("xhr_baseline_request_sha256")
+                                      or parsed.query))
                     or proof.get("xhr_mutated") is not True
                     or proof.get("xhr_response_seen") is not True):
                 continue
@@ -239,10 +248,15 @@ def observed_xss_cell_for_proof(
         for cell in getattr(brain, "coverage_cells", None) or []:
             if (cell.get("source") == "parameter_inventory"
                     and cell.get("observation_source") in OBSERVED_INPUT_SOURCES
-                    and cell.get("test_type") == "xss" and cell.get("method") == "GET"
+                    and cell.get("test_type") == "xss"
+                    and cell.get("method") == ("POST" if xhr_xss and post_xhr else "GET")
                     and _same_observed_origin(parsed_target.scheme, str(cell.get("host") or ""), target)
                     and cell.get("path") == (parsed_target.path or "/")
-                    and cell.get("parameter") in {f"query:{name}" for name in parameters}
+                    and cell.get("parameter") in {
+                        f"{proof['xhr_body_location'] if xhr_xss and post_xhr else 'query'}:{name}"
+                        for name in parameters}
+                    and (not xhr_xss or not post_xhr
+                         or cell.get("capture_id") == proof.get("xhr_capture_id"))
                     and (cell.get("identity") or "anonymous") == receipt.get("identity")):
                 matches[str(cell["id"])] = cell
     return next(iter(matches.values())) if len(matches) == 1 else None
@@ -699,6 +713,12 @@ async def run_independent_verifiers(
                 replayed = await _verify_scoped_response_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
+                replayed = await _verify_scoped_cors_candidate(tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
+                replayed = await _verify_scoped_race_candidate(tools_manager, cand, run)
+                if replayed is not None:
+                    return replayed
                 replayed = await _verify_scoped_xml_xxe_candidate(tools_manager, cand, run)
                 if replayed is not None:
                     return replayed
@@ -903,6 +923,179 @@ async def _verify_scoped_response_candidate(
             except Exception:
                 logging.getLogger(__name__).exception("Response verifier replay failed")
                 failure = "Response verifier replay failed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title,
+            "status": "inconclusive", "verifier_summary": failure,
+            "key_findings": [], "tool_calls": 1, "error": None}
+
+
+async def _verify_scoped_cors_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Repeat the credentialed CORS reflection on the same endpoint."""
+    import asyncio
+    import logging
+    import secrets
+    from urllib.parse import urlsplit
+
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.parameter_inventory import _origin
+    from app.services.agent.proof_policy import validate_proof
+    from app.services.agent.scoped_assessment.response_probe import probe_cors
+
+    claim = cand.vulnerability_class
+    if claim != "cors":
+        return None
+    store = evidence_store(tools_manager)
+    target = urlsplit(cand.target)
+    scoped_origin = f"{target.scheme}://{target.netloc}"
+    cell = next((row for row in _brain(tools_manager).coverage_cells
+                 if row.get("id") == cand.coverage_cell_id
+                 and row.get("test_type") == "cors"
+                 and row.get("source") == "surface_applicability"
+                 and row.get("path") == (target.path or "/")), None)
+    identity = str(cand.identity or "anonymous")
+    hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
+                   if eid in store.records
+                   and store.records[eid].get("kind") == "scoped_response_probe"
+                   and store.records[eid].get("target") == cand.target
+                   and store.records[eid].get("identity") == identity
+                   and store.records[eid].get("payload", {}).get("test_type") == "cors"
+                   and store.records[eid].get("payload", {}).get("proof_confirmed") is True), None)
+    failure = "A credentialed CORS reflection receipt is required"
+    if cell and hunter:
+        hunter_id, _receipt = hunter
+        nonce = secrets.token_hex(8)
+        try:
+            if _origin(scoped_origin) != _origin(str(cand.target)):
+                raise ValueError("Target origin changed")
+            tools_manager._scoped_origin(cand.target)
+            tools_manager._scoped_claim_gets(2)
+            replay = await asyncio.to_thread(
+                probe_cors, cand.target, allowed_origin=scoped_origin,
+                state=tools_manager._scoped_state(identity, cand.target),
+                nonce=nonce,
+            )
+            summary = {"test_type": "cors", "parameter": "origin",
+                       "path": cell["path"], "request_context": "origin_header",
+                       "nonce": nonce, **replay}
+            artifact_id = store.record(
+                "scoped_response_probe", summary, target=cand.target,
+                identity=identity, coverage_cell_id=cand.coverage_cell_id,
+                test_type="cors", success=replay["proof_confirmed"],
+            )
+            if replay.get("proof_confirmed") is True:
+                proof = {"kind": "scoped_cors_credentialed",
+                         "hunter_artifact_id": hunter_id, "artifact_id": artifact_id}
+                valid, why = validate_proof(store, cand, proof, [artifact_id])
+                fresh, fresh_why = store.validate(
+                    [artifact_id], candidate_id=cand.id, revision=cand.revision,
+                    run_id=run.id, target=cand.target,
+                )
+                if valid and fresh:
+                    verified = apply_verdict(
+                        tools_manager, candidate_id=cand.id, verdict="confirmed",
+                        evidence="Fresh CORS canary reproduced credentialed reflection.",
+                        evidence_ids=[artifact_id], proof=proof,
+                    )
+                    if verified and verified.status == "confirmed":
+                        return {"candidate_id": cand.id, "title": cand.title,
+                                "status": "confirmed", "verifier_summary":
+                                "Fresh CORS probe matched the hunter receipt",
+                                "key_findings": [], "tool_calls": 1, "error": None}
+                failure = why or fresh_why or "CORS proof policy rejected the replay"
+            else:
+                failure = "Fresh CORS probe did not reproduce credentialed reflection"
+        except Exception:
+            logging.getLogger(__name__).exception("CORS verifier replay failed")
+            failure = "CORS verifier replay failed"
+    apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
+                  evidence=failure, summary=failure)
+    return {"candidate_id": cand.id, "title": cand.title,
+            "status": "inconclusive", "verifier_summary": failure,
+            "key_findings": [], "tool_calls": 1, "error": None}
+
+
+async def _verify_scoped_race_candidate(
+    tools_manager: Any, cand: FindingCandidate, run: Any,
+) -> Optional[Dict[str, Any]]:
+    """Repeat the sequential-vs-concurrent overrun with a fresh canary."""
+    import logging
+    import secrets
+    from urllib.parse import urlsplit
+
+    from app.services.agent.evidence_store import evidence_store
+    from app.services.agent.parameter_inventory import _origin
+    from app.services.agent.proof_policy import validate_proof
+    from app.services.agent.scoped_assessment.race_probe import probe_race
+
+    claim = cand.vulnerability_class
+    if claim != "race_condition":
+        return None
+    store = evidence_store(tools_manager)
+    target = urlsplit(cand.target)
+    scoped_origin = f"{target.scheme}://{target.netloc}"
+    identity = str(cand.identity or "anonymous")
+    hunter = next(((eid, store.records[eid]) for eid in cand.evidence_ids
+                   if eid in store.records
+                   and store.records[eid].get("kind") == "scoped_race_probe"
+                   and store.records[eid].get("target") == cand.target
+                   and store.records[eid].get("identity") == identity
+                   and store.records[eid].get("payload", {}).get("proof_confirmed") is True), None)
+    failure = "A sequential-vs-concurrent overrun receipt is required"
+    if hunter:
+        hunter_id, receipt = hunter
+        payload = receipt.get("payload", {})
+        field = str(payload.get("field") or "")
+        readback_url = str(payload.get("readback_url") or "")
+        cleanup_template = str(payload.get("cleanup_template") or "")
+        method = str(payload.get("method") or "POST").upper()
+        nonce = secrets.token_hex(8)
+        try:
+            if _origin(scoped_origin) != _origin(str(cand.target)):
+                raise ValueError("Target origin changed")
+            tools_manager._scoped_origin(cand.target)
+            tools_manager._scoped_claim_race()
+            replay = await probe_race(
+                cand.target, readback_url, cleanup_template, method=method,
+                field=field, allowed_origin=scoped_origin,
+                state=tools_manager._scoped_state(identity, cand.target),
+                nonce=nonce, concurrency=int(payload.get("concurrency") or 10),
+            )
+            summary = {"nonce": nonce, "path": payload.get("path"),
+                       "readback_url": readback_url,
+                       "cleanup_template": cleanup_template, **replay}
+            artifact_id = store.record(
+                "scoped_race_probe", summary, target=cand.target,
+                identity=identity, coverage_cell_id=cand.coverage_cell_id,
+                test_type="race_condition", success=replay["proof_confirmed"],
+            )
+            if replay.get("proof_confirmed") is True:
+                proof = {"kind": "scoped_race_overrun",
+                         "hunter_artifact_id": hunter_id, "artifact_id": artifact_id}
+                valid, why = validate_proof(store, cand, proof, [artifact_id])
+                fresh, fresh_why = store.validate(
+                    [artifact_id], candidate_id=cand.id, revision=cand.revision,
+                    run_id=run.id, target=cand.target,
+                )
+                if valid and fresh:
+                    verified = apply_verdict(
+                        tools_manager, candidate_id=cand.id, verdict="confirmed",
+                        evidence="Fresh concurrent burst reproduced the limit overrun.",
+                        evidence_ids=[artifact_id], proof=proof,
+                    )
+                    if verified and verified.status == "confirmed":
+                        return {"candidate_id": cand.id, "title": cand.title,
+                                "status": "confirmed", "verifier_summary":
+                                "Fresh race burst matched the hunter receipt",
+                                "key_findings": [], "tool_calls": 1, "error": None}
+                failure = why or fresh_why or "Race proof policy rejected the replay"
+            else:
+                failure = "Fresh concurrent burst did not reproduce the overrun"
+        except Exception:
+            logging.getLogger(__name__).exception("Race verifier replay failed")
+            failure = "Race verifier replay failed"
     apply_verdict(tools_manager, candidate_id=cand.id, verdict="inconclusive",
                   evidence=failure, summary=failure)
     return {"candidate_id": cand.id, "title": cand.title,
@@ -1143,7 +1336,9 @@ async def _verify_scoped_post_sql_candidate(
 
     from app.services.agent.evidence_store import evidence_store
     from app.services.agent.proof_policy import validate_proof
-    from app.services.agent.scoped_assessment.body_probe import post_sql_error_proof_valid
+    from app.services.agent.scoped_assessment.body_probe import (
+        post_sql_boolean_proof_valid, post_sql_error_proof_valid,
+    )
     from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
 
     target = urlsplit(cand.target)
@@ -1163,29 +1358,42 @@ async def _verify_scoped_post_sql_candidate(
             or (cand.parameter and cand.parameter != cell.get("parameter"))):
         return None
     store = evidence_store(tools_manager)
+    validators = {
+        "scoped_body_sqli_error": post_sql_error_proof_valid,
+        "scoped_body_sqli_boolean": post_sql_boolean_proof_valid,
+    }
     hunter_ids = [artifact_id for artifact_id in cand.evidence_ids
                   if (artifact_id in store.records
-                      and store.records[artifact_id]["kind"] == "scoped_body_sqli_error"
+                      and store.records[artifact_id]["kind"] in validators
                       and store.records[artifact_id]["target"] == cand.target
                       and store.records[artifact_id]["identity"] == identity
                       and store.records[artifact_id]["payload"].get("parameter") == parameter
                       and store.records[artifact_id]["payload"].get("source_artifact_id") == capture_id
                       and store.records[artifact_id]["payload"].get("proof_confirmed") is True
-                      and post_sql_error_proof_valid(store.records[artifact_id]["payload"]))]
+                      and validators[store.records[artifact_id]["kind"]](
+                          store.records[artifact_id]["payload"]))]
     if not hunter_ids:
         return None
+    hunter_kind = store.records[hunter_ids[0]]["kind"]
+    hunter_ids = [artifact_id for artifact_id in hunter_ids
+                  if store.records[artifact_id]["kind"] == hunter_kind]
+    boolean = hunter_kind == "scoped_body_sqli_boolean"
     failure = "Fresh POST SQLi controls did not reproduce the hunter proof"
     try:
-        result = await tools_manager._scoped_body_sql_error_verifier(capture_id, parameter, identity)
+        result = await (
+            tools_manager._scoped_body_sql_boolean_verifier(capture_id, parameter, identity)
+            if boolean else tools_manager._scoped_body_sql_error_verifier(capture_id, parameter, identity)
+        )
         artifact_id = str(result.get("evidence_id") or "")
         verifier = store.records.get(artifact_id)
-        if (not post_sql_error_proof_valid(result) or result.get("proof_confirmed") is not True
-                or not verifier or verifier.get("kind") != "scoped_body_sqli_error"
+        if (not validators[hunter_kind](result) or result.get("proof_confirmed") is not True
+                or not verifier or verifier.get("kind") != hunter_kind
                 or verifier.get("run_id") != run.id):
-            failure = "Fresh POST SQL error controls did not confirm injection"
+            failure = "Fresh POST SQL controls did not confirm injection"
         else:
             for hunter_id in hunter_ids:
-                proof = {"kind": "post_error_sqli", "hunter_artifact_id": hunter_id,
+                proof = {"kind": "post_boolean_sqli" if boolean else "post_error_sqli",
+                         "hunter_artifact_id": hunter_id,
                          "artifact_id": artifact_id}
                 valid, why = validate_proof(store, cand, proof, [artifact_id])
                 fresh, fresh_why = store.validate(
@@ -1195,14 +1403,14 @@ async def _verify_scoped_post_sql_candidate(
                 if valid and fresh:
                     verified = apply_verdict(
                         tools_manager, candidate_id=cand.id, verdict="confirmed",
-                        evidence="Fresh scoped POST SQL error controls reproduced the candidate on the exact captured input.",
+                        evidence="Fresh scoped POST SQL controls reproduced the candidate on the exact captured input.",
                         evidence_ids=[artifact_id], proof=proof,
                     )
                     if verified and verified.status == "confirmed":
                         return {"candidate_id": cand.id, "title": cand.title,
-                                "status": "confirmed", "verifier_summary": "Fresh POST SQL error proof matched the hunter receipt",
+                                "status": "confirmed", "verifier_summary": "Fresh POST SQL proof matched the hunter receipt",
                                 "key_findings": [], "tool_calls": 1, "error": None}
-                failure = why or fresh_why or "POST SQL error proof policy rejected the replay"
+                failure = why or fresh_why or "POST SQL proof policy rejected the replay"
     except Exception:
         logging.getLogger(__name__).exception(
             "Deterministic POST SQLi verifier could not replay candidate %s", cand.id,
@@ -1256,10 +1464,17 @@ async def _verify_scoped_browser_xss_candidate(
         return None
     location, separator, parameter = str(cell.get("parameter") or "").partition(":")
     dom_query = dom_xss and location == "query" and bool(separator and parameter)
-    form_xss = cell.get("method") == "POST" and location == "body_form"
+    post_xhr_xss = (cell.get("method") == "POST"
+                    and location in {"body_form", "body_json"}
+                    and any((store_row := evidence_store(tools_manager).records.get(evidence_id))
+                            and store_row.get("kind") == "scoped_browser_check_xhr_xss"
+                            and isinstance(store_row.get("payload"), dict)
+                            and store_row["payload"].get("xhr_method") == "POST"
+                            for evidence_id in cand.evidence_ids))
+    form_xss = cell.get("method") == "POST" and location == "body_form" and not post_xhr_xss
     target = urlsplit(cand.target)
     identity = str(cell.get("identity") or "anonymous")
-    if (not (dom_xss or (location == "query" and not form_xss) or form_xss)
+    if (not (dom_xss or (location == "query" and not form_xss) or form_xss or post_xhr_xss)
             or (not dom_xss and (not separator or not parameter))
             or target.scheme not in {"http", "https"}
             or not _same_observed_origin(target.scheme, str(cell.get("host") or ""), cand.target)
@@ -1339,8 +1554,14 @@ async def _verify_scoped_browser_xss_candidate(
                     or not _same_observed_origin(parsed.scheme, parsed.netloc, cand.target)
                     or parsed.fragment or proof.get("xhr_path") != (target.path or "/")
                     or proof.get("xhr_parameter") != parameter
+                    or (proof.get("xhr_method") == "POST") != post_xhr_xss
                     or not isinstance(proof.get("xhr_query_keys"), list)
-                    or parameter not in proof["xhr_query_keys"]
+                    or (proof.get("xhr_query_keys") != [] if post_xhr_xss
+                        else parameter not in proof["xhr_query_keys"])
+                    or (post_xhr_xss and (proof.get("xhr_capture_id") != cell.get("capture_id")
+                                          or proof.get("xhr_body_location") != location
+                                          or not proof.get("xhr_baseline_request_sha256")
+                                          or parsed.query))
                     or "__PROWL_NONCE__" not in str(proof.get("xhr_payload_template") or "")
                     or proof.get("xhr_mutated") is not True
                     or proof.get("xhr_response_seen") is not True):
@@ -1374,6 +1595,8 @@ async def _verify_scoped_browser_xss_candidate(
                                     "xhr_parameter": parameter,
                                     "xhr_query_keys": hunter_proof["xhr_query_keys"],
                                     "xhr_payload_template": hunter_proof["xhr_payload_template"]})
+                if post_xhr_xss:
+                    replay_args["xhr_capture_id"] = hunter_proof["xhr_capture_id"]
                 if hunter_proof.get("xhr_actions"):
                     replay_args["xhr_actions"] = hunter_proof["xhr_actions"]
             wrapped = await tools_manager.execute("scoped_browser_assessment", replay_args)
