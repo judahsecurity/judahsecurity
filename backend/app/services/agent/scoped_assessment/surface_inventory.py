@@ -149,7 +149,10 @@ def build_surface_inventory(result: dict, *, body_replay_paths: set[str] | None 
                 continue
             parameter(path, method, location, name, "live_browser",
                       field.get("value_type", "unknown"), action_ref, artifact_id)
+            replayable_mime = ("application/json" if location == "json"
+                               else "application/x-www-form-urlencoded")
             if (method == "POST" and path in allowed_bodies and artifact_id
+                    and traffic.get("request_content_type") == replayable_mime
                     and isinstance(name, str) and not _CREDENTIAL_FIELD.search(name)):
                 key = (path, method, location, name)
                 suggestions.setdefault(key, {"operation": "http_body_probe", "target": origin + path,

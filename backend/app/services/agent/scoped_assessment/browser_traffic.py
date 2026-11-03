@@ -7,6 +7,8 @@ import hashlib
 import json
 import re
 from collections import Counter
+from email import policy
+from email.parser import BytesParser
 from urllib.parse import parse_qsl, urlsplit
 
 from .browser import origin
@@ -18,6 +20,57 @@ MAX_URL_LENGTH = 2_048
 MAX_BODY_FIELDS = 40
 _POSITIVE_INTEGER = re.compile(r"[1-9][0-9]{0,8}\Z")
 _GRAPHQL_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,79}\Z")
+_PROTECTED_FIELD = re.compile(r"csrf|xsrf|nonce|session|token|secret|api[_-]?key|authorization|jwt|bearer", re.I)
+
+
+def likely_input_request(url: str, request_body: bytes) -> bool:
+    """Keep private captures for browser requests with a query or body input."""
+    try:
+        return bool(urlsplit(url).query or request_body)
+    except (TypeError, ValueError):
+        return bool(request_body)
+
+
+def capture_priority(public: dict) -> int:
+    """Prefer structured, testable inputs when a browser run reaches its cap."""
+    fields = [field.get("name") for field in public.get("query_fields", [])]
+    fields += [field.get("path") for field in public.get("body_fields", [])]
+    testable = sum(isinstance(name, str) and not _PROTECTED_FIELD.search(name)
+                   for name in fields)
+    return (int(bool(public.get("request_bytes") or fields))
+            + min(testable, 3) * 2
+            + int(bool(public.get("body_fields")))
+            + int(public.get("body_fields_status") == "parsed"))
+
+
+def exchange_shape(public: dict) -> tuple:
+    """Deduplicate repeated values while keeping distinct parameter shapes."""
+    return (public["method"], public["path"],
+            tuple(public["query_keys"]), public["request_content_type"],
+            public["graphql_document_sha256"],
+            tuple((field.get("location"), field.get("path"))
+                  for field in public["body_fields"]))
+
+
+def retain_exchange(exchanges: list[dict], seen_shapes: set[tuple],
+                    item: dict, *, limit: int = MAX_EXCHANGES) -> str:
+    """Retain novel input shapes, replacing weaker ones only at capacity."""
+    shape = exchange_shape(item["public"])
+    if shape in seen_shapes:
+        return "duplicate"
+    if len(exchanges) < limit:
+        exchanges.append(item)
+        seen_shapes.add(shape)
+        return "added"
+    weakest = min(range(len(exchanges)), key=lambda index: (
+        capture_priority(exchanges[index]["public"]), index,
+    ))
+    if capture_priority(item["public"]) <= capture_priority(exchanges[weakest]["public"]):
+        return "capacity"
+    seen_shapes.discard(exchange_shape(exchanges[weakest]["public"]))
+    exchanges[weakest] = item
+    seen_shapes.add(shape)
+    return "replaced"
 
 
 def _replay_headers(headers: dict[str, str] | None, *, expected_origin: str = "") -> dict[str, str]:
@@ -138,6 +191,23 @@ def _body_fields(data: bytes, content_type: str) -> tuple[str, str, list[dict]]:
                 if len(fields) >= MAX_BODY_FIELDS:
                     break
         return mime, "parsed", fields
+    if mime == "multipart/form-data":
+        try:
+            message = BytesParser(policy=policy.default).parsebytes(
+                b"Content-Type: " + content_type.encode("ascii")
+                + b"\r\nMIME-Version: 1.0\r\n\r\n" + data,
+            )
+            if not message.is_multipart():
+                return mime, "invalid", []
+            for part in list(message.iter_parts())[:MAX_BODY_FIELDS]:
+                name = part.get_param("name", header="content-disposition")
+                if isinstance(name, str) and name not in seen and 0 < len(name) <= 80:
+                    seen.add(name)
+                    fields.append({"location": "form", "path": name,
+                                   "value_type": "file" if part.get_filename() is not None else "string"})
+            return mime, "parsed", fields
+        except (UnicodeError, ValueError):
+            return mime, "invalid", []
     return mime, "unsupported", []
 
 
@@ -145,7 +215,9 @@ def package_exchange(*, url: str, expected_origin: str, action_ref: str,
                      method: str, resource_type: str, status: int,
                      content_type: str, request_body: bytes,
                      response_body: bytes, request_content_type: str = "",
-                     page_url: str = "", request_headers: dict[str, str] | None = None) -> tuple[dict, bytes]:
+                     page_url: str = "", request_headers: dict[str, str] | None = None,
+                     response_body_truncated: bool = False,
+                     response_bytes_declared: int | None = None) -> tuple[dict, bytes]:
     if origin(url) != expected_origin:
         raise ValueError("Exchange is outside the browser origin")
     if len(url) > MAX_URL_LENGTH:
@@ -191,8 +263,10 @@ def package_exchange(*, url: str, expected_origin: str, action_ref: str,
         "content_type": content_type.split(";", 1)[0][:80],
         "request_bytes": len(request_body),
         "response_bytes": len(response_body),
+        "response_bytes_declared": response_bytes_declared,
+        "response_body_truncated": response_body_truncated,
         "request_sha256": hashlib.sha256(request_body).hexdigest(),
-        "response_sha256": hashlib.sha256(response_body).hexdigest(),
+        "response_sha256": "" if response_body_truncated else hashlib.sha256(response_body).hexdigest(),
     }
     # Full URL and bodies stay in the private artifact. No cookie or Authorization
     # header is copied; future replay must draw credentials from a named identity.
@@ -209,5 +283,6 @@ def package_exchange(*, url: str, expected_origin: str, action_ref: str,
         "replay_headers": replay_headers,
         "graphql_operation_type": graphql[0] if graphql else "",
         "response_body_base64": base64.b64encode(response_body).decode("ascii"),
+        "response_body_truncated": response_body_truncated,
     }, sort_keys=True).encode()
     return public, private

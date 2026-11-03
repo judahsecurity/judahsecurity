@@ -327,6 +327,11 @@ async def check_browser(
     request_rows: dict[object, dict] = {}
     seen_request_templates: set[tuple] = set()
     seen_exchange_shapes: set[tuple] = set()
+    traffic_capture_counts = {
+        "input_responses_seen": 0, "input_responses_queued": 0,
+        "request_oversize": 0, "response_truncated": 0,
+        "discarded_at_capacity": 0, "replaced_at_capacity": 0,
+    }
     current_action_ref = "navigate"
     actions: list[dict] = []
     read_only_interaction = operation in {"check_xhr_xss", "check_form_xss", "check_stored_xss", "check_client"}
@@ -539,7 +544,10 @@ async def check_browser(
             page.on("response", record_response)
 
             if traffic_exchanges is not None and operation in {"map", "crawl", "inspect_js"}:
-                from .browser_traffic import MAX_BODY_BYTES, MAX_EXCHANGES, package_exchange
+                from .browser_traffic import (
+                    MAX_BODY_BYTES, MAX_EXCHANGES, likely_input_request,
+                    package_exchange, retain_exchange,
+                )
 
                 async def capture_exchange(response):
                     try:
@@ -552,16 +560,25 @@ async def check_browser(
                             if (request.method.upper() != "GET" or not parts.query
                                     or not allowed_discovery_path(parts.path or "/")):
                                 return
-                        if len(traffic_exchanges) >= MAX_EXCHANGES:
-                            return
                         declared = response.headers.get("content-length", "")
-                        if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
-                            return
                         request_body = request.post_data_buffer or b""
                         if len(request_body) > MAX_BODY_BYTES:
+                            traffic_capture_counts["request_oversize"] += 1
                             return
-                        async with body_slots:
-                            response_body = await response.body()
+                        response_bytes_declared = int(declared) if declared.isdigit() else None
+                        response_truncated = bool(response_bytes_declared is not None
+                                                  and response_bytes_declared > MAX_BODY_BYTES)
+                        response_body = b""
+                        if not response_truncated:
+                            try:
+                                async with body_slots:
+                                    body = await response.body()
+                                response_truncated = len(body) > MAX_BODY_BYTES
+                                response_body = body[:MAX_BODY_BYTES]
+                            except Exception:
+                                response_truncated = True
+                        if response_truncated:
+                            traffic_capture_counts["response_truncated"] += 1
                         initiator_page = request_pages.get(request, "")
                         public, private = package_exchange(
                             url=response.url, expected_origin=expected_origin,
@@ -573,25 +590,35 @@ async def check_browser(
                             request_content_type=request.headers.get("content-type", ""),
                             page_url=initiator_page,
                             request_headers=request.headers,
+                            response_body_truncated=response_truncated,
+                            response_bytes_declared=response_bytes_declared,
                         )
-                        shape = (public["method"], public["path"],
-                                 tuple(public["query_keys"]), public["request_content_type"],
-                                 public["graphql_document_sha256"],
-                                 tuple((field.get("location"), field.get("path"))
-                                       for field in public["body_fields"]))
-                        if shape not in seen_exchange_shapes and len(traffic_exchanges) < MAX_EXCHANGES:
-                            seen_exchange_shapes.add(shape)
-                            traffic_exchanges.append({"public": public, "private": private})
+                        outcome = retain_exchange(
+                            traffic_exchanges, seen_exchange_shapes,
+                            {"public": public, "private": private},
+                        )
+                        if outcome == "capacity":
+                            traffic_capture_counts["discarded_at_capacity"] += 1
+                        elif outcome == "replaced":
+                            traffic_capture_counts["replaced_at_capacity"] += 1
                     except Exception:
                         return
 
                 def queue_exchange(response):
                     try:
-                        relevant = response.request.resource_type in {"document", "xhr", "fetch"} and origin(response.url) == expected_origin
-                    except ValueError:
+                        request = response.request
+                        relevant = (request.resource_type in {"document", "xhr", "fetch"}
+                                    and origin(response.url) == expected_origin
+                                    and likely_input_request(request.url, request.post_data_buffer or b""))
+                    except (TypeError, ValueError):
                         relevant = False
-                    if relevant and len(traffic_tasks) < MAX_EXCHANGES * 3:
-                        traffic_tasks.append(asyncio.create_task(capture_exchange(response)))
+                    if relevant:
+                        traffic_capture_counts["input_responses_seen"] += 1
+                        if len(traffic_tasks) < MAX_EXCHANGES * 3:
+                            traffic_capture_counts["input_responses_queued"] += 1
+                            traffic_tasks.append(asyncio.create_task(capture_exchange(response)))
+                        else:
+                            traffic_capture_counts["discarded_at_capacity"] += 1
 
                 page.on("response", queue_exchange)
 
@@ -1196,6 +1223,7 @@ async def check_browser(
                 result["collection_limit"] = MAX_SOURCES
                 result["actions"] = actions
                 result["traffic_count"] = len(traffic_exchanges)
+                result["traffic_capture"] = dict(traffic_capture_counts)
                 result["max_actions"] = max_actions
                 result["max_pages"] = max_pages
                 result["page_paths"] = page_paths

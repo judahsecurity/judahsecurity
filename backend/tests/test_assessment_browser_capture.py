@@ -327,6 +327,56 @@ async def test_get_replay_uses_fresh_header_and_cookie():
         server.server_close()
         thread.join(timeout=2)
 
+
+@pytest.mark.asyncio
+async def test_browser_capture_retains_parameterized_request_with_large_response():
+    from app.services.agent.scoped_assessment.browser import check_browser
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            if self.path == "/catalog":
+                body = (b"<script>fetch('/api/ping');"
+                        b"fetch('/api/search?term=seed')</script>")
+                mime = "text/html"
+            elif self.path == "/api/search?term=seed":
+                body = b"A" * 300_000
+                mime = "text/plain"
+            else:
+                body = b"ok"
+                mime = "text/plain"
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        traffic = []
+        result, _ = await check_browser(
+            operation="map", url=base + "/catalog", allowed_origins=[base],
+            traffic_exchanges=traffic,
+        )
+        assert [row["public"]["path"] for row in traffic] == ["/api/search"]
+        capture = traffic[0]
+        assert capture["public"]["query_fields"] == [{"name": "term", "value_type": "string"}]
+        assert capture["public"]["response_body_truncated"] is True
+        assert capture["public"]["response_bytes"] == 0
+        assert capture["public"]["response_bytes_declared"] == 300_000
+        assert json.loads(capture["private"])["response_body_base64"] == ""
+        assert result["traffic_capture"]["input_responses_seen"] == 1
+        assert result["traffic_capture"]["response_truncated"] == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_ASSESSMENT_BROWSER_TESTS") != "1",
     reason="Opt-in local Chromium fixture",
