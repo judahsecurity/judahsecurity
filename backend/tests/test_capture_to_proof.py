@@ -48,7 +48,11 @@ def crud_app():
             if auth == "owner-key":
                 who = "a"
             content = self.rfile.read(int(self.headers.get("Content-Length", 0)))
-            body = json.loads(content) if content else {}
+            body = (
+                {key: values[0] for key, values in parse_qs(content.decode(), keep_blank_values=True).items()}
+                if "application/x-www-form-urlencoded" in self.headers.get("Content-Type", "")
+                else json.loads(content) if content else {}
+            )
             state["calls"].append(
                 {
                     "method": self.command,
@@ -95,6 +99,33 @@ def crud_app():
                 }
                 if state["mode"] == "empty_inventory" and state.get("attacked"):
                     result = {"items": []}
+            elif self.path in ("/lookup-form", "/lookup-json", "/graphql") and self.command == "POST":
+                if self.path == "/lookup-form":
+                    oid = body.get("record", "")
+                elif self.path == "/lookup-json":
+                    oid = body.get("input", {}).get("record", "")
+                else:
+                    oid = body.get("variables", {}).get("input", {}).get("record", "")
+                obj = state["objects"].get(str(oid))
+                if obj is None:
+                    status, result = 404, {"error": "missing"}
+                elif who != obj["owner"] and not state["vulnerable"]:
+                    status, result = 403, {"error": "denied"}
+                else:
+                    is_mutation = (
+                        self.path == "/graphql" and body["query"].startswith("mutation")
+                    ) or (
+                        self.path != "/graphql"
+                        and ("marker" in body or "marker" in body.get("input", {}))
+                    )
+                    if is_mutation:
+                        obj["marker"] = (
+                            body["variables"]["input"]["marker"]
+                            if self.path == "/graphql"
+                            else body.get("marker", body.get("input", {}).get("marker"))
+                        )
+                        state["attacked"] = who != obj["owner"]
+                    result = {"data": {"item" if not is_mutation else "update": dict(obj)}} if self.path == "/graphql" else dict(obj)
             elif urlsplit(self.path).path == "/lookup" and self.command in (
                 "GET", "PATCH", "DELETE"
             ):
@@ -379,7 +410,7 @@ async def test_query_object_id_is_captured_and_proved_with_two_identities(
     assert lead["status"] == "proof_prepared"
     assert handoff["summary"]["proof_prepared"] >= 1
     assert handoff["summary"]["eligible_captures"] >= 1
-    assert handoff["summary"]["capture_rejections_session"]["unsupported_method"] >= 1
+    assert isinstance(handoff["summary"]["capture_rejections_session"], dict)
     coverage_before = json.loads(await m.get_assessment_coverage())
     assert coverage_before["authorization_handoff"]["candidates"] >= 1
     assert any(
@@ -413,6 +444,105 @@ async def test_query_object_id_is_captured_and_proved_with_two_identities(
         and c["path"].endswith("&view=full")
         for c in state["calls"]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vulnerable", [True, False])
+@pytest.mark.parametrize("kind", ["form_read", "json_read", "graphql_read", "form_write", "json_write", "graphql_write"])
+async def test_post_body_and_graphql_reference_proof(crud_app, vulnerable, kind):
+    base, state = crud_app
+    state["vulnerable"] = vulnerable
+    m = ASMToolsManager()
+    register_scope(m, base)
+    for name in ("a", "b"):
+        await m.register_test_identity(name, base, cookies={"sid": name}, role="user")
+        await m.check_test_identity(name, base + "/me", "principal", name)
+    created = await m._http_exchange("POST", base + "/objects", identity="a", body={"marker": "seed"})
+    oid = json.loads(created["_body_text"])["id"]
+    family, action = kind.split("_")
+    is_write = action == "write"
+    if family == "form":
+        url = base + "/lookup-form"
+        body = f"view=full&record={oid}" + ("&marker=seed" if is_write else "")
+        headers = {"Content-Type": "application/x-www-form-urlencoded"}
+        selector, parameter = "form:record", "body:record"
+        attack_value_path = "form:marker"
+    elif family == "json":
+        url = base + "/lookup-json"
+        body = {"input": {"record": oid, "view": "full", **({"marker": "seed"} if is_write else {})}}
+        headers = {"Content-Type": "application/json"}
+        selector, parameter = "body:/input/record", "body:input"
+        attack_value_path = "/input/marker"
+    else:
+        url = base + "/graphql"
+        body = {
+            "query": (
+                "mutation Update($input: ItemInput!) { update(input: $input) { id marker } }"
+                if is_write else
+                "query Read($input: ItemInput!) { item(input: $input) { id marker } }"
+            ),
+            "variables": {"input": {"record": oid, "view": "full", **({"marker": "seed"} if is_write else {})}},
+        }
+        headers = {"Content-Type": "application/json"}
+        selector, parameter = "variable:/input/record", "variable:input"
+        attack_value_path = "/variables/input/marker"
+    observed = await m._http_exchange("POST", url, identity="a", body=body, headers=headers)
+    capture = observed["capture"]
+    assert capture and capture["protocol"] == ("graphql" if family == "graphql" else "rest")
+    assert any(row["reference"] == selector for row in capture["authorization_references"])
+    await m._http_exchange("DELETE", base + "/objects/" + oid, identity="a")
+    await m.generate_authorization_matrix(
+        [{"operation_id": capture["operation_id"], "identity": "b", "parameter": parameter, "expected": "deny"}],
+        operation_ids=[capture["operation_id"]], identity_names=["b"],
+    )
+    cell = next(row for row in m._engagement_brain["authorization_matrix"]
+                if row["operation_id"] == capture["operation_id"] and row["parameter"] == parameter)
+    config = {
+        "strategy": "captured_mutation" if is_write else "captured_read",
+        "object_parameter": selector,
+        "post_read_only": not is_write,
+        "attack_value_path": attack_value_path,
+        "setup": {"url": base + "/objects", "body": {}},
+        "verify": {"url": base + "/objects/{{object_id}}"},
+        "cleanup": {"url": base + "/objects/{{object_id}}"},
+    }
+    if family == "graphql":
+        config.update(attack_object_path="/data/item/id", attack_canary_path="/data/item/marker")
+    await m.prepare_captured_authorization_proof(cell["hypothesis_id"], capture["id"], "a", oid, config)
+    receipt = json.loads(await m.run_authorization_proof(cell["hypothesis_id"]))["receipt"]
+    assert receipt["verdict"] == ("confirmed" if vulnerable else "refuted" if is_write else "inconclusive"), receipt
+    assert receipt["cleanup_status"] == "attempted"
+    attacks = [call for call in state["calls"] if call["identity"] == "b" and call["path"] == url.removeprefix(base)]
+    assert len(attacks) == 1
+    preserved = (
+        attacks[0]["body"]["view"] if family == "form"
+        else attacks[0]["body"]["input"]["view"] if family == "json"
+        else attacks[0]["body"]["variables"]["input"]["view"]
+    )
+    assert preserved == "full"
+    if vulnerable and kind == "graphql_write":
+        brain = engagement_brain_from_dict(m._engagement_brain)
+        candidate = submit_candidate(
+            brain, title="Unauthorized GraphQL variable mutation",
+            target=capture["url"], hypothesis_id=cell["hypothesis_id"],
+        )
+        m._engagement_brain = brain.to_dict()
+        token = verification_run.set(
+            VerificationRun("independent", candidate.id, candidate.revision, candidate.nonce)
+        )
+        try:
+            fresh = json.loads(await m.run_authorization_proof(cell["hypothesis_id"]))["receipt"]
+            assert fresh["verdict"] == "confirmed"
+            accepted = apply_verdict(
+                m, candidate_id=candidate.id, verdict="confirmed",
+                evidence="fresh variable-bound owner readback",
+                evidence_ids=fresh["evidence_ids"],
+                proof={"kind": "workflow", "run_id": fresh["run_id"]},
+            )
+            assert accepted.status == "confirmed", accepted
+        finally:
+            verification_run.reset(token)
+    assert not state["objects"]
 
 
 @pytest.mark.asyncio

@@ -4,15 +4,15 @@ import json
 import math
 import secrets
 from copy import deepcopy
-from urllib.parse import unquote, unquote_plus, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote_plus, unquote, unquote_plus, urlsplit, urlunsplit
 
 from app.services.agent.evidence_store import origin
 from app.services.agent.proof_engine import pointer, render
 
 METHODS = {
-    "captured_read": ("GET",),
-    "captured_mutation": ("PATCH", "PUT"),
-    "captured_property": ("PATCH", "PUT"),
+    "captured_read": ("GET", "POST"),
+    "captured_mutation": ("POST", "PATCH", "PUT"),
+    "captured_property": ("POST", "PATCH", "PUT"),
     "captured_delete": ("DELETE",),
 }
 
@@ -70,6 +70,95 @@ def bind_captured_object_url(url, object_id, selector=""):
     return urlunsplit(parts), location
 
 
+def _json_parts(path):
+    if not isinstance(path, str) or not path.startswith("/") or path == "/":
+        raise ValueError("Select an existing JSON pointer")
+    return [part.replace("~1", "/").replace("~0", "~") for part in path[1:].split("/")]
+
+
+def _set_json_pointer(document, path, value):
+    parts = _json_parts(path)
+    current = document
+    for part in parts[:-1]:
+        current = current[int(part)] if isinstance(current, list) else current[part]
+    leaf = parts[-1]
+    if isinstance(current, list):
+        current[int(leaf)] = value
+    else:
+        if leaf not in current:
+            raise ValueError("Selected JSON field is not present in the capture")
+        current[leaf] = value
+
+
+def _set_form_field(body, field, value, expected_id=None, require_nonempty=False):
+    """Replace exactly one raw form value, retaining every other encoded field."""
+    if not isinstance(body, str) or not field:
+        raise ValueError("Captured form body and field are required")
+    segments = body.split("&")
+    matches = []
+    occurrences = 0
+    for index, segment in enumerate(segments):
+        key, separator, raw = segment.partition("=")
+        if separator and unquote_plus(key) == field:
+            occurrences += 1
+            decoded = unquote_plus(raw)
+            if expected_id is None or decoded == str(expected_id):
+                matches.append((index, key, decoded))
+    if occurrences != 1 or len(matches) != 1 or (require_nonempty and not matches[0][2]):
+        raise ValueError("Selected form field must occur once with the observed object ID")
+    index, key, _ = matches[0]
+    segments[index] = key + "=" + value
+    return "&".join(segments)
+
+
+def bind_captured_object_body(attack, selector, object_id, body_format):
+    """Bind a single observed JSON pointer, GraphQL variable or form field."""
+    given_id = str(object_id or "")
+    if selector.startswith("form:") and body_format == "form":
+        field = selector.removeprefix("form:")
+        attack["body"] = _set_form_field(
+            attack["body"], field, "{{object_id}}", given_id or None,
+            require_nonempty=True,
+        )
+        return selector
+    if selector.startswith("body:/") and body_format == "json":
+        path = selector.removeprefix("body:")
+    elif selector.startswith("variable:/") and body_format == "json":
+        path = "/variables" + selector.removeprefix("variable:")
+    else:
+        raise ValueError("Object selector does not match the captured body format")
+    observed = pointer(attack["body"], path)
+    if type(observed) not in (str, int) or str(observed) in ("", ".", ".."):
+        raise ValueError("Selected body object ID must be a nonempty string or integer")
+    if given_id and str(observed) != given_id:
+        raise ValueError("Selected body field does not contain the captured object ID")
+    _set_json_pointer(attack["body"], path, "{{object_id}}")
+    return selector
+
+
+def render_captured_body(body, bindings, body_format):
+    if body_format != "form":
+        return render(body, bindings)
+    result = body
+    for key, value in bindings.items():
+        result = result.replace("{{" + key + "}}", quote_plus(str(value), safe=""))
+    if "{{" in result:
+        raise ValueError("Unresolved form proof binding")
+    return result
+
+
+def matrix_parameter_for_object(selector):
+    if selector.startswith("query:"):
+        return selector
+    if selector.startswith("form:"):
+        return "body:" + selector.removeprefix("form:")
+    if selector.startswith("body:/"):
+        return "body:" + _json_parts(selector.removeprefix("body:"))[0]
+    if selector.startswith("variable:/"):
+        return "variable:" + _json_parts(selector.removeprefix("variable:"))[0]
+    return ""
+
+
 def build_plan(capture, *, owner_identity, object_id, configuration):
     config = deepcopy(configuration)
     strategy = config["strategy"]
@@ -81,9 +170,25 @@ def build_plan(capture, *, owner_identity, object_id, configuration):
         "legacy",
     ):
         raise ValueError("Capture must belong to the registered owner identity")
-    attack["url"], object_parameter = bind_captured_object_url(
-        attack["url"], object_id, config.get("object_parameter", "")
-    )
+    selector = str(config.get("object_parameter") or "")
+    body_format = capture.get("body_format", "json" if isinstance(attack.get("body"), dict) else "none")
+    protocol = capture.get("protocol", "rest")
+    if selector.startswith(("body:/", "form:", "variable:/")):
+        object_parameter = bind_captured_object_body(attack, selector, object_id, body_format)
+    else:
+        attack["url"], object_parameter = bind_captured_object_url(
+            attack["url"], object_id, selector
+        )
+    if protocol == "graphql":
+        if attack["method"] != "POST" or (
+            strategy == "captured_read" and capture.get("graphql_kind") != "query"
+        ) or (
+            strategy in ("captured_mutation", "captured_property")
+            and capture.get("graphql_kind") != "mutation"
+        ):
+            raise ValueError("GraphQL proof strategy must match the captured query or mutation")
+    elif strategy == "captured_read" and attack["method"] == "POST" and config.get("post_read_only") is not True:
+        raise ValueError("REST POST read proof requires an explicit post_read_only assertion")
     canary_path = config.get("canary_path", "/marker")
     marker = field_name(canary_path)
     setup = config["setup"]
@@ -96,12 +201,9 @@ def build_plan(capture, *, owner_identity, object_id, configuration):
     if "{{object_id}}" in json.dumps(setup):
         raise ValueError("Setup cannot depend on a pre-existing object ID")
     value_path = config.get("value_path", canary_path)
-    value_field = field_name(value_path)
+    attack_value = None
     if strategy in ("captured_mutation", "captured_property"):
-        if not isinstance(attack["body"], dict) or value_field not in attack["body"]:
-            raise ValueError(
-                "Selected mutation property must exist in the captured JSON body"
-            )
+        attack_value_path = config.get("attack_value_path", value_path)
         if strategy == "captured_property":
             value = config.get("attack_value")
             if type(value) not in (bool, int, float) or (
@@ -110,17 +212,34 @@ def build_plan(capture, *, owner_identity, object_id, configuration):
                 raise ValueError(
                     "Property proofs require a finite numeric or boolean attack_value"
                 )
-            if value_field == marker:
+            if value_path == canary_path:
                 raise ValueError(
                     "Typed property proof needs a separate string canary property"
                 )
-            if marker in attack["body"]:
+            if isinstance(attack["body"], dict) and marker in attack["body"]:
                 attack["body"][marker] = "{{nonce}}"
+            if body_format == "form" and any(
+                key == marker for key, _ in parse_qsl(attack["body"], keep_blank_values=True)
+            ):
+                attack["body"] = _set_form_field(attack["body"], marker, "{{nonce}}")
         else:
             value = "{{attack_nonce}}"
-        attack["body"][value_field] = value
-    elif attack.get("body") is not None:
-        raise ValueError("Read/delete captures must have no request body")
+        if body_format == "form":
+            field = (
+                attack_value_path.removeprefix("form:")
+                if attack_value_path.startswith("form:")
+                else field_name(attack_value_path)
+            )
+            attack["body"] = _set_form_field(attack["body"], field, value)
+        elif body_format == "json":
+            _set_json_pointer(attack["body"], attack_value_path, value)
+        else:
+            raise ValueError("Mutation requires a captured JSON or form body")
+        attack_value = value
+    elif strategy == "captured_delete" and attack.get("body") is not None:
+        raise ValueError("Delete captures must have no request body")
+    elif strategy == "captured_read" and attack["method"] == "GET" and attack.get("body") is not None:
+        raise ValueError("GET read captures must have no request body")
     cleanup = config["cleanup"]
     cleanup["method"] = "DELETE"
     if cleanup.get("body") or cleanup["url"].count("{{object_id}}") != 1:
@@ -130,8 +249,11 @@ def build_plan(capture, *, owner_identity, object_id, configuration):
     verify = config["verify"]
     if verify.get("method", "GET").upper() != "GET" or verify.get("body"):
         raise ValueError("Verification must be a read-only GET")
-    if strategy != "captured_delete" and verify["url"] != attack["url"]:
-        raise ValueError("Owner readback must address the same controlled object")
+    if strategy != "captured_delete":
+        same_url = verify["url"] == attack["url"]
+        separate_control = verify["url"].count("{{object_id}}") == 1
+        if not (same_url or separate_control):
+            raise ValueError("Owner readback must address the fresh controlled object")
     for spec in (setup, verify, cleanup):
         if origin(spec["url"]) != origin(attack["url"]):
             raise ValueError("Every recipe step must stay on the capture origin")
@@ -148,6 +270,12 @@ def build_plan(capture, *, owner_identity, object_id, configuration):
         "capture_id": capture["id"],
         "controlled_resource": True,
         "object_parameter": object_parameter,
+        "body_format": body_format,
+        "protocol": protocol,
+        "attack_value": attack_value,
+        "attack_value_path": config.get("attack_value_path", value_path),
+        "attack_object_path": config.get("attack_object_path", config.get("object_path", "/id")),
+        "attack_canary_path": config.get("attack_canary_path", canary_path),
         "owner_identity": owner_identity,
         "target": urlunsplit(urlsplit(capture["request"]["url"])._replace(query="")),
         "operation_id": capture["operation_id"],
@@ -215,7 +343,10 @@ async def run_captured(engine, plan, cell, *, execute, registry):
             method=spec.get("method", "GET"),
             url=url,
             headers=render(spec.get("headers", {}), env),
-            body=render(spec.get("body"), env),
+            body=render_captured_body(
+                spec.get("body"), env,
+                plan["body_format"] if spec is plan["attack"] else "json",
+            ),
             identity=identity,
             hypothesis_id=cell["hypothesis_id"],
             follow_redirects=False,
@@ -301,7 +432,7 @@ async def run_captured(engine, plan, cell, *, execute, registry):
             ):
                 raise ValueError("Attacker control is not a distinct object")
         if strategy in ("captured_mutation", "captured_property"):
-            expected = render(plan["attack"]["body"], bindings)[field_name(value_path)]
+            expected = render(plan["attack_value"], bindings)
             prior = pointer(before, value_path)
             if same_value(prior, expected):
                 raise ValueError("Selected property already has the attack value")
@@ -335,7 +466,11 @@ async def run_captured(engine, plan, cell, *, execute, registry):
             identified(after_doc, victim, bindings["nonce"])
             try:
                 disclosed = document(attack_response, successful=False)
-                identified(disclosed, victim, bindings["nonce"])
+                if (
+                    not same_value(pointer(disclosed, plan["attack_object_path"]), victim)
+                    or pointer(disclosed, plan["attack_canary_path"]) != bindings["nonce"]
+                ):
+                    raise ValueError("Attacker response did not identify the fresh owner object")
                 verdict, reason = (
                     "confirmed",
                     "Attacker read the fresh owner-only canary and object ID",

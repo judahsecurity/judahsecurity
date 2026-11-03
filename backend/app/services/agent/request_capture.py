@@ -1,4 +1,4 @@
-"""Bounded execution-owned REST request templates, never credential storage.
+"""Bounded execution-owned request templates, never credential storage.
 
 Only transport/browser callbacks populate this store. Imported inventories are
 discovery hints and cannot acquire replay authority. Values stay session-local.
@@ -67,24 +67,49 @@ class RequestCaptureStore:
             ):
                 return self._reject("sensitive_query")
             method = request.get("method", "GET").upper()
-            if method not in ("GET", "PATCH", "PUT", "DELETE"):
+            if method not in ("GET", "POST", "PATCH", "PUT", "DELETE"):
                 return self._reject("unsupported_method")
+            content_type = next(
+                (str(value).lower() for key, value in (request.get("headers") or {}).items()
+                 if str(key).lower() == "content-type"),
+                "",
+            )
             body = request.get("body")
             if body in (None, "", b""):
                 body = None
-            elif isinstance(body, (str, bytes)):
-                body = json.loads(body)
-            if body is not None and not isinstance(body, dict):
+            elif isinstance(body, bytes):
+                body = body.decode("utf-8")
+            if body is None:
+                body_format = "none"
+            elif "application/x-www-form-urlencoded" in content_type:
+                if not isinstance(body, str) or len(body.encode()) > 65536:
+                    return self._reject("unsupported_body")
+                fields = parse_qsl(body, keep_blank_values=True)
+                if len(fields) > 64 or "{{" in body or any(
+                    not key or re.search(
+                        r"password|passwd|secret|token|credential|api.?key|authorization|cookie|session|csrf",
+                        key, re.IGNORECASE,
+                    ) for key, _ in fields
+                ):
+                    return self._reject("unsupported_body")
+                body_format = "form"
+            else:
+                if isinstance(body, str):
+                    body = json.loads(body)
+                if not isinstance(body, dict):
+                    return self._reject("unsupported_body")
+                encoded = json.dumps(body, allow_nan=False)
+                if len(encoded.encode()) > 65536 or "{{" in encoded:
+                    return self._reject("unsupported_body")
+                if redact_artifact(body) != body or re.search(
+                    r'"[^"\n]*(?:password|secret|token|credential|api.?key|authorization|cookie)[^"\n]*"\s*:',
+                    encoded,
+                    re.IGNORECASE,
+                ):
+                    return self._reject("sensitive_body")
+                body_format = "json"
+            if method in ("GET", "DELETE") and body is not None:
                 return self._reject("unsupported_body")
-            encoded = json.dumps(body, allow_nan=False)
-            if len(encoded.encode()) > 65536 or "{{" in encoded:
-                return self._reject("unsupported_body")
-            if redact_artifact(body) != body or re.search(
-                r'"[^"\n]*(?:password|secret|token|credential|api.?key|authorization|cookie)[^"\n]*"\s*:',
-                encoded,
-                re.IGNORECASE,
-            ):
-                return self._reject("sensitive_body")
             # Carry only representation headers. Authentication and routing
             # headers come exclusively from the identity registry at execution.
             headers = {
@@ -99,8 +124,22 @@ class RequestCaptureStore:
                 "body": body,
             }
             ops = normalize_request(spec, identity=identity, source=source)
-            if len(ops) != 1 or ops[0]["protocol"] != "rest":
+            if len(ops) != 1 or ops[0]["protocol"] not in ("rest", "graphql"):
                 return self._reject("not_rest_or_static")
+            protocol = ops[0]["protocol"]
+            if protocol == "graphql":
+                query_text = body.get("query") if isinstance(body, dict) else None
+                operation = re.match(r"\s*(query|mutation)\b", query_text or "")
+                shorthand = isinstance(query_text, str) and query_text.lstrip().startswith("{")
+                definitions = re.findall(
+                    r"(?:^|})\s*(?:query|mutation|subscription)\b",
+                    query_text or "",
+                )
+                if body_format != "json" or not (operation or shorthand) or len(definitions) > 1:
+                    return self._reject("unsupported_graphql")
+                graphql_kind = operation.group(1) if operation else "query"
+            else:
+                graphql_kind = ""
             capture_id = secrets.token_hex(16)
             row = {
                 "id": capture_id,
@@ -119,6 +158,9 @@ class RequestCaptureStore:
                 "verifier_run_id": str(verifier_run_id or ""),
                 "finding_id": str(finding_id or ""),
                 "request": deepcopy(spec),
+                "body_format": body_format,
+                "protocol": protocol,
+                "graphql_kind": graphql_kind,
             }
             self._records[capture_id] = row
             while len(self._records) > self.limit:
@@ -141,7 +183,11 @@ class RequestCaptureStore:
             "query_fields": sorted(
                 {key for key, _ in parse_qsl(parts.query, keep_blank_values=True)}
             ),
-            "body_fields": sorted((spec["body"] or {}).keys()),
+            "body_fields": sorted(
+                {key for key, _ in parse_qsl(spec["body"], keep_blank_values=True)}
+                if row.get("body_format") == "form"
+                else (spec["body"] or {}).keys()
+            ),
             "authorization_references": [
                 {key: lead[key] for key in (
                     "reference", "path_index", "value_shape", "priority_score", "replayable"

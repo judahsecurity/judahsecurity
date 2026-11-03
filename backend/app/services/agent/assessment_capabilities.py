@@ -108,7 +108,7 @@ class AssessmentCapabilities:
         return report
 
     async def list_proof_captures(self, operation_id: str | None = None) -> str:
-        """List execution-owned REST replay templates, without body values or credentials."""
+        """List execution-owned REST/GraphQL replay templates without private values."""
         return json.dumps(dict(captures=self._capture_requests().list(operation_id)))
 
     async def list_authorization_leads(
@@ -132,17 +132,20 @@ class AssessmentCapabilities:
 
         configuration requires strategy, setup POST JSON, verify GET and cleanup
         DELETE URLs. The captured object ID can be a complete path segment or
-        query value. For a unique query field, pass object_parameter (for
-        example query:record_id) and an empty object_id; the captured value
-        stays private. Object URLs use {{object_id}}.
-        Optional top-level JSON
-        pointers: canary_path (/marker), value_path, object_path (/id), and
-        inventory_path (/items) for delete. captured_property needs attack_value.
+        query value, form field, JSON pointer or GraphQL variable pointer. Pass
+        object_parameter such as query:record, form:record, body:/input/record,
+        or variable:/input/record; an empty object_id selects the sole observed
+        field value. Object URLs use {{object_id}}. REST POST reads require an
+        explicit post_read_only assertion. For nested mutations, set
+        attack_value_path separately from the owner readback value_path.
+        GraphQL reads may need attack_object_path and attack_canary_path to
+        identify the fresh object inside data. captured_property needs a typed
+        attack_value. Delete proofs need inventory_path (/items).
         The owner must have captured the selected operation; policy must deny
         the other identity. Only disposable fixtures with explicit cleanup work.
         """
         from copy import deepcopy
-        from app.services.agent.captured_proof import build_plan, field_name
+        from app.services.agent.captured_proof import build_plan, matrix_parameter_for_object
 
         capture = self._capture_requests().get(capture_id)
         brain = engagement_brain_from_dict(self._engagement_brain)
@@ -169,18 +172,17 @@ class AssessmentCapabilities:
             configuration=configuration,
         )
         selected = cell["parameter"]
-        query_selected = (
-            plan["object_parameter"].startswith("query:")
-            and selected == plan["object_parameter"]
-        )
+        reference_parameter = matrix_parameter_for_object(plan["object_parameter"])
+        object_selected = bool(reference_parameter and selected == reference_parameter)
         body_selected = (
             plan["strategy"] in ("captured_mutation", "captured_property")
-            and selected == "body:" + field_name(plan["value_path"])
+            and plan["body_format"] == "json"
+            and selected == "body:" + plan["attack_value_path"].lstrip("/").split("/", 1)[0]
         )
-        if selected and not (query_selected or body_selected):
+        if selected and not (object_selected or body_selected):
             raise ValueError("Recipe does not test the selected parameter")
-        if plan["object_parameter"].startswith("query:") and not query_selected:
-            raise ValueError("Query object proofs require the matching parameter cell")
+        if reference_parameter and not object_selected:
+            raise ValueError("Object-reference proofs require the matching parameter cell")
         existing = self._captured_proof_plans.get(hypothesis_id)
         if existing is not None and existing != plan:
             raise ValueError(
@@ -317,11 +319,15 @@ class AssessmentCapabilities:
             raise ValueError(
                 "Plan target must exactly match the selected operation URL"
             )
-        if op["protocol"] != "rest":
+        if op["protocol"] not in ("rest", "graphql") or (
+            op["protocol"] == "graphql" and plan.get("protocol") != "graphql"
+        ):
             raise ValueError(
-                "Current proof recipes support REST JSON operations; protocol-specific verification is required"
+                "Captured proof protocol differs from the selected operation"
             )
         captured = plan["strategy"].startswith("captured_")
+        if op["protocol"] == "graphql" and not captured:
+            raise ValueError("GraphQL authorization requires an execution-owned capture")
         registered_capture = self._captured_proof_plans.get(hypothesis_id)
         if registered_capture is not None and registered_capture != plan:
             raise ValueError(
@@ -364,10 +370,16 @@ class AssessmentCapabilities:
                 raise ValueError(
                     "Attack template does not match the selected operation"
                 )
-        if captured and plan.get("object_parameter", "").startswith("query:"):
-            if plan["object_parameter"] not in op.get("parameters", []):
-                raise ValueError("Query object field was not observed on the operation")
-            if attack["url"].count("{{object_id}}") != 1:
+        if captured:
+            from app.services.agent.captured_proof import matrix_parameter_for_object
+
+            reference_parameter = matrix_parameter_for_object(plan.get("object_parameter", ""))
+            if reference_parameter and reference_parameter not in op.get("parameters", []):
+                raise ValueError("Object reference was not observed on the operation")
+            bound = attack["url"].count("{{object_id}}") + json.dumps(
+                attack.get("body")
+            ).count("{{object_id}}")
+            if bound != 1:
                 raise ValueError("Attack must bind exactly one controlled object ID")
         registry = identity_registry(self)
         for name in (plan["owner_identity"], cell["identity"]):

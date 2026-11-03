@@ -87,7 +87,7 @@ def test_eviction_removes_expired_leads_from_the_queue():
 def test_rejected_capture_shapes_are_counted_for_handoff_coverage():
     store = RequestCaptureStore()
     assert store.record(
-        {"method": "POST", "url": "https://app.test/lookup?record=1"},
+        {"method": "OPTIONS", "url": "https://app.test/lookup?record=1"},
         identity="owner", source="browser",
     ) is None
     assert store.record(
