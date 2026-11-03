@@ -134,6 +134,26 @@ def _find_system_chromium() -> Optional[str]:
     return None
 
 
+def _assessment_launch_kwargs() -> dict:
+    """Route crawl traffic through the assessment Caido proxy when configured.
+
+    Mirrors the scoped assessment browser: when AEGIS_ASSESSMENT_PROXY_URL is set
+    (with a readable CA bundle), the crawler's Chromium proxies through Caido so
+    the walk is captured for analyst review. The CA is trusted at container
+    startup, so only the proxy server is passed here. Unset -> direct, as before.
+    """
+    try:
+        from app.services.agent.assessment_proxy import assessment_browser_proxy
+
+        proxy = assessment_browser_proxy()
+    except Exception:
+        # A misconfigured assessment proxy must not disable the crawler; the
+        # scoped assessment path surfaces configuration errors on its own.
+        logger.warning("assessment proxy unavailable for crawl; crawling direct", exc_info=True)
+        return {}
+    return {"proxy": proxy} if proxy else {}
+
+
 async def _launch_chromium(pw):
     """
     Launch Chromium, resilient to a missing Playwright-managed browser.
@@ -143,8 +163,9 @@ async def _launch_chromium(pw):
     system Chromium the images always apt-install. Raises RuntimeError with an
     actionable message if neither is available.
     """
+    proxy_kwargs = _assessment_launch_kwargs()
     try:
-        return await pw.chromium.launch(headless=True, args=_LAUNCH_ARGS)
+        return await pw.chromium.launch(headless=True, args=_LAUNCH_ARGS, **proxy_kwargs)
     except Exception as managed_err:
         sys_chrome = _find_system_chromium()
         if not sys_chrome:
@@ -159,7 +180,7 @@ async def _launch_chromium(pw):
             str(managed_err)[:120], sys_chrome,
         )
         return await pw.chromium.launch(
-            headless=True, args=_LAUNCH_ARGS, executable_path=sys_chrome,
+            headless=True, args=_LAUNCH_ARGS, executable_path=sys_chrome, **proxy_kwargs,
         )
 
 # Bounds — keep a single crawl cheap and predictable for agent sessions.

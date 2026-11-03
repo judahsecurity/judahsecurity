@@ -188,3 +188,60 @@ use is permitted by the upstream commercial-use guidance. If Judah Security make
 Interceptor functionality available as a hosted or managed customer service, or
 embeds it as a substantial part of a sold product, confirm a commercial license
 with Hacker Valley Media before offering that use.
+
+## Capture crawls in the assessment Caido
+
+Crawl traffic can be recorded in the dedicated assessment Caido project so an
+analyst can review the walk for IDOR and business-logic issues. There are two
+crawlers, handled separately.
+
+### Playwright `deep_crawl` (in-container fallback)
+
+The backend's Playwright crawler captures automatically. When
+`AEGIS_ASSESSMENT_PROXY_URL` is set (with a readable `AEGIS_ASSESSMENT_CA_BUNDLE`
+— the same two values that route the scoped assessment browser), the crawler's
+Chromium proxies through the assessment Caido. The CA is trusted at container
+startup, so no per-crawl setup is needed. If the proxy is unset or
+misconfigured, the crawler runs direct, exactly as before.
+
+### Remote Interceptor worker (Mac / Ubuntu)
+
+Interceptor workers run a real browser on a separate host, so they cannot reach
+`caido-assessment` on the Compose network. Route them through an SSH tunnel to
+the loopback-only proxy port added by the opt-in overlay:
+
+1. On the Compose host, start the assessment Caido with the overlay so its proxy
+   is published on loopback (`127.0.0.1:8084`), and select a persistent project
+   in its UI:
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.interceptor-assessment.yml \
+     --profile caido-assessment up -d caido-assessment
+   ```
+
+2. Copy the assessment Caido public CA off the backend container:
+
+   ```bash
+   docker compose cp backend:/app/certs/caido/ca.crt /etc/asm/caido-assessment-ca.crt
+   ```
+
+3. From the Interceptor worker host, tunnel the loopback proxy (and, if needed,
+   the UI) to the Compose host:
+
+   ```bash
+   ssh -N -L 8084:127.0.0.1:8084 -L 8083:127.0.0.1:8083 <compose-host>
+   ```
+
+4. Point the Interceptor browser at the tunneled assessment proxy using the
+   existing host installer knobs:
+
+   ```bash
+   INTERCEPTOR_PROXY_SERVER=http://127.0.0.1:8084 \
+   INTERCEPTOR_PROXY_CA_CERT=/etc/asm/caido-assessment-ca.crt \
+   RUN_E2E_SMOKE=1 ./scripts/install-interceptor-host.sh
+   ```
+
+The assessment proxy is published on loopback only and never on `0.0.0.0`; keep
+the overlay out of deployments that do not need remote crawl capture. As with
+all Caido capture, recorded traffic is an analyst view, not proof: Prowl's own
+evidence receipts remain the source of truth.

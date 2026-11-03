@@ -1,0 +1,21 @@
+# Opt-in overlay: expose the assessment Caido proxy on the loopback interface
+# ONLY, so a remote Interceptor worker host can reach it through an SSH tunnel
+# and have its real-browser crawl traffic captured in the assessment project.
+#
+# This is NOT part of the default deployment. Without this overlay the
+# assessment proxy stays reachable only on the Compose network (the base file
+# publishes the assessment Caido UI on 127.0.0.1:8083 and nothing else). The
+# overlay adds the proxy port on loopback; it is never bound to 0.0.0.0.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.interceptor-assessment.yml \
+#     --profile caido-assessment up -d caido-assessment
+#
+# Then, from the Interceptor worker host, tunnel the loopback proxy port and
+# point the Interceptor browser at it (see docs/interceptor-workers.md →
+# "Capture crawls in the assessment Caido").
+services:
+  caido-assessment:
+    ports:
+      # host loopback -> assessment Caido proxy-listen (0.0.0.0:8082 in-container)
+      - "127.0.0.1:8084:8082"
