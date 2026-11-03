@@ -159,6 +159,7 @@ def _json_pointer_value(document: object, pointer: str) -> object:
 
 def match_browser_post_body(
     baseline: bytes, live: bytes | None, *, mime: str, parameter: str, payload: str,
+    require_nonce: bool = True,
 ) -> tuple[bytes, str, list[str]] | None:
     """Mutate the live POST only when its captured input and stable fields agree.
 
@@ -168,7 +169,8 @@ def match_browser_post_body(
     if (not isinstance(live, bytes) or not live or len(live) > MAX_REPLAY_BODY
             or not baseline or len(baseline) > MAX_REPLAY_BODY
             or not isinstance(mime, str)
-            or not isinstance(payload, str) or not 0 < len(payload) <= 300
+            or not isinstance(payload, str) or not 0 <= len(payload) <= 300
+            or (require_nonce and not payload)
             or b"__PROWL_NONCE__" in live):
         return None
     json_body = mime == "application/json" or mime.endswith("+json")
@@ -176,11 +178,12 @@ def match_browser_post_body(
         return None
     if live == baseline:
         try:
-            changed = (_mutate_json(live, parameter, payload) if json_body
+            changed = (live if not payload else
+                       _mutate_json(live, parameter, payload) if json_body
                        else _mutate_form(live, parameter, payload))
         except (ValueError, TypeError, RecursionError):
             return None
-        return (changed, "exact", []) if changed.count(b"__PROWL_NONCE__") == 1 else None
+        return (changed, "exact", []) if not require_nonce or changed.count(b"__PROWL_NONCE__") == 1 else None
 
     changed_fields: list[str] = []
     if json_body:
@@ -225,7 +228,7 @@ def match_browser_post_body(
 
             if not same_shape(original, current) or not changed_fields:
                 return None
-            changed = _mutate_json(live, parameter, payload)
+            changed = live if not payload else _mutate_json(live, parameter, payload)
         except (UnicodeDecodeError, TypeError, ValueError, RecursionError):
             return None
     else:
@@ -257,10 +260,10 @@ def match_browser_post_body(
                 changed_fields.append(name)
             if not changed_fields:
                 return None
-            changed = _mutate_form(live, parameter, payload)
+            changed = live if not payload else _mutate_form(live, parameter, payload)
         except (UnicodeDecodeError, ValueError):
             return None
-    return (changed, "volatile_fields", sorted(changed_fields)) if changed.count(b"__PROWL_NONCE__") == 1 else None
+    return (changed, "volatile_fields", sorted(changed_fields)) if not require_nonce or changed.count(b"__PROWL_NONCE__") == 1 else None
 
 
 def captured_volatile_post_fields(body: bytes, mime: str) -> list[str]:

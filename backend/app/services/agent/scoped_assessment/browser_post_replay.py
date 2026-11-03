@@ -99,11 +99,11 @@ async def replay_observed_post_controls(
                                     and request.headers.get("content-type", "").split(";", 1)[0].strip().lower() == mime):
                                 matched = match_browser_post_body(
                                     baseline, request.post_data_buffer, mime=mime,
-                                    parameter=parameter, payload="__PROWL_NONCE__",
+                                    parameter=parameter, payload=suffix, require_nonce=False,
                                 )
                                 if matched is not None:
                                     changed, match_mode, volatile_fields = matched
-                                    sent_body = changed.replace(b"__PROWL_NONCE__", suffix.encode())
+                                    sent_body = changed
                                     selected_request = request
                                     selected = True
                                     await route.continue_(post_data=sent_body)
