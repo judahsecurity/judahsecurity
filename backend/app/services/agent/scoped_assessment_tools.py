@@ -344,13 +344,42 @@ class ScopedAssessmentTools:
         xhr_payload_template: str = "",
         xhr_query_keys: list[str] | None = None,
         xhr_actions: list[dict] | None = None,
+        xhr_capture_id: str = "",
         readback_url: str = "", cleanup_url_template: str = "",
         client_test_type: str = "",
     ) -> str:
         """Run scoped map, crawl, JS inspection, or nonce XSS execution in Chromium."""
         if operation not in ("map", "crawl", "inspect_js", "check_xss", "check_form_xss", "check_xhr_xss", "check_stored_xss", "check_client"):
             raise ValueError("Unsupported scoped browser operation")
+        if xhr_capture_id and operation != "check_xhr_xss":
+            raise ValueError("A POST XHR capture requires the XHR browser check")
         allowed = self._scoped_origin(url)
+        xhr_post = None
+        if operation == "check_xhr_xss" and xhr_capture_id:
+            record = evidence_store(self).records.get(xhr_capture_id)
+            row = self._scoped_capture_row(xhr_capture_id)
+            run = verification_run.get()
+            if (not record or record.get("kind") != "scoped_browser_exchange"
+                    or not row or row.get("identity") != identity
+                    or row.get("verifier_run_id")
+                    or (run is not None and record.get("run_id"))):
+                raise ValueError("POST XHR requires an execution-owned browser capture")
+            private = row["private"]
+            observed = json.loads(private)
+            if (observed.get("page_url") != url
+                    or observed.get("replay_actions", []) != (xhr_actions or [])):
+                raise ValueError("POST XHR rendering page or actions differ from capture")
+            captured_url, mime, baseline, changed = body_probe.plan_observed_body(
+                private, parameter=xhr_parameter, allowed_origins=[allowed],
+                payload=xhr_payload_template,
+            )
+            if (captured_url != allowed + xhr_path or xhr_query_keys not in (None, [])
+                    or (urlsplit(captured_url).path or "/") not in
+                    (getattr(self, "_scoped_body_replay_paths", None) or set())
+                    or browser.NONCE_MARKER.encode() not in changed):
+                raise ValueError("POST XHR must match an approved captured request")
+            xhr_post = (baseline, changed, mime)
+            self._scoped_claim_posts(1)
         if operation in {"check_form_xss", "check_stored_xss"}:
             if self._scoped_origin(form_action) != allowed:
                 raise ValueError("Form action is outside the assessment origin")
@@ -383,6 +412,14 @@ class ScopedAssessmentTools:
             xhr_payload_template=xhr_payload_template,
             xhr_query_keys=xhr_query_keys,
             xhr_actions=xhr_actions,
+            xhr_post_baseline=xhr_post[0] if xhr_post else None,
+            xhr_post_template=xhr_post[1] if xhr_post else None,
+            xhr_post_content_type=xhr_post[2] if xhr_post else "",
+            xhr_capture_id=xhr_capture_id,
+            xhr_body_location=("body_json" if xhr_post and
+                               (xhr_post[2] == "application/json" or xhr_post[2].endswith("+json"))
+                               else "body_form" if xhr_post else ""),
+            xhr_baseline_request_sha256=hashlib.sha256(xhr_post[0]).hexdigest() if xhr_post else "",
             readback_url=readback_url, cleanup_url_template=cleanup_url_template,
             client_test_type=client_test_type,
         )

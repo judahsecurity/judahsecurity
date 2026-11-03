@@ -5,7 +5,7 @@ import os
 import threading
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, quote
 
 import pytest
 from app.services.agent.assessment_scope import register_scope
@@ -310,6 +310,94 @@ async def test_scoped_xhr_xss_replays_observed_tab_before_mutating_request(monke
             assert result["xhr_mutated"] is True
             assert result["xhr_response_seen"] is True
             assert result["executed"] is not encoded
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_scoped_post_xhr_xss_mutates_only_matching_capture_and_needs_execution(monkeypatch):
+    from app.services.agent.scoped_assessment.browser import check_browser
+    from playwright.async_api import BrowserType
+
+    executable = os.environ.get("ASSESSMENT_TEST_CHROMIUM")
+    if executable:
+        original = BrowserType.launch
+
+        async def launch(self, **kwargs):
+            return await original(self, **dict(kwargs, executable_path=executable))
+
+        monkeypatch.setattr(BrowserType, "launch", launch)
+
+    seen_posts = []
+
+    class Handler(BaseHTTPRequestHandler):
+        encode = False
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            body = (b'<div id="result"></div><script>'
+                    b'fetch("/api/render", {method:"POST", headers:{"Content-Type":'
+                    b'"application/x-www-form-urlencoded"}, body:"message=seed"})'
+                    b'.then(r => r.text()).then(v => '
+                    b'document.getElementById("result").innerHTML = v)'
+                    b'</script>')
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            seen_posts.append(body)
+            value = parse_qs(body.decode()).get("message", [""])[0]
+            rendered = (escape(value) if self.encode else value).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(rendered)))
+            self.end_headers()
+            self.wfile.write(rendered)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    payload = '<img src=x onerror=alert("__PROWL_NONCE__")>'
+    template = ("message=" + quote(payload, safe="")).encode()
+    try:
+        for encoded in (False, True):
+            Handler.encode = encoded
+            result, _ = await check_browser(
+                operation="check_xhr_xss", url=base + "/catalog",
+                allowed_origins=[base], xhr_path="/api/render",
+                xhr_parameter="message", xhr_query_keys=[],
+                xhr_payload_template=payload, xhr_post_baseline=b"message=seed",
+                xhr_post_template=template,
+                xhr_post_content_type="application/x-www-form-urlencoded",
+                xhr_capture_id="fixture",
+                xhr_body_location="body_form",
+            )
+            assert result["xhr_mutated"] is True
+            assert result["xhr_response_seen"] is True
+            assert result["executed"] is not encoded
+        count = len(seen_posts)
+        mismatch, _ = await check_browser(
+            operation="check_xhr_xss", url=base + "/catalog",
+            allowed_origins=[base], xhr_path="/api/render",
+            xhr_parameter="message", xhr_query_keys=[],
+            xhr_payload_template=payload, xhr_post_baseline=b"message=other",
+            xhr_post_template=template,
+            xhr_post_content_type="application/x-www-form-urlencoded",
+            xhr_capture_id="fixture",
+            xhr_body_location="body_form",
+        )
+        assert mismatch["xhr_mutated"] is False
+        assert mismatch["executed"] is False
+        assert len(seen_posts) == count
     finally:
         server.shutdown()
         server.server_close()

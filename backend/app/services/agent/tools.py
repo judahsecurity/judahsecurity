@@ -1856,9 +1856,66 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         body = {"artifact_id": cell["capture_id"], "parameter": parameter, "identity": identity}
         method = str(cell.get("method") or "GET")
         if cell.get("specialist") == "xss" and method == "POST" and location in {"body_json", "body_form"}:
-            if technique not in {"captured", "xss_reflection"}:
+            if technique not in {"captured", "xss_reflection", *xss_payloads}:
                 return {"success": False, "error": "unsupported_xss_browser",
-                        "output": "POST XSS first pass requires an approved captured body"}
+                        "output": "POST XSS requires an approved captured body"}
+            captured_row = self._scoped_capture_row(str(cell["capture_id"]))
+            captured = {}
+            if captured_row and captured_row.get("identity") == identity:
+                try:
+                    captured = json.loads(captured_row["private"])
+                except (TypeError, ValueError):
+                    pass
+            page_url = str(captured.get("page_url") or "")
+            captured_url = str(captured.get("url") or "")
+            browser_ready = (technique != "xss_reflection"
+                             and captured.get("method") == "POST"
+                             and captured.get("resource_type") in {"xhr", "fetch"}
+                             and (urlsplit(captured_url).path or "/") == cell.get("path")
+                             and bool(page_url)
+                             and not urlsplit(page_url).query
+                             and not urlsplit(page_url).fragment)
+            if browser_ready:
+                try:
+                    proof = json.loads(await self.scoped_browser_assessment(
+                        "check_xhr_xss", page_url, identity=identity,
+                        xhr_path=cell["path"], xhr_parameter=parameter,
+                        xhr_payload_template=xss_payloads.get(
+                            technique, xss_payloads["xss_browser"]),
+                        xhr_query_keys=[], xhr_capture_id=cell["capture_id"],
+                        xhr_actions=captured.get("replay_actions") or [],
+                    ))
+                except ValueError as exc:
+                    return {"success": False, "error": "post_xhr_replay_blocked",
+                            "reason": str(exc)[:200]}
+                artifact_id = str(proof.get("evidence_id") or "")
+                if not artifact_id:
+                    return {"success": False, "error": "missing_probe_evidence"}
+                live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+                current = next((row for row in live.coverage_cells
+                                if row.get("id") == coverage_cell_id
+                                and row.get("lease_id") == coverage_lease_id), None)
+                if current is None:
+                    return {"success": False, "error": "lease_changed"}
+                current["probe_artifact_ids"] = list(dict.fromkeys([
+                    *(current.get("probe_artifact_ids") or []), artifact_id,
+                ]))[:20]
+                current["evidence_ids"] = list(dict.fromkeys([
+                    *(current.get("evidence_ids") or []), artifact_id,
+                ]))[:30]
+                current["last_probe"] = "scoped_browser_check_xhr_xss"
+                if proof.get("executed") is True:
+                    current["status"] = "in_focus"
+                    current["reason"] = "Captured POST XHR executed in browser; independent verification required"
+                self._engagement_brain = live.to_dict()
+                return {"success": True, "coverage_cell_id": coverage_cell_id,
+                        "coverage_lease_id": coverage_lease_id,
+                        "operation": "scoped_browser_check_xhr_xss",
+                        "evidence_id": artifact_id,
+                        "proof_confirmed": proof.get("executed") is True,
+                        "probe_result": {"executed": proof.get("executed") is True,
+                                         "xhr_mutated": proof.get("xhr_mutated") is True,
+                                         "xhr_response_seen": proof.get("xhr_response_seen") is True}}
             try:
                 proof = json.loads(await self.scoped_body_xss_reflection(
                     cell["capture_id"], parameter, identity,
