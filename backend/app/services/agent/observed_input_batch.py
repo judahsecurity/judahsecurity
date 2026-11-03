@@ -32,11 +32,17 @@ from app.services.agent.scoped_assessment_tools import (
 from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
 
 logger = logging.getLogger(__name__)
+# Leave ten minutes for independent verification after the longest tool
+# confirmation wait that a single first-pass call may consume.
+FIRST_PASS_CONFIRMATION_TIMEOUT_SECONDS = 360
+FIRST_PASS_START_MARGIN_SECONDS = 600 + FIRST_PASS_CONFIRMATION_TIMEOUT_SECONDS
 _STALE_LEASE_REASONS = frozenset({
     "not_leased", "lease_mismatch", "lease_expired", "lease_changed",
 })
 _RETRYABLE_HANDOFF_ERRORS = frozenset({
     "invalid_coverage_lease", "lease_changed", "missing_probe_evidence",
+    "sweep_request_failed",
+    "sweep_capture_failed",
     "First-pass probe timed out without a proof receipt",
 })
 XSS_GET_TECHNIQUES = (
@@ -154,7 +160,7 @@ def pending_first_pass_cells(brain: Any, *, target: str = "") -> list[dict[str, 
     touched_paths = Counter(key[:3] for key in touched_inputs)
     completed_by_class = Counter(str(cell.get("specialist")) for cell in completed)
     now = time.time()
-    return sorted(
+    ordered = sorted(
         (
             cell for cell in cells
             if isinstance(cell, dict)
@@ -187,14 +193,19 @@ def pending_first_pass_cells(brain: Any, *, target: str = "") -> list[dict[str, 
                     and float(cell.get("lease_deadline") or 0) <= time.time())
             )
             and (not cell.get("first_pass_outcome") or _retryable_first_pass(cell, now)
+                 or (cell.get("triage_pending")
+                     and float(cell.get("triage_retry_at") or 0) <= now)
                  or (cell.get("test_type") == "xss" and cell.get("xss_pending_techniques")
                      and float(cell.get("first_pass_retry_at") or 0) <= now))
             and not cell.get("candidate_id")
-            and (not cell.get("probe_artifact_ids") or cell.get("xss_pending_techniques"))
-            and (not cell.get("service_probe_artifact_ids") or cell.get("xss_pending_techniques"))
+            and (not cell.get("probe_artifact_ids") or cell.get("xss_pending_techniques")
+                 or cell.get("triage_pending"))
+            and (not cell.get("service_probe_artifact_ids") or cell.get("xss_pending_techniques")
+                 or cell.get("triage_pending"))
         ),
         key=lambda cell: (
             int(cell.get("first_pass_attempts") or 0),
+            int(cell.get("observation_source") == "observed_form"),
             int(input_key(cell) in touched_inputs),
             completed_by_class[str(cell.get("specialist") or "")],
             touched_paths[input_key(cell)[:3]],
@@ -206,6 +217,14 @@ def pending_first_pass_cells(brain: Any, *, target: str = "") -> list[dict[str, 
             cell.get("test_type", ""),
         ),
     )
+    # Finish the breadth sweep across the entire queue, then triage saved
+    # leads before spending time on more browser variants from one input.
+    first = [cell for cell in ordered if not cell.get("first_pass_outcome")
+             or _retryable_first_pass(cell, now)]
+    if first:
+        return first
+    leads = [cell for cell in ordered if cell.get("triage_pending")]
+    return leads if leads else ordered
 
 
 async def run_observed_input_batch(
@@ -219,6 +238,15 @@ async def run_observed_input_batch(
     brain = engagement_brain_from_dict(getattr(manager, "_engagement_brain", None))
     migrate_coverage_cells(brain)
     manager._engagement_brain = brain.to_dict()
+    from app.services.agent.orchestrator import _turn_deadline_var
+    turn_deadline = _turn_deadline_var.get(None)
+    if (turn_deadline is not None and
+            turn_deadline - time.monotonic() <= FIRST_PASS_START_MARGIN_SECONDS):
+        return {
+            "processed": 0, "remaining": len(pending_first_pass_cells(brain, target=target)),
+            "results": [], "reason": "verification_time_reserved",
+            "funnel": parameter_test_funnel(brain),
+        }
     cmap = getattr(manager, "_capability_map", None) or {}
     active_target = str(target or getattr(manager, "_fallback_target", "") or
                         cmap.get("target") or "")
@@ -326,6 +354,7 @@ async def run_observed_input_batch(
                 "xss_variant_failures": {},
             })
             continue
+        triage = bool(selected.get("triage_pending"))
         if _retryable_first_pass(selected, time.time()):
             # Preserve the attempt count but allow the lease selector to take
             # this exact cell for one more execution after the cooldown.
@@ -349,6 +378,8 @@ async def run_observed_input_batch(
         outcome = "unattempted"
         reason = "No supported scoped first-pass probe for this input shape"
         evidence_id = ""
+        baseline_evidence_id = ""
+        probe_evidence_id = ""
         candidate_id = ""
         evidence_source = ""
         candidate_handoff_error = ""
@@ -367,7 +398,9 @@ async def run_observed_input_batch(
             remaining = max(1.0, cell_deadline - time.monotonic())
             probe_args = {"coverage_cell_id": cell["id"], "coverage_lease_id": lease.id}
             if method == "GET" and location == "query" and parameter:
-                if specialist == "sqli" and cell.get("value_type") in {"positive_integer", "number"}:
+                if not triage and callable(getattr(manager, "scoped_input_sweep_assigned", None)):
+                    operation_name = "scoped_input_sweep_assigned"
+                elif specialist == "sqli" and cell.get("value_type") in {"positive_integer", "number"}:
                     if cell.get("observation_source") == "browser_traffic" and cell.get("capture_id"):
                         operation_name = "scoped_assessment_probe_assigned"
                     else:
@@ -391,8 +424,11 @@ async def run_observed_input_batch(
             elif (cell.get("observation_source") == "browser_traffic"
                   and cell.get("capture_id") and method == "POST"
                   and location in {"body_json", "body_form"}):
-                operation_name = "scoped_assessment_probe_assigned"
-                if specialist == "xss":
+                if not triage and callable(getattr(manager, "scoped_input_sweep_assigned", None)):
+                    operation_name = "scoped_input_sweep_assigned"
+                else:
+                    operation_name = "scoped_assessment_probe_assigned"
+                if specialist == "xss" and operation_name != "scoped_input_sweep_assigned":
                     first_technique = (xss_pending[0] if xss_pending
                                        and xss_pending[0] in XSS_POST_XHR_TECHNIQUES
                                        else "xss_browser")
@@ -402,7 +438,9 @@ async def run_observed_input_batch(
             if operation_name:
                 result = await asyncio.wait_for(
                     _invoke(manager, operation_name, probe_args),
-                    timeout=min(remaining, 45.0),
+                    # Tool confirmation may wait up to five minutes. Do not
+                    # abandon its live approval after the old 45s probe cap.
+                    timeout=FIRST_PASS_CONFIRMATION_TIMEOUT_SECONDS,
                 )
                 if (isinstance(result, dict)
                         and result.get("error") == "invalid_coverage_lease"
@@ -416,14 +454,17 @@ async def run_observed_input_batch(
                         remaining = max(1.0, cell_deadline - time.monotonic())
                         result = await asyncio.wait_for(
                             _invoke(manager, operation_name, probe_args),
-                            timeout=min(remaining, 45.0),
+                            timeout=FIRST_PASS_CONFIRMATION_TIMEOUT_SECONDS,
                         )
                 evidence_id = str(result.get("evidence_id") or next(
                     iter(result.get("service_artifact_ids") or []), ""
                 ))
+                baseline_evidence_id = str(result.get("baseline_evidence_id") or "")
+                probe_evidence_id = str(result.get("probe_evidence_id") or "")
                 if evidence_id:
                     evidence_source = "local" if result.get("evidence_id") else "service"
                 if (specialist == "xss" and first_technique
+                        and result.get("first_pass_mode") != "sweep"
                         and result.get("success") is True
                         and result.get("evidence_id")):
                     if first_technique and first_technique not in xss_attempted:
@@ -485,7 +526,7 @@ async def run_observed_input_batch(
                                     manager, operation_name,
                                     {"coverage_cell_id": cell["id"], "coverage_lease_id": lease.id,
                                      "technique": technique},
-                                ), timeout=min(remaining, 20.0))
+                                ), timeout=FIRST_PASS_CONFIRMATION_TIMEOUT_SECONDS)
                             except asyncio.TimeoutError:
                                 xss_variant_failures[technique] = int(
                                     xss_variant_failures.get(technique) or 0
@@ -581,6 +622,18 @@ async def run_observed_input_batch(
                         else:
                             reason = "Scoped service proof signal; service candidate handoff required"
                             candidate_handoff_error = "service_candidate_handoff_required"
+                    elif result.get("first_pass_mode") == "sweep":
+                        outcome = "inconclusive"
+                        lead = str((result.get("probe_result") or {}).get("lead_kind") or "")
+                        reason = (
+                            f"First-pass {lead} lead queued for controlled follow-up"
+                            if lead and not (result.get("probe_result") or {}).get("inconclusive")
+                            else "Baseline and one mutation saved; "
+                            + ("baseline unusable: " + str(
+                                (result.get("probe_result") or {}).get("baseline_failure_reason")
+                            ) if (result.get("probe_result") or {}).get("baseline_failure_reason")
+                               else "no executable proof")
+                        )
                     elif (specialist == "sqli" and result.get("evidence_id")
                           and (result.get("probe_result") or {}).get("proof_recipe")
                               in {"numeric_and_boolean_v1", "string_or_boolean_v1",
@@ -661,6 +714,22 @@ async def run_observed_input_batch(
             if evidence_id:
                 current["first_pass_evidence_id"] = evidence_id
                 current["first_pass_evidence_source"] = evidence_source
+            if baseline_evidence_id:
+                current["first_pass_baseline_id"] = baseline_evidence_id
+            if probe_evidence_id:
+                current["first_pass_probe_id"] = probe_evidence_id
+            response_ids = list(dict.fromkeys(
+                artifact for artifact in (baseline_evidence_id, probe_evidence_id)
+                if artifact
+            ))
+            if response_ids:
+                current["evidence_ids"] = list(dict.fromkeys([
+                    *(current.get("evidence_ids") or []), *response_ids,
+                ]))[:30]
+            if triage:
+                current["triage_pending"] = False
+                current["triage_attempts"] = int(current.get("triage_attempts") or 0) + 1
+                current.pop("triage_retry_at", None)
             xss_techniques = ()
             if specialist == "xss":
                 if ((method == "GET" and location == "query")
@@ -668,7 +737,7 @@ async def run_observed_input_batch(
                     xss_techniques = XSS_GET_TECHNIQUES
                 elif method == "POST" and result.get("operation") == "scoped_browser_check_xhr_xss":
                     xss_techniques = XSS_POST_XHR_TECHNIQUES
-            if xss_techniques:
+            if xss_techniques and result.get("first_pass_mode") != "sweep":
                 xss_pending = ([] if outcome == "proof_signal" else [
                     technique for technique in xss_techniques
                     if technique not in xss_attempted
@@ -705,7 +774,9 @@ async def run_observed_input_batch(
                 current.pop("first_pass_candidate_handoff_error", None)
             release_coverage_cell_lease(
                 live, lease, verdict="proven" if outcome == "proof_signal" else "inconclusive",
-                evidence_ids=[evidence_id] if evidence_id else [], candidate_id=candidate_id,
+                evidence_ids=list(dict.fromkeys([
+                    *response_ids, *([evidence_id] if evidence_id else []),
+                ])), candidate_id=candidate_id,
                 reason=reason,
             )
             if (outcome == "unattempted" and current.get("status") == "inconclusive"
@@ -718,6 +789,8 @@ async def run_observed_input_batch(
         results.append({
             "coverage_cell_id": cell["id"], "test_type": cell.get("test_type"),
             "outcome": outcome, "reason": reason, "evidence_id": evidence_id,
+            "baseline_evidence_id": baseline_evidence_id,
+            "probe_evidence_id": probe_evidence_id,
             "candidate_id": candidate_id,
             "evidence_source": evidence_source,
             "candidate_handoff_error": candidate_handoff_error,
@@ -727,6 +800,8 @@ async def run_observed_input_batch(
             "xss_pending_techniques": xss_pending if specialist == "xss" else [],
             "xss_variant_failures": xss_variant_failures if specialist == "xss" else {},
         })
+        if reason.split(":", 1)[0] in {"confirmation_expired", "confirmation_denied"}:
+            break
 
     brain = engagement_brain_from_dict(getattr(manager, "_engagement_brain", None))
     return {

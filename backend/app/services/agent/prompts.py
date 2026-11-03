@@ -674,6 +674,7 @@ TOOL_PHASE_MAP = {
     "scoped_assessment_memory": ["informational", "exploitation", "post_exploitation"],
     "scoped_assessment_probe": ["exploitation", "post_exploitation"],
     "scoped_assessment_probe_assigned": ["exploitation", "post_exploitation"],
+    "scoped_input_sweep_assigned": ["exploitation", "post_exploitation"],
     "scoped_input_probe_assigned": ["exploitation", "post_exploitation"],
     "scoped_dom_xss_assigned": ["exploitation", "post_exploitation"],
     "scoped_client_probe_assigned": ["exploitation", "post_exploitation"],

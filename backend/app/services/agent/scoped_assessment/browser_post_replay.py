@@ -83,6 +83,7 @@ def _valid_get_variant(baseline: str, changed: str, parameter: str) -> bool:
 async def _replay_observed_controls(
     private_exchange: bytes, *, parameter: str, payloads: dict[str, str],
     allowed_origins: list[str], storage_state: dict | None, request_method: str,
+    capture_body: bool = False,
 ) -> dict[str, dict]:
     """Issue bounded GET or POST controls through fresh page loads."""
     from playwright.async_api import async_playwright
@@ -252,7 +253,7 @@ async def _replay_observed_controls(
                                                   if isinstance(parsed.get(name), list)}
                                 except (UnicodeDecodeError, ValueError):
                                     pass
-                            response_future.set_result({
+                            receipt = {
                                 "status": response.status, "content_type": content_type,
                                 "bytes_captured": len(data), "truncated": truncated,
                                 "body_sha256": hashlib.sha256(data).hexdigest(),
@@ -263,9 +264,17 @@ async def _replay_observed_controls(
                                 "json_array_lengths": arrays,
                                 "sql_error_family": _sql_error_family(data),
                                 "redirected": bool(response.headers.get("location")),
+                                "location_sha256": hashlib.sha256(
+                                    response.headers["location"].encode()
+                                ).hexdigest() if response.headers.get("location") else "",
                                 "body_match_mode": match_mode,
                                 "volatile_fields": volatile_fields,
-                            })
+                            }
+                            if capture_body:
+                                receipt["_private_body"] = data
+                                receipt["_private_request_body"] = sent_body
+                                receipt["_private_location"] = response.headers.get("location", "")
+                            response_future.set_result(receipt)
                         except Exception as exc:
                             response_future.set_exception(exc)
 
@@ -328,20 +337,22 @@ async def _replay_observed_controls(
 async def replay_observed_post_controls(
     private_exchange: bytes, *, parameter: str, payloads: dict[str, str],
     allowed_origins: list[str], storage_state: dict | None,
+    capture_body: bool = False,
 ) -> dict[str, dict]:
     return await _replay_observed_controls(
         private_exchange, parameter=parameter, payloads=payloads,
         allowed_origins=allowed_origins, storage_state=storage_state,
-        request_method="POST",
+        request_method="POST", capture_body=capture_body,
     )
 
 
 async def replay_observed_get_controls(
     private_exchange: bytes, *, parameter: str, variants: dict[str, str],
     allowed_origins: list[str], storage_state: dict | None,
+    capture_body: bool = False,
 ) -> dict[str, dict]:
     return await _replay_observed_controls(
         private_exchange, parameter=parameter, payloads=variants,
         allowed_origins=allowed_origins, storage_state=storage_state,
-        request_method="GET",
+        request_method="GET", capture_body=capture_body,
     )

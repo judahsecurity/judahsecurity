@@ -302,7 +302,18 @@ def _resumable_identity_first_pass_cells(
 def _observed_input_batch_step(
     state: Dict[str, Any], trace: List[Dict[str, Any]], signature: str,
 ) -> Optional[Dict[str, Any]]:
-    from app.services.agent.observed_input_batch import pending_first_pass_cells
+    from app.services.agent.observed_input_batch import (
+        FIRST_PASS_START_MARGIN_SECONDS, pending_first_pass_cells,
+    )
+    from app.services.agent.orchestrator import _turn_deadline_var
+    import time
+
+    turn_deadline = _turn_deadline_var.get(None)
+    # A browser approval can remain pending for five minutes. Start no new
+    # first-pass batch unless verification still has room after that wait.
+    if (turn_deadline is not None and
+            turn_deadline - time.monotonic() <= FIRST_PASS_START_MARGIN_SECONDS):
+        return None
 
     pending_cells = pending_first_pass_cells(
         state.get("engagement_brain") or {}, target=primary_web_target(state),

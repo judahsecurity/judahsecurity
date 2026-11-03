@@ -256,6 +256,55 @@ class ScopedAssessmentTools:
                 return template, source
         return f"{url}?{quote(parameter, safe='')}={quote(payload, safe='')}", "single_parameter"
 
+    def _observed_get_query_sample(
+        self, url: str, parameter: str, identity: str, capture_id: str = "",
+    ) -> tuple[str, str, dict[str, str]]:
+        """Return an exact observed GET request; never invent a baseline value."""
+        from app.services.agent.scoped_assessment.body_probe import safe_replay_headers
+
+        target = urlsplit(url)
+        candidates: list[tuple[str, str, dict[str, str]]] = []
+        capture_ids = ([capture_id] if capture_id else
+                       list(reversed(self._scoped_capture_ids()))[:40])
+        for artifact_id in capture_ids:
+            try:
+                private = self._scoped_exchange(artifact_id, identity)
+                captured = json.loads(private)
+                if (captured.get("method") == "GET" and
+                        captured.get("resource_type") in {"document", "xhr", "fetch"}):
+                    candidates.append((str(captured.get("url") or ""),
+                                       "browser_traffic", safe_replay_headers(private)))
+            except (TypeError, ValueError):
+                continue
+        links = (getattr(self, "_scoped_link_baselines", None) or {}).get(identity) or []
+        candidates.extend((value, "browser_link", {}) for value in links)
+        cmap = getattr(self, "_capability_map", None) or {}
+        candidates.extend(
+            (str(sample.get("url") or ""), "captured_api", {})
+            for sample in (cmap.get("api_samples") or [])
+            if isinstance(sample, dict)
+            and str(sample.get("method") or "GET").upper() == "GET"
+            and str(sample.get("identity") or "anonymous") == identity
+        )
+        for candidate, source, headers in candidates:
+            if len(candidate) > 2048:
+                continue
+            try:
+                parts = urlsplit(candidate)
+            except ValueError:
+                continue
+            if ((parts.scheme, parts.netloc, parts.path or "/") !=
+                    (target.scheme, target.netloc, target.path or "/")
+                    or parts.fragment or len(parts.query) > 2048):
+                continue
+            fields = parts.query.split("&")
+            if len(fields) > 40:
+                continue
+            if sum(bool(field) and unquote_plus(field.split("=", 1)[0]) == parameter
+                   for field in fields) == 1:
+                return candidate, source, headers
+        raise ValueError("observed_query_baseline_missing")
+
     def _scoped_claim_gets(self, count: int) -> None:
         if count < 1 or count > 9:
             raise ValueError("Invalid assessment request reservation")

@@ -490,6 +490,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _captured_proof_plans = SessionValue(dict)
     _request_capture_store = SessionValue(lambda: None)
     _scoped_browser_exchanges = SessionValue(dict)
+    _scoped_sweep_responses = SessionValue(dict)
     _scoped_link_baselines = SessionValue(dict)
     _scoped_get_count = SessionValue(lambda: 0)
     _scoped_verify_get_count = SessionValue(lambda: 0)
@@ -723,6 +724,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             "scoped_assessment_observe": self.scoped_assessment_observe,
             "scoped_assessment_probe": self.scoped_assessment_probe,
             "scoped_assessment_probe_assigned": self.scoped_assessment_probe_assigned,
+            "scoped_input_sweep_assigned": self.scoped_input_sweep_assigned,
             "scoped_input_probe_assigned": self.scoped_input_probe_assigned,
             "scoped_dom_xss_assigned": self.scoped_dom_xss_assigned,
             "scoped_response_probe_assigned": self.scoped_response_probe_assigned,
@@ -1143,6 +1145,351 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 "funnel": parameter_test_funnel(live),
                 **({"xss_trace": trace, "technique": technique, "variant": variant}
                    if cell["test_type"] == "xss" else {})}
+
+    async def scoped_input_sweep_assigned(
+        self, coverage_cell_id: str, coverage_lease_id: str,
+    ) -> Dict[str, Any]:
+        """Replay one observed GET and one mutation, retaining both responses."""
+        import base64
+        import secrets
+        import time
+        from urllib.parse import quote, unquote_plus, urlsplit, urlunsplit
+
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.parameter_inventory import _origin
+        from app.services.agent.private_capture_store import persist_capture
+        from app.services.agent.scoped_assessment import browser_post_replay, http_observe
+        from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
+        from app.services.agent.tester_loop import OBSERVED_INPUT_SOURCES
+
+        brain = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        cell = next((row for row in brain.coverage_cells
+                     if row.get("id") == coverage_cell_id), None)
+        location, separator, parameter = str((cell or {}).get("parameter") or "").partition(":")
+        method = str((cell or {}).get("method") or "").upper()
+        get_input = method == "GET" and location == "query"
+        post_input = (method == "POST" and location in {"body_form", "body_json"}
+                      and bool((cell or {}).get("capture_id"))
+                      and (cell or {}).get("observation_source") == "browser_traffic")
+        reason = (
+            "missing_cell" if not cell else
+            "not_leased" if cell.get("status") != "leased" else
+            "lease_mismatch" if cell.get("lease_id") != coverage_lease_id else
+            "lease_expired" if float(cell.get("lease_deadline") or 0) <= time.time() else
+            "not_observed_input" if cell.get("source") != "parameter_inventory" or
+                cell.get("observation_source") not in OBSERVED_INPUT_SOURCES else
+            "unsupported_input" if cell.get("test_type") not in {"sqli", "xss"}
+                or not (get_input or post_input) or not separator or not parameter else
+            "unsafe_path" if not allowed_discovery_path(str(cell.get("path") or "/")) else ""
+        )
+        if reason:
+            return {"success": False, "error": "invalid_coverage_lease", "reason": reason}
+        if post_input:
+            return await self._scoped_body_sweep_assigned(
+                cell, coverage_cell_id, coverage_lease_id, parameter,
+            )
+        cmap = getattr(self, "_capability_map", None) or {}
+        target = str(cmap.get("target") or cmap.get("scope") or
+                     getattr(self, "_fallback_target", "") or "")
+        scoped_origin = _origin(target)
+        parts = urlsplit(scoped_origin)
+        if (not scoped_origin or _origin(
+            f"{parts.scheme}://{cell.get('host') or ''}"
+        ) != scoped_origin):
+            return {"success": False, "error": "scope_mismatch"}
+        path_url = f"{scoped_origin}{cell['path']}"
+        try:
+            self._scoped_origin(path_url)
+            identity = str(cell.get("identity") or "anonymous")
+            state = self._scoped_state(identity, path_url)
+            baseline_url, source, headers = self._observed_get_query_sample(
+                path_url, parameter, identity, str(cell.get("capture_id") or ""),
+            )
+            fields = urlsplit(baseline_url).query.split("&")
+            index = next(i for i, field in enumerate(fields)
+                         if field and unquote_plus(field.split("=", 1)[0]) == parameter)
+            name, _, value = fields[index].partition("=")
+            marker = "prowlxss" + secrets.token_hex(8) if cell["test_type"] == "xss" else ""
+            fields[index] = (name + "=" + quote(marker, safe="") if marker
+                             else name + "=" + value + "%27")
+            mutated_url = urlunsplit(urlsplit(baseline_url)._replace(query="&".join(fields)))
+            self._scoped_origin(mutated_url)
+            if len(mutated_url) > 2048:
+                raise ValueError("mutated_query_too_long")
+        except (KeyError, StopIteration, ValueError) as exc:
+            return {"success": False, "error": str(exc)[:100]}
+
+        self._scoped_assessment_started = True
+        self._scoped_claim_gets(2)
+        store = evidence_store(self)
+        responses = getattr(self, "_scoped_sweep_responses", None)
+        if responses is None:
+            responses = {}
+            self._scoped_sweep_responses = responses
+
+        def save_response(kind: str, request_url: str, observed: dict) -> tuple[str, dict]:
+            private_body = observed.pop("_private_body", b"")
+            private_request_body = observed.pop("_private_request_body", b"")
+            private_location = observed.pop("_private_location", "")
+            private = json.dumps({
+                "request_url": request_url,
+                "request_body_base64": base64.b64encode(private_request_body).decode("ascii"),
+                "replay_headers": headers,
+                "response_body_base64": base64.b64encode(private_body).decode("ascii"),
+                "response_location": private_location,
+                "source_artifact_id": str(cell.get("capture_id") or ""),
+            }, sort_keys=True).encode()
+            metadata = {key: value for key, value in observed.items()
+                        if key != "target_template"}
+            metadata.update({"coverage_cell_id": coverage_cell_id,
+                             "baseline_source": source, "response_kind": kind})
+            artifact_id = store.record(
+                "scoped_input_sweep_response", metadata,
+                target=path_url, identity=identity,
+            )
+            responses[artifact_id] = private
+            if len(responses) > 256:
+                responses.pop(next(iter(responses)))
+            persist_capture(store.namespace, artifact_id, {
+                "identity": identity, "private": private,
+                "verifier_run_id": None,
+            })
+            return artifact_id, metadata
+
+        baseline_id = ""
+        try:
+            private_exchange = (self._scoped_exchange(str(cell["capture_id"]), identity)
+                                if source == "browser_traffic" and cell.get("capture_id")
+                                else b"")
+            browser_ready = bool(private_exchange and
+                                 json.loads(private_exchange).get("resource_type") in
+                                 {"xhr", "fetch"} and
+                                 browser_post_replay.has_replayable_source(
+                                     private_exchange, [scoped_origin],
+                                 ))
+            if browser_ready:
+                baseline = (await browser_post_replay.replay_observed_get_controls(
+                    private_exchange, parameter=parameter,
+                    variants={"baseline": baseline_url},
+                    allowed_origins=[scoped_origin], storage_state=state,
+                    capture_body=True,
+                ))["baseline"]
+            else:
+                baseline = await asyncio.to_thread(
+                    http_observe.observe_get, baseline_url, [scoped_origin], state,
+                    replay_headers=headers, capture_body=True,
+                )
+            baseline_id, baseline_meta = save_response("baseline", baseline_url, baseline)
+            if browser_ready:
+                probe = (await browser_post_replay.replay_observed_get_controls(
+                    private_exchange, parameter=parameter,
+                    variants={"probe": mutated_url},
+                    allowed_origins=[scoped_origin], storage_state=state,
+                    capture_body=True,
+                ))["probe"]
+                probe["reflection_detected"] = bool(
+                    marker and marker.encode() in probe.get("_private_body", b"")
+                )
+            else:
+                probe = await asyncio.to_thread(
+                    http_observe.observe_get, mutated_url, [scoped_origin], state,
+                    replay_headers=headers, reflection_marker=marker, capture_body=True,
+                )
+            probe_id, probe_meta = save_response("probe", mutated_url, probe)
+        except Exception as exc:
+            return {"success": False, "error": "sweep_request_failed",
+                    "reason": type(exc).__name__, "baseline_evidence_id": baseline_id}
+
+        changed = (baseline_meta["status"] != probe_meta["status"] or
+                   baseline_meta["body_sha256"] != probe_meta["body_sha256"] or
+                   baseline_meta["location_sha256"] != probe_meta["location_sha256"])
+        signal = ("reflected" if marker and probe_meta["reflection_detected"] else
+                  "sql_difference" if not marker and
+                  (changed or bool(probe_meta["sql_error_family"])) else "")
+        inconclusive = any(row["truncated"] or
+                           row["status"] in {401, 403}
+                           for row in (baseline_meta, probe_meta))
+        baseline_failure = (
+            "response_truncated" if baseline_meta["truncated"] else
+            "authentication_required" if baseline_meta["status"] in {401, 403} else ""
+        )
+        live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        current = next((row for row in live.coverage_cells
+                        if row.get("id") == coverage_cell_id and
+                        row.get("lease_id") == coverage_lease_id), None)
+        if current is None:
+            return {"success": False, "error": "lease_changed",
+                    "baseline_evidence_id": baseline_id,
+                    "probe_evidence_id": probe_id}
+        current["first_pass_baseline_id"] = baseline_id
+        current["first_pass_probe_id"] = probe_id
+        current["first_pass_signal"] = signal
+        current["first_pass_baseline_failure_reason"] = baseline_failure
+        current["triage_pending"] = bool(signal and not inconclusive)
+        current["evidence_ids"] = list(dict.fromkeys([
+            *(current.get("evidence_ids") or []), baseline_id, probe_id,
+        ]))[:30]
+        self._engagement_brain = live.to_dict()
+        return {"success": True, "first_pass_mode": "sweep",
+                "coverage_cell_id": coverage_cell_id,
+                "baseline_evidence_id": baseline_id,
+                "probe_evidence_id": probe_id, "evidence_id": probe_id,
+                "proof_confirmed": False,
+                "probe_result": {"lead_kind": signal, "changed": changed,
+                                 "reflection_detected": bool(marker and signal),
+                                 "inconclusive": inconclusive,
+                                 "baseline_failure_reason": baseline_failure,
+                                 "baseline_source": source,
+                                 "baseline_status": baseline_meta["status"],
+                                 "probe_status": probe_meta["status"],
+                                 "sql_error_family": probe_meta["sql_error_family"]}}
+
+    async def _scoped_body_sweep_assigned(
+        self, cell: Dict[str, Any], coverage_cell_id: str,
+        coverage_lease_id: str, parameter: str,
+    ) -> Dict[str, Any]:
+        """Replay an approved captured POST once clean and once with one mutation."""
+        import base64
+        import secrets
+        from urllib.parse import urlsplit
+
+        from app.services.agent.engagement_brain import engagement_brain_from_dict
+        from app.services.agent.evidence_store import evidence_store
+        from app.services.agent.private_capture_store import persist_capture
+        from app.services.agent.scoped_assessment import body_probe, browser_post_replay
+
+        identity = str(cell.get("identity") or "anonymous")
+        try:
+            private = self._scoped_exchange(str(cell["capture_id"]), identity)
+            captured = json.loads(private)
+            url = str(captured.get("url") or "")
+            allowed = self._scoped_origin(url)
+            if (captured.get("method") != "POST"
+                    or captured.get("resource_type") not in {"xhr", "fetch"}
+                    or (urlsplit(url).path or "/") != cell.get("path")):
+                raise ValueError("captured_post_shape_mismatch")
+            if (urlsplit(url).path or "/") not in (
+                getattr(self, "_scoped_body_replay_paths", None) or set()
+            ):
+                raise ValueError("operator_approval_required")
+            marker = "prowlxss" + secrets.token_hex(8) if cell["test_type"] == "xss" else ""
+            suffix = marker or "'"
+            _, mime, baseline_body, probe_body = body_probe.plan_observed_body(
+                private, parameter=parameter, allowed_origins=[allowed], payload=suffix,
+            )
+            state = self._scoped_state(identity, url)
+        except (KeyError, TypeError, ValueError) as exc:
+            return {"success": False, "error": str(exc)[:100]}
+
+        self._scoped_assessment_started = True
+        self._scoped_claim_posts(2)
+        store = evidence_store(self)
+        try:
+            if (body_probe.captured_volatile_post_fields(baseline_body, mime)
+                    or browser_post_replay.has_replayable_source(private, [allowed])):
+                receipts = await browser_post_replay.replay_observed_post_controls(
+                    private, parameter=parameter,
+                    payloads={"baseline": "", "probe": suffix},
+                    allowed_origins=[allowed], storage_state=state, capture_body=True,
+                )
+            else:
+                replay_headers = body_probe.safe_replay_headers(private)
+                receipts = {
+                    "baseline": await asyncio.to_thread(
+                        body_probe._observe_post, url, mime, baseline_body, [allowed], state,
+                        replay_headers=replay_headers, capture_body=True,
+                    ),
+                    "probe": await asyncio.to_thread(
+                        body_probe._observe_post, url, mime, probe_body, [allowed], state,
+                        replay_headers=replay_headers, capture_body=True,
+                    ),
+                }
+        except Exception as exc:
+            return {"success": False, "error": "sweep_request_failed",
+                    "reason": type(exc).__name__}
+
+        responses = getattr(self, "_scoped_sweep_responses", None)
+        if responses is None:
+            responses = {}
+            self._scoped_sweep_responses = responses
+        saved: dict[str, tuple[str, dict]] = {}
+        try:
+            for kind in ("baseline", "probe"):
+                observed = dict(receipts[kind])
+                response_body = observed.pop("_private_body", b"")
+                request_body = observed.pop("_private_request_body", b"")
+                response_location = observed.pop("_private_location", "")
+                metadata = {**observed, "coverage_cell_id": coverage_cell_id,
+                            "response_kind": kind, "baseline_source": "browser_traffic"}
+                private_response = json.dumps({
+                    "request_url": url,
+                    "request_body_base64": base64.b64encode(request_body).decode("ascii"),
+                    "response_body_base64": base64.b64encode(response_body).decode("ascii"),
+                    "response_location": response_location,
+                    "source_artifact_id": cell["capture_id"],
+                }, sort_keys=True).encode()
+                artifact_id = store.record("scoped_input_sweep_response", metadata,
+                                           target=allowed + (urlsplit(url).path or "/"),
+                                           identity=identity)
+                responses[artifact_id] = private_response
+                if len(responses) > 256:
+                    responses.pop(next(iter(responses)))
+                persist_capture(store.namespace, artifact_id, {
+                    "identity": identity, "private": private_response,
+                    "verifier_run_id": None,
+                })
+                saved[kind] = artifact_id, metadata
+        except Exception as exc:
+            return {"success": False, "error": "sweep_capture_failed",
+                    "reason": type(exc).__name__,
+                    "baseline_evidence_id": saved.get("baseline", ("", {}))[0]}
+
+        baseline_id, baseline = saved["baseline"]
+        probe_id, probe = saved["probe"]
+        changed = (baseline["status"] != probe["status"] or
+                   baseline["body_sha256"] != probe["body_sha256"] or
+                   baseline.get("location_sha256") != probe.get("location_sha256"))
+        reflected = bool(marker and marker.encode() in receipts["probe"]["_private_body"])
+        signal = ("reflected" if reflected else "sql_difference" if not marker and
+                  (changed or bool(probe.get("sql_error_family"))) else
+                  "sql_blind_followup" if not marker else "")
+        inconclusive = any(row["truncated"] or
+                           row["status"] in {401, 403}
+                           for row in (baseline, probe))
+        baseline_failure = (
+            "response_truncated" if baseline["truncated"] else
+            "authentication_required" if baseline["status"] in {401, 403} else ""
+        )
+        live = engagement_brain_from_dict(getattr(self, "_engagement_brain", None))
+        current = next((row for row in live.coverage_cells
+                        if row.get("id") == coverage_cell_id
+                        and row.get("lease_id") == coverage_lease_id), None)
+        if current is None:
+            return {"success": False, "error": "lease_changed",
+                    "baseline_evidence_id": baseline_id,
+                    "probe_evidence_id": probe_id}
+        current["first_pass_baseline_id"] = baseline_id
+        current["first_pass_probe_id"] = probe_id
+        current["first_pass_signal"] = signal
+        current["first_pass_baseline_failure_reason"] = baseline_failure
+        current["triage_pending"] = bool(signal and not inconclusive)
+        current["evidence_ids"] = list(dict.fromkeys([
+            *(current.get("evidence_ids") or []), baseline_id, probe_id,
+        ]))[:30]
+        self._engagement_brain = live.to_dict()
+        return {"success": True, "first_pass_mode": "sweep",
+                "coverage_cell_id": coverage_cell_id,
+                "baseline_evidence_id": baseline_id,
+                "probe_evidence_id": probe_id, "evidence_id": probe_id,
+                "proof_confirmed": False,
+                "probe_result": {"lead_kind": signal, "changed": changed,
+                                 "reflection_detected": reflected,
+                                 "inconclusive": inconclusive,
+                                 "baseline_failure_reason": baseline_failure,
+                                 "baseline_status": baseline["status"],
+                                 "probe_status": probe["status"],
+                                 "sql_error_family": probe.get("sql_error_family", "")}}
 
     async def probe_observed_input_batch(
         self, max_checks: int = 32, max_seconds: int = 180,
@@ -2190,7 +2537,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         run_id = active_run_id.get()
         if (run_id and not verification_run.get() and tool_name in {
             "execute_browser", "execute_curl", "scoped_input_probe_assigned",
-            "scoped_assessment_probe_assigned",
+            "scoped_assessment_probe_assigned", "scoped_input_sweep_assigned",
         }):
             import time as _time
 
@@ -2969,7 +3316,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
             prior_parameter_map = self._capability_map if tool_name == "discover_parameters" else None
             result = await tool(**tool_args)
             assigned_failure = (
-                tool_name == "scoped_input_probe_assigned"
+                tool_name in {"scoped_input_probe_assigned", "scoped_input_sweep_assigned"}
                 and isinstance(result, dict)
                 and result.get("success") is False
             )
