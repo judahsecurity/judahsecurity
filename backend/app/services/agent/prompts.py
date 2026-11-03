@@ -890,6 +890,7 @@ TOOL_PHASE_MAP = {
     "scoped_http_get": ["informational", "exploitation", "post_exploitation"],
     "scoped_http_compare": ["informational", "exploitation", "post_exploitation"],
     "list_scoped_browser_exchanges": ["informational", "exploitation", "post_exploitation"],
+    "list_idor_leads": ["informational", "exploitation", "post_exploitation"],
     "scoped_assessment_summary": ["informational", "exploitation", "post_exploitation"],
     "complete_scoped_assessment": ["informational", "exploitation", "post_exploitation"],
     "get_finding_candidate": ["informational", "exploitation", "post_exploitation"],
@@ -963,6 +964,14 @@ can test bounded, repeated Boolean controls against the same baseline. Only
 proof_confirmed=True from a controlled recipe may become a POST SQLi candidate;
 the independent verifier replays the same captured request with fresh requests
 and a fresh Boolean nonce before publication.
+list_idor_leads is read-only and value-free: it lists object-reference
+(IDOR/BOLA) replay candidates from already-captured traffic (paths, input names,
+methods, identity labels), ranked write-access and enumerable-id first. It sends
+no requests. Every row is a lead, never proof. Use it to choose which exact
+resource to ask the operator to declare, then confirm with scoped_owner_only
+(read) or scoped_owner_only_write (write) under two named identities and the
+verifier gate. When the operator enabled caido_idor_leads and configured the
+assessment Caido, its in-scope HTTP history augments the same leads.
 scoped_owner_only requires an operator-declared exact owner-only GET
 resource and two registered test identities. Neither may invent its own policy.
 For a scoped proof candidate, include the hunter tool evidence_id in

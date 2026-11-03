@@ -64,3 +64,39 @@ so restrict its UI to authorized
 analysts and avoid treating its traffic store as a per-tenant isolation
 boundary. Disable routing by removing the two environment values and
 recreating the backend; its native evidence receipts continue to work.
+
+## IDOR / BOLA lead extraction
+
+`list_idor_leads` turns already-captured, value-free traffic into object-level
+authorization *leads* — candidates for cross-identity replay. It reads only the
+paths, input names, methods, and identity labels already in the capability map
+and this session's browser captures. It sends no requests, charges no budget,
+and copies no request values, cookies, or auth headers. Every row is a lead,
+never a finding and never proof. Confirming a lead still requires an
+operator-declared exact resource, two named identities, `scoped_owner_only`
+(read) or `scoped_owner_only_write` (write), and the independent verifier gate.
+
+### Optional: augment leads from the assessment Caido history
+
+By default Prowl does not read back from Caido; Caido is a one-way analyst view.
+An operator may opt a session in to also mine the assessment Caido project's
+in-scope HTTP history for the same value-free leads. This is gated twice:
+
+1. Set the GraphQL endpoint (and token if the project requires one) in
+   `/opt/asm/.env`:
+
+   ```dotenv
+   AEGIS_ASSESSMENT_CAIDO_GRAPHQL_URL=http://caido-assessment:8080/graphql
+   AEGIS_ASSESSMENT_CAIDO_TOKEN=
+   ```
+
+2. Enable it for the session through the operator-supplied assessment policy
+   (`caido_idor_leads: true`). The model cannot enable it on its own.
+
+The reader issues a single bounded GraphQL **query** (never a mutation), keeps
+only records whose origin is in the current assessment scope, and extracts
+methods, paths, and parameter names only. Caido's GraphQL schema changes between
+releases, so this source is best-effort: if the endpoint is unreachable or the
+schema shifted, `list_idor_leads` simply reports `caido_history.ok = false` and
+returns the leads it derived from Prowl's own captures. Prowl's receipts remain
+the source of truth; a Caido-derived lead is still only a lead.

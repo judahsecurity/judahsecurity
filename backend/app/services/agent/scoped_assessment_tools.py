@@ -18,7 +18,7 @@ from app.services.agent.assessment_sessions import browser_storage_state, identi
 from app.services.agent.evidence_store import evidence_store, verification_run
 from app.services.agent.private_capture_store import delete_capture, load_capture, persist_capture
 from app.services.agent.scoped_assessment import (
-    authz_proof, body_probe, browser, http_observe, planning, query_probe,
+    authz_proof, body_probe, browser, http_observe, idor_leads, planning, query_probe,
     sqli_boolean, sqli_string, technology,
 )
 from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
@@ -34,6 +34,7 @@ SCOPED_ASSESSMENT_TOOLS = (
     "scoped_body_probe",
     "scoped_owner_only",
     "list_scoped_browser_exchanges",
+    "list_idor_leads",
     "scoped_assessment_summary",
     "complete_scoped_assessment",
     "get_finding_candidate",
@@ -155,6 +156,7 @@ class ScopedAssessmentTools:
         self._scoped_race_cleanup_paths = set(race_cleanup_paths)
         self._scoped_owner_expectations = approved
         self._scoped_auth_login_path = auth_login_path
+        self._scoped_caido_idor_leads = bool(policy.get("caido_idor_leads"))
         if paths or cleanup_paths or race_action_paths or race_cleanup_paths or approved:
             self._scoped_assessment_started = True
 
@@ -334,6 +336,102 @@ class ScopedAssessmentTools:
             if row:
                 rows.append({**row["public"], "artifact_id": artifact_id, "identity": row["identity"]})
         return json.dumps({"exchanges": rows[-40:]})
+
+    async def list_idor_leads(self) -> str:
+        """Surface object-reference (IDOR/BOLA) replay candidates from captured traffic.
+
+        Read-only and value-free: it reads only the paths, input names, methods, and
+        identity labels already in the capability map and this session's browser
+        captures, plus any assessment-Caido history the operator has enabled. It
+        sends no requests and charges no budget. Every result is a *lead* — a
+        candidate for cross-identity replay — never a finding and never proof.
+        Confirm a lead by declaring the exact resource and two named identities,
+        then running scoped_owner_only (read) or scoped_owner_only_write (write)
+        and passing the independent verifier gate.
+        """
+        from app.services.agent.parameter_inventory import collect_parameter_inventory
+
+        cmap = getattr(self, "_capability_map", None) or {}
+        inventory = collect_parameter_inventory(cmap if isinstance(cmap, dict) else {})
+
+        observed: list[dict] = []
+
+        def add_endpoint(raw_url: str, method: str, identity: str) -> None:
+            if not isinstance(raw_url, str) or not raw_url:
+                return
+            try:
+                path = urlsplit(raw_url).path or "/"
+            except ValueError:
+                return
+            if path.startswith("/"):
+                observed.append({"method": method, "path": path, "identity": identity})
+
+        if isinstance(cmap, dict):
+            for page in (cmap.get("pages_visited") or [])[:200]:
+                add_endpoint(page if isinstance(page, str) else "", "GET", "anonymous")
+            for link in (cmap.get("discovered_links") or [])[:500]:
+                if isinstance(link, dict):
+                    add_endpoint(str(link.get("url") or ""), "GET",
+                                 str(link.get("identity") or "anonymous"))
+            for sample in (cmap.get("api_samples") or [])[:200]:
+                if isinstance(sample, dict):
+                    add_endpoint(str(sample.get("url") or ""),
+                                 str(sample.get("method") or "GET").upper(),
+                                 str(sample.get("identity") or "anonymous"))
+
+        # Execution-owned browser captures expose value-free path + method + identity.
+        for artifact_id in self._scoped_capture_ids():
+            row = self._scoped_capture_row(artifact_id)
+            if not row:
+                continue
+            public = row.get("public") or {}
+            path = public.get("path")
+            if isinstance(path, str) and path.startswith("/"):
+                observed.append({
+                    "method": str(public.get("method") or "GET").upper(),
+                    "path": path, "identity": str(row.get("identity") or "anonymous"),
+                })
+
+        # Optional, operator-enabled assessment-Caido history (leads only).
+        caido_rows, caido_endpoints, caido_status = self._caido_history_observations()
+        inventory = [*inventory, *caido_rows]
+        observed.extend(caido_endpoints)
+
+        leads = idor_leads.identifier_leads(inventory, observed)
+        return json.dumps({
+            "leads": leads,
+            "summary": idor_leads.summarize_leads(leads),
+            "caido_history": caido_status,
+        })
+
+    def _caido_history_observations(self) -> tuple[list[dict], list[dict], dict]:
+        """Pull value-free IDOR observations from the assessment Caido project.
+
+        Off unless the operator both configured a reachable assessment-Caido
+        GraphQL endpoint and opted this session in via the assessment policy
+        (`caido_idor_leads`). Returns parameter rows, observed endpoints, and a
+        small status dict. Never raises into the tool: a disabled or unreachable
+        Caido simply yields no leads.
+        """
+        if not getattr(self, "_scoped_caido_idor_leads", False):
+            return [], [], {"enabled": False, "reason": "not_enabled_by_operator"}
+        cmap = getattr(self, "_capability_map", None) or {}
+        allowed_set: set[str] = set()
+        for candidate in (cmap.get("scope"), cmap.get("target"),
+                          getattr(self, "_fallback_target", "")):
+            if isinstance(candidate, str) and candidate:
+                try:
+                    allowed_set.add(browser.origin(candidate))
+                except ValueError:
+                    continue
+        allowed = sorted(allowed_set)
+        from app.services.agent.caido_history import caido_history_observations
+
+        try:
+            rows, endpoints, status = caido_history_observations(allowed)
+        except Exception as exc:  # defensive: Caido API is version-sensitive
+            return [], [], {"enabled": True, "ok": False, "reason": type(exc).__name__}
+        return rows, endpoints, status
 
     async def scoped_browser_assessment(
         self, operation: str, url: str, identity: str = "anonymous",
