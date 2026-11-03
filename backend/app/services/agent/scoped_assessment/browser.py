@@ -1222,8 +1222,6 @@ async def check_browser(
                 result["script_count"] = len(javascript_sources)
                 result["collection_limit"] = MAX_SOURCES
                 result["actions"] = actions
-                result["traffic_count"] = len(traffic_exchanges)
-                result["traffic_capture"] = dict(traffic_capture_counts)
                 result["max_actions"] = max_actions
                 result["max_pages"] = max_pages
                 result["page_paths"] = page_paths
@@ -1231,6 +1229,9 @@ async def check_browser(
                 result["pages"] = page_observations
                 result["get_form_actions"] = get_form_actions
             await settle_capture()
+            if operation in {"map", "crawl", "inspect_js"} and traffic_exchanges is not None:
+                result["traffic_count"] = len(traffic_exchanges)
+                result["traffic_capture"] = dict(traffic_capture_counts)
             screenshot = await page.screenshot(full_page=True)
             await context.unroute_all(behavior="ignoreErrors")
             await context.close()
