@@ -177,6 +177,15 @@ def validate_proof(
         first, second = hunter["payload"], verifier["payload"]
         if hunter["target"] != verifier["target"] or hunter["target"] != candidate.target:
             return False, "Both actors must prove the same candidate target"
+        if kind in {"numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli"} and (
+            first.get("replay_mode") == "browser_live_get"
+            or second.get("replay_mode") == "browser_live_get"
+        ) and (
+            first.get("replay_mode") != second.get("replay_mode")
+            or not first.get("source_artifact_id")
+            or first.get("source_artifact_id") != second.get("source_artifact_id")
+        ):
+            return False, "Independent browser GET replay must use the same observed request"
         if kind in {"scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed"}:
             expected_type = {
                 "scoped_response_crlf": "crlf",

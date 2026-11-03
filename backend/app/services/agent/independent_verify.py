@@ -1267,9 +1267,28 @@ async def _verify_scoped_sql_candidate(
     probe_name = "scoped_numeric_sqli" if hunter_kind == "scoped_numeric_sqli" else "scoped_string_sqli"
     failure = "Fresh SQLi replay did not reproduce the hunter proof"
     try:
-        wrapped = await tools_manager.execute(probe_name, {
+        hunter_payload = store.records[hunter_ids[0]]["payload"]
+        browser_replay = hunter_payload.get("replay_mode") == "browser_live_get"
+        source_id = str(hunter_payload.get("source_artifact_id") or "")
+        if browser_replay and (not source_id or source_id != cell.get("capture_id")):
+            raise ValueError("Hunter browser source no longer matches coverage capture")
+        probe_args = {
             "url": cand.target, "parameter": parameter, "identity": identity,
-        })
+        }
+        if browser_replay:
+            probe_args["artifact_id"] = source_id
+            if hunter_kind == "scoped_numeric_sqli":
+                probe_args.pop("url")
+        if browser_replay:
+            from app.services.agent.scoped_assessment_tools import get_sql_verifier_capture
+
+            source_token = get_sql_verifier_capture.set(source_id)
+            try:
+                wrapped = await tools_manager.execute(probe_name, probe_args)
+            finally:
+                get_sql_verifier_capture.reset(source_token)
+        else:
+            wrapped = await tools_manager.execute(probe_name, probe_args)
         output = wrapped.get("output") if isinstance(wrapped, dict) else None
         result = json.loads(output) if isinstance(output, str) else output
         if not isinstance(result, dict):

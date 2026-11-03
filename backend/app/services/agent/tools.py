@@ -1962,7 +1962,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         operation = "scoped_string_sqli"
                         url = json.loads(self._scoped_exchange(cell["capture_id"], identity))["url"]
                         proof = json.loads(await self.scoped_string_sqli(
-                            url, parameter, identity,
+                            url, parameter, identity, artifact_id=cell["capture_id"],
                         ))
                 elif method == "POST" and location in {"body_json", "body_form"}:
                     operation = "scoped_body_probe"
@@ -1977,8 +1977,15 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     return {"success": False, "error": "unsupported_capture",
                             "output": "No built-in replay for this captured input shape"}
             except ValueError as exc:
-                return {"success": False, "error": "local_probe_blocked",
-                        "reason": str(exc)[:200]}
+                reason = str(exc)
+                error = (
+                    "browser_replay_request_cap" if reason == "Browser replay request cap exceeded" else
+                    "browser_replay_no_match" if reason == "Fresh browser request did not match captured input and replay action" else
+                    "browser_replay_response_missing" if reason == "Browser replay response missing" else
+                    "browser_replay_source_missing" if reason == "Captured request has no safe source page for fresh replay" else
+                    "local_probe_blocked"
+                )
+                return {"success": False, "error": error, "reason": reason[:200]}
             artifact_id = str(proof.get("evidence_id") or "")
             if not artifact_id:
                 return {"success": False, "error": "missing_probe_evidence"}

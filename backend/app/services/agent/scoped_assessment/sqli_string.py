@@ -355,15 +355,24 @@ def probe_string_boolean(
         )}
         checks[key]["sql_error_family"] = response.get("sql_error_family", "")
         checks[key]["json_array_lengths"] = response.get("json_array_lengths", {})
+    return build_string_boolean_result(baseline, nonce, parameter=parameter, checks=checks)
+
+
+def build_string_boolean_result(baseline: str, nonce: str, *, parameter: str,
+                                checks: dict[str, dict], browser_replay: bool = False) -> dict:
+    """Evaluate the same OR controls from direct or live browser GETs."""
     parts = urlsplit(baseline)
     result = {
         "operation": "sqli_boolean_string", "proof_recipe": "string_or_boolean_v1",
         "target": origin(baseline) + (parts.path or "/"),
         "method": "GET", "location": "query", "parameter": parameter,
         "nonce": nonce, "requests_sent": len(CHECK_ORDER),
-        "identity_transport": "named_identity_cookies_only", "checks": checks,
+        "identity_transport": "named_identity_browser_state" if browser_replay else "named_identity_cookies_only",
+        "checks": checks,
         "input_encoding": observed_query_encoding(baseline, parameter),
     }
+    if browser_replay:
+        result["replay_mode"] = "browser_live_get"
     result["proof_confirmed"] = string_sql_proof_valid(result)
     if not result["proof_confirmed"]:
         result["proof_recipe"] = "string_or_json_rows_v1"
@@ -385,15 +394,24 @@ def probe_string_and_boolean(
         checks[key] = {name: response[name] for name in (
             "status", "content_type", "bytes_captured", "truncated", "body_sha256", "redirected",
         )}
+    return build_string_and_result(baseline, nonce, parameter=parameter, checks=checks)
+
+
+def build_string_and_result(baseline: str, nonce: str, *, parameter: str,
+                            checks: dict[str, dict], browser_replay: bool = False) -> dict:
+    """Evaluate repeated AND controls from direct or live browser GETs."""
     parts = urlsplit(baseline)
     result = {
         "operation": "sqli_boolean_string", "proof_recipe": "string_and_boolean_v1",
         "target": origin(baseline) + (parts.path or "/"),
         "method": "GET", "location": "query", "parameter": parameter,
         "nonce": nonce, "requests_sent": len(AND_CHECK_ORDER),
-        "identity_transport": "named_identity_cookies_only", "checks": checks,
+        "identity_transport": "named_identity_browser_state" if browser_replay else "named_identity_cookies_only",
+        "checks": checks,
         "input_encoding": observed_query_encoding(baseline, parameter),
     }
+    if browser_replay:
+        result["replay_mode"] = "browser_live_get"
     result["proof_confirmed"] = string_sql_proof_valid(result)
     return result
 
@@ -414,14 +432,23 @@ def probe_string_error(
             "status", "content_type", "bytes_captured", "truncated", "body_sha256", "redirected",
         )}
         checks[key]["sql_error_family"] = response.get("sql_error_family", "")
+    return build_string_error_result(baseline, parameter=parameter, checks=checks)
+
+
+def build_string_error_result(baseline: str, *, parameter: str,
+                              checks: dict[str, dict], browser_replay: bool = False) -> dict:
+    """Evaluate repeated error controls from direct or live browser GETs."""
     parts = urlsplit(baseline)
     result = {
         "operation": "sqli_error_string", "proof_recipe": "string_error_v1",
         "target": origin(baseline) + (parts.path or "/"),
         "method": "GET", "location": "query", "parameter": parameter,
         "requests_sent": len(ERROR_CHECK_ORDER),
-        "identity_transport": "named_identity_cookies_only", "checks": checks,
+        "identity_transport": "named_identity_browser_state" if browser_replay else "named_identity_cookies_only",
+        "checks": checks,
         "input_encoding": observed_query_encoding(baseline, parameter),
     }
+    if browser_replay:
+        result["replay_mode"] = "browser_live_get"
     result["proof_confirmed"] = string_error_proof_valid(result)
     return result

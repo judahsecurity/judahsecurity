@@ -495,6 +495,43 @@ async def test_post_and_owner_proofs_require_operator_policy(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_captured_get_query_lead_replays_with_live_browser_state(monkeypatch):
+    from app.services.agent.scoped_assessment import browser_post_replay
+
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    register_scope(manager, "app.example.test")
+    public, private = package_exchange(
+        url="https://app.example.test/api/filter?template=botox",
+        expected_origin="https://app.example.test",
+        page_url="https://app.example.test/catalog", action_ref="navigate",
+        method="GET", resource_type="fetch", status=200,
+        content_type="text/html", request_body=b"", response_body=b"normal",
+    )
+    manager._scoped_browser_exchanges = {
+        "capture-1": {"identity": "anonymous", "private": private, "public": public},
+    }
+
+    async def replay(capture, *, parameter, variants, allowed_origins, storage_state):
+        assert capture == private and parameter == "template"
+        assert variants["baseline"].endswith("template=botox")
+        assert variants["probe"].endswith("template=botox%27")
+        return {
+            key: {"status": 200, "content_type": "text/html", "bytes_captured": 6,
+                  "truncated": False, "redirected": False,
+                  "body_sha256": "a" * 64 if key == "baseline" else "b" * 64,
+                  "browser_requests_seen": 2}
+            for key in variants
+        }
+
+    monkeypatch.setattr(browser_post_replay, "replay_observed_get_controls", replay)
+    result = json.loads(await manager.scoped_query_probe("capture-1", "template"))
+    assert result["changed"] is True and result["finding"] is False
+    assert result["replay_mode"] == "browser_live_get"
+    assert result["browser_request_counts"] == {"baseline": 2, "probe": 2}
+
+
+@pytest.mark.asyncio
 async def test_post_xss_reflection_uses_capture_and_keeps_execution_unproven(monkeypatch):
     manager = ASMToolsManager()
     manager._fallback_target = "https://app.example.test"
