@@ -60,6 +60,26 @@ def caido_graphql_config() -> tuple[str, str] | None:
     return url.rstrip("/"), token
 
 
+def assessment_caido_binding() -> dict:
+    """Describe which Caido instance/project this deployment is bound to.
+
+    A shared assessment Caido keeps one active project at a time, so isolating
+    concurrent engagements means one instance (or at least one project) per
+    engagement. This records the configured binding so the active project is
+    explicit and auditable, and flags an unlabeled (pooled) configuration.
+    """
+    url = os.environ.get("AEGIS_ASSESSMENT_CAIDO_GRAPHQL_URL", "").strip()
+    project = os.environ.get("AEGIS_ASSESSMENT_CAIDO_PROJECT", "").strip()
+    endpoint_host = urlsplit(url).netloc if url else ""
+    return {
+        "endpoint": endpoint_host,
+        "project": project,
+        # Operators should run one instance/project per engagement; an unlabeled
+        # endpoint cannot be attributed to a single engagement.
+        "isolation": "labeled" if project else ("unlabeled_shared" if url else "unconfigured"),
+    }
+
+
 def _iter_nodes(payload: dict):
     """Yield request nodes from the tolerated GraphQL envelope shapes."""
     data = payload.get("data") if isinstance(payload, dict) else None
@@ -171,5 +191,6 @@ def caido_history_observations(allowed_origins: list[str]) -> tuple[list[dict], 
         "enabled": True, "ok": True, "endpoint": url,
         "records_in_scope": len(endpoints),
         "graphql_errors": bool(isinstance(payload, dict) and payload.get("errors")),
+        "binding": assessment_caido_binding(),
     }
     return rows, endpoints, status

@@ -126,3 +126,37 @@ def test_observations_queries_and_parses(monkeypatch):
     assert captured["trust_env"] is False
     assert captured["is_query"] is True  # never a mutation
     assert endpoints[0]["path"] == "/api/orders"
+
+
+def test_binding_reports_isolation_state(monkeypatch):
+    from app.services.agent.caido_history import assessment_caido_binding
+    monkeypatch.delenv("AEGIS_ASSESSMENT_CAIDO_GRAPHQL_URL", raising=False)
+    monkeypatch.delenv("AEGIS_ASSESSMENT_CAIDO_PROJECT", raising=False)
+    assert assessment_caido_binding()["isolation"] == "unconfigured"
+    monkeypatch.setenv("AEGIS_ASSESSMENT_CAIDO_GRAPHQL_URL", "http://caido-assessment:8080/graphql")
+    b = assessment_caido_binding()
+    assert b["isolation"] == "unlabeled_shared" and b["endpoint"] == "caido-assessment:8080"
+    monkeypatch.setenv("AEGIS_ASSESSMENT_CAIDO_PROJECT", "engagement-acme-2026")
+    b = assessment_caido_binding()
+    assert b["isolation"] == "labeled" and b["project"] == "engagement-acme-2026"
+
+
+def test_observations_status_includes_binding(monkeypatch):
+    monkeypatch.setenv("AEGIS_ASSESSMENT_CAIDO_GRAPHQL_URL", "http://caido-assessment:8080/graphql")
+    monkeypatch.setenv("AEGIS_ASSESSMENT_CAIDO_PROJECT", "engagement-acme-2026")
+
+    class _Resp:
+        def raise_for_status(self): return None
+        def json(self): return _payload(_edge("app.example.test", "/api/orders", "id=5"))
+
+    class _Client:
+        def __init__(self, *a, **k): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def post(self, *a, **k): return _Resp()
+
+    import httpx
+    monkeypatch.setattr(httpx, "Client", _Client, raising=True)
+    _rows, _eps, status = caido_history_observations(ALLOWED)
+    assert status["binding"]["project"] == "engagement-acme-2026"
+    assert status["binding"]["isolation"] == "labeled"

@@ -1,0 +1,79 @@
+# Per-engagement isolated assessment Caido instance.
+#
+# Real isolation for concurrent engagements: each engagement gets its own Caido
+# container, volumes, CA, project, and loopback-only UI/proxy ports — instead of
+# sharing the single pooled `caido-assessment` service (which keeps only one
+# active project at a time and therefore cannot separate concurrent tenants).
+#
+# This file is self-contained. Run it under a per-engagement compose project
+# name so Docker namespaces the containers and volumes for you:
+#
+#   BACKEND_IMAGE=asm-backend:latest \
+#   ASSESSMENT_UI_PORT=8183 ASSESSMENT_PROXY_PORT=8184 \
+#   docker compose -p caido-acme2026 \
+#     -f docker-compose.assessment-caido-instance.yml up -d
+#
+# Then bind that engagement's backend to this instance (own .env / own backend):
+#   AEGIS_ASSESSMENT_PROXY_URL=http://<instance-host>:8082         # on the compose network
+#   AEGIS_ASSESSMENT_CA_BUNDLE=/app/certs/caido/ca.crt             # this instance's public CA
+#   AEGIS_ASSESSMENT_CAIDO_GRAPHQL_URL=http://<instance-host>:8080/graphql
+#   AEGIS_ASSESSMENT_CAIDO_PROJECT=acme2026                        # records the binding
+#
+# Select a persistent project named for the engagement in the instance UI before
+# routing traffic. Ports bind to loopback only; never expose them on 0.0.0.0.
+
+services:
+  caido-assessment-cert-init:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: ${BACKEND_IMAGE:-asm-backend:latest}
+    user: "0:0"
+    entrypoint: ["/bin/sh", "/app/scripts/init_caido_ca.sh"]
+    command: []
+    restart: "no"
+    network_mode: "none"
+    volumes:
+      - ca_private:/caido-ca-private
+      - ca_public:/caido-ca-public
+
+  caido-assessment-data-init:
+    image: caido/caido:0.58.3@sha256:1e5058bebeb9acb6de8f04b4956fa16c68f6fcb3b61d89ab8715860d753e3205
+    user: "0:0"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["chown -R 996:996 /home/caido/.local/share/caido"]
+    restart: "no"
+    volumes:
+      - data:/home/caido/.local/share/caido
+
+  caido-assessment-instance:
+    image: caido/caido:0.58.3@sha256:1e5058bebeb9acb6de8f04b4956fa16c68f6fcb3b61d89ab8715860d753e3205
+    restart: unless-stopped
+    depends_on:
+      caido-assessment-data-init:
+        condition: service_completed_successfully
+      caido-assessment-cert-init:
+        condition: service_completed_successfully
+    command:
+      - caido-cli
+      - --no-open
+      - --no-renderer-sandbox
+      - --ui-listen
+      - 0.0.0.0:8080
+      - --proxy-listen
+      - 0.0.0.0:8082
+      - --import-ca-cert
+      - /caido-ca-private/ca.p12
+      - --import-ca-cert-pass
+      - ""
+    ports:
+      - "127.0.0.1:${ASSESSMENT_UI_PORT:-8183}:8080"
+      - "127.0.0.1:${ASSESSMENT_PROXY_PORT:-8184}:8082"
+    volumes:
+      - data:/home/caido/.local/share/caido
+      - ca_private:/caido-ca-private:ro
+
+volumes:
+  data:
+  ca_private:
+  ca_public:

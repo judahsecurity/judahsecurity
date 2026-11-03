@@ -143,3 +143,49 @@ The hunter result is one actor's evidence. The independent verifier must repeat
 the proof with a fresh execution-owned capture and fresh canaries; the
 publication gate requires two confirmed runs with distinct captures and distinct
 canaries before a finding can be created.
+
+## Per-engagement isolation
+
+The shared `caido-assessment` service keeps one active project at a time, so it
+pools traffic and must not be treated as a per-tenant boundary. To isolate
+concurrent engagements, give each its own assessment Caido instance.
+
+### Isolated instance per engagement
+
+`docker-compose.assessment-caido-instance.yml` is a self-contained, parameterized
+instance. Run it under a per-engagement compose project name so Docker namespaces
+its container and volumes, with its own loopback UI/proxy ports:
+
+```bash
+BACKEND_IMAGE=asm-backend:latest \
+ASSESSMENT_UI_PORT=8183 ASSESSMENT_PROXY_PORT=8184 \
+docker compose -p caido-acme2026 \
+  -f docker-compose.assessment-caido-instance.yml up -d
+```
+
+Select a persistent project named for the engagement in that instance's UI, then
+bind that engagement's backend to it:
+
+```dotenv
+AEGIS_ASSESSMENT_PROXY_URL=http://<instance-host>:8082
+AEGIS_ASSESSMENT_CA_BUNDLE=/app/certs/caido/ca.crt
+AEGIS_ASSESSMENT_CAIDO_GRAPHQL_URL=http://<instance-host>:8080/graphql
+AEGIS_ASSESSMENT_CAIDO_PROJECT=acme2026
+```
+
+Each instance has its own CA and volumes; one engagement's traffic store is
+never visible to another. Ports bind to loopback only.
+
+### Binding attribution
+
+`AEGIS_ASSESSMENT_CAIDO_PROJECT` records which engagement/project the deployment
+is bound to. `list_idor_leads` echoes this under `caido_history.binding`:
+
+* `isolation: "labeled"` — a project label is set (attributable to one engagement)
+* `isolation: "unlabeled_shared"` — a Caido endpoint is configured but no project
+  label, so traffic cannot be attributed to a single engagement (pooled)
+* `isolation: "unconfigured"` — no Caido history source
+
+Set a project label whenever the Caido history source is enabled so the active
+binding is explicit and auditable. Isolation itself still comes from running a
+separate instance per engagement, not from the label.
