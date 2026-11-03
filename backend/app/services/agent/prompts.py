@@ -990,7 +990,11 @@ After defining explicit deny policy, prepare_captured_authorization_proof takes
 hypothesis_id, capture_id, owner_identity, captured object_id and configuration:
 strategy captured_read/captured_mutation/captured_property/captured_delete; setup
 POST JSON for a disposable object; verify GET; cleanup DELETE of the same object.
-Use {{object_id}} in object URLs. canary_path defaults /marker, object_path /id;
+The object ID may be a complete URL path segment or query value. For a unique
+query field, pass object_parameter like query:record_id and an empty object_id;
+choose the matching query parameter matrix cell. Query values remain private
+in the capture; list_proof_captures shows field names only. Use {{object_id}}
+in object URLs. canary_path defaults /marker, object_path /id;
 value_path selects the property; captured_property requires numeric/boolean
 attack_value; captured_delete requires an owner inventory with inventory_path /items.
 Then run_authorization_proof(hypothesis_id) runs the registered recipe. Readback,

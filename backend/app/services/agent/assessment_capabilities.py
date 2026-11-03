@@ -83,7 +83,11 @@ class AssessmentCapabilities:
         """Prepare (do not execute) a controlled captured_read/mutation/property/delete recipe.
 
         configuration requires strategy, setup POST JSON, verify GET and cleanup
-        DELETE URLs. Object URLs use {{object_id}}. Optional top-level JSON
+        DELETE URLs. The captured object ID can be a complete path segment or
+        query value. For a unique query field, pass object_parameter (for
+        example query:record_id) and an empty object_id; the captured value
+        stays private. Object URLs use {{object_id}}.
+        Optional top-level JSON
         pointers: canary_path (/marker), value_path, object_path (/id), and
         inventory_path (/items) for delete. captured_property needs attack_value.
         The owner must have captured the selected operation; policy must deny
@@ -116,11 +120,19 @@ class AssessmentCapabilities:
             object_id=object_id,
             configuration=configuration,
         )
-        if cell["parameter"] and (
-            plan["strategy"] not in ("captured_mutation", "captured_property")
-            or cell["parameter"] != "body:" + field_name(plan["value_path"])
-        ):
+        selected = cell["parameter"]
+        query_selected = (
+            plan["object_parameter"].startswith("query:")
+            and selected == plan["object_parameter"]
+        )
+        body_selected = (
+            plan["strategy"] in ("captured_mutation", "captured_property")
+            and selected == "body:" + field_name(plan["value_path"])
+        )
+        if selected and not (query_selected or body_selected):
             raise ValueError("Recipe does not test the selected parameter")
+        if plan["object_parameter"].startswith("query:") and not query_selected:
+            raise ValueError("Query object proofs require the matching parameter cell")
         existing = self._captured_proof_plans.get(hypothesis_id)
         if existing is not None and existing != plan:
             raise ValueError(
@@ -289,7 +301,8 @@ class AssessmentCapabilities:
         attack = plan["attack"]
         if attack.get("method", "GET").upper() != op["method"]:
             raise ValueError("Attack method differs from the selected operation")
-        # Binding is allowed only in the path segment occupied by the controlled object.
+        # Captured plans may bind the controlled object in a path segment or
+        # observed query value; both retain the operation's normalized path.
         attack_path = urlsplit(attack["url"]).path
         if "{{object_id}}" not in attack_path and attack_path != op["path"]:
             raise ValueError("Attack path differs from the selected operation")
@@ -303,6 +316,11 @@ class AssessmentCapabilities:
                 raise ValueError(
                     "Attack template does not match the selected operation"
                 )
+        if captured and plan.get("object_parameter", "").startswith("query:"):
+            if plan["object_parameter"] not in op.get("parameters", []):
+                raise ValueError("Query object field was not observed on the operation")
+            if attack["url"].count("{{object_id}}") != 1:
+                raise ValueError("Attack must bind exactly one controlled object ID")
         registry = identity_registry(self)
         for name in (plan["owner_identity"], cell["identity"]):
             if name != "anonymous":

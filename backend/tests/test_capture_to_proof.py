@@ -8,6 +8,7 @@ import json
 import threading
 from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from app.services.agent.assessment_scope import register_scope
@@ -94,6 +95,23 @@ def crud_app():
                 }
                 if state["mode"] == "empty_inventory" and state.get("attacked"):
                     result = {"items": []}
+            elif urlsplit(self.path).path == "/lookup" and self.command in (
+                "GET", "PATCH"
+            ):
+                oid = parse_qs(urlsplit(self.path).query).get("record", [""])[0]
+                obj = state["objects"].get(oid)
+                if obj is None:
+                    status, result = 404, {"error": "missing"}
+                else:
+                    allowed = who == obj["owner"] or state["vulnerable"]
+                    if self.command == "PATCH" and who != obj["owner"]:
+                        state["attacked"] = True
+                    if not allowed:
+                        status, result = 403, {"error": "denied"}
+                    else:
+                        if self.command == "PATCH":
+                            obj.update(body)
+                        result = dict(obj)
             elif self.path.startswith("/objects/"):
                 oid = self.path.rsplit("/", 1)[1]
                 obj = state["objects"].get(oid)
@@ -157,6 +175,7 @@ async def prepare(
     attack_value=None,
     m=None,
     capture=None,
+    query_object=False,
 ):
     m = m or ASMToolsManager()
     register_scope(m, base)
@@ -187,9 +206,12 @@ async def prepare(
             if method == "PATCH"
             else None
         )
-        response = await m._http_exchange(
-            method, base + "/objects/" + oid, identity="a", body=body
+        captured_url = (
+            base + "/lookup?record=" + oid + "&view=full"
+            if query_object
+            else base + "/objects/" + oid
         )
+        response = await m._http_exchange(method, captured_url, identity="a", body=body)
         capture = response["capture"]
         assert capture
         # Remove the discovery fixture. Proof runs must provision fresh objects.
@@ -197,7 +219,9 @@ async def prepare(
     else:
         oid = capture["url"].rsplit("/", 1)[1]
     parameter = (
-        "body:" + value_path[1:]
+        "query:record"
+        if query_object
+        else "body:" + value_path[1:]
         if strategy in ("captured_mutation", "captured_property")
         else ""
     )
@@ -221,6 +245,7 @@ async def prepare(
     )
     config = {
         "strategy": strategy,
+        "object_parameter": "query:record" if query_object else "path",
         "value_path": value_path,
         "attack_value": attack_value,
         "setup": {
@@ -233,13 +258,15 @@ async def prepare(
             + (
                 "/objects"
                 if strategy == "captured_delete"
+                else "/lookup?record={{object_id}}&view=full"
+                if query_object
                 else "/objects/{{object_id}}"
             )
         },
         "cleanup": {"url": base + "/objects/{{object_id}}"},
     }
     await m.prepare_captured_authorization_proof(
-        cell["hypothesis_id"], capture["id"], "a", oid, config
+        cell["hypothesis_id"], capture["id"], "a", "" if query_object else oid, config
     )
     return m, cell, capture, config
 
@@ -329,6 +356,36 @@ async def test_detection_matrix_with_fresh_independent_verification(
         c["api_key"] == "" and "sid=a" not in c["cookie"] for c in attacks
     )
     assert not state["objects"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("vulnerable", [True, False])
+@pytest.mark.parametrize("strategy", ["captured_read", "captured_mutation"])
+async def test_query_object_id_is_captured_and_proved_with_two_identities(
+    crud_app, vulnerable, strategy
+):
+    base, state = crud_app
+    state["vulnerable"] = vulnerable
+    m, cell, capture, _ = await prepare(base, strategy, query_object=True)
+    assert capture["url"] == base + "/lookup"
+    assert capture["query_fields"] == ["record", "view"]
+    private = m._capture_requests().get(capture["id"])
+    assert private["request"]["url"].endswith("?record=1&view=full")
+    receipt = json.loads(await m.run_authorization_proof(cell["hypothesis_id"]))[
+        "receipt"
+    ]
+    assert receipt["verdict"] == (
+        "confirmed" if vulnerable else "inconclusive"
+        if strategy == "captured_read" else "refuted"
+    )
+    assert receipt["cleanup_status"] == "attempted"
+    assert not state["objects"]
+    assert any(
+        c["identity"] == "b"
+        and c["path"].startswith("/lookup?record=")
+        and c["path"].endswith("&view=full")
+        for c in state["calls"]
+    )
 
 
 @pytest.mark.asyncio
@@ -434,10 +491,39 @@ def test_capture_store_bounds_redaction_and_immutability():
         )
         is None
     )
+    query_capture = store.record(
+        {**request, "url": request["url"] + "?record=1&view=full"},
+        identity="a",
+        source="browser",
+    )
+    assert query_capture["url"] == request["url"]
+    assert query_capture["query_fields"] == ["record", "view"]
+    assert "record=1" not in json.dumps(query_capture)
+    assert store.get(query_capture["id"])["request"]["url"].endswith(
+        "?record=1&view=full"
+    )
     for _ in range(2):
         store.record(request, identity="a", source="browser")
     with pytest.raises(ValueError, match="expired"):
         store.get(first["id"])
+
+
+def test_query_object_binding_requires_one_exact_value_and_preserves_other_fields():
+    from app.services.agent.captured_proof import bind_captured_object_url
+
+    url = "https://app.test/lookup?view=full&record=a%2Bb&sort=asc"
+    bound, location = bind_captured_object_url(url, "a+b")
+    assert location == "query:record"
+    assert bound == "https://app.test/lookup?view=full&record={{object_id}}&sort=asc"
+    assert bind_captured_object_url(url, "", "query:record") == (bound, location)
+    with pytest.raises(ValueError, match="exactly one"):
+        bind_captured_object_url("https://app.test/lookup?first=1&second=1", "1")
+    with pytest.raises(ValueError, match="exactly one"):
+        bind_captured_object_url(
+            "https://app.test/lookup?record=1&record=2", "", "query:record"
+        )
+    with pytest.raises(ValueError, match="exactly one"):
+        bind_captured_object_url(url, "b")
 
 
 def test_new_tools_registered_and_guided():

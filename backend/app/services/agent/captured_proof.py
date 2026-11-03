@@ -4,7 +4,7 @@ import json
 import math
 import secrets
 from copy import deepcopy
-from urllib.parse import unquote, urlsplit, urlunsplit
+from urllib.parse import unquote, unquote_plus, urlsplit, urlunsplit
 
 from app.services.agent.evidence_store import origin
 from app.services.agent.proof_engine import pointer, render
@@ -28,6 +28,48 @@ def field_name(path):
     return path[1:].replace("~1", "/").replace("~0", "~")
 
 
+def bind_captured_object_url(url, object_id, selector=""):
+    """Replace one observed path segment or complete query value, preserving the rest."""
+    parts = urlsplit(url)
+    given_id = str(object_id or "")
+    if given_id in (".", "..") or (
+        not given_id and not str(selector).startswith("query:")
+    ):
+        raise ValueError("Select a query field or provide the captured object ID")
+    segments = parts.path.split("/")
+    candidates = [
+        ("path", i)
+        for i, value in enumerate(segments)
+        if given_id and unquote(value) == given_id
+    ]
+    fields = (
+        [part.partition("=") for part in parts.query.split("&")]
+        if parts.query
+        else []
+    )
+    candidates.extend(
+        ("query:" + unquote_plus(raw_key), i)
+        for i, (raw_key, separator, raw_value) in enumerate(fields)
+        if separator
+        and unquote_plus(raw_value)
+        and (not given_id or unquote_plus(raw_value) == given_id)
+    )
+    matches = [item for item in candidates if not selector or item[0] == selector]
+    if len(matches) != 1:
+        raise ValueError(
+            "Captured object ID must identify exactly one URL path segment or query value"
+        )
+    location, index = matches[0]
+    if location == "path":
+        segments[index] = "{{object_id}}"
+        parts = parts._replace(path="/".join(segments))
+    else:
+        raw_key, _, _ = fields[index]
+        fields[index] = (raw_key, "=", "{{object_id}}")
+        parts = parts._replace(query="&".join("".join(field) for field in fields))
+    return urlunsplit(parts), location
+
+
 def build_plan(capture, *, owner_identity, object_id, configuration):
     config = deepcopy(configuration)
     strategy = config["strategy"]
@@ -39,17 +81,9 @@ def build_plan(capture, *, owner_identity, object_id, configuration):
         "legacy",
     ):
         raise ValueError("Capture must belong to the registered owner identity")
-    parts = urlsplit(attack["url"])
-    segments = parts.path.split("/")
-    matches = [
-        i for i, value in enumerate(segments) if unquote(value) == str(object_id)
-    ]
-    if len(matches) != 1 or not str(object_id) or str(object_id) in (".", ".."):
-        raise ValueError(
-            "Captured object ID must occupy exactly one complete URL path segment"
-        )
-    segments[matches[0]] = "{{object_id}}"
-    attack["url"] = urlunsplit(parts._replace(path="/".join(segments)))
+    attack["url"], object_parameter = bind_captured_object_url(
+        attack["url"], object_id, config.get("object_parameter", "")
+    )
     canary_path = config.get("canary_path", "/marker")
     marker = field_name(canary_path)
     setup = config["setup"]
@@ -89,8 +123,10 @@ def build_plan(capture, *, owner_identity, object_id, configuration):
         raise ValueError("Read/delete captures must have no request body")
     cleanup = config["cleanup"]
     cleanup["method"] = "DELETE"
-    if cleanup["url"] != attack["url"] or cleanup.get("body"):
-        raise ValueError("Cleanup must delete the same fresh controlled-object URL")
+    if cleanup.get("body") or cleanup["url"].count("{{object_id}}") != 1:
+        raise ValueError("Cleanup must address the fresh controlled object")
+    if object_parameter == "path" and cleanup["url"] != attack["url"]:
+        raise ValueError("Path-object cleanup must use the captured object URL")
     verify = config["verify"]
     if verify.get("method", "GET").upper() != "GET" or verify.get("body"):
         raise ValueError("Verification must be a read-only GET")
@@ -111,8 +147,9 @@ def build_plan(capture, *, owner_identity, object_id, configuration):
         "strategy": strategy,
         "capture_id": capture["id"],
         "controlled_resource": True,
+        "object_parameter": object_parameter,
         "owner_identity": owner_identity,
-        "target": capture["request"]["url"],
+        "target": urlunsplit(urlsplit(capture["request"]["url"])._replace(query="")),
         "operation_id": capture["operation_id"],
         "setup": setup,
         "attack": attack,
