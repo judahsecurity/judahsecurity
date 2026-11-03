@@ -209,11 +209,11 @@ def pending_first_pass_cells(brain: Any, *, target: str = "") -> list[dict[str, 
 
 
 async def run_observed_input_batch(
-    manager: Any, *, target: str = "", max_checks: int = 8,
+    manager: Any, *, target: str = "", max_checks: int = 32,
     max_seconds: int = 180,
 ) -> dict[str, Any]:
     """Probe a small fair slice, and persist a result even when proof is blocked."""
-    max_checks = max(1, min(int(max_checks), 8))
+    max_checks = max(1, min(int(max_checks), 32))
     max_seconds = max(15, min(int(max_seconds), 180))
     deadline = time.monotonic() + max_seconds
     brain = engagement_brain_from_dict(getattr(manager, "_engagement_brain", None))

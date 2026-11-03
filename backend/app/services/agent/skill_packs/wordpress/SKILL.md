@@ -22,7 +22,7 @@ wait for a rich capability map, methodology-card richness, or WPScan quota.
    comments (`Yoast SEO plugin v24.3`), `?ver=` on `/wp-content/plugins/`, Server
    header. Version-in-range of a published CVE is a finding — quote the evidence
    and the affected range; note auth preconditions. Do not wait on WPScan.
-3. `execute_curl` `GET {origin}/wp-json/wp/v2/users?per_page=100` (`-sS -D-`).
+3. `execute_curl` `GET {origin}/wp-json/wp/v2/users?per_page=100` (`-s -i`).
    HTTP 200 with `slug` / `name` → `submit_finding_candidate` then
    `create_finding` (CWE-200 user enumeration). 401/403/empty list → kill the
    card with that evidence. Do not require privileged impact.

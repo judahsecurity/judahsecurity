@@ -235,7 +235,7 @@ def wordpress_forced_step(
         return {
             "tool_name": "execute_curl",
             "tool_args": {
-                "args": f"-sS -D- {origin}{_USERS_PATH}?per_page=100",
+                "args": f"-s -i {origin}{_USERS_PATH}?per_page=100",
             },
             "thought": (
                 "WordPress fingerprint — unauth REST user enum first. "
@@ -294,7 +294,7 @@ def wordpress_hunt_note(state: Optional[Dict[str, Any]] = None) -> str:
             "version-in-range hits before moving on."
         )
     lines.append(
-        f"1. Unauth REST user enum FIRST: execute_curl(args=\"-sS -D- {origin}"
+        f"1. Unauth REST user enum FIRST: execute_curl(args=\"-s -i {origin}"
         f"{_USERS_PATH}?per_page=100\"). "
         "A 200 with slug/name is a finding (user enumeration). Then create_finding "
         "with title/description/severity/target filled in."

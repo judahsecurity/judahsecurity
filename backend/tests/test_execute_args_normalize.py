@@ -1,5 +1,7 @@
 """Tests for execute_* tool arg normalization (Ollama-friendly)."""
 
+import pytest
+
 from app.services.agent.tools import (
     extract_seed_target,
     normalize_execute_tool_args,
@@ -51,3 +53,31 @@ def test_normalize_ignores_internal_keys_and_fills():
 
 def test_default_args_httpx():
     assert "-u https://t.com" in _default_args_for_tool("execute_httpx", "https://t.com")
+
+
+@pytest.mark.asyncio
+async def test_identical_curl_contract_error_is_not_reexecuted(monkeypatch):
+    from app.services.agent import action_ledger
+    from app.services.agent.tools import ASMToolsManager
+
+    manager = ASMToolsManager()
+    calls = []
+
+    async def rejected(_name, _args):
+        calls.append(1)
+        return {"success": False,
+                "error": "Censor rejected execute_curl.args: unsupported curl argument '-D-'"}
+
+    monkeypatch.setattr(manager, "_execute_recorded", rejected)
+    monkeypatch.setattr(action_ledger, "append_action", lambda *_args, **_kwargs: None)
+    token = action_ledger.active_run_id.set("contract-test-run")
+    try:
+        args = {"args": "-s -D- https://app.test/"}
+        first = await manager.execute("execute_curl", args)
+        second = await manager.execute("execute_curl", args)
+    finally:
+        action_ledger.active_run_id.reset(token)
+
+    assert len(calls) == 1
+    assert first["success"] is False
+    assert second["suppressed_repeat"] is True
