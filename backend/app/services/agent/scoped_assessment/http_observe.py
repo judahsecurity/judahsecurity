@@ -97,8 +97,15 @@ def _cookie_header(storage_state: dict | None, url: str) -> str:
     return "; ".join(selected)
 
 
-def observe_get(url: str, allowed_origins: list[str], storage_state: dict | None = None) -> dict:
-    """GET one in-scope URL without redirects; return bounded response metadata."""
+def observe_get(url: str, allowed_origins: list[str], storage_state: dict | None = None,
+                markers: list[str] | None = None) -> dict:
+    """GET one in-scope URL without redirects; return bounded response metadata.
+
+    ``markers`` is an optional list of caller-owned canary strings; the result's
+    ``markers`` maps each to whether it appears in the (bounded) response body.
+    Only the caller's own freshly written nonces are passed, so this reveals no
+    response content — just whether a value we wrote is reflected back.
+    """
     assert_in_scope(url, allowed_origins)
     headers = {"Accept": "application/json, text/html;q=0.9, */*;q=0.8"}
     cookies = _cookie_header(storage_state, url)
@@ -132,7 +139,7 @@ def observe_get(url: str, allowed_origins: list[str], storage_state: dict | None
                     shape = {"type": "array", "items": min(len(parsed), 1000)}
             except (UnicodeDecodeError, ValueError):
                 pass
-        return {
+        result = {
             "operation": "http_get",
             "target_template": url,
             "method": "GET",
@@ -147,3 +154,9 @@ def observe_get(url: str, allowed_origins: list[str], storage_state: dict | None
             "directory_index": _directory_index_detected(data, content_type),
             "redirected": bool(location),
         }
+        if markers is not None:
+            result["markers"] = {
+                marker: (marker.encode() in data)
+                for marker in markers if isinstance(marker, str) and marker
+            }
+        return result

@@ -100,3 +100,46 @@ releases, so this source is best-effort: if the endpoint is unreachable or the
 schema shifted, `list_idor_leads` simply reports `caido_history.ok = false` and
 returns the leads it derived from Prowl's own captures. Prowl's receipts remain
 the source of truth; a Caido-derived lead is still only a lead.
+
+## Write-style IDOR (cross-identity write authorization)
+
+`scoped_owner_only` proves a second identity can *read* an owner's object.
+`scoped_owner_only_write` proves a second identity can *modify* it, using a
+bounded canary write and an owner-side readback:
+
+1. owner readback — neither fresh canary present (baseline)
+2. owner writes canary A (authorized self-write)
+3. owner readback — canary A present (the field is writable and reflected)
+4. the other identity writes canary B to the owner's object
+5. owner readback — canary B present ⇒ the other identity mutated the owner's
+   object (cross-account write confirmed)
+6. owner restores the field (cleanup) and a final readback confirms neither test
+   canary remains
+
+Only step 5 confirms the finding; a rejected (4xx) or unreflected other-identity
+write does not. Every write targets one operator-declared, bounded field with
+short random nonces, and the owner restores the field at the end. Cleanup never
+affects `proof_confirmed`.
+
+This is gated by the operator, never the model. The operator declares each write
+resource in the assessment policy and must also list its write path among
+`body_replay_paths`:
+
+```json
+{
+  "body_replay_paths": ["/api/orders/42"],
+  "owner_only_write_resources": [{
+    "target": "https://app.example.test/api/orders/42",
+    "readback_target": "https://app.example.test/api/orders/42/view",
+    "method": "PUT",
+    "field": "/note",
+    "owner_identity": "owner",
+    "other_identity": "attacker"
+  }]
+}
+```
+
+The hunter result is one actor's evidence. The independent verifier must repeat
+the proof with a fresh execution-owned capture and fresh canaries; the
+publication gate requires two confirmed runs with distinct captures and distinct
+canaries before a finding can be created.

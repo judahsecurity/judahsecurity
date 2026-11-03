@@ -18,8 +18,8 @@ from app.services.agent.assessment_sessions import browser_storage_state, identi
 from app.services.agent.evidence_store import evidence_store, verification_run
 from app.services.agent.private_capture_store import delete_capture, load_capture, persist_capture
 from app.services.agent.scoped_assessment import (
-    authz_proof, body_probe, browser, http_observe, idor_leads, planning, query_probe,
-    sqli_boolean, sqli_string, technology,
+    authz_proof, authz_write_proof, body_probe, browser, http_observe, idor_leads,
+    planning, query_probe, sqli_boolean, sqli_string, technology,
 )
 from app.services.agent.scoped_assessment.browser_actions import allowed_discovery_path
 
@@ -33,6 +33,7 @@ SCOPED_ASSESSMENT_TOOLS = (
     "scoped_string_sqli",
     "scoped_body_probe",
     "scoped_owner_only",
+    "scoped_owner_only_write",
     "list_scoped_browser_exchanges",
     "list_idor_leads",
     "scoped_assessment_summary",
@@ -155,10 +156,58 @@ class ScopedAssessmentTools:
         self._scoped_race_action_paths = set(race_action_paths)
         self._scoped_race_cleanup_paths = set(race_cleanup_paths)
         self._scoped_owner_expectations = approved
+        self._scoped_owner_write_expectations = self._parse_owner_write_policy(
+            policy.get("owner_only_write_resources") or [], set(paths))
         self._scoped_auth_login_path = auth_login_path
         self._scoped_caido_idor_leads = bool(policy.get("caido_idor_leads"))
-        if paths or cleanup_paths or race_action_paths or race_cleanup_paths or approved:
+        if (paths or cleanup_paths or race_action_paths or race_cleanup_paths or approved
+                or self._scoped_owner_write_expectations):
             self._scoped_assessment_started = True
+
+    @staticmethod
+    def _parse_owner_write_policy(rows: list, approved_write_paths: set) -> dict:
+        """Validate operator-declared cross-identity write-authorization resources.
+
+        Each row needs a write target on an operator-approved write path
+        (body_replay_paths), a safe GET readback resource, a write method, one
+        bounded field, and two distinct identities. Model-supplied rules are
+        never accepted here; this runs only from set_scoped_assessment_policy.
+        """
+        if not isinstance(rows, list) or len(rows) > 8:
+            raise ValueError("Invalid owner-only write policy")
+        approved: dict[str, tuple] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError("Invalid owner-only write policy")
+            target = row.get("target")
+            readback = row.get("readback_target")
+            method = str(row.get("method") or "").upper()
+            field = row.get("field")
+            owner, other = row.get("owner_identity"), row.get("other_identity")
+            if method not in ("POST", "PUT", "PATCH"):
+                raise ValueError("Owner-only write needs a POST, PUT, or PATCH method")
+            if (not isinstance(target, str) or len(target) > 2048
+                    or not isinstance(readback, str) or len(readback) > 2048
+                    or not isinstance(owner, str) or not isinstance(other, str)
+                    or not owner or not other or owner == other):
+                raise ValueError("Owner-only write needs two distinct identities and exact resources")
+            if (not isinstance(field, str) or not 0 < len(field) <= 120
+                    or any(char in field for char in "\r\n\t ")):
+                raise ValueError("Owner-only write needs one bounded field name or JSON pointer")
+            write_parts = urlsplit(target)
+            if (write_parts.query or write_parts.fragment
+                    or target != browser.origin(target) + (write_parts.path or "/")):
+                raise ValueError("Owner-only write target needs an exact path")
+            write_path = write_parts.path or "/"
+            if write_path not in approved_write_paths:
+                raise ValueError("Owner-only write target must be an operator-approved write path")
+            read_parts = urlsplit(readback)
+            if (read_parts.query or read_parts.fragment
+                    or not allowed_discovery_path(read_parts.path or "/")
+                    or readback != browser.origin(readback) + (read_parts.path or "/")):
+                raise ValueError("Owner-only write readback needs an exact safe GET path")
+            approved[target] = (owner, other, method, field, readback)
+        return approved
 
     def _scoped_origin(self, url: str) -> str:
         assert_url_in_scope(self, url)
@@ -933,6 +982,72 @@ class ScopedAssessmentTools:
         result["finding"] = False
         result["evidence_id"] = evidence_store(self).record(
             "scoped_owner_only", result, target=target, identity=owner_identity,
+            success=result["proof_confirmed"],
+        )
+        return json.dumps(result)
+
+    async def scoped_owner_only_write(self, artifact_id: str, owner_identity: str) -> str:
+        """Prove a second identity can modify an owner's object (write-style IDOR).
+
+        Operator-gated: requires an owner_only_write_resources policy for the exact
+        captured write target, and that write path among the approved write paths.
+        Runs a bounded canary write as the owner, then as the other identity, with
+        owner-side readbacks, then restores the field. Only a reflected
+        cross-identity write confirms. The hunter result is one actor's evidence;
+        an independent verifier must repeat it with a fresh capture and fresh
+        canaries before create_finding.
+        """
+        private = self._scoped_exchange(artifact_id, owner_identity)
+        self._scoped_assessment_started = True
+        captured = json.loads(private)
+        write_url = captured.get("url") if isinstance(captured, dict) else None
+        if not isinstance(write_url, str):
+            raise ValueError("Capture does not contain a write URL")
+        allowed = self._scoped_origin(write_url)
+        write_parts = urlsplit(write_url)
+        if (write_parts.path or "/") not in (getattr(self, "_scoped_body_replay_paths", None) or set()):
+            raise ValueError("Write path was not approved by the assessment operator")
+        write_target = allowed + (write_parts.path or "/")
+        policy = (getattr(self, "_scoped_owner_write_expectations", None) or {}).get(write_target)
+        if not policy or policy[0] != owner_identity:
+            raise ValueError("Owner-only write policy was not declared for this exact resource")
+        other_identity, method, field, readback_target = policy[1], policy[2], policy[3], policy[4]
+        readback_allowed = self._scoped_origin(readback_target)
+        owner_state = self._scoped_state(owner_identity, write_url)
+        other_state = self._scoped_state(other_identity, write_url)
+        replay_headers = body_probe.safe_replay_headers(private)
+        owner_canary = "own" + secrets.token_hex(8)
+        other_canary = "oth" + secrets.token_hex(8)
+        restore_canary = "rst" + secrets.token_hex(8)
+
+        def write_fn(identity: str, canary: str) -> dict:
+            url, got_method, mime, body = body_probe.plan_observed_write(
+                private, parameter=field, allowed_origins=[allowed], value=canary)
+            if got_method != method:
+                raise ValueError("Captured write method does not match the declared policy")
+            state = owner_state if identity == owner_identity else other_state
+            return body_probe.send_observed_write(
+                url, got_method, mime, body, allowed_origins=[allowed],
+                storage_state=state, replay_headers=replay_headers)
+
+        def readback_fn(markers: list[str]) -> dict:
+            return http_observe.observe_get(
+                readback_target, [readback_allowed], owner_state, markers=markers)
+
+        self._scoped_claim_posts(3)
+        self._scoped_claim_gets(4)
+        result = await asyncio.to_thread(
+            authz_write_proof.probe_owner_only_write,
+            write_target, readback_target, method=method, field=field,
+            owner_identity=owner_identity, other_identity=other_identity,
+            owner_canary=owner_canary, other_canary=other_canary, restore_canary=restore_canary,
+            write_fn=write_fn, readback_fn=readback_fn, before_request=lambda: None,
+        )
+        result["source_artifact_id"] = artifact_id
+        result["captured_artifact_id"] = artifact_id
+        result["finding"] = False
+        result["evidence_id"] = evidence_store(self).record(
+            "scoped_owner_only_write", result, target=write_target, identity=owner_identity,
             success=result["proof_confirmed"],
         )
         return json.dumps(result)

@@ -26,6 +26,7 @@ CAPABILITY_TOOLS = (
     "scoped_string_sqli",
     "scoped_body_probe",
     "scoped_owner_only",
+    "scoped_owner_only_write",
     "list_scoped_browser_exchanges",
     "list_idor_leads",
     "scoped_assessment_summary",

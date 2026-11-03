@@ -899,6 +899,7 @@ TOOL_PHASE_MAP = {
     "scoped_string_sqli": ["exploitation", "post_exploitation"],
     "scoped_body_probe": ["exploitation", "post_exploitation"],
     "scoped_owner_only": ["exploitation", "post_exploitation"],
+    "scoped_owner_only_write": ["exploitation", "post_exploitation"],
     # Tester-process control plane
     "compare_requests": ["exploitation", "post_exploitation"],
     "sync_engagement_brain": ["informational", "exploitation", "post_exploitation"],
@@ -974,6 +975,15 @@ verifier gate. When the operator enabled caido_idor_leads and configured the
 assessment Caido, its in-scope HTTP history augments the same leads.
 scoped_owner_only requires an operator-declared exact owner-only GET
 resource and two registered test identities. Neither may invent its own policy.
+scoped_owner_only_write proves write-style IDOR: a second identity modifying an
+owner's object. It requires an operator-declared owner_only_write_resources
+entry (exact write target on an approved write path, a safe GET readback
+resource, the write method, one bounded field, and two distinct identities) plus
+a fresh execution-owned capture of that write. It runs a bounded canary write as
+the owner, then as the other identity, with owner-side readbacks, and restores
+the field; only a reflected cross-identity write confirms. The hunter result is
+one actor's evidence — submit a candidate and require a fresh independent
+verifier (new capture, new canaries) before create_finding.
 For a scoped proof candidate, include the hunter tool evidence_id in
 submit_finding_candidate. A verifier must repeat the same operation with fresh
 browser capture when required, then call record_verify_verdict with both

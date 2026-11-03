@@ -25,7 +25,7 @@ PROOFS_BY_CLASS = {
     "exposure": frozenset({"response_match", "public_directory_index"}),
     "sql_injection": frozenset({"numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "post_error_sqli", "post_boolean_sqli"}),
     "xss": frozenset({"browser_xss", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "upload_xss"}),
-    "authorization": frozenset({"authorization", "owner_only", "state_change", "workflow"}),
+    "authorization": frozenset({"authorization", "owner_only", "owner_only_write", "state_change", "workflow"}),
     "ssrf": frozenset({"oob_callback"}),
     "xxe": frozenset({"oob_callback"}),
     "crlf": frozenset({"scoped_response_crlf"}),
@@ -132,7 +132,7 @@ def validate_proof(
     allowed, reason = proof_kind_allowed(candidate, kind)
     if not allowed:
         return False, reason
-    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "post_error_sqli", "post_boolean_sqli", "owner_only", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed", "scoped_race_overrun", "scoped_browser_client"):
+    if kind in ("numeric_boolean_sqli", "string_boolean_sqli", "string_error_sqli", "post_error_sqli", "post_boolean_sqli", "owner_only", "owner_only_write", "public_directory_index", "scoped_browser_xss", "scoped_browser_form_xss", "scoped_browser_xhr_xss", "scoped_browser_stored_xss", "scoped_response_crlf", "scoped_response_redirect", "scoped_cors_credentialed", "scoped_race_overrun", "scoped_browser_client"):
         hunter_id = proof.get("hunter_artifact_id")
         verifier = row("artifact_id")
         hunter = (store.records.get(hunter_id)
@@ -144,6 +144,7 @@ def validate_proof(
             "post_error_sqli": "scoped_body_sqli_error",
             "post_boolean_sqli": "scoped_body_sqli_boolean",
             "owner_only": "scoped_owner_only",
+            "owner_only_write": "scoped_owner_only_write",
             "public_directory_index": "scoped_http_get",
             "scoped_browser_xss": "scoped_browser_check_xss",
             "scoped_browser_form_xss": "scoped_browser_check_form_xss",
@@ -330,6 +331,24 @@ def validate_proof(
                     or not second.get("captured_artifact_id")
                     or first["captured_artifact_id"] == second["captured_artifact_id"]):
                 return False, "Independent owner-only proof with separate browser captures is required"
+            return True, ""
+        if kind == "owner_only_write":
+            from app.services.agent.scoped_assessment.authz_write_proof import owner_only_write_proof_valid
+            if (not owner_only_write_proof_valid(first) or not owner_only_write_proof_valid(second)
+                    or first.get("proof_confirmed") is not True
+                    or second.get("proof_confirmed") is not True
+                    or first.get("owner_identity") != second.get("owner_identity")
+                    or first.get("other_identity") != second.get("other_identity")
+                    or first.get("method") != second.get("method")
+                    or first.get("field") != second.get("field")
+                    or first.get("readback_target") != second.get("readback_target")
+                    # Independent runs must use fresh, distinct canaries.
+                    or first.get("owner_canary") == second.get("owner_canary")
+                    or first.get("other_canary") == second.get("other_canary")
+                    or not first.get("source_artifact_id")
+                    or not second.get("source_artifact_id")
+                    or first["source_artifact_id"] == second["source_artifact_id"]):
+                return False, "Independent cross-identity write proof with separate captures and fresh canaries is required"
             return True, ""
         if kind == "public_directory_index":
             if (hunter["identity"] != verifier["identity"] or hunter["identity"] != "anonymous"

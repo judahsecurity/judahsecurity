@@ -511,3 +511,148 @@ def probe_observed_body_reflection(
         "proof_confirmed": False, "finding": False,
         "next_test": "Reproduce execution in the target browser context",
     }
+
+
+# --- Cross-identity write-authorization proof primitives ---------------------
+# These replay an operator-approved captured write (POST/PUT/PATCH) with one
+# field set to an exact canary value, under a named identity. They are used only
+# by scoped_owner_only_write; the SQLi/XSS body paths above are unaffected.
+
+_WRITE_METHODS = ("POST", "PUT", "PATCH")
+
+
+def _set_json(data: bytes, pointer: str, value: str) -> bytes:
+    """Set one observed JSON field to exactly ``value`` (no appended payload)."""
+    if not pointer.startswith("/") or len(pointer) > 300:
+        raise ValueError("A bounded JSON pointer is required")
+    try:
+        document = json.loads(data)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ValueError("Captured JSON body is invalid") from exc
+    current = document
+    tokens = pointer.split("/")[1:]
+    for token in tokens[:-1]:
+        if re.search(r"~(?![01])", token):
+            raise ValueError("Invalid JSON pointer escape")
+        key = token.replace("~1", "/").replace("~0", "~")
+        if isinstance(current, dict) and key in current:
+            current = current[key]
+        elif isinstance(current, list) and (key == "*" and len(current) == 1 or key.isdecimal() and int(key) < len(current)):
+            current = current[0 if key == "*" else int(key)]
+        else:
+            raise ValueError("JSON pointer does not identify an observed field")
+    token = tokens[-1]
+    if re.search(r"~(?![01])", token):
+        raise ValueError("Invalid JSON pointer escape")
+    key = token.replace("~1", "/").replace("~0", "~")
+    if isinstance(current, dict) and key in current:
+        existing = current[key]
+        setter = lambda new: current.__setitem__(key, new)
+    elif isinstance(current, list) and (key == "*" and len(current) == 1 or key.isdecimal() and int(key) < len(current)):
+        index = 0 if key == "*" else int(key)
+        existing = current[index]
+        setter = lambda new: current.__setitem__(index, new)
+    else:
+        raise ValueError("JSON pointer does not identify an observed field")
+    if isinstance(existing, bool) or not isinstance(existing, (str, int, float)):
+        raise ValueError("Write proof requires a string or numeric field")
+    setter(value)
+    changed = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode()
+    if len(changed) > MAX_REPLAY_BODY:
+        raise ValueError("Mutated body exceeds replay limit")
+    return changed
+
+
+def _set_form(data: bytes, parameter: str, value: str) -> bytes:
+    """Set one observed form field to exactly ``value``."""
+    from urllib.parse import quote
+
+    try:
+        raw = data.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ValueError("Captured form body is not ASCII encoded") from exc
+    if not 0 < len(parameter) <= 80 or len(raw) > MAX_REPLAY_BODY:
+        raise ValueError("A bounded form field is required")
+    fields = raw.split("&")
+    if len(fields) > 40:
+        raise ValueError("Captured form has too many fields")
+    matches = [index for index, field in enumerate(fields)
+               if field and unquote_plus(field.split("=", 1)[0]) == parameter]
+    if len(matches) != 1:
+        raise ValueError("Form field must occur exactly once")
+    index = matches[0]
+    name = fields[index].partition("=")[0]
+    fields[index] = name + "=" + quote(value, safe="")
+    changed = "&".join(fields).encode("ascii")
+    if len(changed) > MAX_REPLAY_BODY:
+        raise ValueError("Mutated body exceeds replay limit")
+    return changed
+
+
+def plan_observed_write(private_exchange: bytes, *, parameter: str,
+                        allowed_origins: list[str], value: str) -> tuple[str, str, str, bytes]:
+    """Validate an operator-approved captured write and set one field to ``value``.
+
+    Returns (url, method, mime, body). Accepts POST/PUT/PATCH XHR/fetch with a
+    JSON or form body; rejects GraphQL mutations (they need a workflow proof).
+    """
+    try:
+        captured = json.loads(private_exchange)
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise ValueError("Invalid captured exchange") from exc
+    method = str(captured.get("method") or "").upper() if isinstance(captured, dict) else ""
+    if (not isinstance(captured, dict) or method not in _WRITE_METHODS
+            or captured.get("resource_type") not in ("xhr", "fetch")):
+        raise ValueError("Write proof requires a browser-observed POST/PUT/PATCH XHR/fetch exchange")
+    if captured.get("graphql_operation_type") not in (None, "", "query"):
+        raise ValueError("GraphQL mutation needs a disposable workflow proof")
+    url = captured.get("url")
+    if not isinstance(url, str) or not isinstance(parameter, str):
+        raise ValueError("Observed URL and parameter name are required")
+    assert_in_scope(url, allowed_origins)
+    parts = urlsplit(url)
+    if parts.query or parts.fragment:
+        raise ValueError("Write replay does not accept query or fragment values")
+    mime = captured.get("request_content_type")
+    json_body = mime == "application/json" or (isinstance(mime, str) and mime.endswith("+json"))
+    if not json_body and mime != "application/x-www-form-urlencoded":
+        raise ValueError("Write replay requires captured JSON or form content type")
+    try:
+        body = base64.b64decode(captured.get("request_body_base64", ""), validate=True)
+    except (binascii.Error, TypeError, ValueError) as exc:
+        raise ValueError("Invalid captured request body") from exc
+    if not body or len(body) > MAX_REPLAY_BODY:
+        raise ValueError("Captured body is empty or exceeds replay limit")
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9]{6,64}", value):
+        raise ValueError("Write proof canary must be a short alphanumeric token")
+    changed = _set_json(body, parameter, value) if json_body else _set_form(body, parameter, value)
+    return url, method, mime, changed
+
+
+def send_observed_write(url: str, method: str, mime: str, body: bytes, *,
+                        allowed_origins: list[str], storage_state: dict | None,
+                        replay_headers: dict[str, str] | None = None,
+                        timeout: int = 15) -> dict:
+    """Send one in-scope write under a named identity; return {'status': int}.
+
+    Credentials come only from the named identity's cookies; no captured Cookie
+    or Authorization header is replayed. Redirects are not followed.
+    """
+    if method not in _WRITE_METHODS:
+        raise ValueError("Unsupported write method")
+    assert_in_scope(url, allowed_origins)
+    headers = {"Accept": "application/json, text/html;q=0.9, */*;q=0.8", "Content-Type": mime}
+    headers.update(_replay_headers(replay_headers, expected_origin=origin(url)))
+    cookies = _cookie_header(storage_state, url)
+    if cookies:
+        headers["Cookie"] = cookies
+    request = Request(url, data=body, headers=headers, method=method)
+    opener = build_opener(*assessment_urllib_handlers(), _NoRedirect())
+    try:
+        response = opener.open(request, timeout=timeout)
+    except HTTPError as error:
+        response = error
+    with response:
+        response.read(1)  # drain minimally; the readback does the detection
+        return {"status": response.status,
+                "redirected": bool(response.headers.get("Location", ""))}
