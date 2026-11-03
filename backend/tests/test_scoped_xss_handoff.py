@@ -25,13 +25,14 @@ TEMPLATE = TARGET + "?searchTerm=" + quote('<img src=x onerror=alert("__PROWL_NO
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("linked", [False, True])
-@pytest.mark.parametrize("verifier_mode", ["confirmed", "no_execution", "changed_baseline"])
+@pytest.mark.parametrize("match_mode", ["exact", "volatile_fields"])
+@pytest.mark.parametrize("verifier_mode", ["confirmed", "no_execution", "changed_baseline", "changed_match_field"])
 @pytest.mark.parametrize("mime,body,field,location", [
-    ("application/x-www-form-urlencoded", b"message=hello", "message", "body_form"),
-    ("application/json", b'{"message":"hello"}', "/message", "body_json"),
+    ("application/x-www-form-urlencoded", b"message=hello&csrf_token=old-token", "message", "body_form"),
+    ("application/json", b'{"message":"hello","csrf_token":"old-token"}', "/message", "body_json"),
 ])
 async def test_captured_post_xhr_xss_requires_exact_body_and_fresh_execution(
-    monkeypatch, linked, verifier_mode, mime, body, field, location,
+    monkeypatch, linked, match_mode, verifier_mode, mime, body, field, location,
 ):
     manager = ASMToolsManager()
     manager._fallback_target = "https://app.example.test"
@@ -69,6 +70,10 @@ async def test_captured_post_xhr_xss_requires_exact_body_and_fresh_execution(
                  "xhr_baseline_request_sha256": (
                      "0" * 64 if len(browser_calls) == 2 and verifier_mode == "changed_baseline"
                      else kwargs["xhr_baseline_request_sha256"]),
+                 "xhr_body_match_mode": match_mode,
+                 "xhr_volatile_fields": (["nonce"] if len(browser_calls) == 2
+                                         and verifier_mode == "changed_match_field"
+                                         else ["csrf_token"] if match_mode == "volatile_fields" else []),
                  "xhr_actions": [], "xhr_actions_replayed": 0,
                  "xhr_mutated": True, "xhr_response_seen": True,
                  "executed": not (len(browser_calls) == 2 and verifier_mode == "no_execution"),
@@ -102,9 +107,8 @@ async def test_captured_post_xhr_xss_requires_exact_body_and_fresh_execution(
     )
     assert len(browser_calls) == 2
     assert browser_calls[0]["xhr_capture_id"] == browser_calls[1]["xhr_capture_id"]
-    assert reports[0]["status"] == (
-        "confirmed" if verifier_mode == "confirmed" else "inconclusive"
-    ), reports
+    expected = "confirmed" if verifier_mode == "confirmed" else "inconclusive"
+    assert reports[0]["status"] == expected, reports
 
 
 @pytest.mark.asyncio

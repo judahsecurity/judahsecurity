@@ -25,6 +25,11 @@ from .http_observe import MAX_BODY, _NoRedirect, _cookie_header, _sql_error_fami
 
 
 MAX_REPLAY_BODY = min(MAX_BODY_BYTES, 64 * 1024)
+VOLATILE_POST_FIELDS = frozenset({
+    "csrf", "_csrf", "csrf_token", "_csrf_token", "csrftoken",
+    "csrfmiddlewaretoken", "xsrf_token", "_xsrf", "authenticity_token",
+    "request_id", "request_nonce", "timestamp",
+})
 _SAFE_SQL_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _-]{0,39}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 SQL_ERROR_CHECK_ORDER = (
@@ -47,12 +52,17 @@ def safe_replay_headers(private_exchange: bytes) -> dict[str, str]:
                            expected_origin=origin(url) if isinstance(url, str) else "")
 
 
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("Invalid JSON number")
+
+
 def _mutate_json(data: bytes, pointer: str, payload: str = "'") -> bytes:
     if not pointer.startswith("/") or len(pointer) > 300:
         raise ValueError("A bounded JSON pointer is required")
     try:
-        document = json.loads(data)
-    except (UnicodeDecodeError, ValueError) as exc:
+        document = json.loads(data, object_pairs_hook=_unique_json_object,
+                              parse_constant=_reject_json_constant)
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise ValueError("Captured JSON body is invalid") from exc
     current = document
     tokens = pointer.split("/")[1:]
@@ -82,7 +92,8 @@ def _mutate_json(data: bytes, pointer: str, payload: str = "'") -> bytes:
     if isinstance(value, bool) or not isinstance(value, (str, int, float)):
         raise ValueError("Body probe requires a string or numeric field")
     setter(str(value) + payload)
-    changed = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode()
+    changed = json.dumps(document, ensure_ascii=False, separators=(",", ":"),
+                         allow_nan=False).encode()
     if len(changed) > MAX_REPLAY_BODY:
         raise ValueError("Mutated body exceeds replay limit")
     return changed
@@ -111,6 +122,145 @@ def _mutate_form(data: bytes, parameter: str, payload: str = "'") -> bytes:
     if len(changed) > MAX_REPLAY_BODY:
         raise ValueError("Mutated body exceeds replay limit")
     return changed
+
+
+def _volatile_value(value: object) -> bool:
+    return (type(value) in {str, int} and 0 < len(str(value)) <= 128
+            and not any(char in str(value) for char in "\r\n\x00"))
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON key in browser POST")
+        result[key] = value
+    return result
+
+
+def _json_pointer_value(document: object, pointer: str) -> object:
+    if not pointer.startswith("/") or len(pointer) > 300:
+        raise ValueError("A bounded JSON pointer is required")
+    current = document
+    for raw in pointer.split("/")[1:]:
+        if re.search(r"~(?![01])", raw):
+            raise ValueError("Invalid JSON pointer escape")
+        key = raw.replace("~1", "/").replace("~0", "~")
+        if isinstance(current, dict) and key in current:
+            current = current[key]
+        elif isinstance(current, list) and (
+            key == "*" and len(current) == 1 or key.isdecimal() and int(key) < len(current)
+        ):
+            current = current[0 if key == "*" else int(key)]
+        else:
+            raise ValueError("JSON pointer does not identify an observed field")
+    return current
+
+
+def match_browser_post_body(
+    baseline: bytes, live: bytes | None, *, mime: str, parameter: str, payload: str,
+) -> tuple[bytes, str, list[str]] | None:
+    """Mutate the live POST only when its captured input and stable fields agree.
+
+    A short named token may rotate between capture and replay. Other value or
+    field changes are a different request and are not sent by the browser.
+    """
+    if (not isinstance(live, bytes) or not live or len(live) > MAX_REPLAY_BODY
+            or not baseline or len(baseline) > MAX_REPLAY_BODY
+            or not isinstance(mime, str)
+            or not isinstance(payload, str) or not 0 < len(payload) <= 300
+            or b"__PROWL_NONCE__" in live):
+        return None
+    json_body = mime == "application/json" or mime.endswith("+json")
+    if not json_body and mime != "application/x-www-form-urlencoded":
+        return None
+    if live == baseline:
+        try:
+            changed = (_mutate_json(live, parameter, payload) if json_body
+                       else _mutate_form(live, parameter, payload))
+        except (ValueError, TypeError, RecursionError):
+            return None
+        return (changed, "exact", []) if changed.count(b"__PROWL_NONCE__") == 1 else None
+
+    changed_fields: list[str] = []
+    if json_body:
+        try:
+            def parse(data: bytes) -> object:
+                return json.loads(data, object_pairs_hook=_unique_json_object,
+                                  parse_constant=_reject_json_constant)
+
+            original, current = parse(baseline), parse(live)
+            selected_before = _json_pointer_value(original, parameter)
+            selected_now = _json_pointer_value(current, parameter)
+            if (type(selected_before) is not type(selected_now)
+                    or selected_before != selected_now):
+                return None
+            nodes = 0
+
+            def same_shape(before: object, now: object, depth: int = 0) -> bool:
+                nonlocal nodes
+                nodes += 1
+                if depth > 8 or nodes > 200 or type(before) is not type(now):
+                    return False
+                if isinstance(before, dict):
+                    if len(before) > 40 or before.keys() != now.keys():
+                        return False
+                    for key, value in before.items():
+                        live_value = now[key]
+                        if value != live_value and key.lower().replace("-", "_") in VOLATILE_POST_FIELDS:
+                            if (not _volatile_value(value) or not _volatile_value(live_value)
+                                    or type(value) is not type(live_value)
+                                    or key in changed_fields
+                                    or len(changed_fields) >= 3):
+                                return False
+                            changed_fields.append(key)
+                        elif not same_shape(value, live_value, depth + 1):
+                            return False
+                    return True
+                if isinstance(before, list):
+                    return len(before) <= 40 and len(before) == len(now) and all(
+                        same_shape(a, b, depth + 1) for a, b in zip(before, now)
+                    )
+                return before == now
+
+            if not same_shape(original, current) or not changed_fields:
+                return None
+            changed = _mutate_json(live, parameter, payload)
+        except (UnicodeDecodeError, TypeError, ValueError, RecursionError):
+            return None
+    else:
+        try:
+            def fields(data: bytes) -> list[tuple[str, str, str]]:
+                raw = data.decode("ascii").split("&")
+                if len(raw) > 40 or any("=" not in field for field in raw):
+                    raise ValueError("Ambiguous form body")
+                parts = [(name, unquote_plus(name), value)
+                         for name, value in (field.split("=", 1) for field in raw)]
+                if len({name for _, name, _ in parts}) != len(parts):
+                    raise ValueError("Duplicate form field")
+                return parts
+
+            original, current = fields(baseline), fields(live)
+            if (len(original) != len(current)
+                    or sum(name == parameter for _, name, _ in original) != 1):
+                return None
+            for (raw_name, name, value), (live_raw_name, live_name, live_value) in zip(original, current):
+                if raw_name != live_raw_name or name != live_name:
+                    return None
+                if value == live_value:
+                    continue
+                if (name == parameter or name.lower().replace("-", "_") not in VOLATILE_POST_FIELDS
+                        or not _volatile_value(unquote_plus(value))
+                        or not _volatile_value(unquote_plus(live_value))
+                        or len(changed_fields) >= 3):
+                    return None
+                changed_fields.append(name)
+            if not changed_fields:
+                return None
+            changed = _mutate_form(live, parameter, payload)
+        except (UnicodeDecodeError, ValueError):
+            return None
+    return (changed, "volatile_fields", sorted(changed_fields)) if changed.count(b"__PROWL_NONCE__") == 1 else None
 
 
 def plan_observed_body(private_exchange: bytes, *, parameter: str,
