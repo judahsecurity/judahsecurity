@@ -123,6 +123,19 @@ def test_leasing_without_probe_does_not_count_as_attempted():
     assert funnel["unattempted"] == funnel["checks"]
 
 
+def test_funnel_reports_specific_replay_blockers_without_raw_error_text():
+    brain = _brain()
+    first, second = brain.coverage_cells[:2]
+    first.update(first_pass_outcome="unattempted",
+                 first_pass_handoff_error="post_xhr_replay_blocked: secret token value")
+    second.update(first_pass_outcome="unattempted",
+                  first_pass_blocked_reason="identity_unavailable")
+    reasons = parameter_test_funnel(brain)["replay_block_reasons"]
+    assert reasons["post_xhr_replay_blocked"] == 1
+    assert reasons["identity_unavailable"] == 1
+    assert "secret token value" not in str(reasons)
+
+
 def test_sql_xss_batch_does_not_consume_xxe_work():
     brain = _brain()
     seed_parameter_coverage_cells(brain, [{
@@ -361,11 +374,18 @@ def test_unapproved_post_form_is_recorded_as_open_blocked_coverage():
                 "source": "observed_form", "testable": True,
             }])
             self._engagement_brain = brain.to_dict()
-            self._capability_map = {"target": "https://app.test"}
+            self._capability_map = {"target": "https://app.test", "forms": [{
+                "method": "POST", "action": "https://app.test/newsletter",
+                "inputs": ["email"], "page": "https://app.test/newsletter",
+            }]}
             self._scoped_body_replay_paths = set()
+            self.calls = 0
 
         async def scoped_input_probe_assigned(self, **_kwargs):
-            raise AssertionError("Unapproved POST must not reach the executor")
+            self.calls += 1
+            return {"success": True, "operation": "scoped_browser_check_form_xss",
+                    "evidence_id": "approved-post-receipt", "proof_confirmed": False,
+                    "probe_result": {"reflection_contexts": []}}
 
     manager = Manager()
     result = asyncio.run(run_observed_input_batch(manager, max_checks=2))
@@ -377,6 +397,13 @@ def test_unapproved_post_form_is_recorded_as_open_blocked_coverage():
                 if row["test_type"] == "xss")
     assert cell["status"] == "blocked"
     assert cell["first_pass_outcome"] == "unattempted"
+    assert cell["first_pass_blocked_reason"] == "post_path_not_approved"
+    assert result["funnel"]["replay_block_reasons"]["post_path_not_approved"] == 1
+    assert manager.calls == 0
+    manager._scoped_body_replay_paths.add("/newsletter")
+    resumed = asyncio.run(run_observed_input_batch(manager, max_checks=1))
+    assert resumed["policy_reopened"] == 1
+    assert resumed["processed"] == 1 and manager.calls > 0
 
 def test_transient_first_pass_handoff_gets_one_delayed_retry():
     class Manager:

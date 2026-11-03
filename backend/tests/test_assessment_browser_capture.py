@@ -13,6 +13,112 @@ import pytest
 from app.services.agent.assessment_scope import register_scope
 from test_capture_to_proof import crud_app as crud_app, prepare
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["error", "blind", "patched"])
+async def test_fresh_token_post_sqli_controls_keep_repeated_proof(mode):
+    """Every control needs a new browser token; a patched endpoint stays negative."""
+    from app.services.agent.scoped_assessment import body_probe
+    from app.services.agent.scoped_assessment.browser_post_replay import replay_observed_post_controls
+
+    class Handler(BaseHTTPRequestHandler):
+        issued = 0
+        used = set()
+        seen = []
+
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            Handler.issued += 1
+            token = f"fresh-{Handler.issued}"
+            body = ("<script>fetch('/api/filter',{method:'POST',headers:{'Content-Type':"
+                    "'application/x-www-form-urlencoded'},body:new URLSearchParams({"
+                    f"template:'botox',csrf_token:'{token}'"
+                    "})})</script>").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_POST(self):
+            data = parse_qs(self.rfile.read(int(self.headers["Content-Length"])).decode())
+            token = data.get("csrf_token", [""])[0]
+            value = data.get("template", [""])[0]
+            Handler.seen.append((token, value))
+            if token in Handler.used or not token.startswith("fresh-"):
+                self.send_response(403)
+                self.end_headers()
+                return
+            Handler.used.add(token)
+            if mode == "error" and value.endswith("'") and not value.endswith("''"):
+                body = b"SQLSTATE[42000]: Syntax error 1064 You have an error in your SQL syntax"
+            elif mode == "blind" and " OR '" in value:
+                import re
+                match = re.search(r" OR '(\d{5})'='(\d{5})'-- $", value)
+                body = b"A" * (700 if match and match.group(1) == match.group(2) else 100)
+            else:
+                body = b"A" * 100
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_port}"
+    private = json.dumps({
+        "url": base + "/api/filter", "method": "POST", "resource_type": "fetch",
+        "page_url": base + "/catalog", "request_content_type": "application/x-www-form-urlencoded",
+        "request_body_base64": base64.b64encode(b"template=botox&csrf_token=captured-old").decode(),
+    }).encode()
+    try:
+        url, mime, baseline, _, _ = body_probe.plan_sql_error_body(
+            private, parameter="template", allowed_origins=[base],
+        )
+        if mode == "blind":
+            _, _, variants, nonce = body_probe.plan_sql_boolean_body(
+                private, parameter="template", allowed_origins=[base],
+            )
+            other = nonce[:-1] + str((int(nonce[-1]) + 1) % 10)
+            checks = await replay_observed_post_controls(
+                private, parameter="template", allowed_origins=[base], storage_state=None,
+                payloads={
+                    "baseline_first": "", "true_first": f"' OR '{nonce}'='{nonce}'-- ",
+                    "false_first": f"' OR '{nonce}'='{other}'-- ",
+                    "true_second": f"' OR '{nonce}'='{nonce}'-- ",
+                    "false_second": f"' OR '{nonce}'='{other}'-- ",
+                    "baseline_last": "",
+                },
+            )
+            result = body_probe.build_sql_boolean_result(
+                url, mime, variants, nonce, parameter="template", checks=checks,
+            )
+            assert result["proof_confirmed"] is True
+        else:
+            checks = await replay_observed_post_controls(
+                private, parameter="template", allowed_origins=[base], storage_state=None,
+                payloads={
+                    "baseline_first": "", "quote_first": "'", "escaped_quote": "''",
+                    "quote_second": "'", "baseline_last": "",
+                },
+            )
+            result = body_probe.build_sql_error_result(
+                url, mime, baseline, parameter="template", checks=checks,
+            )
+            assert result["proof_confirmed"] is (mode == "error")
+        assert len(Handler.seen) == len(checks)
+        assert len({token for token, _ in Handler.seen}) == len(checks)
+        assert all(row["body_match_mode"] == "volatile_fields" for row in checks.values())
+        assert all(row["status"] == 200 for row in checks.values())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_ASSESSMENT_BROWSER_TESTS") != "1",
     reason="Opt-in local Chromium fixture",

@@ -273,6 +273,88 @@ async def test_approved_capture_reaches_fresh_post_verifier(
     assert manager._scoped_verifier_post_count == 5
 
 
+@pytest.mark.asyncio
+async def test_token_bearing_post_uses_browser_controls_and_independent_verifier(monkeypatch):
+    from app.services.agent.scoped_assessment import browser_post_replay
+
+    manager = ASMToolsManager()
+    manager._fallback_target = "https://app.example.test"
+    manager._assessment_scope.add("app.example.test")
+    manager.set_scoped_assessment_policy({
+        "body_replay_paths": ["/controllers/extraeDataContenido"],
+    })
+    public, private = package_exchange(
+        url=TARGET, expected_origin="https://app.example.test",
+        action_ref="navigate", method="POST", resource_type="xhr", status=200,
+        content_type="text/html", request_body=b"template=botox&csrf_token=old-token",
+        response_body=b"ordinary response",
+        request_content_type="application/x-www-form-urlencoded",
+        page_url="https://app.example.test/materials/botox",
+    )
+    store = evidence_store(manager)
+    capture_id = store.record("scoped_browser_exchange", public, target=TARGET,
+                              identity="anonymous")
+    manager._scoped_browser_exchanges = {
+        capture_id: {"identity": "anonymous", "private": private,
+                     "public": public, "verifier_run_id": None},
+    }
+    serial = 0
+
+    async def replay(capture, *, parameter, payloads, allowed_origins, storage_state):
+        nonlocal serial
+        assert capture == private and allowed_origins == ["https://app.example.test"]
+        checks = {}
+        for key, suffix in payloads.items():
+            serial += 1
+            _, _, baseline, planned = body_probe.plan_observed_body(
+                capture, parameter=parameter, allowed_origins=allowed_origins,
+                payload=suffix or "'",
+            )
+            if not suffix:
+                planned = baseline
+            actual = planned.replace(b"old-token", f"fresh-{serial}".encode())
+            value = parse_qs(actual.decode())["template"][0]
+            row = _row(MYSQL_ERROR if value.endswith("'") and not value.endswith("''")
+                       else b"ordinary response", actual)
+            row["variant_sha256"] = hashlib.sha256(planned).hexdigest()
+            row["body_match_mode"] = "volatile_fields"
+            row["volatile_fields"] = ["csrf_token"]
+            checks[key] = row
+        return checks
+
+    monkeypatch.setattr(browser_post_replay, "replay_observed_post_controls", replay)
+    hunter = json.loads(await manager.scoped_body_probe(capture_id, "template"))
+    assert hunter["proof_confirmed"] is True
+    assert hunter["replay_mode"] == "browser_fresh_post"
+    assert len({row["request_sha256"] for row in hunter["checks"].values()}) == 5
+    assert manager._scoped_post_count == 5
+
+    brain = EngagementBrain(target=TARGET)
+    brain.coverage_cells = [{
+        "id": "cell-1", "source": "parameter_inventory",
+        "observation_source": "browser_traffic", "test_type": "sqli",
+        "method": "POST", "host": "app.example.test",
+        "path": "/controllers/extraeDataContenido",
+        "parameter": "body_form:template", "identity": "anonymous",
+        "capture_id": capture_id,
+    }]
+    candidate = FindingCandidate(
+        id="candidate-1", title="SQL injection in template", target=TARGET,
+        vulnerability_class="sql_injection", coverage_cell_id="cell-1",
+        parameter="body_form:template", evidence_ids=[hunter["evidence_id"]],
+    )
+    brain.candidates = [candidate.to_dict()]
+    manager._engagement_brain = brain.to_dict()
+    run = VerificationRun("fresh-token-post-run", "candidate-1", 1, "nonce")
+    token = verification_run.set(run)
+    try:
+        verdict = await _verify_scoped_sql_candidate(manager, candidate, run)
+    finally:
+        verification_run.reset(token)
+    assert verdict["status"] == "confirmed"
+    assert manager._scoped_verifier_post_count == 5
+
+
 @pytest.mark.parametrize("request_body, content_type, parameter, location", [
     (b"template=botox&filtro=All", "application/x-www-form-urlencoded", "template", "body_form"),
     (b'{"template":"botox","page":2}', "application/json", "/template", "body_json"),
