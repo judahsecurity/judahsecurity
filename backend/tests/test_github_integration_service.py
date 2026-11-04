@@ -570,3 +570,36 @@ def test_app_jwt_is_rs256_signed_with_the_app_key(monkeypatch):
 
     claims = jwt.decode(gh._app_jwt(), public, algorithms=["RS256"])
     assert claims["iss"] == "123" and 0 < claims["exp"] - claims["iat"] <= 600
+
+
+def test_scan_priority_puts_secret_files_first():
+    paths = ["src/deep/nested/app.py", "app.py", "config/app.yaml", ".env.production", "deploy/id_rsa"]
+    ordered = sorted(paths, key=lambda p: (gh._scan_priority(p), p))
+    assert ordered[:2] == [".env.production", "deploy/id_rsa"]
+    assert ordered[2] == "config/app.yaml"
+    assert ordered[-1] == "src/deep/nested/app.py"
+
+
+@pytest.mark.asyncio
+async def test_capped_scan_covers_high_risk_files_and_is_marked_partial(fake):
+    tree = [{"path": f"src/mod{i}.py", "type": "blob", "size": 10, "sha": f"s{i}"} for i in range(5)]
+    tree.append({"path": "zz/.env", "type": "blob", "size": 10, "sha": "env"})
+    fake.add("GET", "/repos/acme/api/git/trees/main", {"truncated": False, "tree": tree})
+    fake.add("GET", "/repos/acme/api/git/blobs/env", _b64(f"KEY={AWS_KEY}\n"))
+    for i in range(5):
+        fake.add("GET", f"/repos/acme/api/git/blobs/s{i}", _b64("x = 1\n"))
+    async with gh.GitHubClient("t") as client:
+        findings, complete, files = await gh.scan_repository(client, _repo("acme/api"), max_files=2)
+    assert files == 2 and complete is False
+    assert [f["file"] for f in findings] == ["zz/.env"]
+
+
+@pytest.mark.asyncio
+async def test_sync_respects_blob_budget(db, fake, monkeypatch):
+    integration = _pat_integration(db, import_member_repos=False)
+    _org_fake(fake, secret_file_text=f"AWS_KEY = '{AWS_KEY}'\n")
+    monkeypatch.setattr(gh, "MAX_BLOBS_PER_SYNC", 1)
+    result = await gh.sync_integration(db, integration)
+    # acme/api uses the whole budget; acme/private-infra waits for the next sync.
+    assert result["files_scanned"] == 1 and result["repos_scanned"] == 1
+    assert result["repos_scan_skipped"] == 1

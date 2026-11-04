@@ -488,6 +488,8 @@ export interface GitHubSyncResult {
   members_skipped: boolean;
   repos_scanned: number;
   repos_scan_skipped: number;
+  repos_scan_partial: number;
+  files_scanned: number;
   secrets_created: number;
   secrets_updated: number;
   secrets_resolved: number;

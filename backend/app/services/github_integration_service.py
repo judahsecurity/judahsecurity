@@ -60,7 +60,10 @@ MAX_PAGES = 100  # 100 items/page → 10k repositories per listing
 MAX_MEMBERS = 2000
 MAX_MEMBER_REPO_PAGES = 5
 MAX_REPOS_SCANNED_PER_SYNC = 200
-MAX_FILES_PER_REPO = 300
+MAX_FILES_PER_REPO = 2000
+# Blob fetches across all repositories in one sync. Installation tokens and
+# PATs get 5,000 requests/hour; this leaves headroom for discovery calls.
+MAX_BLOBS_PER_SYNC = 3500
 MAX_BLOB_BYTES = 512 * 1024
 BLOB_CONCURRENCY = 8
 
@@ -747,6 +750,8 @@ class _Stats:
         self.members_skipped = False
         self.repos_scanned = 0
         self.repos_scan_skipped = 0
+        self.repos_scan_partial = 0
+        self.files_scanned = 0
         self.secrets_created = 0
         self.secrets_updated = 0
         self.secrets_resolved = 0
@@ -892,6 +897,23 @@ def _should_scan_path(path: str, size: int) -> bool:
     return name in _SCAN_NAMES or name.startswith(".env") or name.endswith(_SCAN_EXTENSIONS)
 
 
+_HIGH_RISK_EXTENSIONS = (".env", ".pem", ".key", ".tfvars", ".ipynb")
+_CONFIG_EXTENSIONS = (
+    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".config",
+    ".properties", ".xml", ".tf", ".sh", ".bash", ".ps1",
+)
+
+
+def _scan_priority(path: str) -> int:
+    """Lower scans first, so a capped scan covers the likeliest secret files."""
+    name = path.rsplit("/", 1)[-1].lower()
+    if name in _SCAN_NAMES or name.startswith(".env") or name.endswith(_HIGH_RISK_EXTENSIONS):
+        return 0
+    if name.endswith(_CONFIG_EXTENSIONS) or "config" in name or "secret" in name or "settings" in name:
+        return 1
+    return 2 + path.count("/")  # shallower source files before deeply nested ones
+
+
 def find_secrets(content: str, path: str) -> List[Dict[str, Any]]:
     """Return secret matches in one file's text, with full matched values."""
     findings: List[Dict[str, Any]] = []
@@ -917,12 +939,19 @@ def find_secrets(content: str, path: str) -> List[Dict[str, Any]]:
     return findings
 
 
-async def scan_repository(client: GitHubClient, repo: Dict[str, Any]) -> Tuple[List[Dict[str, Any]], bool]:
-    """Scan a repository's default branch. Returns findings and whether coverage was complete."""
+async def scan_repository(
+    client: GitHubClient, repo: Dict[str, Any], *, max_files: int = MAX_FILES_PER_REPO
+) -> Tuple[List[Dict[str, Any]], bool, int]:
+    """Scan a repository's default branch.
+
+    Returns findings, whether every candidate file was scanned, and how many
+    files were fetched. Files are scanned in risk order, so a capped scan still
+    covers ``.env``/key/config files first.
+    """
     full_name = str(repo["full_name"])
     branch = str(repo.get("default_branch") or "")
     if not branch:
-        return [], True
+        return [], True, 0
     response = await client.request(
         "GET",
         f"/repos/{full_name}/git/trees/{quote(branch, safe='')}",
@@ -930,13 +959,18 @@ async def scan_repository(client: GitHubClient, repo: Dict[str, Any]) -> Tuple[L
         allow=(404, 409),  # 409: empty repository
     )
     if response.status_code != 200:
-        return [], response.status_code == 409
+        return [], response.status_code == 409, 0
     tree = response.json()
-    candidates = [
-        entry for entry in tree.get("tree") or []
-        if entry.get("type") == "blob" and _should_scan_path(str(entry.get("path") or ""), int(entry.get("size") or 0))
-    ]
-    complete = not tree.get("truncated") and len(candidates) <= MAX_FILES_PER_REPO
+    candidates = sorted(
+        (
+            entry for entry in tree.get("tree") or []
+            if entry.get("type") == "blob"
+            and _should_scan_path(str(entry.get("path") or ""), int(entry.get("size") or 0))
+        ),
+        key=lambda entry: (_scan_priority(str(entry["path"])), str(entry["path"])),
+    )
+    selected = candidates[:max(0, max_files)]
+    complete = not tree.get("truncated") and len(selected) == len(candidates)
     semaphore = asyncio.Semaphore(BLOB_CONCURRENCY)
 
     async def scan_blob(entry: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -956,7 +990,7 @@ async def scan_repository(client: GitHubClient, repo: Dict[str, Any]) -> Tuple[L
 
     findings: List[Dict[str, Any]] = []
     for result in await asyncio.gather(
-        *(scan_blob(entry) for entry in candidates[:MAX_FILES_PER_REPO]), return_exceptions=True
+        *(scan_blob(entry) for entry in selected), return_exceptions=True
     ):
         if isinstance(result, GitHubApiError):
             complete = False
@@ -965,7 +999,7 @@ async def scan_repository(client: GitHubClient, repo: Dict[str, Any]) -> Tuple[L
             raise result
         else:
             findings.extend(result)
-    return findings, complete
+    return findings, complete, len(selected)
 
 
 def _secret_template_id(finding: Dict[str, Any]) -> str:
@@ -1097,15 +1131,22 @@ async def sync_integration(db: Session, integration: GitHubIntegration) -> Dict[
                         github_meta.get("last_scan_complete")
                         and github_meta.get("last_scanned_pushed_at") == repo.get("pushed_at")
                     )
-                    if unchanged or stats.repos_scanned >= MAX_REPOS_SCANNED_PER_SYNC:
+                    budget = MAX_BLOBS_PER_SYNC - stats.files_scanned
+                    if unchanged or stats.repos_scanned >= MAX_REPOS_SCANNED_PER_SYNC or budget <= 0:
+                        # Unchanged repos are done; the rest wait for the next sync.
                         stats.repos_scan_skipped += 1
                         continue
                     try:
-                        findings, complete = await scan_repository(client, repo)
+                        findings, complete, files = await scan_repository(
+                            client, repo, max_files=min(MAX_FILES_PER_REPO, budget)
+                        )
                     except GitHubApiError as exc:
                         logger.warning("GitHub secret scan failed for %s: %s", repo.get("full_name"), exc)
                         stats.repos_scan_skipped += 1
                         continue
+                    stats.files_scanned += files
+                    if not complete:
+                        stats.repos_scan_partial += 1
                     store_secret_findings(db, asset, repo, findings, complete=complete, stats=stats)
                     metadata = dict(asset.metadata_ or {})
                     metadata["github"] = {
@@ -1129,7 +1170,15 @@ async def sync_integration(db: Session, integration: GitHubIntegration) -> Dict[
             + f" ({stats.assets_created} new assets)."
         )
         if integration.scan_secrets:
-            message += f" Scanned {stats.repos_scanned} for secrets; {stats.secrets_created} new secret(s)."
+            message += (
+                f" Scanned {stats.files_scanned} files in {stats.repos_scanned} repositories for secrets;"
+                f" {stats.secrets_created} new secret(s)."
+            )
+            if stats.repos_scan_partial:
+                message += (
+                    f" {stats.repos_scan_partial} large repositories were only partly scanned "
+                    "(highest-risk files first)."
+                )
         if stats.members_skipped:
             message += " Member repositories were skipped: the credential can't list organization members."
         return {"ok": True, "message": message, **stats.as_dict()}

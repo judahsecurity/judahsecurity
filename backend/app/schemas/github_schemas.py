@@ -116,6 +116,8 @@ class GitHubSyncResult(BaseModel):
     members_skipped: bool = False
     repos_scanned: int = 0
     repos_scan_skipped: int = 0
+    repos_scan_partial: int = 0
+    files_scanned: int = 0
     secrets_created: int = 0
     secrets_updated: int = 0
     secrets_resolved: int = 0
