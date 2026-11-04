@@ -80,6 +80,30 @@ async def test_specialist_contract_denies_identity_action_and_request_overrun():
 
 
 @pytest.mark.asyncio
+async def test_ordinary_specialist_can_read_and_probe_without_scheduled_limits():
+    class Manager:
+        calls = []
+
+        async def execute(self, name, _args):
+            self.calls.append(name)
+            return {"success": True, "output": "ok"}
+
+    directive = OperationDirective(
+        specialist="sqli", epithet="SQLi", target="https://app.example.test",
+        goal="Check the observed input",
+    )
+    budget = _SpecialistBudget(directive)
+    manager = Manager()
+    assert (await _safe_invoke(
+        manager, "get_parameter_inventory", {"identity": "anonymous"}, budget=budget,
+    )).success
+    assert (await _safe_invoke(manager, "scoped_input_probe_assigned", {}, budget=budget)).success
+    denied = await _safe_invoke(manager, "mutate_captured_request", {}, budget=budget)
+    assert denied.error == "specialist_action_denied"
+    assert manager.calls == ["get_parameter_inventory", "scoped_input_probe_assigned"]
+
+
+@pytest.mark.asyncio
 async def test_specialist_stops_at_tool_call_budget(monkeypatch):
     from app.services.agent import fireteam_service, orchestrator
 

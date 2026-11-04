@@ -1592,9 +1592,14 @@ class _SpecialistBudget:
 
     async def acquire(self, tool_name: str, args: dict) -> str:
         directive = self.directive
-        if _action_kind(tool_name, args) not in set(directive.allowed_actions or []):
+        # An empty directive means the ordinary engagement policy applies.
+        # Scheduled limits fill this list explicitly; without them, read and
+        # probe calls must remain available while state changes stay gated.
+        allowed_actions = set(directive.allowed_actions or ("read", "probe"))
+        if _action_kind(tool_name, args) not in allowed_actions:
             return "specialist_action_denied"
-        if _requested_identities(args) - set(directive.allowed_identities or []):
+        if (directive.allowed_identities
+                and _requested_identities(args) - set(directive.allowed_identities)):
             return "specialist_identity_denied"
         if directive.allowed_hosts:
             for host in re.findall(r'https?://[^\s"\'<>},]+', json.dumps(args or {})):
