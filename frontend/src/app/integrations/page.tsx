@@ -60,6 +60,7 @@ import { cn } from '@/lib/utils';
 import { JiraProjectPicker } from '@/components/integrations/JiraProjectPicker';
 import { ServiceNowSection } from '@/components/integrations/ServiceNowSection';
 import { WizSection } from '@/components/integrations/WizSection';
+import { GitHubSection } from '@/components/integrations/GitHubSection';
 import { NetBrainSection } from '@/components/integrations/NetBrainSection';
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'] as const;
@@ -3205,6 +3206,15 @@ export default function IntegrationsPage() {
             )}
           </CardContent>
         </Card>
+
+        {/* Source code managers */}
+        <div className="space-y-3" id="source-code-managers">
+          <div>
+            <h2 className="text-sm font-semibold">Source Code Managers</h2>
+            <p className="text-xs text-muted-foreground">Bring repositories into the attack surface for continuous monitoring.</p>
+          </div>
+          <GitHubSection />
+        </div>
 
         {/* Censys ASM Integration Card */}
         <CensysSection />

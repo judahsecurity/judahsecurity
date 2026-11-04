@@ -429,6 +429,77 @@ export interface WizSyncResult {
   findings_filtered: number;
 }
 
+export interface GitHubIntegration {
+  id: number;
+  organization_id: number;
+  auth_method: 'app' | 'pat';
+  account_login: string;
+  account_type: 'Organization' | 'User' | string;
+  account_url: string;
+  installation_id?: number;
+  repository_selection?: 'all' | 'selected' | string;
+  installed_by_github_login?: string;
+  import_member_repos: boolean;
+  scan_secrets: boolean;
+  allow_fix_pull_requests: boolean;
+  can_open_pull_requests: boolean;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number | boolean>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GitHubAppStatus {
+  app_configured: boolean;
+  app_slug?: string;
+  app_install_url?: string;
+  pending_requests: { id: number; github_login?: string; requested_at: string; expires_at: string }[];
+}
+
+export interface GitHubConnectionOptions {
+  import_member_repos: boolean;
+  scan_secrets: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+}
+
+export interface GitHubAppCallbackResult {
+  status: 'connected' | 'requested' | 'authorize';
+  message: string;
+  integration_id?: number;
+  authorize_url?: string;
+}
+
+export interface GitHubSyncResult {
+  ok: boolean;
+  message: string;
+  repos_seen: number;
+  assets_created: number;
+  assets_updated: number;
+  member_repos_seen: number;
+  members_skipped: boolean;
+  repos_scanned: number;
+  repos_scan_skipped: number;
+  secrets_created: number;
+  secrets_updated: number;
+  secrets_resolved: number;
+}
+
+export interface GitHubPullRequest {
+  number: number;
+  html_url: string;
+  branch: string;
+  repository: string;
+}
+
 // ── HackerOne shared types ─────────────────────────────────────────────────
 
 export interface HackerOneIntegration {
@@ -3171,6 +3242,83 @@ class ApiClient {
 
   async syncWizIntegration(id: number): Promise<WizSyncResult> {
     const response = await this.client.post(`/integrations/wiz/${id}/sync`);
+    return response.data;
+  }
+
+  // ── GitHub (Source Code Manager) ──────────────────────────────────────────
+
+  async getGitHubAppStatus(): Promise<GitHubAppStatus> {
+    const response = await this.client.get('/integrations/github/app');
+    return response.data;
+  }
+
+  async getGitHubIntegrations(): Promise<GitHubIntegration[]> {
+    const response = await this.client.get('/integrations/github');
+    return response.data;
+  }
+
+  async startGitHubAppInstall(options: GitHubConnectionOptions): Promise<{ install_url: string; expires_at: string }> {
+    const response = await this.client.post('/integrations/github/app/install', options);
+    return response.data;
+  }
+
+  async completeGitHubAppInstall(payload: {
+    state: string;
+    installation_id?: number;
+    setup_action?: string;
+    code?: string;
+  }): Promise<GitHubAppCallbackResult> {
+    const response = await this.client.post('/integrations/github/app/callback', payload);
+    return response.data;
+  }
+
+  async reconcileGitHubAppRequests(): Promise<{ linked: number }> {
+    const response = await this.client.post('/integrations/github/app/reconcile');
+    return response.data;
+  }
+
+  async createGitHubPatIntegration(payload: GitHubConnectionOptions & {
+    token: string;
+    organization_url: string;
+    allow_fix_pull_requests: boolean;
+  }): Promise<GitHubIntegration> {
+    const response = await this.client.post('/integrations/github/pat', payload);
+    return response.data;
+  }
+
+  async updateGitHubIntegration(id: number, payload: Partial<GitHubConnectionOptions & {
+    token: string;
+    allow_fix_pull_requests: boolean;
+    is_active: boolean;
+  }>): Promise<GitHubIntegration> {
+    const response = await this.client.put(`/integrations/github/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteGitHubIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/github/${id}`);
+  }
+
+  async testGitHubIntegration(id: number): Promise<{ ok: boolean; message: string; members_accessible: boolean }> {
+    const response = await this.client.post(`/integrations/github/${id}/test`);
+    return response.data;
+  }
+
+  async syncGitHubIntegration(id: number): Promise<GitHubSyncResult> {
+    const response = await this.client.post(`/integrations/github/${id}/sync`);
+    return response.data;
+  }
+
+  async createGitHubFixPullRequest(id: number, payload: {
+    vulnerability_id: number;
+    title: string;
+    changes: { path: string; content: string | null }[];
+    repository?: string;
+    body?: string;
+    base_branch?: string;
+    commit_message?: string;
+  }): Promise<GitHubPullRequest> {
+    const response = await this.client.post(`/integrations/github/${id}/pull-requests`, payload);
     return response.data;
   }
 

@@ -21,6 +21,7 @@ class AssetType(str, enum.Enum):
     CLOUD_RESOURCE = "CLOUD_RESOURCE"
     API_ENDPOINT = "API_ENDPOINT"
     EMAIL = "EMAIL"
+    REPOSITORY = "REPOSITORY"  # source code repository (e.g. GitHub)
     OTHER = "OTHER"
 
 
@@ -29,6 +30,7 @@ class AssetStatus(str, enum.Enum):
     DISCOVERED = "discovered"
     VERIFIED = "verified"
     UNVERIFIED = "unverified"
+    PENDING = "pending"  # awaiting review, e.g. repos owned by org members
     INACTIVE = "inactive"
     ARCHIVED = "archived"
 

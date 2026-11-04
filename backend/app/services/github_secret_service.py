@@ -166,6 +166,22 @@ SECRET_PATTERNS = {
 }
 
 
+_PLACEHOLDERS = (
+    "example", "placeholder", "your_", "xxx", "123", "abc",
+    "test", "sample", "demo", "dummy", "fake", "mock",
+    "todo", "fixme", "changeme", "insert", "replace",
+)
+
+
+def is_likely_secret(text: str, secret_type: str) -> bool:
+    """Check if a match is likely a real secret (not a placeholder)."""
+    text_lower = text.lower()
+    if any(placeholder in text_lower for placeholder in _PLACEHOLDERS):
+        return False
+    # Repeated characters (e.g. "AKIAAAAAAAAAAAAAAAAA") are not real keys.
+    return len(set(text)) >= 5
+
+
 class GitHubSecretService:
     """
     Service for scanning GitHub repositories for exposed secrets.
@@ -439,23 +455,7 @@ class GitHubSecretService:
     
     def _is_likely_secret(self, text: str, secret_type: str) -> bool:
         """Check if a match is likely a real secret (not a placeholder)."""
-        # Common placeholders/examples
-        placeholders = [
-            "example", "placeholder", "your_", "xxx", "123", "abc",
-            "test", "sample", "demo", "dummy", "fake", "mock",
-            "TODO", "FIXME", "CHANGEME", "INSERT", "REPLACE",
-        ]
-        
-        text_lower = text.lower()
-        for placeholder in placeholders:
-            if placeholder.lower() in text_lower:
-                return False
-        
-        # Check for repeated characters
-        if len(set(text)) < 5:
-            return False
-        
-        return True
+        return is_likely_secret(text, secret_type)
     
     def _redact_secret(self, text: str) -> str:
         """Redact the middle of a secret for safe storage/display."""

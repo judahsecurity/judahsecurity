@@ -599,6 +599,8 @@ export default function AssetsPage() {
         return 'bg-green-500/20 text-green-400 border-green-500/30';
       case 'unverified':
         return 'bg-yellow-500/20 text-yellow-400 border-yellow-500/30';
+      case 'pending':
+        return 'bg-amber-500/20 text-amber-400 border-amber-500/30';
       case 'inactive':
         return 'bg-gray-500/20 text-gray-400 border-gray-500/30';
       case 'archived':
@@ -607,7 +609,6 @@ export default function AssetsPage() {
       case 'active':
       case 'completed':
         return 'bg-green-500/20 text-green-400 border-green-500/30';
-      case 'pending':
       case 'running':
         return 'bg-blue-500/20 text-blue-400 border-blue-500/30';
       case 'error':
@@ -654,6 +655,7 @@ export default function AssetsPage() {
         { label: 'Service', value: 'service' },
         { label: 'Certificate', value: 'certificate' },
         { label: 'API Endpoint', value: 'api_endpoint' },
+        { label: 'Repository', value: 'repository' },
       ],
     },
     {
@@ -663,6 +665,7 @@ export default function AssetsPage() {
         { label: 'Discovered', value: 'discovered' },
         { label: 'Verified', value: 'verified' },
         { label: 'Unverified', value: 'unverified' },
+        { label: 'Pending', value: 'pending' },
         { label: 'Inactive', value: 'inactive' },
         { label: 'Archived', value: 'archived' },
       ],

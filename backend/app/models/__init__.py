@@ -64,6 +64,7 @@ from app.models.workflow import (
     ScriptLanguage,
 )
 from app.models.wiz_integration import WizIntegration
+from app.models.github_integration import GitHubIntegration, GitHubAppInstallRequest
 from app.models.netbrain_integration import NetBrainIntegration
 
 __all__ = [
@@ -145,6 +146,8 @@ __all__ = [
     "WorkflowRunStatus",
     "WorkflowNodeRunStatus",
     "WizIntegration",
+    "GitHubIntegration",
+    "GitHubAppInstallRequest",
     "NetBrainIntegration",
     "ScriptLanguage",
 ]

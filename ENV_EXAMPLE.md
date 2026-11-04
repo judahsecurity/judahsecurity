@@ -271,6 +271,21 @@ NEO4J_BOLT_PORT=7687
 GITHUB_TOKEN=
 
 # =============================================================================
+# GitHub App — Source Code Manager integration (optional)
+# =============================================================================
+# Register a GitHub App with read-only Metadata, Contents, and Members access
+# and no webhook events. Enable "Request user authorization (OAuth) during
+# installation" and set its Callback URL to
+#   https://<frontend>/integrations/github/callback
+# Customers then install the App from Integrations > Source Code Managers.
+# GITHUB_APP_ID=
+# GITHUB_APP_SLUG=
+# GITHUB_APP_CLIENT_ID=
+# GITHUB_APP_CLIENT_SECRET=
+# GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/github-app.pem
+# GITHUB_APP_PRIVATE_KEY=   # or the PEM itself, with \n line breaks
+
+# =============================================================================
 # Scanner Performance Tuning (optional)
 # =============================================================================
 

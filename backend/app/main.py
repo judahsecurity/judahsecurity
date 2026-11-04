@@ -22,6 +22,7 @@ from app.models.jira_integration import JiraIntegration, JiraTicket  # noqa: F40
 from app.models.servicenow_integration import ServiceNowIntegration, ServiceNowDelivery  # noqa: F401 — ensure tables are created
 from app.models.censys_integration import CensysAsmIntegration  # noqa: F401 — ensure table is created
 from app.models.wiz_integration import WizIntegration  # noqa: F401 — ensure table is created
+from app.models.github_integration import GitHubIntegration, GitHubAppInstallRequest  # noqa: F401 — ensure tables are created
 from app.models.hackerone_integration import HackerOneIntegration, HackerOneReportLink  # noqa: F401 — ensure tables are created
 from app.models.panorama_integration import PanoramaIntegration  # noqa: F401 — ensure table is created
 from app.models.f5_integration import F5Integration  # noqa: F401 — ensure table is created
@@ -31,6 +32,7 @@ from app.models.cloudflare_integration import CloudflareWafIntegration  # noqa: 
 from app.models.custom_nuclei_template import CustomNucleiTemplate  # noqa: F401 — ensure table is created
 from app.api.routes import auth, users, organizations, assets, vulnerabilities, scans, discovery, nuclei, ports, screenshots, external_discovery, waybackurls, netblocks, labels, scan_schedules, scan_profiles, tools, sni_discovery, scan_config, acquisitions, oracle, agent
 from app.api.routes import integrations
+from app.api.routes import github_integration as github_integration_router
 from app.api.routes import business_apps as business_apps_router
 from app.api.routes import scoring as scoring_router
 from app.api.routes import posture as posture_router
@@ -199,6 +201,7 @@ app.include_router(acquisitions.router, prefix=settings.API_PREFIX)
 app.include_router(oracle.router, prefix=settings.API_PREFIX)
 app.include_router(agent.router, prefix=settings.API_PREFIX)
 app.include_router(integrations.router, prefix=settings.API_PREFIX)
+app.include_router(github_integration_router.router, prefix=settings.API_PREFIX)
 app.include_router(scoring_router.router, prefix=settings.API_PREFIX)
 app.include_router(posture_router.router, prefix=settings.API_PREFIX)
 app.include_router(threat_intel_router.router, prefix=settings.API_PREFIX)
@@ -313,6 +316,7 @@ async def startup_event():
     apply_oracle_migrations()
     apply_scan_profile_migrations()
     apply_agent_ledger_migrations()
+    apply_asset_enum_migrations()
 
     # Check ProjectDiscovery tools installation
     from app.services.nuclei_service import NucleiService
@@ -741,6 +745,27 @@ def apply_oracle_migrations():
         logger.info("Oracle schema migrations applied.")
     except Exception as exc:
         logger.error("Oracle schema migrations failed (non-fatal): %s", exc)
+
+
+def apply_asset_enum_migrations():
+    """Add asset enum values that create_all cannot add to existing Postgres types.
+
+    ALTER TYPE ... ADD VALUE runs in autocommit, one statement at a time, so a
+    failure (e.g. a non-Postgres database) cannot abort other migrations.
+    """
+    from sqlalchemy import text
+
+    if engine.dialect.name != "postgresql":
+        return
+    for stmt in (
+        "ALTER TYPE assettype ADD VALUE IF NOT EXISTS 'REPOSITORY'",
+        "ALTER TYPE assetstatus ADD VALUE IF NOT EXISTS 'PENDING'",
+    ):
+        try:
+            with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+                conn.execute(text(stmt))
+        except Exception as exc:
+            logger.warning("asset enum migration skipped (%s): %s", stmt, exc)
 
 
 def apply_agent_ledger_migrations():

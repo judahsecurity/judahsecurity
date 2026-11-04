@@ -222,6 +222,15 @@ class Settings(BaseSettings):
     # GitHub Secret Scanning Configuration
     GITHUB_TOKEN: Optional[str] = None
     GITHUB_SECRET_SCAN_ENABLED: bool = True
+
+    # GitHub App for the Source Code Manager integration. The App's private key
+    # never leaves the platform; customers store only an installation ID.
+    GITHUB_APP_ID: Optional[str] = None
+    GITHUB_APP_SLUG: Optional[str] = None  # github.com/apps/<slug>
+    GITHUB_APP_CLIENT_ID: Optional[str] = None  # user-authorization during install
+    GITHUB_APP_CLIENT_SECRET: Optional[str] = None
+    GITHUB_APP_PRIVATE_KEY: Optional[str] = None  # PEM text (\\n escapes allowed)
+    GITHUB_APP_PRIVATE_KEY_PATH: Optional[str] = None  # or a path to the PEM file
     
     # MITRE ATT&CK Enrichment
     MITRE_ENRICHMENT_ENABLED: bool = True
