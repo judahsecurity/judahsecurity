@@ -232,7 +232,8 @@
       "file_upload"
     ],
     "methodology_ids": [
-      "unsafe_file_upload"
+      "unsafe_file_upload",
+      "output_formula_injection"
     ],
     "steps": [
       "Upload a harmless test-owned file through the observed workflow and locate its retrieval URL.",
@@ -655,13 +656,19 @@
       "chat",
       "assistant",
       "mcp",
-      "tool"
+      "tool",
+      "extract",
+      "invoice",
+      "ocr",
+      "summari",
+      "embedding"
     ],
     "test_types": [
       "llm_ai"
     ],
     "methodology_ids": [
-      "agent_tool_enumeration"
+      "agent_tool_enumeration",
+      "llm_prompt_injection"
     ],
     "steps": [
       "Map trusted instructions, retrieved content, user input, and available agent tools.",

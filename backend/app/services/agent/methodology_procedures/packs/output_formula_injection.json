@@ -1,0 +1,21 @@
+{
+  "id": "output_formula_injection",
+  "title": "Formula (CSV / XLSX) injection via exported user input",
+  "summary": "Prove user-controlled text reaches a generated spreadsheet or document cell without neutralizing a formula trigger, so a spreadsheet client would execute it on open. A reflected value that is quote-prefixed or escaped is not impact.",
+  "steps": [
+    "Find a field whose value flows into an export or document-generation sink (CSV/XLSX download, invoice/report generation, PDF conversion).",
+    "Store a benign canary beginning with a formula trigger (=, +, -, @, a leading tab or CR), for example =1+1 or a harmless =HYPERLINK canary — never a data-exfiltration, DDE, or command formula.",
+    "Trigger the export and download the generated file (execute_curl / execute_browser), then inspect the target cell.",
+    "PASS if the cell retains the raw trigger prefix with no leading single quote, escaping, or stripping, so a spreadsheet client would evaluate it.",
+    "Change one variable at a time (field, trigger character); one canary cell is enough — do not seed many rows or production records.",
+    "On PASS: show the submitted value and the raw exported cell with evidence. KILL if the export prefixes a quote, escapes, or removes the trigger characters."
+  ],
+  "tools": ["mutate_captured_request", "execute_curl", "execute_browser", "list_captured_requests"],
+  "pass_signals": [
+    "The exported cell keeps the raw formula prefix unescaped"
+  ],
+  "kill_signals": [
+    "The export quote-prefixes, escapes, or strips the trigger characters"
+  ],
+  "references": ["CWE-1236", "https://owasp.org/www-community/attacks/CSV_Injection"]
+}

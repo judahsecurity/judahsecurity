@@ -159,6 +159,29 @@ _ML_PIPELINE_RE = re.compile(
     r")",
     re.I,
 )
+# A document/content ingestion endpoint that feeds an LLM (extraction, OCR,
+# summarization, embeddings, RAG/knowledge-base) — the indirect prompt-injection
+# surface, distinct from an interactive chat endpoint (_AI_AGENT_RE).
+_LLM_DATA_PIPE_RE = re.compile(
+    r"("
+    r"extract.?invoice|invoice.?extract|/extract\b|/extract-|"
+    r"/ocr\b|/summari[sz]e|summari[sz]ation|"
+    r"/embed\b|/embeddings?\b|vector.?store|"
+    r"knowledge.?base|kb.?query|/retriev|/rag\b|"
+    r"document.?(?:extract|parse|convert|understand|intelligence)"
+    r")",
+    re.I,
+)
+# An export/generation sink that writes user-controlled text into a spreadsheet
+# or document (CSV/XLSX/PDF) — the formula-injection surface.
+_FORMULA_EXPORT_RE = re.compile(
+    r"("
+    r"export.?(?:csv|xlsx|excel|xls)|download.?(?:csv|xlsx|excel|invoice|report)|"
+    r"generate.?(?:csv|xlsx|excel|spreadsheet|report)|to.?excel|"
+    r"\.csv\b|\.xlsx\b|libreoffice|gotenberg"
+    r")",
+    re.I,
+)
 
 
 def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
@@ -1016,6 +1039,54 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             why="ML train / Celery / optimize APIs observed — self-reg often has no RBAC",
         ))
 
+    if _LLM_DATA_PIPE_RE.search(combined) or (has_ai and has_upload):
+        ev = next(
+            (
+                f"{e.get('method', '')} {e.get('path', '')}".strip()
+                for e in apis
+                if isinstance(e, dict) and _LLM_DATA_PIPE_RE.search(
+                    f"{e.get('method', '')} {e.get('path', '')}"
+                )
+            ),
+            None,
+        ) or next(
+            (str(p) for p in pages if _LLM_DATA_PIPE_RE.search(str(p))),
+            "/extract",
+        )
+        add(Methodology(
+            id="llm_prompt_injection",
+            title="Indirect prompt injection via ingested document/content",
+            hunt="llm_prompt_injection",
+            specialist="injection",
+            priority="medium",
+            assumption=(
+                "A document- or content-ingestion endpoint passes attacker-controllable "
+                "text (an uploaded PDF, OCR'd image, or retrieved content) to an LLM "
+                "without partitioning it from the instructions, so injected directives "
+                "override the structured output or cross a tool/data boundary"
+            ),
+            test=(
+                "Submit a baseline document and record the structured output. With "
+                "run_custom_probe, build an identical document carrying a prepended or "
+                "appended directive block (e.g. 'CORRECTED DETAILS' / 'AMENDMENT NOTICE') "
+                "and resubmit; diff the two structured responses. One overridden field is "
+                "proof. Keep payloads test-owned; do not exfiltrate real data or tokens."
+            ),
+            pass_criteria=(
+                "Injected lower-trust text changes a structured field, or drives the "
+                "agent across a tool/data/instruction boundary, versus the baseline"
+            ),
+            kill_criteria=(
+                "Input is partitioned or post-validated; the injected text is ignored "
+                "or only echoed back verbatim"
+            ),
+            cwe_ids=["CWE-77", "CWE-1427"],
+            capec_ids=["CAPEC-248"],
+            owasp="OWASP LLM01: Prompt Injection",
+            evidence=str(ev),
+            why="Document/content ingestion into an LLM pipeline observed",
+        ))
+
     if re.search(
         r"wiki|mediawiki|confluence|dokuwiki|special:createaccount",
         es_blob,
@@ -1794,6 +1865,52 @@ def methodologies_from_capability_map(cmap: Any) -> List[Methodology]:
             owasp="A04:2021 Insecure Design",
             evidence=ev,
             why="Upload form/inputs observed",
+        ))
+
+    if _FORMULA_EXPORT_RE.search(combined) and (has_upload or has_search or bool(forms)):
+        ev = next(
+            (
+                f"{e.get('method', '')} {e.get('path', '')}".strip()
+                for e in apis
+                if isinstance(e, dict) and _FORMULA_EXPORT_RE.search(
+                    f"{e.get('method', '')} {e.get('path', '')}"
+                )
+            ),
+            None,
+        ) or next(
+            (str(p) for p in pages if _FORMULA_EXPORT_RE.search(str(p))),
+            "export",
+        )
+        add(Methodology(
+            id="output_formula_injection",
+            title="Formula (CSV/XLSX) injection via exported user input",
+            hunt="file_upload",
+            specialist="file_upload",
+            priority="medium",
+            assumption=(
+                "User-controlled text reaches a generated CSV/XLSX/PDF cell without "
+                "neutralizing leading =, +, -, @, tab, or CR, so a spreadsheet client "
+                "executes it as a formula on open"
+            ),
+            test=(
+                "Store a benign canary beginning with a formula trigger in a field that "
+                "flows to the export (for example =1+1 or a harmless HYPERLINK canary), "
+                "then download the generated file and confirm the cell retains the raw "
+                "formula prefix unescaped. Do not use data-exfiltration or command "
+                "formulas; one canary cell."
+            ),
+            pass_criteria=(
+                "The exported cell keeps the raw formula prefix (no leading quote / "
+                "escaping), so a spreadsheet client would evaluate it"
+            ),
+            kill_criteria=(
+                "The export prefixes a quote, escapes, or strips the trigger characters"
+            ),
+            cwe_ids=["CWE-1236"],
+            capec_ids=["CAPEC-248"],
+            owasp="A03:2021 Injection",
+            evidence=str(ev),
+            why="Spreadsheet/document export sink with a user-controlled source observed",
         ))
 
     if has_graphql:

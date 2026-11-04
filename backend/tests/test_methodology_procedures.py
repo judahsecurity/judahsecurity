@@ -66,6 +66,43 @@ def test_oauth_and_agent_packs_are_loadable():
     assert "execute_llm_red_team" in agent["tools"]
 
 
+def test_llm_and_formula_packs_are_loadable():
+    llm = load_procedure("llm_prompt_injection")
+    assert llm is not None
+    assert "run_custom_probe" in llm["tools"]
+    assert any("baseline" in s.lower() for s in llm["steps"])
+
+    formula = load_procedure("output_formula_injection")
+    assert formula is not None
+    assert "CWE-1236" in formula["references"]
+
+
+def test_llm_prompt_injection_card_seeds_on_extraction_endpoint():
+    cmap = {
+        "target": "https://api.test",
+        "api_endpoints": [{"method": "POST", "path": "/extract-invoices"}],
+        "has_upload": True,
+    }
+    ids = {m.id for m in methodologies_from_capability_map(cmap)}
+    assert "llm_prompt_injection" in ids
+
+
+def test_output_formula_injection_card_seeds_on_export_sink():
+    cmap = {
+        "target": "https://app.test",
+        "api_endpoints": [{"method": "GET", "path": "/download-invoices.xlsx"}],
+        "has_upload": True,
+    }
+    ids = {m.id for m in methodologies_from_capability_map(cmap)}
+    assert "output_formula_injection" in ids
+
+
+def test_llm_card_does_not_seed_on_plain_product_page():
+    cmap = {"target": "https://shop.test", "pages_visited": ["https://shop.test/products"]}
+    ids = {m.id for m in methodologies_from_capability_map(cmap)}
+    assert "llm_prompt_injection" not in ids
+
+
 def test_load_csrf_pack():
     pack = load_procedure("csrf_state_changing")
     assert pack is not None
