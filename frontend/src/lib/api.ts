@@ -429,6 +429,41 @@ export interface WizSyncResult {
   findings_filtered: number;
 }
 
+export interface TenableIntegration {
+  id: number;
+  organization_id: number;
+  connection_name: string;
+  base_url: string;
+  import_assets: boolean;
+  import_vulnerabilities: boolean;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TenableSyncResult {
+  ok: boolean;
+  message: string;
+  assets_seen: number;
+  assets_created: number;
+  assets_updated: number;
+  assets_skipped: number;
+  vulns_seen: number;
+  vulns_created: number;
+  vulns_updated: number;
+  vulns_skipped: number;
+  ports_created: number;
+}
+
 // ── HackerOne shared types ─────────────────────────────────────────────────
 
 export interface HackerOneIntegration {
@@ -3171,6 +3206,56 @@ class ApiClient {
 
   async syncWizIntegration(id: number): Promise<WizSyncResult> {
     const response = await this.client.post(`/integrations/wiz/${id}/sync`);
+    return response.data;
+  }
+
+  // ── Tenable VM Integration ─────────────────────────────────────────────────
+
+  async getTenableIntegrations(): Promise<TenableIntegration[]> {
+    const response = await this.client.get('/integrations/tenable');
+    return response.data;
+  }
+
+  async createTenableIntegration(payload: {
+    connection_name: string;
+    base_url: string;
+    access_key: string;
+    secret_key: string;
+    import_assets: boolean;
+    import_vulnerabilities: boolean;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<TenableIntegration> {
+    const response = await this.client.post('/integrations/tenable', payload);
+    return response.data;
+  }
+
+  async updateTenableIntegration(id: number, payload: Partial<{
+    connection_name: string;
+    base_url: string;
+    access_key: string;
+    secret_key: string;
+    import_assets: boolean;
+    import_vulnerabilities: boolean;
+    is_active: boolean;
+    continuous_sync_enabled: boolean;
+    sync_interval_minutes: number;
+  }>): Promise<TenableIntegration> {
+    const response = await this.client.put(`/integrations/tenable/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteTenableIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/tenable/${id}`);
+  }
+
+  async testTenableConnection(id: number): Promise<{ ok: boolean; message: string; assets_export_ok: boolean; vulns_export_ok: boolean }> {
+    const response = await this.client.post(`/integrations/tenable/${id}/test`);
+    return response.data;
+  }
+
+  async syncTenableIntegration(id: number): Promise<TenableSyncResult> {
+    const response = await this.client.post(`/integrations/tenable/${id}/sync`);
     return response.data;
   }
 

@@ -18,6 +18,7 @@ from app.models.jira_integration import JiraIntegration, JiraTicket
 from app.models.servicenow_integration import ServiceNowDelivery, ServiceNowIntegration
 from app.models.censys_integration import CensysAsmIntegration
 from app.models.wiz_integration import WizIntegration
+from app.models.tenable_integration import TenableVmIntegration
 from app.models.hackerone_integration import HackerOneIntegration, HackerOneReportLink
 from app.models.akamai_integration import AkamaiWafIntegration
 from app.models.panorama_integration import (
@@ -68,6 +69,13 @@ from app.schemas.wiz_schemas import (
     WizSyncResult,
     WizTestConnectionResponse,
 )
+from app.schemas.tenable_schemas import (
+    TenableIntegrationCreate,
+    TenableIntegrationResponse,
+    TenableIntegrationUpdate,
+    TenableSyncResult,
+    TenableTestConnectionResponse,
+)
 from app.schemas.hackerone_schemas import (
     AssociateHackerOneReportRequest,
     HackerOneIntegrationCreate,
@@ -117,6 +125,7 @@ from app.services import (
     jira_service,
     censys_asm_service,
     wiz_service,
+    tenable_vm_service,
     hackerone_service,
     akamai_waf_service,
     panorama_service,
@@ -916,6 +925,158 @@ async def sync_wiz_integration(
     if not integration.is_active:
         raise HTTPException(status_code=400, detail="This Wiz connection is disabled.")
     return WizSyncResult(**(await wiz_service.sync_integration(db, integration)))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Tenable VM — read-only import of assessed assets and open vulnerabilities
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_tenable_integration(db: Session, org_id: int, integration_id: int) -> TenableVmIntegration:
+    integration = (
+        db.query(TenableVmIntegration)
+        .filter(
+            TenableVmIntegration.id == integration_id,
+            TenableVmIntegration.organization_id == org_id,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="Tenable VM connection not found.")
+    return integration
+
+
+@router.get("/tenable", response_model=List[TenableIntegrationResponse])
+def list_tenable_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    return (
+        db.query(TenableVmIntegration)
+        .filter(TenableVmIntegration.organization_id == org_id)
+        .order_by(TenableVmIntegration.created_at.desc())
+        .all()
+    )
+
+
+@router.post("/tenable", response_model=TenableIntegrationResponse, status_code=status.HTTP_201_CREATED)
+async def create_tenable_integration(
+    payload: TenableIntegrationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    existing = db.query(TenableVmIntegration).filter(
+        TenableVmIntegration.organization_id == org_id,
+        TenableVmIntegration.connection_name == payload.connection_name,
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"A Tenable VM connection named '{payload.connection_name}' already exists.",
+        )
+
+    result = await tenable_vm_service.test_connection(
+        payload.base_url, payload.access_key, payload.secret_key
+    )
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+
+    integration = TenableVmIntegration(
+        organization_id=org_id,
+        connection_name=payload.connection_name,
+        base_url=payload.base_url,
+        import_assets=payload.import_assets,
+        import_vulnerabilities=payload.import_vulnerabilities,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+        last_tested_at=datetime.utcnow(),
+        last_test_ok=True,
+    )
+    integration.set_access_key(payload.access_key)
+    integration.set_secret_key(payload.secret_key)
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.put("/tenable/{integration_id}", response_model=TenableIntegrationResponse)
+async def update_tenable_integration(
+    integration_id: int,
+    payload: TenableIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_tenable_integration(db, org_id, integration_id)
+    data = payload.model_dump(exclude_unset=True)
+    access_key = data.pop("access_key", None)
+    secret_key = data.pop("secret_key", None)
+    credentials_changed = bool(access_key or secret_key or "base_url" in data)
+    for field, value in data.items():
+        setattr(integration, field, value)
+    if access_key:
+        integration.set_access_key(access_key)
+    if secret_key:
+        integration.set_secret_key(secret_key)
+
+    if credentials_changed:
+        result = await tenable_vm_service.test_connection(
+            integration.base_url, integration.get_access_key(), integration.get_secret_key()
+        )
+        if not result["ok"]:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=result["message"])
+        integration.last_tested_at = datetime.utcnow()
+        integration.last_test_ok = True
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/tenable/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_tenable_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_tenable_integration(db, org_id, integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post("/tenable/{integration_id}/test", response_model=TenableTestConnectionResponse)
+async def test_tenable_connection(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_tenable_integration(db, org_id, integration_id)
+    result = await tenable_vm_service.test_connection(
+        integration.base_url, integration.get_access_key(), integration.get_secret_key()
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    db.commit()
+    return TenableTestConnectionResponse(**result)
+
+
+@router.post("/tenable/{integration_id}/sync", response_model=TenableSyncResult)
+async def sync_tenable_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_tenable_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This Tenable VM connection is disabled.")
+    return TenableSyncResult(**(await tenable_vm_service.sync_integration(db, integration)))
 
 
 # ══════════════════════════════════════════════════════════════════════════════
