@@ -497,7 +497,10 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     _scoped_post_count = SessionValue(lambda: 0)
     _scoped_verifier_post_count = SessionValue(lambda: 0)
     _scoped_body_replay_paths = SessionValue(set)
+    _scoped_policy_applied = SessionValue(lambda: False)
     _scoped_stored_xss_cleanup_paths = SessionValue(set)
+    _scoped_race_action_paths = SessionValue(set)
+    _scoped_race_cleanup_paths = SessionValue(set)
     _scoped_owner_expectations = SessionValue(dict)
     _scoped_auth_login_path = SessionValue(lambda: "")
     _scoped_assessment_started = SessionValue(lambda: False)
@@ -2732,6 +2735,18 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
     async def _execute_impl(self, tool_name: str, tool_args: Dict[str, Any]) -> Dict[str, Any]:
         """Execute a tool with the given arguments."""
         tool_args = dict(tool_args or {}) if isinstance(tool_args, dict) else {}
+        if self._scoped_policy_applied and tool_name in {"run_custom_probe", "run_poc_python"}:
+            return {
+                "success": False,
+                "output": "Custom Python HTTP probes cannot enforce operator method and path approvals; use structured replay tools.",
+                "error": "operator_method_policy_denied",
+            }
+        if self._scoped_policy_applied and tool_name == "execute_interceptor":
+            return {
+                "success": False,
+                "output": "Interceptor workers cannot enforce operator method and path approvals; use execute_deep_crawl.",
+                "error": "operator_method_policy_denied",
+            }
         if tool_name in {"test_credential_spray", "execute_hydra", "execute_brutus"} and not self._credential_testing_allowed:
             return {
                 "success": False,
@@ -2875,6 +2890,28 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                         "success": False, "output": message,
                         "error": "assessment_scope_denied", "reason": reason,
                     }
+
+        if self._scoped_policy_applied and tool_name in {"execute_browser", "execute_deep_crawl"}:
+            try:
+                spec = json.loads(str(tool_args.get("args") or ""))
+                if not isinstance(spec, dict):
+                    raise ValueError("Scoped browser and crawl calls require JSON arguments")
+                if tool_name == "execute_deep_crawl":
+                    target = str(spec.get("url") or spec.get("target") or "").strip()
+                    from app.services.agent.assessment_scope import assert_url_in_scope
+                    assert_url_in_scope(self, target)
+                    spec["allowed_origin"] = target
+                spec["allowed_methods"] = ["GET", "HEAD"]
+                spec["approved_post_paths"] = sorted(
+                    self._scoped_body_replay_paths | self._scoped_race_action_paths
+                    | ({self._scoped_auth_login_path} if self._scoped_auth_login_path else set())
+                )
+                spec["approved_delete_paths"] = sorted(
+                    self._scoped_stored_xss_cleanup_paths | self._scoped_race_cleanup_paths
+                )
+                tool_args["args"] = json.dumps(spec)
+            except (ValueError, TypeError) as exc:
+                return {"success": False, "output": str(exc), "error": "invalid_scoped_browser_args"}
 
         # -- Per-tool confirmation gate ---------------------------------------
         # Consult the org's agent confirmation policy. Dangerous tools
@@ -6181,6 +6218,8 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         datetime, collections, urllib.parse. Hosts must be in engagement scope.
         Print results to stdout. Not a shell — no os/subprocess/sockets.
         """
+        if self._scoped_policy_applied:
+            return json.dumps({"error": "Custom Python HTTP probes cannot enforce operator method and path approvals; use structured replay tools."})
         from app.services.agent.custom_probe import run_custom_probe_async
 
         hosts: List[str] = []
@@ -8929,7 +8968,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
         from app.services.agent.evidence_store import evidence_store, verification_run, origin
         from app.services.agent.request_mutate import coerce_request_body
         origin(url)
-        from app.services.agent.assessment_scope import assert_url_in_scope
+        from app.services.agent.assessment_scope import assert_method_allowed, assert_url_in_scope
         assert_url_in_scope(self, url)
         from app.services.agent.pilot_policy import current_pilot
         pilot = current_pilot()
@@ -8943,6 +8982,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                 raise ValueError("Pilot first pass cannot override credentials or host routing")
             use_auth_session = False
         method = (method or "GET").upper().strip()
+        assert_method_allowed(self, url, method)
         raw_body, hdrs = coerce_request_body({"body": body, "headers": headers or {}}, headers or {})
         session = {}
         if identity is not None:
@@ -9018,6 +9058,7 @@ class ASMToolsManager(ScopedAssessmentTools, AssessmentCapabilities):
                     raise ValueError("Too many redirects")
                 nxt = resp.next_request
                 assert_url_in_scope(self, str(nxt.url))
+                assert_method_allowed(self, str(nxt.url), nxt.method)
                 if origin(str(nxt.url)) != origin(str(req.url)):
                     nxt.headers.pop("authorization", None)
                     if identity not in (None, "anonymous"):

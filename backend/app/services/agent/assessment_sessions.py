@@ -145,16 +145,28 @@ def browser_storage_state(session: dict, target: str) -> dict:
     return dict(cookies=cookies, origins=deepcopy(session.get('storage_state', {}).get('origins', [])))
 
 
-async def configure_browser_origin(context, target: str) -> None:
+async def configure_browser_origin(
+    context, target: str, *, allowed_methods: list[str] | None = None,
+    approved_post_paths: list[str] | None = None,
+    approved_delete_paths: list[str] | None = None,
+) -> None:
     """Apply the same exact-origin boundary to browser and crawler contexts."""
     expected_origin = origin(target)
     from app.services.agent.pilot_policy import PilotDenied, current_pilot
     pilot = current_pilot()
+    methods = set(allowed_methods or ()) if allowed_methods is not None else None
+    post_paths = set(approved_post_paths or ())
+    delete_paths = set(approved_delete_paths or ())
     async def scope_route(route):
         try:
             permitted = origin(route.request.url) == expected_origin
         except ValueError:
             permitted = False
+        if permitted and methods is not None:
+            method = route.request.method.upper()
+            path = urlsplit(route.request.url).path or "/"
+            permitted = (method in methods or (method == "POST" and path in post_paths)
+                         or (method == "DELETE" and path in delete_paths))
         if permitted and pilot is not None:
             try:
                 await pilot.acquire(route.request.url, route.request.method)

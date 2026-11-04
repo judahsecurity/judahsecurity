@@ -3587,8 +3587,8 @@ class AgentOrchestrator:
             # Operator policy arrives through /agent, never through a model tool.
             # SessionValue then isolates it from other organizations and runs.
             set_tenant_context(int(user_id), organization_id, session_id)
-            if assessment_policy is not None:
-                self.tool_manager.set_scoped_assessment_policy(assessment_policy)
+            if mode == "agent" or assessment_policy is not None:
+                self.tool_manager.set_scoped_assessment_policy(assessment_policy or {})
             else:
                 # A prior turn's login opt-in must not authorize this turn.
                 self.tool_manager._scoped_auth_login_path = ""

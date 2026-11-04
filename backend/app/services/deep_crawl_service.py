@@ -820,7 +820,12 @@ async def run_deep_crawl(args: Any) -> Dict[str, Any]:
                 context = await browser.new_context(**context_options)
                 if opts.get("allowed_origin"):
                     from app.services.agent.assessment_sessions import configure_browser_origin
-                    await configure_browser_origin(context, opts["allowed_origin"])
+                    await configure_browser_origin(
+                        context, opts["allowed_origin"],
+                        allowed_methods=opts.get("allowed_methods"),
+                        approved_post_paths=opts.get("approved_post_paths"),
+                        approved_delete_paths=opts.get("approved_delete_paths"),
+                    )
 
                 # Seed authenticated cookies, if provided.
                 cookies = opts.get("cookies")

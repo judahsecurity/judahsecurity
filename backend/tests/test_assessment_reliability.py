@@ -82,6 +82,83 @@ def check(manager, cand):
 
 
 @pytest.mark.asyncio
+async def test_operator_policy_blocks_unapproved_post_before_http_send(manager, transport):
+    sent = []
+    transport(lambda req: (sent.append(req), httpx.Response(200, text="ok"))[1])
+    manager.set_scoped_assessment_policy({})
+
+    result = json.loads(await manager.compare_requests(
+        baseline={"method": "POST", "url": "https://app.test/login", "body": "x=1"},
+        mutant={"method": "POST", "url": "https://app.test/login", "body": "x=2"},
+        use_auth_session=False,
+    ))
+    assert "operator-approved path" in result["error"]
+    assert sent == []
+
+    manager.set_scoped_assessment_policy({"body_replay_paths": ["/login"]})
+    result = json.loads(await manager.compare_requests(
+        baseline={"method": "POST", "url": "https://app.test/login", "body": "x=1"},
+        mutant={"method": "POST", "url": "https://app.test/login", "body": "x=2"},
+        use_auth_session=False,
+    ))
+    assert "error" not in result
+    assert len(sent) == 2
+
+
+@pytest.mark.asyncio
+async def test_operator_policy_blocks_post_redirect(manager, transport):
+    sent = []
+    def handler(req):
+        sent.append(req)
+        return httpx.Response(307, headers={"location": "/write"})
+    transport(handler)
+    manager.set_scoped_assessment_policy({"body_replay_paths": ["/login"]})
+
+    with pytest.raises(ValueError, match="operator-approved path"):
+        await manager._http_exchange("POST", "https://app.test/login", body="x=1")
+    assert len(sent) == 1
+    assert sent[0].method == "POST"
+
+
+@pytest.mark.asyncio
+async def test_operator_policy_blocks_unbounded_python_probe(manager):
+    manager.set_scoped_assessment_policy({})
+    result = await manager._execute_impl("run_custom_probe", {
+        "source": "import httpx; httpx.post('https://app.test/write')",
+    })
+    assert result["error"] == "operator_method_policy_denied"
+    result = await manager._execute_impl("execute_interceptor", {
+        "args": "https://app.test",
+    })
+    assert result["error"] == "operator_method_policy_denied"
+
+
+@pytest.mark.asyncio
+async def test_scoped_deep_crawl_receives_method_route_guard(manager, monkeypatch):
+    import app.services.agent.confirmation_service as confirmation
+
+    async def allow(*_args, **_kwargs):
+        return {"decision": "allow"}
+
+    seen = []
+    async def call_tool(name, args):
+        seen.append((name, args))
+        return {"success": True, "output": "Crawled"}
+
+    monkeypatch.setattr(confirmation, "gate", allow)
+    manager._mcp_server = SimpleNamespace(call_tool=call_tool)
+    manager.set_scoped_assessment_policy({})
+    await manager._execute_impl("execute_deep_crawl", {
+        "args": json.dumps({"url": "https://app.test"}),
+    })
+    assert seen and seen[0][0] == "execute_deep_crawl"
+    spec = json.loads(seen[0][1]["args"])
+    assert spec["allowed_origin"] == "https://app.test"
+    assert spec["allowed_methods"] == ["GET", "HEAD"]
+    assert spec["approved_post_paths"] == []
+
+
+@pytest.mark.asyncio
 async def test_bounded_pilot_blocks_unmetered_and_out_of_scope_http(manager, transport, monkeypatch):
     policy = PilotPolicy(
         target="https://app.test:443", source_ip="203.0.113.25",
@@ -189,6 +266,44 @@ async def test_bounded_pilot_browser_route_checks_each_request(monkeypatch):
         assert seen[-1] == "closed"
     finally:
         reset_pilot(token)
+
+
+@pytest.mark.asyncio
+async def test_scoped_browser_route_blocks_unapproved_post():
+    from app.services.agent.assessment_sessions import configure_browser_origin
+
+    class Context:
+        async def route(self, _pattern, callback):
+            self.callback = callback
+
+        async def route_web_socket(self, _pattern, callback):
+            self.socket_callback = callback
+
+    class Route:
+        def __init__(self, method, url):
+            self.request = SimpleNamespace(method=method, url=url)
+            self.result = None
+
+        async def continue_(self):
+            self.result = "continued"
+
+        async def abort(self):
+            self.result = "aborted"
+
+    context = Context()
+    await configure_browser_origin(
+        context, "https://app.test", allowed_methods=["GET", "HEAD"],
+        approved_post_paths=["/approved"],
+    )
+    for method, url, expected in (
+        ("GET", "https://app.test/read", "continued"),
+        ("POST", "https://app.test/unapproved", "aborted"),
+        ("POST", "https://app.test/approved", "continued"),
+        ("POST", "https://other.test/approved", "aborted"),
+    ):
+        route = Route(method, url)
+        await context.callback(route)
+        assert route.result == expected
 
 
 def cookies_for(jar, url):

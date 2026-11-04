@@ -79,6 +79,31 @@ def assert_url_in_scope(manager, url: str) -> str:
     return host
 
 
+def assert_method_allowed(manager, url: str, method: str) -> None:
+    """Enforce operator write approvals before any agent HTTP exchange."""
+    if not getattr(manager, "_scoped_policy_applied", False):
+        return
+    from urllib.parse import urlsplit
+
+    method = str(method or "GET").upper().strip()
+    path = urlsplit(url).path or "/"
+    if method in {"GET", "HEAD"}:
+        return
+    if method == "POST" and path in (
+        (getattr(manager, "_scoped_body_replay_paths", None) or set())
+        | (getattr(manager, "_scoped_race_action_paths", None) or set())
+        | ({getattr(manager, "_scoped_auth_login_path", "")}
+           if getattr(manager, "_scoped_auth_login_path", "") else set())
+    ):
+        return
+    if method == "DELETE" and path in (
+        (getattr(manager, "_scoped_stored_xss_cleanup_paths", None) or set())
+        | (getattr(manager, "_scoped_race_cleanup_paths", None) or set())
+    ):
+        return
+    raise ValueError(f"{method} {path} requires an exact operator-approved path")
+
+
 def prepare_browser_scope(manager, spec: dict, *, fallback_target: str = "") -> dict:
     """Bind an Agent mode browser call to one registered HTTP origin."""
     if not isinstance(spec, dict) or not isinstance(spec.get("actions"), list):
