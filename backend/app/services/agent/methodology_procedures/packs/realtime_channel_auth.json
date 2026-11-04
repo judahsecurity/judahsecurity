@@ -1,0 +1,24 @@
+{
+  "id": "realtime_channel_auth",
+  "title": "WebSocket / realtime channel authorization",
+  "summary": "Prove a WebSocket or Socket.IO handshake or message handler omits Origin or per-message authorization, so an unauthorized client receives or changes a protected channel. A successful handshake alone is not impact.",
+  "steps": [
+    "Capture the handshake and a message flow with supplied identities (GET /socket.io/?EIO=4&transport=polling for an sid, or a wss:// upgrade).",
+    "Compare one variable at a time: Origin on the handshake, session/cookie, channel subscription, and per-message authorization.",
+    "Cross-origin handshake: an untrusted canary Origin accepted (no Origin check) is a lead; confirm it with a protected message.",
+    "Per-message authz: as a lower-privileged or anonymous identity, subscribe or emit to a protected channel or a fabricated resource id and check for unauthorized receipt or state change with a test-owned canary message.",
+    "Do not flood, send null/malformed crash loops, or disrupt availability (ICS). One or two bounded probes only.",
+    "On PASS: unauthorized receipt or change of a protected channel with the frame evidence. For the unauthenticated get_stream url_key IDOR specifically, use socketio_unauth_stream_idor.",
+    "KILL if the handshake succeeds but protected messages remain authorized."
+  ],
+  "tools": ["execute_curl", "execute_browser", "compare_requests"],
+  "pass_signals": [
+    "An unauthorized client receives or changes a protected channel",
+    "The handshake accepts an untrusted Origin and a protected message then succeeds"
+  ],
+  "kill_signals": [
+    "The handshake succeeds but per-message authorization holds",
+    "Protected channels reject the lower-privileged identity"
+  ],
+  "references": ["CWE-306", "CWE-862", "https://portswigger.net/web-security/websockets"]
+}

@@ -1,0 +1,24 @@
+{
+  "id": "openapi_schema_authz",
+  "title": "OpenAPI / schema-driven API authorization",
+  "summary": "From a documented or discovered schema, prove an operation violates its object or role boundary. A discoverable or introspectable endpoint (an exposed Swagger alone) is a lead, not a finding.",
+  "steps": [
+    "Inventory operations with get_api_operation_inventory / fingerprint_api and pull the schema (GET /openapi.json, /swagger.json, /api/schema/). An exposed spec is the starting map, not impact.",
+    "Flag request serializers where id, created, updated, user, owner, schedule, or periodic_task are writable (not readOnly) — mass-assignment candidates. SUBMIT on that schema even if a write 500s or the DB is down.",
+    "For each sensitive operation, compare_requests across two test identities and object IDs: show another identity's fields, not a 200.",
+    "security: {} on an operation (for example /api/auth/account/?email=) exposing is_staff/role, or a sibling 401 vs lookup 200/404/500, is an unauthenticated role/existence oracle. Use one canary value (aegis-enum-canary@example.invalid); do not spray.",
+    "One bounded canary write only if the DB is up (aegis-verify-*). Never enable ICS schedules or dump OT/ICS asset trees.",
+    "On PASS: the crossed object/role boundary with request evidence. queue_finding_followups(vuln_type='mass_assignment' or 'unauth_account_lookup'). KILL if fields are readOnly / extra_kwargs or object-level 403 holds."
+  ],
+  "tools": ["get_api_operation_inventory", "fingerprint_api", "execute_schemathesis", "compare_requests", "run_custom_probe"],
+  "pass_signals": [
+    "A writable owner/id field in the schema (mass assignment)",
+    "An operation returns or mutates another identity's object",
+    "An unauthenticated schema exposes a role or existence oracle"
+  ],
+  "kill_signals": [
+    "The operation is only discoverable or introspectable without impact",
+    "Sensitive fields are readOnly or object-level 403 is enforced"
+  ],
+  "references": ["CWE-285", "CWE-915", "https://portswigger.net/web-security/api-testing"]
+}

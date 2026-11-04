@@ -1,0 +1,22 @@
+{
+  "id": "file_path_traversal",
+  "title": "File path traversal",
+  "summary": "Prove a path parameter escapes its intended directory and returns a test-owned out-of-directory file. An error message or an in-directory file is not proof.",
+  "steps": [
+    "Locate an observed file/path/download/template parameter and establish the normal file response as a baseline.",
+    "Change only that parameter to a predictable, test-owned out-of-directory target (../ or encoded ../ to a benign app-owned file) and compare with an invalid-path control.",
+    "Prefer a single benign proof file; do not read unrelated or sensitive system files beyond that one demonstration.",
+    "If filtered, try one normalization/encoding layer (%2e%2e, ....//, an absolute path) — one variable at a time, no payload spray.",
+    "On PASS: a response whose content comes from outside the intended directory, with the exact parameter and request evidence.",
+    "KILL if only error text or an in-directory file is returned, or the path is canonicalized/allowlisted."
+  ],
+  "tools": ["list_captured_requests", "mutate_captured_request", "compare_requests", "execute_curl", "run_custom_probe"],
+  "pass_signals": [
+    "A test-owned out-of-directory file is returned for a changed path parameter"
+  ],
+  "kill_signals": [
+    "Only error text or an in-directory file is returned",
+    "The path is canonicalized or allowlisted"
+  ],
+  "references": ["CWE-22", "https://portswigger.net/web-security/file-path-traversal"]
+}

@@ -44,21 +44,13 @@ def test_every_topic_methodology_id_resolves_to_a_loadable_pack():
     with open(topics_path, encoding="utf-8") as fh:
         topics = json.load(fh)
 
-    # Pre-existing dangling references, tracked so this test stays green while
-    # it still blocks any NEW dangling methodology_id. Remove an entry here when
-    # its HOW-pack is added under methodology_procedures/packs/.
-    known_gaps = {
-        ("web_path_traversal", "file_path_traversal"),
-        ("web_information_disclosure", "js_secrets_retire"),
-        ("web_api_testing", "openapi_schema_authz"),
-        ("web_cors", "cors_acao_credentials"),
-        ("web_websockets", "realtime_channel_auth"),
-    }
-
+    # Every topic's methodology_id must resolve to a loadable HOW-pack. Keep this
+    # at zero: a dangling methodology_id silently drops the concrete procedure
+    # from the specialist prompt even though the WHAT-card still fires.
     dangling = []
     for topic in topics:
         for mid in topic.get("methodology_ids", ()):
-            if load_procedure(mid) is None and (topic["id"], mid) not in known_gaps:
+            if load_procedure(mid) is None:
                 dangling.append((topic["id"], mid))
     assert not dangling, f"topics reference missing packs: {dangling}"
 
