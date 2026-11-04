@@ -80,6 +80,27 @@ def assessment_caido_binding() -> dict:
     }
 
 
+def graphql_error_reason(payload: object) -> str:
+    """Classify a Caido GraphQL error envelope. '' means no error.
+
+    Caido returns HTTP 200 with an ``errors`` array on auth failure, so the HTTP
+    status alone never reveals a stale token. An AUTHORIZATION / INVALID_TOKEN
+    extension means the token is missing, the wrong type, or expired (the local
+    API's session token lasts about 7 days).
+    """
+    if not isinstance(payload, dict):
+        return "caido_invalid_response"
+    errors = payload.get("errors")
+    if not isinstance(errors, list) or not errors:
+        return ""
+    for err in errors:
+        caido = (err.get("extensions") or {}).get("CAIDO") if isinstance(err, dict) else None
+        if isinstance(caido, dict) and (caido.get("code") == "AUTHORIZATION"
+                                        or caido.get("reason") == "INVALID_TOKEN"):
+            return "caido_auth_invalid_or_expired"
+    return "caido_graphql_error"
+
+
 def _iter_nodes(payload: dict):
     """Yield request nodes from the tolerated GraphQL envelope shapes."""
     data = payload.get("data") if isinstance(payload, dict) else None
@@ -186,11 +207,16 @@ def caido_history_observations(allowed_origins: list[str]) -> tuple[list[dict], 
         response = client.post(url, json=request, headers=headers)
     response.raise_for_status()
     payload = response.json()
+    reason = graphql_error_reason(payload)
+    if reason:
+        # A stale/invalid token or any GraphQL error must be visible, never a
+        # silent empty result that looks like "no leads".
+        return [], [], {"enabled": True, "ok": False, "endpoint": url,
+                        "reason": reason, "binding": assessment_caido_binding()}
     rows, endpoints = parse_requests_payload(payload, allowed_origins)
     status = {
         "enabled": True, "ok": True, "endpoint": url,
         "records_in_scope": len(endpoints),
-        "graphql_errors": bool(isinstance(payload, dict) and payload.get("errors")),
         "binding": assessment_caido_binding(),
     }
     return rows, endpoints, status

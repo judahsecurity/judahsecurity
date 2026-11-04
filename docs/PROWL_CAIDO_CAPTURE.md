@@ -101,6 +101,36 @@ schema shifted, `list_idor_leads` simply reports `caido_history.ok = false` and
 returns the leads it derived from Prowl's own captures. Prowl's receipts remain
 the source of truth; a Caido-derived lead is still only a lead.
 
+### Authenticating and validating the readback
+
+The local Caido GraphQL API requires a Bearer token. Use the token from the
+logged-in UI session, **not** a Caido Cloud Personal Access Token (a Cloud PAT
+on the local API returns `INVALID_TOKEN`). Get it from the Caido UI
+(opened through the loopback tunnel): DevTools -> Application -> Local Storage,
+or copy the `authorization: Bearer <jwt>` header off any `graphql` request in
+the Network tab. This session token lasts about 7 days; set it as
+`AEGIS_ASSESSMENT_CAIDO_TOKEN`. For a permanent, self-refreshing token, run
+Caido's OAuth device flow (`startAuthenticationFlow`) instead of copying a
+session token.
+
+Because Caido returns HTTP 200 with an `errors` array on auth failure, a stale
+token would otherwise look like "no leads". The reader detects the
+`AUTHORIZATION` / `INVALID_TOKEN` extension and reports
+`caido_history.ok = false` with reason `caido_auth_invalid_or_expired`, never a
+silent empty result.
+
+Validate the whole readback with one command (no browser, no full run):
+
+```bash
+export AEGIS_ASSESSMENT_CAIDO_GRAPHQL_URL=http://localhost:8083/graphql
+export AEGIS_ASSESSMENT_CAIDO_TOKEN="$TOKEN"
+python -m app.services.agent.caido_doctor
+```
+
+It checks configuration, endpoint reachability, that `requestsByOffset` exists,
+token presence and expiry (days left), and one authorized data call, printing a
+PASS/FAIL line per step.
+
 ## Write-style IDOR (cross-identity write authorization)
 
 `scoped_owner_only` proves a second identity can *read* an owner's object.
