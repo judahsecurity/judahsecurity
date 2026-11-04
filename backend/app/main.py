@@ -22,6 +22,7 @@ from app.models.jira_integration import JiraIntegration, JiraTicket  # noqa: F40
 from app.models.servicenow_integration import ServiceNowIntegration, ServiceNowDelivery  # noqa: F401 — ensure tables are created
 from app.models.censys_integration import CensysAsmIntegration  # noqa: F401 — ensure table is created
 from app.models.wiz_integration import WizIntegration  # noqa: F401 — ensure table is created
+from app.models.bitbucket_integration import BitbucketIntegration  # noqa: F401 — ensure table is created
 from app.models.hackerone_integration import HackerOneIntegration, HackerOneReportLink  # noqa: F401 — ensure tables are created
 from app.models.panorama_integration import PanoramaIntegration  # noqa: F401 — ensure table is created
 from app.models.f5_integration import F5Integration  # noqa: F401 — ensure table is created
@@ -313,6 +314,7 @@ async def startup_event():
     apply_oracle_migrations()
     apply_scan_profile_migrations()
     apply_agent_ledger_migrations()
+    apply_asset_type_migrations()
 
     # Check ProjectDiscovery tools installation
     from app.services.nuclei_service import NucleiService
@@ -354,6 +356,25 @@ async def shutdown_event():
     if _evidence_cleanup_task is not None:
         _evidence_cleanup_task.cancel()
     logger.info("Shutting down application")
+
+
+def apply_asset_type_migrations():
+    """Add newer AssetType labels to the Postgres ``assettype`` enum.
+
+    ``create_all`` never alters an existing enum type, so labels added to
+    ``AssetType`` after the table was created must be added here. ``ALTER TYPE
+    ... ADD VALUE`` runs in AUTOCOMMIT so the new label is usable immediately.
+    """
+    from sqlalchemy import text
+
+    if engine.dialect.name != "postgresql":
+        return
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text("ALTER TYPE assettype ADD VALUE IF NOT EXISTS 'REPOSITORY'"))
+        logger.info("Asset type enum migrations applied.")
+    except Exception as exc:
+        logger.error("Asset type enum migration failed (non-fatal): %s", exc)
 
 
 def apply_oracle_migrations():

@@ -18,6 +18,7 @@ from app.models.jira_integration import JiraIntegration, JiraTicket
 from app.models.servicenow_integration import ServiceNowDelivery, ServiceNowIntegration
 from app.models.censys_integration import CensysAsmIntegration
 from app.models.wiz_integration import WizIntegration
+from app.models.bitbucket_integration import BitbucketIntegration
 from app.models.hackerone_integration import HackerOneIntegration, HackerOneReportLink
 from app.models.akamai_integration import AkamaiWafIntegration
 from app.models.panorama_integration import (
@@ -68,6 +69,13 @@ from app.schemas.wiz_schemas import (
     WizSyncResult,
     WizTestConnectionResponse,
 )
+from app.schemas.bitbucket_schemas import (
+    BitbucketIntegrationCreate,
+    BitbucketIntegrationResponse,
+    BitbucketIntegrationUpdate,
+    BitbucketSyncResult,
+    BitbucketTestConnectionResponse,
+)
 from app.schemas.hackerone_schemas import (
     AssociateHackerOneReportRequest,
     HackerOneIntegrationCreate,
@@ -117,6 +125,7 @@ from app.services import (
     jira_service,
     censys_asm_service,
     wiz_service,
+    bitbucket_service,
     hackerone_service,
     akamai_waf_service,
     panorama_service,
@@ -916,6 +925,163 @@ async def sync_wiz_integration(
     if not integration.is_active:
         raise HTTPException(status_code=400, detail="This Wiz connection is disabled.")
     return WizSyncResult(**(await wiz_service.sync_integration(db, integration)))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Bitbucket Cloud — read-only repository import and secret scanning
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_bitbucket_integration(db: Session, org_id: int, integration_id: int) -> BitbucketIntegration:
+    integration = (
+        db.query(BitbucketIntegration)
+        .filter(
+            BitbucketIntegration.id == integration_id,
+            BitbucketIntegration.organization_id == org_id,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="Bitbucket connection not found.")
+    return integration
+
+
+@router.get("/bitbucket", response_model=List[BitbucketIntegrationResponse])
+def list_bitbucket_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    return (
+        db.query(BitbucketIntegration)
+        .filter(BitbucketIntegration.organization_id == org_id)
+        .order_by(BitbucketIntegration.created_at.desc())
+        .all()
+    )
+
+
+@router.post("/bitbucket", response_model=BitbucketIntegrationResponse, status_code=status.HTTP_201_CREATED)
+async def create_bitbucket_integration(
+    payload: BitbucketIntegrationCreate,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    try:
+        workspace, workspace_url = bitbucket_service.parse_workspace_url(payload.workspace_url)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    existing = db.query(BitbucketIntegration).filter(
+        BitbucketIntegration.organization_id == org_id,
+        BitbucketIntegration.workspace == workspace,
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Bitbucket workspace '{workspace}' is already connected.",
+        )
+
+    result = await bitbucket_service.test_connection(workspace_url, payload.access_token)
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+
+    integration = BitbucketIntegration(
+        organization_id=org_id,
+        workspace=workspace,
+        workspace_url=workspace_url,
+        scan_secrets=payload.scan_secrets,
+        max_repo_size_mb=payload.max_repo_size_mb,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+        last_tested_at=datetime.utcnow(),
+        last_test_ok=True,
+    )
+    integration.set_access_token(payload.access_token)
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    # Import repositories right away instead of waiting for the scheduler.
+    background_tasks.add_task(bitbucket_service.sync_integration_by_id, integration.id)
+    return integration
+
+
+@router.put("/bitbucket/{integration_id}", response_model=BitbucketIntegrationResponse)
+async def update_bitbucket_integration(
+    integration_id: int,
+    payload: BitbucketIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_bitbucket_integration(db, org_id, integration_id)
+    data = payload.model_dump(exclude_unset=True)
+    access_token = data.pop("access_token", None)
+    for field, value in data.items():
+        setattr(integration, field, value)
+    if access_token:
+        result = await bitbucket_service.test_connection(integration.workspace_url, access_token)
+        integration.last_tested_at = datetime.utcnow()
+        integration.last_test_ok = result["ok"]
+        if not result["ok"]:
+            db.rollback()
+            raise HTTPException(status_code=400, detail=result["message"])
+        integration.set_access_token(access_token)
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/bitbucket/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_bitbucket_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_bitbucket_integration(db, org_id, integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post("/bitbucket/{integration_id}/test", response_model=BitbucketTestConnectionResponse)
+async def test_bitbucket_connection(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_bitbucket_integration(db, org_id, integration_id)
+    result = await bitbucket_service.test_connection(
+        integration.workspace_url, integration.get_access_token() or ""
+    )
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    db.commit()
+    return BitbucketTestConnectionResponse(**result)
+
+
+@router.post("/bitbucket/{integration_id}/sync", response_model=BitbucketSyncResult)
+async def sync_bitbucket_integration(
+    integration_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    """Start a sync in the background — cloning and scanning can take minutes."""
+    org_id = _get_org_id(current_user)
+    integration = _get_bitbucket_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This Bitbucket connection is disabled.")
+    if bitbucket_service.is_sync_running(integration.id):
+        return BitbucketSyncResult(ok=True, message="A sync for this workspace is already running.")
+    background_tasks.add_task(bitbucket_service.sync_integration_by_id, integration.id)
+    return BitbucketSyncResult(
+        ok=True,
+        message=f"Sync started for '{integration.workspace}'. Results appear here when it finishes.",
+    )
 
 
 # ══════════════════════════════════════════════════════════════════════════════

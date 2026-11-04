@@ -792,6 +792,42 @@ class ScheduleWorker:
         finally:
             db.close()
 
+    async def run_bitbucket_syncs(self):
+        """Run scheduled Bitbucket repository imports and secret scans when due."""
+        from app.models.bitbucket_integration import BitbucketIntegration
+        from app.services import bitbucket_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(BitbucketIntegration).filter(
+                BitbucketIntegration.is_active == True,
+                BitbucketIntegration.continuous_sync_enabled == True,
+            ).all()
+            due = [connection for connection in candidates if connection.is_sync_due(now)]
+            if not due:
+                return
+            logger.info(f"Bitbucket: {len(due)} workspace(s) due for continuous sync")
+            for integration in due:
+                try:
+                    result = await bitbucket_service.sync_integration(db, integration)
+                    logger.info(
+                        f"Bitbucket sync (org {integration.organization_id}, "
+                        f"'{integration.workspace}'): {result.get('message')}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"Bitbucket sync failed for connection {integration.id}: {exc}",
+                        exc_info=True,
+                    )
+                    db.rollback()
+        except Exception as exc:
+            logger.error(f"Bitbucket continuous sync check failed: {exc}", exc_info=True)
+        finally:
+            db.close()
+
     async def run_akamai_waf_syncs(self):
         """Run continuous Akamai WAF syncs for connections whose interval is due."""
         from app.models.akamai_integration import AkamaiWafIntegration
@@ -1009,6 +1045,9 @@ class ScheduleWorker:
 
                 # Continuous Wiz VM and vulnerability syncs
                 await self.run_wiz_syncs()
+
+                # Continuous Bitbucket repository imports and secret scans
+                await self.run_bitbucket_syncs()
 
                 # Continuous Akamai WAF syncs
                 await self.run_akamai_waf_syncs()

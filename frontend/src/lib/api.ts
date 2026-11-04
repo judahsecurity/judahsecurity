@@ -429,6 +429,42 @@ export interface WizSyncResult {
   findings_filtered: number;
 }
 
+export interface BitbucketIntegration {
+  id: number;
+  organization_id: number;
+  workspace: string;
+  workspace_url: string;
+  scan_secrets: boolean;
+  max_repo_size_mb: number;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BitbucketSyncResult {
+  ok: boolean;
+  message: string;
+  repos_seen: number;
+  repos_skipped_forks: number;
+  assets_created: number;
+  assets_updated: number;
+  repos_scanned: number;
+  repos_scan_skipped: number;
+  repos_scan_failed: number;
+  secrets_created: number;
+  secrets_updated: number;
+  secrets_resolved: number;
+}
+
 // ── HackerOne shared types ─────────────────────────────────────────────────
 
 export interface HackerOneIntegration {
@@ -3171,6 +3207,51 @@ class ApiClient {
 
   async syncWizIntegration(id: number): Promise<WizSyncResult> {
     const response = await this.client.post(`/integrations/wiz/${id}/sync`);
+    return response.data;
+  }
+
+  // ── Bitbucket Integration ──────────────────────────────────────────────────
+
+  async getBitbucketIntegrations(): Promise<BitbucketIntegration[]> {
+    const response = await this.client.get('/integrations/bitbucket');
+    return response.data;
+  }
+
+  async createBitbucketIntegration(payload: {
+    workspace_url: string;
+    access_token: string;
+    scan_secrets: boolean;
+    max_repo_size_mb?: number;
+    continuous_sync_enabled?: boolean;
+    sync_interval_minutes?: number;
+  }): Promise<BitbucketIntegration> {
+    const response = await this.client.post('/integrations/bitbucket', payload);
+    return response.data;
+  }
+
+  async updateBitbucketIntegration(id: number, payload: Partial<{
+    access_token: string;
+    scan_secrets: boolean;
+    max_repo_size_mb: number;
+    is_active: boolean;
+    continuous_sync_enabled: boolean;
+    sync_interval_minutes: number;
+  }>): Promise<BitbucketIntegration> {
+    const response = await this.client.put(`/integrations/bitbucket/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteBitbucketIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/bitbucket/${id}`);
+  }
+
+  async testBitbucketConnection(id: number): Promise<{ ok: boolean; message: string; repositories_accessible: boolean }> {
+    const response = await this.client.post(`/integrations/bitbucket/${id}/test`);
+    return response.data;
+  }
+
+  async syncBitbucketIntegration(id: number): Promise<BitbucketSyncResult> {
+    const response = await this.client.post(`/integrations/bitbucket/${id}/sync`);
     return response.data;
   }
 

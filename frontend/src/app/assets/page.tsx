@@ -67,6 +67,7 @@ import {
   CheckSquare,
   MinusSquare,
   Radar,
+  GitBranch,
 } from 'lucide-react';
 import { Checkbox } from '@/components/ui/checkbox';
 import { api } from '@/lib/api';
@@ -136,6 +137,7 @@ const assetIcons: Record<string, typeof Globe> = {
   cloud_resource: Server,
   api_endpoint: Layers,
   email: Globe,
+  repository: GitBranch,
   other: Globe,
 };
 
@@ -152,6 +154,7 @@ const assetColors: Record<string, string> = {
   cloud_resource: 'text-yellow-400',
   api_endpoint: 'text-pink-400',
   email: 'text-teal-400',
+  repository: 'text-sky-400',
   other: 'text-gray-400',
 };
 
