@@ -1,0 +1,26 @@
+{
+  "id": "oauth_sso_misconfig",
+  "title": "OAuth / OIDC flow misconfiguration",
+  "summary": "Prove a redirect_uri allowlist gap, missing state/nonce, or weak PKCE/JWT validation binds or leaks a token or code across a security boundary. A 200 or a rendered login form alone is only a lead.",
+  "steps": [
+    "Map the observed authorize request: client_id, redirect_uri, response_type, scope, state, nonce, and PKCE code_challenge. Flag wildcard or typo scopes and token-in-fragment flows (response_type=id_token token). client_id/tenant often leak from a public appsettings.json or JS bundle.",
+    "redirect_uri differential (compare_requests / execute_curl): a valid-client baseline, then one changed redirect_uri (unregistered host or path). Keep every request on an in-scope authorize/callback host — a third-party IdP endpoint (e.g. login.microsoftonline.com) is out of scope unless the operator registered it.",
+    "Acceptance proof: a valid client_id with an attacker redirect_uri that returns a login form while an invalid client_id and a malformed redirect_uri are both rejected with provider errors.",
+    "State/nonce: replay the callback with absent and with mismatched state; identical acceptance (a fresh session cookie either way) proves the login flow has no CSRF binding.",
+    "PKCE / id_token (execute_jwt): an absent code_challenge, a reused/static verifier, or an id_token whose alg, issuer, or audience is unvalidated is a token-trust failure.",
+    "Keycloak: confirm the client webOrigins is not '*'; a canary Origin with credentials=true accepted on token/userinfo is a separate CORS-credentials finding — prefer '+' or explicit URIs.",
+    "On PASS: show the rejected control vs the accepted attacker value, or the forged/boundary-crossed token, with request evidence. Redact codes and tokens; one variable at a time."
+  ],
+  "tools": ["compare_requests", "execute_curl", "execute_browser", "test_saml_sso", "execute_jwt"],
+  "pass_signals": [
+    "Attacker-controlled redirect_uri accepted while an invalid client_id and malformed URI are rejected",
+    "Callback accepts absent or mismatched state identically (login CSRF binding missing)",
+    "Reused/absent PKCE verifier or an id_token with unvalidated alg/iss/aud is accepted"
+  ],
+  "kill_signals": [
+    "Provider rejects the altered redirect_uri or the mismatched state",
+    "Exact redirect allowlist with a bound, validated state and PKCE",
+    "No token, code, or account binding crosses a security boundary"
+  ],
+  "references": ["CWE-601", "CWE-352", "https://portswigger.net/web-security/oauth"]
+}

@@ -26,6 +26,54 @@ def test_packs_on_disk():
     assert len(ids) >= 10
 
 
+def test_every_topic_methodology_id_resolves_to_a_loadable_pack():
+    """A WHAT-card may not point at a HOW-pack that does not load.
+
+    This keeps the fluid trigger chain intact: observation -> topic signal ->
+    methodology_id -> procedure pack injected into the specialist prompt. A
+    dangling methodology_id silently drops the concrete procedure.
+    """
+    import json
+    import os
+
+    from app.services.agent.methodology_procedures import packs_dir
+
+    topics_path = os.path.join(
+        os.path.dirname(packs_dir()), "web_security_topics.json"
+    )
+    with open(topics_path, encoding="utf-8") as fh:
+        topics = json.load(fh)
+
+    # Pre-existing dangling references, tracked so this test stays green while
+    # it still blocks any NEW dangling methodology_id. Remove an entry here when
+    # its HOW-pack is added under methodology_procedures/packs/.
+    known_gaps = {
+        ("web_path_traversal", "file_path_traversal"),
+        ("web_information_disclosure", "js_secrets_retire"),
+        ("web_api_testing", "openapi_schema_authz"),
+        ("web_cors", "cors_acao_credentials"),
+        ("web_websockets", "realtime_channel_auth"),
+    }
+
+    dangling = []
+    for topic in topics:
+        for mid in topic.get("methodology_ids", ()):
+            if load_procedure(mid) is None and (topic["id"], mid) not in known_gaps:
+                dangling.append((topic["id"], mid))
+    assert not dangling, f"topics reference missing packs: {dangling}"
+
+
+def test_oauth_and_agent_packs_are_loadable():
+    oauth = load_procedure("oauth_sso_misconfig")
+    assert oauth is not None
+    assert "compare_requests" in oauth["tools"]
+    assert any("redirect_uri" in s for s in oauth["steps"])
+
+    agent = load_procedure("agent_tool_enumeration")
+    assert agent is not None
+    assert "execute_llm_red_team" in agent["tools"]
+
+
 def test_load_csrf_pack():
     pack = load_procedure("csrf_state_changing")
     assert pack is not None
