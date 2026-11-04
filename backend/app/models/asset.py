@@ -21,6 +21,7 @@ class AssetType(str, enum.Enum):
     CLOUD_RESOURCE = "CLOUD_RESOURCE"
     API_ENDPOINT = "API_ENDPOINT"
     EMAIL = "EMAIL"
+    REPOSITORY = "REPOSITORY"  # Source code repository (e.g. Azure DevOps Git repo)
     OTHER = "OTHER"
 
 

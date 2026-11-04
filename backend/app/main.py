@@ -22,6 +22,7 @@ from app.models.jira_integration import JiraIntegration, JiraTicket  # noqa: F40
 from app.models.servicenow_integration import ServiceNowIntegration, ServiceNowDelivery  # noqa: F401 — ensure tables are created
 from app.models.censys_integration import CensysAsmIntegration  # noqa: F401 — ensure table is created
 from app.models.wiz_integration import WizIntegration  # noqa: F401 — ensure table is created
+from app.models.scm_integration import SourceCodeManagerIntegration  # noqa: F401 — ensure table is created
 from app.models.hackerone_integration import HackerOneIntegration, HackerOneReportLink  # noqa: F401 — ensure tables are created
 from app.models.panorama_integration import PanoramaIntegration  # noqa: F401 — ensure table is created
 from app.models.f5_integration import F5Integration  # noqa: F401 — ensure table is created
@@ -313,6 +314,7 @@ async def startup_event():
     apply_oracle_migrations()
     apply_scan_profile_migrations()
     apply_agent_ledger_migrations()
+    apply_scm_migrations()
 
     # Check ProjectDiscovery tools installation
     from app.services.nuclei_service import NucleiService
@@ -741,6 +743,22 @@ def apply_oracle_migrations():
         logger.info("Oracle schema migrations applied.")
     except Exception as exc:
         logger.error("Oracle schema migrations failed (non-fatal): %s", exc)
+
+
+def apply_scm_migrations():
+    """Add the REPOSITORY asset type used by source code manager imports.
+
+    ``ALTER TYPE ... ADD VALUE`` cannot be used inside the transaction that
+    first references the new value, so this runs on its own autocommit
+    connection. ``create_all`` never alters existing enum types.
+    """
+    from sqlalchemy import text
+
+    try:
+        with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+            conn.execute(text("ALTER TYPE assettype ADD VALUE IF NOT EXISTS 'REPOSITORY'"))
+    except Exception as exc:  # noqa: BLE001 — non-Postgres dev databases have no enum type
+        logger.warning("SCM migration (assettype REPOSITORY) skipped: %s", exc)
 
 
 def apply_agent_ledger_migrations():

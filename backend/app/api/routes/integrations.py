@@ -18,6 +18,7 @@ from app.models.jira_integration import JiraIntegration, JiraTicket
 from app.models.servicenow_integration import ServiceNowDelivery, ServiceNowIntegration
 from app.models.censys_integration import CensysAsmIntegration
 from app.models.wiz_integration import WizIntegration
+from app.models.scm_integration import PROVIDER_AZURE_DEVOPS, SourceCodeManagerIntegration
 from app.models.hackerone_integration import HackerOneIntegration, HackerOneReportLink
 from app.models.akamai_integration import AkamaiWafIntegration
 from app.models.panorama_integration import (
@@ -68,6 +69,13 @@ from app.schemas.wiz_schemas import (
     WizSyncResult,
     WizTestConnectionResponse,
 )
+from app.schemas.scm_schemas import (
+    AzureDevOpsIntegrationCreate,
+    AzureDevOpsIntegrationResponse,
+    AzureDevOpsIntegrationUpdate,
+    AzureDevOpsSyncResult,
+    AzureDevOpsTestConnectionResponse,
+)
 from app.schemas.hackerone_schemas import (
     AssociateHackerOneReportRequest,
     HackerOneIntegrationCreate,
@@ -117,6 +125,7 @@ from app.services import (
     jira_service,
     censys_asm_service,
     wiz_service,
+    azure_devops_service,
     hackerone_service,
     akamai_waf_service,
     panorama_service,
@@ -916,6 +925,230 @@ async def sync_wiz_integration(
     if not integration.is_active:
         raise HTTPException(status_code=400, detail="This Wiz connection is disabled.")
     return WizSyncResult(**(await wiz_service.sync_integration(db, integration)))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Source code managers — Azure DevOps repository discovery + secret scanning
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+def _get_azure_devops_integration(
+    db: Session, org_id: int, integration_id: int
+) -> SourceCodeManagerIntegration:
+    integration = (
+        db.query(SourceCodeManagerIntegration)
+        .filter(
+            SourceCodeManagerIntegration.id == integration_id,
+            SourceCodeManagerIntegration.organization_id == org_id,
+            SourceCodeManagerIntegration.provider == PROVIDER_AZURE_DEVOPS,
+        )
+        .first()
+    )
+    if not integration:
+        raise HTTPException(status_code=404, detail="Azure DevOps connection not found.")
+    return integration
+
+
+def _parse_azure_devops_scope(scope_url: str):
+    try:
+        return azure_devops_service.parse_scope_url(scope_url)
+    except azure_devops_service.AzureDevOpsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+async def _test_azure_devops(integration: SourceCodeManagerIntegration) -> dict:
+    return await azure_devops_service.test_connection(
+        integration.scope_url,
+        integration.auth_method,
+        personal_access_token=integration.get_access_token(),
+        tenant_id=integration.tenant_id,
+        client_id=integration.client_id,
+        client_secret=integration.get_client_secret(),
+    )
+
+
+@router.get("/scm/azure-devops", response_model=List[AzureDevOpsIntegrationResponse])
+def list_azure_devops_integrations(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    return (
+        db.query(SourceCodeManagerIntegration)
+        .filter(
+            SourceCodeManagerIntegration.organization_id == org_id,
+            SourceCodeManagerIntegration.provider == PROVIDER_AZURE_DEVOPS,
+        )
+        .order_by(SourceCodeManagerIntegration.created_at.desc())
+        .all()
+    )
+
+
+@router.post(
+    "/scm/azure-devops",
+    response_model=AzureDevOpsIntegrationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_azure_devops_integration(
+    payload: AzureDevOpsIntegrationCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    scope = _parse_azure_devops_scope(payload.scope_url)
+    existing = db.query(SourceCodeManagerIntegration).filter(
+        SourceCodeManagerIntegration.organization_id == org_id,
+        SourceCodeManagerIntegration.provider == PROVIDER_AZURE_DEVOPS,
+        SourceCodeManagerIntegration.connection_name == payload.connection_name,
+    ).first()
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"An Azure DevOps connection named '{payload.connection_name}' already exists.",
+        )
+
+    integration = SourceCodeManagerIntegration(
+        organization_id=org_id,
+        provider=PROVIDER_AZURE_DEVOPS,
+        connection_name=payload.connection_name,
+        scope_url=scope.url,
+        scm_organization=scope.organization,
+        scm_project=scope.project,
+        auth_method=payload.auth_method,
+        tenant_id=payload.tenant_id if payload.auth_method == "entra_id" else None,
+        client_id=payload.client_id if payload.auth_method == "entra_id" else None,
+        secret_scanning_enabled=payload.secret_scanning_enabled,
+        include_unverified_secrets=payload.include_unverified_secrets,
+        continuous_sync_enabled=payload.continuous_sync_enabled,
+        sync_interval_minutes=payload.sync_interval_minutes,
+        is_active=True,
+    )
+    if payload.auth_method == "pat":
+        integration.set_access_token(payload.personal_access_token)
+    else:
+        integration.set_client_secret(payload.client_secret)
+
+    result = await _test_azure_devops(integration)
+    if not result["ok"]:
+        raise HTTPException(status_code=400, detail=result["message"])
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = True
+    db.add(integration)
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.put("/scm/azure-devops/{integration_id}", response_model=AzureDevOpsIntegrationResponse)
+async def update_azure_devops_integration(
+    integration_id: int,
+    payload: AzureDevOpsIntegrationUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_azure_devops_integration(db, org_id, integration_id)
+    data = payload.model_dump(exclude_unset=True)
+    token = data.pop("personal_access_token", None)
+    client_secret = data.pop("client_secret", None)
+    scope_url = data.pop("scope_url", None)
+
+    if "connection_name" in data and data["connection_name"] != integration.connection_name:
+        clash = db.query(SourceCodeManagerIntegration).filter(
+            SourceCodeManagerIntegration.organization_id == org_id,
+            SourceCodeManagerIntegration.provider == PROVIDER_AZURE_DEVOPS,
+            SourceCodeManagerIntegration.connection_name == data["connection_name"],
+            SourceCodeManagerIntegration.id != integration.id,
+        ).first()
+        if clash:
+            raise HTTPException(
+                status_code=409,
+                detail=f"An Azure DevOps connection named '{data['connection_name']}' already exists.",
+            )
+    if scope_url:
+        scope = _parse_azure_devops_scope(scope_url)
+        integration.scope_url = scope.url
+        integration.scm_organization = scope.organization
+        integration.scm_project = scope.project
+    for field, value in data.items():
+        setattr(integration, field, value)
+    if token:
+        integration.set_access_token(token)
+    if client_secret:
+        integration.set_client_secret(client_secret)
+
+    # Switching method requires that method's credentials; drop the other's.
+    if integration.auth_method == "pat":
+        if not integration.has_access_token:
+            db.rollback()
+            raise HTTPException(status_code=400, detail="A Personal Access Token is required for PAT authentication.")
+        integration.tenant_id = None
+        integration.client_id = None
+        integration.client_secret_encrypted = None
+    else:
+        if not (integration.tenant_id and integration.client_id and integration.has_client_secret):
+            db.rollback()
+            raise HTTPException(
+                status_code=400,
+                detail="Tenant ID, Application (client) ID and client secret are required for Entra ID authentication.",
+            )
+        integration.access_token_encrypted = None
+
+    result = await _test_azure_devops(integration)
+    if not result["ok"]:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=result["message"])
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = True
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.delete("/scm/azure-devops/{integration_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_azure_devops_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_azure_devops_integration(db, org_id, integration_id)
+    db.delete(integration)
+    db.commit()
+
+
+@router.post(
+    "/scm/azure-devops/{integration_id}/test",
+    response_model=AzureDevOpsTestConnectionResponse,
+)
+async def test_azure_devops_connection(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_active_user),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_azure_devops_integration(db, org_id, integration_id)
+    result = await _test_azure_devops(integration)
+    integration.last_tested_at = datetime.utcnow()
+    integration.last_test_ok = result["ok"]
+    db.commit()
+    return AzureDevOpsTestConnectionResponse(**result)
+
+
+@router.post("/scm/azure-devops/{integration_id}/sync", response_model=AzureDevOpsSyncResult)
+async def sync_azure_devops_integration(
+    integration_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    org_id = _get_org_id(current_user)
+    integration = _get_azure_devops_integration(db, org_id, integration_id)
+    if not integration.is_active:
+        raise HTTPException(status_code=400, detail="This Azure DevOps connection is disabled.")
+    result = await azure_devops_service.sync_integration(
+        db, integration, started_by=getattr(current_user, "username", None)
+    )
+    return AzureDevOpsSyncResult(**result)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

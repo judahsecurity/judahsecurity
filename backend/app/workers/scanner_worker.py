@@ -7551,6 +7551,36 @@ class ScannerWorker:
                 scan.progress = 5
                 db.commit()
 
+            if config.get('scm_integration_id'):
+                # Source code manager scan: clone each imported repository with
+                # the connection's credentials and scan its full history.
+                from app.services import azure_devops_service
+
+                async def scm_progress(pct: int, step: str):
+                    try:
+                        s = db.query(Scan).filter(Scan.id == scan_id).first()
+                        if s:
+                            s.progress = pct
+                            s.current_step = step
+                            db.commit()
+                    except Exception:
+                        db.rollback()
+
+                summary = await azure_devops_service.run_repository_secret_scan(
+                    db, scan_id, organization_id, config, progress=scm_progress,
+                )
+                scan = db.query(Scan).filter(Scan.id == scan_id).first()
+                if scan:
+                    scan.status = ScanStatus.COMPLETED
+                    scan.completed_at = datetime.utcnow()
+                    scan.vulnerabilities_found = summary.get("persisted", 0)
+                    scan.progress = 100
+                    scan.current_step = "Completed"
+                    scan.results = summary
+                db.commit()
+                trigger_graph_sync(organization_id)
+                return
+
             sources = config.get('sources') or []
             if not sources and targets:
                 # Infer: github slug if it looks like org/repo, else git URL.

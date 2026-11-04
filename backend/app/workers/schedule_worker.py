@@ -792,6 +792,45 @@ class ScheduleWorker:
         finally:
             db.close()
 
+    async def run_scm_syncs(self):
+        """Re-enumerate source code manager scopes and queue secret scans when due."""
+        from app.models.scm_integration import PROVIDER_AZURE_DEVOPS, SourceCodeManagerIntegration
+        from app.services import azure_devops_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(SourceCodeManagerIntegration).filter(
+                SourceCodeManagerIntegration.is_active == True,
+                SourceCodeManagerIntegration.continuous_sync_enabled == True,
+                SourceCodeManagerIntegration.provider == PROVIDER_AZURE_DEVOPS,
+            ).all()
+            due = [connection for connection in candidates if connection.is_sync_due(now)]
+            if not due:
+                return
+            logger.info(f"Source code managers: {len(due)} connection(s) due for sync")
+            for integration in due:
+                try:
+                    result = await azure_devops_service.sync_integration(
+                        db, integration, started_by="scheduler"
+                    )
+                    logger.info(
+                        f"Azure DevOps sync (org {integration.organization_id}, "
+                        f"'{integration.connection_name}'): {result.get('message')}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"Azure DevOps sync failed for connection {integration.id}: {exc}",
+                        exc_info=True,
+                    )
+                    db.rollback()
+        except Exception as exc:
+            logger.error(f"Source code manager sync check failed: {exc}", exc_info=True)
+        finally:
+            db.close()
+
     async def run_akamai_waf_syncs(self):
         """Run continuous Akamai WAF syncs for connections whose interval is due."""
         from app.models.akamai_integration import AkamaiWafIntegration
@@ -1009,6 +1048,9 @@ class ScheduleWorker:
 
                 # Continuous Wiz VM and vulnerability syncs
                 await self.run_wiz_syncs()
+
+                # Source code managers (Azure DevOps) — repo discovery + secret scans
+                await self.run_scm_syncs()
 
                 # Continuous Akamai WAF syncs
                 await self.run_akamai_waf_syncs()

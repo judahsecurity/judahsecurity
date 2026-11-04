@@ -60,6 +60,7 @@ import { cn } from '@/lib/utils';
 import { JiraProjectPicker } from '@/components/integrations/JiraProjectPicker';
 import { ServiceNowSection } from '@/components/integrations/ServiceNowSection';
 import { WizSection } from '@/components/integrations/WizSection';
+import { AzureDevOpsSection } from '@/components/integrations/AzureDevOpsSection';
 import { NetBrainSection } from '@/components/integrations/NetBrainSection';
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'] as const;
@@ -3211,6 +3212,13 @@ export default function IntegrationsPage() {
 
         {/* Wiz cloud exposure integration */}
         <WizSection />
+
+        {/* Source code managers — repository discovery + secret scanning */}
+        <div className="pt-2">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-muted-foreground">Source Code Managers</h2>
+          <p className="text-xs text-muted-foreground">Import repositories as assets and scan them for committed secrets.</p>
+        </div>
+        <AzureDevOpsSection />
 
         {/* HackerOne Bug Bounty Integration Card */}
         <HackerOneSection />

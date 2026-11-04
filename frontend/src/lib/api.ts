@@ -429,6 +429,67 @@ export interface WizSyncResult {
   findings_filtered: number;
 }
 
+// ── Source code managers (Azure DevOps) ───────────────────────────────────
+
+export type ScmAuthMethod = 'entra_id' | 'pat';
+
+export interface AzureDevOpsIntegration {
+  id: number;
+  organization_id: number;
+  provider: 'azure_devops';
+  connection_name: string;
+  scope_url: string;
+  scm_organization: string;
+  scm_project?: string | null;
+  auth_method: ScmAuthMethod;
+  tenant_id?: string | null;
+  client_id?: string | null;
+  has_access_token: boolean;
+  has_client_secret: boolean;
+  secret_scanning_enabled: boolean;
+  include_unverified_secrets: boolean;
+  is_active: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  last_tested_at?: string;
+  last_test_ok?: boolean;
+  last_sync_at?: string;
+  last_sync_ok?: boolean;
+  next_sync_at?: string;
+  last_sync_stats?: Record<string, number>;
+  last_scan_id?: number | null;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AzureDevOpsIntegrationPayload {
+  connection_name: string;
+  scope_url: string;
+  auth_method: ScmAuthMethod;
+  personal_access_token?: string;
+  tenant_id?: string;
+  client_id?: string;
+  client_secret?: string;
+  secret_scanning_enabled: boolean;
+  include_unverified_secrets: boolean;
+  continuous_sync_enabled: boolean;
+  sync_interval_minutes: number;
+  is_active?: boolean;
+}
+
+export interface AzureDevOpsSyncResult {
+  ok: boolean;
+  message: string;
+  projects_seen: number;
+  repositories_seen: number;
+  repositories_created: number;
+  repositories_updated: number;
+  forks_skipped: number;
+  disabled_skipped: number;
+  scan_id?: number | null;
+}
+
 // ── HackerOne shared types ─────────────────────────────────────────────────
 
 export interface HackerOneIntegration {
@@ -3171,6 +3232,40 @@ class ApiClient {
 
   async syncWizIntegration(id: number): Promise<WizSyncResult> {
     const response = await this.client.post(`/integrations/wiz/${id}/sync`);
+    return response.data;
+  }
+
+  // ── Source code managers: Azure DevOps ────────────────────────────────────
+
+  async getAzureDevOpsIntegrations(): Promise<AzureDevOpsIntegration[]> {
+    const response = await this.client.get('/integrations/scm/azure-devops');
+    return response.data;
+  }
+
+  async createAzureDevOpsIntegration(payload: AzureDevOpsIntegrationPayload): Promise<AzureDevOpsIntegration> {
+    const response = await this.client.post('/integrations/scm/azure-devops', payload);
+    return response.data;
+  }
+
+  async updateAzureDevOpsIntegration(
+    id: number,
+    payload: Partial<AzureDevOpsIntegrationPayload>,
+  ): Promise<AzureDevOpsIntegration> {
+    const response = await this.client.put(`/integrations/scm/azure-devops/${id}`, payload);
+    return response.data;
+  }
+
+  async deleteAzureDevOpsIntegration(id: number): Promise<void> {
+    await this.client.delete(`/integrations/scm/azure-devops/${id}`);
+  }
+
+  async testAzureDevOpsConnection(id: number): Promise<{ ok: boolean; message: string; projects_accessible: number }> {
+    const response = await this.client.post(`/integrations/scm/azure-devops/${id}/test`);
+    return response.data;
+  }
+
+  async syncAzureDevOpsIntegration(id: number): Promise<AzureDevOpsSyncResult> {
+    const response = await this.client.post(`/integrations/scm/azure-devops/${id}/sync`);
     return response.data;
   }
 

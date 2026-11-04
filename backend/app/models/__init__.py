@@ -65,8 +65,10 @@ from app.models.workflow import (
 )
 from app.models.wiz_integration import WizIntegration
 from app.models.netbrain_integration import NetBrainIntegration
+from app.models.scm_integration import SourceCodeManagerIntegration
 
 __all__ = [
+    "SourceCodeManagerIntegration",
     "User",
     "UserRole",
     "Organization",
