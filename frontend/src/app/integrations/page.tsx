@@ -61,6 +61,7 @@ import { JiraProjectPicker } from '@/components/integrations/JiraProjectPicker';
 import { ServiceNowSection } from '@/components/integrations/ServiceNowSection';
 import { WizSection } from '@/components/integrations/WizSection';
 import { NetBrainSection } from '@/components/integrations/NetBrainSection';
+import { CensysFieldMappingDialog } from '@/components/integrations/CensysFieldMappingDialog';
 
 const SEVERITIES = ['critical', 'high', 'medium', 'low', 'info'] as const;
 
@@ -184,6 +185,7 @@ function CensysSection() {
   const [saving, setSaving] = useState(false);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<CensysIntegration | null>(null);
+  const [mappingTarget, setMappingTarget] = useState<CensysIntegration | null>(null);
 
   useEffect(() => { load(); }, []);
 
@@ -391,6 +393,10 @@ function CensysSection() {
                   <Button size="sm" variant="outline" onClick={() => openEdit(c)}>
                     <Settings2 className="h-4 w-4 mr-2" />Edit
                   </Button>
+                  <Button size="sm" variant="outline" onClick={() => setMappingTarget(c)}>
+                    <ArrowLeftRight className="h-4 w-4 mr-2" />Map fields
+                    {!!c.field_mappings?.length && <span className="ml-1 text-muted-foreground">({c.field_mappings.length})</span>}
+                  </Button>
                   <Button size="sm" variant="outline" className="border-red-600/30 hover:bg-red-600/20 text-red-400" onClick={() => setDeleteTarget(c)}>
                     <Trash2 className="h-4 w-4 mr-2" />Remove
                   </Button>
@@ -527,6 +533,13 @@ function CensysSection() {
       </Dialog>
 
       {/* Delete Confirmation */}
+      <CensysFieldMappingDialog
+        integration={mappingTarget}
+        open={!!mappingTarget}
+        onOpenChange={(open) => { if (!open) setMappingTarget(null); }}
+        onSaved={load}
+      />
+
       <Dialog open={!!deleteTarget} onOpenChange={(v) => { if (!v) setDeleteTarget(null); }}>
         <DialogContent className="max-w-sm">
           <DialogHeader>
