@@ -70,6 +70,8 @@ class CensysSyncResult(BaseModel):
     subdomains_seen: int = 0
     certificates_seen: int = 0
     risks_seen: int = 0
+    risks_without_asset: int = 0
+    risk_assets_unmatched: int = 0
 
 
 class CensysFieldMappingRule(BaseModel):

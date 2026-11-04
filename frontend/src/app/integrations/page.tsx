@@ -266,7 +266,9 @@ function CensysSection() {
       const result = await api.testCensysConnection(integration.id);
       toast({
         title: result.ok ? 'Connection OK' : 'Connection failed',
-        description: result.message,
+        description: result.workspace_id
+          ? `${result.message} Censys workspace ID: ${result.workspace_id}.`
+          : result.message,
         variant: result.ok ? undefined : 'destructive',
       });
       await load();
@@ -373,9 +375,26 @@ function CensysSection() {
                       )}
                     </div>
                     {c.last_sync_ok && c.last_sync_stats && (
-                      <p className="text-xs text-muted-foreground mt-1">
-                        {c.last_sync_stats.assets_created ?? 0} new assets, {c.last_sync_stats.vulns_created ?? 0} new risks imported.
-                      </p>
+                      <div className="text-xs text-muted-foreground mt-1">
+                        <p>{c.last_sync_stats.assets_created ?? 0} new assets.</p>
+                        {c.import_vulnerabilities && (
+                          <p>
+                            Censys risks: {c.last_sync_stats.risks_seen ?? 0} received,{' '}
+                            {c.last_sync_stats.vulns_created ?? 0} new findings,{' '}
+                            {c.last_sync_stats.vulns_updated ?? 0} updated
+                            {(c.last_sync_stats.risks_without_asset ?? 0) > 0 && (
+                              <> · {c.last_sync_stats.risks_without_asset} without an asset reference</>
+                            )}
+                            {(c.last_sync_stats.risk_assets_unmatched ?? 0) > 0 && (
+                              <> · {c.last_sync_stats.risk_assets_unmatched} unmatched asset references</>
+                            )}
+                            .
+                          </p>
+                        )}
+                        {c.import_vulnerabilities && c.last_sync_stats.risks_seen === 0 && (
+                          <p className="text-amber-400">No active risk instances were returned for this API key&apos;s ASM workspace.</p>
+                        )}
+                      </div>
                     )}
                     {c.last_sync_ok === false && c.last_error && (
                       <p className="text-xs text-red-400 mt-1 truncate">{c.last_error}</p>

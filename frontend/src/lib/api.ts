@@ -409,6 +409,8 @@ export interface CensysSyncResult {
   subdomains_seen: number;
   certificates_seen: number;
   risks_seen: number;
+  risks_without_asset: number;
+  risk_assets_unmatched: number;
 }
 
 export interface WizIntegration {
