@@ -792,6 +792,42 @@ class ScheduleWorker:
         finally:
             db.close()
 
+    async def run_tenable_vm_syncs(self):
+        """Run scheduled Tenable VM asset and vulnerability imports when due."""
+        from app.models.tenable_integration import TenableVmIntegration
+        from app.services import tenable_vm_service
+
+        db = self.get_db_session()
+        if not db:
+            return
+        try:
+            now = datetime.utcnow()
+            candidates = db.query(TenableVmIntegration).filter(
+                TenableVmIntegration.is_active == True,
+                TenableVmIntegration.continuous_sync_enabled == True,
+            ).all()
+            due = [connection for connection in candidates if connection.is_sync_due(now)]
+            if not due:
+                return
+            logger.info(f"Tenable VM: {len(due)} connection(s) due for continuous sync")
+            for integration in due:
+                try:
+                    result = await tenable_vm_service.sync_integration(db, integration)
+                    logger.info(
+                        f"Tenable VM sync (org {integration.organization_id}, "
+                        f"'{integration.connection_name}'): {result.get('message')}"
+                    )
+                except Exception as exc:
+                    logger.error(
+                        f"Tenable VM sync failed for connection {integration.id}: {exc}",
+                        exc_info=True,
+                    )
+                    db.rollback()
+        except Exception as exc:
+            logger.error(f"Tenable VM continuous sync check failed: {exc}", exc_info=True)
+        finally:
+            db.close()
+
     async def run_akamai_waf_syncs(self):
         """Run continuous Akamai WAF syncs for connections whose interval is due."""
         from app.models.akamai_integration import AkamaiWafIntegration
@@ -1009,6 +1045,9 @@ class ScheduleWorker:
 
                 # Continuous Wiz VM and vulnerability syncs
                 await self.run_wiz_syncs()
+
+                # Continuous Tenable VM asset and vulnerability syncs
+                await self.run_tenable_vm_syncs()
 
                 # Continuous Akamai WAF syncs
                 await self.run_akamai_waf_syncs()
