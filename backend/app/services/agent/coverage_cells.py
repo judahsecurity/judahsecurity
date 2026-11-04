@@ -746,6 +746,8 @@ def parameter_test_funnel(brain: Any) -> dict[str, Any]:
                 replay_reason = "identity_unavailable"
             elif blocked_code == "get_budget_exhausted":
                 replay_reason = "get_budget_exhausted"
+            elif blocked_code == "observed_query_baseline_missing":
+                replay_reason = "observed_query_baseline_missing"
             elif "operator approval" in str(cell.get("first_pass_reason") or "").lower():
                 replay_reason = "post_path_not_approved"
             elif capture_needed:
