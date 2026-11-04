@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
@@ -75,16 +75,41 @@ export function TenableSection() {
   const [busyId, setBusyId] = useState<number | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<TenableIntegration | null>(null);
 
+  // Connections whose background sync this tab is watching, to report the result.
+  const watching = useRef<Set<number>>(new Set());
+
   useEffect(() => { void load(); }, []);
 
-  async function load() {
-    setLoading(true);
+  // Poll while any sync is running; Tenable exports can take many minutes.
+  const anySyncing = integrations.some((item) => item.sync_in_progress);
+  useEffect(() => {
+    if (!anySyncing) return;
+    const timer = setInterval(() => { void load(true); }, 5000);
+    return () => clearInterval(timer);
+  }, [anySyncing]);
+
+  async function load(quiet = false) {
+    if (!quiet) setLoading(true);
     try {
-      setIntegrations(await api.getTenableIntegrations());
+      const items = await api.getTenableIntegrations();
+      for (const item of items) {
+        if (watching.current.has(item.id) && !item.sync_in_progress) {
+          watching.current.delete(item.id);
+          const stats = item.last_sync_stats || {};
+          toast({
+            title: item.last_sync_ok ? 'Tenable VM sync complete' : 'Tenable VM sync failed',
+            description: item.last_sync_ok
+              ? `${stats.assets_created || 0} new assets, ${stats.vulns_created || 0} new findings, ${stats.vulns_resolved || 0} fixed findings closed, ${stats.assets_retired || 0} assets retired.`
+              : item.last_error || undefined,
+            variant: item.last_sync_ok ? undefined : 'destructive',
+          });
+        }
+      }
+      setIntegrations(items);
     } catch {
-      setIntegrations([]);
+      if (!quiet) setIntegrations([]);
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
   }
 
@@ -168,13 +193,10 @@ export function TenableSection() {
   async function sync(item: TenableIntegration) {
     setBusyId(item.id);
     try {
-      const result = await api.syncTenableIntegration(item.id);
-      toast({
-        title: result.ok ? 'Tenable VM sync complete' : 'Tenable VM sync failed',
-        description: result.message,
-        variant: result.ok ? undefined : 'destructive',
-      });
-      await load();
+      await api.syncTenableIntegration(item.id);
+      watching.current.add(item.id);
+      toast({ title: 'Tenable VM sync started', description: 'Large tenants can take several minutes. You can leave this page.' });
+      await load(true);
     } catch (error) {
       toast({ title: 'Tenable VM sync failed', description: getApiErrorMessage(error), variant: 'destructive' });
     } finally {
@@ -231,6 +253,11 @@ export function TenableSection() {
                 <div>
                   <div className="flex items-center gap-2">
                     <p className="font-medium text-sm">{item.connection_name}</p>
+                    {item.sync_in_progress && (
+                      <Badge variant="outline" className="bg-sky-500/10 text-sky-400 border-sky-500/30 text-xs">
+                        <Loader2 className="h-3 w-3 mr-1 animate-spin" />Syncing…
+                      </Badge>
+                    )}
                     {item.last_test_ok === false && (
                       <Badge variant="outline" className="bg-red-500/10 text-red-400 border-red-500/30 text-xs">
                         <AlertCircle className="h-3 w-3 mr-1" />Auth issue
@@ -248,6 +275,7 @@ export function TenableSection() {
                   {item.last_sync_stats && item.last_sync_ok && (
                     <p className="text-xs text-muted-foreground mt-1">
                       {item.last_sync_stats.assets_created || 0} new assets, {item.last_sync_stats.vulns_created || 0} new findings,{' '}
+                      {item.last_sync_stats.vulns_resolved || 0} fixed findings closed, {item.last_sync_stats.assets_retired || 0} assets retired,{' '}
                       {item.last_sync_stats.assets_skipped || 0} private/internal/cloud assets skipped.
                     </p>
                   )}
@@ -256,7 +284,7 @@ export function TenableSection() {
                   )}
                 </div>
                 <div className="flex flex-wrap gap-2">
-                  <Button size="sm" variant="outline" onClick={() => sync(item)} disabled={busyId === item.id || !item.is_active}>
+                  <Button size="sm" variant="outline" onClick={() => sync(item)} disabled={busyId === item.id || !item.is_active || item.sync_in_progress}>
                     {busyId === item.id ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Download className="h-4 w-4 mr-2" />}Sync now
                   </Button>
                   <Button size="sm" variant="outline" onClick={() => test(item)} disabled={busyId === item.id}>

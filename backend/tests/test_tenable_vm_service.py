@@ -89,8 +89,8 @@ def test_asset_identity_skips_private_internal_and_cloud():
 class FakeTenable:
     """In-memory Tenable export API."""
 
-    def __init__(self, assets=None, vulns=None, status_code=200):
-        self.data = {"assets": assets or [], "vulns": vulns or []}
+    def __init__(self, assets=None, vulns=None, fixed=None, status_code=200):
+        self.data = {"assets-uuid": assets or [], "vulns-uuid": vulns or [], "fixed-uuid": fixed or []}
         self.status_code = status_code
         self.requests = []
         self.polls = {}
@@ -103,17 +103,20 @@ class FakeTenable:
         parts = request.url.path.strip("/").split("/")
         kind = parts[0]
         if request.method == "POST" and parts[-1] == "export":
+            if body["filters"].get("state") == ["FIXED"]:
+                return httpx.Response(200, json={"export_uuid": "fixed-uuid"})
             return httpx.Response(200, json={"export_uuid": f"{kind}-uuid"})
+        export_uuid = parts[2] if len(parts) > 2 else ""
         if parts[-1] == "cancel":
             return httpx.Response(200, json={"status": "CANCELLED"})
         if parts[-1] == "status":
             # Report PROCESSING once with chunk 1, then FINISHED with chunk 2.
-            n = self.polls[kind] = self.polls.get(kind, 0) + 1
+            n = self.polls[export_uuid] = self.polls.get(export_uuid, 0) + 1
             if n == 1:
                 return httpx.Response(200, json={"status": "PROCESSING", "chunks_available": [1]})
             return httpx.Response(200, json={"status": "FINISHED", "chunks_available": [1, 2]})
         if parts[-2] == "chunks":
-            items = self.data[kind]
+            items = self.data[export_uuid]
             half = (len(items) + 1) // 2
             return httpx.Response(200, json=items[:half] if parts[-1] == "1" else items[half:])
         return httpx.Response(404)
@@ -283,3 +286,95 @@ def test_sync_failure_is_recorded(db):
     assert result["ok"] is False
     integration = db.get(TenableVmIntegration, 1)
     assert integration.last_sync_ok is False and "401" in integration.last_error
+
+
+def test_fixed_export_uses_last_fixed_filter():
+    fake = FakeTenable()
+    asyncio.run(fake.client().export_fixed_vulns(456))
+    assert fake.requests[0][2]["filters"] == {
+        "severity": ["low", "medium", "high", "critical"], "state": ["FIXED"], "last_fixed": 456,
+    }
+
+
+def _fixed(vuln, **extra):
+    return {**vuln, "state": "FIXED", "last_fixed": "2026-11-03T00:00:00Z", **extra}
+
+
+def test_fixed_findings_close_open_ones_but_respect_analyst_decisions(db):
+    _sync(db, FakeTenable(assets=ASSETS, vulns=VULNS))
+    usn = db.query(Vulnerability).filter_by(title="Ubuntu USN-1").one()
+    usn.status = VulnerabilityStatus.FALSE_POSITIVE
+    db.commit()
+
+    # Apache + USN now fixed in Tenable; vpn finding still open.
+    result = _sync(db, FakeTenable(assets=ASSETS, vulns=[VULNS[2]], fixed=[_fixed(VULNS[0]), _fixed(VULNS[1])]))
+    assert result["ok"] and result["vulns_resolved"] == 1
+
+    apache = db.query(Vulnerability).filter(Vulnerability.title.like("Apache%")).one()
+    assert apache.status == VulnerabilityStatus.RESOLVED
+    assert apache.resolved_at.isoformat() == "2026-11-03T00:00:00"
+    db.refresh(usn)
+    assert usn.status == VulnerabilityStatus.FALSE_POSITIVE  # analyst decision kept
+    vpn = db.query(Vulnerability).filter_by(title="SSL Certificate Expiry").one()
+    assert vpn.status == VulnerabilityStatus.OPEN
+
+
+def test_fixed_finding_for_unknown_asset_creates_nothing(db):
+    stray = _fixed({"asset": {"uuid": "u-new", "fqdn": "new.acme.com"}, "plugin": {"id": 9, "name": "x"},
+                    "port": {"port": 0}})
+    result = _sync(db, FakeTenable(fixed=[stray]))
+    assert result["ok"] and result["vulns_resolved"] == 0
+    assert db.query(Asset).count() == 0 and db.query(Vulnerability).count() == 0
+
+
+def test_assets_no_longer_reported_are_retired_and_come_back(db):
+    from app.models.asset import AssetStatus
+    _sync(db, FakeTenable(assets=ASSETS))
+    # Someone else's asset that Tenable merely enriched must never be retired.
+    other = Asset(name="shop.acme.com", value="shop.acme.com", asset_type=AssetType.SUBDOMAIN,
+                  organization_id=1, discovery_source="subfinder")
+    db.add(other)
+    db.commit()
+
+    result = _sync(db, FakeTenable(assets=[ASSETS[1]]))  # www.acme.com gone
+    assert result["assets_retired"] == 1
+    www = db.query(Asset).filter_by(value="www.acme.com").one()
+    assert www.status == AssetStatus.INACTIVE and "retired_at" in www.metadata_["tenable"]
+    db.refresh(other)
+    assert other.status != AssetStatus.INACTIVE
+
+    _sync(db, FakeTenable(assets=ASSETS))
+    db.refresh(www)
+    assert www.status == AssetStatus.DISCOVERED
+
+
+def test_empty_asset_export_retires_nothing(db):
+    _sync(db, FakeTenable(assets=ASSETS))
+    result = _sync(db, FakeTenable(assets=[]))
+    assert result["ok"] and result["assets_retired"] == 0
+
+
+def test_sync_lock_blocks_overlapping_syncs_and_is_released(db):
+    from datetime import datetime, timedelta
+    assert svc.acquire_sync_lock(db, 1) is True
+    assert svc.acquire_sync_lock(db, 1) is False
+    busy = _sync(db, FakeTenable(assets=ASSETS))
+    assert busy["ok"] is False and "already running" in busy["message"]
+    assert db.query(Asset).count() == 0
+
+    integration = db.get(TenableVmIntegration, 1)
+    ok = asyncio.run(svc.sync_integration(db, integration, client=FakeTenable(assets=ASSETS).client(),
+                                          address_filter=_filter(), lock_held=True))
+    assert ok["ok"]
+    db.refresh(integration)
+    assert integration.sync_started_at is None and integration.sync_in_progress is False
+
+    # A lock left behind by a crashed worker expires.
+    integration.sync_started_at = datetime.utcnow() - timedelta(hours=5)
+    db.commit()
+    assert svc.acquire_sync_lock(db, 1) is True
+
+
+def test_failed_sync_releases_lock(db):
+    _sync(db, FakeTenable(status_code=401))
+    assert db.get(TenableVmIntegration, 1).sync_started_at is None

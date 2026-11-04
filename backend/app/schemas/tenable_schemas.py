@@ -54,6 +54,8 @@ class TenableIntegrationResponse(BaseModel):
     sync_interval_minutes: int
     last_tested_at: Optional[datetime]
     last_test_ok: Optional[bool]
+    sync_started_at: Optional[datetime] = None
+    sync_in_progress: bool = False
     last_sync_at: Optional[datetime]
     last_sync_ok: Optional[bool]
     next_sync_at: Optional[datetime] = None
@@ -75,12 +77,15 @@ class TenableTestConnectionResponse(BaseModel):
 class TenableSyncResult(BaseModel):
     ok: bool
     message: str
+    started: bool = False
     assets_seen: int = 0
     assets_created: int = 0
     assets_updated: int = 0
     assets_skipped: int = 0
+    assets_retired: int = 0
     vulns_seen: int = 0
     vulns_created: int = 0
     vulns_updated: int = 0
     vulns_skipped: int = 0
+    vulns_resolved: int = 0
     ports_created: int = 0

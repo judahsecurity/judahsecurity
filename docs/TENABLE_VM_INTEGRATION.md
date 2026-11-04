@@ -9,7 +9,12 @@ Judah can import assets and open vulnerabilities from Tenable Vulnerability Mana
 - **Sets severity** from the CVSSv3 temporal score, else the CVSSv3 base score: ≥ 9.0 Critical, ≥ 7.0 High, ≥ 4.0 Medium, ≥ 0.1 Low, otherwise Info. Findings with no CVSSv3 score fall back to Tenable's own risk factor.
 - **Attaches details**: the plugin synopsis/description, solution, and references (`see_also`) become the finding's description, remediation, and references; plugin output, service, CVEs, and CVSS scores and vector are stored as evidence.
 
-Findings are keyed on asset + plugin ID + port, so re-syncs update in place. A finding Judah marked resolved is reopened if Tenable still reports it open. Agent findings are recorded as `tenable_agent` and local-check findings as `tenable_credentialed`, so severity scoring treats them as not externally discoverable.
+Findings are keyed on asset + plugin ID + port, so re-syncs update in place. A finding Judah marked resolved is reopened if Tenable still reports it open.
+
+- **Closes fixed findings** (`POST /vulns/export`, state `FIXED`, `last_fixed` = last 30 days). Matching open or in-progress findings are marked resolved with Tenable's fix date. False positives, accepted risks, and mitigated findings are left as the analyst set them, and fixed findings never create new records.
+- **Retires stale assets.** After a complete, non-empty asset export, assets that Tenable created and no longer reports are marked **Inactive**; they return to Discovered if Tenable reports them again. Assets found by other discovery and only enriched by Tenable are never retired. An empty asset export retires nothing, since that usually means a permissions problem.
+
+Syncs run in the background: **Sync now** returns immediately and the card shows **Syncing…** until the result is in. Each connection holds a lock while syncing, so a manual sync and a scheduled sync can't overlap; a lock left by a crashed worker expires after 4 hours. Agent findings are recorded as `tenable_agent` and local-check findings as `tenable_credentialed`, so severity scoring treats them as not externally discoverable.
 
 ## Tenable prerequisites
 
@@ -23,7 +28,7 @@ Findings are keyed on asset + plugin ID + port, so re-syncs update in place. A f
 2. Enter the **Tenable VM URL** (default `https://cloud.tenable.com`; FedRAMP tenants use `https://fedcloud.tenable.com`), **Access Key**, and **Secret Key**.
 3. Choose **Import Assets** and/or **Import Vulnerabilities**, and the auto-sync interval.
 4. Click **Connect**. Judah checks the keys by requesting an asset export and a vulnerability export (then cancels both). If either fails, check that the service account has **Can View** on **All Assets**.
-5. Use **Sync now** for the first import or wait for the schedule.
+5. Use **Sync now** for the first import or wait for the schedule. `POST …/sync` returns `202` (or `409` if a sync is already running); poll `GET /api/integrations/tenable` for `sync_in_progress` and `last_sync_stats`.
 
 ## Security behavior
 

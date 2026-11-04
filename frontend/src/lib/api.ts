@@ -441,6 +441,8 @@ export interface TenableIntegration {
   sync_interval_minutes: number;
   last_tested_at?: string;
   last_test_ok?: boolean;
+  sync_started_at?: string;
+  sync_in_progress: boolean;
   last_sync_at?: string;
   last_sync_ok?: boolean;
   next_sync_at?: string;
@@ -453,6 +455,7 @@ export interface TenableIntegration {
 export interface TenableSyncResult {
   ok: boolean;
   message: string;
+  started: boolean;
   assets_seen: number;
   assets_created: number;
   assets_updated: number;

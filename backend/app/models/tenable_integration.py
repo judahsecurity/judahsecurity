@@ -9,6 +9,8 @@ from app.db.database import Base
 from app.models.api_config import get_cipher
 
 DEFAULT_TENABLE_URL = "https://cloud.tenable.com"
+# A sync holding the lock longer than this is assumed dead (worker restart).
+SYNC_LOCK_TTL = timedelta(hours=4)
 
 
 class TenableVmIntegration(Base):
@@ -38,6 +40,7 @@ class TenableVmIntegration(Base):
 
     last_tested_at = Column(DateTime, nullable=True)
     last_test_ok = Column(Boolean, nullable=True)
+    sync_started_at = Column(DateTime, nullable=True)  # set while a sync holds the lock
     last_sync_at = Column(DateTime, nullable=True)
     last_sync_ok = Column(Boolean, nullable=True)
     last_sync_stats = Column(JSON, default=dict)
@@ -62,6 +65,10 @@ class TenableVmIntegration(Base):
         if self.secret_key_encrypted:
             return get_cipher().decrypt(self.secret_key_encrypted.encode()).decode()
         return None
+
+    @property
+    def sync_in_progress(self) -> bool:
+        return bool(self.sync_started_at and datetime.utcnow() - self.sync_started_at < SYNC_LOCK_TTL)
 
     @property
     def next_sync_at(self) -> datetime | None:

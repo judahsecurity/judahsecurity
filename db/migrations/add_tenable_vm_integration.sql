@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS tenable_vm_integrations (
     sync_interval_minutes INTEGER NOT NULL DEFAULT 1440,
     last_tested_at TIMESTAMP,
     last_test_ok BOOLEAN,
+    sync_started_at TIMESTAMP,
     last_sync_at TIMESTAMP,
     last_sync_ok BOOLEAN,
     last_sync_stats JSON,
@@ -23,3 +24,6 @@ CREATE TABLE IF NOT EXISTS tenable_vm_integrations (
 
 CREATE INDEX IF NOT EXISTS ix_tenable_vm_integrations_organization_id
     ON tenable_vm_integrations (organization_id);
+
+-- Added after the initial table definition; safe to re-run.
+ALTER TABLE tenable_vm_integrations ADD COLUMN IF NOT EXISTS sync_started_at TIMESTAMP;

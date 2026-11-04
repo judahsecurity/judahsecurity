@@ -1066,17 +1066,51 @@ async def test_tenable_connection(
     return TenableTestConnectionResponse(**result)
 
 
-@router.post("/tenable/{integration_id}/sync", response_model=TenableSyncResult)
+@router.post(
+    "/tenable/{integration_id}/sync",
+    response_model=TenableSyncResult,
+    status_code=status.HTTP_202_ACCEPTED,
+)
 async def sync_tenable_integration(
     integration_id: int,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_analyst),
 ):
+    """Start a sync in the background; poll the connection for its result.
+
+    Tenable exports can take many minutes on large tenants, longer than a
+    browser or proxy will hold a request open.
+    """
     org_id = _get_org_id(current_user)
     integration = _get_tenable_integration(db, org_id, integration_id)
     if not integration.is_active:
         raise HTTPException(status_code=400, detail="This Tenable VM connection is disabled.")
-    return TenableSyncResult(**(await tenable_vm_service.sync_integration(db, integration)))
+    if not tenable_vm_service.acquire_sync_lock(db, integration.id):
+        raise HTTPException(status_code=409, detail="A sync is already running for this connection.")
+    background_tasks.add_task(_bg_sync_tenable, integration.id)
+    return TenableSyncResult(ok=True, started=True, message="Tenable VM sync started.")
+
+
+async def _bg_sync_tenable(integration_id: int) -> None:
+    from app.db.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        integration = db.query(TenableVmIntegration).filter(
+            TenableVmIntegration.id == integration_id
+        ).first()
+        if integration:
+            await tenable_vm_service.sync_integration(db, integration, lock_held=True)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Background Tenable VM sync failed for %s: %s", integration_id, exc)
+        db.rollback()
+        db.query(TenableVmIntegration).filter(TenableVmIntegration.id == integration_id).update(
+            {TenableVmIntegration.sync_started_at: None}, synchronize_session=False
+        )
+        db.commit()
+    finally:
+        db.close()
 
 
 # ══════════════════════════════════════════════════════════════════════════════

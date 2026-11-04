@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 
 from app.models.asset import Asset, AssetStatus, AssetType
 from app.models.port_service import PortService, PortState, Protocol
-from app.models.tenable_integration import DEFAULT_TENABLE_URL, TenableVmIntegration
+from app.models.tenable_integration import DEFAULT_TENABLE_URL, SYNC_LOCK_TTL, TenableVmIntegration
 from app.models.vulnerability import Severity, Vulnerability, VulnerabilityStatus
 
 logger = logging.getLogger(__name__)
@@ -192,12 +192,27 @@ class TenableClient:
             },
         }
 
+    @staticmethod
+    def fixed_vuln_export_body(since_epoch: int) -> Dict[str, Any]:
+        return {
+            "num_assets": TenableClient.VULN_ASSETS_PER_CHUNK,
+            "filters": {
+                "severity": IMPORTED_SEVERITIES,
+                "state": ["FIXED"],
+                "last_fixed": since_epoch,
+            },
+        }
+
     async def export_assets(self, since_epoch: int) -> List[Dict[str, Any]]:
         export_uuid = await self.start_export("assets", self.asset_export_body(since_epoch))
         return await self.collect_export("assets", export_uuid)
 
     async def export_vulns(self, since_epoch: int) -> List[Dict[str, Any]]:
         export_uuid = await self.start_export("vulns", self.vuln_export_body(since_epoch))
+        return await self.collect_export("vulns", export_uuid)
+
+    async def export_fixed_vulns(self, since_epoch: int) -> List[Dict[str, Any]]:
+        export_uuid = await self.start_export("vulns", self.fixed_vuln_export_body(since_epoch))
         return await self.collect_export("vulns", export_uuid)
 
 
@@ -418,10 +433,12 @@ class _Stats:
         self.assets_created = 0
         self.assets_updated = 0
         self.assets_skipped = 0
+        self.assets_retired = 0
         self.vulns_seen = 0
         self.vulns_created = 0
         self.vulns_updated = 0
         self.vulns_skipped = 0
+        self.vulns_resolved = 0
         self.ports_created = 0
 
     def as_dict(self) -> Dict[str, int]:
@@ -494,6 +511,8 @@ class TenableImporter:
             metadata["tenable"] = merged
             asset.metadata_ = metadata
             asset.last_seen = datetime.utcnow()
+            if asset.status == AssetStatus.INACTIVE and asset.discovery_source == DISCOVERY_SOURCE:
+                asset.status = AssetStatus.DISCOVERED
             if operating_systems and not asset.operating_system:
                 asset.operating_system = operating_systems[0][:200]
             if ipv4s and asset_type != AssetType.IP_ADDRESS:
@@ -524,7 +543,8 @@ class TenableImporter:
 
     # Ports -------------------------------------------------------------------
 
-    def _upsert_port(self, asset: Asset, port_info: Dict[str, Any]) -> Optional[PortService]:
+    @staticmethod
+    def _port_key(port_info: Dict[str, Any]) -> Optional[Tuple[int, Protocol]]:
         try:
             number = int(port_info.get("port") or 0)
         except (TypeError, ValueError):
@@ -535,6 +555,18 @@ class TenableImporter:
             protocol = Protocol(str(port_info.get("protocol") or "tcp").lower())
         except ValueError:
             protocol = Protocol.TCP
+        return number, protocol
+
+    @staticmethod
+    def _template_id(plugin: Dict[str, Any], port_key: Optional[Tuple[int, Protocol]]) -> str:
+        suffix = f"{port_key[0]}/{port_key[1].value}" if port_key else "host"
+        return f"{TEMPLATE_PREFIX}{plugin.get('id')}:{suffix}"[:255]
+
+    def _upsert_port(self, asset: Asset, port_info: Dict[str, Any]) -> Optional[PortService]:
+        key = self._port_key(port_info)
+        if key is None:
+            return None
+        number, protocol = key
         port = self.db.query(PortService).filter(
             PortService.asset_id == asset.id,
             PortService.port == number,
@@ -608,8 +640,7 @@ class TenableImporter:
         plugin = finding.get("plugin") or {}
         port_info = finding.get("port") or {}
         port = self._upsert_port(asset, port_info)
-        port_key = f"{port.port}/{port.protocol.value}" if port else "host"
-        template_id = f"{TEMPLATE_PREFIX}{plugin.get('id')}:{port_key}"[:255]
+        template_id = self._template_id(plugin, (port.port, port.protocol) if port else None)
 
         score, severity = cvss_rating(plugin)
         cves = [str(c).upper() for c in _as_list(plugin.get("cve")) if c]
@@ -677,6 +708,81 @@ class TenableImporter:
         self.stats.vulns_created += 1
 
 
+# Analyst decisions that a Tenable "fixed" state must not overwrite.
+_RESOLVABLE_STATUSES = (VulnerabilityStatus.OPEN, VulnerabilityStatus.IN_PROGRESS)
+
+
+def _resolve_fixed(importer: "TenableImporter", findings: List[Dict[str, Any]]) -> None:
+    """Close findings Tenable now reports as FIXED. Never creates anything."""
+    for finding in findings:
+        plugin = finding.get("plugin") or {}
+        source = finding.get("asset") or {}
+        if not plugin.get("id"):
+            continue
+        identity = importer._uuid_to_value.get(str(source.get("uuid") or "")) or importer.addresses.identity(
+            _as_list(source.get("fqdn")) + _as_list(source.get("hostname")), _as_list(source.get("ipv4"))
+        )
+        if identity is None:
+            continue
+        asset = importer._assets.get(identity[0]) or importer.db.query(Asset).filter(
+            Asset.organization_id == importer.org_id, Asset.value == identity[0]
+        ).first()
+        if asset is None:
+            continue
+        template_id = importer._template_id(plugin, importer._port_key(finding.get("port") or {}))
+        vuln = importer.db.query(Vulnerability).filter(
+            Vulnerability.asset_id == asset.id,
+            Vulnerability.template_id == template_id,
+            Vulnerability.status.in_(_RESOLVABLE_STATUSES),
+        ).first()
+        if vuln is None:
+            continue
+        vuln.status = VulnerabilityStatus.RESOLVED
+        vuln.resolved_at = _parse_datetime(finding.get("last_fixed")) or datetime.utcnow()
+        metadata = dict(vuln.metadata_ or {})
+        metadata["tenable_state"] = "FIXED"
+        vuln.metadata_ = metadata
+        importer.stats.vulns_resolved += 1
+
+
+def _retire_stale_assets(importer: "TenableImporter") -> None:
+    """Mark Tenable-created assets Tenable no longer reports as INACTIVE.
+
+    Only assets Tenable itself created are retired; assets found by other
+    discovery and merely enriched by Tenable are left alone.
+    """
+    stale = importer.db.query(Asset).filter(
+        Asset.organization_id == importer.org_id,
+        Asset.discovery_source == DISCOVERY_SOURCE,
+        Asset.status.notin_([AssetStatus.INACTIVE, AssetStatus.ARCHIVED]),
+    ).all()
+    now = datetime.utcnow().isoformat()
+    for asset in stale:
+        if asset.value in importer._touched_assets:
+            continue
+        asset.status = AssetStatus.INACTIVE
+        metadata = dict(asset.metadata_ or {})
+        metadata["tenable"] = {**(metadata.get("tenable") or {}), "retired_at": now}
+        asset.metadata_ = metadata
+        importer.stats.assets_retired += 1
+
+
+def acquire_sync_lock(db: Session, integration_id: int) -> bool:
+    """Atomically claim the connection's sync lock. False if a sync is running."""
+    now = datetime.utcnow()
+    claimed = (
+        db.query(TenableVmIntegration)
+        .filter(
+            TenableVmIntegration.id == integration_id,
+            (TenableVmIntegration.sync_started_at.is_(None))
+            | (TenableVmIntegration.sync_started_at < now - SYNC_LOCK_TTL),
+        )
+        .update({TenableVmIntegration.sync_started_at: now}, synchronize_session=False)
+    )
+    db.commit()
+    return claimed == 1
+
+
 def _client_for(integration: TenableVmIntegration) -> TenableClient:
     access_key = integration.get_access_key()
     secret_key = integration.get_secret_key()
@@ -691,28 +797,43 @@ async def sync_integration(
     *,
     client: Optional[TenableClient] = None,
     address_filter: Optional[_AddressFilter] = None,
+    lock_held: bool = False,
 ) -> Dict[str, Any]:
+    """Run one sync. Takes the connection's lock unless the caller already holds it."""
+    if not lock_held and not acquire_sync_lock(db, integration.id):
+        return {"ok": False, "message": "A sync is already running for this connection."}
+    db.refresh(integration)
     importer = TenableImporter(db, integration.organization_id, address_filter)
     try:
         client = client or _client_for(integration)
         since = _since_epoch()
+        asset_records: Optional[List[Dict[str, Any]]] = None
         if integration.import_assets:
-            importer.import_assets(await client.export_assets(since))
+            asset_records = await client.export_assets(since)
+            importer.import_assets(asset_records)
         if integration.import_vulnerabilities:
             importer.import_vulnerabilities(await client.export_vulns(since))
+            _resolve_fixed(importer, await client.export_fixed_vulns(since))
+        # Only retire after a complete, non-empty asset export: an empty
+        # export is far more likely a permissions problem than an empty estate.
+        if asset_records:
+            _retire_stale_assets(importer)
 
         stats = importer.stats.as_dict()
         integration.last_sync_at = datetime.utcnow()
         integration.last_sync_ok = True
         integration.last_error = None
         integration.last_sync_stats = stats
+        integration.sync_started_at = None
         db.commit()
         return {
             "ok": True,
             "message": (
                 f"Imported {stats['assets_created']} new asset(s) and "
-                f"{stats['vulns_created']} new vulnerability finding(s) from Tenable VM "
-                f"({stats['assets_skipped']} private/internal/cloud asset(s) skipped)."
+                f"{stats['vulns_created']} new vulnerability finding(s) from Tenable VM; "
+                f"closed {stats['vulns_resolved']} fixed finding(s), retired "
+                f"{stats['assets_retired']} asset(s) no longer reported, and skipped "
+                f"{stats['assets_skipped']} private/internal/cloud asset(s)."
             ),
             **stats,
         }
@@ -722,5 +843,6 @@ async def sync_integration(
         integration.last_sync_at = datetime.utcnow()
         integration.last_sync_ok = False
         integration.last_error = str(exc)[:1000]
+        integration.sync_started_at = None
         db.commit()
         return {"ok": False, "message": f"Sync failed: {exc}", **importer.stats.as_dict()}
