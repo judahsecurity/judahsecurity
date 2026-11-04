@@ -188,7 +188,12 @@ async def execute_browser_actions(actions_json: str, *, capture_callback=None) -
             context = await browser.new_context(**ctx_kwargs)
             if allowed_origin:
                 from app.services.agent.assessment_sessions import configure_browser_origin
-                await configure_browser_origin(context, allowed_origin)
+                await configure_browser_origin(
+                    context, allowed_origin,
+                    allowed_methods=spec.get("allowed_methods"),
+                    approved_post_paths=spec.get("approved_post_paths"),
+                    approved_delete_paths=spec.get("approved_delete_paths"),
+                )
             if isinstance(seed_cookies, list) and seed_cookies and not storage_state:
                 try:
                     await context.add_cookies(seed_cookies)

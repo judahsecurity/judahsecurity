@@ -115,6 +115,7 @@ class ScopedAssessmentTools:
     def set_scoped_assessment_policy(self, policy: dict | None) -> None:
         """Install operator supplied rules for this agent session, never model supplied rules."""
         policy = policy or {}
+        self._scoped_policy_applied = True
         paths = policy.get("body_replay_paths") or []
         cleanup_paths = policy.get("stored_xss_cleanup_paths") or []
         race_action_paths = policy.get("race_action_paths") or []
