@@ -111,3 +111,6 @@ backend/nuclei-templates-generated/
 
 # Production deployment backups
 backups/
+
+# TypeScript incremental build cache
+*.tsbuildinfo
