@@ -69,6 +69,76 @@ def test_first_pass_queue_includes_link_inputs_and_skips_recorded_outcomes():
     assert len(pending_first_pass_cells(brain)) == 4
 
 
+def test_missing_original_query_blocks_once_without_rejected_probe_calls():
+    class Manager:
+        def __init__(self):
+            brain = EngagementBrain(target="https://app.test")
+            seed_parameter_coverage_cells(brain, [
+                {"method": "GET", "host": "app.test", "path": path,
+                 "name": "q", "location": "query", "identity": "anonymous",
+                 "source": "browser_link", "testable": True}
+                for path in ("/missing", "/captured")
+            ])
+            self._engagement_brain = brain.to_dict()
+            self._capability_map = {"target": "https://app.test"}
+            self.probe_calls = []
+
+        def _observed_get_query_sample(self, url, parameter, identity, capture_id):
+            assert parameter == "q" and identity == "anonymous" and not capture_id
+            if url.endswith("/missing"):
+                raise ValueError("observed_query_baseline_missing")
+            return url + "?q=original", "browser_link", {}
+
+        async def scoped_input_sweep_assigned(self, coverage_cell_id, **_kwargs):
+            self.probe_calls.append(coverage_cell_id)
+            return {"success": True, "first_pass_mode": "sweep",
+                    "evidence_id": "probe-" + coverage_cell_id,
+                    "baseline_evidence_id": "base-" + coverage_cell_id,
+                    "probe_evidence_id": "probe-" + coverage_cell_id,
+                    "proof_confirmed": False, "probe_result": {}}
+
+    manager = Manager()
+    first = asyncio.run(run_observed_input_batch(manager, max_checks=4))
+    assert first["baseline_blocked"] == 2
+    assert first["handoff_failures"] == 0
+    assert first["processed"] == len(manager.probe_calls) == 2
+    assert first["remaining"] == 0
+    blocked = [row for row in manager._engagement_brain["coverage_cells"]
+               if row["path"] == "/missing" and row["test_type"] in {"sqli", "xss"}]
+    assert all(row["status"] == "blocked"
+               and row["first_pass_outcome"] == "unattempted"
+               and row["first_pass_blocked_reason"] == "observed_query_baseline_missing"
+               for row in blocked), [(row.get("status"), row.get("first_pass_outcome"),
+                                     row.get("first_pass_blocked_reason")) for row in blocked]
+    assert first["funnel"]["replay_block_reasons"]["observed_query_baseline_missing"] == 2
+    second = asyncio.run(run_observed_input_batch(manager, max_checks=4))
+    assert second["processed"] == second["remaining"] == second["baseline_blocked"] == 0
+    assert len(manager.probe_calls) == 2
+
+
+def test_original_query_disappearing_after_preflight_is_not_retried():
+    class Manager:
+        def __init__(self):
+            self._engagement_brain = _brain().to_dict()
+            self._capability_map = {"target": "https://app.test"}
+            self.calls = 0
+
+        async def scoped_input_sweep_assigned(self, **_kwargs):
+            self.calls += 1
+            return {"success": False, "error": "observed_query_baseline_missing"}
+
+    manager = Manager()
+    first = asyncio.run(run_observed_input_batch(manager, max_checks=4))
+    assert first["handoff_failures"] == 4
+    assert manager.calls == 4
+    assert first["remaining"] == 0
+    second = asyncio.run(run_observed_input_batch(manager, max_checks=4))
+    assert second["processed"] == 0
+    assert manager.calls == 4
+    assert all(row["status"] == "blocked" for row in manager._engagement_brain["coverage_cells"]
+               if row["test_type"] in {"sqli", "xss"})
+
+
 def test_first_pass_lease_prefers_untried_input_over_repeating_lead():
     brain = _brain()
     sqli = [cell for cell in brain.coverage_cells if cell["specialist"] == "sqli"]

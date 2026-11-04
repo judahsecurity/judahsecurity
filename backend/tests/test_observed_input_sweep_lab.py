@@ -23,6 +23,39 @@ from app.services.agent.tools import ASMToolsManager
 from harness.local_harness.benchmark.class_lab import handler_for
 
 
+def test_original_query_lookup_reaches_older_retained_capture():
+    base = "https://app.test"
+    manager = ASMToolsManager()
+    public, private = package_exchange(
+        url=base + "/search?q=original&view=full", expected_origin=base,
+        action_ref="search", method="GET", resource_type="fetch", status=200,
+        content_type="application/json", request_body=b"",
+        response_body=b"{}", page_url=base + "/search",
+        request_headers={"Accept": "application/json"},
+    )
+    filler_public, filler_private = package_exchange(
+        url=base + "/other?x=1", expected_origin=base,
+        action_ref="other", method="GET", resource_type="fetch", status=200,
+        content_type="application/json", request_body=b"",
+        response_body=b"{}", page_url=base + "/other",
+    )
+    manager._scoped_browser_exchanges = {
+        "oldest": {"identity": "anonymous", "verifier_run_id": None,
+                   "private": private, "public": public},
+        **{
+            f"filler-{index}": {"identity": "anonymous", "verifier_run_id": None,
+                                 "private": filler_private, "public": filler_public}
+            for index in range(80)
+        },
+    }
+    url, source, headers = manager._observed_get_query_sample(
+        base + "/search", "q", "anonymous",
+    )
+    assert url == base + "/search?q=original&view=full"
+    assert source == "browser_traffic"
+    assert headers["Accept"] == "application/json"
+
+
 @pytest.mark.parametrize("bug_class", ["sqli", "xss"])
 @pytest.mark.parametrize("vulnerable", [True, False])
 def test_exact_observed_input_sweep_retains_both_responses(

@@ -323,6 +323,39 @@ async def run_observed_input_batch(
     if policy_blocked or identity_blocked or identity_reopened or policy_reopened:
         manager._engagement_brain = brain.to_dict()
 
+    # Query-key inventories include forms and discovered endpoints that have
+    # never produced a concrete GET request. Resolve a saved original before
+    # leasing or submitting a sweep. This lookup is local and sends no traffic.
+    baseline_blocked = 0
+    sample = getattr(manager, "_observed_get_query_sample", None)
+    if callable(sample):
+        for cell in pending_first_pass_cells(brain, target=active_target):
+            location, _, parameter = str(cell.get("parameter") or "").partition(":")
+            if (str(cell.get("method") or "GET").upper() != "GET"
+                    or location != "query"
+                    or cell.get("first_pass_outcome") not in (None, "", "unattempted")):
+                continue
+            try:
+                sample(
+                    f"{active_origin}{cell.get('path') or '/'}", parameter,
+                    str(cell.get("identity") or "anonymous"),
+                    str(cell.get("capture_id") or ""),
+                )
+            except ValueError as exc:
+                if str(exc) != "observed_query_baseline_missing":
+                    raise
+                cell["status"] = "blocked"
+                cell["reason"] = "No replayable original GET query request was captured"
+                cell["first_pass_outcome"] = "unattempted"
+                cell["first_pass_reason"] = cell["reason"]
+                cell["first_pass_blocked_reason"] = "observed_query_baseline_missing"
+                cell["first_pass_at"] = time.time()
+                cell["triage_pending"] = False
+                cell["xss_pending_techniques"] = []
+                baseline_blocked += 1
+        if baseline_blocked:
+            manager._engagement_brain = brain.to_dict()
+
     while len(results) < max_checks and time.monotonic() < deadline - 5:
         brain = engagement_brain_from_dict(getattr(manager, "_engagement_brain", None))
         pending = pending_first_pass_cells(brain, target=active_target)
@@ -779,6 +812,16 @@ async def run_observed_input_batch(
                 ])), candidate_id=candidate_id,
                 reason=reason,
             )
+            if outcome == "unattempted" and reason == "observed_query_baseline_missing":
+                # A capture can be evicted between preflight and execution.
+                # Treat that as a durable replay blocker, not another variant
+                # or a retriable tool handoff.
+                current["status"] = "blocked"
+                current["reason"] = "No replayable original GET query request was captured"
+                current["first_pass_reason"] = current["reason"]
+                current["first_pass_blocked_reason"] = "observed_query_baseline_missing"
+                current["triage_pending"] = False
+                current["xss_pending_techniques"] = []
             if (outcome == "unattempted" and current.get("status") == "inconclusive"
                     and reason.split(":", 1)[0] in {
                         "policy_denied", "confirmation_denied", "confirmation_expired",
@@ -807,6 +850,7 @@ async def run_observed_input_batch(
     return {
         "processed": len(results), "policy_blocked": policy_blocked,
         "identity_blocked": identity_blocked,
+        "baseline_blocked": baseline_blocked,
         "identity_reopened": identity_reopened,
         "policy_reopened": policy_reopened,
         "remaining": len(pending_first_pass_cells(

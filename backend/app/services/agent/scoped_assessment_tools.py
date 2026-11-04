@@ -264,8 +264,13 @@ class ScopedAssessmentTools:
 
         target = urlsplit(url)
         candidates: list[tuple[str, str, dict[str, str]]] = []
-        capture_ids = ([capture_id] if capture_id else
-                       list(reversed(self._scoped_capture_ids()))[:40])
+        # A discovery pass can retain 120 exchanges. Search all of them:
+        # limiting this lookup to the newest 40 makes older observed inputs
+        # appear to have no baseline even while their capture is still saved.
+        capture_ids = list(reversed(self._scoped_capture_ids()))
+        if capture_id:
+            capture_ids = [capture_id, *(item for item in capture_ids
+                                         if item != capture_id)]
         for artifact_id in capture_ids:
             try:
                 private = self._scoped_exchange(artifact_id, identity)
@@ -279,6 +284,12 @@ class ScopedAssessmentTools:
         links = (getattr(self, "_scoped_link_baselines", None) or {}).get(identity) or []
         candidates.extend((value, "browser_link", {}) for value in links)
         cmap = getattr(self, "_capability_map", None) or {}
+        if identity == "anonymous":
+            candidates.extend(
+                (value, "page_url", {})
+                for value in (cmap.get("pages_visited") or [])
+                if isinstance(value, str)
+            )
         candidates.extend(
             (str(sample.get("url") or ""), "captured_api", {})
             for sample in (cmap.get("api_samples") or [])
