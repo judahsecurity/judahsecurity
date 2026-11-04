@@ -72,6 +72,8 @@ class CensysAsmIntegration(Base):
     last_sync_ok = Column(Boolean, nullable=True)
     last_sync_stats = Column(JSON, default=dict)  # {"assets_created": .., "vulns_created": .., ...}
     last_error = Column(Text, nullable=True)
+    # Per-workspace enrichment rules; core identity and org attribution remain fixed.
+    field_mappings = Column(JSON, default=list, nullable=False)
 
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

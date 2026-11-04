@@ -176,6 +176,9 @@ def build_vuln_response(
     # Agent demonstrated-compromise chains live alongside those payloads.
     # Everything else in metadata_ stays internal.
     if vuln.metadata_ and isinstance(vuln.metadata_, dict):
+        censys_custom = (vuln.metadata_.get("censys_asm") or {}).get("custom")
+        if censys_custom:
+            d["censys_custom"] = censys_custom
         delphi = vuln.metadata_.get("delphi")
         if delphi:
             d["delphi"] = delphi

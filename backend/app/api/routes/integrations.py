@@ -60,6 +60,7 @@ from app.schemas.censys_schemas import (
     CensysIntegrationUpdate,
     CensysSyncResult,
     CensysTestConnectionResponse,
+    CensysFieldMappingUpdate,
 )
 from app.schemas.wiz_schemas import (
     WizIntegrationCreate,
@@ -125,6 +126,7 @@ from app.services import (
     cloudflare_waf_service,
     servicenow_service,
 )
+from app.services.censys_field_mapping import ENTITY_TARGETS, sample_fields, validate_rules
 
 router = APIRouter(prefix="/integrations", tags=["Integrations"])
 
@@ -751,6 +753,46 @@ async def sync_censys_integration(
 
     result = await censys_asm_service.sync_integration(db, integration)
     return CensysSyncResult(**result)
+
+
+@router.get("/censys/mapping/catalog")
+def censys_mapping_catalog(current_user: User = Depends(get_current_active_user)):
+    _get_org_id(current_user)
+    return {"entities": ENTITY_TARGETS, "custom_target_prefix": "custom."}
+
+
+@router.put("/censys/{integration_id}/mappings", response_model=CensysIntegrationResponse)
+def update_censys_mappings(
+    integration_id: int,
+    payload: CensysFieldMappingUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    integration = _get_censys_integration(db, _get_org_id(current_user), integration_id)
+    try:
+        integration.field_mappings = validate_rules([rule.model_dump() for rule in payload.rules])
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    db.commit()
+    db.refresh(integration)
+    return integration
+
+
+@router.get("/censys/{integration_id}/mappings/sample")
+async def sample_censys_mapping_fields(
+    integration_id: int,
+    entity: str = Query(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst),
+):
+    integration = _get_censys_integration(db, _get_org_id(current_user), integration_id)
+    if entity not in ENTITY_TARGETS:
+        raise HTTPException(status_code=422, detail="Unsupported Censys entity.")
+    try:
+        record = await censys_asm_service.sample_record(integration.get_api_key(), entity)
+    except (ValueError, censys_asm_service.CensysApiError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {"entity": entity, "fields": sample_fields(record) if record else []}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
