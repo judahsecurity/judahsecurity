@@ -51,7 +51,11 @@ def score_case(case: dict, root: Path) -> dict:
         raise ValueError("run scope does not match ground truth")
 
     receipt_complete = bool((assessment.get("ledger_metrics") or {}).get("receipt_complete"))
-    completed = bool(assessment.get("complete") and not assessment.get("error") and receipt_complete)
+    final_run_status = (
+        ledger[-1].get("status") if ledger and isinstance(ledger[-1], dict) else None
+    )
+    completed = bool(assessment.get("complete") and not assessment.get("error")
+                     and receipt_complete and final_run_status == "completed")
     hypotheses = [
         hypothesis
         for run in ledger if isinstance(run, dict)
@@ -77,6 +81,7 @@ def score_case(case: dict, root: Path) -> dict:
         "bug_class": case["bug_class"],
         "polarity": case["polarity"],
         "complete": completed,
+        "final_run_status": final_run_status,
         "eligible_surface_observed": observed,
         "test_attempted": attempted,
         "evidence_captured": evidence,

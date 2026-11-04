@@ -13,7 +13,7 @@ def _run(root, name, *, target, specialist, state, attempts, finding=None, compl
         "max_turns": 4, "max_iterations": 30, "price_limit_usd": 5.0,
         "ledger_metrics": {"receipt_complete": True, "duration_seconds": 12, "test_actions": 2},
     }
-    ledger = [{"hypotheses": [{
+    ledger = [{"status": "completed", "hypotheses": [{
         "specialist": specialist, "state": state, "attempts": attempts,
         "evidence_ids": ["evidence-1"] if attempts else [],
     }]}]
@@ -87,3 +87,18 @@ def test_negative_false_positive_and_incomplete_run_are_not_passing(tmp_path):
     assert report["cases"][1]["status"] == "fail"
     assert report["by_class"]["idor"]["incomplete_or_error"] == 1
     assert report["by_class"]["idor"]["pass"] is False
+
+
+def test_partial_ledger_cannot_pass_even_if_response_claims_completion(tmp_path):
+    _run(tmp_path, "negative", target="https://negative.test", specialist="api_authz",
+         state="negative_with_evidence", attempts=1)
+    ledger_path = tmp_path / "negative" / "agent_ledger.json"
+    ledger = json.loads(ledger_path.read_text())
+    ledger[-1]["status"] = "partial"
+    ledger_path.write_text(json.dumps(ledger))
+    path = tmp_path / "corpus.json"
+    path.write_text(json.dumps({"cases": [_case("negative", "negative", expected=[])]}))
+
+    report = score_corpus(path)
+    assert report["cases"][0]["status"] == "incomplete"
+    assert report["cases"][0]["final_run_status"] == "partial"
